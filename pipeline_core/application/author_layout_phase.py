@@ -116,11 +116,13 @@ def run_layout_phase(
     results (empty dict when nothing was authorable). Never raises on a single
     cluster's failure — the frozen skeleton is always a valid fallback."""
     results: dict[str, AuthorLayoutResult] = {}
-    # Crate-wide layout registry, uid → the definition the FIRST cluster that
-    # reached this item committed. A crate has one definition per private type,
-    # so later clusters adopt it instead of inventing a second, incompatible
-    # one — otherwise the bodies seeded into them from an earlier cluster read
-    # fields that no longer exist and the cluster never compiles.
+    # Crate-wide layout registry, uid → the definition the first cluster to
+    # reach this item committed and no later cluster has DISPROVED. A crate has
+    # one definition per private type, so later clusters adopt it instead of
+    # inventing a second, incompatible one — otherwise the bodies seeded into
+    # them from an earlier cluster read fields that no longer exist and the
+    # cluster never compiles. Precedence is by evidence, not by arrival: see the
+    # drop below.
     registry: dict[str, AuthoredItem] = (
         deps.load_registry(project_dir) if deps.load_registry else {})
     for cluster in cluster_names:
@@ -152,9 +154,44 @@ def run_layout_phase(
             registry=registry,
         )
         results[cluster] = res
+        # A definition this cluster DISPROVED is dropped before anything is
+        # stored, and only then does first-cluster-wins apply to what is left:
+        # the slot is empty, so this cluster's replacement lands in it, and if
+        # no replacement was authored the uid simply has no crate-wide
+        # definition — the next cluster authors one instead of adopting a
+        # measured wrong answer, and `reconcile_layout` (whose rule is that the
+        # registry outranks a per-cluster record) has nothing to reinstall.
+        #
+        # What plain `setdefault` cost, on `anyhow` 2026-08-06: the registry
+        # restored from the `task0c-augmented-anyhow` tag held `pub struct Error
+        # { inner: core::ptr::NonNull<ErrorImpl> }`, authored before the
+        # autotrait pins routed to a component and so never gated on `Error:
+        # Send`. Both clusters adopted it, both were refused by the pin probe
+        # with `error[E0277]: NonNull<ErrorImpl> cannot be sent between threads
+        # safely`, and both re-authored a correct one (`stable`: `inner:
+        # Own<ErrorImpl>`; `nightly`: `NonNull` plus `unsafe impl Send`/`Sync`),
+        # each verified against all 6 pins. `setdefault` kept the refuted text
+        # and `reconcile_layout` reinstalled it over both trees. Nothing
+        # compiled: `pass=0 fail=112`, the compile-blocked frontier narrowed to
+        # the 1 fn the diagnostics implicated, and the run filled 0 of 118 stubs
+        # in 70 minutes. The tag is re-cut AFTER this phase, so the disproved
+        # text was also what every later `--restart-from-augmented` restored.
+        dropped: list[str] = []
+        for comp_res in res.components:
+            for uid in comp_res.refuted_uids:
+                if registry.pop(uid, None) is not None:
+                    dropped.append(uid)
         for comp_res in res.components:
             for uid, item in comp_res.authored_items:
                 registry.setdefault(uid, item)   # first cluster to reach it wins
+        if dropped:
+            orphaned = [uid for uid in dropped if uid not in registry]
+            deps.log(
+                f"  [t1.5] {cluster}: dropped {len(dropped)} crate-wide layout "
+                f"definition(s) the compile+pin gate disproved here — "
+                f"{len(dropped) - len(orphaned)} replaced by what this cluster "
+                f"authored, {len(orphaned)} left with no crate-wide definition "
+                f"(the next cluster authors its own): {', '.join(sorted(dropped))}")
         if deps.save_registry is not None:
             try:
                 deps.save_registry(project_dir, registry)
@@ -200,6 +237,9 @@ def make_layout_phase_runner(
     # Installs/removes the layout-pin probe in the skeleton crate root so the
     # compile gate decides the pins. Absent ⇒ pins stay advisory (prior gate).
     write_pin_probe: Callable[[Path, str, str | None], None] | None = None,
+    # The crate's write-protected in-crate tests (rel path → text). Their member
+    # paths are a constraint on the authored layout — see AuthorLayoutDeps.
+    read_oracle_sources: Callable[[Path], dict[str, str]] | None = None,
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None,
     # Crate-wide layout registry — see LayoutPhaseDeps.
     load_registry: Callable[[Path], dict[str, AuthoredItem]] | None = None,
@@ -246,7 +286,10 @@ def make_layout_phase_runner(
                 log=log,
                 write_pin_probe=(
                     None if write_pin_probe is None
-                    else (lambda src: write_pin_probe(pd, cluster, src))))
+                    else (lambda src: write_pin_probe(pd, cluster, src))),
+                oracle_sources=(
+                    None if read_oracle_sources is None
+                    else (lambda: read_oracle_sources(pd))))
 
         def _recompute_leaf_order(pd: Path, cluster: str) -> None:
             src = skeleton_src_dir_for(pd, cluster)

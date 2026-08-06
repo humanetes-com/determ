@@ -15,6 +15,7 @@ from pipeline_core.domain.generation import (
     extract_gen_tests_body,
     gen_tests_sibling_number,
     has_gen_tests_mod_decl,
+    is_gen_tests_sibling_name,
     parse_gen_tests_filename,
     strip_all_gen_tests_decls,
     strip_gen_tests_decl,
@@ -63,6 +64,36 @@ def read_all_gen_tests(src_file: Path) -> str:
             continue
         parts.append(f"#[cfg(test)]\nmod gen_tests_{n} {{\n{body}\n}}")
     return "\n\n".join(parts)
+
+
+def read_oracle_sibling_sources(project_dir: Path) -> dict[str, str]:
+    """Every gen_tests sibling under `project_dir`, rel path → text.
+
+    The crate's in-crate test oracle as the layout phase needs to see it: these
+    files are generated pre-strip, from the ORIGINAL source, and are
+    write-protected from then on — so the member paths they read are a constraint
+    on any layout the model authors for the types they touch.
+
+    Dot-directories are skipped. `.skeleton/`, `.skeleton-filled/`, `.best_tree/`
+    and `.cluster_augmented/` all hold copies of the same siblings (38 apiece on
+    `anyhow` 2026-08-06); reading them would multiply every path by the number of
+    working trees on disk while adding no constraint. `target/` is skipped for the
+    same reason a wipe skips it — it is build output, not source."""
+    out: dict[str, str] = {}
+    root = Path(project_dir)
+    if not root.exists():
+        return out
+    for f in sorted(root.rglob("*.rs")):
+        rel_parts = f.relative_to(root).parts
+        if any(p.startswith(".") or p == "target" for p in rel_parts[:-1]):
+            continue
+        if not is_gen_tests_sibling_name(f.name):
+            continue
+        try:
+            out[str(f.relative_to(root))] = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return out
 
 
 def load_gen_tests_origin(project_dir: Path) -> dict[str, str]:

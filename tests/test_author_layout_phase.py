@@ -106,6 +106,41 @@ def test_pin_selector_does_not_leak_across_unrelated_public_types():
         "a pin on `Other` must not leak onto ErrorImpl's unrelated component")
 
 
+def test_autotrait_pin_harvested_from_a_test_file_reaches_the_component():
+    # The whole chain, from the bytes a crate's test file actually holds:
+    # harvest → selector → component. The generic-helper idiom puts the bound
+    # on one line and the type on the next, and a pin read from the first line
+    # alone carries `Send` and no subject — it matches no component's items and
+    # no frozen-public name, so it routes nowhere and gates nothing.
+    #
+    # On anyhow 2026-08-06 that cost the whole run: all four autotrait pins
+    # selected into zero components, t1.5 authored an `Error` that is neither
+    # Send nor Sync (it satisfies the size pins, which DID route), and every
+    # test binary in both clusters failed to build on E0277 — with the frontier
+    # then narrowed to the single fn the compiler implicated and task2a filling
+    # 0 of 118 stubs before it declared the cluster exhausted.
+    from pipeline_core.application.extract_behaviours import (
+        harvest_behaviour_suite,
+    )
+    test_src = (
+        "#[test]\n"
+        "fn test_send() {\n"
+        "    fn assert_send<T: Send>() {}\n"
+        "    assert_send::<Error>();\n"
+        "}\n"
+    )
+    surface = _surface()
+    suite = harvest_behaviour_suite(
+        (), cfg_cluster="stable",
+        test_sources=[("tests/test_autotrait.rs", test_src)])
+    select = make_pin_selector(suite, surface)
+    comp = next(c for c in surface.components
+                if any(i.name == "ErrorImpl" for i in c))
+    assert select(comp), (
+        "an autotrait pin applied to the public `Error` must reach the private "
+        "component that `Error` references")
+
+
 class _Recorder:
     def __init__(self, suite, reply, compiles):
         self.suite = suite
@@ -235,3 +270,195 @@ def test_registry_carries_one_layout_across_clusters(tmp_path):
     assert res["nightly"].components[0].adopted
     assert files["nightly"]["src/error.rs"] == files["stable"]["src/error.rs"]
     assert saved["reg"]["ErrorImpl"].definition.startswith("struct ErrorImpl {")
+
+
+def test_a_registry_definition_the_gate_refutes_is_replaced_not_kept(tmp_path):
+    """A stored definition that fails the compile+pin gate on the cluster that
+    tried it is a measured wrong answer, and the layout the cluster authors in
+    its place must take its slot in the registry.
+
+    Keeping it is what `setdefault` did, and on `anyhow` 2026-08-06 it cost a
+    whole run. The registry restored from the `task0c-augmented-anyhow` tag held
+    `pub struct Error { inner: core::ptr::NonNull<ErrorImpl> }` — authored before
+    autotrait pins routed to a component, so nothing had ever gated it on
+    `Error: Send`. Both clusters adopted it, both were refused with `error[E0277]:
+    NonNull<ErrorImpl> cannot be sent between threads safely`, and both authored a
+    correct replacement verified against all 6 pins. The refuted text survived in
+    the registry anyway, and `reconcile_layout` — where the registry outranks a
+    per-cluster record — reinstalled it over the tree: `pass=0 fail=112`, the
+    frontier narrowed to the single fn the diagnostics implicated, 0 of 118 stubs
+    filled in 70 minutes. No fill can repair it; the defect is a declaration."""
+    from pipeline_core.application.author_layout_phase import (
+        LayoutPhaseDeps,
+        run_layout_phase,
+    )
+    from pipeline_core.domain.authored_layout import AuthoredItem
+
+    refuted = "struct ErrorImpl { stale: u8 }"
+    authored = "struct ErrorImpl { inner: Box<dyn StdError> }"
+    files = {"src/error.rs": "struct ErrorImpl { vtable: u8 }\n"}
+    saved: dict[str, dict[str, AuthoredItem]] = {}
+
+    def _author_deps_for(_pd, _cluster):
+        return AuthorLayoutDeps(
+            run_model=lambda _p: (f'<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                                  f'{authored}</LAYOUT_ITEM>'),
+            read_skeleton=lambda rel: files.get(rel),
+            write_skeleton=lambda rel, txt: files.__setitem__(rel, txt),
+            # the gate's verdict, standing in for the pin probe: the stored
+            # definition does not hold on this cluster, the authored one does.
+            compile_check=lambda: (
+                (False, "error[E0277]: cannot be sent between threads safely")
+                if refuted in files["src/error.rs"] else (True, "")),
+            log=lambda _m: None)
+
+    deps = LayoutPhaseDeps(
+        log=lambda _m: None,
+        load_surface=lambda _pd, c: dataclasses.replace(_surface(), cfg_cluster=c),
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_author_deps_for,
+        recompute_leaf_order=lambda _pd, _c: None,
+        load_registry=lambda _pd: {
+            "ErrorImpl": AuthoredItem("ErrorImpl", "struct", refuted)},
+        save_registry=lambda pd, reg: saved.__setitem__("reg", dict(reg)) or pd)
+    res = run_layout_phase(tmp_path, "anyhow", ["stable"], deps)
+
+    comp = res["stable"].components[0]
+    assert comp.authored and not comp.adopted
+    assert comp.refuted_uids == ("ErrorImpl",), "the gate refused the stored definition"
+    assert saved["reg"]["ErrorImpl"].definition == authored, (
+        "a definition the gate disproved must not survive in the registry — "
+        "reconcile_layout would reinstall it over the tree that just rejected it")
+
+
+def test_a_refuted_definition_is_dropped_even_when_re_authoring_fails(tmp_path):
+    """The disproved definition goes whether or not a replacement arrives.
+
+    Replacing it only on success leaves the whole defect intact on the path that
+    reaches it most often: the registry write iterates the items a component
+    COMMITTED, and a component that refuted its adoption and then burned all
+    three authoring attempts commits nothing. The stored text would survive
+    untouched, and `reconcile_layout` installs the registry over the live tree —
+    so the cluster that proved the layout wrong gets it written back. Not a
+    hypothetical path on `anyhow`: the same `Error`/`ErrorImpl` component that
+    refuted its adoption on 2026-08-06 also exhausted 3/3 attempts on
+    `could not locate a frozen definition to replace: Error in lib.rs` in the
+    same log, and its first attempt after the refutation was rejected for
+    marking a field `pub`.
+
+    An empty slot is the honest state: the next cluster authors its own layout
+    instead of adopting a measured wrong answer, and a cluster that verified the
+    old definition still holds it in its own per-cluster record."""
+    from pipeline_core.application.author_layout_phase import (
+        LayoutPhaseDeps,
+        run_layout_phase,
+    )
+    from pipeline_core.domain.authored_layout import AuthoredItem
+
+    refuted = "struct ErrorImpl { stale: u8 }"
+    files = {"src/error.rs": "struct ErrorImpl { vtable: u8 }\n"}
+    saved: dict[str, dict[str, AuthoredItem]] = {}
+
+    def _author_deps_for(_pd, _cluster):
+        return AuthorLayoutDeps(
+            run_model=lambda _p: "the model answers with nothing usable",
+            read_skeleton=lambda rel: files.get(rel),
+            write_skeleton=lambda rel, txt: files.__setitem__(rel, txt),
+            compile_check=lambda: (
+                (False, "error[E0277]: cannot be sent between threads safely")
+                if refuted in files["src/error.rs"] else (True, "")),
+            log=lambda _m: None)
+
+    deps = LayoutPhaseDeps(
+        log=lambda _m: None,
+        load_surface=lambda _pd, c: dataclasses.replace(_surface(), cfg_cluster=c),
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_author_deps_for,
+        recompute_leaf_order=lambda _pd, _c: None,
+        load_registry=lambda _pd: {
+            "ErrorImpl": AuthoredItem("ErrorImpl", "struct", refuted)},
+        save_registry=lambda pd, reg: saved.__setitem__("reg", dict(reg)) or pd)
+    res = run_layout_phase(tmp_path, "anyhow", ["stable"], deps)
+
+    comp = res["stable"].components[0]
+    assert not comp.authored and comp.refuted_uids == ("ErrorImpl",)
+    assert "ErrorImpl" not in saved["reg"], (
+        "the gate disproved this definition and nothing replaced it — leaving it "
+        "in the registry hands reconcile_layout the text the tree just rejected")
+
+
+def test_an_adoption_that_never_compiled_does_not_unseat_the_registry(tmp_path):
+    """Only a COMPILED refusal disproves a stored definition.
+
+    `_try_commit` reports two different failures through one return: rustc said
+    no, and the splice could not install the candidate at all (a frozen def the
+    locator cannot find, a public-contract rejection, a member eviction). The
+    second produces no diagnostic and no compile — it is a statement about this
+    skeleton, not about the layout — and treating it as a refutation would let a
+    cluster overwrite the crate's definition with a fresh design on no evidence,
+    which is the two-layouts-for-one-uid state the registry exists to prevent.
+
+    Here the stored definition drops a field the crate's filled bodies still
+    read, so the eviction veto rejects the splice before any compile: the
+    cluster authors its own layout for its own tree, and the crate-wide
+    definition stands."""
+    from pipeline_core.application.author_layout_phase import (
+        LayoutPhaseDeps,
+        run_layout_phase,
+    )
+    from pipeline_core.domain.authored_layout import AuthoredItem
+
+    stored = "struct ErrorImpl { data: u8 }"          # drops `vtable`
+    authored = "struct ErrorImpl { vtable: u8, data: Box<dyn StdError> }"
+    frozen = "struct ErrorImpl { vtable: u8, data: u8 }"
+    files = {"src/error.rs": frozen + "\n"}
+    saved: dict[str, dict[str, AuthoredItem]] = {}
+
+    def _surface_two_fields():
+        types = [
+            TypeRecord(file="src/lib.rs", kind="struct", name="Error",
+                       is_pub=True,
+                       definition="pub struct Error { inner: Box<ErrorImpl> }"),
+            TypeRecord(file="src/error.rs", kind="struct", name="ErrorImpl",
+                       is_pub=False, definition=frozen),
+        ]
+        return classify_private_surface(types, [], cfg_cluster="stable")
+
+    def _author_deps_for(_pd, _cluster):
+        return AuthorLayoutDeps(
+            run_model=lambda _p: (f'<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                                  f'{authored}</LAYOUT_ITEM>'),
+            read_skeleton=lambda rel: files.get(rel),
+            write_skeleton=lambda rel, txt: files.__setitem__(rel, txt),
+            compile_check=lambda: (True, ""),
+            # a filled body reads the field the stored definition drops
+            filled_bodies=lambda: "fn vtable(&self) -> u8 { self.vtable }",
+            log=lambda _m: None)
+
+    deps = LayoutPhaseDeps(
+        log=lambda _m: None,
+        load_surface=lambda _pd, c: dataclasses.replace(
+            _surface_two_fields(), cfg_cluster=c),
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_author_deps_for,
+        recompute_leaf_order=lambda _pd, _c: None,
+        load_registry=lambda _pd: {
+            "ErrorImpl": AuthoredItem("ErrorImpl", "struct", stored)},
+        save_registry=lambda pd, reg: saved.__setitem__("reg", dict(reg)) or pd)
+    res = run_layout_phase(tmp_path, "anyhow", ["stable"], deps)
+
+    comp = res["stable"].components[0]
+    assert comp.authored and not comp.adopted
+    assert comp.refuted_uids == (), (
+        "nothing compiled, so nothing was disproved — this must not read as a "
+        "refutation")
+    assert saved["reg"]["ErrorImpl"].definition == stored, (
+        "a definition that was never compiled here keeps its slot; replacing it "
+        "gives the crate two layouts for one uid, which is what the registry "
+        "exists to prevent")

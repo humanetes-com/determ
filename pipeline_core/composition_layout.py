@@ -15,6 +15,7 @@ from typing import Any
 from pipeline_core.adapters.artifacts import api_surface_path
 from pipeline_core.adapters.behaviour_store import load_behaviour_suite
 from pipeline_core.adapters.fn_revert import revert_fns_to_stub
+from pipeline_core.adapters.gen_tests_storage import read_oracle_sibling_sources
 from pipeline_core.adapters.layout_outcome_store import (
     load_layout_records,
     load_retrigger_attempts,
@@ -69,6 +70,7 @@ def build_layout_phase_runner(
         save_layout_outcomes=save_layout_outcomes,
         load_registry=load_registry, save_registry=save_registry,
         write_pin_probe=write_pin_probe,
+        read_oracle_sources=read_oracle_sibling_sources,
         author_private_fields=author_private_fields,
     )
 
@@ -130,7 +132,11 @@ def build_retrigger_layout(
                 compile_check=lambda: compile_skeleton_check(
                     pd, cluster, cluster=cluster_by_name.get(cluster)),
                 log=log,
-                write_pin_probe=lambda src: write_pin_probe(pd, cluster, src))
+                write_pin_probe=lambda src: write_pin_probe(pd, cluster, src),
+                # The re-trigger re-authors ONE component mid-run, against the
+                # same oracle: a layout it invents without these paths breaks
+                # the same write-protected tests the first pass had to satisfy.
+                oracle_sources=lambda: read_oracle_sibling_sources(pd))
 
         deps = RetriggerLayoutDeps(
             log=log, load_surface=load_private_surface,

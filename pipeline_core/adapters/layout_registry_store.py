@@ -1,5 +1,9 @@
 """Crate-wide authored-layout registry — uid → the ONE definition this crate
-uses for that private item, whichever cfg-cluster authored it first.
+uses for that private item: whichever cfg-cluster authored it first, until a
+cluster COMPILES it and rustc refuses. A disproved definition is dropped by the
+t1.5 phase rather than kept, because the entry outranks every per-cluster record
+at reconciliation time and would otherwise be reinstalled over the very tree
+that rejected it.
 
 Why crate-level and not per-cluster (unlike `layout_outcome_store.py`): the
 merged crate has exactly one definition of each private struct/fn. When a later

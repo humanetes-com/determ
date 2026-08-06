@@ -233,7 +233,7 @@ def count_attrs(block: str, name: str) -> int:
     return count
 
 
-def _fn_name_on_line(line: str) -> str:
+def fn_name_on_line(line: str) -> str:
     """The name in a `fn <name>(` declaration on `line`, else ""."""
     k = 0
     while (k := line.find("fn", k)) >= 0:
@@ -271,7 +271,7 @@ def attributed_test_fn_names(text: str) -> list[str]:
             if not nxt or nxt.startswith(("//", "#")):
                 j += 1
                 continue
-            name = _fn_name_on_line(lines[j])
+            name = fn_name_on_line(lines[j])
             if name:
                 out.append(name)
             break
@@ -307,7 +307,7 @@ def attributed_fn_names(text: str, attr: str) -> list[str]:
         while j < len(lines):
             nxt = lines[j].strip()
             if j > i and not (not nxt or nxt.startswith(("//", "#"))):
-                name = _fn_name_on_line(lines[j])
+                name = fn_name_on_line(lines[j])
                 if name:
                     out.append(name)
                 break

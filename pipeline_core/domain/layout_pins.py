@@ -20,7 +20,11 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     StaticAssertKind,
 )
-from pipeline_core.domain.rust_scan import contains_word, count_word
+from pipeline_core.domain.rust_scan import (
+    contains_word,
+    count_word,
+    fn_name_on_line,
+)
 
 # The autotrait markers a layout-pinning test uses to freeze Send/Sync/Unpin/…
 _AUTOTRAIT_MACROS = ("assert_impl_all", "assert_not_impl_all", "assert_impl_any")
@@ -61,8 +65,78 @@ def classify_layout_assertions(test_src: str) -> tuple[ObservableOutcome, ...]:
             _add(StaticAssertKind.AUTOTRAITS, ln)
     for ln in test_src.splitlines():
         if is_autotrait_assertion(ln):
-            _add(StaticAssertKind.AUTOTRAITS, ln.strip())
+            _add(StaticAssertKind.AUTOTRAITS, autotrait_pin_expr(test_src, ln))
     return tuple(out)
+
+
+def autotrait_pin_expr(test_src: str, decl_line: str) -> str:
+    """An autotrait pin's expression: the generic helper's declaration PLUS the
+    turbofish calls that apply it, or the declaration alone when it is applied
+    nowhere.
+
+    The subject has to be in here or the pin reaches no component. Everything
+    that routes a pin reads type names off this string — `_spec_pins_types` in
+    the t1.5 pin selector, `pinned_type_names` in the M13 harvest gate — and the
+    idiom the crate's own tests use is TWO statements:
+
+        fn assert_send<T: Send>() {}
+        assert_send::<Error>();
+
+    Read from the declaration alone the pin is a bound with no subject, so
+    `camelcase_type_names` yielded `{Send}` and the selector matched it against
+    no component's items and no frozen-public name. Measured on `anyhow`
+    2026-08-06: all four autotrait pins (three in tests/test_autotrait.rs, one
+    in tests/test_repr.rs) selected into zero components, while the two
+    `size_of::<Error>()` pins in the same file routed correctly — the log's
+    `[2 layout pin(s) verified]` on a component of 34 items. t1.5 then authored
+    `pub struct Error { inner: NonNull<ErrorImpl> }`, which satisfies both size
+    pins and is neither `Send` nor `Sync`, and every test binary in both
+    clusters failed to build on `E0277 NonNull<ErrorImpl> cannot be sent
+    between threads safely`.
+
+    The rendered probe still takes the type it applies from the component's own
+    surface (`build_layout_probe(pinned_types=…)`) — the calls are carried here
+    so the pin can be ROUTED to that component in the first place."""
+    decl = decl_line.strip()
+    helper = fn_name_on_line(decl)
+    if not helper:
+        return decl
+    subjects = autotrait_subject_types(test_src, helper)
+    if not subjects:
+        return decl
+    calls = " ".join(f"{helper}::<{s}>();" for s in subjects)
+    return f"{decl} {calls}"
+
+
+def autotrait_subject_types(test_src: str, helper: str) -> list[str]:
+    """The types `helper` is instantiated with anywhere in `test_src`, in source
+    order and deduped — ``assert_send::<Error>();`` → ``["Error"]``.
+
+    Whole-word on the helper name so `assert` never matches the `assert_eq` of
+    a neighbouring size pin, and the argument list is read by bracket depth so
+    a nested generic (``assert::<Result<(), Error>>()``) stays one type."""
+    out: list[str] = []
+    i = 0
+    while (at := test_src.find(helper, i)) >= 0:
+        i = at + len(helper)
+        before = test_src[at - 1] if at else ""
+        if before and (before.isalnum() or before == "_"):
+            continue
+        j = i
+        while j < len(test_src) and test_src[j].isspace():
+            j += 1
+        if not test_src.startswith("::", j):
+            continue
+        j += 2
+        while j < len(test_src) and test_src[j].isspace():
+            j += 1
+        end = _balanced_angle(test_src, j)
+        if end < 0:
+            continue
+        for arg in _split_top_level_commas(test_src[j + 1:end - 1]):
+            if (ty := arg.strip()) and ty not in out:
+                out.append(ty)
+    return out
 
 
 def is_autotrait_assertion(line: str) -> bool:

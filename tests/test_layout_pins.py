@@ -111,6 +111,61 @@ def test_generic_helper_and_where_clause_forms_are_still_pins() -> None:
         assert len(got) == 1 and got[0].static_kind is StaticAssertKind.AUTOTRAITS, pin
 
 
+_ANYHOW_AUTOTRAIT_TEST = """
+#[test]
+fn test_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<Error>();
+}
+
+#[test]
+fn test_sync() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<Error>();
+}
+"""
+
+
+def test_autotrait_pin_carries_the_type_it_is_applied_to() -> None:
+    # Live defect: the pin was recorded as the helper's DECLARATION alone, so
+    # its type names were the bounds (`Send`) and never the subject (`Error`).
+    # Nothing routes a pin but those names — the t1.5 selector matches them
+    # against a component's items and against the frozen-public names — so all
+    # four of anyhow's autotrait pins selected into ZERO components on
+    # 2026-08-06 while the two `size_of::<Error>()` pins in the same crate
+    # routed correctly. t1.5 then authored `Error { inner: NonNull<ErrorImpl> }`,
+    # which is neither Send nor Sync and satisfies both size pins.
+    specs = tuple(harvest_layout_pin_behaviours(
+        _ANYHOW_AUTOTRAIT_TEST, source_file="tests/test_autotrait.rs"))
+    assert "Error" in pinned_type_names(specs)
+    exprs = [s.then.static_expr for s in specs if s.then is not None]
+    assert exprs == [
+        "fn assert_send<T: Send>() {} assert_send::<Error>();",
+        "fn assert_sync<T: Sync>() {} assert_sync::<Error>();",
+    ]
+
+
+def test_autotrait_pin_without_a_call_site_keeps_the_declaration() -> None:
+    got = classify_layout_assertions("fn assert_send<T: Send>() {}")
+    assert [o.static_expr for o in got] == ["fn assert_send<T: Send>() {}"]
+
+
+def test_autotrait_subject_is_read_by_bracket_depth_and_whole_word() -> None:
+    from pipeline_core.domain.layout_pins import autotrait_subject_types
+    src = ("assert_eq!(size_of::<Error>(), 8);\n"
+           "fn assert<E: Send>() {}\n"
+           "assert::<Result<(), Error>>();\n")
+    # `assert_eq` must not answer for `assert`, and a nested generic is ONE type
+    assert autotrait_subject_types(src, "assert") == ["Result<(), Error>"]
+
+
+def test_autotrait_pin_still_renders_its_bounds_with_the_call_attached() -> None:
+    # The probe reads the bounds off the same expression the subject now shares.
+    from pipeline_core.domain.layout_pins import autotrait_bound_list
+    expr = classify_layout_assertions(_ANYHOW_AUTOTRAIT_TEST)[0].static_expr
+    assert autotrait_bound_list(expr) == "Send"
+
+
 def test_autotrait_bound_list_survives_nested_generics() -> None:
     from pipeline_core.domain.layout_pins import autotrait_bound_list
     assert autotrait_bound_list("fn a<T: AsRef<[u8]> + Send>() {}") == (

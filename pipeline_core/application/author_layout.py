@@ -29,16 +29,27 @@ from pipeline_core.domain.authored_layout import (
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.failure_classification import first_diagnostic
 from pipeline_core.domain.layout_chunking import plan_author_chunks
-from pipeline_core.domain.layout_probe import LayoutProbe, build_layout_probe
+from pipeline_core.domain.layout_probe import (
+    LayoutProbe,
+    build_field_path_probe,
+    build_layout_probe,
+)
 from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+from pipeline_core.domain.oracle_field_paths import (
+    FieldPath,
+    field_path_requirements_text,
+    read_field_paths,
+)
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
     PrivateSurfaceItem,
     SurfaceItemKind,
 )
+from pipeline_core.domain.rust_scan import contains_word
 from pipeline_core.domain.scaffold_rewrite import (
     replace_surface_definitions,
 )
+from pipeline_core.domain.test_results import rustc_error_codes
 from pipeline_core.domain.type_header import (
     TypeHeader,
     declares_pub_field,
@@ -65,6 +76,13 @@ class AuthorLayoutDeps:
     # nothing to contradict and the veto below has no evidence to work from.
     # Absent ⇒ no veto, exactly as before it existed.
     filled_bodies: Callable[[], str] | None = None
+    # The crate's WRITE-PROTECTED in-crate tests (the `gen_tests` siblings), rel
+    # path → text. They are generated from the ORIGINAL source, where the private
+    # fields this phase re-authors were still visible, so they read member paths
+    # by name — and no later stage may edit them to match a new layout. Read here
+    # so the authoring prompt carries those names and the compile gate enforces
+    # them. Absent ⇒ no field-path constraint, exactly as before it existed.
+    oracle_sources: Callable[[], Mapping[str, str]] | None = None
     max_attempts: int = 3
     # M6 chunking: components above `single_shot_max` items are authored in
     # chunks (types first, then fns) instead of demanding one 40-block reply.
@@ -89,6 +107,17 @@ class ComponentResult:
     # Empty unless committed.
     authored_items: tuple[tuple[str, AuthoredItem], ...] = ()
     adopted: bool = False   # committed from the crate-wide registry, no model call
+    # The uids whose registry definitions were tried here and DISPROVED by the
+    # compile+pin gate — the gate produced rustc diagnostics against them, so
+    # this is a measurement, not a competing opinion. The registry write in
+    # `run_layout_phase` drops these before it stores anything: a disproved
+    # definition must not stand for a later cluster to adopt, nor for
+    # `reconcile_layout` to reinstall over the tree that just rejected it. Empty
+    # when the adoption merely could not be INSTALLED (a locate/splice miss or a
+    # public-contract rejection) — nothing was compiled then, so nothing was
+    # disproved, and replacing the crate's definition on that evidence is how
+    # two clusters end up with two layouts for one uid.
+    refuted_uids: tuple[str, ...] = ()
 
 
 class LayoutOutcome(Enum):
@@ -246,6 +275,7 @@ def author_layout(
     type that compiles yet fails the repr tests a whole sweep later. Such a
     component is left FROZEN (gated), loud in the log, never authored blind."""
     results: list[ComponentResult] = []
+    oracle = _oracle_sources(deps)
     for comp in surface.components:
         names = tuple(i.name for i in comp)
         pins = select_pins(comp)
@@ -261,7 +291,10 @@ def author_layout(
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
         pristine = {f: deps.read_skeleton(f) for f in touched}
-        probe = _calibrated_pin_probe(surface, comp, pins, deps)
+        paths = _component_field_paths(comp, oracle)
+        probe = _calibrated_pin_probe(surface, comp, pins, deps).merged_with(
+            _calibrated_field_path_probe(surface, comp, paths, deps))
+        paths_note = field_path_requirements_text(paths)
 
         # ADOPTION BEFORE AUTHORING. A private type authored by an earlier
         # cfg-cluster is already this crate's definition of that type, and this
@@ -271,8 +304,9 @@ def author_layout(
         # compile+pin gate decides it, so an adopted layout is never trusted
         # blind — it just costs no model call.
         adopted = adopt_component(uids, registry or {})
+        refuted: tuple[str, ...] = ()
         if adopted is not None:
-            ok, why, _ = _try_commit(comp, adopted, deps, probe, pristine)
+            ok, why, adopt_errors = _try_commit(comp, adopted, deps, probe, pristine)
             if ok:
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: adopted the "
                          "layout already fixed by an earlier cluster "
@@ -283,10 +317,23 @@ def author_layout(
                     authored_items=tuple((u, adopted[u]) for u in uids),
                     adopted=True))
                 continue
+            # Two failures wear one message otherwise, and they call for
+            # opposite treatment of the crate-wide registry. WITH diagnostics
+            # the stored layout was compiled here and rustc refused it, so it
+            # is disproved and must not survive. WITHOUT them nothing was
+            # compiled — the splice could not even install it (a frozen def the
+            # locator cannot find, a public-contract rejection) — and that is a
+            # statement about this skeleton, not about the layout.
+            refuted = uids if adopt_errors else ()
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: the crate's "
                      f"existing layout does not hold here ({first_diagnostic(why) or why}) "
                      "— re-authoring; this cluster's layout will DIVERGE and "
-                     "cross-cluster body seeding into it will not compile.")
+                     "cross-cluster body seeding into it will not compile."
+                     if adopt_errors else
+                     f"  [t1.5] {surface.cfg_cluster}/{names}: the crate's "
+                     f"existing layout could not be INSTALLED here ({why}) — "
+                     "re-authoring, but the crate-wide definition stands: "
+                     "nothing compiled, so nothing about it was disproved.")
         # Partly covered: the model must EXTEND the fixed definitions (adding
         # what this cluster's cfg needs), never redesign them — so it gets their
         # exact current text and an instruction to reproduce it verbatim.
@@ -300,12 +347,13 @@ def author_layout(
                     chunk_uids: tuple[str, ...], scheme: str, hint: str,
                     *, _pins: list[BehaviourSpec] = pins,
                     _anchors: dict[str, str] = anchors,
-                    _shared: str = shared) -> str:
+                    _shared: str = shared, _paths: str = paths_note) -> str:
             return build_layout_authoring_prompt(
                 module_name=module_name, cfg_cluster=surface.cfg_cluster,
                 items=chunk_items, public_surface=public_surface,
                 layout_pins=_pins, symbol_inventory=symbol_inventory,
-                extra_guidance=extra_guidance + _shared, authored_scheme=scheme,
+                extra_guidance=extra_guidance + _shared + _paths,
+                authored_scheme=scheme,
                 item_uids=chunk_uids, item_anchors=_anchors) + hint
         committed = False
         reason = "no attempt"
@@ -347,7 +395,7 @@ def author_layout(
                      + (f": {diag}" if diag else "."))
         results.append(ComponentResult(
             names, committed, reason, authored_defs=committed_defs,
-            authored_items=committed_items))
+            authored_items=committed_items, refuted_uids=refuted))
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
 
 
@@ -450,6 +498,105 @@ def _calibrated_pin_probe(
                  f"{errors.strip()[:300]}")
         return LayoutProbe(skipped=probe.gated + probe.skipped)
     return probe
+
+
+def _oracle_sources(deps: AuthorLayoutDeps) -> Mapping[str, str]:
+    """The write-protected in-crate tests, read ONCE per phase. Never fatal: a
+    missing oracle means the field-path constraint is simply not applied, which
+    is the behaviour that existed before it did."""
+    if deps.oracle_sources is None:
+        return {}
+    try:
+        return deps.oracle_sources()
+    except Exception as e:      # noqa: BLE001 — degrade, never fail authoring
+        deps.log(f"  [t1.5] could not read the crate's in-crate tests for "
+                 f"field-path constraints ({e}) — authoring without them.")
+        return {}
+
+
+def _component_field_paths(
+    comp: tuple[PrivateSurfaceItem, ...], oracle: Mapping[str, str],
+) -> tuple[FieldPath, ...]:
+    """The member paths the oracle reads on THIS component's types.
+
+    Two filters, both about not gating on a misread. The scan only resolves a
+    local whose type is stated outright, and only for names this component owns;
+    on top of that, a root whose frozen definition is still IN the skeleton must
+    actually declare the first hop — if it does not, the binding was resolved to
+    the wrong type and the path is dropped rather than imposed. A PUB_FIELDS root
+    is exempt because its fields are precisely what the freeze removed: there is
+    nothing left to check the name against, and the oracle is the only record of
+    it that survived."""
+    if not oracle:
+        return ()
+    by_name = {i.name: i for i in comp}
+    out: dict[tuple[str, tuple[str, ...]], FieldPath] = {}
+    for rel, src in sorted(oracle.items()):
+        for p in read_field_paths(rel, src, types=by_name.keys()):
+            item = by_name[p.root_type]
+            if (item.kind is not SurfaceItemKind.PUB_FIELDS
+                    and not contains_word(item.definition, p.fields[0])):
+                continue
+            out.setdefault((p.root_type, p.fields), p)
+    return tuple(out.values())
+
+
+def _calibrated_field_path_probe(
+    surface: PrivateSurface,
+    comp: tuple[PrivateSurfaceItem, ...],
+    paths: tuple[FieldPath, ...],
+    deps: AuthorLayoutDeps,
+) -> LayoutProbe:
+    """The oracle's member paths as a compile-time gate, with the one calibration
+    that fits them.
+
+    The pin probe is calibrated by requiring it to HOLD on the frozen scaffold —
+    the crate's own layout satisfies its own pins by construction. A field path
+    cannot answer to that authority: the freeze DELETED the fields it names, so
+    `no field 'inner' on type 'Error'` is the expected reading of a correct probe
+    against an elided struct, and demanding it hold would disable the gate exactly
+    where it is needed. The rule is therefore by diagnostic:
+
+      compiles                  → the path holds on the frozen layout; gate it
+                                  (an authored layout may not take it away).
+      fails, ONLY E0609         → the fields were elided; that is what this
+                                  component is authoring. Gate it.
+      anything else             → E0616 (private field — the probe sits at the
+                                  crate root and cannot see a field the oracle's
+                                  own module can), E0412, E0107, a parse error:
+                                  the probe is wrong ABOUT ITSELF. Drop it, say so.
+
+    A dropped probe costs nothing but the gate; a probe kept on a misrendered path
+    would freeze a component whose layout was fine, which is why the fall-through
+    is "drop, loudly" rather than "gate anyway"."""
+    if deps.write_pin_probe is None or not paths:
+        return LayoutProbe()
+    generic_roots = frozenset(
+        i.name for i in comp
+        if (h := parse_type_header(i.definition)) is not None and h.generics)
+    probe = build_field_path_probe(paths, generic_roots=generic_roots)
+    names = tuple(i.name for i in comp)
+    if probe.skipped:
+        deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
+                 f"{len(probe.skipped)} oracle member path(s) NOT compile-gated "
+                 f"(generic root — a probe would have to invent its type "
+                 f"parameters): {list(probe.skipped)}")
+    if not probe.checks_anything:
+        return LayoutProbe(skipped=probe.skipped)
+    deps.write_pin_probe(probe.source)
+    holds, errors = deps.compile_check()
+    deps.write_pin_probe(None)
+    codes = set(rustc_error_codes(errors, "E"))
+    if holds or codes == {"E0609"}:
+        deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: gating on "
+                 f"{len(probe.gated)} member path(s) the crate's own "
+                 f"write-protected tests read: {list(probe.gated)}")
+        return probe
+    deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: member-path probe is "
+             "wrong about itself on the FROZEN scaffold (not a layout "
+             f"violation) — path gating disabled for this component. "
+             f"codes={sorted(codes)} {errors.strip()[:300]}")
+    return LayoutProbe(skipped=probe.gated + probe.skipped)
 
 
 def _author_component(

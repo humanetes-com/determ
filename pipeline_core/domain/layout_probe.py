@@ -35,6 +35,7 @@ from pipeline_core.domain.behaviour import (
     StaticAssertKind,
 )
 from pipeline_core.domain.layout_pins import autotrait_bound_list
+from pipeline_core.domain.oracle_field_paths import FieldPath
 
 _AUTOTRAIT_MACROS = ("assert_impl_all!", "assert_not_impl_all!", "assert_impl_any!")
 _CONST_KINDS: frozenset[StaticAssertKind] = frozenset({
@@ -52,6 +53,22 @@ class LayoutProbe:
     @property
     def checks_anything(self) -> bool:
         return bool(self.source and self.gated)
+
+    def merged_with(self, other: LayoutProbe) -> LayoutProbe:
+        """Both probes in ONE compile. The pin probe and the field-path probe are
+        calibrated separately (they answer to different authorities — see
+        `author_layout`), but they gate the same candidate layout, so keeping
+        them apart at compile time would double every attempt's cargo run."""
+        if not self.checks_anything:
+            return LayoutProbe(other.source, other.gated,
+                               self.skipped + other.skipped)
+        if not other.checks_anything:
+            return LayoutProbe(self.source, self.gated,
+                               self.skipped + other.skipped)
+        return LayoutProbe(
+            self.source.rstrip() + "\n" + other.source,
+            self.gated + other.gated,
+            self.skipped + other.skipped)
 
 
 def _balanced_span(text: str, start: int, open_ch: str, close_ch: str) -> int:
@@ -216,3 +233,47 @@ def _autotrait_item(n: int, ty: str, bounds: str) -> str:
     """A never-called fn whose body forces `ty: bounds` to hold at compile time."""
     return (f"#[allow(dead_code)]\nfn _layout_pin_autotrait_{n}() {{ "
             f"fn _a<T: {bounds}>() {{}} _a::<{ty}>(); }}")
+
+
+def build_field_path_probe(
+    paths: tuple[FieldPath, ...] | list[FieldPath],
+    *,
+    generic_roots: frozenset[str] = frozenset(),
+) -> LayoutProbe:
+    """Render the oracle's member paths as lib-target items.
+
+    ``err.inner.ptr`` on an `Error` becomes::
+
+        fn _layout_pin_field_path_0(v: &Error) { let _ = &v.inner.ptr; }
+
+    — a borrow, so no constructor and no value are needed, which is what makes it
+    answerable by a skeleton whose bodies are all ``unimplemented!()``. rustc
+    resolves the whole chain, including the hops through types the same component
+    authors (`Own::ptr` behind `Error::inner`), so nothing here has to model field
+    types.
+
+    `generic_roots` are root names whose frozen declaration takes type parameters:
+    a probe would have to invent them (`fn p(v: &ContextError)` is E0107), so they
+    are SKIPPED and named, never guessed at."""
+    items: list[str] = []
+    gated: list[str] = []
+    skipped: list[str] = []
+    for path in paths:
+        if not path.fields or path.root_type in generic_roots:
+            skipped.append(path.expr)
+            continue
+        chain = "".join(f".{f}" for f in path.fields)
+        items.append(
+            f"#[allow(dead_code)]\nfn _layout_pin_field_path_{len(items)}"
+            f"(v: &{path.root_type}) {{ let _ = &v{chain}; }}")
+        gated.append(path.expr)
+    if not items:
+        return LayoutProbe(skipped=tuple(skipped))
+    source = (
+        "// Field-path probe (t1.5 gate) — generated, compile-time only.\n"
+        "// Each path is read by a WRITE-PROTECTED test of this crate; a layout\n"
+        "// that does not provide it makes that test uncompilable, and no fill\n"
+        "// route may edit a test to match. Rejecting here is the only place the\n"
+        "// question can still be answered by re-authoring.\n"
+        + "\n".join(items) + "\n")
+    return LayoutProbe(source=source, gated=tuple(gated), skipped=tuple(skipped))
