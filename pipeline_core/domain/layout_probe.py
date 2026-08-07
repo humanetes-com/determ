@@ -54,21 +54,92 @@ class LayoutProbe:
     def checks_anything(self) -> bool:
         return bool(self.source and self.gated)
 
-    def merged_with(self, other: LayoutProbe) -> LayoutProbe:
-        """Both probes in ONE compile. The pin probe and the field-path probe are
-        calibrated separately (they answer to different authorities — see
-        `author_layout`), but they gate the same candidate layout, so keeping
-        them apart at compile time would double every attempt's cargo run."""
-        if not self.checks_anything:
-            return LayoutProbe(other.source, other.gated,
-                               self.skipped + other.skipped)
-        if not other.checks_anything:
-            return LayoutProbe(self.source, self.gated,
-                               self.skipped + other.skipped)
-        return LayoutProbe(
-            self.source.rstrip() + "\n" + other.source,
-            self.gated + other.gated,
-            self.skipped + other.skipped)
+
+@dataclass(frozen=True, slots=True)
+class LayoutGate:
+    """Every probe installed for ONE compile of a candidate layout, and the file
+    each one has to live in.
+
+    ``root`` is the layout pins. They belong in the crate root: they name public
+    types (``size_of::<Error>()``) and the crate root is where those names are in
+    scope.
+
+    ``in_file`` maps a skeleton-relative path to the probe that must sit IN that
+    file. A private field is visible to its own module and that module's
+    descendants and nowhere else, so a member-path probe written at the crate
+    root reads ``error[E0616]: field `inner` of `Error` is private`` against a
+    CORRECT layout as soon as the type it borrows through is declared in a
+    submodule — and nothing before the first authoring attempt can tell, because
+    the frozen scaffold has that field elided and answers ``E0609`` first. The
+    oracle's own tests can read the field because they are generated as a child
+    module of the file that declares it; putting the probe in that same file is
+    what gives it the same view. Measured on a two-module crate (2026-08-06):
+    probe at the crate root, field elided → E0609; field present and private →
+    E0616; field present and ``pub`` → clean — and the authoring splice rejects
+    a ``pub`` field outright ("every field of this struct must stay private"),
+    so at the crate root NO authored layout could ever have passed.
+    """
+
+    root: LayoutProbe = LayoutProbe()
+    in_file: tuple[tuple[str, LayoutProbe], ...] = ()
+
+    @property
+    def gated(self) -> tuple[str, ...]:
+        return self.root.gated + tuple(e for _, p in self.in_file for e in p.gated)
+
+    @property
+    def skipped(self) -> tuple[str, ...]:
+        return self.root.skipped + tuple(e for _, p in self.in_file for e in p.skipped)
+
+    def without_member_paths(self) -> LayoutGate:
+        """The same gate with every member-path probe demoted from checked to
+        skipped — what a probe that turned out to be unusable leaves behind.
+
+        The paths are demoted, not dropped: `gated` is what the run log may
+        claim was verified, `skipped` is what it must still name, and a path that
+        vanished from both would be a constraint the log stopped mentioning
+        halfway through a component. Nothing installs a demoted probe, so the
+        remaining attempts neither re-place it nor pay a compile to re-learn the
+        same verdict."""
+        return LayoutGate(root=self.root, in_file=tuple(
+            (rel, LayoutProbe(skipped=p.gated + p.skipped))
+            for rel, p in self.in_file))
+
+
+# Probe regions are marker-delimited, never length-based, so an interrupted run
+# cannot leave a half-probe behind for the next install to nest inside itself.
+# Two pairs, not one, because both regions can land in the SAME file — the pins
+# always go to the crate root and a member-path probe goes there too whenever
+# its root type is declared there (`anyhow` declares `Error` and `Chain` in
+# lib.rs) — and each strip must leave the other region untouched.
+PIN_PROBE_MARKERS = ("// __LAYOUT_PIN_PROBE_BEGIN__", "// __LAYOUT_PIN_PROBE_END__")
+FIELD_PROBE_MARKERS = ("// __LAYOUT_FIELD_PROBE_BEGIN__",
+                       "// __LAYOUT_FIELD_PROBE_END__")
+
+
+def install_probe_region(
+    text: str, source: str, markers: tuple[str, str],
+) -> str:
+    """`text` with `source` installed as this marker pair's region. Strip-then-
+    append, so it is idempotent: a retried attempt replaces the region it wrote
+    last time instead of stacking a second one."""
+    begin, end = markers
+    base = strip_probe_region(text, markers)
+    return f"{base.rstrip()}\n\n{begin}\n{source.rstrip()}\n{end}\n"
+
+
+def strip_probe_region(text: str, markers: tuple[str, str]) -> str:
+    """`text` with this marker pair's region removed; unchanged when absent. An
+    unterminated region (a run killed mid-install) takes the rest of the file
+    with it — the alternative is to leave a fragment that never compiles again."""
+    begin, end = markers
+    at = text.find(begin)
+    if at < 0:
+        return text
+    close = text.find(end, at)
+    if close < 0:
+        return text[:at].rstrip() + "\n"
+    return text[:at].rstrip() + "\n" + text[close + len(end):].lstrip("\n")
 
 
 def _balanced_span(text: str, start: int, open_ch: str, close_ch: str) -> int:

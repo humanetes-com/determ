@@ -7,9 +7,11 @@ from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
     ComponentResult,
     LayoutOutcome,
-    _calibrated_field_path_probe,
+    _calibrated_field_path_probes,
     _component_field_paths,
+    _install_field_probes,
     _oracle_sources,
+    _strip_field_probes,
     author_layout,
     component_outcome,
 )
@@ -19,6 +21,7 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     StaticAssertKind,
 )
+from pipeline_core.domain.layout_probe import LayoutProbe, build_field_path_probe
 from pipeline_core.domain.models import FieldRecord, TypeRecord
 from pipeline_core.domain.oracle_field_paths import FieldPath
 from pipeline_core.domain.private_surface import (
@@ -410,8 +413,8 @@ def test_bake_time_has_no_filled_bodies_and_so_no_veto():
 # `cargo test` failed `error[E0609]: no field 'inner' on type 'Error'` — 0/56
 # unit tests in both clusters, with the only diagnostic pointing into the oracle.
 
-def _item(name, definition, kind=SurfaceItemKind.STRUCT):
-    return PrivateSurfaceItem(kind=kind, name=name, file="src/error.rs",
+def _item(name, definition, kind=SurfaceItemKind.STRUCT, file="src/error.rs"):
+    return PrivateSurfaceItem(kind=kind, name=name, file=file,
                               definition=definition)
 
 
@@ -481,36 +484,113 @@ def test_no_oracle_means_no_paths():
 
 
 class _FieldProbeDeps:
-    """Deps for the field-path probe calibration: records what was written to
-    the probe slot and answers `compile_check` with a scripted result."""
+    """Deps for the member-path probe calibration. The skeleton is a dict, so a
+    test can see WHICH file the probe was written into and what the tree looked
+    like at the moment of each compile; `compile_check` is scripted."""
 
-    def __init__(self, compiles, errors=""):
+    def __init__(self, compiles, errors="", files=None):
         self.compiles = compiles
         self.errors = errors
-        self.written: list[str | None] = []
+        self.files: dict[str, str] = dict(files or {
+            "src/error.rs": "struct ErrorImpl { vtable: u8 }\n",
+            "src/lib.rs": "pub struct Error { }\n"})
+        self.written: list[str | None] = []          # the crate-root pin slot
+        self.at_compile: list[dict[str, str]] = []   # tree snapshot per compile
         self.logs: list[str] = []
 
     def deps(self):
+        def compile_check():
+            self.at_compile.append(dict(self.files))
+            return self.compiles, self.errors
         return AuthorLayoutDeps(
             run_model=lambda p: "",
-            read_skeleton=lambda rel: "",
-            write_skeleton=lambda rel, txt: None,
-            compile_check=lambda: (self.compiles, self.errors),
+            read_skeleton=lambda rel: self.files.get(rel),
+            write_skeleton=lambda rel, txt: self.files.__setitem__(rel, txt),
+            compile_check=compile_check,
             write_pin_probe=self.written.append,
             log=self.logs.append)
 
 
 def _probe_for(paths, deps, comp=None):
     surface = _surface()
-    comp = comp or (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS),)
-    return _calibrated_field_path_probe(surface, comp, tuple(paths), deps)
+    comp = comp or (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS,
+                          file="src/lib.rs"),)
+    return _calibrated_field_path_probes(surface, comp, tuple(paths), deps)
+
+
+def _gated(in_file):
+    return tuple(e for _, p in in_file for e in p.gated)
+
+
+def _skipped(in_file):
+    return tuple(e for _, p in in_file for e in p.skipped)
 
 
 def test_a_path_probe_that_compiles_on_the_frozen_scaffold_is_gated():
     d = _FieldProbeDeps(compiles=True)
-    probe = _probe_for([FieldPath("Error", ("inner",))], d.deps())
-    assert probe.gated == ("Error.inner",)
-    assert d.written[-1] is None, "the probe slot must be cleared after the check"
+    in_file = _probe_for([FieldPath("Error", ("inner",))], d.deps())
+    assert _gated(in_file) == ("Error.inner",)
+    assert "_layout_pin_field_path_0" not in d.files["src/lib.rs"], (
+        "the probe region must be gone once the check has been made")
+
+
+def test_the_probe_is_written_into_the_file_that_DECLARES_the_root():
+    """A private field is visible to its own module and that module's
+    descendants, and nowhere else. Probed from the crate root, a correct layout
+    for a type declared in a submodule answers `error[E0616]: field is private`
+    — and no attempt could ever satisfy it, because `_public_contract_broken`
+    rejects a `pub` field outright. Measured on a two-module crate (2026-08-06):
+    crate-root probe, field elided → E0609 (so calibration arms the gate); field
+    present and private → E0616 on EVERY candidate. In its own file the same
+    probe compiles."""
+    d = _FieldProbeDeps(compiles=True)
+    comp = (_item("ErrorImpl", "struct ErrorImpl { vtable: u8 }", file="src/error.rs"),)
+    in_file = _probe_for([FieldPath("ErrorImpl", ("vtable",))], d.deps(), comp)
+    assert [rel for rel, _ in in_file] == ["src/error.rs"]
+    assert "&v.vtable" in d.at_compile[0]["src/error.rs"]
+    assert "_layout_pin_field_path" not in d.at_compile[0]["src/lib.rs"]
+    assert d.written == [], "the crate-root pin slot is not the member-path slot"
+
+
+def test_roots_declared_in_two_files_get_one_probe_each():
+    d = _FieldProbeDeps(compiles=True)
+    comp = (_item("Error", "pub struct Error { }", SurfaceItemKind.PUB_FIELDS,
+                  file="src/lib.rs"),
+            _item("ErrorImpl", "struct ErrorImpl { vtable: u8 }", file="src/error.rs"))
+    in_file = _probe_for(
+        [FieldPath("Error", ("inner",)), FieldPath("ErrorImpl", ("vtable",))],
+        d.deps(), comp)
+    assert [rel for rel, _ in in_file] == ["src/error.rs", "src/lib.rs"]
+    assert "&v.vtable" in d.at_compile[0]["src/error.rs"]
+    assert "&v.inner" in d.at_compile[0]["src/lib.rs"]
+    assert len(d.at_compile) == 1, "both files, ONE calibration compile"
+
+
+def test_only_a_probe_that_checks_something_is_placed():
+    """A component's paths can group into a file that renders nothing — every
+    root declared there generic. That entry still travels with the gate so its
+    skipped paths stay named, and it must not put an empty region in the file."""
+    d = _FieldProbeDeps(compiles=True)
+    in_file = (("src/error.rs",
+                build_field_path_probe([FieldPath("ErrorImpl", ("vtable",))])),
+               ("src/lib.rs", LayoutProbe(skipped=("ContextError.context",))))
+    deps = d.deps()
+    _install_field_probes(deps, in_file)
+    assert "_layout_pin_field_path_0" in d.files["src/error.rs"]
+    assert d.files["src/lib.rs"] == "pub struct Error { }\n"
+    _strip_field_probes(deps, in_file)
+    assert "_layout_pin_field_path_0" not in d.files["src/error.rs"]
+
+
+def test_a_declaring_file_the_skeleton_does_not_have_is_skipped_not_created():
+    """The probe is a gate. A gate that writes a source file the crate never had
+    would put a `fn` in a module nothing declares, and the compile it then reads
+    would be answering a question about the gate."""
+    d = _FieldProbeDeps(compiles=True, files={"src/lib.rs": "pub struct Error { }\n"})
+    comp = (_item("ErrorImpl", "struct ErrorImpl { vtable: u8 }", file="src/gone.rs"),)
+    in_file = _probe_for([FieldPath("ErrorImpl", ("vtable",))], d.deps(), comp)
+    assert _gated(in_file) == ("ErrorImpl.vtable",)   # rendered, just never placed
+    assert "src/gone.rs" not in d.files
 
 
 def test_a_path_probe_failing_ONLY_on_E0609_is_still_gated():
@@ -520,41 +600,198 @@ def test_a_path_probe_failing_ONLY_on_E0609_is_still_gated():
     probe does, would disable the gate precisely where it is needed."""
     d = _FieldProbeDeps(compiles=False,
                    errors="error[E0609]: no field `inner` on type `Error`")
-    probe = _probe_for([FieldPath("Error", ("inner",))], d.deps())
-    assert probe.gated == ("Error.inner",)
+    in_file = _probe_for([FieldPath("Error", ("inner",))], d.deps())
+    assert _gated(in_file) == ("Error.inner",)
 
 
 def test_a_path_probe_wrong_about_itself_disables_gating_loudly():
-    """E0616 is the probe failing for its OWN reason — it sits at the crate root
-    and cannot see a field the oracle's own module can. Gating on it would
-    reject every correct layout, so it is dropped and said out loud."""
+    """In its own file the probe still resolves the DEEPER hops through types
+    other modules own, and `field 'raw' of 'Vtable' is private` is the probe's
+    own reach, not a layout violation. Gating on it would reject every correct
+    layout, so it is dropped and said out loud."""
     d = _FieldProbeDeps(compiles=False,
-                   errors="error[E0616]: field `inner` of `Error` is private")
-    probe = _probe_for([FieldPath("Error", ("inner",))], d.deps())
-    assert probe.gated == ()
-    assert probe.skipped == ("Error.inner",)
+                   errors="error[E0616]: field `raw` of `Vtable` is private")
+    in_file = _probe_for([FieldPath("Error", ("inner", "raw"))], d.deps())
+    assert _gated(in_file) == ()
+    assert _skipped(in_file) == ("Error.inner.raw",)
     assert any("wrong about itself" in ln for ln in d.logs)
 
 
 def test_a_generic_root_is_named_as_skipped_not_guessed_at():
     d = _FieldProbeDeps(compiles=True)
     comp = (_item("ContextError", "struct ContextError<C, E> { context: C, error: E }"),)
-    probe = _probe_for([FieldPath("ContextError", ("context",))], d.deps(), comp)
-    assert probe.gated == ()
-    assert probe.skipped == ("ContextError.context",)
+    in_file = _probe_for([FieldPath("ContextError", ("context",))], d.deps(), comp)
+    assert _gated(in_file) == ()
+    assert _skipped(in_file) == ("ContextError.context",)
     assert any("generic root" in ln for ln in d.logs)
-    assert d.written == [], "nothing renderable, so nothing is compiled"
+    assert d.at_compile == [], "nothing renderable, so nothing is compiled"
 
 
 def test_no_paths_writes_no_probe():
     d = _FieldProbeDeps(compiles=True)
-    assert _probe_for([], d.deps()).gated == ()
-    assert d.written == []
+    assert _probe_for([], d.deps()) == ()
+    assert d.at_compile == []
 
 
-def test_no_probe_writer_means_no_path_gating():
-    """Callers that cannot place a probe file (the bake-time path) keep the
-    behaviour they had before the gate existed."""
+def test_member_path_gating_does_not_depend_on_the_crate_root_pin_port():
+    """Member-path probes are placed with `read_skeleton`/`write_skeleton`, which
+    every caller supplies. They used to ride in the pin port and were gated on
+    it; keeping that guard after the move would drop the one check standing
+    between an authored layout and a write-protected test that cannot compile —
+    silently, for any caller that happens not to install pins."""
     d = _FieldProbeDeps(compiles=True)
     deps = dataclasses.replace(d.deps(), write_pin_probe=None)
-    assert _probe_for([FieldPath("Error", ("inner",))], deps).gated == ()
+    in_file = _probe_for([FieldPath("Error", ("inner",))], deps)
+    assert _gated(in_file) == ("Error.inner",)
+    assert "&v.inner" in d.at_compile[0]["src/lib.rs"]
+
+
+class _ScriptedDeps:
+    """`compile_check` answers a scripted (compiles, errors) per call, so a test
+    can drive the two calibrations and the attempt compiles apart."""
+
+    def __init__(self, reply, results, oracle):
+        self.reply = reply
+        self.results = list(results)
+        self.oracle = oracle
+        self.files = {"src/error.rs": "struct ErrorImpl { vtable: u8 }\n"}
+        self.at_compile: list[dict[str, str]] = []
+        self.logs: list[str] = []
+
+    def deps(self):
+        def compile_check():
+            self.at_compile.append(dict(self.files))
+            return self.results.pop(0)
+        return AuthorLayoutDeps(
+            run_model=lambda p: self.reply,
+            read_skeleton=lambda rel: self.files.get(rel),
+            write_skeleton=lambda rel, txt: self.files.__setitem__(rel, txt),
+            compile_check=compile_check,
+            write_pin_probe=lambda src: None,
+            oracle_sources=lambda: self.oracle,
+            log=self.logs.append, max_attempts=3)
+
+
+def test_an_E0616_after_authoring_is_the_probe_s_reach_not_a_rejection():
+    """The hop calibration cannot see: with the root's own fields elided rustc
+    stops at E0609 and never resolves `.raw`, so a member private to a THIRD
+    module only shows up once a candidate has put the first hop back. Freezing
+    the component there would reject a layout no attempt could ever fix, so the
+    candidate is re-decided with the probe removed."""
+    oracle = {"src/error.gen_tests_1.rs":
+              "let e: ErrorImpl = make();\nlet _ = e.vtable.raw;\n"}
+    d = _ScriptedDeps(_GOOD, [
+        (True, ""),                                             # pin calibration
+        (False, "error[E0609]: no field `raw` on type `u8`"),    # path calibration
+        (False, "error[E0616]: field `raw` of `Vtable` is private"),  # attempt
+        (True, ""),                                             # re-decided
+    ], oracle)
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored
+    assert "Box<dyn StdError>" in d.files["src/error.rs"]
+    assert "_layout_pin_field_path" not in d.files["src/error.rs"]
+    assert any("private to another module" in ln for ln in d.logs)
+
+
+def test_the_success_line_counts_the_paths_the_compile_did_decide():
+    """The other half of the same rule: when the probe rode along with the
+    compile that accepted the layout, the log says so and says how many."""
+    oracle = {"src/error.gen_tests_1.rs":
+              "let e: ErrorImpl = make();\nlet _ = e.vtable;\n"}
+    d = _ScriptedDeps(_GOOD, [
+        (True, ""),                                          # pin calibration
+        (False, "error[E0609]: no field `vtable`"),           # path calibration
+        (True, ""),                                           # the attempt
+    ], oracle)
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored
+    success = [ln for ln in d.logs if "authored layout compiles" in ln]
+    assert success == [success[0]]
+    assert "1 layout pin(s) verified, 1 member path(s) verified" in success[0]
+    assert "_layout_pin_field_path" not in d.files["src/error.rs"]
+
+
+def test_the_success_line_does_not_claim_paths_the_deciding_compile_never_saw():
+    """The run log is the instrument this phase is diagnosed from, and the
+    fallback's compile ran with the probe stripped. Printing "1 member path(s)
+    verified" three lines under "decided without it" makes the log argue with
+    itself about the one question it was there to answer. The pin count stays:
+    the pins DID hold on the first compile — that is what makes the code set
+    exactly {E0616}."""
+    oracle = {"src/error.gen_tests_1.rs":
+              "let e: ErrorImpl = make();\nlet _ = e.vtable.raw;\n"}
+    d = _ScriptedDeps(_GOOD, [
+        (True, ""),
+        (False, "error[E0609]: no field `raw` on type `u8`"),
+        (False, "error[E0616]: field `raw` of `Vtable` is private"),
+        (True, ""),
+    ], oracle)
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored
+    success = [ln for ln in d.logs if "authored layout compiles" in ln]
+    assert success and "member path(s) verified" not in success[0]
+    assert "1 layout pin(s) verified" in success[0]
+
+
+def test_a_probe_proven_unusable_is_not_reinstalled_on_the_next_attempt():
+    """Cost, and only cost: the same probe would fail the same way and buy a
+    second `compile_check` to reach a verdict already reached. Attempt 2 here
+    compiles ONCE, and the tree it compiles carries no probe region."""
+    oracle = {"src/error.gen_tests_1.rs":
+              "let e: ErrorImpl = make();\nlet _ = e.vtable.raw;\n"}
+    d = _ScriptedDeps(_GOOD, [
+        (True, ""),                                            # pin calibration
+        (False, "error[E0609]: no field `raw` on type `u8`"),   # path calibration
+        (False, "error[E0616]: field `raw` of `Vtable` is private"),  # attempt 1
+        (False, "error: expected one of `,` or `}`"),           # re-decided: no
+        (True, ""),                                             # attempt 2
+    ], oracle)
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert res.all_authored
+    assert len(d.at_compile) == 5, "attempt 2 compiled once, not twice"
+    assert "_layout_pin_field_path" not in d.at_compile[-1]["src/error.rs"]
+    assert any("still refused" in ln for ln in d.logs)
+
+
+def test_an_E0616_that_survives_the_probe_s_removal_is_still_a_rejection():
+    """The fallback re-decides, it does not excuse: a candidate that does not
+    compile without the probe either is reverted exactly as before."""
+    oracle = {"src/error.gen_tests_1.rs":
+              "let e: ErrorImpl = make();\nlet _ = e.vtable.raw;\n"}
+    d = _ScriptedDeps(_GOOD, [
+        (True, ""),
+        (False, "error[E0609]: no field `raw` on type `u8`"),
+    ] + [(False, "error[E0616]: field `raw` of `Vtable` is private")] * 4, oracle)
+    res = author_layout(_surface(), module_name="anyhow", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert not res.all_authored
+    assert d.files["src/error.rs"] == "struct ErrorImpl { vtable: u8 }\n"
+
+
+def test_the_fallback_fires_once_per_component_not_once_per_attempt():
+    """`E0616` keeps arriving after the demotion — the authored layout is bad in
+    its own right — but the probe is no longer installed, so the second compile
+    and the message that blames the probe must not come back. Six compiles for
+    three attempts: two calibrations, then one apiece, with the extra
+    re-decision only on attempt 1. Reading the demoted gate as still-probing
+    cost a compile per attempt and wrote the same explanation three times, twice
+    about a probe region that was not in the tree."""
+    oracle = {"src/error.gen_tests_1.rs":
+              "let e: ErrorImpl = make();\nlet _ = e.vtable.raw;\n"}
+    d = _ScriptedDeps(_GOOD, [
+        (True, ""),
+        (False, "error[E0609]: no field `raw` on type `u8`"),
+    ] + [(False, "error[E0616]: field `raw` of `Vtable` is private")] * 4, oracle)
+    author_layout(_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert len(d.at_compile) == 6
+    assert len([ln for ln in d.logs if "private to another module" in ln]) == 1
+    probed = [i for i, tree in enumerate(d.at_compile)
+              if "_layout_pin_field_path" in tree.get("src/error.rs", "")]
+    assert probed == [1, 2], (
+        "only the path calibration and attempt 1 carry a probe region; every "
+        "compile after the demotion runs on a tree without one")

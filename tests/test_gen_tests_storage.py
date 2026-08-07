@@ -11,6 +11,7 @@ from pipeline_core.adapters.gen_tests_storage import (
     load_gen_tests_origin,
     next_gen_tests_n,
     read_all_gen_tests,
+    read_oracle_sibling_sources,
     revert_gen_tests_pass,
     strip_all_gen_tests_artifacts,
     write_gen_tests_pass,
@@ -162,3 +163,43 @@ def test_strip_all_gen_tests_artifacts(tmp_path: Path) -> None:
     assert siblings == []
     clean = src.read_text(encoding="utf-8")
     assert strip_all_gen_tests_decls(clean) == clean
+
+
+# ── read_oracle_sibling_sources ──────────────────────────────────────────────
+# The layout phase reads these to learn which member paths the crate's own
+# write-protected tests take, so an authored private layout cannot rename a
+# field out from under a file no stage may edit.
+
+def _oracle_tree(tmp_path: Path) -> Path:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "error.gen_tests_3.rs").write_text(
+        "let _ = err.inner.ptr;\n", encoding="utf-8")
+    (tmp_path / "src" / "error.rs").write_text("pub struct Error {}\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_read_oracle_sibling_sources_reads_the_siblings_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    read = read_oracle_sibling_sources(_oracle_tree(tmp_path))
+    assert list(read) == ["src/error.gen_tests_3.rs"]
+    assert read["src/error.gen_tests_3.rs"] == "let _ = err.inner.ptr;\n"
+
+
+def test_read_oracle_sibling_sources_skips_the_working_trees(tmp_path: Path) -> None:
+    """`.skeleton/`, `.skeleton-filled/`, `.best_tree/` and `.cluster_augmented/`
+    each hold a COPY of the same siblings (38 apiece on `anyhow`, 2026-08-06).
+    Reading them would multiply every path by the number of trees on disk and
+    add no constraint; `target/` is build output for the same reason a wipe
+    skips it."""
+    root = _oracle_tree(tmp_path)
+    for d in (".skeleton/stable/src", ".best_tree/src", "target/debug"):
+        (root / d).mkdir(parents=True)
+        (root / d / "error.gen_tests_3.rs").write_text("copy\n", encoding="utf-8")
+    assert list(read_oracle_sibling_sources(root)) == ["src/error.gen_tests_3.rs"]
+
+
+def test_read_oracle_sibling_sources_on_a_missing_project_is_empty(
+    tmp_path: Path,
+) -> None:
+    assert read_oracle_sibling_sources(tmp_path / "nope") == {}

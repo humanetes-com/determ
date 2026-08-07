@@ -30,9 +30,13 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.failure_classification import first_diagnostic
 from pipeline_core.domain.layout_chunking import plan_author_chunks
 from pipeline_core.domain.layout_probe import (
+    FIELD_PROBE_MARKERS,
+    LayoutGate,
     LayoutProbe,
     build_field_path_probe,
     build_layout_probe,
+    install_probe_region,
+    strip_probe_region,
 )
 from pipeline_core.domain.layout_retrigger import dropped_members_in_use
 from pipeline_core.domain.oracle_field_paths import (
@@ -292,8 +296,14 @@ def author_layout(
         touched = {i.file for i in comp}
         pristine = {f: deps.read_skeleton(f) for f in touched}
         paths = _component_field_paths(comp, oracle)
-        probe = _calibrated_pin_probe(surface, comp, pins, deps).merged_with(
-            _calibrated_field_path_probe(surface, comp, paths, deps))
+        # Two probes, two authorities, two homes — one compile per attempt. The
+        # pins are calibrated by having to HOLD on the frozen scaffold and ride
+        # in the crate root; the member paths are calibrated by their diagnostic
+        # and ride in the file that declares each root type.
+        pin_probe = _calibrated_pin_probe(surface, comp, pins, deps)
+        gate = LayoutGate(
+            root=pin_probe,
+            in_file=_calibrated_field_path_probes(surface, comp, paths, deps))
         paths_note = field_path_requirements_text(paths)
 
         # ADOPTION BEFORE AUTHORING. A private type authored by an earlier
@@ -306,8 +316,10 @@ def author_layout(
         adopted = adopt_component(uids, registry or {})
         refuted: tuple[str, ...] = ()
         if adopted is not None:
-            ok, why, adopt_errors = _try_commit(comp, adopted, deps, probe, pristine)
-            if ok:
+            tried = _try_commit(comp, adopted, deps, gate, pristine)
+            why, adopt_errors = tried.reason, tried.errors
+            gate = _gate_after(gate, tried)
+            if tried.committed:
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: adopted the "
                          "layout already fixed by an earlier cluster "
                          "(no model call).")
@@ -367,14 +379,18 @@ def author_layout(
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 continue
-            ok, reason, errors = _try_commit(comp, authored, deps, probe, pristine)
-            if ok:
+            tried = _try_commit(comp, authored, deps, gate, pristine)
+            reason, errors = tried.reason, tried.errors
+            # Before the success line and before the next attempt: a probe the
+            # compile proved unusable must neither be claimed as verified nor
+            # reinstalled (and re-compiled) to reach the same verdict again.
+            gate = _gate_after(gate, tried)
+            if tried.committed:
                 committed = True
                 committed_defs = authored_locate_keys(comp, authored)
                 committed_items = tuple((u, authored[u]) for u in uids
                                        if u in authored)
-                pin_note = (f" [{len(probe.gated)} layout pin(s) verified]"
-                            if probe.checks_anything else "")
+                pin_note = _verified_note(gate)
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                          f"layout compiles (attempt {attempt}).{pin_note}")
                 break
@@ -390,8 +406,8 @@ def author_layout(
             diag = first_diagnostic(errors)
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                      f"scaffold did not compile (attempt {attempt}) — reverted"
-                     + (" (layout pins were gated this attempt)"
-                        if probe.checks_anything else "")
+                     + (" (layout pins/member paths were gated this attempt)"
+                        if gate.gated else "")
                      + (f": {diag}" if diag else "."))
         results.append(ComponentResult(
             names, committed, reason, authored_defs=committed_defs,
@@ -399,17 +415,86 @@ def author_layout(
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
 
 
+def _gate_after(gate: LayoutGate, tried: CommitAttempt) -> LayoutGate:
+    """The gate the NEXT compile (and the success line) may use."""
+    return gate.without_member_paths() if tried.probe_dropped else gate
+
+
+def _verified_note(gate: LayoutGate) -> str:
+    """What the accepted layout was actually held to, for the success line. The
+    two are counted apart because they answer different questions: a pin is the
+    crate's own measured layout, a member path is a name a write-protected test
+    reads."""
+    verified = []
+    if gate.root.gated:
+        verified.append(f"{len(gate.root.gated)} layout pin(s) verified")
+    paths = len(gate.gated) - len(gate.root.gated)
+    if paths:
+        verified.append(f"{paths} member path(s) verified")
+    return f" [{', '.join(verified)}]" if verified else ""
+
+
+def _install_field_probes(
+    deps: AuthorLayoutDeps, in_file: tuple[tuple[str, LayoutProbe], ...],
+) -> None:
+    """Write each member-path probe into the file that DECLARES its root type,
+    as its own marker region (so the pin probe's region in the same file is left
+    alone). A file the caller cannot read is skipped, not created: the probe is
+    a gate, and a gate that invents a source file is a defect of its own."""
+    for rel, probe in in_file:
+        if not probe.checks_anything:
+            continue
+        current = deps.read_skeleton(rel)
+        if current is None:
+            continue
+        deps.write_skeleton(
+            rel, install_probe_region(current, probe.source, FIELD_PROBE_MARKERS))
+
+
+def _strip_field_probes(
+    deps: AuthorLayoutDeps, in_file: tuple[tuple[str, LayoutProbe], ...],
+) -> None:
+    """Remove every member-path probe region. Runs after the compile on BOTH
+    paths — a committed layout must not carry the probe into t2a, and a rejected
+    one is restored from `pristine` anyway."""
+    for rel, probe in in_file:
+        if not probe.checks_anything:
+            continue
+        current = deps.read_skeleton(rel)
+        if current is None:
+            continue
+        deps.write_skeleton(rel, strip_probe_region(current, FIELD_PROBE_MARKERS))
+
+
+@dataclass(frozen=True, slots=True)
+class CommitAttempt:
+    """What one candidate layout's compile decided, and what decided it.
+
+    `errors` is empty for a splice/coverage rejection — the caller needs that
+    apart from a compile failure, since nothing was written and there is no
+    diagnostic to name.
+
+    `probe_dropped` says the member-path probe was removed and the candidate
+    re-decided without it. Two callers need it and neither can infer it: the
+    success line would otherwise print "N member path(s) verified" about a
+    compile those paths took no part in, and the attempt loop would reinstall a
+    probe already proven unusable — paying another `compile_check` to reach the
+    same verdict.
+    """
+
+    committed: bool
+    reason: str = ""
+    errors: str = ""
+    probe_dropped: bool = False
+
+
 def _try_commit(
     items: tuple[PrivateSurfaceItem, ...], authored: dict[str, AuthoredItem],
-    deps: AuthorLayoutDeps, probe: LayoutProbe, pristine: dict[str, str | None],
-) -> tuple[bool, str, str]:
+    deps: AuthorLayoutDeps, gate: LayoutGate, pristine: dict[str, str | None],
+) -> CommitAttempt:
     """Splice one candidate layout into the skeleton and KEEP it only if the
     rewritten scaffold still compiles with the component's layout pins probed.
     Any failure rolls the touched files back to `pristine`.
-
-    Returns (committed, reason, compiler_errors). `compiler_errors` is empty for
-    a splice/coverage rejection — the caller needs the two apart, since nothing
-    was written in that case and there is no diagnostic to name.
 
     One helper for BOTH candidate sources (the model's reply and a layout
     adopted from an earlier cfg-cluster): a second copy of the accept/rollback
@@ -418,25 +503,53 @@ def _try_commit(
     """
     edited, splice_err = _splice_component(items, authored, deps)
     if splice_err:
-        return False, splice_err, ""
+        return CommitAttempt(False, splice_err)
     for rel, txt in edited.items():
         deps.write_skeleton(rel, txt)
-    # The pin probe rides along with THIS compile: a layout that no longer
-    # satisfies `size_of::<Error>() == size_of::<usize>()` must be rejected
-    # here, not discovered a whole sweep later as repr failures blamed on
-    # individual fn bodies.
-    if probe.checks_anything and deps.write_pin_probe is not None:
-        deps.write_pin_probe(probe.source)
+    # The probes ride along with THIS compile: a layout that no longer satisfies
+    # `size_of::<Error>() == size_of::<usize>()`, or that renames a member the
+    # crate's write-protected tests read, must be rejected here — not discovered
+    # a whole sweep later as repr failures blamed on individual fn bodies, or at
+    # the first `cargo test` as a test file no stage may edit.
+    if gate.root.checks_anything and deps.write_pin_probe is not None:
+        deps.write_pin_probe(gate.root.source)
+    _install_field_probes(deps, gate.in_file)
     compiled, errors = deps.compile_check()
     if deps.write_pin_probe is not None:
         deps.write_pin_probe(None)
+    _strip_field_probes(deps, gate.in_file)
+    probe_dropped = False
+    # `checks_anything`, not `in_file`: a gate whose member paths were already
+    # demoted keeps its entries (they carry what the log must still name), so
+    # testing the tuple would re-run this on every later attempt of the same
+    # component — a second `compile_check` and a line blaming a probe that was
+    # not installed, which is both of the things the demotion exists to stop.
+    if (not compiled and any(p.checks_anything for _, p in gate.in_file)
+            and set(rustc_error_codes(errors, "E")) == {"E0616"}):
+        # The member-path probe reached a hop whose OWN module keeps it private:
+        # `err.inner.ptr` needs `ptr` visible where the probe sits, and only the
+        # crate's frozen source decides that. Calibration cannot see this coming
+        # — on the frozen scaffold the root's fields are elided, so rustc stops
+        # at the first hop with E0609 and the deeper hop is never resolved. The
+        # probe is wrong about ITSELF, and a probe that no candidate could ever
+        # satisfy would freeze a component whose layout was fine, so the
+        # candidate is re-decided without it (the region is already stripped).
+        probe_dropped = True
+        compiled, errors = deps.compile_check()
+        deps.log("  [t1.5] the member-path probe reads through a member that is "
+                 "private to another module (E0616) — that is the probe's own "
+                 "reach, not a layout violation; this candidate was decided "
+                 f"without it ({'compiles' if compiled else 'still refused'}).")
     if compiled:
-        return True, "", ""
+        return CommitAttempt(True, probe_dropped=probe_dropped)
     for rel, orig in pristine.items():
         if orig is not None:
             deps.write_skeleton(rel, orig)
-    return False, ("authored scaffold did not compile:\n" + errors
-                   if errors else "authored scaffold did not compile"), errors
+    return CommitAttempt(
+        False,
+        ("authored scaffold did not compile:\n" + errors
+         if errors else "authored scaffold did not compile"),
+        errors, probe_dropped)
 
 
 def _public_anchors(
@@ -541,62 +654,88 @@ def _component_field_paths(
     return tuple(out.values())
 
 
-def _calibrated_field_path_probe(
+def _calibrated_field_path_probes(
     surface: PrivateSurface,
     comp: tuple[PrivateSurfaceItem, ...],
     paths: tuple[FieldPath, ...],
     deps: AuthorLayoutDeps,
-) -> LayoutProbe:
-    """The oracle's member paths as a compile-time gate, with the one calibration
-    that fits them.
+) -> tuple[tuple[str, LayoutProbe], ...]:
+    """The oracle's member paths as a compile-time gate: one probe per DECLARING
+    file, calibrated together in one compile.
 
-    The pin probe is calibrated by requiring it to HOLD on the frozen scaffold —
-    the crate's own layout satisfies its own pins by construction. A field path
-    cannot answer to that authority: the freeze DELETED the fields it names, so
-    `no field 'inner' on type 'Error'` is the expected reading of a correct probe
-    against an elided struct, and demanding it hold would disable the gate exactly
-    where it is needed. The rule is therefore by diagnostic:
+    WHERE. A member-path probe borrows a PRIVATE field, and a private field is
+    visible only inside its own module and that module's descendants. The probe
+    therefore goes in the file that declares the root type, exactly like the
+    oracle's own tests, which can read the field only because they are generated
+    as a child module of that file (see :class:`LayoutGate`).
+
+    CALIBRATION. The pin probe is calibrated by requiring it to HOLD on the
+    frozen scaffold — the crate's own layout satisfies its own pins by
+    construction. A member path cannot answer to that authority: the freeze
+    DELETED the fields it names, so `no field 'inner' on type 'Error'` is the
+    expected reading of a CORRECT probe against an elided struct, and demanding
+    it hold would disable the gate exactly where it is needed. The rule is
+    therefore by diagnostic:
 
       compiles                  → the path holds on the frozen layout; gate it
                                   (an authored layout may not take it away).
       fails, ONLY E0609         → the fields were elided; that is what this
                                   component is authoring. Gate it.
-      anything else             → E0616 (private field — the probe sits at the
-                                  crate root and cannot see a field the oracle's
-                                  own module can), E0412, E0107, a parse error:
-                                  the probe is wrong ABOUT ITSELF. Drop it, say so.
+      anything else             → E0412 (root not in scope in its own file),
+                                  E0107, a parse error: the probe is wrong ABOUT
+                                  ITSELF. Drop it, say so.
 
     A dropped probe costs nothing but the gate; a probe kept on a misrendered path
     would freeze a component whose layout was fine, which is why the fall-through
-    is "drop, loudly" rather than "gate anyway"."""
-    if deps.write_pin_probe is None or not paths:
-        return LayoutProbe()
+    is "drop, loudly" rather than "gate anyway". The one case calibration cannot
+    reach — a deeper hop that is private to a THIRD module, invisible while the
+    root's own fields are still elided — is caught after the fact in
+    `_try_commit`, on the same principle.
+
+    The only precondition is having paths. These probes are placed with
+    `read_skeleton`/`write_skeleton`, which every caller supplies; gating them on
+    the crate-root pin port as well (they used to ride in it) would drop the one
+    check standing between an authored layout and a write-protected test that
+    cannot compile — silently, for any caller that happens not to install pins."""
+    if not paths:
+        return ()
+    by_name = {i.name: i for i in comp}
     generic_roots = frozenset(
         i.name for i in comp
         if (h := parse_type_header(i.definition)) is not None and h.generics)
-    probe = build_field_path_probe(paths, generic_roots=generic_roots)
+    grouped: dict[str, list[FieldPath]] = {}
+    for p in paths:
+        grouped.setdefault(by_name[p.root_type].file, []).append(p)
+    probes = tuple(
+        (rel, build_field_path_probe(tuple(ps), generic_roots=generic_roots))
+        for rel, ps in sorted(grouped.items()))
+    live = tuple((rel, pr) for rel, pr in probes if pr.checks_anything)
+    skipped = tuple(e for _, pr in probes for e in pr.skipped)
     names = tuple(i.name for i in comp)
-    if probe.skipped:
-        deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
-                 f"{len(probe.skipped)} oracle member path(s) NOT compile-gated "
-                 f"(generic root — a probe would have to invent its type "
-                 f"parameters): {list(probe.skipped)}")
-    if not probe.checks_anything:
-        return LayoutProbe(skipped=probe.skipped)
-    deps.write_pin_probe(probe.source)
+    if skipped:
+        deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {len(skipped)} oracle "
+                 "member path(s) NOT compile-gated — a generic root would force "
+                 "the probe to invent its type parameters, and a path with no "
+                 f"member names nothing to borrow: {list(skipped)}")
+    if not live:
+        return probes
+    _install_field_probes(deps, live)
     holds, errors = deps.compile_check()
-    deps.write_pin_probe(None)
+    _strip_field_probes(deps, live)
     codes = set(rustc_error_codes(errors, "E"))
+    gated = tuple(e for _, pr in live for e in pr.gated)
     if holds or codes == {"E0609"}:
         deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: gating on "
-                 f"{len(probe.gated)} member path(s) the crate's own "
-                 f"write-protected tests read: {list(probe.gated)}")
-        return probe
+                 f"{len(gated)} member path(s) the crate's own write-protected "
+                 f"tests read: {list(gated)} (probed in "
+                 f"{[rel for rel, _ in live]})")
+        return probes
     deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: member-path probe is "
              "wrong about itself on the FROZEN scaffold (not a layout "
              f"violation) — path gating disabled for this component. "
              f"codes={sorted(codes)} {errors.strip()[:300]}")
-    return LayoutProbe(skipped=probe.gated + probe.skipped)
+    return tuple((rel, LayoutProbe(skipped=pr.gated + pr.skipped))
+                 for rel, pr in probes)
 
 
 def _author_component(

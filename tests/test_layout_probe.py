@@ -15,8 +15,14 @@ from pipeline_core.domain.behaviour import (
 )
 from pipeline_core.domain.layout_pins import harvest_layout_pin_behaviours
 from pipeline_core.domain.layout_probe import (
+    FIELD_PROBE_MARKERS,
+    PIN_PROBE_MARKERS,
+    LayoutGate,
+    LayoutProbe,
     build_field_path_probe,
     build_layout_probe,
+    install_probe_region,
+    strip_probe_region,
 )
 from pipeline_core.domain.oracle_field_paths import FieldPath
 
@@ -263,3 +269,93 @@ def test_field_path_probe_gates_what_it_can_and_names_what_it_cannot() -> None:
 
 def test_no_paths_renders_no_probe() -> None:
     assert not build_field_path_probe([]).checks_anything
+
+
+# --- probe regions ------------------------------------------------------------
+# Two marker pairs, not one, because both regions land in the same file whenever
+# the member-path probe's root type is declared at the crate root — `anyhow`
+# declares `Error` and `Chain` in lib.rs (2026-08-06). One shared marker pair
+# would make each install strip the other's region, and the gate that lost its
+# region would silently check nothing.
+
+def test_installing_a_region_appends_it_and_stripping_takes_it_back() -> None:
+    text = "pub struct Error { inner: Own<ErrorImpl> }\n"
+    with_probe = install_probe_region(text, "fn _p(v: &Error) {}", PIN_PROBE_MARKERS)
+    assert "fn _p(v: &Error) {}" in with_probe
+    assert with_probe.startswith(text.rstrip())
+    assert strip_probe_region(with_probe, PIN_PROBE_MARKERS) == text
+
+
+def test_installing_twice_replaces_the_region_instead_of_stacking_it() -> None:
+    once = install_probe_region("mod x;\n", "fn _a() {}", PIN_PROBE_MARKERS)
+    twice = install_probe_region(once, "fn _b() {}", PIN_PROBE_MARKERS)
+    assert twice.count(PIN_PROBE_MARKERS[0]) == 1
+    assert "fn _a() {}" not in twice and "fn _b() {}" in twice
+
+
+def test_each_marker_pair_leaves_the_other_region_alone() -> None:
+    """The case that made two pairs necessary: pins and a member path in one
+    file, each installed and removed on its own schedule."""
+    text = install_probe_region("mod x;\n", "fn _pin() {}", PIN_PROBE_MARKERS)
+    text = install_probe_region(text, "fn _path() {}", FIELD_PROBE_MARKERS)
+    assert "fn _pin() {}" in text and "fn _path() {}" in text
+    without_path = strip_probe_region(text, FIELD_PROBE_MARKERS)
+    assert "fn _pin() {}" in without_path and "fn _path() {}" not in without_path
+    assert strip_probe_region(without_path, PIN_PROBE_MARKERS) == "mod x;\n"
+
+
+def test_stripping_a_region_that_is_not_there_changes_nothing() -> None:
+    assert strip_probe_region("mod x;\n", PIN_PROBE_MARKERS) == "mod x;\n"
+
+
+def test_an_unterminated_region_is_removed_to_the_end_of_the_file() -> None:
+    """A run killed mid-install leaves an opening marker and no close. Keeping
+    the fragment would leave a file that never compiles again; the region is
+    generated, so the truncation loses nothing the tree needs."""
+    text = "mod x;\n\n" + PIN_PROBE_MARKERS[0] + "\nfn _half("
+    assert strip_probe_region(text, PIN_PROBE_MARKERS) == "mod x;\n"
+
+
+# --- the gate --------------------------------------------------------------
+
+def test_the_gate_counts_both_probes_and_keeps_them_in_their_own_files() -> None:
+    gate = LayoutGate(
+        root=LayoutProbe("const _: () = assert!(true);", ("size_of::<Error>()",)),
+        in_file=(("src/lib.rs", build_field_path_probe(
+            [FieldPath("Error", ("inner",))])),))
+    assert gate.gated == ("size_of::<Error>()", "Error.inner")
+    assert [rel for rel, _ in gate.in_file] == ["src/lib.rs"]
+
+
+def test_the_gate_names_what_neither_probe_could_check() -> None:
+    gate = LayoutGate(
+        root=LayoutProbe(skipped=("align_of::<Error>()",)),
+        in_file=(("src/lib.rs", build_field_path_probe(
+            [FieldPath("ContextError", ("error",))],
+            generic_roots=frozenset({"ContextError"}))),))
+    assert gate.gated == ()
+    assert gate.skipped == ("align_of::<Error>()", "ContextError.error")
+
+
+def test_an_empty_gate_checks_nothing() -> None:
+    assert LayoutGate().gated == () and LayoutGate().skipped == ()
+
+
+def test_demoting_the_member_paths_keeps_the_pins_and_names_what_it_gave_up() -> None:
+    """What a probe that turned out to be unusable leaves behind: the paths move
+    from checked to skipped rather than disappearing, so the log can still say
+    what was NOT decided, and nothing places a demoted probe."""
+    gate = LayoutGate(
+        root=LayoutProbe("const _: () = assert!(true);", ("size_of::<Error>()",)),
+        in_file=(("src/lib.rs", build_field_path_probe(
+            [FieldPath("Error", ("inner",))])),))
+    after = gate.without_member_paths()
+    assert after.root == gate.root
+    assert after.gated == ("size_of::<Error>()",)
+    assert after.skipped == ("Error.inner",)
+    assert not any(p.checks_anything for _, p in after.in_file)
+
+
+def test_demoting_a_gate_with_no_member_paths_changes_nothing() -> None:
+    gate = LayoutGate(root=LayoutProbe("const _: () = assert!(true);", ("size",)))
+    assert gate.without_member_paths() == gate
