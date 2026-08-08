@@ -477,6 +477,65 @@ def item_names(text: str) -> list[str]:
     return names
 
 
+def stubbed_fn_names(text: str) -> frozenset[str]:
+    """Names of the fns in `text` whose body is nothing but the skeletoniser's
+    hollow marker — `unimplemented!()`, in either the bare or the `::core::`
+    spelling the skeletoniser writes.
+
+    Answers "which of this file's fns are still holes" from the file text
+    alone, at any nesting depth, with no extractor binary and no cluster
+    context. That is what makes it usable at CONVICTION-WRITE time, where the
+    only thing in hand is the snapshot the failed attempt compiled against: a
+    retrospective that blames a sibling for being a stub can then record which
+    siblings those were, and a later reader can see they have since filled.
+
+    Comments are stripped before the test, because a reverted body is not bare.
+    `make_failed_attempt_body` keeps the attempt and the cargo error beside the
+    marker, so the live tree's hollow bodies run 20-40 lines of `//` before the
+    `unimplemented!()` — matching only a bare body would report a freshly-failed
+    fn as filled, which is the opposite of the truth.
+
+    A bodyless declaration (a trait method's `fn f(&self);`, an `extern` block)
+    is not a hole in this crate and is never reported.
+    """
+    mask = code_mask(text)
+    n = len(text)
+    out: set[str] = set()
+    i = 0
+    while i < n:
+        if mask[i] or not _word_at(text, i, "fn"):
+            i += 1
+            continue
+        j = i + 2
+        while j < n and (mask[j] or text[j].isspace()):
+            j += 1
+        k = j
+        while k < n and (text[k].isalnum() or text[k] == "_"):
+            k += 1
+        name = text[j:k]
+        if not name:
+            i += 2
+            continue
+        end = _skip_fn_item(text, mask, k)
+        # `_skip_fn_item` stops ON a depth-0 `}` for a fn-POINTER type
+        # (`object_drop: unsafe fn(Own<ErrorImpl>)` in a vtable struct is the
+        # live case) — no body, nothing declared, and consuming it would walk
+        # past the rest of the enclosing item.
+        body_open = text.find("{", k, end)
+        if body_open != -1 and not mask[body_open]:
+            close = _matching_brace(text, mask, body_open)
+            if close is not None and _is_hollow_body(text[body_open + 1:close - 1]):
+                out.add(name)
+        i = max(end, i + 2)
+    return frozenset(out)
+
+
+def _is_hollow_body(body: str) -> bool:
+    """True when `body` carries no code but an `unimplemented!()`."""
+    core = strip_line_block_comments(body).strip().rstrip(";").strip()
+    return core in ("unimplemented!()", "::core::unimplemented!()")
+
+
 def struct_declarations(text: str) -> list[tuple[str, int]]:
     """(name, index of its ``struct`` keyword) per ``struct NAME`` item, in
     declaration order.

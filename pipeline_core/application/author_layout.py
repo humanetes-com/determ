@@ -14,13 +14,14 @@ pure orchestration over domain VOs.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
     AuthoredItem,
     adopt_component,
     authored_locate_keys,
+    carry_frozen_repr,
     component_uids,
     definition_replacements,
     parse_authored_layout,
@@ -182,6 +183,18 @@ def _splice_component(
     a missing block, an unreadable file and a locate miss are three different
     bugs and collapsing them into one message hides which one is happening."""
     filled = deps.filled_bodies() if deps.filled_bodies is not None else ""
+    # A dropped `#[repr(...)]` is not a layout choice — see `carry_frozen_repr`
+    # for the sweep it cost. Restored BEFORE the checks below so everything
+    # downstream (contract check, member eviction, the replacement plan) reads
+    # the text that will actually be spliced.
+    authored = dict(authored)
+    for uid, it in zip(component_uids(items), items, strict=True):
+        block = authored.get(uid)
+        if block is None:
+            continue
+        carried = carry_frozen_repr(it.definition, block.definition)
+        if carried != block.definition:
+            authored[uid] = replace(block, definition=carried)
     for uid, it in zip(component_uids(items), items, strict=True):
         block = authored.get(uid)
         if it.kind is SurfaceItemKind.PUB_FIELDS:

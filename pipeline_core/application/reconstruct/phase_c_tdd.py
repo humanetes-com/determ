@@ -30,6 +30,7 @@ from pipeline_core.domain.attribution import (
     FailureFrontier,
     union_unattributed_stubs,
 )
+from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.crash_site import (
     crash_evidence_by_locator,
     vanish_is_stub_confounded,
@@ -58,6 +59,7 @@ from pipeline_core.domain.models import (
     Frontier,
 )
 from pipeline_core.domain.oracle_ledger import SweepOracle, reconcile_sweep
+from pipeline_core.domain.pass_highwater import PassHighWater
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
@@ -107,9 +109,21 @@ class PhaseCTddDeps:
     # futile_containers) -> Frontier additions. None disables escalation.
     escalate_to_producers: Callable[..., Frontier] | None = None
     # Persist a new pass high-water fill tree to heal's restore tiers:
-    # (project_dir, cluster_name, filled_dir, pass_count, iteration) -> None.
+    # (project_dir, cluster_name, filled_dir, BestTreeMark) -> None.
     # None disables checkpointing (heal then has only excision + skeleton).
     checkpoint_fill_tree: Callable[..., None] | None = None
+    # What the durable snapshot already on disk says about itself:
+    # (project_dir, cluster) -> BestTreeMark | None. None here means the driver
+    # cannot see the slot and every sweep may replace it — the pre-seed
+    # behaviour, and what a unit test not exercising the tier wants.
+    load_best_tree_mark: Callable[..., Any] | None = None
+    # Release the disk-persisted exhaustion verdicts whose recorded blocking
+    # stubs have filled:
+    # (project_dir, {file: still-stubbed fn names}, cluster) -> count.
+    # None disables the release, which is the pre-fix behaviour: a unit
+    # convicted for calling `unimplemented!()` siblings stays convicted after
+    # they fill, and only a cluster-wide score move can free it.
+    retire_unblocked_convictions: Callable[..., int] | None = None
     # Stage A, the durable loop floor: (project_dir, cluster) -> the persisted
     # mapping or None, and (project_dir, cluster, mapping) -> None. Both None
     # keeps the pre-Stage-A behaviour (a fresh streak every process), which is
@@ -311,6 +325,12 @@ def run_phase_c_tdd(
     stall = 0
     best_pass = UNSET_PASS
     best_fail = None
+    # The high-water's account of WHICH TREE it describes. A retrigger's
+    # deliberate re-stub makes `best_pass` a fact about a tree the pipeline
+    # deleted, and four consumers read it — see `domain/pass_highwater.py` for
+    # what each one does with the stale figure and why the void is recorded here
+    # rather than as a fourth per-gate exemption.
+    _highwater = PassHighWater()
     # Stage A — the floor a previous process left on disk. Read here, ADOPTED
     # after the first sweep (its guard key needs that sweep's tree_sha and
     # oracle_size). See `domain/tdd_floor.py` for why all three key fields are
@@ -335,8 +355,39 @@ def run_phase_c_tdd(
     # the in-memory batch ratchet above so the tiers stay populated even when
     # PHASE_C_TDD_BATCH_RATCHET is off — without this, a parse-corruption heal
     # falls straight through to the skeleton nuke (loses every fill in the file).
-    _checkpoint_best = UNSET_PASS
-    _checkpoint_sha: str | None = None
+    #
+    # SEEDED FROM DISK, unlike the in-memory ratchet above, because what these
+    # two variables describe also lives on disk and outlives this process.
+    # `snapshot_due` reads a `None` sha as "no snapshot yet" and
+    # `save_cluster_best_tree` rmtree's the slot before copying, so starting
+    # both at their sentinels made the FIRST sweep of every process replace the
+    # stored tree however much worse it was. Live on `anyhow`, 2026-08-07: run
+    # `241132-f9fae0a6` left `.best_tree/stable` at 81 passing; run
+    # `259637-36db9aad` resumed that tree, its crash retrigger deliberately
+    # re-stubbed 56 bodies, and the 21-passing sweep that followed — a sweep the
+    # batch ratchet WITHHELD from charging, precisely because a deliberate
+    # re-stub is not a regression — became the stored tree, then 23, then 26.
+    # `_tdd_floor_stable.json` read `best_pass: 81` throughout, so the two
+    # durable records describing one cluster disagreed and the one heal reads
+    # held the worse tree. `domain/tdd_floor.py` names this gap itself:
+    # "Restoring the peak across a death … needs a durable ratchet snapshot,
+    # which is a separate piece of work."
+    #
+    # Seeded on the pass count ALONE — not on `code_id` the way the loop floor
+    # is. The floor gates termination, so a code change must not let a stale
+    # streak end a cluster the change was meant to unstick; this slot is source
+    # text a heal copies back, and which pipeline build measured it does not
+    # change how many tests it passes. An oracle change is the one thing that
+    # would make the counts incomparable, and the only path to one is task0c
+    # re-augmentation under `--clean`, which rmtree's the workspace and the
+    # slot with it.
+    _mark = (deps.load_best_tree_mark(project_dir, cluster.name)
+             if deps.load_best_tree_mark is not None else None)
+    _checkpoint_best = UNSET_PASS if _mark is None else _mark.pass_count
+    _checkpoint_sha: str | None = None if _mark is None else _mark.tree_sha
+    if _mark is not None:
+        deps.log(f"  {tag} [phase-c/tdd] durable best tree already on disk: "
+                 f"{_mark.render()} — a sweep replaces it only by beating it.")
     recently_filled: list[FnLocator] = []
     recently_filled_max = int(os.getenv("TDD_RECENTLY_FILLED_MAX", "50"))
     # Hook 3 — causal-regression tracking. `prev_failed` = the failing-test set
@@ -413,10 +464,18 @@ def run_phase_c_tdd(
         """Open a window for a landed re-stub, and SAY SO. Logged here rather
         than at the three fire sites so the window's size is on the record the
         moment it is granted: without it a window is only visible once it
-        withholds something, and a clipped one looks exactly like a sized one."""
+        withholds something, and a clipped one looks exactly like a sized one.
+
+        This is also where the pass high-water is VOIDED, for the same reason
+        the logging lives here: all three fire sites end in the same surgical
+        revert, and a void applied at only two of them is the shape of defect
+        `PassHighWater` exists to close."""
+        nonlocal _highwater
         _g = RefillGrace.for_restub(
             reverted, total_filled, per_iter=_grace_per_iter,
             max_iters=_grace_max_iters, granted_at=iter_n)
+        if _g.restubbed:
+            _highwater = _highwater.voided_by_restub(iter_n)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window open for "
                  f"{_g.iters_left} iter(s) — {_g.restubbed} body(ies) re-stubbed "
                  f"at ~{_grace_per_iter} re-fill(s)/iter"
@@ -528,6 +587,9 @@ def run_phase_c_tdd(
     # binaries did not compile. Carried as evidence, never as a threshold — a
     # tree that cannot build produces no verdict at all, so waiting is pure loss.
     _compile_broke_streak = 0
+    # Stub count at the previous sweep, for the plateau check below. -1 means
+    # "no previous sweep", which never counts as a decrease.
+    _stubs_prev = -1
     # Set only by the compile-blocked exit below, and returned, so the caller
     # can tell "this cluster is finished" from "this tree does not build".
     _baseline_broken = False
@@ -789,7 +851,10 @@ def run_phase_c_tdd(
                 and snapshot_due(pass_count, _checkpoint_best, _tree_sha, _checkpoint_sha) \
                 and _oracle.missing_count == 0:
             deps.checkpoint_fill_tree(
-                project_dir, cluster.name, target_src_dir, pass_count, iter_n)
+                project_dir, cluster.name, target_src_dir,
+                BestTreeMark(pass_count=pass_count, iteration=iter_n,
+                             tree_sha=_tree_sha,
+                             oracle_size=pass_count + fail_count))
             _checkpoint_best = pass_count
             _checkpoint_sha = _tree_sha
         # F6 — measurement provenance: stamp every iter event with the tree it
@@ -875,6 +940,26 @@ def run_phase_c_tdd(
         # all above), so the compile verdict is read once and shared by every
         # consumer below rather than re-derived at each.
         _sweep_compile_broke = "could not compile" in (output or "")
+        # Read once here, not at the dispatch site further down: the plateau
+        # check below needs it, and nothing between the two mutates the tree
+        # (the ratchet's re-sweeps and every splice are outside this span).
+        _stub_list = deps.scan_unimplemented_for_cluster(target_src_dir, cluster)
+        _stub_keys = frozenset(_stub_list)
+        # Release the disk convictions whose blockers have filled, HERE — the
+        # authoritative stub set exists at this point and nowhere else in the
+        # iteration, and releasing before the frontier is built makes a unit
+        # dispatchable the same sweep its producer filled rather than the next.
+        # Independent of the score-gated re-admission above on purpose: a
+        # producer filling IS the new evidence, and for the units that hold a
+        # cluster's whole test set it is the only evidence that can arrive.
+        if deps.retire_unblocked_convictions is not None:
+            _by_file: dict[str, set[str]] = {}
+            for _loc in _stub_list:
+                _by_file.setdefault(str(_loc.file), set()).add(_loc.fn_name)
+            deps.retire_unblocked_convictions(
+                project_dir,
+                {f: frozenset(names) for f, names in _by_file.items()},
+                cluster.name)
         # Stage A — adopt the floor a previous PROCESS left behind, once this
         # sweep has produced the two halves of the key it is guarded on. It
         # cannot happen at loop entry: `tree_sha` and `oracle_size` are results
@@ -934,6 +1019,37 @@ def run_phase_c_tdd(
         # measured nothing.
         if state.best_metric > float("-inf"):
             best_pass = int(state.best_metric)
+        _highwater = _highwater.observed(best_pass)
+        # The high-water describes a tree the retrigger deleted; THIS sweep is
+        # the first measurement of the one it made. Re-base every scalar derived
+        # from it, in one place, so no consumer is left reading the old lineage
+        # — the defect this replaces was exactly one un-updated consumer.
+        # A compile-broken sweep measured nothing and cannot be a baseline.
+        if _highwater.rebase_due(iter_n) and not _sweep_compile_broke:
+            _stale = _highwater.best
+            _highwater = _highwater.rebased(pass_count)
+            best_pass = _highwater.best
+            state.best_metric = float(best_pass)
+            # The re-admission baseline follows, or the release gate stays shut
+            # for the whole re-climb: `readmission_warranted` asks for a score
+            # move past this number, and the re-stub is what put the score below
+            # it. Left at the pre-re-stub figure it took run `259637-36db9aad`
+            # (2026-08-07) from iteration 4 to its death printing `NOT
+            # re-admitting exhausted fn(s)` on every sweep. An UNSPENT free
+            # grant (the negative sentinel) is left alone — it is not a baseline
+            # yet and re-basing it would spend it here for nothing.
+            if _pass_at_last_reset >= 0:
+                _pass_at_last_reset = best_pass
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: high-water re-based "
+                     f"{render_pass_floor(_stale)} -> {best_pass} — the "
+                     f"retrigger re-stubbed {_grace.restubbed} body(ies), so "
+                     f"{render_pass_floor(_stale)} describes a tree this run no "
+                     "longer has. The re-climb is judged from here.")
+            deps.emit("phase_c.tdd.highwater_rebased", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "stale_best": _stale, "new_best": best_pass,
+                "restubbed": _grace.restubbed,
+            })
         stall = state.stalls
         if _grace.bodies_in_flight:
             # THIRD consumer of the re-stub's depressed count, and the one that
@@ -952,6 +1068,44 @@ def run_phase_c_tdd(
             # a free iter of plateau.
             state.stalls = 0
             stall = 0
+        elif (not improved and not _sweep_compile_broke
+                and _stubs_prev >= 0 and len(_stub_keys) < _stubs_prev):
+            # A cluster early in its climb pays in STUBS and is only paid back
+            # in TESTS several iterations later: nothing flips until a whole
+            # producer chain is complete, and the loop says so itself — the
+            # sweep below this one logs `deferred N consumer(s) blocked by
+            # still-stubbed producer(s)`. Charging those iterations to a
+            # 3-iteration pass_count budget abandons a cluster that is working.
+            # Live, cluster `stable` of run 7445-00ee8a3c on 2026-08-07: iters
+            # 1-3 filled 36 then 26 fns, taking the stub count 132 -> 118 -> 82
+            # -> 75 while the pass count went 11 -> 13 -> 13. Iter 3 was charged
+            # `stall=1/3`, so two more such iterations would have ended task2a
+            # for that cluster with 75 `unimplemented!()` bodies still on disk.
+            # So a sweep that shrank the stub set is not a plateau — it moved
+            # the only metric that CAN move yet. Termination is unaffected and
+            # needs no cap: the stub set only shrinks (a retrigger's re-stub
+            # raises it, which is not a decrease and charges the stall as
+            # before), and part of it never fills at all — 13 of `stable`'s 88
+            # are cfg-gated out of this cluster — so the count floors, the
+            # decreases stop, and the exit below fires on schedule. A RED sweep
+            # is excluded: it dispatches only the fns rustc implicates (1 of 85
+            # on `stable` at 2026-08-06T13:19Z), so one body an iteration would
+            # shrink the set forever while the diagnostics stand still. A tree
+            # that does not build has its own terminators — the compile-blocked
+            # exit and the cause-A retrigger — and must not borrow this one.
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: pass count flat but "
+                     f"the tree is still filling ({_stubs_prev} -> "
+                     f"{len(_stub_keys)} stub(s)) — not charging the plateau "
+                     "budget for an iteration whose fills no test can score "
+                     "yet.")
+            deps.emit("phase_c.tdd.stub_progress", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "stubs_prev": _stubs_prev, "stubs_now": len(_stub_keys),
+                "pass_count": pass_count, "stall_before": stall,
+            })
+            state.stalls = 0
+            stall = 0
+        _stubs_prev = len(_stub_keys)
 
         # The re-admission baseline starts at a sentinel any score beats, so
         # the FIRST re-admission of a process is free. That free grant is the
@@ -1094,8 +1248,7 @@ def run_phase_c_tdd(
         # while its tested callers thrash as "blocked by an unfilled sibling
         # stub". order_frontier sorts leaf-first so helpers fill ahead of their
         # callers; the D3 filter + permanently_exhausted still bound re-entry.
-        frontier = union_unattributed_stubs(
-            frontier, deps.scan_unimplemented_for_cluster(target_src_dir, cluster))
+        frontier = union_unattributed_stubs(frontier, _stub_list)
 
         # No frontier key may be a `#[test]` fn — the tests ARE the oracle, and a
         # fill dispatched at one rewrites the thing it is being judged by. The
@@ -1128,8 +1281,8 @@ def run_phase_c_tdd(
         # defer it (NOT exhaust) so the producer gets the LLM budget first. This
         # is stateless: recomputed each iter from the current stub set, so a
         # deferred consumer is re-admitted the moment its producer fills.
-        _stub_keys = frozenset(
-            deps.scan_unimplemented_for_cluster(target_src_dir, cluster))
+        # (`_stub_keys` is scanned once per iter, up with the sweep verdict, so
+        # the plateau check can read the same set this dispatch does.)
         if _sweep_compile_broke and deps.implicated_fns is not None:
             # A red build reports no test verdict, so the frontier above is
             # reachability rather than evidence and dispatching from it burns

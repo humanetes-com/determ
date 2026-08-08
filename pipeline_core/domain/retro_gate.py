@@ -32,7 +32,7 @@ from .model_notes import (
     struct_fields,
 )
 from .rust_idents import impl_self_type
-from .rust_scan import struct_names
+from .rust_scan import contains_word, struct_names, stubbed_fn_names
 
 # Bumped whenever the ACCEPTANCE semantics change: a conviction says "every
 # attempt failed the gate", which means nothing once the gate is a different
@@ -218,6 +218,81 @@ class ConvictionEvidence:
         return frozenset(str(t) for t in stored) <= self.tests
 
 
+@dataclass(frozen=True, slots=True)
+class BlockedOnStubs:
+    """The hollow siblings a conviction's own failed attempts ran against.
+
+    The third way a conviction rots, and the one neither :class:`RetroProvenance`
+    nor :class:`ConvictionEvidence` can see. Both of those ask whether the
+    verdict was earned in a comparable WORLD; this asks whether it was earned
+    against a comparable TREE. A unit whose every attempt died because the fns
+    it calls were `unimplemented!()` was never given a fair attempt at all, and
+    nothing about the cluster, the layout fingerprint, the gate or the blame map
+    moves when those fns fill.
+
+    Measured on `anyhow` cluster `stable`, 2026-08-07: `src/error.rs::new` was
+    convicted GENUINELY_HARD, and the stored guidance is the conviction arguing
+    against itself — *"The vtable functions referenced in the body
+    (`object_drop`, `object_ref`, `object_boxed`, `object_downcast`,
+    `object_drop_front`, etc.) are not implemented in the crate — they panic
+    with 'not implemented' ... this cannot be fixed by body-only changes."* By
+    the time it mattered every fn that sentence names was filled on disk
+    (`construct`, `object_drop`, `object_drop_front`, `object_ref`,
+    `object_boxed`, `object_downcast`, `object_reallocate_boxed`,
+    `context_drop_rest`, `context_chain_drop_rest`), and the record still
+    skipped the unit on every dispatch. **A conviction is a claim about a
+    moment; this is the moment, written down.**
+
+    Recorded from the FAILED BODY's own callees rather than from the file's
+    whole stub set: a file mid-reconstruction is mostly holes, so "any stub in
+    this file filled" would retire every conviction almost every iteration and
+    buy the retries with activity instead of evidence — the same defect
+    `readmission_warranted` documents from the other direction.
+
+    Retirement is self-limiting and needs no attempt cap. Each release is bought
+    by a DISTINCT blocker filling, the caller narrows the stored set to those
+    still hollow, and a stub set only shrinks — so a record can be released at
+    most once per fn it recorded, and the last release leaves nothing to trigger
+    another."""
+
+    stubs: frozenset[str]
+
+    @classmethod
+    def at_conviction(
+        cls, attempted_body: str, file_text: str, *, exclude: str = "",
+    ) -> BlockedOnStubs:
+        """The fns `attempted_body` names that are still hollow in `file_text`.
+
+        `exclude` drops the convicted fn itself: its own body is a stub while
+        the attempt that failed is being judged, and a record that lists itself
+        would be released by its own eventual fill."""
+        return cls(frozenset(
+            name for name in stubbed_fn_names(file_text)
+            if name != exclude and contains_word(attempted_body, name)))
+
+    def stamp(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Record the blockers on a record about to be persisted (in place)."""
+        record["blocked_on"] = sorted(self.stubs)
+        return record
+
+
+def cleared_blockers(
+    record: Mapping[str, Any] | None, still_stubbed: frozenset[str],
+) -> frozenset[str]:
+    """The blockers a conviction recorded that are no longer hollow.
+
+    Empty for a record with no `blocked_on` stamp — a conviction earned before
+    the stamp existed, or one drawn from compile errors that named no sibling,
+    asserts nothing about the tree and is left to the provenance and evidence
+    gates. Silence is not a release."""
+    if not record:
+        return frozenset()
+    stored = record.get("blocked_on")
+    if not isinstance(stored, list):
+        return frozenset()
+    return frozenset(str(s) for s in stored) - still_stubbed
+
+
 class ConvictionStanding(Enum):
     """Why a stored ``fully_exhausted`` verdict does or does not apply here."""
     CURRENT = "current"
@@ -276,7 +351,14 @@ def stamp_conviction(
     record: dict[str, Any],
     provenance: RetroProvenance,
     evidence: ConvictionEvidence,
+    blockers: BlockedOnStubs | None = None,
 ) -> dict[str, Any]:
-    """Both halves a later reader needs: the CONTEXT the verdict was earned in
-    (equality-checked) and the EVIDENCE it rests on (subset-checked)."""
-    return evidence.stamp(provenance.stamp(record))
+    """Every half a later reader needs: the CONTEXT the verdict was earned in
+    (equality-checked), the EVIDENCE it rests on (subset-checked) and the hollow
+    siblings it ran against (`cleared_blockers`, difference-checked).
+
+    `blockers` is optional so a caller with no file snapshot in hand still
+    writes a well-formed record; such a record simply carries no tree claim and
+    is never released by `cleared_blockers`."""
+    stamped = evidence.stamp(provenance.stamp(record))
+    return blockers.stamp(stamped) if blockers is not None else stamped

@@ -767,3 +767,81 @@ def test_a_caller_that_never_scores_is_unaffected():
         f.attempts = dict(f.saved_attempts or f.attempts)
         assert res.reason != "cluster payoff budget spent"
     assert not any(k.startswith("payoff:") for k in (f.saved_attempts or {}))
+
+
+def _blame_collision() -> _Fakes:
+    """Cluster `stable` as it stood at 2026-08-08T08:19Z, reduced to the two
+    components that mattered. Registry order puts the private `StdError` helper
+    trait (`src/context.rs`) at a LOWER index than the component that declares
+    the blamed fn, and the blamed fn's return type spells `StdError` because
+    that is the crate's alias for `std::error::Error` — a different symbol."""
+    f = _Fakes(fn_records=[
+        FnRecord(file="error.rs", fn_name="object_reallocate_boxed",
+                 sig_text=("unsafe fn object_reallocate_boxed(e: Own<ErrorImpl>)"
+                           " -> Box<dyn StdError + Send + Sync + 'static>"),
+                 body_text="let unerased = e.cast::<ErrorImpl<E>>().boxed();"),
+    ])
+    f._records = [
+        LayoutComponentRecord(frozenset({"StdError"}), LayoutOutcome.FROZEN),
+        LayoutComponentRecord(
+            frozenset({"ErrorImpl", "object_reallocate_boxed", "vtable"}),
+            LayoutOutcome.FROZEN),
+    ]
+    return f
+
+
+def _uaf_evidence():
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    return CrashEvidence(
+        vanished=frozenset({"test_reallocate_into_boxed_dyn_error_without_backtrace_io"}),
+        suspect_fns=frozenset(),
+        blamed_fns=frozenset({FnLocator("src/error.rs",
+                                        "object_reallocate_boxed")}))
+
+
+def test_the_crash_walk_fires_at_the_component_that_declares_the_blamed_fn():
+    """Registry index is not evidence. The declarer is recorded SECOND here and
+    must still be the one re-authored."""
+    f = _blame_collision()
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=_uaf_evidence())
+    assert res.fired and res.succeeded and res.cause == "RUNTIME_CRASH"
+    assert "object_reallocate_boxed" in (f.committed[0] if f.committed else "")
+    assert "StdError" not in (f.committed[0] if f.committed else "")
+
+
+def test_a_capped_declarer_stops_the_crash_walk_instead_of_demoting_to_a_mention():
+    """The trap, at the action. ASAN blamed
+    `src/error.rs::object_reallocate_boxed`; its component was at 2 of a cap of
+    2, so the walk `continue`d and re-authored `StdError` — a five-line private
+    trait in `src/context.rs` that the blamed fn cannot even see — reverting 29
+    bodies that spell the token and taking the cluster from 49 passing to 24.
+
+    'The fault is in code this component owns, and this component may not be
+    re-authored again' is a complete answer. Nothing is re-authored, nothing is
+    reverted, and the sweep goes on to fill: the blamed fn is already in the
+    frontier carrying its ASAN report, which is the retry a body fault wants."""
+    f = _blame_collision()
+    f.attempts = {"ErrorImpl|object_reallocate_boxed|vtable": 2}
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=_uaf_evidence())
+    assert not res.fired
+    assert res.reason == "the faulting component is not re-authorable"
+    assert f.reverted_calls == []
+    assert f.committed == []
+    assert f.prompts == []          # no layout-authoring model call was spent
+    assert any("merely references" in ln for ln in f.logs)
+
+
+def test_a_crash_no_component_declares_still_reaches_the_ones_it_mentions():
+    """The tier must not make cause C weaker where it worked: with no declarer
+    among the candidates the referencing tier is the whole of the evidence, and
+    it still fires."""
+    f = _Fakes()   # canonical records: `fmt` references ErrorImpl, declares nothing
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
+                       suspect_fns=frozenset(),
+                       blamed_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=ev)
+    assert res.fired and res.succeeded and res.cause == "RUNTIME_CRASH"

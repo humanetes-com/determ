@@ -56,12 +56,13 @@ from pipeline_core.domain.layout_retrigger import (
     DEFAULT_MAX_MECHANICAL,
     DEFAULT_MAX_ZERO_PAYOFF,
     PAYOFF_HIGH_KEY,
+    BlameGrade,
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
     classify_compile_retrigger,
-    classify_crash_retrigger,
     classify_layout_retrigger,
+    crash_candidate_grade,
     crash_evidence_confounded,
     filled_body_text,
     find_fns_referencing,
@@ -73,6 +74,7 @@ from pipeline_core.domain.layout_retrigger import (
     reconcile_interrupted_attempts,
     settle_retrigger_payoff,
     should_retrigger,
+    top_blame_tier,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import (
@@ -349,16 +351,37 @@ def retrigger_layout(
     starv_cause, _evidence = classify_starvation("", "", error_text)
     _live_records: list[FnRecord] | None = None
 
+    # Cause C aims at ONE component and the registry order it is walked in is
+    # not evidence. Grade every candidate against the observed fault FIRST, keep
+    # only the strongest tier, and let the walk below run inside it: a component
+    # that merely spells a name the faulting fn also spells can then never be
+    # reached while a component that DECLARES the faulting fn exists, whatever
+    # their registry indices are.
+    _blame_tier = BlameGrade.NONE
+    if crash_evidence is not None:
+        _live_records = deps.enumerate_fns(filled_crate_dir) or []
+        _graded = [(rec, crash_candidate_grade(
+            crash_evidence, _live_records, rec.names)) for rec in candidates]
+        _blame_tier = top_blame_tier(g for _, g in _graded)
+        candidates = [rec for rec, g in _graded if g is _blame_tier
+                      and g is not BlameGrade.NONE]
+        if _blame_tier is BlameGrade.OWNS:
+            deps.log(
+                f"  [layout-retrigger] {cfg_cluster}: the observed fault is "
+                f"inside code {len(candidates)} component(s) declare — "
+                f"{'; '.join(sorted('|'.join(sorted(r.names)) for r in candidates))[:200]}"
+                " — so no component that merely references the faulting fn is "
+                "a candidate this sweep.")
+
     for rec in candidates:
         names = rec.names
         if compile_evidence is not None:
             cause = classify_compile_retrigger(compile_evidence, names)
         elif crash_evidence is not None:
-            if _live_records is None:
-                _live_records = deps.enumerate_fns(filled_crate_dir) or []
-            cause = classify_crash_retrigger(crash_evidence, _live_records, names)
-            if (should_retrigger(cause)
-                    and crash_evidence_confounded(_live_records, names)):
+            # Graded above; every survivor is at the top tier by construction.
+            assert _live_records is not None
+            cause = LayoutRetriggerCause.RUNTIME_CRASH
+            if crash_evidence_confounded(_live_records, names):
                 deps.log(
                     f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
                     "crash evidence confounded — most of the component's own "
@@ -441,6 +464,22 @@ def retrigger_layout(
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         return outcome
 
+    if _blame_tier is BlameGrade.OWNS:
+        # Every component the fault was observed INSIDE is unavailable — capped,
+        # confounded, or already failing mechanically. That is the answer, and
+        # the walk ends on it. Falling through to a weaker candidate here is the
+        # defect this tier exists to remove: the sweep spends its budget on a
+        # type the fault never touched and mass-reverts every body that spells
+        # its name, which is progress deleted for evidence nobody has. The
+        # caller's fill pass still runs, and the blamed fn is already in its
+        # frontier carrying the ASAN report — a body fault gets a body retry.
+        deps.log(
+            f"  [layout-retrigger] {cfg_cluster}: the fault's own component(s) "
+            "cannot be re-authored again this run — NOT re-authoring a "
+            "component the fault merely references; the blamed fn stays in the "
+            "fill frontier with its crash report instead.")
+        return RetriggerResult(
+            fired=False, reason="the faulting component is not re-authorable")
     return RetriggerResult(fired=False, reason="no component matched the evidence")
 
 

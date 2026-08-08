@@ -79,6 +79,7 @@ from pipeline_core.domain.refine import (
     best_progress_of,
 )
 from pipeline_core.domain.retro_gate import (
+    BlockedOnStubs,
     ConvictionEvidence,
     ConvictionStanding,
     RetroGateTally,
@@ -1798,9 +1799,18 @@ def fill_impl_blocks(
                 # save-after-write race could have one thread's
                 # `_save_retrospectives` persist a snapshot taken before the
                 # other thread's key landed, silently losing that entry.
-                # Stamped with the context it was earned in AND the convicting
-                # tests it was drawn from: a later reader honours the verdict
-                # only where both still hold.
+                # Stamped with the context it was earned in, the convicting
+                # tests it was drawn from AND the hollow siblings the attempt
+                # ran against: a later reader honours the verdict only where all
+                # three still hold. The third is the one a block like
+                # `impl Error` needs — nine members failing on `E0425: cannot
+                # find value object_drop_rest` is a verdict about the tree the
+                # attempt compiled in, not about the block.
+                # `exclude` is empty on purpose: a block's key is `*impl*`, so
+                # there is no single fn of its own to leave out, and its members
+                # ARE among the stubs that release it.
+                _blockers = BlockedOnStubs.at_conviction(
+                    last_response[:_FAILED_BODY_CAP], snapshot)
                 _prov = RetroProvenance.current(cluster_name, snapshot)
                 with _counters_lock:
                     retros_cache[
@@ -1816,7 +1826,7 @@ def fill_impl_blocks(
                            if new_best is not None else {}),
                         "fully_exhausted": full_exhaust,
                         "last_error_preview": last_error_excerpt[:240],
-                    }, _prov, _block_evidence)
+                    }, _prov, _block_evidence, _blockers)
                     _save_retrospectives(project_dir, retros_cache)
                 _retry_informed = not full_exhaust and not _downstream
             except Exception as _re:

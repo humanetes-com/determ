@@ -201,6 +201,9 @@ from pipeline_core.adapters.retros import (
     reset_exhaustion_flags as _reset_exhaustion_flags,
 )
 from pipeline_core.adapters.retros import (
+    retire_unblocked_convictions as _retire_unblocked_convictions,
+)
+from pipeline_core.adapters.retros import (
     retro_key as _retros_key,
 )
 from pipeline_core.adapters.retros import (
@@ -544,7 +547,10 @@ from pipeline_core.application.validate import (
 from pipeline_core.application.validate import (
     validate_task4_output as _validate_task4_output,
 )
-from pipeline_core.application.workspace_lifecycle import save_cluster_best_tree
+from pipeline_core.application.workspace_lifecycle import (
+    load_cluster_best_tree_mark,
+    save_cluster_best_tree,
+)
 from pipeline_core.application.workspace_lifecycle import (
     save_gen_tests_siblings as _wl_save_gen_tests_siblings,
 )
@@ -556,6 +562,7 @@ from pipeline_core.composition_layout import (
     build_retrigger_layout,
 )
 from pipeline_core.domain import graceful_stop as _graceful_stop
+from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
 )
@@ -2024,27 +2031,26 @@ def build_app(
     )
 
     def _checkpoint_fill_tree(
-        project_dir: Path, cluster: str, filled_dir: Path,
-        pass_count: int, iteration: int,
+        project_dir: Path, cluster: str, filled_dir: Path, mark: BestTreeMark,
     ) -> None:
         """Persist a new pass high-water fill tree to heal's durable restore
         tiers so a later parse-corruption heal restores this good state
         (best-tree copy → git ancestor) instead of nuking the file to the
         baked skeleton."""
         try:
-            n = save_cluster_best_tree(
-                project_dir, cluster, filled_dir, pass_count, iteration)
+            n = save_cluster_best_tree(project_dir, cluster, filled_dir, mark)
         except Exception as e:  # snapshot must never break the fill loop
             ports.log(f"  [ratchet] cluster best-tree snapshot failed: {e}")
             n = 0
         committed = git_commit_paths(
             WorkspaceDeps(log=ports.log, emit=ports.emit), project_dir,
             [f".skeleton-filled/{cluster}"],
-            f"pipeline: task2a checkpoint — {cluster}:{pass_count} passing "
-            f"(iter {iteration})",
+            f"pipeline: task2a checkpoint — {cluster}:{mark.pass_count} passing "
+            f"(iter {mark.iteration})",
             managed=run_state.git_managed)
         ports.emit("phase_c.checkpoint", data={
-            "cluster": cluster, "pass_count": pass_count,
+            "cluster": cluster, "pass_count": mark.pass_count,
+            "tree_sha": mark.tree_sha, "oracle_size": mark.oracle_size,
             "best_tree_files": n, "git_committed": committed})
 
     def _tdd_floor_path(project_dir: Path, cluster: str) -> Path:
@@ -2240,6 +2246,7 @@ def build_app(
             order_frontier=_order_frontier,
             record_tdd_regression=record_tdd_regression,
             reset_exhaustion_flags=_reset_exhaustion_flags,
+            retire_unblocked_convictions=_retire_unblocked_convictions,
             run_cargo=helpers.run_cargo,
             scan_unimplemented_for_cluster=structure_cache.scan_unimplemented_for_cluster,
             scan_unimplemented_functions=scan_unimplemented_functions,
@@ -2247,6 +2254,7 @@ def build_app(
             escalate_to_producers=functools.partial(
                 escalate_frontier_to_producers, _attr_deps),
             checkpoint_fill_tree=_checkpoint_fill_tree,
+            load_best_tree_mark=load_cluster_best_tree_mark,
             load_tdd_floor=_load_tdd_floor,
             save_tdd_floor=_save_tdd_floor,
             retrigger_layout=retrigger_layout,

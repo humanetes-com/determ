@@ -11,6 +11,14 @@ import subprocess
 
 from pipeline_core.adapters.workspace import WorkspaceDeps, git_commit_paths
 from pipeline_core.application.workspace_lifecycle import save_cluster_best_tree
+from pipeline_core.domain.best_tree_mark import BestTreeMark
+
+
+def _save(root, cluster, filled, pass_count):
+    return save_cluster_best_tree(
+        root, cluster, filled,
+        BestTreeMark(pass_count=pass_count, iteration=1,
+                     tree_sha=f"sha-{pass_count}", oracle_size=pass_count + 1))
 
 
 def _mk_fill_tree(root, cluster, files):
@@ -28,7 +36,7 @@ def test_best_tree_layout_matches_heal_reader(tmp_path) -> None:
     filled = _mk_fill_tree(tmp_path, "stable",
                            {"src/error.rs": "fn a() {}\n",
                             "src/fmt.rs": "fn b() {}\n"})
-    n = save_cluster_best_tree(tmp_path, "stable", filled, pass_count=13)
+    n = _save(tmp_path, "stable", filled, 13)
     assert n == 2
     # exact path heal's reader dereferences (heal.py best_tree_bytes(rel)):
     bp = tmp_path / ".best_tree" / "stable" / "src" / "error.rs"
@@ -40,9 +48,9 @@ def test_best_tree_is_cluster_scoped(tmp_path) -> None:
     # Snapshotting one cluster must not wipe another's snapshot.
     f1 = _mk_fill_tree(tmp_path, "stable", {"src/e.rs": "stable\n"})
     f2 = _mk_fill_tree(tmp_path, "nightly", {"src/e.rs": "nightly\n"})
-    save_cluster_best_tree(tmp_path, "stable", f1, pass_count=5)
-    save_cluster_best_tree(tmp_path, "nightly", f2, pass_count=7)
-    save_cluster_best_tree(tmp_path, "stable", f1, pass_count=6)  # re-snap stable
+    _save(tmp_path, "stable", f1, 5)
+    _save(tmp_path, "nightly", f2, 7)
+    _save(tmp_path, "stable", f1, 6)  # re-snap stable
     assert (tmp_path / ".best_tree" / "nightly" / "src" / "e.rs").read_text() \
         == "nightly\n"
     assert (tmp_path / ".best_tree" / "stable" / "src" / "e.rs").read_text() \

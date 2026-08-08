@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection
 from pathlib import Path
 
+from pipeline_core.domain.best_tree_mark import UNKNOWN_TREE_SHA, BestTreeMark
 from pipeline_core.log import log
 
 
@@ -171,9 +172,25 @@ def save_best_tree(
     return saved
 
 
+def load_cluster_best_tree_mark(
+    project_dir: Path, cluster: str,
+) -> BestTreeMark | None:
+    """What ``.best_tree/<cluster>/`` says about itself, or None if no snapshot.
+
+    The reader the TDD driver seeds its replace-decision from at loop entry.
+    Without it that decision starts every process believing the slot is empty,
+    and the first sweep replaces whatever is there — see
+    ``domain/best_tree_mark.py`` for the run that measured it."""
+    import json
+    meta = project_dir / BEST_TREE_DIR / cluster / _BEST_META
+    try:
+        return BestTreeMark.from_dict(json.loads(meta.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
+
+
 def save_cluster_best_tree(
-    project_dir: Path, cluster: str, filled_dir: Path, pass_count: int,
-    iteration: int = 0,
+    project_dir: Path, cluster: str, filled_dir: Path, mark: BestTreeMark,
 ) -> int:
     """Snapshot a cluster's fill tree (``.skeleton-filled/<cluster>/``) into
     ``.best_tree/<cluster>/`` so heal's BEST_TREE_COPY tier has a parseable
@@ -182,7 +199,11 @@ def save_cluster_best_tree(
     with ``rel`` relative to ``filled_dir`` (e.g. ``src/error.rs``).
 
     Cluster-scoped: replaces only this cluster's subtree, never other
-    clusters' snapshots. Returns files saved."""
+    clusters' snapshots. Returns files saved.
+
+    Destructive by construction — the slot is rmtree'd before the copy, so a
+    caller that has not established ``mark`` beats what is already stored
+    destroys it. ``load_cluster_best_tree_mark`` is how that is established."""
     import json
     import shutil
     dst_root = project_dir / BEST_TREE_DIR / cluster
@@ -198,8 +219,7 @@ def save_cluster_best_tree(
         saved += 1
     if saved:
         (dst_root / _BEST_META).write_text(
-            json.dumps({"pass_count": pass_count, "iteration": iteration}),
-            encoding="utf-8")
+            json.dumps(mark.to_dict()), encoding="utf-8")
     return saved
 
 
@@ -212,23 +232,22 @@ MERGED_BEST = "_merged"
 
 
 def save_merged_best_tree(project_dir: Path, pass_count: int,
-                          iteration: int = 0) -> int:
+                          iteration: int = 0, tree_sha: str = UNKNOWN_TREE_SHA,
+                          oracle_size: int = 0) -> int:
     """Snapshot the merged `src/` at its best. task2c tracked `best_pass` only
     to compute `improved`; nothing kept the tree that earned it, so the stage
     ended on whatever its last iteration produced. task2a has had this ratchet
     all along."""
-    return save_cluster_best_tree(project_dir, MERGED_BEST, project_dir / "src",
-                                  pass_count, iteration)
+    return save_cluster_best_tree(
+        project_dir, MERGED_BEST, project_dir / "src",
+        BestTreeMark(pass_count=pass_count, iteration=iteration,
+                     tree_sha=tree_sha, oracle_size=oracle_size))
 
 
 def merged_best_pass_count(project_dir: Path) -> int | None:
     """Pass count of the merged snapshot, or None if there is none."""
-    import json
-    meta = project_dir / BEST_TREE_DIR / MERGED_BEST / _BEST_META
-    try:
-        return int(json.loads(meta.read_text(encoding="utf-8"))["pass_count"])
-    except (OSError, ValueError, KeyError):
-        return None
+    mark = load_cluster_best_tree_mark(project_dir, MERGED_BEST)
+    return None if mark is None else mark.pass_count
 
 
 def restore_merged_best_tree(project_dir: Path) -> list[str]:

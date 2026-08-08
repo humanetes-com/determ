@@ -22,7 +22,7 @@ Typed, not string-matched: the trigger reason is an enum a caller acts on.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -301,17 +301,78 @@ def classify_compile_retrigger(
     return LayoutRetriggerCause.DESIGN_CONFLICT
 
 
-def _implicates(
+class BlameGrade(Enum):
+    """How strongly an observed fault implicates ONE component. Ordered."""
+    NONE = 0
+    REFERENCES = 1   # a component name occurs in the faulting fn's own text
+    OWNS = 2         # the faulting fn IS one of the component's items, or is a
+    #                  method whose SELF TYPE is one of them
+
+    def __lt__(self, other: BlameGrade) -> bool:
+        return self.value < other.value
+
+
+def self_type_names(container: str) -> frozenset[str]:
+    """The identifier tokens naming the type a method BELONGS to, given an
+    `FnRecord.container` (`""` | `"impl X for Y"` | `"impl X"` | `"trait T"`).
+
+    Only the self type counts, never the trait: `impl StdError for ContextError`
+    declares a method OF `ContextError` that merely satisfies `StdError`. Reading
+    both is what let a use-after-free in `src/error.rs` implicate `context.rs`'s
+    private `ext::StdError` trait — two symbols that share a token and nothing
+    else. Generic arguments are kept (`ContextError<C, E>` yields `ContextError`,
+    `C`, `E`); a stray type parameter can only ever widen ownership to a
+    component that declares a one-letter item, and none do."""
+    body = container.strip()
+    if body.startswith("trait "):
+        body = body[len("trait "):]
+    elif body.startswith("impl"):
+        body = body[len("impl"):]
+        # `for` is a keyword here, so the LAST one separates trait from self
+        # type; a lifetime/bound elsewhere cannot introduce another.
+        marker = body.rfind(" for ")
+        body = body[marker + len(" for "):] if marker >= 0 else body
+    else:
+        return frozenset()
+    out: set[str] = set()
+    token = ""
+    for ch in body:
+        if ch.isalnum() or ch == "_":
+            token += ch
+        else:
+            if token:
+                out.add(token)
+            token = ""
+    if token:
+        out.add(token)
+    return frozenset(out)
+
+
+def crash_blame_grade(
     locators: frozenset[FnLocator],
     fn_records: list[FnRecord],
     component_names: frozenset[str],
-) -> bool:
-    """Whether any of `locators` either IS a component member by name or has a
-    filled signature/body that references a component type/fn name — i.e. the
-    crash reaches THIS component's scheme rather than an unrelated body."""
+) -> BlameGrade:
+    """How strongly the faulting fns implicate THIS component.
+
+    The two grades are different claims and the caller must be able to rank
+    them. OWNS says the fault was observed inside code this component declares —
+    its own free fn, or a method of its own type. REFERENCES says only that the
+    faulting fn's text contains one of the component's names, which for a
+    reconstruction mid-flight is true of most of the crate: `StdError` occurs in
+    the signature of nearly every fn in `src/error.rs`, and the component of
+    that name is a five-line private helper trait in `src/context.rs` that no
+    one of them can even see."""
     if any(fn.fn_name in component_names for fn in locators):
-        return True
-    return bool(set(find_fns_referencing(fn_records, component_names)) & locators)
+        return BlameGrade.OWNS
+    by_locator = {FnLocator(f.file, f.fn_name): f for f in fn_records}
+    for loc in locators:
+        rec = by_locator.get(loc)
+        if rec is not None and self_type_names(rec.container) & component_names:
+            return BlameGrade.OWNS
+    if set(find_fns_referencing(fn_records, component_names)) & locators:
+        return BlameGrade.REFERENCES
+    return BlameGrade.NONE
 
 
 def classify_crash_retrigger(
@@ -320,8 +381,9 @@ def classify_crash_retrigger(
     component_names: frozenset[str],
 ) -> LayoutRetriggerCause:
     """Cause C decision for ONE frozen component. RUNTIME_CRASH iff the crash
-    implicates this component (`_implicates`). No compile-error text is required:
-    the defining feature of the crash class is a clean compile.
+    implicates this component at any grade (`crash_blame_grade`). No
+    compile-error text is required: the defining feature of the crash class is a
+    clean compile.
 
     **When the localizer produced blame, the blame DECIDES and reachability is
     not consulted.** A vanished test statically reaches most of the crate, so
@@ -334,18 +396,60 @@ def classify_crash_retrigger(
     97, twice). A component the observed fault does not touch is not a cause-C
     candidate, so returning NONE here is what stops the caller falling through to
     it. Blame is absent (empty) whenever localization was skipped or found no
-    native fault, and then this is exactly the reachability rule it always was."""
+    native fault, and then this is exactly the reachability rule it always was.
+
+    Admitting a component is NOT choosing it. This still returns RUNTIME_CRASH
+    for every component the fault so much as mentions, and the caller walks them
+    in registry order — see `crash_candidate_grade` and `top_blame_tier` for the
+    rank that decides between them."""
+    return (LayoutRetriggerCause.NONE
+            if crash_candidate_grade(evidence, fn_records, component_names)
+            is BlameGrade.NONE
+            else LayoutRetriggerCause.RUNTIME_CRASH)
+
+
+def crash_candidate_grade(
+    evidence: CrashEvidence,
+    fn_records: list[FnRecord],
+    component_names: frozenset[str],
+) -> BlameGrade:
+    """`classify_crash_retrigger`'s decision, kept as the GRADE it was made at.
+
+    The caller needs the grade because cause C picks ONE component out of many
+    and the registry order it walks carries no evidence at all. Measured on
+    cluster `stable`, 2026-08-08T08:19Z: ASAN localized a heap-use-after-free to
+    `src/error.rs::object_reallocate_boxed`, a declared member of the 34-name
+    `Error|ErrorImpl|ErrorVTable|…|object_reallocate_boxed|vtable` component at
+    registry index 13. The walk never reached index 13. Index 3 is `StdError` —
+    a five-line private helper trait declared inside `mod ext` in
+    `src/context.rs` — admitted because the blamed fn's signature returns
+    `Box<dyn StdError + Send + Sync>`, where `StdError` is the crate's alias for
+    `std::error::Error` and not that trait at all. It re-authored the unrelated
+    trait and reverted 29 bodies that merely spell the token, taking the cluster
+    from 49 passing to 24."""
     if not evidence.vanished:
-        return LayoutRetriggerCause.NONE
+        return BlameGrade.NONE
     if evidence.blamed_fns:
-        return (LayoutRetriggerCause.RUNTIME_CRASH
-                if _implicates(evidence.blamed_fns, fn_records, component_names)
-                else LayoutRetriggerCause.NONE)
+        return crash_blame_grade(
+            evidence.blamed_fns, fn_records, component_names)
     if not evidence.suspect_fns:
-        return LayoutRetriggerCause.NONE
-    return (LayoutRetriggerCause.RUNTIME_CRASH
-            if _implicates(evidence.suspect_fns, fn_records, component_names)
-            else LayoutRetriggerCause.NONE)
+        return BlameGrade.NONE
+    return crash_blame_grade(
+        evidence.suspect_fns, fn_records, component_names)
+
+
+def top_blame_tier(grades: Iterable[BlameGrade]) -> BlameGrade:
+    """The strongest grade any candidate reached, NONE when none did.
+
+    The policy the caller applies with it: only candidates AT this grade may be
+    re-authored, and when every one of them is unavailable — capped, confounded,
+    already failing mechanically — the crash walk STOPS rather than demoting to
+    the tier below. "The fault is in code this component owns, and this component
+    may not be re-authored again" is a complete answer; turning it into "so
+    re-author something the fault only mentions" is how a spent budget on the
+    right component became a spent attempt on the wrong one, twice in two days
+    (81 → 21 on 08-07, 49 → 24 on 08-08)."""
+    return max(grades, default=BlameGrade.NONE)
 
 
 def crash_evidence_confounded(
@@ -444,12 +548,17 @@ class RefillGrace:
     A re-author reverts every fn referencing the component to a stub so each
     re-fills under the new shape. Until they do, the tree is WORSE than before by
     construction: a stub panic inside drop/vtable code aborts whole test binaries,
-    so the pass count collapses and the oracle shrinks. Two consumers read those
-    signals and both are wrong during the window:
+    so the pass count collapses and the oracle shrinks. Four consumers read those
+    signals and all four are wrong during the window:
 
       * the batch ratchet convicts on "this sweep measures last iter's fills";
       * the crash retrigger convicts on "the oracle shrank for N sweeps";
-      * the stall budget convicts on "N iters of fills moved no test".
+      * the stall budget convicts on "N iters of fills moved no test";
+      * the exhaustion re-admission gate demands a score move past a high-water
+        the re-stub itself made unreachable — the one that does not merely
+        mis-report but DEADLOCKS, and the one nobody thought of for six months.
+        It is not gated here: a window is a bounded excuse, and that gate needs
+        the high-water to stop being a lie at all. See `domain/pass_highwater.py`.
 
     Left ungated, they destroy the re-author and then re-fire on the crash it was
     about to fix — the ratchet's revert is a whole-`src/` restore, so it takes the

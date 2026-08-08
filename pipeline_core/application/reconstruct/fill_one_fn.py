@@ -52,6 +52,7 @@ from pipeline_core.domain.refine import (
     best_progress_of,
 )
 from pipeline_core.domain.retro_gate import (
+    BlockedOnStubs,
     ConvictionEvidence,
     ConvictionStanding,
     RetroGateVerdict,
@@ -921,9 +922,16 @@ class FillOneFn:
                         )
                     _new_count = _prior_count + 1
                     # Stamped with the context it was earned in (same cluster,
-                    # layout, gate and route set) AND the convicting tests it
-                    # was drawn from: the next reader honours the verdict only
-                    # where both still hold.
+                    # layout, gate and route set), the convicting tests it was
+                    # drawn from, AND the hollow siblings the attempt ran
+                    # against: the next reader honours the verdict only where
+                    # all three still hold. The third is what a verdict like
+                    # `src/error.rs::new`'s needs — "the vtable functions
+                    # referenced in the body are not implemented in the crate"
+                    # is an argument that expires the moment they are.
+                    _blockers = BlockedOnStubs.at_conviction(
+                        last_body or first_failed_body or "", snapshot,
+                        exclude=fn_name)
                     _retros[_retro_k] = stamp_conviction({
                         "category": _retro.get("category", ""),
                         "guidance": _retro.get("guidance", ""),
@@ -935,7 +943,7 @@ class FillOneFn:
                            if _new_best is not None else {}),
                         "fully_exhausted": _full_exhaust,
                         "last_error_preview": (error_excerpt or "")[:240],
-                    }, _provenance, _evidence)
+                    }, _provenance, _evidence, _blockers)
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to

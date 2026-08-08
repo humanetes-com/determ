@@ -501,3 +501,115 @@ def test_payoff_rows_are_never_mistaken_for_a_component() -> None:
     # …and an ordinary fire's own rows survive a reconcile untouched.
     attempts = _fire({}, 93)
     assert reconcile_interrupted_attempts(attempts) == (attempts, ())
+
+
+def _stderr_collision_records() -> list[FnRecord]:
+    """The live shape of cluster `stable` on 2026-08-08. Two unrelated symbols
+    spell `StdError`: the crate's alias for `std::error::Error`, named in the
+    signature of nearly every fn in `src/error.rs`, and a five-line private
+    helper trait declared inside `mod ext` in `src/context.rs`."""
+    return [
+        FnRecord(file="src/error.rs", fn_name="object_reallocate_boxed",
+                 sig_text=("unsafe fn object_reallocate_boxed(e: Own<ErrorImpl>)"
+                           " -> Box<dyn StdError + Send + Sync + 'static>"),
+                 body_text="let unerased = e.cast::<ErrorImpl<E>>().boxed();"),
+        FnRecord(file="src/context.rs", fn_name="source",
+                 container="impl<C, E> StdError for ContextError<C, E>",
+                 sig_text="fn source(&self) -> Option<&(dyn StdError + 'static)>",
+                 body_text="Some(&self.error)"),
+    ]
+
+
+def test_a_blamed_fn_a_component_declares_outranks_one_that_only_spells_its_name():
+    """The trap this pins: ASAN localized a heap-use-after-free to
+    `src/error.rs::object_reallocate_boxed`, a declared member of the 34-name
+    Error/ErrorImpl/ErrorVTable component at registry index 13. The walk fired
+    at index 3 instead — `StdError`, the private trait in `src/context.rs` —
+    because the blamed fn's return type spells that token, and 29 bodies that
+    also spell it were reverted. 49 passing became 24."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        CrashEvidence,
+        classify_crash_retrigger,
+        crash_candidate_grade,
+        top_blame_tier,
+    )
+    records = _stderr_collision_records()
+    ev = CrashEvidence(
+        vanished=frozenset({"test_reallocate_into_boxed_dyn_error_without_backtrace_io"}),
+        suspect_fns=frozenset(),
+        blamed_fns=frozenset({FnLocator("src/error.rs",
+                                        "object_reallocate_boxed")}))
+    vtable_comp = frozenset({"Error", "ErrorImpl", "ErrorVTable", "Own",
+                             "object_reallocate_boxed", "vtable"})
+    stderr_comp = frozenset({"StdError"})
+
+    # Both are admitted — that much is unchanged, and is why registry order
+    # could decide.
+    assert classify_crash_retrigger(
+        ev, records, vtable_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    assert classify_crash_retrigger(
+        ev, records, stderr_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    # The grade separates them, and the top tier holds only the declarer.
+    assert crash_candidate_grade(ev, records, vtable_comp) is BlameGrade.OWNS
+    assert crash_candidate_grade(
+        ev, records, stderr_comp) is BlameGrade.REFERENCES
+    assert top_blame_tier(
+        [BlameGrade.REFERENCES, BlameGrade.OWNS]) is BlameGrade.OWNS
+    assert top_blame_tier([]) is BlameGrade.NONE
+    assert top_blame_tier([BlameGrade.NONE]) is BlameGrade.NONE
+
+
+def test_a_method_is_owned_by_its_self_type_not_by_the_trait_it_implements():
+    """`impl StdError for ContextError` declares a method OF `ContextError`.
+    Reading the trait side too would hand every `impl Trait for T` in the crate
+    to whichever component owns `Trait`, which for this crate is the same
+    `src/context.rs` helper — the collision one level down."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        CrashEvidence,
+        crash_candidate_grade,
+        self_type_names,
+    )
+    records = _stderr_collision_records()
+    ev = CrashEvidence(vanished=frozenset({"test_context_source"}),
+                       suspect_fns=frozenset(),
+                       blamed_fns=frozenset({FnLocator("src/context.rs",
+                                                       "source")}))
+    assert crash_candidate_grade(
+        ev, records, frozenset({"ContextError"})) is BlameGrade.OWNS
+    assert crash_candidate_grade(
+        ev, records, frozenset({"StdError"})) is BlameGrade.REFERENCES
+
+    assert self_type_names("impl<C, E> StdError for ContextError<C, E>") == \
+        frozenset({"ContextError", "C", "E"})
+    assert self_type_names("impl Error") == frozenset({"Error"})
+    assert self_type_names("trait CastTo") == frozenset({"CastTo"})
+    assert self_type_names("") == frozenset()
+
+
+def test_a_fault_no_component_declares_still_reaches_the_ones_it_references():
+    """The tier must not make cause C weaker where it was working. `downcast`
+    is declared by no component; the vtable component's names appear in its
+    body, and that is the whole of the evidence available."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        CrashEvidence,
+        crash_candidate_grade,
+        top_blame_tier,
+    )
+    records = [
+        FnRecord(file="src/error.rs", fn_name="downcast",
+                 sig_text="fn downcast<E>(self) -> Result<E, Self>",
+                 body_text="unsafe { (vtable(self.inner.ptr).object_downcast)(x) }"),
+    ]
+    ev = CrashEvidence(vanished=frozenset({"test_downcast"}),
+                       suspect_fns=frozenset(),
+                       blamed_fns=frozenset({FnLocator("src/error.rs",
+                                                       "downcast")}))
+    comp = frozenset({"ErrorVTable", "object_downcast", "vtable"})
+    assert crash_candidate_grade(ev, records, comp) is BlameGrade.REFERENCES
+    assert top_blame_tier([BlameGrade.REFERENCES]) is BlameGrade.REFERENCES
+    # A component nothing implicates stays out of the tier entirely.
+    assert crash_candidate_grade(
+        ev, records, frozenset({"Quoted"})) is BlameGrade.NONE

@@ -190,9 +190,32 @@ def test_refill_window_survives_only_while_re_fills_land() -> None:
 
 
 def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
-                 frontier=None, fills_per_iter=0, graceful_stop=None, fill=None):
+                 frontier=None, fills_per_iter=0, graceful_stop=None, fill=None,
+                 best_mark=None, checkpoints=None, resets=None, stubs=None,
+                 retires=None, logs=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
+
+    def _checkpoint(pd, cluster_name, filled_dir, mark):
+        """The durable best-tree save. Recording the MARK rather than a bare
+        call count is what lets a test say which tree was stored: the defect
+        this harness exists for is a worse tree replacing a better one, and
+        both spellings of that are one call."""
+        if checkpoints is not None:
+            checkpoints.append(mark)
+
+    def _retire(pd, by_file, cluster_name):
+        if retires is not None:
+            retires.append((cluster_name, {f: set(n) for f, n in by_file.items()}))
+        return 0
+
+    def _reset(pd, reason):
+        # The reason names the iter and the two pass counts it compared, so a
+        # test can pin WHICH sweep bought the release, not merely that one did.
+        if resets is not None:
+            resets.append(reason)
+        return 0
+
     return PhaseCTddDeps(
         attribute_failures=lambda *a, **k: AttributionResult(
             dict(frontier or {}), FailureKind.NO_FRONTIER,
@@ -205,16 +228,21 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         count_relevant_notes=lambda *a, **k: 0,
         effective_stalls=lambda budget, module: budget,
         emit=lambda ev, **k: events.append((ev, k.get("data") or {})),
-        log=lambda *a, **k: None,
+        log=(logs.append if logs is not None else (lambda *a, **k: None)),
         order_frontier=lambda eligible, counts: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
-        reset_exhaustion_flags=lambda *a, **k: 0,
+        reset_exhaustion_flags=_reset,
         run_cargo=run_cargo,
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: list(stubs or []),
         scan_unimplemented_functions=lambda *a, **k: [],
         task2_fill_fns_one_by_one=fill or (lambda **kw: ClusterFillResult(
             attempts=1, fns_filled=fills_per_iter)),
-        checkpoint_fill_tree=lambda pd, cl, d, p, i: None,
+        checkpoint_fill_tree=_checkpoint,
+        # None means "the driver cannot see the slot", which is the pre-seed
+        # behaviour every test that does not exercise the durable tier wants.
+        load_best_tree_mark=(None if best_mark is None
+                             else (lambda pd, cl: best_mark)),
+        retire_unblocked_convictions=_retire,
         active_test_inventory=inventory,
         retrigger_layout=retrigger,
     )
@@ -222,7 +250,7 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
 
 def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
              frontier=None, fills_per_iter=0, max_stalls="2",
-             graceful_stop=None, fill=None) -> None:
+             graceful_stop=None, fill=None, **kw) -> None:
     """Drive the TDD loop with ratchet ON over a scripted cargo-output list.
     Each cargo call pops the next output (last one repeats); the call ALSO
     mutates src/a.rs when the popped entry says so — simulating a fill that
@@ -247,7 +275,7 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
         _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
                      events, retrigger, frontier=frontier,
                      fills_per_iter=fills_per_iter,
-                     graceful_stop=graceful_stop, fill=fill),
+                     graceful_stop=graceful_stop, fill=fill, **kw),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=BuildCluster(
@@ -650,3 +678,297 @@ def test_retrigger_grace_lasts_exactly_one_iter(
     reverts = [d for ev, d in events if ev == "phase_c.tdd.batch_revert"]
     assert reverts and "pass_count 0<1" in reverts[0]["breach"]
     assert (src / "a.rs").read_text(encoding="utf-8") == "orig"
+
+
+# --------------------------------------------------------------------------- #
+# The DURABLE best tree. `.best_tree/<cluster>/` outlives the process; the two
+# variables that decided whether a sweep may replace it did not. See
+# `domain/best_tree_mark.py`.
+# --------------------------------------------------------------------------- #
+def test_worse_first_sweep_does_not_overwrite_the_durable_best_tree(
+        tmp_path: Path, monkeypatch) -> None:
+    """The 81 -> 21 case at the driver level.
+
+    `.best_tree/<cluster>/` outlives the process; `_checkpoint_best` and
+    `_checkpoint_sha` did not, and `snapshot_due` reads a `None` sha as "no
+    snapshot yet". So the first sweep of every process replaced the stored tree
+    however much worse it was — and the save is a replacement, not a merge.
+    Live on `anyhow` 2026-08-07: run `241132-f9fae0a6` left `.best_tree/stable`
+    at 81 passing on a 108-test oracle, run `259637-36db9aad` resumed it, the
+    crash retrigger re-stubbed 56 bodies on purpose, and the 21-passing sweep
+    that followed became the stored tree — the same sweep the batch ratchet
+    WITHHELD from charging, because a deliberate re-stub is not a regression.
+    """
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    events: list[tuple[str, dict]] = []
+    marks: list[Any] = []
+    _run_tdd(monkeypatch, tmp_path, [(_INTACT, False)], events,
+             best_mark=BestTreeMark(pass_count=2, iteration=9,
+                                    tree_sha="208bdf5ec9a2ec18", oracle_size=2),
+             checkpoints=marks)
+    assert marks == []
+
+
+def test_beating_the_durable_best_tree_still_checkpoints(
+        tmp_path: Path, monkeypatch) -> None:
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    events: list[tuple[str, dict]] = []
+    marks: list[Any] = []
+    _run_tdd(monkeypatch, tmp_path, [(_INTACT, False)], events,
+             best_mark=BestTreeMark(pass_count=0, iteration=3,
+                                    tree_sha="old", oracle_size=2),
+             checkpoints=marks)
+    assert len(marks) == 1
+    assert marks[0].oracle_size == 2 and marks[0].tree_sha != "old"
+
+
+def test_no_durable_mark_keeps_the_pre_seed_behaviour(
+        tmp_path: Path, monkeypatch) -> None:
+    events: list[tuple[str, dict]] = []
+    marks: list[Any] = []
+    _run_tdd(monkeypatch, tmp_path, [(_INTACT, False)], events,
+             checkpoints=marks)
+    assert len(marks) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The pass high-water's LINEAGE. A retrigger's deliberate re-stub makes the
+# high-water a fact about a tree the pipeline itself deleted; four consumers
+# read it and the fourth deadlocks. See `domain/pass_highwater.py`.
+# --------------------------------------------------------------------------- #
+# A four-test oracle: a re-stub must be able to cost more than one sweep can
+# win back, which the two-test outputs above cannot express.
+def _sweep(passed: int, named: int = 4) -> str:
+    """A cargo run where `named` of the four tests reported and `passed` of
+    them passed. `named < 4` is a crashed binary — the oracle shrinks, which is
+    the evidence the crash retrigger fires on."""
+    lines = [f"test t{i} ... {'ok' if i <= passed else 'FAILED'}"
+             for i in range(1, named + 1)]
+    verdict = "ok" if passed == named else "FAILED"
+    lines.append(f"test result: {verdict}. {passed} passed; "
+                 f"{named - passed} failed; 0 ignored")
+    return "\n".join(lines)
+
+
+_FOUR_TESTS = frozenset({"t1", "t2", "t3", "t4"})
+
+
+def _run_per_iter(monkeypatch, tmp_path: Path, sweeps, events, retrigger=None,
+                  **kw) -> list[str]:
+    """Drive the loop with one cargo output per ITERATION (the last repeats).
+
+    `_run_tdd` scripts one entry per cargo CALL, which the ratchet's
+    confirm-before-revert re-sweep makes unreadable the moment a pin is about
+    which ITERATION measured what — a breach silently eats the next entry and
+    every reading after it shifts. The iteration is taken from the loop's own
+    `iter N: running cargo test` line, so a confirm re-sweep re-serves its
+    iteration's reading instead of consuming the next one."""
+    logs: list[str] = []
+    cur = [0]
+
+    def _cargo(*a: Any, **k: Any):
+        for line in reversed(logs):
+            if "running cargo test" in line and "iter " in line:
+                cur[0] = int(line.split("iter ", 1)[1].split(":", 1)[0])
+                break
+        return 101, sweeps[min(max(cur[0], 1) - 1, len(sweeps) - 1)]
+
+    from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
+    from pipeline_core.domain.models import BuildCluster, FnLocator
+    monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
+    monkeypatch.setenv("TDD_MAX_STALLS", kw.pop("max_stalls", "3"))
+    # The harness frontier is one fn, so the per-locator behavioural re-fill cap
+    # would exhaust it two iterations in and every later iteration would skip
+    # the fill phase — starving the re-admission gate of the "fills landed"
+    # half of its rule for reasons that have nothing to do with these pins.
+    monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "99")
+    (tmp_path / "src").mkdir(exist_ok=True)
+    run_phase_c_tdd(
+        _driver_deps(_cargo,
+                     lambda pd, cl, stems, lib=False: (4, _FOUR_TESTS),
+                     events, retrigger, logs=logs,
+                     frontier={FnLocator("src/a.rs", "f"): {"t2"}},
+                     fills_per_iter=2, **kw),
+        project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
+        cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
+        cluster=BuildCluster(
+            name="stable", env_extra={}, tarpaulin_exclude_files=[],
+            excluded_cfg=[], active_cfg=[], prompt_nightly_rule=""),
+        check_cmd="cargo check", cluster_env={}, leaf_counts=None, fr_path=None,
+        test_cmd_builder=lambda stems, include_lib=False: "cargo test",
+        tag="[stable]")
+    return logs
+
+
+def _restub_retrigger(src: Path, *, on_call: int = 1, reverted: int = 3):
+    """A retrigger that fires on its `on_call`-th consideration and does what
+    the real one does — re-stub the fns referencing the re-authored component
+    so they re-fill under the new shape."""
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    calls: list[int] = []
+
+    def _retrig(*a: Any, **k: Any) -> RetriggerResult:
+        calls.append(1)
+        if len(calls) != on_call:
+            return RetriggerResult(fired=False, reason="capped")
+        (src / "a.rs").write_text("RESTUBBED", encoding="utf-8")
+        return RetriggerResult(fired=True, succeeded=True,
+                               reverted_count=reverted, cause="RUNTIME_CRASH")
+    return _retrig
+
+
+# 4/4, then a crashed binary, then the re-stub's collapse, then the re-climb.
+# The retrigger fires on its SECOND consideration, so the free re-admission
+# grant is spent first — which is the live setup: an unseeded baseline grants
+# one release unconditionally, and the deadlock is what happens after it is
+# gone.
+_RESTUB_RUN = [_sweep(4), _sweep(3, named=3), _sweep(3), _sweep(3),
+               _sweep(1), _sweep(2)]
+
+
+def test_a_deliberate_restub_rebases_the_pass_high_water(
+        tmp_path: Path, monkeypatch) -> None:
+    """Iter 4's retrigger re-stubs 3 bodies on purpose and iter 5 therefore
+    reads below the 4 the tree scored at iter 1. Left standing, that 4 is a
+    fact about a tree this run no longer has.
+
+    Live on `anyhow` cluster `stable`, run `259637-36db9aad` (2026-08-07): 56 of
+    178 filled bodies re-stubbed, 81 -> 21, then 23 / 26 / 26 with 109 fills
+    landing in one of those iterations."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    _run_per_iter(monkeypatch, tmp_path, _RESTUB_RUN, events,
+                  retrigger=_restub_retrigger(src, on_call=2))
+    rebased = [d for ev, d in events if ev == "phase_c.tdd.highwater_rebased"]
+    assert len(rebased) == 1, "one re-base, on the first sweep after the re-stub"
+    assert rebased[0]["stale_best"] == 4 and rebased[0]["new_best"] == 1
+    assert rebased[0]["restubbed"] == 3
+
+
+def test_the_re_climb_can_buy_a_re_admission_again(
+        tmp_path: Path, monkeypatch) -> None:
+    """The consumer the re-base exists for, and the only one that DEADLOCKS.
+
+    `readmission_warranted` releases the disk-persisted `fully_exhausted`
+    convictions only on a score move past the baseline. With the baseline left
+    at the pre-re-stub high-water the release can never be bought — and on the
+    live run the units holding the cluster's whole remaining test set were
+    exactly the convicted ones, so passing 81 needed them and releasing them
+    needed passing 81. Every sweep from iteration 4 to the run's death logged
+    `NOT re-admitting exhausted fn(s)`.
+
+    Here: the free grant is spent at iter 2 against the pre-re-stub 4, the
+    re-stub drops the tree to 1, and the re-climb to 2 must buy a release. On
+    the un-re-based figure that is `2 > 4` — false for the rest of the run."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    resets: list[str] = []
+    logs = _run_per_iter(monkeypatch, tmp_path, _RESTUB_RUN, events,
+                         retrigger=_restub_retrigger(src, on_call=2),
+                         resets=resets)
+    assert any("pass -1 -> 4" in r for r in resets), \
+        f"the free grant was not spent before the re-stub: {resets}"
+    assert any("pass 1 -> 2" in r for r in resets), \
+        f"the re-climb never bought a re-admission: {resets}"
+    # ...and no sweep after the re-base is still measured against the 4.
+    _stale = [ln for ln in logs
+              if "NOT re-admitting" in ln and "no further than 4" in ln
+              and int(ln.split("iter ", 1)[1].split(":", 1)[0]) > 5]
+    assert not _stale, f"still judging the re-climb against the deleted tree: {_stale}"
+
+
+def test_a_flat_re_climb_still_buys_no_re_admission(
+        tmp_path: Path, monkeypatch) -> None:
+    """The rule the re-base must not soften. A release is bought with PAYOFF,
+    not activity — the defect on `anyhow/nightly` was 51 fills moving the score
+    by +0, re-admitting the fns that had already failed and taking the frontier
+    41 -> 73 with iteration cost following to 224 min. A re-climb that lands
+    fills and moves no test is that case, re-based or not."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    resets: list[str] = []
+    _run_per_iter(monkeypatch, tmp_path, _RESTUB_RUN[:4], events,
+                  retrigger=_restub_retrigger(src, on_call=2), resets=resets)
+    assert [d for ev, d in events if ev == "phase_c.tdd.highwater_rebased"]
+    _after = [r for r in resets if "pass -1 -> 4" not in r]
+    assert not _after, f"a flat re-climb bought a re-admission: {resets}"
+
+
+def test_a_fired_but_failed_attempt_rebases_nothing(
+        tmp_path: Path, monkeypatch) -> None:
+    """`restubbed == 0` re-stubbed nothing, so its sweep measures the same tree
+    as the one before it. Re-basing there would hand the loop a free reset of a
+    floor it never lost — the mirror of why `breach_withheld` excuses nothing
+    for a fired-but-failed attempt."""
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    calls: list[int] = []
+
+    def _failed(*a: Any, **k: Any) -> RetriggerResult:
+        calls.append(1)
+        if len(calls) != 1:
+            return RetriggerResult(fired=False, reason="capped")
+        return RetriggerResult(fired=True, succeeded=True, reverted_count=0,
+                               cause="RUNTIME_CRASH")
+
+    events: list[tuple[str, dict]] = []
+    _run_per_iter(monkeypatch, tmp_path, _RESTUB_RUN, events, retrigger=_failed)
+    assert not [d for ev, d in events if ev == "phase_c.tdd.highwater_rebased"]
+
+
+def test_a_tree_that_cannot_build_is_not_a_new_baseline(
+        tmp_path: Path, monkeypatch) -> None:
+    """A compile-broken sweep reports 0 because nothing RAN. Adopting it as the
+    lineage's baseline would make the next broken build read as a 0-to-0
+    plateau on a cluster that is merely un-buildable — the same reason
+    `improved` and the persisted floor both refuse such a sweep. The re-base
+    waits for a reading instead."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    _run_per_iter(monkeypatch, tmp_path,
+                  [*_RESTUB_RUN[:4],
+                   "error: could not compile `anyhow` (lib test)", _sweep(2)],
+                  events, retrigger=_restub_retrigger(src, on_call=2))
+    rebased = [d for ev, d in events if ev == "phase_c.tdd.highwater_rebased"]
+    assert rebased and rebased[0]["new_best"] == 2, \
+        "the broken sweep measured nothing and must not become the baseline"
+
+
+def test_the_plateau_exit_still_fires_on_a_flat_re_climb(
+        tmp_path: Path, monkeypatch) -> None:
+    """Termination is the thing a re-based floor could plausibly cost, so it is
+    pinned. Once the re-climb flattens, `improved` goes false against the
+    RE-BASED figure and the budget runs out on schedule — the loop must not
+    become immortal because its floor moved down once."""
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+    _run_per_iter(monkeypatch, tmp_path, _RESTUB_RUN[:4], events,
+                  retrigger=_restub_retrigger(src, on_call=2), max_stalls="2")
+    assert any(d.get("kind") == "stall_exit"
+               for ev, d in events if ev == "phase_c.tdd.iter"), "no plateau exit"
+    iters = [d for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert len(iters) < 12, f"the loop did not terminate: {len(iters)} iters"
+
+
+def test_the_loop_offers_the_stub_set_to_the_conviction_release(
+        tmp_path: Path, monkeypatch) -> None:
+    """Wiring for the blocked-on release, which is where it can silently become
+    a no-op: it must be handed the sweep's OWN stub set, keyed by file the way
+    the retro store spells it."""
+    from pipeline_core.domain.models import FnLocator
+    events: list[tuple[str, dict]] = []
+    retires: list[tuple[str, dict]] = []
+    _run_tdd(monkeypatch, tmp_path, [(_INTACT, False)], events,
+             retires=retires,
+             stubs=[FnLocator("src/error.rs", "construct_from_std"),
+                    FnLocator("src/error.rs", "provide"),
+                    FnLocator("src/context.rs", "with_context")])
+    assert retires, "the release was never offered the stub set"
+    assert retires[0] == ("stable", {
+        "src/error.rs": {"construct_from_std", "provide"},
+        "src/context.rs": {"with_context"}}), \
+        "the sweep's own stub set, scoped to the sweeping cluster"

@@ -35,11 +35,14 @@ LLM_STREAM_LOG="$LOG_DIR/stream.log"
 source "$SCRIPT_DIR/lib/graceful_stop.sh"
 # shellcheck source=lib/pipeline_pids.sh
 source "$SCRIPT_DIR/lib/pipeline_pids.sh"
+# shellcheck source=lib/tree_stamp.sh
+source "$SCRIPT_DIR/lib/tree_stamp.sh"
 
 _YES=false
 _FORCE=false
 _KEEP_AUGMENTED=false
 _NO_TAIL=false
+_NO_PRE_RUN=false
 for _arg in "$@"; do
     [[ "$_arg" == "--y" ]]              && _YES=true
     [[ "$_arg" == "--force" ]]          && _FORCE=true
@@ -57,7 +60,52 @@ for _arg in "$@"; do
     }
     [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true
     [[ "$_arg" == "--no-tail" ]]        && _NO_TAIL=true
+    [[ "$_arg" == "--no-pre-run" ]]     && _NO_PRE_RUN=true
 done
+
+# ---------------------------------------------------------------------------
+# Pre-run gate. `pre_run.sh` stamps the content hash of the tree its gates ran
+# against; this recomputes it and refuses to launch when the two disagree.
+#
+# Checked HERE — before the stop logic below, and before any backend is touched
+# — because a refusal must cost nothing. A gate placed next to the launch block
+# would kill the running pipeline first and then decline to start its
+# replacement, which is strictly worse than not having run it.
+#
+# The stamp covers pipeline.py, pipeline_core, tools and the extractor's Rust
+# sources, so a relaunch after a crash with no edits still matches and passes
+# free. It goes stale only when the code that decides run behaviour changed,
+# which is precisely when the gates have not seen it.
+#
+# --no-pre-run is a real escape hatch and prints as one. Launching untested is
+# sometimes the right call; doing it by accident never is.
+# ---------------------------------------------------------------------------
+if [[ "$_NO_PRE_RUN" == true ]]; then
+    echo "PRE-RUN GATE BYPASSED (--no-pre-run) — launching code no gate has seen."
+else
+    _stamp_file="$(pipeline_stamp_file "$SCRIPT_DIR")"
+    _want="$(pipeline_tree_stamp "$SCRIPT_DIR")"
+    _have="$(head -1 "$_stamp_file" 2>/dev/null || true)"
+    if [[ "$_want" != "$_have" ]]; then
+        if [[ -z "$_have" ]]; then
+            echo "continue.sh: this tree has never passed the pre-run gate." >&2
+            echo "  Nothing has vouched for the code about to spend GPU hours." >&2
+        else
+            echo "continue.sh: the pre-run gate passed against a DIFFERENT tree." >&2
+            echo "  gated : $_have" >&2
+            echo "  now   : $_want" >&2
+            echo "  The code that decides how a run behaves has changed since" >&2
+            echo "  that gate, so the pass does not describe this tree." >&2
+        fi
+        echo "  Run the gate, then relaunch:" >&2
+        echo "" >&2
+        echo "    bash pre_run.sh" >&2
+        echo "" >&2
+        echo "  To launch anyway (untested): bash continue.sh --no-pre-run ..." >&2
+        exit 3
+    fi
+    echo "Pre-run gate: OK (tree $_want)."
+fi
 
 # Policy: an unflagged `continue.sh` invocation NEVER kills a running
 # pipeline. The user must opt in via --y (graceful stop) or --force

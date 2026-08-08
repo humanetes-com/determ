@@ -31,3 +31,7 @@ tools/skeleton_extractor/target/
 # The ratchet BASELINE is committed — it is the coverage floor, not data.
 .coverage*
 !.coverage_ratchet.json
+
+# The pre-run gate stamp: the content hash of the tree check.sh + the walks last
+# passed against. A claim about THIS checkout, never shared between machines.
+.pre_run_stamp

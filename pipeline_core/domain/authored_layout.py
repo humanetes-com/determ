@@ -17,6 +17,7 @@ emitting ``Own&lt;T&gt;`` — left as-is, that text would splice as non-Rust).
 from __future__ import annotations
 
 import html
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -130,6 +131,54 @@ def component_uids(items: tuple[PrivateSurfaceItem, ...]) -> tuple[str, ...]:
             seen[it.name] = seen.get(it.name, 0) + 1
             uids.append(f"{it.name}.{seen[it.name]}")
     return tuple(uids)
+
+
+_REPR_ATTR = re.compile(r"^[ \t]*#\[repr\([^\]]*\)\][ \t]*$", re.MULTILINE)
+_ITEM_DECL = re.compile(
+    r"^([ \t]*)(?:pub(?:[ \t]*\([^)]*\))?[ \t]+)?(?:struct|enum|union)[ \t]",
+    re.MULTILINE)
+
+
+def carry_frozen_repr(frozen: str, authored: str) -> str:
+    """Re-attach the `#[repr(...)]` the frozen definition carried when the
+    authored replacement dropped it. Returns `authored` unchanged otherwise.
+
+    A type's memory representation is a fact of the crate being reconstructed,
+    not part of the layout the model is free to design. On 2026-08-07 the crash
+    retrigger of run `241132-f9fae0a6` re-authored `stable`'s
+    Error/ErrorImpl/ErrorVTable/Own/Ref component and its `pub struct Error`
+    came back without the `#[repr(transparent)]` the frozen definition has. The
+    next sweep could not build the cluster at all — `tests/test_ffi.rs:7:
+    error: extern fn uses type anyhow::Error, which is not FFI-safe`, from a
+    write-protected test that passes `anyhow::Error` by value through
+    `extern "C"` under `#![deny(improper_ctypes)]`. By then 56 of the 84
+    referencing fns had been reverted to stubs against the new layout and the
+    cluster read pass=0 for two iterations, until the batch ratchet restored 8
+    files.
+
+    Nothing upstream of the splice can catch this: the accept gate is
+    `cargo check --lib --quiet` inside `.skeleton/<cluster>`, a directory with
+    no `tests/` at all, and that check returns 0 on the very layout `test_ffi`
+    rejects (measured on a copy of the tree, 2026-08-07). Nine of the 53 frozen
+    definitions in `stable`'s private surface carry a repr, and losing one is
+    not always a compile error: `ErrorImpl` and `ContextError` are `#[repr(C)]`
+    "to ensure that E remains in the final position", so dropping THAT one
+    silently reorders fields under the pointer casts that read them.
+
+    Deliberately one-directional: a definition that already carries a repr of
+    its own is returned untouched. The model that re-represents a type on
+    purpose still gets its way and still answers to the compile gate, and this
+    can never emit a conflicting `transparent` + `C` pair.
+    """
+    if _REPR_ATTR.search(authored):
+        return authored
+    attrs = _REPR_ATTR.findall(frozen)
+    decl = _ITEM_DECL.search(authored)
+    if not attrs or decl is None:
+        return authored
+    indent = decl.group(1)
+    carried = "".join(f"{indent}{a.strip()}\n" for a in attrs)
+    return authored[:decl.start()] + carried + authored[decl.start():]
 
 
 def definition_replacements(

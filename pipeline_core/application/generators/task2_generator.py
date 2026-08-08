@@ -39,6 +39,7 @@ from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...application.reconstruct.import_repair import repair_missing_imports
 from ...application.workspace_lifecycle import (
+    merged_best_pass_count,
     restore_merged_best_tree,
     save_merged_best_tree,
 )
@@ -2620,6 +2621,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
         best_fail = None
         iter_n = 0
         measured_any = False
+
+        def _snapshot_merged(pass_count: int, fail_count: int) -> None:
+            """Replace `.best_tree/_merged/` only by beating what is stored.
+
+            `best_pass` above is this PROCESS's high-water and starts at -1, so
+            gating the snapshot on it alone let the first improving sweep of a
+            restarted stage overwrite a better tree left by the previous one —
+            and the save is a replacement (`save_cluster_best_tree` rmtree's the
+            slot). The stored count is the only thing that can answer "better
+            than what is already there". `best_pass` is deliberately NOT seeded
+            from it: it also drives `improved`, the stall streak and the
+            below-floor restore, and carrying a peak this process cannot
+            re-measure would pin those under a ceiling — the same split
+            `domain/tdd_floor.py` makes between the stall half and the
+            best_pass half of a resumed floor."""
+            stored = merged_best_pass_count(project_dir)
+            if stored is not None and pass_count <= stored:
+                return
+            save_merged_best_tree(project_dir, pass_count, iter_n,
+                                  oracle_size=pass_count + fail_count)
         while iter_n < hard_cap:
             iter_n += 1
             self.tel.check_stop(f"post-merge fill iter {iter_n}")
@@ -2661,7 +2682,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     "missing": gap.missing,
                 })
                 if pass_count > best_pass:
-                    save_merged_best_tree(project_dir, pass_count, iter_n)
+                    _snapshot_merged(pass_count, fail_count)
                 return not gap
             if rc == -1:
                 self.tel.log(f"  {tag} post-merge cargo test TIMED OUT. Stopping.")
@@ -2681,7 +2702,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 best_pass = pass_count
                 best_fail = fail_count
                 stall = 0
-                save_merged_best_tree(project_dir, pass_count, iter_n)
+                _snapshot_merged(pass_count, fail_count)
             else:
                 stall += 1
                 if best_pass > 0 and pass_count < best_pass:

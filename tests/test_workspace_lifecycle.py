@@ -135,6 +135,7 @@ def test_merged_best_tree_is_scoped_and_does_not_wipe_cluster_snapshots(tmp_path
         save_cluster_best_tree,
         save_merged_best_tree,
     )
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
     assert merged_best_pass_count(tmp_path) is None
     assert restore_merged_best_tree(tmp_path) == []
 
@@ -142,7 +143,10 @@ def test_merged_best_tree_is_scoped_and_does_not_wipe_cluster_snapshots(tmp_path
     filled = tmp_path / ".skeleton-filled" / "nightly"
     (filled / "src").mkdir(parents=True)
     (filled / "src/lib.rs").write_text("cluster body")
-    save_cluster_best_tree(tmp_path, "nightly", filled, 100, iteration=6)
+    save_cluster_best_tree(
+        tmp_path, "nightly", filled,
+        BestTreeMark(pass_count=100, iteration=6, tree_sha="abc",
+                     oracle_size=104))
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src/error.rs").write_text("good merged body")

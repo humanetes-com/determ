@@ -152,6 +152,21 @@ def readmission_warranted(
     than the last measurement is what stops one real gain from paying for
     re-admission twice.
 
+    **``best_metric`` must describe the tree being measured, and the caller owns
+    that.** This rule is sound only while the floor and the sweep are readings
+    of one lineage. A layout retrigger's deliberate re-stub breaks that: it
+    reverts filled bodies on purpose, so the score falls below a floor the
+    pipeline itself made unreachable, and the gate below then reads as
+    "withholding a retry for lack of evidence" while it is in fact closed by
+    construction. Live on `anyhow` cluster `stable`, run `259637-36db9aad`
+    (2026-08-07): 56 of 178 bodies re-stubbed at iteration 1, `best_metric`
+    frozen at the pre-re-stub 81, and every sweep from iteration 4 to the run's
+    death logged `NOT re-admitting exhausted fn(s)` — with the only two units
+    that could reach the missing 60 tests sitting convicted on disk. Passing 81
+    needed them; releasing them needed passing 81. `domain/pass_highwater.py`
+    is what keeps the caller's figure honest; see it before adding an exemption
+    here.
+
     ``metric_at_last_reset`` is a PRECONDITION on the caller: any score beats
     a negative sentinel, so an unseeded baseline grants one re-admission
     unconditionally. That grant is deliberate — it is the only way a unit that

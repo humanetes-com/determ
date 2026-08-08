@@ -1,7 +1,6 @@
 """Per-fn retrospectives store — the engine's compounding cross-iteration
 learning record (`.phase_c_logs/retrospectives.json`), keyed by
-(file, fn, canonical container). Relocated verbatim from pipeline.py
-(P2 slice 2); the `_`-prefixes dropped on promotion (R6.5).
+(file, fn, canonical container).
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.identity import RetroKey
+from pipeline_core.domain.retro_gate import cleared_blockers
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
 from pipeline_core.log import emit, log
@@ -20,7 +20,7 @@ from pipeline_core.log import emit, log
 __all__ = [
     "canon_container", "is_fn_fully_exhausted", "load_retrospectives",
     "migrate_absolute_gate_retros", "migrate_confounded_retros",
-    "reset_exhaustion_flags", "retro_key",
+    "reset_exhaustion_flags", "retire_unblocked_convictions", "retro_key",
     "retrospectives_path", "save_retrospectives",
 ]
 
@@ -79,9 +79,10 @@ def retro_key(file_rel: str, fn_name: str, container: str) -> RetroKey:
 def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
     """Clear `fully_exhausted` flags (keep the lessons — category, guidance,
     history all stay) at a phase boundary where the evidence context changed
-    (e.g. the merged tree landed dozens of fills). FR-024's cross-iter skip
-    was written against a narrower tree; one fresh, note-informed attempt per
-    boundary is exactly D3's re-entry rule applied across phases.
+    (e.g. the merged tree landed dozens of fills). The cross-iteration skip
+    those flags drive was earned against a narrower tree; one fresh,
+    note-informed attempt per boundary is the same re-entry rule the per-fn
+    engine applies within a pass, applied across phases.
 
     Capped PER FN via `reset_attempts` (env `RETRO_RESET_MAX_ATTEMPTS`,
     default 2): a fn that has already been reset and immediately
@@ -117,10 +118,81 @@ def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
 
 
 
+def retire_unblocked_convictions(
+    project_dir: Path, still_stubbed: dict[str, frozenset[str]],
+    cluster: str = "",
+) -> int:
+    """Release every `fully_exhausted` verdict whose recorded blocking stubs
+    have since been filled. `still_stubbed` maps a file (repo-relative, as the
+    retro key spells it) to the fn names still hollow in it, and must be the
+    WHOLE of what this sweep found — a file absent from it is read as "nothing
+    hollow left here", which is the only way a record whose last blocker filled
+    is ever released. Returns the number of flags cleared.
+
+    Two guards keep that reading from becoming a mass release:
+
+    * `cluster` scopes it to records earned in the sweeping cluster. The store
+      is shared and the stub scan is cluster-scoped, so `src/nightly.rs`'s fns
+      are absent from every `stable` sweep while still being `unimplemented!()`
+      on disk. A record with no cluster stamp is legacy — earned in an unknown
+      context, which is not the same as this one — and is left alone, the same
+      rule `RetroProvenance.matches` applies to the verdict itself.
+    * an EMPTY map releases nothing. A mid-reconstruction cluster with no hollow
+      fn anywhere is far likelier to be a scan that failed than a tree that
+      finished — this pipeline has already had a walk report a crate with 186
+      fns and no tests because it would not follow a symlink — and the cost of
+      being wrong is a full frontier of model calls on units already convicted.
+      When the tree really has finished, the loop is about to exit and the
+      release would have bought nothing.
+
+    Deliberately NOT routed through the score gate that guards
+    `reset_exhaustion_flags`. That gate asks "has the cluster's pass count moved
+    since the last release", which is the right question for a blanket
+    re-admission and the wrong one here: a producer filling is itself the new
+    evidence, and on `anyhow` cluster `stable` (2026-08-07) the score could not
+    move until exactly these units were released — run `259637-36db9aad` logged
+    `NOT re-admitting exhausted fn(s)` on every sweep from iteration 4 to its
+    death while `src/error.rs::*impl*::Error` and `src/error.rs::new::Error` —
+    the two units the ~60 missing tests run through — stayed convicted against a
+    tree whose vtable helpers had all filled.
+
+    Bounded without a cap: the stored blocker set is narrowed to those still
+    hollow on every release, and a stub set only shrinks, so a record can be
+    released at most once per fn it recorded and each release answers to a
+    distinct fill. A record with no `blocked_on` stamp is never touched."""
+    if not still_stubbed:
+        return 0
+    retros = load_retrospectives(project_dir)
+    cleared = 0
+    freed: list[str] = []
+    for key, rec in retros.items():
+        if not (isinstance(rec, dict) and rec.get("fully_exhausted")):
+            continue
+        if rec.get("cluster") != cluster:
+            continue
+        file_rel = str(key).split("::", 1)[0]
+        released = cleared_blockers(rec, still_stubbed.get(file_rel, frozenset()))
+        if not released:
+            continue
+        rec["fully_exhausted"] = False
+        rec["blocked_on"] = sorted(
+            frozenset(str(s) for s in rec.get("blocked_on", [])) - released)
+        cleared += 1
+        freed.append(f"{key} (unblocked by {', '.join(sorted(released))})")
+    if cleared:
+        save_retrospectives(project_dir, retros)
+        log(f"  [phase-c] released {cleared} exhausted unit(s) — a fn each one "
+            f"was convicted for calling is no longer a stub: {'; '.join(freed[:6])}"
+            + (f" (+{cleared - 6} more)" if cleared > 6 else ""))
+        emit("phase_c.exhaustion.unblocked",
+             data={"cleared": cleared, "units": freed[:20]})
+    return cleared
+
+
 def is_fn_fully_exhausted(
     retros: dict[str, Any], file_rel: str, fn_name: str, container: str,
 ) -> bool:
-    """FR-024 cross-iter skip: progress-gated. A fn is permanently skipped
+    """The cross-iteration skip, progress-gated. A fn is permanently skipped
     only when (a) the LLM classified it GENUINELY_HARD, or (b) a
     retrospective fired AND the next-best error count did NOT improve over
     the prior best (`fully_exhausted` flag set at write time). No hard

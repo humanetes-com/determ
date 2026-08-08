@@ -74,6 +74,16 @@ strict_optional = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    # A walk replays a recorded pathological run through the real control loop
+    # with cargo and the model stubbed, and asserts on the DECISION a fix was
+    # meant to make reachable — not on the pass count, which a fixed observation
+    # sequence cannot honestly predict past the first divergent iteration.
+    # `pre_run.sh` runs these as its own stage so their verdict reads separately
+    # from "is the code correct"; the default pytest run still includes them, so
+    # the coverage they carry stays counted.
+    "walk: replays a recorded run's iterations through the real loop",
+]
 
 # Enforce the clean-architecture dependency rule (CODE_ARCHITECTURE.md §1): a higher layer
 # may import a lower one, never the reverse. domain is the floor (stdlib + the foundational
