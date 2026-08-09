@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from pipeline_core.domain.retro_gate import (
     GATE_VERSION,
+    GUIDANCE_FROM_HOLLOW_TREE,
     ROUTE_VERSION,
+    BlockedOnStubs,
     ConvictionEvidence,
     ConvictionStanding,
     RetroGateTally,
@@ -211,3 +213,76 @@ def test_fingerprint_survives_comment_and_fn_local_churn() -> None:
         + "/* error[E0560]: struct ErrorImpl has no field named `_object` */\n"
     )
     assert layout_fingerprint(churned) == layout_fingerprint(LAYOUT)
+
+
+VTABLE_LAYOUT = """
+pub(crate) struct ErrorVTable {
+    object_drop: unsafe fn(Own<ErrorImpl>),
+    object_drop_rest: unsafe fn(Own<ErrorImpl>, TypeId),
+}
+unsafe fn object_drop(e: Own<ErrorImpl>) { unimplemented!() }
+unsafe fn object_drop_front(e: Own<ErrorImpl>, t: TypeId) { unimplemented!() }
+"""
+
+
+def test_guidance_prescribing_a_field_as_a_fn_is_retired() -> None:
+    # `object_drop_rest` is a FIELD of ErrorVTable and no fn of that name is
+    # declared; the field-claim sieve alone reads it as a real member and keeps
+    # the text. On cluster `stable` (2026-08-09) the stored lesson for
+    # `error.rs::construct_from_std` read "replace `object_drop_front::<E>` with
+    # `object_drop_rest::<E>` in the vtable literal" — the exact inverse of the
+    # correct assignment `object_drop_rest: object_drop_front::<E>` — and every
+    # attempt that honoured it died on an unresolved name.
+    poisoned = {
+        "guidance": "…replace `object_drop_front::<E>` with `object_drop_rest::<E>` "
+                    "in the vtable literal.",
+        "error_count": 3, "convicted_by": [],
+    }
+    assert admissible_guidance(poisoned, VTABLE_LAYOUT, evidence=NO_TESTS) == ""
+    # The correct direction names a fn the file declares and must survive.
+    sound = {"guidance": "Assign `object_drop_front::<E>` to the drop_rest slot.",
+             "error_count": 3, "convicted_by": []}
+    assert admissible_guidance(sound, VTABLE_LAYOUT, evidence=NO_TESTS)
+
+
+def test_path_qualified_and_type_turbofish_are_not_call_claims() -> None:
+    # `crate::x::object_drop_rest::<E>` resolves elsewhere and `Own::<T>` is a
+    # type — neither is a claim about a fn THIS file should declare, so a sieve
+    # that retired them would throw away sound guidance.
+    for text in ("Use `crate::vt::object_drop_rest::<E>` here.",
+                 "Annotate it `Own::<ErrorImpl>` explicitly."):
+        assert admissible_guidance(
+            {"guidance": text, "error_count": 3, "convicted_by": []},
+            VTABLE_LAYOUT, evidence=NO_TESTS) == text
+
+
+def test_lesson_written_against_hollow_callees_is_never_injected() -> None:
+    # A body that COMPILED and then aborted the test binary, while the fns it
+    # calls were still `unimplemented!()`, yields a retrospective explaining an
+    # abort the stubs caused. All four of `error.rs`'s Error constructors earned
+    # exactly that record on cluster `stable` (2026-08-09) — error_count 0,
+    # blocked_on naming `construct`/`no_backtrace`/`error`/`object_drop_front`.
+    prov = RetroProvenance.current("stable", VTABLE_LAYOUT)
+    blocked = stamp_conviction(
+        {"guidance": "Give drop_rest a no-op closure.", "error_count": 0},
+        prov, NO_TESTS, BlockedOnStubs(frozenset({"construct", "no_backtrace"})))
+    assert admissible_guidance(blocked, VTABLE_LAYOUT, evidence=NO_TESTS) == ""
+    # Narrowing `blocked_on` as the blockers fill must NOT resurrect it: the
+    # premise is provably false exactly then, and the stored text still argues
+    # from it. Only a fresh retrospective clears the flag.
+    blocked["blocked_on"] = []
+    assert admissible_guidance(blocked, VTABLE_LAYOUT, evidence=NO_TESTS) == ""
+
+
+def test_compiler_taught_lesson_survives_hollow_callees() -> None:
+    # The same run's `error.rs::context::Error` record carried error_count 2 and
+    # a non-empty blocked_on. A compile error is the compiler's verdict on the
+    # body itself; a hollow sibling still type-checks, so it cannot have caused
+    # it and must not cost the lesson.
+    prov = RetroProvenance.current("stable", VTABLE_LAYOUT)
+    taught = stamp_conviction(
+        {"guidance": "Instantiate E explicitly; the Box deref makes it unsized.",
+         "error_count": 2},
+        prov, NO_TESTS, BlockedOnStubs(frozenset({"backtrace", "source"})))
+    assert taught[GUIDANCE_FROM_HOLLOW_TREE] is False
+    assert admissible_guidance(taught, VTABLE_LAYOUT, evidence=NO_TESTS)

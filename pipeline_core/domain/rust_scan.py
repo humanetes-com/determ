@@ -477,6 +477,20 @@ def item_names(text: str) -> list[str]:
     return names
 
 
+def declared_fn_names(text: str) -> frozenset[str]:
+    """Names declared by ``fn`` items anywhere in ``text``, at any nesting depth.
+
+    Same token scan as `item_names`, narrowed to the one keyword: the caller
+    that needs this is asking "does this crate declare something CALLABLE by
+    that name", for which a struct or const of the same name is not an answer.
+    Rust keeps field names and fn names in separate namespaces, so a note may
+    name a real field and still be prescribing a call that cannot resolve."""
+    tokens = text.split()
+    return frozenset(
+        name for i, tok in enumerate(tokens[:-1]) if tok == "fn"
+        for name in (_leading_ident(tokens[i + 1]),) if name)
+
+
 def stubbed_fn_names(text: str) -> frozenset[str]:
     """Names of the fns in `text` whose body is nothing but the skeletoniser's
     hollow marker — `unimplemented!()`, in either the bare or the `::core::`

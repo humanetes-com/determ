@@ -16,6 +16,7 @@ directory.
 """
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 from pipeline_core.application.workspace_lifecycle import (
@@ -146,3 +147,64 @@ def test_other_clusters_survive_a_save(tmp_path) -> None:
     assert (tmp_path / ".best_tree/stable/src/error.rs").read_text() == "s"
     assert load_cluster_best_tree_mark(tmp_path, "stable") is not None
     assert load_cluster_best_tree_mark(tmp_path, "nightly") is not None
+
+
+# --- the slot is never populated-but-mark-less -----------------------------
+#
+# The save used to rmtree the slot, copy file by file, then write `_meta.json`
+# LAST. A death anywhere in that window — the process this slot exists to
+# survive — left a populated slot with no mark, and that is not a neutral
+# state: `load_cluster_best_tree_mark` returns None, the driver seeds
+# `_checkpoint_sha` to None, and `snapshot_due`'s "there is no snapshot yet"
+# clause is TRUE of the variable while false of the directory. The next
+# process's first sweep then claimed the slot however much worse it was.
+
+def test_a_death_mid_save_does_not_leave_the_slot_without_a_mark(tmp_path,
+                                                                 monkeypatch) -> None:
+    save_cluster_best_tree(tmp_path, "stable", _filled(tmp_path, "stable", "95"),
+                           _mark(95, "968e763ff3f8cf37"))
+    import shutil as _sh
+    real_copy, calls = _sh.copy2, {"n": 0}
+
+    def _die_partway(src, dst, *a, **k):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("disk went away mid-snapshot")
+        return real_copy(src, dst, *a, **k)
+
+    monkeypatch.setattr(_sh, "copy2", _die_partway)
+    filled = _filled(tmp_path, "stable", "13")
+    (filled / "src" / "extra.rs").write_text("13", encoding="utf-8")
+    with contextlib.suppress(OSError):        # the death this test simulates
+        save_cluster_best_tree(tmp_path, "stable", filled, _mark(13, "42e333d7"))
+    monkeypatch.undo()
+
+    mark = load_cluster_best_tree_mark(tmp_path, "stable")
+    assert mark is not None, "slot left mark-less — the next run claims it free"
+    assert mark.pass_count == 95, "the 95 slot was replaced by a partial 13"
+    assert (tmp_path / ".best_tree/stable/src/error.rs").read_text() == "95"
+
+
+def test_an_empty_fill_tree_does_not_wipe_a_good_slot(tmp_path) -> None:
+    """An empty tree is not evidence the stored one is stale."""
+    save_cluster_best_tree(tmp_path, "stable", _filled(tmp_path, "stable", "95"),
+                           _mark(95))
+    empty = tmp_path / "empty"
+    (empty / "src").mkdir(parents=True)
+
+    assert save_cluster_best_tree(tmp_path, "stable", empty, _mark(0)) == 0
+
+    assert (tmp_path / ".best_tree/stable/src/error.rs").read_text() == "95"
+    mark = load_cluster_best_tree_mark(tmp_path, "stable")
+    assert mark is not None and mark.pass_count == 95
+
+
+def test_no_staging_or_retired_dirs_survive_a_clean_save(tmp_path) -> None:
+    """Heal walks `.best_tree/<cluster>`; a leftover sibling would shadow
+    nothing but would be committed by the checkpoint's `git add`."""
+    save_cluster_best_tree(tmp_path, "stable", _filled(tmp_path, "stable", "a"),
+                           _mark(81))
+    save_cluster_best_tree(tmp_path, "stable", _filled(tmp_path, "stable", "b"),
+                           _mark(83))
+
+    assert [p.name for p in (tmp_path / ".best_tree").iterdir()] == ["stable"]

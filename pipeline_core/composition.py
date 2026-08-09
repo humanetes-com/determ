@@ -720,6 +720,7 @@ from pipeline_core.domain.workspace_layout import MANIFEST_NAME as _MANIFEST_NAM
 from pipeline_core.domain.workspace_layout import (
     PROJECT_PROFILE_NAME as _PROJECT_PROFILE_NAME,
 )
+from pipeline_core.domain.workspace_layout import SKELETON_DIR, SKELETON_FILLED_DIR
 from pipeline_core.domain.workspace_layout import WORKSPACE_DIR as _WORKSPACE_DIR
 from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
@@ -2042,16 +2043,35 @@ def build_app(
         except Exception as e:  # snapshot must never break the fill loop
             ports.log(f"  [ratchet] cluster best-tree snapshot failed: {e}")
             n = 0
+        # The commit message must name WHERE the tree it scores actually is.
+        # It did not, and on 2026-08-08 that cost a day: commit `1f4099b`
+        # ("task2a checkpoint — stable:95 passing") holds the best tree this
+        # project has produced, and the obvious check — `git ls-tree <sha> --
+        # src` — returns a one-line `lib.rs`, because the workspace `src/` is a
+        # stub shell after strip and the reconstruction lives under
+        # `.skeleton-filled/<cluster>/src`. The tree was written up as
+        # unrecoverable and a restart was run over it while it sat in the object
+        # store the whole time. The pair matters too: `.skeleton/<cluster>` is
+        # the layout these bodies answer to, and t1.5 re-authors it per run.
+        rel = f"{SKELETON_FILLED_DIR}/{cluster}"
         committed = git_commit_paths(
             WorkspaceDeps(log=ports.log, emit=ports.emit), project_dir,
-            [f".skeleton-filled/{cluster}"],
+            [rel],
             f"pipeline: task2a checkpoint — {cluster}:{mark.pass_count} passing "
-            f"(iter {mark.iteration})",
+            f"(iter {mark.iteration})\n\n"
+            f"Tree: {rel}/src (NOT src/, which is a stub shell after strip).\n"
+            f"Restore with the matching layout or the bodies will not compile:\n"
+            f"  git archive <sha> {SKELETON_DIR}/{cluster} {rel} | tar -x -C <dest>",
             managed=run_state.git_managed)
+        if committed:
+            ports.log(f"  [ratchet] checkpoint — {cluster}:{mark.pass_count} "
+                      f"passing, tree at {rel}/src")
         ports.emit("phase_c.checkpoint", data={
             "cluster": cluster, "pass_count": mark.pass_count,
             "tree_sha": mark.tree_sha, "oracle_size": mark.oracle_size,
-            "best_tree_files": n, "git_committed": committed})
+            "best_tree_files": n, "git_committed": committed,
+            "tree_path": f"{rel}/src",
+            "layout_path": f"{SKELETON_DIR}/{cluster}/src"})
 
     def _tdd_floor_path(project_dir: Path, cluster: str) -> Path:
         return project_dir / ".skeleton" / f"_tdd_floor_{cluster}.json"

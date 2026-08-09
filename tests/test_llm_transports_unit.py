@@ -13,10 +13,29 @@ from pipeline_core.adapters import llm_transports as t
 
 def test_model_cap_helpers_default_and_lookup() -> None:
     assert t._model_uses_think("qwen3:32b") is True
-    assert t._model_uses_think("qwen3.6:27b-q8") is False
+    # `qwen3.6:27b-q8` was pinned think=False from 2026-05-16 to 2026-08-09 and
+    # was never once True, while the stated intent for it was always True. The
+    # pin worked around `_stream_compat` reading only `delta.content`: Qwen3.6
+    # puts reasoning in a separate field, so content stayed empty for the whole
+    # reasoning phase. That path reads both field names now.
+    assert t._model_uses_think("qwen3.6:27b-q8") is True
     assert t._model_uses_think("unknown-model") is True          # default think
     assert t._model_use_native_ollama("qwen3.6:27b") is True
+    assert t._model_use_native_ollama("qwen3.6:27b-q8") is False  # compat path
     assert t._model_use_native_ollama("unknown-model") is False  # default
+
+
+def test_the_compat_stream_reads_a_separate_reasoning_field() -> None:
+    """The 139 backport. `_stream_compat` used to read only
+    `delta.content` and run `InlineThinkSplitter` over it, which handles Qwen3's
+    inline `<think>` tags. Qwen3.6 emits reasoning in a separate field, so on
+    this path content stayed empty through the whole reasoning phase, the
+    splitter found no tags, and the response came back blank — the reason for
+    the think=False pin above."""
+    import inspect
+    src = inspect.getsource(t.OllamaTransport._stream_compat)
+    assert '"reasoning"' in src and '"reasoning_content"' in src, \
+        "the dual-field read is gone; qwen3.6 on the compat path returns empty"
 
 
 def test_default_max_tokens_explicit(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 
 from .rust_lex import code_mask
-from .rust_scan import item_names
+from .rust_scan import declared_fn_names, item_names, struct_names
 from .test_results import (
     camelcase_type_tokens,
     parse_error_code_note,
@@ -323,6 +323,54 @@ def _field_claims(note: str, struct_names: set[str]) -> frozenset[str]:
     return frozenset(claims)
 
 
+def _call_claims(note: str) -> frozenset[str]:
+    """Snake_case names the note prescribes CALLING, from the one shape that
+    says so unambiguously: a turbofish, ``name::<...>``.
+
+    Path-qualified segments (``crate::wrapper::helper::<T>``) are skipped — the
+    name resolves in another module, so this file's declarations say nothing
+    about it. Type paths are skipped by the same test, their last segment being
+    CamelCase.
+
+    A field and a fn with the same name coexist happily in Rust, which is what
+    makes this worth extracting separately: `_field_claims` sees
+    ``object_drop_rest`` on `ErrorVTable` and is satisfied, while the note is
+    directing the model at a free fn of that name that the crate never declares.
+    """
+    claims: set[str] = set()
+    start = 0
+    while True:
+        i = note.find("::<", start)
+        if i == -1:
+            break
+        start = i + 3
+        j = i
+        while j > 0 and (note[j - 1].isalnum() or note[j - 1] == "_"):
+            j -= 1
+        name = note[j:i]
+        if (name and (name[0].isalpha() or name[0] == "_")
+                and not name[0].isupper() and note[max(0, j - 2):j] != "::"):
+            claims.add(name)
+    return frozenset(claims)
+
+
+def _fields_declared_anywhere(
+    file_text: str, cache: dict[str, frozenset[str] | None],
+) -> frozenset[str]:
+    """Every field name declared by any struct in ``file_text``.
+
+    Deliberately not scoped to the structs the note names: the note that cost
+    the plateau said "replace `object_drop_front::<E>` with `object_drop_rest::<E>`"
+    while naming only `Box` and `Self`, so a scoped lookup would have anchored on
+    `Error` (field `inner`) and seen nothing to contradict."""
+    out: set[str] = set()
+    for name in struct_names(file_text):
+        if name not in cache:
+            cache[name] = struct_fields(file_text, name)
+        out.update(cache[name] or ())
+    return frozenset(out)
+
+
 class LayoutJudgement(Enum):
     """Outcome of checking one piece of persisted model-facing text against the
     layout of the file being compiled. ``UNANCHORED`` is not "fine" — it is
@@ -353,6 +401,14 @@ def judge_note_against_layout(
         if name not in cache:
             cache[name] = struct_fields(file_text, name)
         return cache[name]
+
+    # A prescribed call on a name this file declares as a FIELD and never as a
+    # fn: judged before the struct anchoring below, because it needs no anchor
+    # — the file's own declarations settle it either way.
+    calls = _call_claims(note)
+    if calls and (calls & _fields_declared_anywhere(file_text, cache)
+                  ) - declared_fn_names(file_text):
+        return LayoutJudgement.CONTRADICTED
 
     named: dict[str, frozenset[str]] = {}
     for tok in camelcase_type_tokens(note):

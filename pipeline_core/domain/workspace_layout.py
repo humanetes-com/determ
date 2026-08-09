@@ -19,6 +19,27 @@ MODULE_AUGMENTED_DIR = ".module_augmented"
 # Strip sentinel dir: present once a module's source has been skeletonised.
 MODULE_STRIPPED_DIR = ".module_stripped"
 
+# The three directories that hold the reconstruction itself. `src/` in the
+# workspace is a stub shell after strip (a one-line lib.rs plus the
+# `*.gen_tests_*.rs` oracle); what the loop builds, tests and scores lives here.
+#   .skeleton/<cluster>/src        — the authored layout the bodies answer to
+#   .skeleton-filled/<cluster>/src — the filled bodies; run_phase_c_tdd's
+#                                    target_src_dir, and what a resume picks up
+#   .best_tree/<cluster>/src       — heal's durable restore tier
+# All three are TRACKED in the workspace repo (its .gitignore is /target/ and
+# /Cargo.lock only), which is what makes the task2a checkpoint commits real and
+# what makes a `git reset --hard` to a pre-fill tag delete them wholesale.
+SKELETON_DIR = ".skeleton"
+SKELETON_FILLED_DIR = ".skeleton-filled"
+BEST_TREE_DIR = ".best_tree"
+
+# Ordered widest-first: the layout and the bodies are a PAIR (t1.5 re-authors
+# the layout per run, so bodies from one run do not compile against another's
+# skeleton) and any operation that moves one must move all three together.
+RECONSTRUCTION_DIRS: tuple[str, ...] = (
+    SKELETON_FILLED_DIR, SKELETON_DIR, BEST_TREE_DIR,
+)
+
 # Per-cluster build configuration dump (env_extra / cfg / tarpaulin excludes).
 BUILD_CONFIGS_NAME = "build_configs.md"
 
@@ -78,6 +99,16 @@ ITERATION_PHASE_PREFIXES: tuple[str, ...] = (
 )
 
 
+# THE source of truth. `strip_to_tests.py` keeps a byte-equal copy of this set
+# rather than importing it, because that module is a standalone stdlib-only CLI
+# (`python strip_to_tests.py <dir>`) and coupling it to the package would cost
+# that. `tests/test_skip_dirs_parity.py` asserts the two are equal, because the
+# copy DRIFTED and the drift was destructive: the canonical set carried
+# `.best_tree` and the copy did not, so run `491052-1af6b4f4`'s strip walked 36
+# consecutive files inside the recovery slot on 2026-08-08 — `chain.rs`,
+# `kind.rs`, `macros.rs` and `nightly.rs` DELETED from the snapshot, the other
+# eight stripped back to signatures. Add a name here and the parity test names
+# the copy that has not caught up.
 SKIP_DIR_NAMES: frozenset[str] = frozenset({
     ".git", ".hg", ".svn",            # VCS internals
     "target",                          # Rust / Maven build output
@@ -87,11 +118,15 @@ SKIP_DIR_NAMES: frozenset[str] = frozenset({
     "__pycache__", ".mypy_cache",     # Python caches
     "dist", "build", ".build",        # Generic build output
     ".tox", ".eggs",                   # Python test infra artifacts
-    ".skeleton", ".skeleton-filled",  # TASK 2 skeleton backend scratch dirs
-    ".best_tree",                      # best-tree ratchet snapshot
+    "farf",                            # Solana test ledger artifacts
+    SKELETON_DIR, SKELETON_FILLED_DIR, # TASK 2 skeleton backend scratch dirs
+    BEST_TREE_DIR,                     # best-tree ratchet snapshot
     ".original_structure",             # pre-strip API snapshot
     ".chunk_cache", ".task1_partials", # task1 caches
     ".phase_c_logs",                   # Phase C test-fix iteration archives
+    CLUSTER_AUGMENTED_DIR,             # task0c augmentation sentinels
+    MODULE_AUGMENTED_DIR,
+    MODULE_STRIPPED_DIR,               # strip sentinel
 })
 
 

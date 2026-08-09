@@ -11,6 +11,7 @@ from pipeline_core.domain.rust_scan import (
     branch_guard_label,
     count_attrs,
     count_cfg_attrs,
+    declared_fn_names,
     drop_duplicate_attributes,
     duplicate_attribute_runs,
     has_code_brace,
@@ -966,3 +967,29 @@ def test_declared_member_count_reads_only_the_first_item_of_an_entry() -> None:
     )
     assert declared_member_count(entry) == 1
     assert declared_members(entry) == frozenset()
+
+
+def test_declared_fn_names_separates_the_field_and_fn_namespaces() -> None:
+    # Rust lets a struct field and a free fn share a name, and a note may name a
+    # real field while prescribing a call that cannot resolve. `anyhow`'s
+    # ErrorVTable declares an `object_drop_rest` FIELD whose value is the fn
+    # `object_drop_front`; no fn `object_drop_rest` exists in the crate.
+    text = """
+struct ErrorVTable {
+    object_drop: unsafe fn(Own<ErrorImpl>),
+    object_drop_rest: unsafe fn(Own<ErrorImpl>, TypeId),
+}
+unsafe fn object_drop_front(e: Own<ErrorImpl>, t: TypeId) {}
+const object_drop_const: u8 = 0;
+"""
+    names = declared_fn_names(text)
+    assert "object_drop_front" in names
+    assert "object_drop_rest" not in names
+    # A const or struct of the same name is not something callable by it.
+    assert "object_drop_const" not in names
+    assert "ErrorVTable" not in names
+
+
+def test_declared_fn_names_finds_nested_and_modified_fns() -> None:
+    text = "impl X { pub async unsafe fn inner<T>(&self) -> T { fn helper() {} } }"
+    assert declared_fn_names(text) == frozenset({"inner", "helper"})

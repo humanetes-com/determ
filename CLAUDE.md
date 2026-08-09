@@ -114,6 +114,60 @@ vtable functions referenced in the body ... are not implemented in the crate", a
 `context_chain_drop_rest` and `construct` were all filled on disk by the time it
 mattered. Check a conviction's stated premise against the tree before believing it.
 
+## The crate under reconstruction is not in `src/`, and a path-scoped negative proves nothing
+
+`src/` in the workspace is a shell: after strip it holds `*.gen_tests_*.rs` and a
+one-line `lib.rs`. The crate the loop builds, tests and scores is
+`.skeleton-filled/<cluster>/src` — `run_phase_c_tdd`'s `target_src_dir` is
+`filled_dir = project_dir / ".skeleton-filled" / cluster.name`
+(`application/generators/task2_generator.py`), which is what cargo runs against,
+what the task2a checkpoint stages, and what a resume picks up (the seed at cluster
+entry is `if not dst.exists()`, so prior fills are never overwritten). Two siblings
+complete the picture: `.skeleton/<cluster>/src` is the authored layout those bodies
+answer to, and `.best_tree/<cluster>/src` is heal's durable restore tier. **All
+three are tracked in the workspace repo** — its `.gitignore` is `/target/` and
+`/Cargo.lock`, nothing else.
+
+**The instance, and it cost a plan.** A debt entry concluded that the commit
+`pipeline: task2a checkpoint — stable:95 passing (iter 3)` "contains no
+reconstruction", on one measurement:
+
+    $ git ls-tree -r --name-only 1f4099b -- src | grep -v gen_tests
+    src/lib.rs                          # 1 line
+
+True, and evidence of nothing. The same commit carries
+`.skeleton-filled/stable/src/error.rs` at 40,645 bytes with 9 `unimplemented!()` —
+25 stubs across the cluster against the 107 in the tree that replaced it — and the
+`gen_tests` blobs are byte-identical between the two commits, so the counts compare
+directly. The record tree was recoverable the entire time it was being written up
+as lost, and "the checkpoint is broken" became the premise of the next session's
+fix batch.
+
+**The rule.** A query that returns nothing has two explanations — the thing is
+absent, or the query was scoped where it never was — and only one is a finding.
+Before reporting an absence, establish the path from the code that WRITES the
+artefact, or drop the pathspec and enumerate whole: `git ls-tree -r <sha>` with no
+`-- path`, `find` with no `-path`, `grep -r` from the repo root. It costs one
+command, and it is the difference between a broken mechanism and a working one
+whose output nobody had located.
+
+**Restoring a past tree is a pair, never one directory.** t1.5 re-authors the
+layout on every run, so bodies from one run do not compile against another's
+skeleton: between `1f4099b` and the tree that replaced it, `ErrorImpl` lost
+`pub(crate) backtrace: crate::backtrace::Backtrace`. Take `.skeleton/<cluster>` and
+`.skeleton-filled/<cluster>` from the same commit or take neither. Extract with
+`git archive <sha> <paths> | tar -x -C <scratch>` and copy deliberately — a
+`git checkout <sha> -- <path>` overwrites the working tree, which in this workspace
+is permanently dirty and holds fills newer than any commit.
+
+**The tracking is also what makes `--restart-from-augmented` destructive.**
+`RestoreFromAugmented.run` (`adapters/workspace_restore.py`) is
+`git reset --hard <task0c-augmented-* tag>`, and the tag predates every fill, so the
+reset DELETES those tracked dot-directories rather than leaving them alone. Measured
+across the 2026-08-08 restart: 5,137 files removed, 5,067 of them
+`.skeleton-filled`. The artefact survives in the object store — after such a reset,
+reach a past tree by sha, never by looking at the working tree.
+
 ## A fix that silences a failure deletes whatever guard was keying on the noise
 
 `carry_frozen_repr` (`domain/authored_layout.py`) is correct and it is what made

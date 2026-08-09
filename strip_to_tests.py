@@ -73,7 +73,27 @@ SOURCE_EXTENSIONS = {
     ".ada", ".adb", ".ads", ".pas", ".pp",
 }
 
-# Directories to never descend into
+# Directories to never descend into.
+#
+# This is a deliberate COPY of `pipeline_core.domain.workspace_layout`'s
+# SKIP_DIR_NAMES, not an import: this module is a standalone stdlib-only CLI
+# (`python strip_to_tests.py <project_dir>`) and importing the package would
+# cost that. `tests/test_skip_dirs_parity.py` asserts the two sets are equal,
+# and that test exists because the copy drifted and the drift destroyed data.
+#
+# What the drift cost, 2026-08-08. The canonical set carried `.best_tree`;
+# this copy did not. Run `491052-1af6b4f4`'s strip therefore descended into the
+# recovery slot and logged 36 consecutive lines inside it —
+# `STRIP .best_tree/_merged/backtrace.rs`, `DELETE .best_tree/_merged/chain.rs`,
+# `STRIP .best_tree/nightly/src/error.rs`, and so on. `chain.rs`, `kind.rs`,
+# `macros.rs` and `nightly.rs` were deleted outright;
+# `backtrace/context/ensure/error/fmt/lib/ptr/wrapper` were cut back to bare
+# signatures, leaving `.best_tree/src` at 8 files and 136 lines total. That slot
+# is the tier heal restores a corrupted file from before it falls through to
+# nuking the file back to the baked skeleton.
+#
+# Adding a name to the canonical set alone will fail the parity test; add it in
+# both places.
 SKIP_DIRS = {
     ".git", ".hg", ".svn",
     "target",           # Rust build output
@@ -84,15 +104,14 @@ SKIP_DIRS = {
     "dist", "build", ".build",
     ".tox", ".eggs",
     "farf",             # Solana test ledger artifacts
-    # Pipeline scratch dirs — produced by the bake step (which runs
-    # BEFORE strip). Without these in the skip list, strip would walk
-    # `.skeleton/{cluster}/src/` and delete the very artefacts TASK 2
-    # depends on. Mirror of pipeline.py's SKIP_DIR_NAMES.
-    ".skeleton", ".skeleton-filled",
+    # Pipeline scratch dirs — produced by the bake step (which runs BEFORE
+    # strip). Without these, strip walks `.skeleton/{cluster}/src/` and deletes
+    # the very artefacts TASK 2 depends on, and `.best_tree/` with them.
+    ".skeleton", ".skeleton-filled", ".best_tree",
     ".original_structure",
     ".phase_c_logs",
     ".chunk_cache", ".task1_partials",
-    ".module_augmented", ".module_stripped",
+    ".cluster_augmented", ".module_augmented", ".module_stripped",
 }
 
 

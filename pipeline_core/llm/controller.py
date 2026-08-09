@@ -22,6 +22,8 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipeline_core.domain.text import PromptDigest
+
 from .budget import BudgetSpec, BudgetState, Plan, request_max_tokens
 from .detect import StopDetector
 from .events import (
@@ -167,13 +169,55 @@ class LLMController:
 
         # Thinking exhausted (no content) or stream length-truncated mid-output:
         # re-feed the reasoning and ask for code only, thinking disabled.
+        #
+        # `cap.stop == "think_cap"` is the third arm and it is not redundant.
+        # Capping a stream converts a server-side `finish_reason == "length"`
+        # into a CLIENT-side break, and a client-side break abandons the
+        # generator before the chunk carrying finish_reason ever arrives — so
+        # `meta.finish_reason` stays None on exactly the path the cap creates.
+        # The `not result` arm covers it whenever the break lands before any
+        # content, which on vLLM is every time in practice (the cap test in
+        # `_consume` sits inside `if delta.reasoning`, and Qwen3.6 emits its
+        # whole reasoning block before the first content delta). The arm is here
+        # for the case that ordering does not hold: break after content has
+        # started and `result` is non-empty while finish_reason is None, so the
+        # first two arms both miss and a TRUNCATED body would be returned as
+        # though it were complete.
         followup = (transport.supports_followup and reasoning_text
-                    and (not result or meta.finish_reason == "length"))
+                    and (not result or meta.finish_reason == "length"
+                         or cap.stop == "think_cap"))
         if followup:
             result = self._followup(transport, messages, reasoning_text, model, max_tokens) or result
 
         if reasoning_text:
             self._h.persist_thinking(result, reasoning_text)
+
+        # Stream provenance. `llm.response` (adapters/ask_client.py) records only
+        # `{prompt_sha, response: {sha256, char_count}}`, and StreamMeta cannot
+        # reach it: this method returns a bare `str`, and so do
+        # `model_interact.ask` and the late-binding `ask_raw` the adapter holds.
+        # So the facts live here, on a sibling event, keyed on the SAME
+        # `PromptDigest.of(prompt).sha256` the adapter uses — identical input,
+        # identical function, so the two join exactly.
+        #
+        # Why it is worth an event of its own: diagnosing the 2026-08-08 slow run
+        # was impossible from `events.jsonl` and needed `logs/pipeline_guards.log`
+        # (which carries no run ids and no dates, and spans months) plus the vLLM
+        # Prometheus endpoint. A `char_count: 0` response is indistinguishable
+        # there from a short one, so four calls that each burned ~20 minutes of
+        # GPU producing zero characters looked like ordinary slow calls.
+        self._h.emit("llm.stream_meta", {
+            "prompt_sha": PromptDigest.of(prompt).sha256,
+            "model": model,
+            "finish_reason": meta.finish_reason,
+            "prompt_tokens": meta.prompt_tokens,
+            "content_chars": len(result),
+            "reasoning_chars": len(reasoning_text),
+            "stop": cap.stop,
+            "followup": bool(followup),
+            "request_max": plan.request_max,
+            "enable_thinking": enable_thinking,
+        })
 
         self._h.sock_close()
         if not result:

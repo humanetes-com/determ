@@ -201,25 +201,60 @@ def save_cluster_best_tree(
     Cluster-scoped: replaces only this cluster's subtree, never other
     clusters' snapshots. Returns files saved.
 
-    Destructive by construction — the slot is rmtree'd before the copy, so a
-    caller that has not established ``mark`` beats what is already stored
-    destroys it. ``load_cluster_best_tree_mark`` is how that is established."""
+    Destructive by construction — the slot is replaced wholesale, so a caller
+    that has not established ``mark`` beats what is already stored destroys it.
+    ``load_cluster_best_tree_mark`` is how that is established.
+
+    STAGED AND SWAPPED, because the obvious order was unsafe in a way that
+    defeated exactly the guard above. It used to rmtree the slot, copy the files
+    one at a time, and write ``_meta.json`` LAST — so a death anywhere in that
+    window (the process this slot exists to survive) left the slot populated and
+    MARK-LESS. ``load_cluster_best_tree_mark`` then returns None, the driver
+    seeds ``_checkpoint_sha`` to None, and ``snapshot_due``'s first clause
+    (``snap_sha is None`` — "there is no snapshot yet") is true of the variable
+    and false of the directory, so the next process's first sweep claimed the
+    slot however much worse it was. That is the same shape as the crash the
+    atomic write in ``_save_tdd_floor`` exists for.
+
+    So: build the replacement beside the slot with its mark already inside, then
+    two renames. Both are atomic, the slot is never half-written, and the worst
+    a death leaves behind is a ``<cluster>.old-<pid>`` directory that is named
+    for what it is rather than a silent downgrade."""
     import json
+    import os as _os
     import shutil
-    dst_root = project_dir / BEST_TREE_DIR / cluster
-    if dst_root.exists():
-        shutil.rmtree(dst_root)
+    root = project_dir / BEST_TREE_DIR
+    dst_root = root / cluster
+    staging = root / f"{cluster}.staging-{_os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
     saved = 0
     for src in sorted(Path(filled_dir).rglob("*.rs")):
         if not src.is_file():
             continue
-        dst = dst_root / src.relative_to(filled_dir)
+        dst = staging / src.relative_to(filled_dir)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         saved += 1
-    if saved:
-        (dst_root / _BEST_META).write_text(
-            json.dumps(mark.to_dict()), encoding="utf-8")
+    if not saved:
+        # Nothing to store. Leave whatever is already in the slot alone: an
+        # empty fill tree is not evidence that the stored one is stale.
+        if staging.exists():
+            shutil.rmtree(staging)
+        return 0
+    # The mark goes in BEFORE the swap, so the slot is mark-less at no point.
+    (staging / _BEST_META).write_text(json.dumps(mark.to_dict()), encoding="utf-8")
+    retired = root / f"{cluster}.old-{_os.getpid()}"
+    if dst_root.exists():
+        _os.replace(dst_root, retired)
+    try:
+        _os.replace(staging, dst_root)
+    except OSError:
+        if retired.exists():          # put the old slot back rather than none
+            _os.replace(retired, dst_root)
+        raise
+    if retired.exists():
+        shutil.rmtree(retired, ignore_errors=True)
     return saved
 
 

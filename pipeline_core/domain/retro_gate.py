@@ -293,6 +293,14 @@ def cleared_blockers(
     return frozenset(str(s) for s in stored) - still_stubbed
 
 
+# Set on a record whose lesson was written from a test outcome that hollow
+# siblings, not the attempted body, decided. `blocked_on` alone cannot carry
+# this: the caller narrows that set as blockers fill, so it empties out and the
+# text would become admissible again on the strength of the blockers having been
+# fixed — which is precisely when the false premise is provable, not forgivable.
+GUIDANCE_FROM_HOLLOW_TREE = "guidance_from_hollow_tree"
+
+
 class ConvictionStanding(Enum):
     """Why a stored ``fully_exhausted`` verdict does or does not apply here."""
     CURRENT = "current"
@@ -337,10 +345,23 @@ def admissible_guidance(
       test outcomes alone, so a narrowed frontier voids the lesson exactly as it
       voids the verdict. Re-admitting a unit while still handing it the lesson a
       foreign red test taught just spends the fresh attempts on the same wrong
-      target."""
+      target;
+    - it was written from a test run the tree's own holes decided. A body that
+      compiled and then aborted the test binary, while the fns it calls were
+      still `unimplemented!()`, produces a retrospective explaining an abort the
+      stubs caused. On cluster `stable` (2026-08-09) all four of `error.rs`'s
+      Error constructors earned exactly this record — `error_count` 0, one or
+      two failing tests, `blocked_on` naming `construct`, `no_backtrace`,
+      `error` or `object_drop_front` — and the resulting text told the model to
+      write `object_drop_rest::<E>`, which is an `ErrorVTable` FIELD and not a
+      fn the crate declares. Three iterations and six hours held pass=13 with
+      every constructor stubbed. The same run's one compiler-taught record
+      (`context::Error`, `error_count` 2) is a real lesson and stays."""
     rec = record or {}
     guidance = str(rec.get("guidance") or "")
     if not guidance:
+        return ""
+    if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
         return ""
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return ""
@@ -361,4 +382,8 @@ def stamp_conviction(
     writes a well-formed record; such a record simply carries no tree claim and
     is never released by `cleared_blockers`."""
     stamped = evidence.stamp(provenance.stamp(record))
-    return blockers.stamp(stamped) if blockers is not None else stamped
+    if blockers is None:
+        return stamped
+    stamped[GUIDANCE_FROM_HOLLOW_TREE] = bool(
+        blockers.stubs) and int(stamped.get("error_count") or 0) == 0
+    return blockers.stamp(stamped)

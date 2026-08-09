@@ -30,6 +30,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     ask_with_pulls,
     workspace_file_reader,
 )
+from pipeline_core.application.reconstruct.unit_pool import run_units_concurrently
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
     escalation_refusal_note,
@@ -1912,15 +1913,41 @@ def fill_impl_blocks(
         # impl header for every file that has one.
         for b in _refill_only_deferred:
             _by_file.setdefault(b.file, []).append(b)
-        for _file_rel, _fblocks in _by_file.items():
-            # `>= 2` is there because a lone block is the per-block route's own
-            # unit — which is false of a block that route does not iterate. A
-            # file whose only frontier work is a free-fn or oversized re-fill
-            # gets this route or none.
+        # `>= 2` is there because a lone block is the per-block route's own
+        # unit — which is false of a block that route does not iterate. A file
+        # whose only frontier work is a free-fn or oversized re-fill gets this
+        # route or none.
+        _ff_units = [
+            (_file_rel, _fblocks) for _file_rel, _fblocks in _by_file.items()
             if len(_fblocks) >= 2 or any(
-                    not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)
-                    for b in _fblocks):
-                _fill_file_first(_file_rel, _fblocks)
+                not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)
+                for b in _fblocks)
+        ]
+        # One FILE is this route's unit, so independent files dispatch to a
+        # pool for exactly the reasons the per-block route below already
+        # states: `_splice_check_lock` and `_counters_lock` serialise
+        # everything touching shared state, and no two units name the same
+        # file, so their splices cannot collide.
+        #
+        # It ran serially on the MAIN THREAD until 2026-08-09, and that is
+        # where run `491052-1af6b4f4`'s wall clock went. Paired from
+        # `logs/events.jsonl`: 47 % of the run's 5-second slots had a
+        # MainThread call in flight, and across those slots mean concurrency
+        # was **1.03** — the worker pools sat idle behind it — against 2.85
+        # while MainThread was free. 20 of the run's 68 MainThread calls came
+        # from this loop, at a mean of 193 s each.
+        if _ff_units and min(max(1, parallelism), len(_ff_units)) > 1:
+            _log(f"  [phase-c/file] parallelism="
+                 f"{min(max(1, parallelism), len(_ff_units))} over "
+                 f"{len(_ff_units)} file(s) (one prompt per file, "
+                 "splice+cargo serialised per tree).")
+        run_units_concurrently(
+            _ff_units, workers=parallelism,
+            name_prefix=f"file-first-{cluster_name}",
+            run_unit=lambda u: _fill_file_first(u[0], u[1]),
+            describe=lambda u: u[0], log=_log,
+            check_stop=_check_graceful_stop,
+        )
     # Independent FILES dispatch to a thread pool — the LLM call inside
     # each block's fix loop is the slow part; `_splice_check_lock` +
     # `_counters_lock` (above) already serialize everything that touches

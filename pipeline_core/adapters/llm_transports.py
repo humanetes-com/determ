@@ -74,7 +74,14 @@ MAX_TOKENS = _default_max_tokens()
 MODEL_CAPS: dict[str, dict[str, Any]] = {
     "qwen3:32b":                  {"think": True,  "native_ollama": False},
     "qwen3.6:27b":                {"think": True,  "native_ollama": True},
-    "qwen3.6:27b-q8":             {"think": False, "native_ollama": False},   # compat layer routes think=True to reasoning_content (empty content); think=False works reliably
+    # `think: False` from its introduction (2026-05-16) until 2026-08-09, and
+    # never once True, while the stated intent for this model was always
+    # think=True — code and intent had never agreed. The pin was a workaround
+    # for `_stream_compat` reading only `delta.content`: Qwen3.6 puts reasoning
+    # in a separate field, so content stayed empty for the whole reasoning phase
+    # and the response came back blank. That path now reads both field names,
+    # so the pin has nothing left to work around.
+    "qwen3.6:27b-q8":             {"think": True,  "native_ollama": False},
     "qwen3.6-27b-q8":             {"think": True,  "native_ollama": False},   # SGLang served name (dash, not colon)
     "Qwen/Qwen3.6-27B-FP8":                      {"think": True,  "native_ollama": False},
     "mattbucci/Qwen3.6-27B-AWQ":                  {"think": True,  "native_ollama": False},
@@ -123,6 +130,32 @@ class _BaseTransport:
     def clean(self, text: str, *, model: str) -> str:
         return strip_think(text)
 
+    @staticmethod
+    def _refeed_as_user_turn(base_messages: list[dict[str, Any]],
+                             reasoning_text: str) -> list[dict[str, Any]]:
+        """Re-feed reasoning in a USER turn and ask for code only.
+
+        NOT an assistant turn carrying `<think>…</think>`, which is what every
+        OpenAI-compatible path here used to send: Qwen3-family chat templates
+        DISCARD think blocks in prior assistant turns, so the followup re-fed
+        nothing while telling the model it had "already reasoned above".
+        Measured against the live server on 2026-08-09 — prompt_tokens for that
+        assistant turn against reasoning of 0 / 2,000 / 20,000 / 121,481 chars
+        was 33 / 33 / 33 / 33, versus 33 / 1,034 / 10,034 / 60,774 for the same
+        bodies in a user turn.
+
+        The native Ollama `/api/chat` path is exempt and keeps its assistant
+        turn: it sets the `thinking` FIELD, which the endpoint reads directly
+        rather than parsing out of content.
+        """
+        return base_messages + [
+            {"role": "user", "content": (
+                "Your earlier reasoning on this exact task:\n\n"
+                f"{reasoning_text}\n\n"
+                "Now write the code block. Do not re-explain — output only the code."
+            )},
+        ]
+
     def wait_until_ready(self) -> None:
         return None
 
@@ -138,6 +171,39 @@ _CHUNK_TIMEOUT    = int(os.getenv("OLLAMA_CHUNK_TIMEOUT", "60"))
 # Thinking cap: break out of thinking loop after this many chars (~10k tokens).
 # Falls through to the existing followup "now write the code" path.
 _MAX_THINK_CHARS  = int(os.getenv("OLLAMA_MAX_THINK_CHARS", "40000"))
+
+# The same cap for vLLM, which ran UNCAPPED until 2026-08-09 and so had nothing
+# to interrupt a runaway reasoning stream. Four calls in run `491052-1af6b4f4`
+# each consumed the entire 32,768-token budget inside the reasoning block and
+# produced ZERO characters of answer, at 856, 872, 1,364 and 856 seconds —
+# 65.8 minutes of a 464-minute run:
+#
+#   [18:07:30] llm/length_truncated hit max_tokens=32768 (content=0, thinking=121,481)
+#   [20:36:53] llm/length_truncated hit max_tokens=32768 (content=0, thinking=121,109)
+#   [22:03:22] llm/length_truncated hit max_tokens=32768 (content=0, thinking=121,432)
+#   [22:44:43] llm/length_truncated hit max_tokens=32768 (content=0, thinking=124,043)
+#
+# The exact value is immaterial and that is measured, not assumed: across 226
+# recorded traces the reasoning-length distribution is sharply bimodal — one
+# population at 0–36,570 chars, another at 69,830–152,088, and a VERIFIED EMPTY
+# BAND 33,260 chars wide between them. Any cap inside the band separates the two.
+# Healthy reasoning on the fill probe ran 7,000–12,000 chars, and the server's
+# mean is 5,205 output tokens per request, so the median call never reaches this.
+#
+# This is NOT the May 2026 `safe_max_tokens` bug rebuilt. That one predicted a
+# token count from `chars // 4`, was off by 8,449 tokens against Qwen3's denser
+# tokenizer, and returned HTTP 400 on `input + max_tokens > ctx`. This predicts
+# nothing: `_consume` sums `len(delta.reasoning)` over deltas ALREADY RECEIVED
+# and breaks on the running total. No tokenizer, no context arithmetic, and the
+# error is one-sided — breaking early strictly reduces tokens used, so it cannot
+# overflow. A wrong value costs answer quality, visible as `llm/think_cap`.
+_VLLM_MAX_THINK_CHARS = int(os.getenv("VLLM_MAX_THINK_CHARS", str(_MAX_THINK_CHARS)))
+
+# The measured empty band, kept next to the value so a future change to
+# `_VLLM_MAX_THINK_CHARS` can be checked against the evidence that sized it
+# rather than against a remembered number. `tests/test_think_cap.py` asserts the
+# default lies inside it.
+VLLM_THINK_EMPTY_BAND: tuple[int, int] = (36_570, 69_830)
 
 
 _GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))
@@ -347,7 +413,24 @@ class OllamaTransport(_BaseTransport):
                 **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
-                    delta = chunk.choices[0].delta.content
+                    if not chunk.choices:
+                        continue
+                    _d = chunk.choices[0].delta
+                    # Two reasoning conventions, and reading only the first is
+                    # what pinned `qwen3.6:27b-q8` to `think: False`. Qwen3 and
+                    # older emit reasoning INLINE in `content` wrapped in
+                    # `<think>` tags, which `InlineThinkSplitter` handles.
+                    # Qwen3.6 emits it in a SEPARATE field instead, so on this
+                    # path `content` stayed empty through the whole reasoning
+                    # phase and the splitter found no tags to split — an empty
+                    # response, hence the pin. `VLLMTransport.stream` has read
+                    # both field names since it was written; the dual read was
+                    # never backported here.
+                    _reasoning = (getattr(_d, "reasoning", None)
+                                  or getattr(_d, "reasoning_content", None))
+                    if _reasoning:
+                        yield Delta(reasoning=_reasoning)
+                    delta = _d.content
                     if not delta:
                         continue
                     c, r = splitter.feed(delta)
@@ -375,14 +458,10 @@ class OllamaTransport(_BaseTransport):
                     "Now write the code block. Do not re-explain — output only the code."
                 )},
             ]
+        # OpenAI-compat path: the template strips an assistant think block, so
+        # the reasoning has to travel as a user turn. See `_refeed_as_user_turn`.
         tail = reasoning_text[-6000:] if len(reasoning_text) > 6000 else reasoning_text
-        return base_messages + [
-            {"role": "assistant", "content": f"<think>\n{tail}\n</think>"},
-            {"role": "user", "content": (
-                "You have already reasoned through this problem above. "
-                "Now write the code block. Do not re-explain — output only the code."
-            )},
-        ]
+        return self._refeed_as_user_turn(base_messages, tail)
 
     def clean(self, text: str, *, model: str) -> str:
         result, events = strip_chat_boundaries(text, model=model)
@@ -537,13 +616,7 @@ class SGLangTransport(_BaseTransport):
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
                           *, model: str) -> list[dict[str, Any]]:
         tail = reasoning_text[-6000:] if len(reasoning_text) > 6000 else reasoning_text
-        return base_messages + [
-            {"role": "assistant", "content": f"<think>\n{tail}\n</think>"},
-            {"role": "user", "content": (
-                "You have already reasoned through this problem above. "
-                "Now write the code block. Do not re-explain — output only the code."
-            )},
-        ]
+        return self._refeed_as_user_turn(base_messages, tail)
 
 
 def _parse_input_token_overflow(msg: str) -> int | None:
@@ -598,7 +671,7 @@ class VLLMTransport(_BaseTransport):
             ctx_len=self._ctx, content_budget=self._content_budget,
             thinking_budget=self._thinking_budget, margin=512, cpt_floor=3.0,
             adaptive_cpt=True, add_thinking_to_request=True, cap_by_ctx=True,
-            send_max_tokens=True, thinking_char_cap=None,
+            send_max_tokens=True, thinking_char_cap=_VLLM_MAX_THINK_CHARS,
         )
 
     def resolve_thinking(self, model: str, want_think: bool | None) -> bool:
@@ -653,7 +726,31 @@ class VLLMTransport(_BaseTransport):
 
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
                           *, model: str) -> list[dict[str, Any]]:
-        # Keep the whole chain when it fits; else trim from the FRONT (keep the conclusion).
+        """Re-feed the reasoning and ask for code only.
+
+        The reasoning goes in a USER turn. It used to go in an assistant turn as
+        `<think>…</think>`, and Qwen3.6's chat template DISCARDS think blocks in
+        prior assistant turns — so the followup re-fed nothing, then told the
+        model "You have already reasoned through this problem above". Measured
+        against the live server on 2026-08-09, prompt_tokens for that assistant
+        turn against reasoning of 0 / 2,000 / 20,000 / 121,481 chars:
+
+            33 / 33 / 33 / 33
+
+        Thirty-three tokens of template scaffolding, whatever the size. The same
+        bodies carried in a user turn cost 33 / 1,034 / 10,034 / 60,774. That is
+        why the followup recovered essentially nothing: `logs/pipeline_guards.log`
+        records **226 `llm/followup` fires and 225 with `result_len=0`**, and
+        `thinking_len` did not separate the one success (120,188 chars) from the
+        failures (median 113,731) — because none of it was ever sent.
+
+        It also means the feared cost never existed: the followup prompt was the
+        base prompt plus 33 tokens, not the ~220k chars / ~73k tokens it looked
+        like from the client side. The trim below is what keeps the now-real
+        payload inside ctx.
+        """
+        # Keep the whole chain when it fits; else trim from the FRONT (keep the
+        # conclusion — the model's last thoughts are the ones nearest the code).
         base_chars = sum(len(m.get("content") or "") for m in base_messages)
         cpt = max(3.0, self._state.cpt)
         base_input = int(base_chars / cpt)
@@ -662,9 +759,9 @@ class VLLMTransport(_BaseTransport):
         tail = (reasoning_text[-think_char_budget:]
                 if len(reasoning_text) > think_char_budget else reasoning_text)
         return base_messages + [
-            {"role": "assistant", "content": f"<think>\n{tail}\n</think>"},
             {"role": "user", "content": (
-                "You have already reasoned through this problem above. "
+                "Your earlier reasoning on this exact task:\n\n"
+                f"{tail}\n\n"
                 "Now write the code block. Do not re-explain — output only the code."
             )},
         ]
