@@ -349,3 +349,42 @@ def test_real_stream_reads_both_reasoning_field_names(monkeypatch) -> None:
         CAP, "m")
 
     assert captured.stop == "think_cap"
+
+
+# --------------------------------------------------------------------------- #
+# 4. the followup answer must not be discarded as reasoning
+# --------------------------------------------------------------------------- #
+def test_followup_answer_on_the_reasoning_channel_is_kept() -> None:
+    """Qwen3.6-FP8 on vLLM answers a `enable_thinking=False` followup through
+    `reasoning_content`, leaving `content` empty. The 2026-08-09 00:37 run
+    logged 35 followups and 35 `result_len=0` while the code sat in
+    `cap.reasoning`: the capture in `logs/stream.file-first-stable-w1.log` holds
+    four complete `<FN …>` blocks and no `[CONTENT]` marker, which `_consume`
+    writes for every content delta. All 13 `llm/think_cap` breaks fed one of
+    those followups, so the cap bought a truncation and never a recovery."""
+    answer = "unsafe fn object_ref<E>() {}"
+    # NEGATIVE CONTROL: routed as reasoning, the answer is lost. This is the
+    # shipped-until-now behaviour and it must reproduce, or the assertion below
+    # is not evidence about the live system.
+    lost = FakeTransport([_runaway(), [Delta(reasoning=answer)]],
+                         spec=_spec(thinking_char_cap=CAP))
+    assert _run(lost)[0] == ""
+
+    # Routed by the rule under test, the same bytes survive.
+    assert VLLMTransport._reasoning_delta(answer, False) == Delta(content=answer)
+    kept = FakeTransport(
+        [_runaway(), [VLLMTransport._reasoning_delta(answer, False)]],
+        spec=_spec(thinking_char_cap=CAP))
+    assert _run(kept)[0] == answer
+
+
+def test_reasoning_stays_reasoning_when_thinking_was_requested() -> None:
+    """The separate field exists for the thinking case; redirecting it there
+    would feed the reasoning block back as the answer and defeat the cap."""
+    assert VLLMTransport._reasoning_delta("deliberating", True) == Delta(
+        reasoning="deliberating")
+    t = FakeTransport([_runaway(), [Delta(content="fn f() {}")]],
+                      spec=_spec(thinking_char_cap=CAP))
+    out, guards = _run(t)
+    assert out == "fn f() {}"
+    assert any(n == "llm/think_cap" for n, _ in guards), guards

@@ -678,6 +678,29 @@ class VLLMTransport(_BaseTransport):
         base = _model_uses_think(self._model_name) if want_think is None else want_think
         return base and self._thinking_budget > 0
 
+    @staticmethod
+    def _reasoning_delta(reasoning: str, enable_thinking: bool) -> Delta:
+        """Which channel this server's reasoning-field text belongs on.
+
+        A request that DISABLED thinking has no legitimate reasoning channel, so
+        text arriving on one is the answer, misrouted by the server. Qwen3.6-FP8
+        on vLLM does exactly that on the followup: `enable_thinking=False` sends
+        the whole reply through `reasoning_content` with `content` left empty.
+        Measured on the 2026-08-09 00:37 run — the followup capture in
+        `logs/stream.file-first-stable-w1.log` holds four complete `<FN …>`
+        blocks and carries NO `[CONTENT]` marker, which `_consume` writes for
+        every content delta. All 35 followups that run logged `result_len=0`
+        while the code sat in `cap.reasoning`, discarded as thinking; each of the
+        13 `llm/think_cap` breaks fed one of them, so the cap bought a truncation
+        and never a recovery.
+
+        Yielding it as reasoning when thinking WAS requested stays correct — that
+        is the case the separate field exists for. Scoped to this transport
+        deliberately: it is a property of what this server does with
+        `chat_template_kwargs.enable_thinking`, not a fact about the protocol,
+        and the other compat paths are not in use to have been measured."""
+        return Delta(reasoning=reasoning) if enable_thinking else Delta(content=reasoning)
+
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
                meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
@@ -709,7 +732,7 @@ class VLLMTransport(_BaseTransport):
                     delta = chunk.choices[0].delta
                     reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
                     if reasoning:
-                        yield Delta(reasoning=reasoning)
+                        yield self._reasoning_delta(reasoning, enable_thinking)
                     text = getattr(delta, "content", None)
                     if text:
                         yield Delta(content=text)
