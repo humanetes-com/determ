@@ -26,7 +26,12 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 from pipeline_core.application.reconstruct.cargo_errors import (
     err_sig as cargo_err_sig,
 )
-from pipeline_core.application.reconstruct.context import PerFnPassCtx, fill_skip
+from pipeline_core.application.reconstruct.context import (
+    PerFnPassCtx,
+    crash_block_mark,
+    crash_block_stands,
+    fill_skip,
+)
 from pipeline_core.application.reconstruct.fill_rules import (
     is_unimplemented_body,
     make_failed_attempt_body,
@@ -42,6 +47,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
+from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
@@ -165,10 +171,41 @@ class FillOneFn:
         # A list so the nested attempt closure can record without `nonlocal`,
         # matching the other cross-attempt holders in this method.
         _blocked_by: list[FnSite] = []
+        # Non-empty iff the latest revert was a crash-only regression blamed
+        # wholly outside this unit — holds the crash-block mark to persist.
+        _crash_blocked_mark: list[str] = []
         # A crash-implicated fn is never exhaustion-skipped: the localized
         # faulting stack is evidence no prior attempt ever saw.
         _crash_evidence = (ctx.crash_evidence or {}).get(
             FnLocator(rel_file, fn_name), "")
+        _unit_key = self.retros.retro_key(rel_file, fn_name, container)
+        # Crash-blocked: a previous attempt was reverted for a crash-only
+        # regression whose localized blame lies wholly OUTSIDE this unit.
+        # While the blamed file's text is unchanged, re-attempting buys the
+        # identical crash — measured 2026-08-10, `src/context.rs::StdErrorforE`
+        # was reverted for `binary crashed: ['tests/test_context.rs'] (net -6)`
+        # five times, ~4-6 model calls each, with ASAN blaming
+        # `src/error.rs::object_drop` throughout.
+        if ctx.crash_blocked is not None:
+            _mark = ctx.crash_blocked.get(_unit_key)
+            if _mark is not None:
+                if crash_block_stands(ctx.target_src_dir, _mark):
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
+                        f"{rel_file}::{fn_name} [{container}] — crash-blocked "
+                        f"by a sibling's fault ({_mark}); re-admitted when the "
+                        "blamed file changes. No attempt charged.")
+                    self.tel.emit("phase_c.fn.fill.skip", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "reason": "crash_blocked",
+                    })
+                    return fill_skip(rec, attempts)
+                ctx.crash_blocked.pop(_unit_key, None)
+                self.tel.log(
+                    f"  [phase-c/per-fn] {rel_file}::{fn_name} [{container}]: "
+                    f"blamed file moved since the crash-block ({_mark}) — "
+                    "re-admitted.")
         file_path = ctx.target_src_dir / rel_file
         try:
             snapshot = file_path.read_text(encoding="utf-8")
@@ -637,6 +674,30 @@ class FillOneFn:
                     # normal fix path: revert + re-prompt with the failing tests
                     # as the stall signature.
                     _u2_fail_sig, cargo_out = _v.self_failures, _v.detail
+                    # EXCEPT when this attempt was dispatched on localized
+                    # crash evidence: a correct fix of a LATENT fault moves no
+                    # test at baseline by definition — the tests it saves only
+                    # crash when the activating sibling fill is in the tree,
+                    # and that fill is being crash-reverted by the same fault
+                    # (measured 2026-08-09/10: eight crash-evidence re-fills
+                    # of the block holding `object_drop` were all reverted for
+                    # no strict improvement while `ext_context` crash-reverted
+                    # beside them; each half's payoff exists only jointly).
+                    # Accept on NON-REGRESSION — no self-failure that was
+                    # passing in a completed binary at baseline — and let the
+                    # next sweep judge the joint tree. The regression gate
+                    # below still runs, and the batch ratchet's snapshot
+                    # predates this fill, so a breach claws it back then.
+                    if (_crash_evidence and _attempt_baseline_test is not None
+                            and not (_v.self_failures
+                                     & _attempt_baseline_test.passed_names)):
+                        self.tel.log(
+                            f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: "
+                            "crash-evidence re-fill KEPT on non-regression "
+                            f"({len(_v.self_failures)} self-failure(s), none "
+                            "passing at baseline) — judged for real at the "
+                            "next sweep, in the joint tree.")
+                        _u2_fail_sig = None
                 elif _v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY:
                     # Compiles, but every attributed failure panics inside a
                     # DIFFERENT still-stubbed fn — not this fn's fault. Keep the
@@ -676,6 +737,21 @@ class FillOneFn:
                     self.tel.log(
                         f"  [phase-c/per-fn] {fn_name}: reverted — "
                         f"regressed sibling test(s): {_cmp.summary}.")
+                    # Crash-only (no newly-red verdict in a completed binary)
+                    # with the localized blame wholly outside this unit: the
+                    # fill routes execution into a sibling's fault and the
+                    # binary dies. The revert STAYS — a memory fault does not
+                    # prove this fill innocent the way a stub panic does — but
+                    # retrying, diagnosing and convicting the unit charges it
+                    # for the sibling's defect (and writes a retrospective
+                    # whose premise is false).
+                    if (_cmp.newly_crashed and not _cmp.newly_red
+                            and blame_outside_unit(
+                                ctx.crash_blamed or frozenset(),
+                                rel_file, frozenset({fn_name}))):
+                        _crash_blocked_mark[:] = [crash_block_mark(
+                            ctx.target_src_dir,
+                            [b.file for b in (ctx.crash_blamed or frozenset())])]
             if rc == 0 and _u2_fail_sig is None:
                 ctx.splice_check_lock.release()
                 _lock_released = True
@@ -782,6 +858,13 @@ class FillOneFn:
             if not _lock_released:
                 ctx.splice_check_lock.release()
                 _lock_released = True
+            if _crash_blocked_mark:
+                self.tel.log(
+                    f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: kept "
+                    "reverted and STOPPING — the crash is a sibling's "
+                    "localized fault; re-prompting this unit buys the same "
+                    "crash until the blamed file changes.")
+                return FixOutcome("stop")
             _codes = sorted(ecodes_in_text(cargo_out))
             _kind = "U2 test" if _u2_fail_sig is not None else "compile"
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: {_kind} failed "
@@ -838,6 +921,12 @@ class FillOneFn:
                 check_stop=self.tel.check_stop,
             )
             if success:
+                break
+            if _crash_blocked_mark:
+                # No retrospective and no conviction: the failure was never
+                # about this body, and a diagnosis of it would write guidance
+                # whose premise is false into the store the loop later
+                # believes. The unit exits crash-blocked below instead.
                 break
 
             # retrospective: actively diagnose why the fix loop
@@ -984,6 +1073,28 @@ class FillOneFn:
                 "retro_round": _retro_round,
             })
 
+        if not success and _crash_blocked_mark:
+            # Plain revert only: no salvage (the best compiling body IS the
+            # crash-activating one), no annotated stub (the body was never
+            # shown wrong), no conviction, no exhaustion. Attempts stay in the
+            # returned telemetry — they were real model calls — but nothing
+            # persistent moves against this unit.
+            with ctx.splice_check_lock:
+                _revert_own_body()
+            if ctx.crash_blocked is not None:
+                ctx.crash_blocked[_unit_key] = _crash_blocked_mark[0]
+            self.tel.log(
+                f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name} "
+                f"[{container}]: crash-blocked ({_crash_blocked_mark[0]}) — "
+                "no attempt charged, no retrospective written; re-admitted "
+                "when the blamed file changes.")
+            self.tel.emit("phase_c.fn.crash_blocked", data={
+                "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                "file": rel_file, "fn": fn_name, "container": container,
+                "mark": _crash_blocked_mark[0],
+            })
+            return FillResult(file=rec.file, fn_name=fn_name,
+                              filled=False, attempts=attempts)
         if not success:
             # Restore the snapshot first (clears whatever broken body the
             # loop left in place), then splice an annotated stub that

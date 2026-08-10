@@ -183,8 +183,14 @@ def test_rc0_with_short_oracle_never_closes_cluster(
                 attribution_kwargs=attrs, checkpoints=ckpts, events=events)
     assert not any(d.get("kind") == "pass" for ev, d in events
                    if ev == "phase_c.tdd.iter")
-    # Short-oracle trees are never checkpointed as "best".
-    assert ckpts == []
+    # A short oracle blocks only an EQUAL count. With no stored mark this
+    # sweep's 2 is a verified floor over an empty slot, so it checkpoints —
+    # requiring a full oracle unconditionally froze the heal tier at 18/105
+    # while live sweeps read 81 and 88 under a chronic one-binary crash
+    # (2026-08-09/10 on `anyhow`). The equal-count churn veto is pinned in
+    # test_tdd_ratchet.py; "short oracle never CLOSES the cluster" (the
+    # assertion above) is unchanged.
+    assert ckpts == [2]
 
 
 def test_intact_oracle_keeps_legacy_done_path(

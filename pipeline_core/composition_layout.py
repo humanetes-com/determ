@@ -18,8 +18,10 @@ from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.adapters.gen_tests_storage import read_oracle_sibling_sources
 from pipeline_core.adapters.layout_outcome_store import (
     load_layout_records,
+    load_rejection_notes,
     load_retrigger_attempts,
     save_layout_outcomes,
+    save_rejection_notes,
     save_retrigger_attempts,
     update_layout_outcome,
 )
@@ -158,6 +160,8 @@ def build_retrigger_layout(
             git_commit=git_commit,
             load_attempts=load_retrigger_attempts,
             save_attempts=save_retrigger_attempts,
+            load_rejection_notes=load_rejection_notes,
+            save_rejection_notes=save_rejection_notes,
             max_attempts=max_attempts,
         )
         return retrigger_layout(

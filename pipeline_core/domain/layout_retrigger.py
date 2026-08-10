@@ -49,7 +49,9 @@ _LAYOUT_ATTRIBUTABLE_CODES = (
 MECHANICAL_KEY_PREFIX = "mech:"
 INFLIGHT_KEY_PREFIX = "inflight:"
 PAYOFF_KEY_PREFIX = "payoff:"
+REJECTED_KEY_PREFIX = "rejected:"
 DEFAULT_MAX_MECHANICAL = 2
+DEFAULT_MAX_REJECTIONS = 3
 
 # Attempts-store keys for the CLUSTER-wide payoff budget (below). Prefixed on
 # the same rule as `mechanical_key`: a component key is Rust idents joined by
@@ -76,7 +78,37 @@ def inflight_key(component_key: str) -> str:
 
 def _is_bookkeeping_key(key: str) -> bool:
     return key.startswith(
-        (MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, PAYOFF_KEY_PREFIX))
+        (MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, PAYOFF_KEY_PREFIX,
+         REJECTED_KEY_PREFIX))
+
+
+def rejected_key(component_key: str) -> str:
+    """Attempts-store key counting a component's CONSECUTIVE rejected
+    re-authors — authored output the accept path refused (a frozen public
+    declaration changed, a field widened to `pub`, dropped members bodies
+    still read, or rustc). Same prefixing rule as `mechanical_key`."""
+    return f"{REJECTED_KEY_PREFIX}{component_key}"
+
+
+def rejection_budget_spent(
+    attempts: Mapping[str, int], component_key: str,
+    cap: int = DEFAULT_MAX_REJECTIONS,
+) -> bool:
+    """Whether this component's last `cap` re-authors were all REJECTED.
+
+    The destruction cap (`attempts[key]`) counts LANDED re-authors — each one
+    re-stubs dozens of bodies, which is what the cap of 2 exists to bound. A
+    rejected re-author destroys nothing, but charging it there anyway is how
+    the 34-name `Error` component reached its cap on two t1.5 rejections
+    (2026-08-09/10: `struct ErrorInner` for `pub struct Error`, then a `pub`
+    field) with no re-author ever applied — permanently closing the only
+    structural escape for an ASAN-localized use-after-free in `object_drop`.
+
+    Rejections still cannot be free: a deterministic crash re-fires every
+    iteration and every fire costs authoring calls, so consecutive rejections
+    get their own cap, cleared only by an ACCEPTED re-author. Reaching it is
+    attempt-invariant — RED at the moment it prints, not a countdown."""
+    return attempts.get(rejected_key(component_key), 0) >= cap
 
 
 def settle_retrigger_payoff(

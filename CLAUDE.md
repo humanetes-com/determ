@@ -199,6 +199,15 @@ keying on the loudness and ship its replacement **in the same change**. The
 question to ask of any such fix is not "is the new state valid" but "what used to
 fire here, and what fires now".
 
+## A final summary of changes ends with a suggested commit message
+
+Commits are user-owned and the tree is permanently dirty: the assistant never
+runs `git commit` and never checks commit state. The flip side is that the
+user commits from the summary, not from a diff crawl — so **every final
+summary of a finished batch of changes concludes with a ready-to-use
+suggested commit message as its last line.** One message per coherent batch;
+if the batch is the session's work, one message for the session.
+
 ## The commands this repo's gate is made of
 
     bash pre_run.sh                 # check.sh + walks, then stamp the tree

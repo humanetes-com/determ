@@ -110,6 +110,8 @@ class _Fakes:
         self.outcome_updates: list[ComponentResult] = []
         self.logs: list[str] = []
         self.prompts: list[str] = []
+        # The persisted rejection checklist, keyed by component key.
+        self.rejection_notes: dict[str, list[str]] = {}
 
     def _read_live(self, src_dir, rel) -> str | None:
         """Resolve like the real adapter: only a path that actually lands
@@ -189,8 +191,15 @@ class _Fakes:
             git_commit=git_commit,
             load_attempts=lambda pd, c: self.attempts,
             save_attempts=save_attempts,
+            load_rejection_notes=lambda pd, c: {
+                k: list(v) for k, v in self.rejection_notes.items()},
+            save_rejection_notes=self._save_rejection_notes,
             max_attempts=2,
         )
+
+    def _save_rejection_notes(self, pd, c, notes):
+        self.rejection_notes = {k: list(v) for k, v in notes.items()}
+        return Path(pd) / "_rejections.json"
 
 
 def test_fires_reauthors_and_reverts_only_referencing_fns():
@@ -379,15 +388,86 @@ def test_mechanical_splice_failure_refunds_the_attempt():
     assert "mechanical" in (res.reason or "")
 
 
-def test_model_rejection_still_consumes_the_attempt():
-    # The complement: the model DID author something and it failed to compile.
-    # That is real evidence — the attempt must stay spent.
+def test_a_rejected_reauthor_spends_the_rejection_budget_not_the_cap():
+    """The destruction cap counts LANDED re-authors only. A rejected one —
+    validation or rustc — destroyed nothing, yet charging it against the cap
+    closed the only structural escape for a localized memory fault: on
+    `anyhow` 2026-08-09/10 the 34-name component reached its cap of 2 on two
+    t1.5 rejections (`struct ErrorInner` head change, then a `pub` field),
+    with no re-author ever applied and nothing reverted, while ASAN kept
+    blaming `object_drop` every iteration. Rejections get their own
+    consecutive budget, cleared by an accepted re-author."""
     f = _Fakes(compiles=False)
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
                            f.deps())
-    assert res.fired and not res.succeeded
-    assert f.saved_attempts == {"ErrorImpl": 1}
-    assert not any("refunded" in m for m in f.logs)
+    assert res.fired and not res.succeeded and res.rejected
+    assert f.saved_attempts == {"ErrorImpl": 0, "rejected:ErrorImpl": 1}
+    assert any("rejection" in m for m in f.logs)
+
+
+def test_three_consecutive_rejections_close_the_walk_loudly():
+    """Bounded, deliberately: a deterministic crash re-fires every iteration
+    and each fire costs authoring calls, so rejections cannot be free — but
+    the refusal is attempt-invariant and the line must read as RED, not as
+    a budget ticking down."""
+    f = _Fakes(attempts={"rejected:ErrorImpl": 3})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+    assert not res.fired
+    assert not f.committed
+    assert any("REJECTED" in m and "3" in m for m in f.logs)
+
+
+def test_an_accepted_reauthor_clears_the_rejection_streak():
+    f = _Fakes(attempts={"rejected:ErrorImpl": 2})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+    assert res.fired and res.succeeded
+    assert f.saved_attempts is not None
+    assert "rejected:ErrorImpl" not in f.saved_attempts
+
+
+def test_a_rejected_fire_opens_no_payoff_claim():
+    """The payoff budget asks what a fire BOUGHT. A rejected re-author changed
+    nothing, so the claim it opens can only ever settle against the cluster's
+    zero-payoff cap — the same argument the mechanical refund already states.
+    A landed fire on the same walk still opens one."""
+    f = _Fakes(compiles=False)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps(), best_pass=50)
+    assert res.fired and res.rejected
+    assert f.saved_attempts is not None
+    assert "payoff:pending" not in f.saved_attempts
+    f2 = _Fakes()
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                            f2.deps(), best_pass=50)
+    assert res2.fired and res2.succeeded
+    assert f2.saved_attempts is not None
+    assert "payoff:pending" in f2.saved_attempts
+
+
+def test_rejection_reasons_reach_the_next_fires_prompt():
+    """Across FIRES nothing was carried at all: six authoring attempts across
+    the two 2026-08-09/10 fires cycled renamed struct -> pub field -> dropped
+    member, each fixing the last violation while recommitting an earlier one.
+    A rejection's reasons persist beside the attempts store and open the next
+    fire's prompt as a checklist; an accepted re-author clears them."""
+    f = _Fakes(compiles=False)
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert f.rejection_notes.get("ErrorImpl"), (
+        "a rejection must persist its reasons for the next fire")
+    f2 = _Fakes(attempts={"ErrorImpl": 1})
+    f2.rejection_notes = {
+        "ErrorImpl": ["authored Error marks a field `pub`, widening the "
+                      "public API"]}
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f2.deps())
+    assert res.fired and res.succeeded
+    assert any("widening the public API" in p for p in f2.prompts), (
+        "the next fire's authoring prompt must carry every constraint an "
+        "earlier fire's reply violated")
+    assert not f2.rejection_notes.get("ErrorImpl"), (
+        "an accepted re-author retires the checklist")
 
 
 def test_compile_evidence_fires_without_any_fill_attempt():
@@ -584,13 +664,16 @@ def test_checkpoint_marks_the_attempt_in_flight_and_the_outcome_clears_it():
 
 
 def test_a_failed_attempt_also_clears_the_marker():
-    # A measured failure is still a measurement: only an UNRESOLVED attempt may
-    # be refunded, or the cap stops bounding model attempts at all.
+    # A measured failure is still a measurement: the in-flight marker clears
+    # and the outcome lands in a budget. Since a rejected re-author destroyed
+    # nothing, that budget is the rejection one — the destruction cap counts
+    # landed re-authors only.
     f = _Fakes(compiles=False)
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
     assert res.fired and not res.succeeded
     assert "inflight:ErrorImpl" not in f.saved_attempts
-    assert f.saved_attempts["ErrorImpl"] == 1     # charged, not refunded
+    assert f.saved_attempts["rejected:ErrorImpl"] == 1
+    assert f.saved_attempts["ErrorImpl"] == 0     # measured, not destroyed
 
 
 def test_an_interrupted_attempt_is_refunded_before_the_cap_is_read():

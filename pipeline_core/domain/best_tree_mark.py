@@ -58,10 +58,18 @@ class BestTreeMark:
     iteration: int
     tree_sha: str
     oracle_size: int
+    # How many expected tests reported no verdict in the sweep that earned
+    # this mark. 0 is a full oracle. Non-zero says the count is a verified
+    # FLOOR (missing tests were already counted as failing, and the pass
+    # counter is trailer-only, so a crashed binary contributed nothing) — a
+    # future consumer choosing between equal counts should prefer the
+    # full-oracle tree.
+    missing_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {"pass_count": self.pass_count, "iteration": self.iteration,
-                "tree_sha": self.tree_sha, "oracle_size": self.oracle_size}
+                "tree_sha": self.tree_sha, "oracle_size": self.oracle_size,
+                "missing_count": self.missing_count}
 
     @staticmethod
     def from_dict(raw: Any) -> BestTreeMark | None:
@@ -90,14 +98,20 @@ class BestTreeMark:
             oracle_size = int(raw.get("oracle_size", 0))
         except (TypeError, ValueError):
             oracle_size = 0
+        try:
+            missing_count = int(raw.get("missing_count", 0))
+        except (TypeError, ValueError):
+            missing_count = 0
         sha = raw.get("tree_sha")
         return BestTreeMark(
             pass_count=pass_count, iteration=iteration,
             tree_sha=str(sha) if isinstance(sha, str) and sha else UNKNOWN_TREE_SHA,
-            oracle_size=oracle_size)
+            oracle_size=oracle_size, missing_count=missing_count)
 
     def render(self) -> str:
         """How the mark is spelled in a log line."""
         oracle = f"/{self.oracle_size}" if self.oracle_size else ""
+        short = (f", {self.missing_count} test(s) unmeasured"
+                 if self.missing_count else "")
         return (f"{self.pass_count}{oracle} passing (iter {self.iteration}, "
-                f"tree {self.tree_sha})")
+                f"tree {self.tree_sha}{short})")

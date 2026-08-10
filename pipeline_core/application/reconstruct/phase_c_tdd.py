@@ -33,6 +33,7 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.crash_site import (
+    blamed_locators,
     crash_evidence_by_locator,
     vanish_is_stub_confounded,
 )
@@ -382,6 +383,11 @@ def run_phase_c_tdd(
     # would make the counts incomparable, and the only path to one is task0c
     # re-augmentation under `--clean`, which rmtree's the workspace and the
     # slot with it.
+    # Units reverted for a crash-only regression blamed wholly outside them,
+    # unit key -> blamed-file fingerprint. Loop-lifetime so the block holds
+    # across iterations; the fill units mutate it and clear each entry when
+    # the blamed file's content moves. See PerFnPassCtx.crash_blocked.
+    crash_blocked_units: dict[str, str] = {}
     _mark = (deps.load_best_tree_mark(project_dir, cluster.name)
              if deps.load_best_tree_mark is not None else None)
     _checkpoint_best = UNSET_PASS if _mark is None else _mark.pass_count
@@ -856,19 +862,40 @@ def run_phase_c_tdd(
                 _bratchet_passing = _sweep.passing
         # Durable checkpoint of the new-best fill tree so a later heal restores
         # THIS good state (best-tree copy / git ancestor) instead of nuking the
-        # file to the baked skeleton. Independent of _batch_ratchet. Never
-        # persisted while the oracle is short: a higher pass count over a
-        # shrunken suite must not overwrite a full-oracle best tree.
-        if deps.checkpoint_fill_tree is not None \
-                and snapshot_due(pass_count, _checkpoint_best, _tree_sha, _checkpoint_sha) \
-                and _oracle.missing_count == 0:
+        # file to the baked skeleton. Independent of _batch_ratchet. A short
+        # oracle blocks only an EQUAL count: missing tests were already counted
+        # as failing above, and `parse_test_counts` is trailer-only (a crashed
+        # binary contributes zero passes), so pass_count is a verified floor —
+        # every counted pass ran green in a COMPLETED binary, and a floor
+        # strictly above the stored mark dominates it whatever the missing
+        # tests would have said. Requiring a full oracle unconditionally froze
+        # the slot under a chronic crasher: 2026-08-09/10 on `anyhow`, the mark
+        # held 18/105 (written 08:56 UTC) while sweeps read 81/105 and 88/106
+        # with `tests/test_context.rs` crashing every iteration — heal's
+        # restore tier sat 70 tests behind the live tree, silently. An equal
+        # count still needs a full oracle: an unmeasurable tree at an equal
+        # count must not churn the slot through snapshot_due's tree-moved arm.
+        _snap_due = snapshot_due(
+            pass_count, _checkpoint_best, _tree_sha, _checkpoint_sha)
+        if deps.checkpoint_fill_tree is not None and _snap_due \
+                and (_oracle.missing_count == 0
+                     or pass_count > _checkpoint_best):
             deps.checkpoint_fill_tree(
                 project_dir, cluster.name, target_src_dir,
                 BestTreeMark(pass_count=pass_count, iteration=iter_n,
                              tree_sha=_tree_sha,
-                             oracle_size=pass_count + fail_count))
+                             oracle_size=pass_count + fail_count,
+                             missing_count=_oracle.missing_count))
             _checkpoint_best = pass_count
             _checkpoint_sha = _tree_sha
+        elif deps.checkpoint_fill_tree is not None and _snap_due:
+            # A guard that declines silently is how the freeze above went
+            # unnoticed for a session — say what was withheld and why.
+            deps.log(
+                f"  {tag} [phase-c/tdd] durable best tree NOT replaced: sweep "
+                f"{pass_count} with {_oracle.missing_count} test(s) unmeasured "
+                f"does not beat the stored {_checkpoint_best} — an equal count "
+                "needs a full oracle.")
         # F6 — measurement provenance: stamp every iter event with the tree it
         # measured (content hash), the oracle size (denominator), and the actual
         # test names, so cross-run pass-count claims are verifiable and oracle
@@ -1177,6 +1204,11 @@ def run_phase_c_tdd(
         # verdicts (a localized crash is new information the earlier attempts
         # never saw).
         crash_texts: dict[FnLocator, str] = {}
+        # The ORIGIN blame alone, beside the evidence dict: `crash_texts` keys
+        # by EVERY frame (access and origin), so the innocent caller that
+        # routes execution into the fault is a key too — any "is the blame
+        # outside this unit" test needs the blamed locators, not the keys.
+        crash_blamed: frozenset[FnLocator] = frozenset()
         # Gated on NAMED vanished tests, never the bare missing count: an
         # unnamed shortfall is an inventory gap, and sending gdb + an ASAN
         # rebuild after it burns a sweep to conclude "no native fault".
@@ -1197,6 +1229,7 @@ def run_phase_c_tdd(
                 _sites = deps.localize_crashes(
                     output, test_cmd, target_src_dir, cluster_env)
                 crash_texts = crash_evidence_by_locator(tuple(_sites))
+                crash_blamed = blamed_locators(tuple(_sites))
                 for _site in _sites:
                     _blame = (str(_site.blamed_locator)
                               if _site.blamed_locator is not None
@@ -1636,6 +1669,8 @@ def run_phase_c_tdd(
                 tdd_test_cmd=test_cmd,     # Plan 10 U2: scoped cluster test cmd
                 skip_end_pass_test=True,
                 crash_evidence=crash_texts or None,
+                crash_blamed=crash_blamed or None,
+                crash_blocked=crash_blocked_units,
             )
         except BaseException:
             _restore_abandoned_bet("stopped during the fill pass")

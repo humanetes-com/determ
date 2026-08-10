@@ -22,6 +22,10 @@ from pipeline_core.application.reconstruct.cargo_errors import ecodes_in_text, f
 from pipeline_core.application.reconstruct.cluster_membership import (
     collect_impl_refill_targets,
 )
+from pipeline_core.application.reconstruct.context import (
+    crash_block_mark,
+    crash_block_stands,
+)
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
 )
@@ -38,6 +42,7 @@ from pipeline_core.domain.attempt_loss import (
 )
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
+from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
     refills_deferred_by_impl_route,
@@ -258,6 +263,13 @@ def fill_impl_blocks(
     tdd_test_cmd: str | None = None,                                       # Plan 10 U2
     parallelism: int = 1,
     crash_evidence: dict[FnLocator, str] | None = None,
+    # The ORIGIN blame only — see PerFnPassCtx.crash_blamed: evidence KEYS
+    # include access frames, so key-membership reads the blame as inside the
+    # innocent caller.
+    crash_blamed: frozenset[FnLocator] | None = None,
+    # Shared crash-block map (unit key -> blamed-file fingerprint), mutated
+    # here and read across iterations — see PerFnPassCtx.crash_blocked.
+    crash_blocked: dict[str, str] | None = None,
 ) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -946,17 +958,33 @@ def fill_impl_blocks(
                 _u2_reject = (_u2_file is not None
                               and _u2_file.decision is U2Decision.REJECT)
                 _bank: JointImprovement | None = None
+                _joint: JointImprovement | None = None
                 if _u2_reject and _u2_file is not None and _baseline_test is not None:
-                    _jb = assess_joint_improvement(
+                    _joint = assess_joint_improvement(
                         frozenset(_file_tests),
                         _baseline_test.passed_names,
                         _baseline_test.ignored_names,
                         _u2_file)
-                    _bank = _jb if _jb.banks else None
+                    _bank = _joint if _joint.banks else None
+                # An attempt dispatched on crash evidence is judged by a
+                # metric that cannot credit it — a correct fix of a latent
+                # fault moves no test while its activating sibling is
+                # crash-reverted beside it. Keep on NON-REGRESSION (no NEW
+                # failures against baseline; the regression gate below still
+                # holds) and let the next sweep judge the joint tree.
+                _crash_keep_file = (rc == 0 and _u2_reject
+                                    and bool(_file_crash)
+                                    and _joint is not None
+                                    and not _joint.new_failures)
+                if _crash_keep_file:
+                    _log(f"  [phase-c/file] GUARD {glabel}: crash-evidence "
+                         "re-fill KEPT on non-regression — judged for real "
+                         "at the next sweep, in the joint tree.")
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
                     if rc == 0 else None)
-                if rc == 0 and (not _u2_reject or _bank is not None) and _regr_file is None:
+                if rc == 0 and (not _u2_reject or _bank is not None
+                                or _crash_keep_file) and _regr_file is None:
                     fns_filled_total += spliced_now
                     _log(f"  [phase-c/file] {glabel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass"
@@ -1079,6 +1107,25 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
+        # Crash-blocked: a previous attempt of THIS block was reverted for a
+        # crash-only regression blamed wholly outside it. While the blamed
+        # file is unchanged, re-attempting buys the identical crash
+        # (2026-08-10: `src/context.rs::StdErrorforE`, five reverts of
+        # `binary crashed: ['tests/test_context.rs'] (net -6)`, ~4-6 model
+        # calls each, ASAN blaming `src/error.rs::object_drop` throughout).
+        if crash_blocked is not None:
+            _cb_key = _retro_key(block.file, "*impl*", block.container)
+            _cb_mark = crash_blocked.get(_cb_key)
+            if _cb_mark is not None:
+                if crash_block_stands(target_src_dir, _cb_mark):
+                    _log(f"  [phase-c/impl] {block_id}: skipped — "
+                         f"crash-blocked by a sibling's fault ({_cb_mark}); "
+                         "re-admitted when the blamed file changes. No "
+                         "attempt charged.")
+                    return
+                crash_blocked.pop(_cb_key, None)
+                _log(f"  [phase-c/impl] {block_id}: blamed file moved since "
+                     f"the crash-block ({_cb_mark}) — re-admitted.")
         # `stub_members` is pass-scan-time state — earlier blocks'
         # family/sibling routing may have already filled members of THIS block.
         # Re-scan before spending an LLM call; a block with nothing left is
@@ -1244,6 +1291,9 @@ def fill_impl_blocks(
         # already answered, so a bigger prompt buys nothing. A list
         # so the nested attempt closures write without `nonlocal` chains.
         _last_loss: list[AttemptLoss] = []
+        # Non-empty iff the latest revert was a crash-only regression blamed
+        # wholly outside this block — holds the crash-block mark to persist.
+        _crash_blocked_mark: list[str] = []
         # B3: baseline = the crate's error signature with THIS block's
         # stubs still unimplemented. A fill is "non-regressing" if it adds no
         # error beyond this baseline and none on the filled fns — then we keep
@@ -1521,12 +1571,53 @@ def fill_impl_blocks(
                     last_error_excerpt = _regr_detail
                     _rsig = _cmp.signature
                     last_metric = FixProgress(0, max(1, len(_rsig)))
+                    # Crash-only regression (no newly-red verdict in a
+                    # completed binary) with the localized blame wholly
+                    # outside this block: the fill routes execution into a
+                    # sibling's fault. The revert above STAYS — a memory
+                    # fault does not exonerate the fill the way a stub panic
+                    # does — but re-prompting, diagnosing and convicting this
+                    # block charges it for the sibling's defect.
+                    if (_cmp.newly_crashed and not _cmp.newly_red
+                            and blame_outside_unit(
+                                crash_blamed or frozenset(), block.file,
+                                frozenset(m.fn_name for m in block.members))):
+                        _crash_blocked_mark[:] = [crash_block_mark(
+                            target_src_dir,
+                            [b.file for b in (crash_blamed or frozenset())])]
+                        _log(f"  [phase-c/impl] GUARD {block_id}: kept "
+                             "reverted and STOPPING — the crash is a "
+                             "sibling's localized fault; re-prompting this "
+                             "block buys the same crash until the blamed "
+                             "file changes.")
+                        return FixOutcome("stop")
                     # rc==0 got us here, so the block COMPILES — its regression
                     # is a test-tier loss, never a compile-tier one.
                     return FixOutcome("failed", err_sig=_rsig,
                                       metric=FixProgress(
                                           0, max(1, len(_rsig))))
-                if rc == 0 and (not _u2_impl_reject or _bank_impl is not None):
+                # A REJECT on an attempt dispatched with crash evidence is
+                # judged by a metric that cannot credit it: a correct fix of
+                # a LATENT fault moves no test while the activating sibling
+                # fill is crash-reverted beside it (2026-08-09/10: eight
+                # crash-evidence re-fills of the block holding `object_drop`
+                # all reverted for no strict improvement). Keep on
+                # NON-REGRESSION — no self-failure that was passing in a
+                # completed binary at baseline; the regression gate above
+                # already held — and let the next sweep judge the joint tree.
+                _crash_keep = (
+                    rc == 0 and _u2_impl_reject and bool(_block_crash_evidence)
+                    and _u2_impl is not None and _baseline_test is not None
+                    and not (_u2_impl.self_failures
+                             & _baseline_test.passed_names))
+                if _crash_keep and _u2_impl is not None:
+                    _log(f"  [phase-c/impl] GUARD {block_id}: crash-evidence "
+                         "re-fill KEPT on non-regression "
+                         f"({len(_u2_impl.self_failures)} self-failure(s), "
+                         "none passing at baseline) — judged for real at the "
+                         "next sweep, in the joint tree.")
+                if rc == 0 and (not _u2_impl_reject or _bank_impl is not None
+                                or _crash_keep):
                     if _u2_external_only and _u2_impl is not None:
                         _emit("phase_c.u2.external_only", data={
                             "cluster": cluster_name, "file": block.file,
@@ -1684,6 +1775,11 @@ def fill_impl_blocks(
                 check_stop=_check_graceful_stop,
             )
             if members_filled_this_block > 0 or block_already_complete:
+                break
+            if _crash_blocked_mark:
+                # No last-resort escalation, no retrospective, no conviction:
+                # the failure was never about these bodies, and a bigger
+                # prompt buys the identical sibling crash.
                 break
             # P6: maximal last-resort — ONE attempt with budgets OFF (round 1
             # only; later rounds change guidance, not budgets): the WHOLE
@@ -1848,6 +1944,25 @@ def fill_impl_blocks(
                 "container": block.container, "retro_round": _retro_round,
             })
 
+        if (members_filled_this_block == 0 and not block_already_complete
+                and _crash_blocked_mark):
+            # Plain reverted exit: no salvage (the best compiling image IS
+            # the crash-activating one), no failure charge, no conviction.
+            # Attempts stay in the returned telemetry — real model calls.
+            if crash_blocked is not None:
+                crash_blocked[
+                    _retro_key(block.file, "*impl*", block.container)
+                ] = _crash_blocked_mark[0]
+            _log(f"  [phase-c/impl] GUARD {block_id}: crash-blocked "
+                 f"({_crash_blocked_mark[0]}) — no attempt charged, no "
+                 "retrospective written; re-admitted when the blamed file "
+                 "changes.")
+            _emit("phase_c.impl.crash_blocked", data={
+                "cluster": cluster_name, "file": block.file,
+                "container": block.container,
+                "mark": _crash_blocked_mark[0],
+            })
+            return
         if members_filled_this_block == 0 and not block_already_complete:
             _salvaged = salvage.best
             if _salvaged is not None:

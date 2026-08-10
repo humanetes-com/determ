@@ -54,6 +54,7 @@ from pipeline_core.domain.authored_layout import (
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_MAX_MECHANICAL,
+    DEFAULT_MAX_REJECTIONS,
     DEFAULT_MAX_ZERO_PAYOFF,
     PAYOFF_HIGH_KEY,
     BlameGrade,
@@ -72,6 +73,8 @@ from pipeline_core.domain.layout_retrigger import (
     mechanical_key,
     payoff_budget_spent,
     reconcile_interrupted_attempts,
+    rejected_key,
+    rejection_budget_spent,
     settle_retrigger_payoff,
     should_retrigger,
     top_blame_tier,
@@ -101,6 +104,12 @@ class RetriggerResult:
     # this module has to answer the same question — "did this attempt buy
     # model evidence?" — and a substring of a log sentence is not an answer.
     refunded: bool = False
+    # The model's output was evaluated and REFUSED — validation or rustc.
+    # Distinct from `refunded` (evidence WAS bought) and from a landed
+    # re-author (nothing was destroyed): a rejection moves to the rejection
+    # budget and must not open a payoff claim, since a fire that changed
+    # nothing can only ever settle against the zero-payoff cap.
+    rejected: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,16 @@ class RetriggerLayoutDeps:
     git_commit: Callable[[Path, str], bool]
     load_attempts: Callable[[Path, str], dict[str, int]]
     save_attempts: Callable[[Path, str, dict[str, int]], Path]
+    # The rejection checklist, persisted BESIDE the attempts store: every
+    # constraint a rejected re-author violated, by component key. The next
+    # fire's authoring prompt opens with all of them — without this, fire 2
+    # re-learned fire 1's constraints from scratch (live: renamed struct ->
+    # pub field -> dropped member, then the same ring again). Cleared by an
+    # accepted re-author. Optional so bare harnesses keep working; None
+    # disables only the CROSS-fire carry, never the within-fire checklist.
+    load_rejection_notes: Callable[[Path, str], dict[str, list[str]]] | None = None
+    save_rejection_notes: Callable[
+        [Path, str, dict[str, list[str]]], object] | None = None
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     # Crate-wide layout registry upsert. A re-author is a deliberate redesign of
     # THIS CRATE's layout, so the new definitions must become the ones later
@@ -407,6 +426,15 @@ def retrigger_layout(
                      "failing, so another authoring call would burn on the same "
                      "bug; not retriggering until it is fixed.")
             continue
+        if rejection_budget_spent(attempts, key):
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                     f"{DEFAULT_MAX_REJECTIONS} consecutive re-author(s) "
+                     "REJECTED at validation — RED, this refusal is "
+                     "attempt-invariant: the model keeps violating the frozen "
+                     "contract and only an ACCEPTED re-author clears the "
+                     "streak. The rejection budget refused (the destruction "
+                     "cap counts landed re-authors only). Not retriggering.")
+            continue
 
         surface = deps.load_surface(project_dir, cfg_cluster)
         narrowed = PrivateSurface(
@@ -458,8 +486,10 @@ def retrigger_layout(
         # point, against the pass_count it fired at, and only a fire that
         # reached an outcome the model was answerable for may be asked. A
         # refunded attempt is excluded on the rule its refund already states —
-        # no model evidence was bought, so no budget may be spent.
-        if plateau_walk and not outcome.refunded:
+        # no model evidence was bought, so no budget may be spent. A REJECTED
+        # one is excluded too: it changed nothing in the tree, so the claim it
+        # opens can only ever settle against the cluster's zero-payoff cap.
+        if plateau_walk and not outcome.refunded and not outcome.rejected:
             attempts = mark_retrigger_pending(attempts, best_pass)
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         return outcome
@@ -506,6 +536,24 @@ def _settle_interrupted(
     return settled
 
 
+def _remember_rejections(
+    project_dir: Path, cfg_cluster: str, key: str,
+    reasons: list[str], deps: RetriggerLayoutDeps,
+) -> None:
+    """Append this rejection's violated constraints to the component's
+    persisted checklist (deduplicated, newest last, bounded so a pathological
+    reason string cannot grow the prompt without limit)."""
+    if deps.load_rejection_notes is None or deps.save_rejection_notes is None:
+        return
+    notes = deps.load_rejection_notes(project_dir, cfg_cluster)
+    have = notes.get(key) or []
+    for r in reasons:
+        if r and r not in have:
+            have.append(r)
+    notes[key] = have[-12:]
+    deps.save_rejection_notes(project_dir, cfg_cluster, notes)
+
+
 def _run_layout_attempt(
     *,
     project_dir: Path, module_name: str, cfg_cluster: str,
@@ -529,6 +577,22 @@ def _run_layout_attempt(
     # moved every byte offset in this one, and its records are what locate the
     # fns to revert. Sharing one would revert against stale spans.
     filled = filled_body_text(deps.enumerate_fns(filled_crate_dir) or [])
+    guidance = (CRASH_GUIDANCE
+                if cause is LayoutRetriggerCause.RUNTIME_CRASH else "")
+    # Constraints earlier FIRES violated open this fire's prompt. The
+    # within-fire retry hint accumulates only inside one authoring call;
+    # without this carry, each new fire re-learned the same frozen-contract
+    # constraints from scratch (live 2026-08-09/10: renamed struct -> pub
+    # field -> dropped member, then the same ring again a fire later).
+    prior = (deps.load_rejection_notes(project_dir, cfg_cluster)
+             if deps.load_rejection_notes is not None else {})
+    checklist = prior.get(key) or []
+    if checklist:
+        guidance += (
+            "\n\nEARLIER RE-AUTHOR ATTEMPTS OF THIS COMPONENT WERE REJECTED."
+            " Each line below is a constraint an earlier reply violated;"
+            " your reply must satisfy ALL of them at once:\n"
+            + "\n".join(f"- {r}" for r in checklist) + "\n")
     res = author_layout(
         narrowed, module_name=module_name,
         public_surface=deps.public_surface_text(project_dir, cfg_cluster),
@@ -536,9 +600,7 @@ def _run_layout_attempt(
         symbol_inventory=deps.symbol_inventory_text(project_dir, cfg_cluster),
         deps=replace(deps.author_deps_for(project_dir, cfg_cluster),
                      filled_bodies=lambda: filled),
-        extra_guidance=(CRASH_GUIDANCE
-                        if cause is LayoutRetriggerCause.RUNTIME_CRASH
-                        else ""))
+        extra_guidance=guidance)
 
     if not res.all_authored:
         # The cap bounds MODEL attempts. A failure whose reason is splice/
@@ -570,11 +632,25 @@ def _run_layout_attempt(
         # rustc — a broken public contract, or a layout that drops members the
         # filled bodies read — and a log that mis-attributes those reads as the
         # model being unable to write compiling Rust.
+        #
+        # A rejection destroys nothing (nothing was applied, nothing reverted),
+        # so it is moved off the destruction cap and onto its own consecutive
+        # budget — the cap counts LANDED re-authors only. Two rejections
+        # charged against the cap of 2 are how the 34-name component lost its
+        # only structural escape on 2026-08-09/10 while ASAN kept blaming
+        # `object_drop` every iteration.
+        attempts[key] = max(0, attempts[key] - 1)
+        attempts[rejected_key(key)] = attempts.get(rejected_key(key), 0) + 1
+        deps.save_attempts(project_dir, cfg_cluster, attempts)
         why = next((c.reason for c in res.components if not c.authored), "")
+        _remember_rejections(project_dir, cfg_cluster, key, _reasons, deps)
         deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: re-author "
-                 f"attempt {attempts[key]} was not accepted"
+                 f"was not accepted (rejection "
+                 f"{attempts[rejected_key(key)]}/{DEFAULT_MAX_REJECTIONS}, "
+                 "destruction cap not charged)"
                  + (f": {why}" if why else "."))
         return RetriggerResult(fired=True, succeeded=False, cause=cause.name,
+                               rejected=True,
                                reason=why or "re-authoring failed again")
 
     # Land the new definitions in the tree that is actually built. Its keys
@@ -626,7 +702,13 @@ def _run_layout_attempt(
                                reason=f"live-tree splice failed: {apply_err}")
 
     attempts.pop(mechanical_key(key), None)   # consecutive-failure counter
+    attempts.pop(rejected_key(key), None)     # an ACCEPTED re-author clears it
     deps.save_attempts(project_dir, cfg_cluster, attempts)
+    if deps.load_rejection_notes is not None \
+            and deps.save_rejection_notes is not None:
+        _notes = deps.load_rejection_notes(project_dir, cfg_cluster)
+        if _notes.pop(key, None) is not None:
+            deps.save_rejection_notes(project_dir, cfg_cluster, _notes)
     if deps.upsert_layout_registry is not None:
         deps.upsert_layout_registry(
             project_dir,

@@ -13,7 +13,7 @@ pure orchestration over domain VOs.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 
@@ -384,13 +384,23 @@ def author_layout(
         reason = "no attempt"
         committed_defs: tuple[tuple[str, str], ...] = ()
         committed_items: tuple[tuple[str, AuthoredItem], ...] = ()
+        # Every violation this fire has produced so far, in order. The retry
+        # hint carries them ALL: a reply that satisfies only the most recent
+        # rejection routinely re-breaks an earlier one.
+        violations: list[str] = []
+
+        def _learned(r: str, *, _v: list[str] = violations) -> None:
+            if r and r not in _v:
+                _v.append(r)
+
         for attempt in range(1, deps.max_attempts + 1):
-            hint = _retry_hint(reason) if attempt > 1 else ""
+            hint = _retry_hint(violations) if violations else ""
             authored, reason = _author_component(
                 comp, surface.cfg_cluster, _prompt, hint, deps)
             if authored is None:
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
+                _learned(reason)
                 continue
             tried = _try_commit(comp, authored, deps, gate, pristine)
             reason, errors = tried.reason, tried.errors
@@ -410,6 +420,7 @@ def author_layout(
             if not errors:   # splice/coverage rejection, nothing was written
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
+                _learned(reason)
                 continue
             # Name the first diagnostic: an environmental failure that no
             # authored layout can fix (E0554 = nightly `#![feature]` built on
@@ -422,6 +433,7 @@ def author_layout(
                      + (" (layout pins/member paths were gated this attempt)"
                         if gate.gated else "")
                      + (f": {diag}" if diag else "."))
+            _learned(reason)
         results.append(ComponentResult(
             names, committed, reason, authored_defs=committed_defs,
             authored_items=committed_items, refuted_uids=refuted))
@@ -787,8 +799,11 @@ def _author_component(
             missing = frozenset(u for u in want if u not in authored)
             if not missing:
                 break
-            hint = _retry_hint(
-                f"missing authored items: {', '.join(sorted(missing))}")
+            # ADD the coverage miss to whatever the outer attempt already
+            # learned — overwriting `attempt_hint` here used to throw away the
+            # accumulated violation checklist for the rest of the chunk loop.
+            hint = attempt_hint + _retry_hint(
+                (f"missing authored items: {', '.join(sorted(missing))}",))
         if missing:
             return None, f"missing authored items: {', '.join(sorted(missing))}"
         scheme_parts.extend(
@@ -796,6 +811,15 @@ def _author_component(
     return authored, ""
 
 
-def _retry_hint(reason: str) -> str:
-    return ("\n\n=== PREVIOUS ATTEMPT FAILED ===\n"
-            f"{reason}\nFix this and re-emit ALL <LAYOUT_ITEM> blocks.\n")
+def _retry_hint(reasons: Sequence[str]) -> str:
+    """The retry hint is CUMULATIVE. Carrying only the last rejection let six
+    authoring attempts across two fires (2026-08-09/10, the 34-name `Error`
+    component) cycle renamed struct -> pub field -> dropped member and back,
+    each reply fixing the named violation while recommitting an earlier one."""
+    lines = "\n".join(f"- {r}" for r in reasons)
+    return ("\n\n=== EVERY PREVIOUS ATTEMPT FAILED — CUMULATIVE CHECKLIST ===\n"
+            "Each line below is a constraint one of your earlier replies "
+            "violated. Your next reply must satisfy ALL of them at once — "
+            "fixing one by re-breaking another restarts the list:\n"
+            f"{lines}\n"
+            "Fix ALL of the above and re-emit ALL <LAYOUT_ITEM> blocks.\n")

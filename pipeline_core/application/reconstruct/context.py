@@ -51,6 +51,22 @@ class PerFnPassCtx:
     # CRASH_EVIDENCE prompt section and overrides the fully-exhausted skip
     # (a localized crash is evidence prior attempts never saw).
     crash_evidence: dict[Any, str] | None = None
+    # The ORIGIN blame only (FnLocator set) — where the localizer put the
+    # fault. NOT derivable from `crash_evidence`, whose keys include access
+    # frames: the innocent caller routing execution into the fault is a key
+    # there, so key-membership reads the blame as inside the caller.
+    crash_blamed: frozenset[Any] | None = None
+    # Units reverted for a crash-only regression whose blame lies wholly
+    # outside them, keyed retro-style (`file::container::fn`), value =
+    # "<blamed file>@<content md5>" at mark time. SHARED and MUTATED across
+    # iterations by the fill units (same sharing model as `retros_cache`):
+    # while the blamed file's text is unchanged, re-attempting the unit buys
+    # the same crash — skip it, charge nothing. Cleared per-unit the moment
+    # the blamed file's content moves. In-process only, deliberately: the
+    # measured burn (five reverts of `src/context.rs::StdErrorforE`,
+    # 2026-08-10, ~4-6 model calls each) is intra-run, and a restart costs
+    # at most one re-derivation cycle per unit.
+    crash_blocked: dict[str, str] | None = None
     # Sieve counters for this pass (shared, mutated by the workers): how many
     # stored guidance strings were honoured / retired / unjudgeable. Logged
     # once per pass so "retires everything" and "retires nothing" are
@@ -62,3 +78,28 @@ def fill_skip(rec: Stub, attempts: int) -> FillResult:
     """Early-exit result for the fill unit (skip/race/read-failure paths)."""
     return FillResult(file=rec.file, fn_name=rec.fn_name,
                       filled=False, attempts=attempts)
+
+
+def _file_fingerprint(src_dir: Path, rel: str) -> str:
+    import hashlib
+    try:
+        digest = hashlib.md5((src_dir / rel).read_bytes()).hexdigest()[:12]
+    except OSError:
+        digest = "unreadable"
+    return f"{rel}@{digest}"
+
+
+def crash_block_mark(src_dir: Path, blamed_files: list[str]) -> str:
+    """The `crash_blocked` map's value: each blamed file with its content
+    fingerprint at mark time. File-granular on purpose — 'the blamed fn's
+    body text changed' is approximated by 'the file holding it changed',
+    which re-admits strictly more often (the safe direction)."""
+    return ";".join(_file_fingerprint(src_dir, rel)
+                    for rel in sorted(set(blamed_files)))
+
+
+def crash_block_stands(src_dir: Path, mark: str) -> bool:
+    """True while every blamed file still matches its mark-time fingerprint —
+    re-attempting the unit would buy the identical crash."""
+    rels = [part.split("@", 1)[0] for part in mark.split(";") if part]
+    return bool(rels) and mark == crash_block_mark(src_dir, rels)

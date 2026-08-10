@@ -177,6 +177,8 @@ class PhaseCFillEngine:
         tdd_frontier_tests: FailureFrontier | None = None,
         tdd_test_cmd: str | None = None,
         crash_evidence: dict[FnLocator, str] | None = None,
+        crash_blamed: frozenset[FnLocator] | None = None,
+        crash_blocked: dict[str, str] | None = None,
     ) -> ClusterFillResult:
         """Phase C — Flavour B with full validation loops."""
         if cluster_env is None:
@@ -233,6 +235,8 @@ class PhaseCFillEngine:
                 tdd_test_cmd=tdd_test_cmd,               # Plan 10 U2
                 parallelism=self.config.parallelism,
                 crash_evidence=crash_evidence,
+                crash_blamed=crash_blamed,
+                crash_blocked=crash_blocked,
             )
             # If there are still stub members the per-impl path didn't cover
             # (free fns or oversized blocks), fall through to the per-fn path.
@@ -413,6 +417,8 @@ class PhaseCFillEngine:
                 ),
                 behaviour_specs=self.behaviour_loader(project_dir, cluster_name),
                 crash_evidence=crash_evidence,
+                crash_blamed=crash_blamed,
+                crash_blocked=crash_blocked,
             )
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,

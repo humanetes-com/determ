@@ -126,3 +126,33 @@ def save_retrigger_attempts(
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(attempts, indent=2, sort_keys=True), encoding="utf-8")
     return p
+
+
+def _rejections_path(project_dir: Path, cfg_cluster: str) -> Path:
+    return (Path(project_dir) / _SKELETON_DIR
+            / f"_layout_retrigger_rejections_{cfg_cluster}.json")
+
+
+def load_rejection_notes(
+    project_dir: Path, cfg_cluster: str,
+) -> dict[str, list[str]]:
+    """Per-component checklist of constraints rejected re-authors violated
+    (key = sorted item names joined by ``|``). Sibling of the attempts store,
+    string-valued and therefore its own file: the attempts store is typed
+    dict[str, int] and every reader does arithmetic on it."""
+    p = _rejections_path(project_dir, cfg_cluster)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        return {str(k): [str(x) for x in v] for k, v in raw.items()
+                if isinstance(v, list)}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_rejection_notes(
+    project_dir: Path, cfg_cluster: str, notes: dict[str, list[str]],
+) -> Path:
+    p = _rejections_path(project_dir, cfg_cluster)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(notes, indent=2, sort_keys=True), encoding="utf-8")
+    return p

@@ -39,6 +39,20 @@ set -u
 
 LOG_DIR="$1"; shift
 DEATHS="$LOG_DIR/deaths.jsonl"
+# Write-ahead half of the record. A death row written at exit cannot report a
+# death that takes the recorder too — 2026-08-09: run 1159463 (the 18→76
+# climb) vanished with its supervisor between 08:41 and the 22:44 relaunch,
+# and deaths.jsonl still ends at the PREVIOUS run. KILL is untrappable and the
+# TERM/INT/HUP traps below never ran, so the exit-time design has a hole
+# exactly the width of "both processes died at once" (a pattern-kill matching
+# this script's own argv, a cgroup-level OOM kill, power loss). The journal
+# closes it: a birth row lands BEFORE the child starts, and the next launch
+# reconciles any birth with no matching death into a synthesized row.
+BIRTHS="$LOG_DIR/births.jsonl"
+# Overridable so tests can run this script without clobbering the live
+# pipeline's pid file (readers resolve real pids via pgrep; this file is the
+# convenience copy).
+PIDFILE="${DETERM_PIPELINE_PIDFILE:-/tmp/determ_pipeline.pid}"
 SENTINEL=/tmp/pipeline_graceful_stop
 # The other deliberate stop. `graceful_stop_pipeline` asks the pipeline to exit
 # at its next checkpoint and marks it with SENTINEL; `kill_pipeline` — the
@@ -67,6 +81,62 @@ _code_id="$(md5sum pipeline.py 2>/dev/null | cut -c1-8)"
 # dmesg cursor: only lines that arrive AFTER launch can be about this death.
 _dmesg_before="$(dmesg 2>/dev/null | wc -l)"
 
+# Settle births that never reached a death row. Runs BEFORE this launch's
+# child starts, so a synthesized row can only describe a PREVIOUS process.
+# A birth is settled when a death row carries its started_at + child pid; it
+# is an orphan when neither its supervisor nor its child is still running.
+# (Pid reuse can hold a row open one launch longer — it is retried next
+# time, never dropped.) No exit status exists for an orphan — nothing was
+# alive to read it — so ended_at is bounded by the pipeline log's last
+# write, and the signal field says exactly what is known: the supervisor
+# died WITH the child, which the exit-time recorder cannot report.
+_reconcile_births() {
+    [[ -s "$BIRTHS" ]] || return 0
+    local _keep="" _line _sup _child _born _bcode _ended _born_s _ended_s _up _del
+    while IFS= read -r _line; do
+        [[ -n "$_line" ]] || continue
+        _sup="$(printf '%s' "$_line" | sed -n 's/.*"supervisor_pid":\([0-9]*\).*/\1/p')"
+        _child="$(printf '%s' "$_line" | sed -n 's/.*"child_pid":\([0-9]*\).*/\1/p')"
+        _born="$(printf '%s' "$_line" | sed -n 's/.*"started_at":"\([^"]*\)".*/\1/p')"
+        _bcode="$(printf '%s' "$_line" | sed -n 's/.*"code_id":"\([^"]*\)".*/\1/p')"
+        [[ -n "$_child" && -n "$_born" ]] || continue   # unparseable: drop
+        if [[ -s "$DEATHS" ]] \
+                && grep -q "\"started_at\":\"$_born\".*\"pid\":$_child," "$DEATHS"; then
+            continue                                    # settled
+        fi
+        if kill -0 "$_sup" 2>/dev/null || kill -0 "$_child" 2>/dev/null; then
+            _keep+="$_line"$'\n'                        # still running
+            continue
+        fi
+        _ended="$(date -u -r "$PIPELINE_LOG" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                  || date -u +%Y-%m-%dT%H:%M:%SZ)"
+        _born_s="$(date -d "$_born" +%s 2>/dev/null || echo 0)"
+        _ended_s="$(date -d "$_ended" +%s 2>/dev/null || echo 0)"
+        _up=$(( _ended_s > _born_s ? _ended_s - _born_s : 0 ))
+        _del=false
+        [[ -e "$SENTINEL" || -e "$OPERATOR_SENTINEL" ]] && _del=true
+        {
+            printf '{'
+            printf '"started_at":"%s",'    "$_born"
+            printf '"ended_at":"%s",'      "$_ended"
+            printf '"uptime_s":%d,'        "$_up"
+            printf '"pid":%d,'             "$_child"
+            printf '"exit_status":%d,'     -1
+            printf '"signal":"%s",'        "UNKNOWN_KILLED_WITH_SUPERVISOR"
+            printf '"deliberate_stop":%s,' "$_del"
+            printf '"code_id":"%s",'       "$(_json_escape "$_bcode")"
+            printf '"dmesg":"",'
+            printf '"log_tail":"%s",'      "$(_json_escape "$(tail -3 "$PIPELINE_LOG" 2>/dev/null)")"
+            printf '"synthesized":true'
+            printf '}\n'
+        } >> "$DEATHS"
+        printf '[death-watch] RECONCILED an unrecorded death: pipeline %s (born %s) vanished WITH its supervisor — no exit status exists; ended_at bounded by the log'\''s last write (%s).\n' \
+            "$_child" "$_born" "$_ended" >> "$PIPELINE_LOG"
+    done < "$BIRTHS"
+    printf '%s' "$_keep" > "$BIRTHS"
+}
+_reconcile_births
+
 # `--wait` matters: plain `setsid` forks and exits immediately, which would
 # throw away the exit status this whole wrapper exists to read. With it, setsid
 # waits for the child and exits WITH the child's status, so `wait` below still
@@ -85,9 +155,24 @@ else
     _pid=$!
     _pipeline_pid=$_pid
 fi
+# The write-ahead birth row, BEFORE the pid file — the pid file is the
+# signal readers act on, so by the time anything can aim at this run the
+# journal already holds it. From here on, this run can never vanish
+# unexplained: either the wait below writes its death row, or the next
+# launch's reconciliation synthesizes one from this line.
+{
+    printf '{'
+    printf '"started_at":"%s",'   "$_started_at"
+    printf '"supervisor_pid":%d,' "$$"
+    printf '"child_pid":%d,'      "$_pipeline_pid"
+    printf '"code_id":"%s",'      "$(_json_escape "$_code_id")"
+    printf '"cmd":"%s"'           "$(_json_escape "$*")"
+    printf '}\n'
+} >> "$BIRTHS"
+
 # The child's PID, for anyone who wants it without pgrep. `pipeline_pids`
 # still resolves the real interpreter, and is what every other caller uses.
-echo "$_pipeline_pid" > /tmp/determ_pipeline.pid
+echo "$_pipeline_pid" > "$PIDFILE"
 
 # A death nobody recorded is at least BOUNDED in time by this. The 03:05:36
 # disappearance was pinned only because the per-worker stream logs happened to

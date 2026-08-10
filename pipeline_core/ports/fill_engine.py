@@ -254,4 +254,6 @@ class ImplFillPath(Protocol):
         tdd_frontier_tests: FailureFrontier | None, tdd_test_cmd: str | None,
         parallelism: int = 1,
         crash_evidence: dict[FnLocator, str] | None = None,
+        crash_blamed: frozenset[FnLocator] | None = None,
+        crash_blocked: dict[str, str] | None = None,
     ) -> ClusterFillResult: ...

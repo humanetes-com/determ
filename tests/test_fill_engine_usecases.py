@@ -533,3 +533,158 @@ def test_engine_runs_impl_route_when_every_stub_is_covered(tmp_path: Path) -> No
         tdd_frontier_tests=FailureFrontier.of_direct({}), skip_end_pass_test=True)
     assert out is stats
     assert "phase_c.dispatch.impl_route_deferred" not in fake.events
+
+
+# ---- crash-blocked units (sibling's fault) and crash-evidence re-fills ----
+#
+# The live burn, 2026-08-10, run on `anyhow`: `src/context.rs::StdErrorforE`
+# was reverted for `binary crashed: ['tests/test_context.rs'] (net -6)` five
+# times across two retro rounds (~4-6 model calls each) while ASAN blamed
+# `src/error.rs::object_drop` throughout — and the eight crash-evidence
+# re-fills of the block holding `object_drop` were all reverted for no strict
+# improvement, because a correct fix of a latent fault moves no test while
+# its activating sibling is crash-reverted beside it.
+
+def _crash_only_regression() -> tuple[RegressionComparison, str]:
+    return (RegressionComparison(
+        newly_red=frozenset(), newly_crashed=("tests/test_context.rs",),
+        excluded_crashed=(), not_run=(), measured=(),
+        base_pass=6, cur_pass=0, base_executed=6, cur_executed=0),
+        "crash detail")
+
+
+class RecordingFill(FakeFill):
+    """FakeFill that counts model asks and retro diagnoses and records
+    conviction saves — the three costs the crash-block exists to stop."""
+
+    def __init__(self, **scripted: Any) -> None:
+        super().__init__(**scripted)
+        self.ask_calls = 0
+        self.diagnose_calls = 0
+        self.saved: list[Any] = []
+
+    def ask_per_fn_body(self, *a: Any, **k: Any) -> tuple[str | None, str]:
+        self.ask_calls += 1
+        return super().ask_per_fn_body(*a, **k)
+
+    def diagnose(self, **k: Any) -> dict[str, Any]:
+        self.diagnose_calls += 1
+        return {"signal": "", "category": "GENUINELY_HARD", "guidance": "g"}
+
+    def save(self, *a: Any) -> None:
+        self.saved.append(a)
+
+    def retro_key(self, f: str, fn: str, c: str) -> str:
+        return f"{f}::{c}::{fn}"
+
+
+def test_crash_only_revert_with_outside_blame_charges_nothing(
+        tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "other.rs").write_text("fn object_drop() { old }\n")
+    blocked: dict[str, str] = {}
+    ctx = replace(_ctx(ws),
+                  crash_blamed=frozenset({FnLocator("other.rs", "object_drop")}),
+                  crash_blocked=blocked)
+    fake = RecordingFill(run=(0, ""), regr=_crash_only_regression(),
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert not res.filled
+    assert fake.diagnose_calls == 0, "no retrospective for a sibling's fault"
+    assert not fake.saved, "no conviction for a sibling's fault"
+    assert blocked, "the unit must be marked crash-blocked"
+    assert any("crash_blocked" in ev for ev in fake.events)
+    # The next dispatch skips without a model call…
+    asks = fake.ask_calls
+    res2 = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert not res2.filled and fake.ask_calls == asks
+    # …until the blamed file's content moves, which re-admits the unit.
+    (ws / "src" / "other.rs").write_text("fn object_drop() { fixed }\n")
+    _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert fake.ask_calls > asks
+
+
+def test_crash_only_revert_without_blame_still_burns_the_old_way(
+        tmp_path: Path) -> None:
+    """The negative control, by injection: with the blame channel empty the
+    exemption cannot fire, and the pre-fix behaviour reproduces — the unit
+    re-enters retro and writes a conviction for a crash it did not cause.
+    If this stops reproducing, the control has drifted and the test above
+    proves nothing."""
+    from dataclasses import replace
+    ws = _mk_ws(tmp_path)
+    ctx = replace(_ctx(ws), crash_blamed=None, crash_blocked={})
+    fake = RecordingFill(run=(0, ""), regr=_crash_only_regression(),
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert not res.filled
+    assert fake.diagnose_calls >= 1
+    assert fake.saved, "the false conviction is exactly what the fix stops"
+
+
+def test_crash_evidence_refill_is_kept_on_non_regression(
+        tmp_path: Path) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    ws = _mk_ws(tmp_path)
+    baseline = SimpleNamespace(passed_names=frozenset({"t_pass"}),
+                               ignored_names=frozenset())
+    reject = U2Verdict(U2Decision.REJECT,
+                       self_failures=frozenset({"t_latent"}),
+                       detail="Your body ABORTED the test binary")
+    ctx = replace(_ctx(ws), crash_evidence={
+        FnLocator("lib.rs", "answer"): "AddressSanitizer: heap-use-after-free"})
+    fake = RecordingFill(run=(0, ""), u2=reject, regr=None,
+                         regr_base=baseline, body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert res.filled, (
+        "a crash-evidence re-fill whose self-failures were all failing at "
+        "baseline regressed nothing — kept, judged at the next sweep")
+    assert any("crash-evidence re-fill KEPT" in m for m in fake.logs)
+
+
+def test_the_same_rejection_without_evidence_still_reverts(
+        tmp_path: Path) -> None:
+    """Control 1: no crash evidence → the strict gate stands (the pre-fix
+    revert reproduces)."""
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    ws = _mk_ws(tmp_path)
+    baseline = SimpleNamespace(passed_names=frozenset({"t_pass"}),
+                               ignored_names=frozenset())
+    reject = U2Verdict(U2Decision.REJECT,
+                       self_failures=frozenset({"t_latent"}), detail="red")
+    fake = RecordingFill(run=(0, ""), u2=reject, regr=None,
+                         regr_base=baseline, body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert not res.filled
+
+
+def test_a_real_regression_reverts_even_with_crash_evidence(
+        tmp_path: Path) -> None:
+    """Control 2: a self-failure that was PASSING at baseline is a true
+    regression — the evidence buys no keep."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    ws = _mk_ws(tmp_path)
+    baseline = SimpleNamespace(passed_names=frozenset({"t_pass"}),
+                               ignored_names=frozenset())
+    reject = U2Verdict(U2Decision.REJECT,
+                       self_failures=frozenset({"t_pass"}), detail="red")
+    ctx = replace(_ctx(ws), crash_evidence={
+        FnLocator("lib.rs", "answer"): "AddressSanitizer: heap-use-after-free"})
+    fake = RecordingFill(run=(0, ""), u2=reject, regr=None,
+                         regr_base=baseline, body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert not res.filled

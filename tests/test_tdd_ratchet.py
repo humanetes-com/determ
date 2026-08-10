@@ -731,6 +731,52 @@ def test_no_durable_mark_keeps_the_pre_seed_behaviour(
     assert len(marks) == 1
 
 
+def test_a_verified_floor_beats_a_stale_mark_despite_a_short_oracle(
+        tmp_path: Path, monkeypatch) -> None:
+    """The freeze, at the driver level. Missing tests are counted as failing
+    BEFORE pass_count is read, and the counter is trailer-only — a crashed
+    binary contributes zero passes — so a sweep's pass_count is a verified
+    floor: every counted pass ran green in a completed binary. A floor
+    strictly above the stored mark dominates it whatever the missing tests
+    would have said. Live on `anyhow`, 2026-08-09/10: the mark froze at
+    18/105 (written 08:56 UTC) while sweeps read 81/105 and 88/106 under a
+    chronic `tests/test_context.rs` crash — heal's restore tier sat 70 tests
+    behind the live tree, and the veto that held it there logged nothing."""
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    events: list[tuple[str, dict]] = []
+    marks: list[Any] = []
+    # Sweep reports only t1 of the expected {t1, t2}: pass=1, one test
+    # unmeasured. The stored mark is 0 — strictly dominated.
+    _run_tdd(monkeypatch, tmp_path, [(_SHRUNK, False)], events,
+             best_mark=BestTreeMark(pass_count=0, iteration=1,
+                                    tree_sha="old", oracle_size=2),
+             checkpoints=marks)
+    assert len(marks) == 1, (
+        "a verified floor above the stored count must replace the mark even "
+        "while the oracle is short — pre-fix the veto froze the slot here")
+    assert marks[0].pass_count == 1 and marks[0].missing_count == 1
+
+
+def test_an_equal_count_over_a_short_oracle_still_may_not_churn_the_slot(
+        tmp_path: Path, monkeypatch) -> None:
+    """The half the veto keeps: an unmeasurable tree at an EQUAL count must
+    not replace a full-oracle tree (snapshot_due's tree-moved branch would
+    otherwise re-snapshot on every sweep of a chronic crasher). And the
+    refusal must be SAID — the live freeze sat unnoticed from 08:56 UTC to
+    the next session because the veto declined silently."""
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    events: list[tuple[str, dict]] = []
+    marks: list[Any] = []
+    logs: list[str] = []
+    _run_tdd(monkeypatch, tmp_path, [(_SHRUNK, False)], events,
+             best_mark=BestTreeMark(pass_count=1, iteration=1,
+                                    tree_sha="a-different-tree", oracle_size=2),
+             checkpoints=marks, logs=logs)
+    assert marks == []
+    assert any("NOT replaced" in ln and "unmeasured" in ln for ln in logs), (
+        "the withheld checkpoint must log both counts, not decline silently")
+
+
 # --------------------------------------------------------------------------- #
 # The pass high-water's LINEAGE. A retrigger's deliberate re-stub makes the
 # high-water a fact about a tree the pipeline itself deleted; four consumers

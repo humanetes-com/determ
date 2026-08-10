@@ -263,6 +263,54 @@ def test_field_made_public_is_rejected():
     assert "widening the public API" in res.components[0].reason
 
 
+class _SeqDeps(_PubDeps):
+    """Replies pop in order — one distinct violation per attempt."""
+
+    def __init__(self, replies, compile_results):
+        super().__init__("", compile_results)
+        self.replies = list(replies)
+
+    def deps(self):
+        base = super().deps()
+        return dataclasses.replace(
+            base, run_model=lambda p: (self.prompts.append(p),
+                                       self.replies.pop(0))[1])
+
+
+def test_retry_prompts_accumulate_every_violated_constraint():
+    """The live failure shape, in one fire: six authoring attempts across two
+    2026-08-09/10 fires each fixed the named violation while committing a
+    different one (renamed struct -> pub field -> dropped member, then the
+    same ring again), because the retry hint carried only the LAST rejection.
+    The hint is a cumulative checklist: attempt 3 must still see attempt 1's
+    violation."""
+    d = _SeqDeps([
+        # attempt 1: drops the `?Sized` bound — frozen head changed.
+        '<LAYOUT_ITEM name="Error" kind="struct">'
+        'pub struct Error<T> { boxed: Box<dyn StdError> }</LAYOUT_ITEM>',
+        # attempt 2: head restored, but a field turned `pub`.
+        '<LAYOUT_ITEM name="Error" kind="struct">'
+        'pub struct Error<T: ?Sized> { pub boxed: Box<dyn StdError> }'
+        '</LAYOUT_ITEM>',
+        # attempt 3: would be correct — the assertion is about its PROMPT.
+        '<LAYOUT_ITEM name="Error" kind="struct">'
+        'pub struct Error<T: ?Sized> { boxed: Box<dyn StdError> }'
+        '</LAYOUT_ITEM>',
+    ], compile_results=(True, True, True))
+    res = author_layout(_pub_fields_surface(), module_name="anyhow",
+                        public_surface="pub struct Error<T: ?Sized>;",
+                        select_pins=_has_pins, symbol_inventory="Box",
+                        deps=d.deps())
+    assert res.all_authored
+    assert len(d.prompts) == 3
+    assert "changed the frozen public declaration" in d.prompts[1]
+    assert "changed the frozen public declaration" in d.prompts[2], (
+        "attempt 3's prompt must still carry attempt 1's violation — "
+        "last-only feedback is how the live fires cycled through the same "
+        "three violations twice")
+    assert "widening the public API" in d.prompts[2]
+
+
 # ---- cross-cluster adoption: one crate, ONE definition per private type ----
 
 def test_registry_hit_adopts_without_calling_the_model():

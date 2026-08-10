@@ -370,6 +370,31 @@ def crash_evidence_by_locator(
     return out
 
 
+def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
+    """The ORIGIN blame only — one locator per site, where the localizer put
+    the fault (`CrashSite.blamed_locator`).
+
+    Deliberately not the evidence keys: `crash_evidence_by_locator` keys by
+    EVERY frame, access and origin, so the innocent caller that merely routes
+    execution into the fault is a key too. Any 'is the blame outside this
+    unit' test written against the keys reads the blame as inside the caller
+    and never fires — live 2026-08-09/10, `ext_context` (src/context.rs) was
+    an access frame of the very `object_drop` (src/error.rs) fault it was
+    being charged for."""
+    return frozenset(
+        s.blamed_locator for s in sites if s.blamed_locator is not None)
+
+
+def blame_outside_unit(
+    blamed: frozenset[FnLocator], unit_file: str, unit_fns: frozenset[str],
+) -> bool:
+    """True iff a localized blame exists and NONE of it lands in this unit
+    (same file AND one of the unit's own fns). No blame at all is False —
+    with nothing localized there is no evidence the unit is innocent."""
+    return bool(blamed) and not any(
+        b.file == unit_file and b.fn_name in unit_fns for b in blamed)
+
+
 def _parse_asan_frame_line(line: str) -> dict[str, object] | None:
     """``#N 0xADDR in SYMBOL FILE:LINE[:COL]`` → frame record, else None."""
     toks = line.split()

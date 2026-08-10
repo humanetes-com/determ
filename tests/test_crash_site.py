@@ -320,3 +320,42 @@ def test_evidence_carries_the_unfiltered_free_stack() -> None:
     ev = site.render_evidence()
     assert "drop_glue::<alloc::raw_vec::RawVec<u8>>" in ev
     assert "freed by thread T2 here:" in ev
+
+
+# ---- origin blame vs evidence keys, and the outside-the-unit test ----
+
+def test_blamed_locators_are_the_origin_not_every_frame() -> None:
+    """`crash_evidence_by_locator` keys by EVERY frame — access and origin —
+    so the innocent caller routing execution into the fault is a key too.
+    Live 2026-08-09/10: `ext_context` (src/context.rs) was an access frame of
+    the very `src/error.rs::object_drop` fault it was being charged for. The
+    blame set must carry the origin alone, or any outside-the-unit test reads
+    the blame as inside the caller and never fires."""
+    from pipeline_core.domain.crash_site import (
+        CrashFrame,
+        CrashSite,
+        blame_outside_unit,
+        blamed_locators,
+    )
+    access = CrashFrame(file_rel="src/context.rs", line=10,
+                        fn_name="ext_context", symbol="anyhow::ext_context")
+    origin = CrashFrame(file_rel="src/error.rs", line=99,
+                        fn_name="object_drop", symbol="anyhow::object_drop")
+    site = CrashSite(binary_label="tests/test_context.rs",
+                     test_name="test_downcast_high",
+                     signal="AddressSanitizer: heap-use-after-free",
+                     frames=(access,), origin_frames=(origin,),
+                     raw_report="")
+    evidence = crash_evidence_by_locator((site,))
+    assert FnLocator("src/context.rs", "ext_context") in evidence  # the trap
+    blamed = blamed_locators((site,))
+    assert blamed == frozenset({FnLocator("src/error.rs", "object_drop")})
+    # The innocent caller's unit is OUTSIDE the blame…
+    assert blame_outside_unit(blamed, "src/context.rs",
+                              frozenset({"ext_context"}))
+    # …the faulty fn's own unit is not…
+    assert not blame_outside_unit(blamed, "src/error.rs",
+                                  frozenset({"object_drop"}))
+    # …and no blame at all exonerates nobody.
+    assert not blame_outside_unit(frozenset(), "src/context.rs",
+                                  frozenset({"ext_context"}))
