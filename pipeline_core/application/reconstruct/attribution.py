@@ -303,26 +303,48 @@ def frontier_from_diags(deps: AttributionDeps,
     frontier: Frontier = {}
     fn_records_by_file: dict[str, list[dict[str, Any]]] = {}
     file_text_cache: dict[str, str] = {}
-    for d in diagnostics or []:
-        rel = d.file or ""
-        line_no = int(d.line or 0)
+
+    def _locate(rel: str, line_no: int) -> FnLocator | None:
         if not rel or line_no < 1:
-            continue
+            return None
         if rel not in fn_records_by_file:
             _all_recs = deps.structure.enumerate_fns(src_dir) or []
             fn_records_by_file[rel] = [r for r in _all_recs if r.get("file") == rel]
         recs = fn_records_by_file[rel]
         if not recs:
-            continue
+            return None
         if rel not in file_text_cache:
             try:
                 file_text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
             except Exception:
-                continue
+                return None
         rec = line_to_fn_record(file_text_cache[rel], line_no, recs)
         if rec is None:
+            return None
+        return FnLocator(rel, rec["fn_name"])
+
+    for d in diagnostics or []:
+        loc = _locate(d.file or "", int(d.line or 0))
+        if loc is None:
+            # An error raised inside a macro expansion renders its primary span
+            # at the macro DEFINITION, where there is usually no fn record to
+            # attribute to. `backtrace_if_absent!`'s nightly variant casts
+            # `$err as &dyn core::error::Error`; two filled bodies invoked it by
+            # value, the two E0605s pointed at src/backtrace.rs:21 (only fn
+            # record nearby: `_assert_send_sync`), the frontier came back empty
+            # and BUILD mode aborted `unattributed_compile_errors` — while the
+            # fillable culprits (src/error.rs `new` line 47, `from_boxed` line
+            # 151) sat parsed in `macro_call_sites` the whole time (run
+            # `2514529-5e77dafb`, 2026-08-10). Walk the recorded invocation
+            # chain only after the primary span fails to attribute, so
+            # non-macro behaviour is byte-identical.
+            for m_file, m_line in d.macro_call_sites:
+                loc = _locate(m_file or "", int(m_line or 0))
+                if loc is not None:
+                    break
+        if loc is None:
             continue
-        frontier.setdefault(FnLocator(rel, rec["fn_name"]), set()).add("<compile>")
+        frontier.setdefault(loc, set()).add("<compile>")
     return frontier
 
 def compile_error_frontier(

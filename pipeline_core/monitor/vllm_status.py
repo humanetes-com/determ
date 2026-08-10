@@ -69,11 +69,22 @@ def vllm_status_rows(width: int) -> list[str]:
                 with open(cid_file) as f:
                     cid = f.read().strip()
             if not cid:
-                cid = subprocess.check_output(
-                    ["docker", "ps", "--filter", "ancestor=vllm/vllm-openai:latest",
-                     "--format", "{{.ID}}", "--latest"],
+                # Match the image REPOSITORY, not one tag. `--filter
+                # ancestor=vllm/vllm-openai` normalises to `:latest` and so
+                # finds nothing when the server runs from another tag — the
+                # image is selectable per model now (VLLM_IMAGE in .env),
+                # because a model can need a newer server than the one :latest
+                # resolved to. Without this the loading pane shows the spinner
+                # and no log lines, which reads as a hung container.
+                ps = subprocess.check_output(
+                    ["docker", "ps", "--format", "{{.ID}} {{.Image}}"],
                     stderr=subprocess.DEVNULL, timeout=2, text=True
-                ).strip()
+                )
+                for row in ps.splitlines():
+                    ident, _, image = row.partition(" ")
+                    if "vllm/vllm-openai" in image:
+                        cid = ident.strip()
+                        break
             if cid:
                 logs = subprocess.check_output(
                     ["docker", "logs", "--tail", "6", cid],

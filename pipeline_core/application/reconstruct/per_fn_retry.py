@@ -51,6 +51,7 @@ from pipeline_core.domain.source_snapshot import SourceSnapshot
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_cmd import build_test_cmd
 from pipeline_core.domain.test_results import (
+    compile_error_digest,
     parse_failed_tests,
     parse_test_counts,
     strip_ansi,
@@ -281,7 +282,16 @@ def run_task3_inline_retry(
         list((project_dir / "tests").rglob("*.rs")))
 
     def _read_tree() -> TreeReading:
-        """One sweep of every cluster: ran-state and failing-test count each."""
+        """One sweep of every cluster: ran-state and failing-test count each.
+
+        A cluster that produced no verdicts additionally carries its DISTINCT
+        compile-diagnostic count, read from the same captured output — the
+        probe already ran cargo under that cluster's env and a broken lib's
+        diagnostics are in that output, so no second cargo invocation is spent.
+        The dedup in `compile_error_digest` is load-bearing: a cluster-wide
+        break reprints one lib error per test binary, so a raw occurrence
+        count moves with binary coverage while the distinct set is stable —
+        and equal-vs-worse is exactly what the accept gate compares."""
         readings: list[ClusterReading] = []
         for p in _probes:
             _rc, out = deps.cargo.run(p.command, project_dir, p.env,
@@ -289,8 +299,11 @@ def run_task3_inline_retry(
             p_n, f_n, _ign = parse_test_counts(out)
             _fails = {t for t in parse_failed_tests(out)
                       if t.split("::")[-1] not in _unrepairable_all}
+            _ran = (p_n + f_n) > 0
+            _diags = 0 if _ran else compile_error_digest(strip_ansi(out))[0]
             readings.append(ClusterReading(
-                cluster=p.name, ran=(p_n + f_n) > 0, failures=len(_fails)))
+                cluster=p.name, ran=_ran, failures=len(_fails),
+                diag_count=_diags))
         return TreeReading(per_cluster=tuple(readings))
 
     # Two modes. TEST mode (some test FAILED) attributes via the test
@@ -387,10 +400,15 @@ def run_task3_inline_retry(
                                  timeout=deps.test_timeout)
         # Ran-state first. A tree that compiles nothing prints no `FAILED`
         # lines, so a raw failure count reads 0 — the best score possible — and
-        # the loop's ratchet records a floor no working tree can beat.
+        # the loop's ratchet records a floor no working tree can beat. A tree
+        # that produced no verdicts is ordered by its distinct compile-error
+        # count on top of the sentinel, so a broken tree gaining errors reads
+        # worse instead of identical.
         p_n, f_n, _ign = parse_test_counts(out)
+        _ran = (p_n + f_n) > 0
         return rc == 0, out, failure_metric(
-            ran=(p_n + f_n) > 0, failures=len(parse_failed_tests(out)))
+            ran=_ran, failures=len(parse_failed_tests(out)),
+            diag_count=0 if _ran else compile_error_digest(strip_ansi(out))[0])
 
     def _run_check_build() -> tuple[bool, str, int]:
         rc, rendered, diags = deps.cargo.check_diag(
@@ -916,7 +934,12 @@ def _draft_or_none(
 
 
 def _reading_summary(r: TreeReading) -> str:
-    """`nightly 2 fail, stable 1 fail` — or `nightly NO VERDICTS`."""
+    """`nightly 2 fail, stable 1 fail` — or `nightly NO VERDICTS (2 err)`.
+
+    The diagnostic count is printed with the NO VERDICTS state because it is
+    now what the accept gate compares between two broken readings — a revert
+    logged on it is unreadable if the log renders both sides identically."""
     return ", ".join(
-        f"{c.cluster} {c.failures} fail" if c.ran else f"{c.cluster} NO VERDICTS"
+        f"{c.cluster} {c.failures} fail" if c.ran
+        else f"{c.cluster} NO VERDICTS ({c.diag_count} err)"
         for c in r.per_cluster) or "no clusters"

@@ -112,3 +112,70 @@ def test_timed_iter_passes_through_and_raises_on_error() -> None:
 
     with pytest.raises(ValueError, match="nope"):
         list(t._timed_iter(_boom(), timeout=5))
+
+
+# --- reasoning dialects ----------------------------------------------------
+# Muse-Glimmer-30B's chat template has no thinking boolean. It reads a level:
+#     {%- set rs = reasoning_strength if reasoning_strength is defined
+#        and reasoning_strength else 'high' -%}
+#     {{- 'Reasoning strength: ' + rs + '.' -}}
+# (chat_template.jinja, meta-models/Muse-Glimmer-30B, read 2026-08-10). An
+# unknown chat_template_kwargs key is silently dropped, not rejected, so the
+# wrong dialect is a quiet wrong state rather than a failure.
+
+def test_qwen_keeps_the_boolean_thinking_dialect() -> None:
+    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", True) == {"enable_thinking": True}
+    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", False) == {"enable_thinking": False}
+    # A model absent from MODEL_CAPS gets the dialect every model here used
+    # before Muse Glimmer.
+    assert t.reasoning_template_kwargs("unknown-model", True) == {"enable_thinking": True}
+
+
+def test_muse_glimmer_asks_by_strength_and_can_actually_turn_reasoning_down() -> None:
+    """The negative control for the dialect split.
+
+    On the old code both models got `{"enable_thinking": ...}`. For Muse Glimmer
+    that key is not in its template: `rs` stays undefined, the template's own
+    fallback supplies 'high', and the request that asked for NO reasoning gets
+    the most. The followup path is the one that pays — it re-feeds the reasoning
+    and asks for code only, so a re-reasoned followup is the failure the
+    thinking-off request exists to prevent. Assert the OFF request differs from
+    the ON one, which is exactly what sending the boolean could not achieve."""
+    on = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True)
+    off = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", False)
+    assert "enable_thinking" not in on and "enable_thinking" not in off
+    assert on == {"reasoning_strength": t._REASONING_STRENGTH_ON}
+    assert off == {"reasoning_strength": t._REASONING_STRENGTH_OFF}
+    assert on != off, "thinking-off is indistinguishable from thinking-on"
+    # Both rungs must be levels the template accepts; there is no 'off'.
+    assert {on["reasoning_strength"], off["reasoning_strength"]} <= {"low", "medium", "high", "xhigh"}
+    assert t.reasoning_template_kwargs("meta-models/Muse-Glimmer-30B", True) == on
+
+
+def test_reasoning_text_stays_reasoning_on_the_strength_dialect() -> None:
+    """`_reasoning_delta` reroutes reasoning_content to the CONTENT channel when
+    thinking was disabled — a measured Qwen3.6-on-vLLM misroute (2026-08-09 run,
+    35 followups with result_len=0). A strength model has no disabled state to
+    misroute out of: its OFF rung still reasons, so that text is genuinely
+    reasoning and routing it to content would splice the model's thinking into a
+    Rust body."""
+    muse = t.VLLMTransport()
+    muse._model_name = "RedHatAI/Muse-Glimmer-30B-FP8-block"
+    assert muse._reasoning_delta("weighing it up", False).reasoning == "weighing it up"
+    assert muse._reasoning_delta("weighing it up", False).content in (None, "")
+    # The Qwen behaviour it is scoped away from is unchanged.
+    qwen = t.VLLMTransport()
+    qwen._model_name = "Qwen/Qwen3.6-27B-FP8"
+    assert qwen._reasoning_delta("the answer", False).content == "the answer"
+    assert qwen._reasoning_delta("thinking", True).reasoning == "thinking"
+
+
+def test_muse_glimmer_is_not_prompted_as_a_weak_model() -> None:
+    """model_tier falls back to WEAK for any name it does not recognise, which
+    silently drops the FILE markers and explicit reasoning directives from the
+    prompts — no error, just worse output from a model reported at 51.2 on
+    SWE-Bench Pro."""
+    from pipeline_core.domain.enums import ModelTier
+    from pipeline_core.domain.model_caps import model_tier
+    assert model_tier("RedHatAI/Muse-Glimmer-30B-FP8-block") is ModelTier.MID
+    assert model_tier("meta-models/Muse-Glimmer-30B") is ModelTier.MID

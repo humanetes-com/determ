@@ -41,21 +41,78 @@ _model_cached() {
     return 0
 }
 
-VLLM_MODEL=$(_env VLLM_MODEL_NAME)
+# MODEL is the one switch. VLLM_MODEL_NAME falls back to it exactly as the
+# Python side does (`os.getenv("VLLM_MODEL_NAME", MODEL)` in
+# pipeline_core/adapters/llm_transports.py), and TaskModels.from_env defaults
+# every TASK*_MODEL to it too, so with the per-key overrides left unset in .env
+# a single MODEL= line moves the server, the served name, the per-task models
+# and — through MODEL_CAPS and model_tier, both keyed on that same string — the
+# reasoning dialect and the prompt tier.
+VLLM_MODEL=$(_env VLLM_MODEL_NAME); VLLM_MODEL="${VLLM_MODEL:-$(_env MODEL)}"
 VLLM_URL=$(_env VLLM_BASE_URL); VLLM_URL="${VLLM_URL:-http://localhost:8000/v1}"
 VLLM_PORT="${VLLM_URL##*:}"; VLLM_PORT="${VLLM_PORT%%/*}"; VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_TP=$(_env VLLM_TENSOR_PARALLEL); VLLM_TP="${VLLM_TP:-1}"
-VLLM_MAX_LEN=$(_env VLLM_MAX_MODEL_LEN); VLLM_MAX_LEN="${VLLM_MAX_LEN:-131072}"
+
+# Server-side defaults that are a property of the MODEL, not of this box. An
+# explicit .env key still wins; these only fill a gap, so switching models does
+# not mean remembering four more lines. Keyed on the model string, like
+# MODEL_CAPS on the Python side — the two tables carry different facts (server
+# flags here, request dialect there) and are keyed the same on purpose.
+#
+#   image      Muse Glimmer needs vLLM 0.27.0+ for its architecture and the
+#              muse_glimmer parsers, shipped as vllm/vllm-openai:muse-glimmer;
+#              Qwen3.6-27B-FP8 runs on :latest.
+#   parsers    muse_glimmer emits reasoning and tool calls in its own framing.
+#   max len    a CEILING, not just a default. Qwen3.6-FP8 (~30 GB) leaves room
+#              for 131072 across the two 24 GB cards; the Muse FP8-block weights
+#              are 32.8 GB and the model keeps a BF16 vision tower and a
+#              202k-entry BF16 output head, so the KV pool that remains will not
+#              hold it. This one stays an explicit .env key rather than a pure
+#              derivation because the PYTHON side reads VLLM_MAX_MODEL_LEN
+#              directly for its budget math (VLLMTransport._ctx, whose own
+#              default is 65536) — deleting the key to let the launcher derive it
+#              would quietly halve the client's context while the server kept
+#              serving 131072. So: keep the key, and refuse a value the model
+#              cannot honour instead of letting vLLM fail at KV allocation with
+#              an error that names no cause.
+case "$VLLM_MODEL" in
+    *Muse-Glimmer*)
+        _def_image="vllm/vllm-openai:muse-glimmer"
+        _def_reasoning="muse_glimmer"; _def_tool="muse_glimmer"; _max_len_ceiling=32768 ;;
+    *Qwen3.6*|*qwen3*)
+        _def_image="vllm/vllm-openai:latest"
+        _def_reasoning="qwen3"; _def_tool=""; _max_len_ceiling=131072 ;;
+    *)
+        # Unknown model: no parser rather than a guessed one. A wrong
+        # --reasoning-parser does not fail, it just stops splitting reasoning
+        # out of the answer, so guessing costs more than declining.
+        _def_image="vllm/vllm-openai:latest"
+        _def_reasoning=""; _def_tool=""; _max_len_ceiling=131072 ;;
+esac
+VLLM_MAX_LEN=$(_env VLLM_MAX_MODEL_LEN); VLLM_MAX_LEN="${VLLM_MAX_LEN:-$_max_len_ceiling}"
+if (( VLLM_MAX_LEN > _max_len_ceiling )); then
+    echo "[error] VLLM_MAX_MODEL_LEN=$VLLM_MAX_LEN exceeds the $_max_len_ceiling this box has" >&2
+    echo "        measured room for with '$VLLM_MODEL' at TP=$VLLM_TP." >&2
+    echo "        → set VLLM_MAX_MODEL_LEN=$_max_len_ceiling in .env (the Python budget math" >&2
+    echo "          reads the same key, so it must be the value the server is started with)." >&2
+    exit 1
+fi
+VLLM_IMAGE=$(_env VLLM_IMAGE); VLLM_IMAGE="${VLLM_IMAGE:-$_def_image}"
+VLLM_REASONING=$(_env VLLM_REASONING_PARSER); VLLM_REASONING="${VLLM_REASONING:-$_def_reasoning}"
+VLLM_TOOL=$(_env VLLM_TOOL_CALL_PARSER); VLLM_TOOL="${VLLM_TOOL:-$_def_tool}"
 HF_TOKEN=$(_env HF_TOKEN)
 CONTAINER_ID_FILE=/tmp/vllm_container.id
 
 # Parse flags: --y / -y skips the confirmation prompts below.
 # --allow-download bypasses the "model fully cached?" gate (lets vLLM fetch it).
+# --no-pull keeps whatever image copy is on disk (offline restart after a crash).
 _YES=false
 _ALLOW_DL=false
+_NO_PULL=false
 for _arg in "$@"; do
     [[ "$_arg" == "--y" || "$_arg" == "-y" ]] && _YES=true
     [[ "$_arg" == "--allow-download" ]] && _ALLOW_DL=true
+    [[ "$_arg" == "--no-pull" ]] && _NO_PULL=true
 done
 
 # Fail fast BEFORE touching any container: if VLLM_MODEL_NAME isn't fully in the
@@ -118,8 +175,13 @@ if [[ -f "$CONTAINER_ID_FILE" ]]; then
     fi
 fi
 if [[ -z "$_running_cid" ]]; then
-    # Fallback: look for any running vllm-openai container.
-    _running_cid=$(docker ps -q --filter ancestor=vllm/vllm-openai:latest | head -1)
+    # Fallback: any running vllm-openai container, WHATEVER tag it was started
+    # from. An ancestor filter pinned to one tag misses a server left over from
+    # a different image (a :latest container while VLLM_IMAGE now names
+    # :muse-glimmer), and that container still holds both GPUs — the new one
+    # would then OOM at load with no hint as to why.
+    _running_cid=$(docker ps --format '{{.ID}} {{.Image}}' \
+        | awk '$2 ~ /vllm\/vllm-openai/ {print $1}' | head -1)
 fi
 
 if [[ -n "$_running_cid" ]]; then
@@ -140,9 +202,36 @@ if [[ -n "$_running_cid" ]]; then
 fi
 rm -f "$CONTAINER_ID_FILE"
 
+# Pull before every launch. `docker run` only fetches an image it does not
+# already have LOCALLY, so a moving tag never moves once pulled: this box can
+# sit on a months-old :latest and report the vLLM version that shipped with it,
+# which is how a model that needs a newer server fails as "unknown
+# architecture" rather than as "your image is stale". A no-op when current.
+# Non-fatal: an offline relaunch after a crash must still start on the local
+# copy, and the run below fails loudly by itself if there is no copy at all.
+if [[ "$_NO_PULL" == false ]]; then
+    echo "Pulling $VLLM_IMAGE (skip with --no-pull) ..."
+    docker pull "$VLLM_IMAGE" || echo "[warn] pull failed — using the local copy of $VLLM_IMAGE, which may be stale."
+else
+    echo "Skipping image pull (--no-pull) — using the local copy of $VLLM_IMAGE."
+fi
+if ! _img_built=$(docker image inspect -f '{{.Created}}' "$VLLM_IMAGE" 2>/dev/null); then
+    echo "[error] image '$VLLM_IMAGE' is not present locally and could not be pulled." >&2
+    exit 1
+fi
+echo "Image $VLLM_IMAGE built ${_img_built%T*}"
+
 echo "Starting vLLM Docker container (model: $VLLM_MODEL) ..."
+echo "  tp=$VLLM_TP  max-model-len=$VLLM_MAX_LEN  reasoning-parser=${VLLM_REASONING:-<none>}  tool-call-parser=${VLLM_TOOL:-<none>}"
 _hf_env=()
 [[ -n "$HF_TOKEN" ]] && _hf_env=(-e "HF_TOKEN=${HF_TOKEN}")
+
+# Parser flags are built rather than inlined: an empty VLLM_REASONING_PARSER
+# used to reach vLLM as `--reasoning-parser ""`, and the tool-call parser is
+# per-model (muse_glimmer needs one, the Qwen path does not).
+_parser_args=()
+[[ -n "$VLLM_REASONING" ]] && _parser_args+=(--reasoning-parser "$VLLM_REASONING")
+[[ -n "$VLLM_TOOL" ]] && _parser_args+=(--enable-auto-tool-choice --tool-call-parser "$VLLM_TOOL")
 
 CID=$(docker run -d \
     --runtime nvidia --gpus all \
@@ -151,7 +240,7 @@ CID=$(docker run -d \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p "${VLLM_PORT}:${VLLM_PORT}" \
     --ipc=host \
-    vllm/vllm-openai:latest \
+    "$VLLM_IMAGE" \
     "$VLLM_MODEL" \
     --port "$VLLM_PORT" \
     --tensor-parallel-size "$VLLM_TP" \
@@ -159,7 +248,7 @@ CID=$(docker run -d \
     --gpu-memory-utilization 0.90 \
     --enable-prefix-caching \
     --max-num-seqs 4 \
-    --reasoning-parser "$(_env VLLM_REASONING_PARSER)")
+    "${_parser_args[@]}")
 
 
 echo "$CID" > "$CONTAINER_ID_FILE"

@@ -67,10 +67,38 @@ MAX_TOKENS = _default_max_tokens()
 #                receives an empty string when think=True via compat.
 #                qwen3:32b works fine via compat (older Qwen3 family, no this issue).
 #
+# reasoning     — WHICH chat-template variable turns extended reasoning on and off
+#                for this model. Two dialects exist among the models served here and
+#                they are not interchangeable:
+#
+#                "enable_thinking"  — Qwen3.6's template branches on a boolean
+#                    `enable_thinking`, so False actually suppresses the think block.
+#
+#                "reasoning_strength" — Muse-Glimmer-30B's template has NO thinking
+#                    boolean. It reads a level and renders it into the system prompt:
+#                        {%- set rs = reasoning_strength if reasoning_strength is
+#                           defined and reasoning_strength else 'high' -%}
+#                        {{- 'Reasoning strength: ' + rs + '.' -}}
+#                    (chat_template.jinja, meta-models/Muse-Glimmer-30B, read
+#                    2026-08-10). Levels are low / medium / high / xhigh; the card
+#                    recommends high or xhigh for coding and agentic work, and the
+#                    template's own default when the variable is absent is 'high'.
+#
+#                The failure this key exists to prevent: an unknown template
+#                variable is not an error, it is silently dropped. Sending
+#                `enable_thinking: false` to Muse Glimmer leaves `rs` undefined,
+#                the template falls back to 'high', and the request that asked for
+#                NO reasoning gets the most. The followup path depends on that
+#                suppression working — it re-feeds the reasoning and asks for code
+#                only — so on the wrong dialect it would re-reason instead.
+#
 # History:
 #   qwen3:32b        — confirmed good results via OpenAI-compat + think:true (sessions 3-9)
 #   qwen3.6:27b      — needs native ollama endpoint; think:true recommended for coding tasks
 #   qwen3.6-27b-q8   — SGLang served name for the same model; uses OpenAI-compat + thinking_budget
+REASONING_ENABLE_THINKING = "enable_thinking"
+REASONING_STRENGTH = "reasoning_strength"
+
 MODEL_CAPS: dict[str, dict[str, Any]] = {
     "qwen3:32b":                  {"think": True,  "native_ollama": False},
     "qwen3.6:27b":                {"think": True,  "native_ollama": True},
@@ -86,7 +114,20 @@ MODEL_CAPS: dict[str, dict[str, Any]] = {
     "Qwen/Qwen3.6-27B-FP8":                      {"think": True,  "native_ollama": False},
     "mattbucci/Qwen3.6-27B-AWQ":                  {"think": True,  "native_ollama": False},
     "/home/user/Qwen3.6-27B-Q8_0.gguf":          {"think": True,  "native_ollama": False},
+    "meta-models/Muse-Glimmer-30B":               {"think": True,  "native_ollama": False,
+                                                  "reasoning": REASONING_STRENGTH},
+    "RedHatAI/Muse-Glimmer-30B-FP8-block":        {"think": True,  "native_ollama": False,
+                                                  "reasoning": REASONING_STRENGTH},
 }
+
+# The two rungs the boolean `enable_thinking` maps onto in the strength dialect.
+# There is no "off": the levels are low / medium / high / xhigh, so a request
+# that wants no reasoning asks for the least. Both are overridable because the
+# right ON rung is a quality/latency trade the card leaves open (it recommends
+# "high or xhigh" for coding and agentic tasks) and only a measured run here can
+# settle it.
+_REASONING_STRENGTH_ON = os.getenv("VLLM_REASONING_STRENGTH", "high")
+_REASONING_STRENGTH_OFF = os.getenv("VLLM_REASONING_STRENGTH_OFF", "low")
 
 
 def _model_uses_think(model: str) -> bool:
@@ -95,6 +136,23 @@ def _model_uses_think(model: str) -> bool:
 
 def _model_use_native_ollama(model: str) -> bool:
     return bool(MODEL_CAPS.get(model, {}).get("native_ollama", False))
+
+
+def _model_reasoning_dialect(model: str) -> str:
+    """Which chat-template variable expresses reasoning on/off for this model.
+
+    Defaults to the boolean dialect: it is what every model served here before
+    Muse Glimmer used, and a model whose template has neither variable drops it
+    either way."""
+    return str(MODEL_CAPS.get(model, {}).get("reasoning", REASONING_ENABLE_THINKING))
+
+
+def reasoning_template_kwargs(model: str, enable_thinking: bool) -> dict[str, Any]:
+    """The `chat_template_kwargs` payload that asks `model` for (no) reasoning."""
+    if _model_reasoning_dialect(model) == REASONING_STRENGTH:
+        return {REASONING_STRENGTH: _REASONING_STRENGTH_ON if enable_thinking
+                else _REASONING_STRENGTH_OFF}
+    return {REASONING_ENABLE_THINKING: enable_thinking}
 
 
 # ---------------------------------------------------------------------------
@@ -678,8 +736,7 @@ class VLLMTransport(_BaseTransport):
         base = _model_uses_think(self._model_name) if want_think is None else want_think
         return base and self._thinking_budget > 0
 
-    @staticmethod
-    def _reasoning_delta(reasoning: str, enable_thinking: bool) -> Delta:
+    def _reasoning_delta(self, reasoning: str, enable_thinking: bool) -> Delta:
         """Which channel this server's reasoning-field text belongs on.
 
         A request that DISABLED thinking has no legitimate reasoning channel, so
@@ -698,7 +755,16 @@ class VLLMTransport(_BaseTransport):
         is the case the separate field exists for. Scoped to this transport
         deliberately: it is a property of what this server does with
         `chat_template_kwargs.enable_thinking`, not a fact about the protocol,
-        and the other compat paths are not in use to have been measured."""
+        and the other compat paths are not in use to have been measured.
+
+        Scoped to the boolean dialect for the same reason. A model whose template
+        takes a reasoning STRENGTH has no disabled state to misroute out of —
+        `enable_thinking=False` becomes the lowest rung, which still reasons, and
+        its reasoning_content is then genuinely reasoning. Rerouting it to content
+        would splice the model's thinking into the answer that gets written to a
+        Rust body."""
+        if _model_reasoning_dialect(self._model_name) == REASONING_STRENGTH:
+            return Delta(reasoning=reasoning)
         return Delta(reasoning=reasoning) if enable_thinking else Delta(content=reasoning)
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
@@ -708,7 +774,7 @@ class VLLMTransport(_BaseTransport):
         client = OpenAI(base_url=self._base_url, api_key="vllm",
                         timeout=httpx.Timeout(connect=30, read=900, write=30, pool=30))
         extra_body: dict[str, Any] = {
-            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+            "chat_template_kwargs": reasoning_template_kwargs(self._model_name, enable_thinking),
             "repetition_penalty": self._rep_penalty,
         }
         try:

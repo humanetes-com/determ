@@ -27,19 +27,34 @@ from enum import StrEnum
 NO_VERDICTS_METRIC = 1_000_000
 
 
-def failure_metric(*, ran: bool, failures: int) -> int:
-    """The improvement loop's lower-is-better reading of one sweep."""
-    return failures if ran else NO_VERDICTS_METRIC
+def failure_metric(*, ran: bool, failures: int, diag_count: int = 0) -> int:
+    """The improvement loop's lower-is-better reading of one sweep.
+
+    `diag_count` — distinct compile diagnostics, consulted only when the sweep
+    produced no verdicts — keeps a broken tree ORDERED instead of constant: a
+    flat `NO_VERDICTS_METRIC` read 2 compile errors and 3 as the same reading,
+    so nothing accumulating new damage on a broken tree could ever register as
+    worse. The sentinel still dominates any real failure count (no crate has a
+    million distinct diagnostics), so a broken tree never beats one that ran."""
+    return failures if ran else NO_VERDICTS_METRIC + diag_count
 
 
 @dataclass(frozen=True, slots=True)
 class ClusterReading:
     """One cluster's verdict on one tree state. `ran` is the compile/run state —
-    a cluster whose binaries never reported has no meaningful `failures`."""
+    a cluster whose binaries never reported has no meaningful `failures`.
+
+    `diag_count` is the DISTINCT compile-diagnostic count observed when
+    `ran=False` (0 whenever the cluster ran: a tree that produced verdicts
+    compiled). It is what lets two broken readings of the same cluster be
+    compared at all — deduplicated, because a cluster-wide break reprints the
+    same lib error once per test binary, so a raw occurrence count moves with
+    binary coverage while the distinct set is stable."""
 
     cluster: str
     ran: bool
     failures: int
+    diag_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +89,7 @@ class BodyVerdict(StrEnum):
     KEEP = "keep"
     REVERT_BROKE_BUILD = "broke_build"   # a cluster stopped reporting verdicts
     REVERT_REGRESSED = "regressed"       # a cluster gained failing tests
+                                         # or new compile errors while broken
 
 
 def body_verdict(*, before: TreeReading, after: TreeReading) -> BodyVerdict:
@@ -83,15 +99,28 @@ def body_verdict(*, before: TreeReading, after: TreeReading) -> BodyVerdict:
     test in `nightly` and breaks one in `stable` nets zero and must still be
     refused.
 
-    Both comparisons are gated on the cluster having RUN before. A cluster that
-    was not producing verdicts has no failure count worth comparing — a body
-    that gets it compiling again reports its first real failures, and reading
-    those as "regressed from 0" would revert exactly the body that fixed the
-    build.
+    The failure-count comparisons are gated on the cluster having RUN before.
+    A cluster that was not producing verdicts has no failure count worth
+    comparing — a body that gets it compiling again reports its first real
+    failures, and reading those as "regressed from 0" would revert exactly the
+    body that fixed the build.
+
+    A cluster broken on BOTH sides is compared on its distinct
+    compile-diagnostic count instead of being skipped. Skipping it entirely
+    meant a broken cluster could not get worse: for 4h15m on 2026-08-10 (run
+    `2514529-5e77dafb`) every accepted splice was gated on "stable didn't
+    regress, nightly still says NO VERDICTS" — nightly's 2 E0605s free to
+    become N with no gate able to see it, during the repair of the other
+    cluster. Equal counts stay neutral (the splice did not touch that
+    cluster's break), and the broken→running transition still keeps.
     """
     for aft in after.per_cluster:
         bef = before.cluster(aft.cluster)
-        if bef is None or not bef.ran:
+        if bef is None:
+            continue
+        if not bef.ran:
+            if not aft.ran and aft.diag_count > bef.diag_count:
+                return BodyVerdict.REVERT_REGRESSED
             continue
         if not aft.ran:
             return BodyVerdict.REVERT_BROKE_BUILD

@@ -354,6 +354,16 @@ def test_real_stream_reads_both_reasoning_field_names(monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 # 4. the followup answer must not be discarded as reasoning
 # --------------------------------------------------------------------------- #
+def _vllm_transport_for(model: str) -> VLLMTransport:
+    """A transport pinned to `model`, so the routing rule under test is read
+    against a named model rather than whatever VLLM_MODEL_NAME happens to hold
+    when the suite runs."""
+    tr = VLLMTransport()
+    tr._model_name = model
+    return tr
+
+
+
 def test_followup_answer_on_the_reasoning_channel_is_kept() -> None:
     """Qwen3.6-FP8 on vLLM answers a `enable_thinking=False` followup through
     `reasoning_content`, leaving `content` empty. The 2026-08-09 00:37 run
@@ -370,10 +380,14 @@ def test_followup_answer_on_the_reasoning_channel_is_kept() -> None:
                          spec=_spec(thinking_char_cap=CAP))
     assert _run(lost)[0] == ""
 
-    # Routed by the rule under test, the same bytes survive.
-    assert VLLMTransport._reasoning_delta(answer, False) == Delta(content=answer)
+    # Routed by the rule under test, the same bytes survive. Pinned to the model
+    # the misroute was measured on: the rule is scoped to the boolean thinking
+    # dialect, and a model whose template takes a reasoning STRENGTH instead has
+    # no disabled state to misroute out of (see llm_transports.MODEL_CAPS).
+    _qwen = _vllm_transport_for("Qwen/Qwen3.6-27B-FP8")
+    assert _qwen._reasoning_delta(answer, False) == Delta(content=answer)
     kept = FakeTransport(
-        [_runaway(), [VLLMTransport._reasoning_delta(answer, False)]],
+        [_runaway(), [_qwen._reasoning_delta(answer, False)]],
         spec=_spec(thinking_char_cap=CAP))
     assert _run(kept)[0] == answer
 
@@ -381,8 +395,8 @@ def test_followup_answer_on_the_reasoning_channel_is_kept() -> None:
 def test_reasoning_stays_reasoning_when_thinking_was_requested() -> None:
     """The separate field exists for the thinking case; redirecting it there
     would feed the reasoning block back as the answer and defeat the cap."""
-    assert VLLMTransport._reasoning_delta("deliberating", True) == Delta(
-        reasoning="deliberating")
+    assert _vllm_transport_for("Qwen/Qwen3.6-27B-FP8")._reasoning_delta(
+        "deliberating", True) == Delta(reasoning="deliberating")
     t = FakeTransport([_runaway(), [Delta(content="fn f() {}")]],
                       spec=_spec(thinking_char_cap=CAP))
     out, guards = _run(t)

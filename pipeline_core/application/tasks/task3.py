@@ -288,8 +288,13 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
             _unrepairable = not_body_repairable_tests(
                 list((project_dir / "tests").rglob("*.rs")))
             _by_name = {r["cluster"]: r for r in _actionable}
+            # compile-broken = INCOMPLETE with rc != 0: no verdicts, compiler
+            # diagnostics present. Disjoint from every test-failing candidate
+            # (those are status FAIL), so the 2026-08-05 ordering between two
+            # clusters that both RAN is untouched.
             _order = rank_repair_candidates(
-                [(r["cluster"], frozenset(parse_failed_tests(r["output"])))
+                [(r["cluster"], frozenset(parse_failed_tests(r["output"])),
+                  r["status"] == ClusterStatus.INCOMPLETE and r["rc"] != 0)
                  for r in _actionable], _unrepairable)
             _chosen = _by_name[_order[0]]
             primary_test_output = _chosen["output"]

@@ -19,6 +19,13 @@ _MID_TIER_PREFIXES: tuple[str, ...] = (
     "qwen3", "qwen2.5-72",
     "llama-3.3-70", "llama-3.1-70", "llama-3.1-405",
     "mistral-large", "mixtral-8x22",
+    # Muse-Glimmer-30B. Without an entry it classifies WEAK by fallback and the
+    # prompts silently lose the FILE markers and explicit reasoning directives —
+    # a quality drop with no error, on a model whose card reports 51.2 on
+    # SWE-Bench Pro and which is built for multi-step tool use. Matched on the
+    # bare name, so it covers both the BF16 repo and the FP8-block one
+    # ("muse-glimmer-30b", "muse-glimmer-30b-fp8-block").
+    "muse-glimmer",
 )
 
 # Headroom (tokens) reserved for the system prompt + generation; the rest is content.

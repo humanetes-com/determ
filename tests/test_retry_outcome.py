@@ -67,9 +67,12 @@ def test_retry_mode_values() -> None:
 
 # ── the per-body accept gate's decision, and the ran-state metric ─────────────
 
-def _r(**per: tuple[bool, int]) -> TreeReading:
+def _r(**per: tuple) -> TreeReading:
+    """`cluster=(ran, failures)` or `cluster=(ran, failures, diag_count)`."""
     return TreeReading(per_cluster=tuple(
-        ClusterReading(cluster=k, ran=ran, failures=f) for k, (ran, f) in per.items()))
+        ClusterReading(cluster=k, ran=t[0], failures=t[1],
+                       diag_count=t[2] if len(t) > 2 else 0)
+        for k, t in per.items()))
 
 
 def test_a_body_that_fixes_one_cluster_and_breaks_another_is_refused() -> None:
@@ -103,6 +106,38 @@ def test_a_neutral_body_is_kept() -> None:
     assert body_verdict(before=same, after=same) is BodyVerdict.KEEP
 
 
+def test_a_broken_cluster_gaining_compile_errors_is_refused() -> None:
+    """Skipping a baseline-not-ran cluster entirely meant a broken cluster
+    could not get worse: for 4h15m on 2026-08-10 (run `2514529-5e77dafb`)
+    every accepted splice was gated on "stable didn't regress, nightly still
+    says NO VERDICTS" — nightly's 2 E0605s free to become N unseen. Two broken
+    readings compare on their distinct compile-diagnostic count."""
+    assert body_verdict(
+        before=_r(nightly=(False, 0, 2), stable=(True, 17)),
+        after=_r(nightly=(False, 0, 3), stable=(True, 17)),
+    ) is BodyVerdict.REVERT_REGRESSED
+
+
+def test_a_broken_cluster_with_the_same_errors_stays_neutral() -> None:
+    """2 → 2: the splice did not touch that cluster's break — refusing on it
+    would deadlock every stable-side repair while nightly stays broken."""
+    assert body_verdict(
+        before=_r(nightly=(False, 0, 2), stable=(True, 17)),
+        after=_r(nightly=(False, 0, 2), stable=(True, 16)),
+    ) is BodyVerdict.KEEP
+
+
+def test_the_broken_to_running_transition_still_keeps() -> None:
+    """The deliberate skip survives the diag-count comparison: a body that
+    gets a broken cluster compiling reports its first real failures, and
+    reading those as a regression would revert exactly the body that fixed
+    the build."""
+    assert body_verdict(
+        before=_r(nightly=(False, 0, 2), stable=(True, 1)),
+        after=_r(nightly=(True, 5), stable=(True, 1)),
+    ) is BodyVerdict.KEEP
+
+
 def test_a_cluster_absent_from_the_baseline_cannot_convict() -> None:
     assert body_verdict(before=_r(nightly=(True, 1)),
                         after=_r(nightly=(True, 1), stable=(True, 9))) is BodyVerdict.KEEP
@@ -114,6 +149,17 @@ def test_a_tree_with_no_verdicts_scores_worse_than_any_failure_count() -> None:
     on a tree that compiled nothing."""
     assert failure_metric(ran=False, failures=0) > failure_metric(ran=True, failures=999)
     assert failure_metric(ran=True, failures=3) == 3
+
+
+def test_a_broken_tree_is_ordered_by_its_diagnostic_count() -> None:
+    """A flat sentinel read 2 compile errors and 3 as the same reading, so a
+    broken tree accumulating damage could never register as worse. The count
+    rides on top of the sentinel; the sentinel still dominates any real
+    failure count."""
+    two = failure_metric(ran=False, failures=0, diag_count=2)
+    three = failure_metric(ran=False, failures=0, diag_count=3)
+    assert three > two
+    assert two > failure_metric(ran=True, failures=999)
 
 
 def test_tree_reading_aggregates_ran_and_failures() -> None:
@@ -131,24 +177,48 @@ def test_the_repair_cluster_is_chosen_by_evidence_not_by_name() -> None:
     compile-fail harness no body rewrite can satisfy) plus `test_boxed_str`;
     `stable` fails only `test_boxed_str`."""
     order = rank_repair_candidates(
-        [("nightly", frozenset({"ui", "test_boxed_str"})),
-         ("stable", frozenset({"test_boxed_str"}))],
+        [("nightly", frozenset({"ui", "test_boxed_str"}), False),
+         ("stable", frozenset({"test_boxed_str"}), False)],
         unrepairable=frozenset({"ui"}))
     assert order[0] == "stable"
 
 
 def test_a_cluster_whose_every_failure_is_unrepairable_goes_last() -> None:
     order = rank_repair_candidates(
-        [("nightly", frozenset({"ui"})),
-         ("stable", frozenset({"a", "b", "c"}))],
+        [("nightly", frozenset({"ui"}), False),
+         ("stable", frozenset({"a", "b", "c"}), False)],
         unrepairable=frozenset({"ui"}))
     assert order == ["stable", "nightly"]
 
 
 def test_the_choice_is_reproducible_when_the_evidence_ties() -> None:
     order = rank_repair_candidates(
-        [("stable", frozenset({"x"})), ("nightly", frozenset({"y"}))])
+        [("stable", frozenset({"x"}), False), ("nightly", frozenset({"y"}), False)])
     assert order == ["nightly", "stable"]
+
+
+def test_a_compile_broken_cluster_repairs_first_without_disturbing_the_test_order() -> None:
+    """Both incidents, same test, so the second fix can never regress the first.
+
+    2026-08-10 (run `2514529-5e77dafb`): `nightly` INCOMPLETE rc=101 — 2
+    compile errors, NO failing-test names — sorted into the "nothing
+    repairable" bucket and waited 4h15m behind `stable`'s 17-failure TEST-mode
+    grind, its ~138 expected verdicts worth zero to the accept gate the whole
+    time. Compile-broken now ranks first: the fix is bounded by diagnostic
+    count and restores the cluster's verdicts for every later repair.
+
+    2026-08-05: both clusters RAN (compile_broken False — INCOMPLETE+rc≠0 is
+    disjoint from "ran with unrepairable failures"), so the name-based key
+    still decides and `stable` still beats ui-only `nightly`."""
+    broken_incident = rank_repair_candidates(
+        [("nightly", frozenset(), True),
+         ("stable", frozenset({f"t{i}" for i in range(17)}), False)])
+    assert broken_incident[0] == "nightly"
+    ran_incident = rank_repair_candidates(
+        [("nightly", frozenset({"ui", "test_boxed_str"}), False),
+         ("stable", frozenset({"test_boxed_str"}), False)],
+        unrepairable=frozenset({"ui"}))
+    assert ran_incident[0] == "stable"
 
 
 # ── the merged view's cfg identity ───────────────────────────────────────────

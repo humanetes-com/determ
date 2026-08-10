@@ -217,7 +217,18 @@ export LLM_DEBUG_LOG LLM_STREAM_LOG OLLAMA_CHUNK_TIMEOUT OLLAMA_MAX_THINK_CHARS
 if [[ "$BACKEND" == "vllm" ]]; then
     _vllm_url=$(grep -E "^[[:space:]]*VLLM_BASE_URL=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
     _vllm_port="${_vllm_url##*:}"; _vllm_port="${_vllm_port%%/*}"; _vllm_port="${_vllm_port:-8000}"
-    _model=$(grep -E "^[[:space:]]*VLLM_MODEL_NAME=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
+    # VLLM_MODEL_NAME is legitimately unset (.env documents it as defaulting
+    # to MODEL on both the Python and the launcher side) — and under
+    # `set -euo pipefail` an unmatched grep in the substitution exits the
+    # WHOLE script here, after the server check and before the launch block:
+    # continue.sh printed "vLLM already healthy" and died rc=1 with no
+    # pipeline started (2026-08-10). Tolerate the miss and apply the
+    # documented default, so the readiness POST also probes a model name the
+    # server actually serves instead of 404ing for the full 20-min budget.
+    _model=$(grep -E "^[[:space:]]*VLLM_MODEL_NAME=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true)
+    if [[ -z "$_model" ]]; then
+        _model=$(grep -E "^[[:space:]]*MODEL=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true)
+    fi
     echo "Waiting for vLLM inference endpoint to be ready ..."
     for _i in $(seq 1 240); do
         _status=$(curl -s -o /dev/null -w "%{http_code}" \
