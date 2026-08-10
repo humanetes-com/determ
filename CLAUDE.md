@@ -1,6 +1,22 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Comments and docstrings must stand alone
+## Nothing leaves this machine
+
+**Never transmit repository or workspace content to any external service.**
+No claude.ai Artifact publishing, no gists or pastebins, no third-party APIs,
+no cloud-side agents or remote sessions. This covers everything: source,
+logs, prompts, spec docs, trackers, and the crate under reconstruction. The
+only sanctioned LLM endpoint is the locally served model (vLLM/Ollama on
+localhost).
+
+**Why.** The pipeline's whole design assumes a closed loop on this machine —
+uncommitted trees, untracked working notes, and logs that quote both. An
+upload publishes whatever it carries; external services may cache or index
+it, and deletion is not retrieval.
+
+**Instead, render and share locally.** A markdown preview in the IDE, a
+local mermaid render to SVG, a file path in the chat. If a preview genuinely
+cannot be produced locally, say so and stop — do not fall back to an upload.
 
 **Never reference a tracker ID in source, tests, prompts, log lines or event
 payloads.** That means no `debt 91.2`, no `debt #46 point 2`, no `FR-018`, no

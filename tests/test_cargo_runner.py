@@ -446,3 +446,129 @@ def test_u2_gate_rc_zero_missing_test_is_a_filter_miss_not_an_abort() -> None:
     v = _gate(_const_run_cargo(0, "test a ... ok\ntest result: ok. 1 passed"),
               {"a", "b"}, baseline=_judged(["a", "b"]))
     assert v.decision is U2Decision.ACCEPT
+
+
+# --- crash attribution: a stub panic is the hollow tree speaking -------------
+# Run `1048052-2feafd52` (2026-08-09, cluster `stable`): `from_boxed` burned 5
+# attempts on "U2 test failed ... (binary crashed)" and `context.rs`'s
+# file-first fill was reverted "binary crashed: ['unittests src/lib.rs']
+# (net -2 test(s))" — in both cases the aborting panic was `not implemented`
+# inside a still-stubbed sibling (`src/error.rs` drop-path fns), so the fill
+# under judgment was never the fault. While any drop-path stub remains, every
+# correct fill crashes the binary, the guard reverts it, and the component can
+# only close by one lottery sweep that fills everything at once.
+
+
+def test_u2_gate_abort_by_external_stub_panic_keeps_fill(tmp_path) -> None:
+    # The unit's judged tests vanished (abort), but the capture proves the
+    # aborting panic fired inside ANOTHER fn's `unimplemented!()` — e.g. a
+    # correct vtable body finally lets Error::drop reach hollow object_drop.
+    # Keep the fill, name the blocker, defer to the outer loop.
+    (tmp_path / "src").mkdir()
+    err = tmp_path / "src" / "error.rs"
+    err.write_text("fn object_drop() {\n    unimplemented!()\n}\n",
+                   encoding="utf-8")
+    recs = [{"file": "src/error.rs", "fn_name": "object_drop",
+             "container": "impl Error", "sig_byte_start": 0,
+             "body_byte_end": len(err.read_text())}]
+    out = ("running 2 tests\n"
+           "test a ... \n"
+           "thread 'a' panicked at src/error.rs:2:5:\n"
+           "not implemented\n"
+           "error: process didn't exit successfully")
+    v = _gate(_const_run_cargo(101, out), {"a", "b"},
+              baseline=_judged(["a", "b"]),
+              unit_fns=frozenset({FnSite("src/lib.rs", "mine", "")}),
+              structure=_FakeStructure(recs), src_dir=tmp_path)
+    assert v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
+    assert FnSite("src/error.rs", "object_drop", "impl Error") in v.blocking_fns
+
+
+def test_u2_gate_abort_with_own_panic_still_charges(tmp_path) -> None:
+    # Negative control for the keep: the aborting panic locates INSIDE the
+    # unit itself — that is the unit's own fault, REJECT exactly as before.
+    (tmp_path / "src").mkdir()
+    lib = tmp_path / "src" / "lib.rs"
+    lib.write_text("fn mine() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    recs = [{"file": "src/lib.rs", "fn_name": "mine", "container": "",
+             "sig_byte_start": 0, "body_byte_end": len(lib.read_text())}]
+    out = ("running 2 tests\n"
+           "test a ... \n"
+           "thread 'a' panicked at src/lib.rs:2:5:\n"
+           "not implemented\n")
+    v = _gate(_const_run_cargo(101, out), {"a", "b"},
+              baseline=_judged(["a", "b"]),
+              unit_fns=frozenset({FnSite("src/lib.rs", "mine", "")}),
+              structure=_FakeStructure(recs), src_dir=tmp_path)
+    assert v.decision is U2Decision.REJECT
+
+
+def test_u2_gate_abort_without_stub_evidence_still_charges() -> None:
+    # Negative control: a silent abort (segfault — no panic text at all) keeps
+    # the pre-existing REJECT; forgiveness rides ONLY on stub-panic proof.
+    v = _gate(_const_run_cargo(101, "error: process didn't exit successfully"),
+              {"a", "b"}, baseline=_judged(["a", "b"]))
+    assert v.decision is U2Decision.REJECT
+    assert "ABORTED the test process" in v.detail
+
+
+def _crashed_after(panic_lines: str) -> str:
+    """After-reading for the regression gate: the one baseline binary opens
+    its section and dies before the trailer."""
+    return ("    Running unittests src/lib.rs (t/lib-1)\n"
+            "running 2 tests\n"
+            "test x ... \n" + panic_lines)
+
+
+def _completed_baseline() -> object:
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    base_out = ("    Running unittests src/lib.rs (t/lib-1)\n"
+                "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+                "test result: ok. 2 passed; 0 failed; 0 ignored\n")
+    return TestStateReading(parse_binary_results(base_out))
+
+
+def test_regression_gate_keeps_fill_when_crash_is_stub_panic_only() -> None:
+    # A previously-completing binary crashes after the fill, and the capture's
+    # ONLY panic is `not implemented` in a stub: the crash is a still-hollow
+    # sibling speaking. Keep the fill (return None), surface via guard.
+    fired: list[tuple[str, str]] = []
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    res = test_regression_gate(
+        _const_run_cargo(
+            101, _crashed_after("thread 'x' panicked at src/error.rs:64:17:\n"
+                                "not implemented\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired.append((loc, m)))
+    assert res is None
+    assert any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired)
+
+
+def test_regression_gate_still_reverts_crash_without_stub_evidence() -> None:
+    # Negative controls: a segfault (no panic text) and an assertion panic
+    # followed by a stub panic both keep the revert — partial attribution
+    # must not exonerate.
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    res = test_regression_gate(
+        _const_run_cargo(101, _crashed_after("Segmentation fault\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120, guard=lambda *_: None)
+    assert res is not None and res[0].newly_crashed
+    res2 = test_regression_gate(
+        _const_run_cargo(
+            101, _crashed_after(
+                "thread 'x' panicked at tests/t.rs:9:5:\n"
+                "assertion failed: boom\n"
+                "thread 'x' panicked at src/error.rs:64:17:\n"
+                "not implemented\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120, guard=lambda *_: None)
+    assert res2 is not None and res2[0].newly_crashed

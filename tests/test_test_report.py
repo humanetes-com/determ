@@ -388,3 +388,53 @@ def test_self_abort_ignores_tests_the_baseline_never_judged() -> None:
     # No prior verdict ⇒ nothing was destroyed ⇒ nothing to charge.
     assert self_aborted_tests(frozenset({"a"}), frozenset()) == frozenset()
     assert self_aborted_tests(frozenset(), frozenset({"a"})) == frozenset()
+
+
+# --- stub_only_crash: attribute an abort to the hollow tree ------------------
+
+
+def test_stub_only_crash_collects_stub_panic_sites_new_style() -> None:
+    from pipeline_core.domain.test_report import stub_only_crash
+    out = ("running 2 tests\n"
+           "test a ... \n"
+           "thread 'a' panicked at src/error.rs:64:17:\n"
+           "not implemented\n"
+           "thread 'a' panicked at src/error.rs:80:9:\n"
+           "not yet implemented\n")
+    assert stub_only_crash(out) == frozenset({("src/error.rs", 64),
+                                              ("src/error.rs", 80)})
+
+
+def test_stub_only_crash_old_style_location() -> None:
+    from pipeline_core.domain.test_report import stub_only_crash
+    out = "thread 'a' panicked at 'not implemented', src/error.rs:64:17\n"
+    assert stub_only_crash(out) == frozenset({("src/error.rs", 64)})
+
+
+def test_stub_only_crash_vetoed_by_any_non_stub_panic() -> None:
+    # An assertion panic in the same capture is real self-evidence; the mix
+    # must not exonerate (the assertion may be what started the unwind that
+    # reached the hollow Drop).
+    from pipeline_core.domain.test_report import stub_only_crash
+    out = ("thread 'a' panicked at tests/t.rs:9:5:\n"
+           "assertion failed: boom\n"
+           "thread 'a' panicked at src/error.rs:64:17:\n"
+           "not implemented\n")
+    assert stub_only_crash(out) == frozenset()
+
+
+def test_stub_only_crash_empty_without_panics() -> None:
+    # A segfault prints no panic line: no evidence, no forgiveness.
+    from pipeline_core.domain.test_report import stub_only_crash
+    assert stub_only_crash("error: process didn't exit successfully") == frozenset()
+    assert stub_only_crash("") == frozenset()
+
+
+def test_stub_only_crash_unparseable_panic_line_vetoes() -> None:
+    # A `panicked at` line whose location cannot be parsed is unknown
+    # evidence; unknown must not exonerate.
+    from pipeline_core.domain.test_report import stub_only_crash
+    out = ("thread 'a' panicked at somewhere strange\n"
+           "thread 'a' panicked at src/error.rs:64:17:\n"
+           "not implemented\n")
+    assert stub_only_crash(out) == frozenset()

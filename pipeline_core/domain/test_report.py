@@ -15,7 +15,7 @@ structure reader), never approximated here.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -258,6 +258,89 @@ def partition_blame(
                 continue
         self_f.append(f)
     return BlameVerdict(tuple(self_f), tuple(external), tuple(no_verdict))
+
+
+def _iter_located_panics(
+    text: str,
+) -> Iterator[tuple[str, int, str] | None]:
+    """Every ``panicked at`` occurrence in a raw capture → (file, line,
+    message), or None for one whose location does not parse (unknown
+    evidence). Same two libtest forms as :func:`_parse_panic_location`, but
+    ALL occurrences: a crash capture can hold several — the drop panic that
+    aborted the process plus the panic it interrupted — and attribution must
+    see every one before it may exonerate."""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        idx = ln.find("panicked at ")
+        if idx < 0:
+            continue
+        after = ln[idx + len("panicked at "):]
+        if after.startswith("'"):
+            j = after.rfind("', ")
+            if j <= 0:
+                yield None
+                continue
+            msg = after[1:j]
+            loc = after[j + 3:].strip()
+        else:
+            loc = after.rstrip()
+            if loc.endswith(":"):
+                loc = loc[:-1]
+            msg = ""
+            for nxt in lines[i + 1:]:
+                if nxt.strip():
+                    msg = nxt.strip()
+                    break
+        parsed = _split_location(loc)
+        if parsed is None:
+            yield None
+            continue
+        pf, pl, _pc = parsed
+        yield (pf, pl, msg)
+
+
+def stub_only_crash(raw_output: str) -> frozenset[tuple[str, int]]:
+    """The (file, line) sites of a crashed capture's panics, iff EVERY located
+    panic is a stub panic (``unimplemented!()``/``todo!()`` markers) — else
+    empty.
+
+    This is the evidence that separates "the fill is bad unsafe code" from
+    "the fill correctly reached a still-hollow sibling": a stub panic names
+    the hollow fn's own line, while a segfault prints no panic at all and an
+    assertion panic carries a real message. ALL-or-nothing on purpose — an
+    assertion panic followed by a stub panic in the unwind's Drop is real
+    self-evidence, and partial attribution must not exonerate. An
+    unparseable ``panicked at`` line likewise vetoes: unknown evidence is not
+    exculpatory evidence."""
+    sites: set[tuple[str, int]] = set()
+    for p in _iter_located_panics(raw_output):
+        if p is None:
+            return frozenset()
+        pf, pl, msg = p
+        if not any(m in msg for m in _STUB_MARKERS):
+            return frozenset()
+        sites.add((pf, pl))
+    return frozenset(sites)
+
+
+def external_stub_crash_sites(
+    raw_output: str,
+    unit_sites: frozenset[FnSite],
+    locate: Callable[[str, int], FnSite | None],
+) -> frozenset[FnSite]:
+    """The still-stubbed fns OUTSIDE `unit_sites` whose stub panics are the
+    ONLY panics in a crashed capture — the blockers an abort is attributable
+    to. Empty when any panic is not a stub panic, fails to locate, or
+    resolves inside the unit itself: in each of those cases the abort may be
+    the unit's own doing and must stay charged."""
+    own = {_site_key(s) for s in unit_sites}
+    out: set[FnSite] = set()
+    for pf, pl in stub_only_crash(raw_output):
+        loc = locate(pf, pl)
+        if loc is None or _site_key(loc) in own:
+            return frozenset()
+        out.add(loc)
+    return frozenset(out)
 
 
 class U2Decision(Enum):

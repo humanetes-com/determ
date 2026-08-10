@@ -97,6 +97,49 @@ def breach_withheld(breach: str, grace: RefillGrace) -> str:
     return ""
 
 
+def closure_withheld(
+    breach: str,
+    lost: frozenset[str],
+    judged_now: frozenset[str],
+    stub_crash_sites: frozenset[tuple[str, int]],
+) -> str:
+    """Why this breach is a coupled component CLOSING, not a regression
+    ('' = charge it normally). The second standing withhold beside
+    :func:`breach_withheld`'s re-fill window.
+
+    The fill gates keep a compiling body whose only cost is a binary aborted
+    by a still-hollow stub's panic (the crash names the stub's own line, so
+    the evidence is the capture's, not a heuristic's). While a strongly
+    coupled family — anyhow's `Error`/vtable web, where nearly every test
+    constructs an `Error` and its `Drop` reaches every vtable slot — is being
+    closed, those kept fills can legitimately drop the sweep's pass count:
+    tests vanish with the crashed binary before the fills that un-crash it
+    have landed. Charging that breach restores the pre-closure snapshot and
+    erases exactly the fills the closure needs, so the component can only
+    ever close inside one lottery sweep that fills every drop-reachable stub
+    at once — the `pass=13` orbit of runs `800669-a17dabc4` and
+    `1048052-2feafd52` (2026-08-09), where 25 per-fn fills landed in one
+    iteration and the tree's hollow set net-moved by 2.
+
+    Withheld ONLY while the evidence holds, and it expires by itself: every
+    lost test must have VANISHED with a crash (a lost test that received a
+    verdict in a completed binary really regressed — charge), and the
+    capture's panics must be stub panics exclusively (a segfault or an
+    assertion panic is the fill's own fault — charge). Once the last
+    drop-reachable stub fills, the binaries complete, both conditions turn
+    false, and the ratchet judges the closed component against the snapshot
+    with real verdicts."""
+    if not (breach and lost and stub_crash_sites):
+        return ""
+    if lost & judged_now:
+        return ""
+    _locs = ", ".join(f"{f}:{ln}" for f, ln in sorted(stub_crash_sites))
+    return (f"all {len(lost)} lost test(s) vanished with a binary whose only "
+            f"panic(s) are stub panics at {_locs} — kept crash-blocked "
+            "fill(s) closing a coupled component; the charge waits until the "
+            "stub(s) fill and the tree is judgeable again")
+
+
 def snapshot_due(
     pass_count: int, best_pass: int, tree_sha: str, snap_sha: str | None,
 ) -> bool:

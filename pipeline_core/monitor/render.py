@@ -10,6 +10,8 @@ rather than in the god-file ``monitor.py``.
 
 from __future__ import annotations
 
+from datetime import datetime
+from statistics import median
 from typing import Any
 
 
@@ -179,6 +181,128 @@ def progress_bar(pct: float, width: int = 18, label: str = "") -> str:
         for i, ch in enumerate(label):
             s[i] = ch
     return "".join(s)
+
+
+def _iso_ts_seconds(ts: str) -> float | None:
+    """Epoch seconds from an events.jsonl ISO timestamp, else None."""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _fmt_dur(seconds: float) -> str:
+    """Compact duration: 45s / 12m / 3.2h."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
+    """Progress INSIDE the current TDD iteration — where the hours go.
+
+    The between-iteration measures already live on neighbouring rows (the
+    tdd row's pass=/fail= with its history chain); repeating the pass count
+    here duplicated them, and anything keyed to the sweep only moves every
+    few hours. This row shows what observably moves within an iteration:
+
+    - the pace bar — time elapsed in this iteration against the median
+      sweep-to-sweep gap of this run. It advances on every refresh. A pace
+      reference, deliberately not an ETA: iterations legitimately overrun
+      the median (the bar caps full while the numbers keep counting), and
+      the score an iteration ends on is a step function over coupled
+      components — a single sweep has moved it 13→83.
+    - fills — completed fill units this iteration (per-fn fills, impl-block
+      members, whole-file fns; re-fills and retries included): the counter
+      that ticks every few minutes on a healthy run, with the age of the
+      newest fill beside it. A growing age while the pipeline is RUNNING is
+      the finest-grain stall signal the events carry.
+    - the frontier the iteration is working through, as the sweep line
+      printed it. Fills routinely exceed it (file-first fills touch
+      non-frontier fns), so the two are labeled apart, never slash-joined —
+      the row this replaced rendered `frontier: 65/22` and invited reading
+      "65 out of 22".
+    - the sweep bar — fill units completed against the batch the sweep
+      opened with, the in-iteration progress that keeps moving after the
+      `bodies` bar retires. Overflow past the denominator is labeled, not
+      folded in.
+
+    A second `bodies` row — fns with a body out of the cluster total —
+    appears only while that count is still climbing (the initial fill of a
+    fresh tree). Once every fn has a body it disappears: the saturated bar
+    it replaced sat at 100% for hours while the loop rewrote wrong bodies,
+    teaching nothing.
+    """
+    rows: list[str] = []
+    stamps = [t for t in (_iso_ts_seconds(s)
+                          for s in state.get("tdd_iter_ts") or [])
+              if t is not None]
+    done = state.get("pass_fills_done", 0) or 0
+    failed = state.get("pass_fills_failed", 0) or 0
+    if stamps:
+        elapsed = max(0.0, now - stamps[-1])
+        deltas = [b - a for a, b in zip(stamps, stamps[1:], strict=False)
+                  if b > a]
+        if deltas:
+            med = median(deltas)
+            pace = min(100.0, elapsed / med * 100) if med > 0 else 0.0
+            head = (f"[{progress_bar(pace, 24)}]  "
+                    f"{_fmt_dur(elapsed)} of ~{_fmt_dur(med)} typical")
+        else:
+            head = f"{_fmt_dur(elapsed)} elapsed (first iter, no typical yet)"
+        bits = [f"fills {done + failed}"]
+        last_fill = _iso_ts_seconds(state.get("last_fill_ts_iso") or "")
+        if last_fill is not None:
+            bits.append(f"last {_fmt_dur(max(0.0, now - last_fill))} ago")
+        if state.get("tdd_frontier"):
+            bits.append(f"frontier {state['tdd_frontier']} fn(s)")
+        rows.append(f"           iter     {head}   "
+                    f"{dim(' · '.join(bits))}".rstrip())
+
+    # The sweep bar — completed fill units against the frontier batch the
+    # sweep opened with (pass.start's stub snapshot). This is the counter
+    # the pipeline log prints as `N/34`, and it is the only within-iteration
+    # progress signal that survives once every fn has a body (the `bodies`
+    # bar below hides itself then) — without it the panel showed no forward
+    # motion for the whole 9-hour iter 3 of run 1159463-b1e352e5. Fill units
+    # from the file/impl passes count members, so the numerator can pass the
+    # denominator; the bar caps and the excess is labeled instead of
+    # slash-joining two different populations.
+    queue_total = state.get("pass_stubs_total", 0) or 0
+    if queue_total > 0:
+        units = done + failed
+        spct = min(100.0, units / queue_total * 100)
+        over = units - queue_total
+        seg = [f"{min(units, queue_total)}/{queue_total} unit(s)",
+               green(f"{done} ✓") + " " + (red(f"{failed} ✗") if failed
+                                           else dim("0 ✗"))]
+        if over > 0:
+            seg.append(dim(f"+{over} beyond frontier"))
+        rows.append(f"           sweep    [{progress_bar(spct, 24)}]  "
+                    f"{'  '.join(seg)}")
+
+    total = state.get("total_fns_in_cluster", 0) or 0
+    filled_start = state.get("filled_count_at_pass_start", 0) or 0
+    hollow_start = state.get("all_stubs_remaining_at_pass_start", 0) or 0
+    queue = state.get("pass_stubs_total", 0) or 0
+    if total > 0 and (filled_start + hollow_start) > 0:
+        cum = min(total, filled_start + done)
+        hollow = total - cum
+        if hollow > 0:
+            bpct = cum / total * 100
+            rows.append(f"           bodies   [{progress_bar(bpct, 24)}]  "
+                        f"{cum}/{total} fns ({int(bpct)}%) · {hollow} hollow")
+    elif total > 0 and queue > 0:
+        # Events predate the filled_count snapshot: infer from the queue. The
+        # inference undercounts when the TDD driver narrows the queue to a
+        # per-iter frontier, hence the marker.
+        cum = max(0, total - queue + done)
+        bpct = cum / total * 100
+        rows.append(f"           bodies   [{progress_bar(bpct, 24)}]  "
+                    f"~{cum}/{total} fns ({int(bpct)}%, inferred)")
+    return rows
 
 
 def loop_hierarchy_rows(

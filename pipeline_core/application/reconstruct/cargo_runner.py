@@ -24,11 +24,15 @@ from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_report import (
     BlameVerdict,
     FailureExcerpt,
+    FailureKind,
+    TestFailure,
     TestRunReport,
     U2Verdict,
+    external_stub_crash_sites,
     parse_test_output,
     partition_blame,
     self_aborted_tests,
+    stub_only_crash,
 )
 from pipeline_core.domain.test_results import (
     RegressionComparison,
@@ -130,6 +134,7 @@ def measure_test_state(
     env: dict[str, str],
     *,
     timeout: int = 120,
+    raw_sink: list[str] | None = None,
 ) -> TestStateReading | None:
     """Run the FULL cluster `test_cmd` and return a per-binary
     :class:`TestStateReading`, or None when the suite could not run (compile
@@ -138,8 +143,14 @@ def measure_test_state(
     per-binary shape lets the gate scope its comparison to binaries that
     COMPLETED in both readings — a binary that crashes mid-run emits a
     nondeterministic subset of verdicts, so whole-run counts are draws from a
-    distribution, not measurements."""
+    distribution, not measurements.
+
+    `raw_sink`, when given, receives the raw combined capture: the READING
+    deliberately drops panic text, but crash attribution (was the abort a
+    still-hollow stub's panic?) is decided from exactly that text."""
     rc, out = run_cargo_fn(test_cmd, cwd, env, timeout=timeout)
+    if raw_sink is not None:
+        raw_sink.append(out)
     if rc == -1:
         return None
     reading = TestStateReading(parse_binary_results(out))
@@ -185,9 +196,10 @@ def test_regression_gate(
     """
     if not (enabled and test_cmd and baseline is not None):
         return None
+    _raw: list[str] = []
     try:
         after = measure_test_state(run_cargo_fn, test_cmd, cwd, env or {},
-                                   timeout=timeout)
+                                   timeout=timeout, raw_sink=_raw)
     except Exception as e:  # noqa: BLE001 — fail-safe to compile-based accept
         guard("phase-c/regr_skip", f"{type(e).__name__}: {e}")
         return None
@@ -212,6 +224,37 @@ def test_regression_gate(
                   "The oracle score is the objective; a strict net gain is "
                   "not refused over an individual loss")
         return None
+    # A crash-only verdict is asked one more question before it may revert:
+    # WHAT panicked. When every completed binary held (no newly-red, no
+    # measured-scope count drop) and the capture's only panics are
+    # `not implemented` in a stub, the crash is a still-hollow sibling
+    # speaking — typically a correct fill letting Error::drop reach hollow
+    # vtable fns for the first time. Reverting there erases correct work and
+    # makes the component closable only by one sweep that fills every
+    # drop-reachable stub at once: `construct_from_adhoc` was reverted five
+    # times this way (run of 2026-08-09 00:37) and `context.rs`'s file-first
+    # fill lost a compiling fill to a crash `src/error.rs` caused
+    # (run `1048052-2feafd52`, iter 4). Keep the fill; the tests it cannot
+    # move stay red/vanished, so nothing is over-reported, and once the last
+    # stub fills the same gate judges everything again with real verdicts.
+    # NOTE for future call sites: every current caller judges a FILL (hollow →
+    # body). A caller judging the reverse direction — deliberately
+    # INTRODUCING a stub — must not use this gate without revisiting this
+    # branch, because a stub restore's own panic would exonerate itself.
+    if (cmp.newly_crashed and not cmp.newly_red
+            and cmp.cur_pass >= cmp.base_pass
+            and cmp.cur_executed >= cmp.base_executed):
+        _stub_sites = stub_only_crash(_raw[-1] if _raw else "")
+        if _stub_sites:
+            _locs = sorted(f"{f}:{ln}" for f, ln in _stub_sites)
+            guard("phase-c/crash_blocked_kept",
+                  f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
+                  f"{list(cmp.newly_crashed)} crashed, and the capture's only "
+                  f"panic(s) are stub panics at {_locs} — a still-hollow "
+                  "sibling speaking, not this fill's fault; fill KEPT, its "
+                  "scoring deferred until the stub(s) fill (cost withheld: "
+                  f"{cmp.crash_lost_pass} baseline pass(es))")
+            return None
     return cmp, render_regression_detail(cmp)
 
 
@@ -362,6 +405,34 @@ def u2_test_gate(
                 if baseline is not None and rc != 0 and not _compile_failed
                 else frozenset())
     if _aborted:
+        # Destroyed verdicts convict the body — unless the capture proves the
+        # aborting panic fired inside ANOTHER unit's `unimplemented!()` stub
+        # (all panics stub panics, none resolving into this unit). Then the
+        # abort is the hollow tree speaking: a correct body finally made a
+        # still-stubbed sibling reachable (drop-path fns, typically), and
+        # rejecting it burns attempts toward a conviction the unit never
+        # earned — `from_boxed` spent attempts 2/4/5 exactly here in run
+        # `1048052-2feafd52` while `src/error.rs` still held its hollow
+        # drop machinery. Keep the fill, name the blockers, defer to the
+        # outer loop's producer re-admission.
+        _ext = external_stub_crash_sites(
+            out, frozenset(unit_sites),
+            make_fn_site_locator(structure, target_src_dir))
+        if _ext:
+            _names = sorted(f"{s.file}::{s.fn_name}" for s in _ext)
+            guard("phase-c/u2_abort_external",
+                  f"{sorted(_aborted)} lost their verdict to an abort whose "
+                  f"only panic(s) are stub panics in still-stubbed {_names} — "
+                  "external, fill kept and deferred (not this unit's fault)")
+            _sites = sorted(
+                _ext, key=lambda s: (s.file, s.fn_name, s.container))
+            _pairs = tuple(
+                (TestFailure(test_name=n, kind=FailureKind.STUB_PANIC,
+                             panic_file=s.file, panic_line=None,
+                             panic_col=None, body=""), s)
+                for n, s in zip(sorted(_aborted),
+                                _sites * len(_aborted), strict=False))
+            return U2Verdict.accept_external_only(_pairs, frozenset(_aborted))
         return U2Verdict.reject(
             frozenset(_aborted) | {f.test_name for f in scoped.failures},
             _render_u2_abort(_aborted, scoped, err_cap))

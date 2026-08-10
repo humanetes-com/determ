@@ -453,3 +453,87 @@ def test_pipeline_log_facts_reports_whether_the_run_had_a_task0c_phase(tmp_path,
     facts2 = ed.pipeline_log_facts()
     assert facts2["has_task0c"] is True
     assert facts2["attempt"] == "2" and facts2["max_attempt"] == "10"
+
+
+def test_phase_c_state_collects_tdd_iter_timestamps(tmp_path, monkeypatch):
+    """Consecutive tdd.iter timestamps are whole-iteration durations (one
+    summary per iter) — the panel's `~N/iter` median reads them in arrival
+    order."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-08-09T10:00:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 1, "pass_count": 11,
+                  "fail_count": 94}},
+        {"ts": "2026-08-09T10:30:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 2, "pass_count": 76,
+                  "fail_count": 28}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["tdd_iter_ts"] == [
+        "2026-08-09T10:00:00+00:00", "2026-08-09T10:30:00+00:00"]
+
+
+def test_phase_c_state_tracks_newest_fill_timestamp(tmp_path, monkeypatch):
+    """The newest fill's age is the finest-grain stall signal — any of the
+    three fill shapes (fn / impl / file), done or fail, must refresh it."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-08-09T10:00:00+00:00", "event": "phase_c.fn.fill.done",
+         "data": {"fn": "erase", "cluster": "stable"}},
+        {"ts": "2026-08-09T10:05:00+00:00", "event": "phase_c.impl.fill.fail",
+         "data": {"container": "impl Error", "cluster": "stable"}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["last_fill_ts_iso"] == "2026-08-09T10:05:00+00:00"
+
+
+def test_phase_c_terminal_events_without_done_still_clear_in_flight(tmp_path, monkeypatch):
+    """`file.fill.revert` and `impl.fill.already_complete` end their unit
+    without a done/fail event. Unhandled (live, run 1159463-b1e352e5,
+    2026-08-09), a reverted src/lib.rs file unit and an already-complete impl
+    unit rendered as in-flight for 8.6 h and 5.6 h, crowding the real fills
+    out of the 4-slot in-flight display."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        {"ts": "2026-08-09T13:00:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 3, "frontier_size": 34}},
+        {"ts": "2026-08-09T13:26:49+00:00", "event": "phase_c.file.fill.start",
+         "data": {"cluster": "stable", "file": "src/lib.rs"}},
+        {"ts": "2026-08-09T13:30:47+00:00", "event": "phase_c.file.fill.revert",
+         "data": {"file": "src/lib.rs", "attempt": 1}},
+        {"ts": "2026-08-09T16:32:09+00:00", "event": "phase_c.impl.fill.start",
+         "data": {"cluster": "stable", "file": "src/error.rs",
+                  "container": "impl From<Error> for Box<dyn StdError>",
+                  "stub_count": 1}},
+        {"ts": "2026-08-09T16:47:45+00:00",
+         "event": "phase_c.impl.fill.already_complete",
+         "data": {"container": "impl From<Error> for Box<dyn StdError>"}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    assert s["in_flight"] == []
+    # Neither shape moves the outcome counters: the fns involved are
+    # re-dispatched by a later pass, which is where their outcome is counted.
+    assert s["fills_done"] == 0 and s["fills_failed"] == 0
+
+
+def test_read_recent_events_window_survives_a_long_iteration(tmp_path, monkeypatch):
+    """9 h into iter 3 (run 1159463-b1e352e5, 2026-08-09) the 1 MB tail no
+    longer reached the previous tdd.iter stamp, so the pace bar — which needs
+    two stamps for a median — vanished exactly when the iteration ran long.
+    The window must survive >1 MB of newer events."""
+    ev = tmp_path / "events.jsonl"
+    pad = "x" * 4096
+    recs = [{"ts": "2026-08-09T13:06:48+00:00", "event": "phase_c.tdd.iter",
+             "data": {"cluster": "stable", "iter": 2, "pass_count": 76}}]
+    recs += [{"ts": "2026-08-09T14:00:00+00:00", "event": "llm.response",
+              "data": {"pad": pad}} for _ in range(400)]  # ~1.6 MB after the stamp
+    _write(ev, *recs)
+    _patch(monkeypatch, ev)
+    got = ed.read_recent_events(lambda n: n == "phase_c.tdd.iter")
+    assert len(got) == 1

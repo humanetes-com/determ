@@ -260,7 +260,13 @@ def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:
         with open(EVENTS_LOG, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
-            fh.seek(max(0, size - 1024 * 1024))  # last 1 MB
+            # 8 MB ≈ a week at this pipeline's measured append rate (run
+            # 1159463-b1e352e5 wrote <1 MB in 11 h). At 1 MB the window was
+            # shorter than one long TDD iteration: on 2026-08-09 it held only
+            # the newest of two tdd.iter stamps 9 h into iter 3, so the pace
+            # bar (needs two stamps for a median) vanished exactly when the
+            # iteration ran long.
+            fh.seek(max(0, size - 8 * 1024 * 1024))
             raw = fh.read()
     except Exception:
         return []
@@ -362,6 +368,10 @@ def phase_c_state() -> dict[str, Any]:
         "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
         "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
         "tdd_max_stalls": None,
+        # ISO ts of each tdd.iter event this run, in arrival order. Consecutive
+        # gaps are whole-iteration durations (the summary prints once per
+        # iter), which is what the panel's `~N/iter` median is computed from.
+        "tdd_iter_ts": [],
         # Which outer loop is driving this run. Under "tdd" the per-fn engine is
         # an inner detail invoked with max_passes=1 — and it short-circuits
         # without a pass.start whenever the frontier is all behavioural re-fills
@@ -378,6 +388,10 @@ def phase_c_state() -> dict[str, Any]:
         # Cumulative body-fills landed (phase_c.fill.progress) — mid-sweep
         # progress independent of the per-sweep pass reading.
         "fills_landed": 0,
+        # ISO ts of the newest completed fill unit (done or fail, any of the
+        # three fill shapes). Its age is the finest-grain stall signal the
+        # events carry: fills tick every few minutes on a healthy iteration.
+        "last_fill_ts_iso": None,
     }
     events = read_recent_events(
         lambda n: n.startswith("phase_c.") or n == "cluster.done")
@@ -398,6 +412,10 @@ def phase_c_state() -> dict[str, Any]:
         _cl = d.get("cluster") or e.get("cluster")
         if _cl and _cl not in out["clusters_seen"]:
             out["clusters_seen"].append(_cl)
+        if ev in ("phase_c.fn.fill.done", "phase_c.fn.fill.fail",
+                  "phase_c.file.fill.done", "phase_c.impl.fill.done",
+                  "phase_c.impl.fill.fail") and e.get("ts"):
+            out["last_fill_ts_iso"] = e["ts"]
         if ev == "cluster.done":
             _dc = e.get("cluster") or d.get("cluster")
             if _dc and _dc not in out["clusters_done"]:
@@ -482,6 +500,14 @@ def phase_c_state() -> dict[str, Any]:
             out["pass_fills_done"] = out.get("pass_fills_done", 0) + _fns
             out["fills_first"] += _fns
             in_flight_units.pop(_lbl, None)
+        elif ev in ("phase_c.file.fill.revert", "phase_c.file.fill.mismatch"):
+            # Terminal for the file unit's current attempt but emits no
+            # done/fail. Unhandled, the unit sat "in-flight" for 8.6h on
+            # 2026-08-09 (src/lib.rs, reverted 13:30 UTC, shown until the
+            # next tdd.iter cleared it). No counter moves: the file's fns
+            # are re-dispatched by a later start or by the per-fn pass,
+            # which is where their outcome gets counted.
+            in_flight_units.pop(f"file {d.get('file') or '?'}", None)
         elif ev == "phase_c.impl.fill.done":
             _lbl = d.get('container') or '?'
             _members = int(d.get("members_filled", 0)) or 1
@@ -497,6 +523,11 @@ def phase_c_state() -> dict[str, Any]:
             out["pass_fills_failed"] = out.get("pass_fills_failed", 0) + 1
             in_flight_units.pop(_lbl, None)
             _record_error_codes(out, d)
+        elif ev == "phase_c.impl.fill.already_complete":
+            # Terminal without done/fail: the block had no stubs left to fill.
+            # Unhandled, the unit reads as in-flight until the next tdd.iter
+            # (5.6h for `impl From<Error> for Box<...>` on 2026-08-09).
+            in_flight_units.pop(d.get('container') or '?', None)
         elif ev == "phase_c.fill.progress":
             # Cumulative fills-landed for the cluster — the mid-sweep progress
             # signal (pass= only re-measures per multi-hour sweep). Last value
@@ -515,6 +546,8 @@ def phase_c_state() -> dict[str, Any]:
             _tcl = d.get("cluster") or out["cluster"]
             out["cluster"] = _tcl or out["cluster"]
             out["tdd_iter"] = d.get("iter", out["tdd_iter"])
+            if e.get("ts"):
+                out["tdd_iter_ts"].append(e["ts"])
             # Fresh iter → drop any in-flight units left dangling from the prior
             # iter's sweep (pass_fills_done resets separately on the pass.start
             # the tdd driver emits at the head of each iter).

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
+    closure_withheld,
     ratchet_breach,
     restore_src_tree,
     snapshot_due,
@@ -72,7 +73,7 @@ from pipeline_core.domain.tdd_floor import (
     resume_floor,
 )
 from pipeline_core.domain.test_command import ensure_serial_harness
-from pipeline_core.domain.test_report import parse_test_output
+from pipeline_core.domain.test_report import parse_test_output, stub_only_crash
 from pipeline_core.domain.test_results import (
     TestStateReading,
     compile_error_digest,
@@ -776,6 +777,17 @@ def run_phase_c_tdd(
         _breach = ratchet_breach(pass_count, _bratchet_best,
                                  _sweep.passing, _bratchet_passing)
         _withheld = breach_withheld(_breach, _grace)
+        if _breach and not _withheld:
+            # Second standing withhold: the fill gates KEEP a body whose only
+            # cost is a binary aborted by a still-hollow stub's panic, so a
+            # breach whose every lost test crash-vanished under stub-only
+            # panics is the component closing, not last iter's fills
+            # regressing. Restoring the snapshot here re-opens the very holes
+            # the closure just paid to fill.
+            _withheld = closure_withheld(
+                _breach, _bratchet_passing - _sweep.passing,
+                TestStateReading(parse_binary_results(output)).judged_names,
+                stub_only_crash(output))
         if _withheld:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
                      f"breach ({_breach}) NOT charged: {_withheld}.")

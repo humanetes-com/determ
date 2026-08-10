@@ -972,3 +972,54 @@ def test_the_loop_offers_the_stub_set_to_the_conviction_release(
         "src/error.rs": {"construct_from_std", "provide"},
         "src/context.rs": {"with_context"}}), \
         "the sweep's own stub set, scoped to the sweeping cluster"
+
+
+# --- closure withhold: the flat region of a coupled component ----------------
+# While a component (anyhow's Error/vtable web) is being closed, a KEPT
+# crash-blocked fill can legitimately drop the sweep's pass count: the tests
+# it costs vanish with a binary whose only panic is a still-hollow stub's
+# `not implemented`. Charging that breach restores the pre-closure tree and
+# erases the very fills the closure needs — the ratchet becomes the lottery
+# reset. Withheld ONLY while the evidence holds: every lost test crash-
+# vanished (none flipped red in a completed binary) AND the capture's panics
+# are stub panics exclusively.
+
+
+def test_closure_withhold_forgives_stub_crash_vanished_breach() -> None:
+    from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
+    reason = closure_withheld(
+        "pass_count 11<13",
+        lost=frozenset({"x", "y"}),
+        judged_now=frozenset({"a", "b"}),
+        stub_crash_sites=frozenset({("src/error.rs", 64)}))
+    assert reason and "src/error.rs:64" in reason
+
+
+def test_closure_withhold_charges_when_a_lost_test_flipped_red() -> None:
+    # A lost test that RECEIVED a verdict in a completed binary is a real
+    # regression, not crash noise — the breach stands.
+    from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
+    assert closure_withheld(
+        "pass_count 12<13",
+        lost=frozenset({"x"}),
+        judged_now=frozenset({"x"}),
+        stub_crash_sites=frozenset({("src/error.rs", 64)})) == ""
+
+
+def test_closure_withhold_charges_without_stub_evidence() -> None:
+    from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
+    assert closure_withheld(
+        "pass_count 11<13",
+        lost=frozenset({"x", "y"}),
+        judged_now=frozenset(),
+        stub_crash_sites=frozenset()) == ""
+
+
+def test_closure_withhold_needs_a_breach_and_a_loss() -> None:
+    from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
+    assert closure_withheld(
+        "", lost=frozenset({"x"}), judged_now=frozenset(),
+        stub_crash_sites=frozenset({("src/error.rs", 64)})) == ""
+    assert closure_withheld(
+        "pass_count 11<13", lost=frozenset(), judged_now=frozenset(),
+        stub_crash_sites=frozenset({("src/error.rs", 64)})) == ""

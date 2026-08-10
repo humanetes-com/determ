@@ -121,6 +121,9 @@ from pipeline_core.monitor.render import (
     event_format as _event_format,
 )
 from pipeline_core.monitor.render import (
+    iteration_progress_rows as _iteration_progress_rows,
+)
+from pipeline_core.monitor.render import (
     loop_hierarchy_rows as _loop_hierarchy_rows,
 )
 from pipeline_core.monitor.render import (
@@ -412,63 +415,12 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
         rows.append(f"           err      {yellow(_ec)} "
                     f"{dim('(' + _ERR_NAMES.get(_ec, '?') + ')')}   {dim('top: ' + _top)}")
 
-    # Cumulative progress bar (across runs):
-    #   filled_cumulative = filled_count_at_pass_start + this_pass_done
-    # Authoritative source = `filled_count` from phase_c.pass.start (snapshot
-    # of "how many fns in this cluster are NOT still unimplemented" at the
-    # moment the pass started). Adding this-pass fills tracks progress
-    # mid-pass without ever crossing the total.
-    #
-    # Legacy fallback for events emitted before that field existed:
-    # `total - pass_stubs_total + done`. This is wrong when the TDD driver
-    # narrows pass_stubs_total to a per-pass frontier (1-2 fns) instead of
-    # the full remaining-stubs count — the math then claims ~99% with only
-    # 1 frontier slot, which is what was hiding the real cluster progress.
-    # The `· frontier: A/B` segment appended below (both the primary and legacy
-    # branches) reads:
-    #   A = fills done + failed in the current fill pass
-    #       (pass_fills_done + pass_fills_failed) — counts each per-fn fill, each
-    #       impl-block MEMBER, and each whole-file fn individually.
-    #   B = the number of stubs the fill engine QUEUED for this pass
-    #       (pass_stubs_total) — that's the frontier fns PLUS their leaf-first
-    #       prerequisites and any behavioral re-fill targets, so B is usually
-    #       larger than the raw tdd frontier_size.
-    # So "frontier: 6/9" = 6 of the 9 queued stubs have been attempted this pass.
-    # Under the tdd driver pass.start fires once per iter, so A resets per iter.
-    _pt = state.get("pass_stubs_total", 0) or 0
-    _pd = state.get("pass_fills_done", 0) or 0
-    _pf = state.get("pass_fills_failed", 0) or 0
-    _total = state.get("total_fns_in_cluster", 0) or 0
-    _filled_at_start = state.get("filled_count_at_pass_start", 0) or 0
-    _all_stubs_at_start = state.get("all_stubs_remaining_at_pass_start", 0) or 0
-    if _total > 0 and _filled_at_start >= 0 and (_filled_at_start + _all_stubs_at_start) > 0:
-        _cum_filled = min(_total, _filled_at_start + _pd)
-        _cum_pct = _cum_filled / _total if _total else 0
-        _bar_w = 28
-        _bar_filled = int(_bar_w * _cum_pct)
-        _bar = "█" * _bar_filled + "░" * (_bar_w - _bar_filled)
-        # `this pass` denominator: prefer the frontier size (pass_stubs_total)
-        # — that's the actionable workload for the current TDD iteration.
-        rows.append(f"           progress  [{_bar}]  "
-                    f"{_cum_filled}/{_total} ({int(_cum_pct * 100)}%) "
-                    f"cluster  · frontier: {_pd + _pf}/{_pt}")
-    elif _total > 0 and _pt > 0:
-        # Legacy fallback path (no filled_count in events).
-        _cum_filled = max(0, _total - _pt + _pd)
-        _cum_pct = _cum_filled / _total if _total else 0
-        _bar_w = 28
-        _bar_filled = int(_bar_w * _cum_pct)
-        _bar = "█" * _bar_filled + "░" * (_bar_w - _bar_filled)
-        rows.append(f"           progress  [{_bar}]  "
-                    f"{_cum_filled}/{_total} ({int(_cum_pct * 100)}%) "
-                    f"cluster (legacy)  · frontier: {_pd + _pf}/{_pt}")
-    elif _pt > 0:
-        _done_this_pass = _pd + _pf
-        _pct = _done_this_pass / _pt
-        _bar_w = 28
-        _filled = int(_bar_w * _pct)
-        _bar = "█" * _filled + "░" * (_bar_w - _filled)
-        rows.append(f"           progress  [{_bar}]  {_done_this_pass}/{_pt} ({int(_pct * 100)}%)")
+    # Intra-iteration progress (render.iteration_progress_rows): pace bar
+    # (elapsed vs median iteration length — moves every refresh), fills
+    # counter with last-fill age, frontier context; plus a `bodies` bar only
+    # while the initial fill is still climbing. The pass count itself is NOT
+    # repeated here — the tdd row above already carries it with its history.
+    rows.extend(_iteration_progress_rows(state, time.time()))
 
     first = state.get("fills_first", 0)
     rec = state.get("fills_recovered", 0)

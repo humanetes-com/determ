@@ -30,6 +30,33 @@ def group_priority_levels(
     return levels
 
 
+def match_records_to_order(
+    ordered: list[FnLocator], records: list[Stub],
+) -> list[Stub]:
+    """Reorder `records` to follow `ordered` (a leaf-first key sequence),
+    taking same-key records in their original relative order.
+
+    Every record batch that feeds `group_priority_levels` MUST pass through a
+    leaf-first ordering first: that function opens a new barriered LEVEL at
+    every ref-count change, so an unsorted segment shatters into
+    near-singleton levels and the per-level worker pool dispatches alone.
+    Measured on run `1159463-b1e352e5` iter 3 (2026-08-09, cluster `stable`):
+    the batch was 33 behavioral re-fills appended in source-scan order, and
+    the per-fn phase ran 5.0 h at mean concurrency 1.09 against
+    PIPELINE_PARALLELISM=4 — 91 % of it strictly serial, on a level
+    structure that leaf-first ordering would have grouped as 12 levels
+    (4 of them holding 4-7 units each). Pure: no engine state."""
+    remaining: dict[FnLocator, list[Stub]] = {}
+    for r in records:
+        remaining.setdefault(r.key, []).append(r)
+    out: list[Stub] = []
+    for key in ordered:
+        bucket = remaining.get(key)
+        if bucket:
+            out.append(bucket.pop(0))
+    return out
+
+
 def leaf_first_group_order(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort groups so leaf groups (fewest cross-group symbol overlaps) come first.
 

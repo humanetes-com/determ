@@ -53,3 +53,92 @@ def test_driver_counter_prefers_the_live_outer_loop() -> None:
     per_fn = {"driver": "per-fn", "pass_n": 2, "max_passes": 3}
     assert _render.driver_counter(per_fn) == "pass=2/3"
     assert _render.driver_counter({}) == "pass=?/?"
+
+
+def test_iteration_progress_rows_move_inside_the_iteration() -> None:
+    """The row must measure the inside of the iteration — pace vs the run's
+    median iteration length, the fills counter, last-fill age, frontier —
+    and must NOT repeat the pass count the tdd row already carries."""
+    from datetime import datetime
+    t1, t2 = "2026-08-09T10:00:00+00:00", "2026-08-09T10:30:00+00:00"
+    now = datetime.fromisoformat(t2).timestamp() + 600
+    state = {
+        "tdd_pass": 76, "tdd_fail": 28, "tdd_iter": 3, "tdd_frontier": 34,
+        "tdd_iter_ts": [t1, t2],
+        "last_fill_ts_iso": "2026-08-09T10:38:00+00:00",
+        "total_fns_in_cluster": 223, "filled_count_at_pass_start": 180,
+        "all_stubs_remaining_at_pass_start": 43,
+        "pass_fills_done": 10, "pass_fills_failed": 25, "pass_stubs_total": 22,
+    }
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "10m of ~30m typical" in text
+    assert "fills 35" in text and "last 2m ago" in text
+    assert "frontier 34 fn(s)" in text
+    assert "passing" not in text and "76" not in text
+    # Initial fill still climbing → bodies bar present.
+    assert "190/223 fns (85%) · 33 hollow" in text
+
+
+def test_iteration_progress_rows_saturated_tree_drops_the_bodies_bar() -> None:
+    """A `223/223 (100%)` bar sat unchanged for hours while the loop rewrote
+    WRONG bodies — once every fn has a body the bodies row must disappear,
+    not fake completion."""
+    state = {
+        "tdd_pass": 76, "tdd_fail": 28, "tdd_iter": 5, "tdd_frontier": 34,
+        "tdd_iter_ts": ["2026-08-09T10:00:00+00:00"],
+        "total_fns_in_cluster": 223, "filled_count_at_pass_start": 223,
+        "all_stubs_remaining_at_pass_start": 0,
+        "pass_fills_done": 40, "pass_fills_failed": 25, "pass_stubs_total": 22,
+    }
+    from datetime import datetime
+    now = datetime.fromisoformat("2026-08-09T10:42:00+00:00").timestamp()
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "bodies" not in text and "100%" not in text
+    # First iter of the run: elapsed with no median yet — never a fake bar.
+    assert "42m elapsed (first iter, no typical yet)" in text
+    assert "fills 65" in text
+
+
+def test_iteration_progress_rows_never_join_fills_and_queue_as_fraction() -> None:
+    """`frontier: 65/22` invited reading '65 out of 22': fills count re-fills
+    and retries while queue/frontier count fns, so A>B is normal. The
+    counters must never be rendered slash-joined."""
+    state = {
+        "tdd_iter_ts": ["2026-08-09T10:00:00+00:00"], "tdd_frontier": 34,
+        "total_fns_in_cluster": 223, "filled_count_at_pass_start": 223,
+        "all_stubs_remaining_at_pass_start": 0,
+        "pass_fills_done": 40, "pass_fills_failed": 25, "pass_stubs_total": 22,
+    }
+    from datetime import datetime
+    now = datetime.fromisoformat("2026-08-09T10:01:00+00:00").timestamp()
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "fills 65" in text
+    assert "65/22" not in text and "65/34" not in text
+
+
+def test_iteration_progress_rows_sweep_bar_tracks_the_batch() -> None:
+    """Once every fn has a body the bodies bar retires, and the panel showed
+    no forward motion inside an iteration (9 h of iter 3, run
+    1159463-b1e352e5, 2026-08-09). The sweep row is that motion: completed
+    fill units against the batch the sweep opened with — the same counter the
+    pipeline log prints as `N/34`. Overflow past the batch (file/impl passes
+    count members) is capped and labeled, never slash-joined."""
+    state = {
+        "tdd_iter_ts": ["2026-08-09T10:00:00+00:00"], "tdd_frontier": 34,
+        "total_fns_in_cluster": 223, "filled_count_at_pass_start": 223,
+        "all_stubs_remaining_at_pass_start": 0,
+        "pass_fills_done": 22, "pass_fills_failed": 9, "pass_stubs_total": 34,
+    }
+    from datetime import datetime
+    now = datetime.fromisoformat("2026-08-09T10:01:00+00:00").timestamp()
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "31/34 unit(s)" in text and "22 ✓" in text and "9 ✗" in text
+    # Numerator can pass the batch size: bar caps, excess labeled apart.
+    state["pass_fills_done"] = 40
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "34/34 unit(s)" in text and "+15 beyond frontier" in text
+    assert "49/34" not in text
+    # No batch snapshot (per-fn short-circuit emits no pass.start) → no row.
+    state["pass_stubs_total"] = 0
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "sweep" not in text

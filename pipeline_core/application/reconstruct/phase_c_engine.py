@@ -29,7 +29,10 @@ from pipeline_core.application.reconstruct.cluster_membership import (
 )
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
-from pipeline_core.application.reconstruct.scheduling import group_priority_levels
+from pipeline_core.application.reconstruct.scheduling import (
+    group_priority_levels,
+    match_records_to_order,
+)
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
@@ -101,6 +104,18 @@ class PhaseCFillEngine:
     # store); default returns none so the engine stays additive without it.
     behaviour_loader: Callable[[Path, str], tuple[BehaviourSpec, ...]] = (
         lambda _project_dir, _cluster: ())
+
+    def _leaf_first_records(
+        self, records: list[Stub],
+        leaf_name_counts: dict[str, int] | None,
+    ) -> list[Stub]:
+        """Leaf-first order for any record batch headed into the level
+        grouper — through the `ws` seam so tests that script the ordering
+        keep their hook. See `match_records_to_order` for why every batch
+        must be sorted, not just the stub half."""
+        ordered = self.ws.leaf_first_fn_order(
+            [r.key for r in records], leaf_name_counts)
+        return match_records_to_order(ordered, records)
 
     def _collect_refill_targets(
         self, target_src_dir: Path, stubs: list[Stub],
@@ -299,21 +314,18 @@ class PhaseCFillEngine:
                 target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests)
             if not stubs and not _refill_recs:
                 break
-            # D: leaf-first order — most-referenced fns first.
-            _tuples = [r.key for r in stubs]
-            _ordered_tuples = self.ws.leaf_first_fn_order(_tuples, leaf_name_counts)
-            # Reorder records to match the leaf-first tuple order.
-            _seen: dict[FnLocator, int] = {}
-            _reordered: list[Stub] = []
-            for tup in _ordered_tuples:
-                matches = [r for r in stubs if r.key == tup]
-                taken = _seen.get(tup, 0)
-                if taken < len(matches):
-                    _reordered.append(matches[taken])
-                    _seen[tup] = taken + 1
-            # Stubs first (fill missing pieces), behavioral re-fills after (correct
-            # wrong bodies once their prerequisites exist).
-            stubs = _reordered + _refill_recs
+            # D: leaf-first order — most-referenced fns first. Stubs first
+            # (fill missing pieces), behavioral re-fills after (correct wrong
+            # bodies once their prerequisites exist) — and the re-fill tail is
+            # leaf-first sorted TOO: `group_priority_levels` below opens a new
+            # barriered level at every ref-count change, so appending the
+            # re-fills in their source-scan order shattered them into
+            # near-singleton levels and the per-level worker pool ran alone
+            # (mean concurrency 1.09 over a 5.0 h per-fn phase, 91 % of it
+            # strictly serial — run 1159463-b1e352e5 iter 3, 2026-08-09,
+            # whose 33-unit batch was all re-fills).
+            stubs = (self._leaf_first_records(stubs, leaf_name_counts)
+                     + self._leaf_first_records(_refill_recs, leaf_name_counts))
             if _refill_recs:
                 self.tel.log(f"  [phase-c/per-fn] {len(_refill_recs)} behavioral "
                              "re-fill target(s) (filled bodies with failing tests).")

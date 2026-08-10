@@ -1,6 +1,6 @@
 # Prompt-content audit — which spec docs reach which LLM prompt
 
-Offline trace (CODE_ARCHITECTURE.md line 887). Answers: per task, which of the four
+Offline trace of the prompt-builder code paths. Answers: per task, which of the four
 spec docs — `coverage_strategy.md` (CS), `functional_requirements.md` (FR),
 `genesis.md` (GEN), `api_surface` (API) — actually reach the model prompt, and where
 in code that injection happens. Pinned executable by `tests/test_prompt_content_audit.py`
@@ -15,7 +15,7 @@ Legend: `P`=produces the doc · `✓`=injected into this task's prompt · `R`=re
 | Task | CS | FR | GEN | API | RepoSpec bundle | Evidence (file:line) |
 |---|---|---|---|---|---|---|
 | 0b discovery | P | — | — | — | — | `tasks/task0b_discovery.py:248` emits CS |
-| 0c augment | ✓ | — | — | — | — (by design) | `ports/augment.py:75` `augment(... coverage_strategy, project_context)`; RepoSpec NOT injected (CODE_ARCHITECTURE.md line 772) |
+| 0c augment | ✓ | — | — | — | — (by design) | `ports/augment.py:75` `augment(... coverage_strategy, project_context)`; RepoSpec NOT injected — 0c runs before task1 and bake, so FR, GEN and API do not exist yet |
 | 1 requirements | ✓ | P | ✓ | ✓ | — | `task1_synthesizer.py:171` CS, `:175` API via `format_api_surface_section`, `:179-188` GEN, FR is the output |
 | 2 generate (group/whole-file) | ✓ | ✓ | ✓(rules) | ✓ | — (FR/CS interpolated directly) | `task2_generator.py:766` CS, `:774` FR; `genesis_rules` complement via `_spec_block` |
 | 2 generate (per-fn / per-impl fill) | — | ✓ | ✓ | ✓ | ✓ | `prompts/per_fn.py:94`, `prompts/per_impl.py:99` `repo_spec_section(fr_path,...)` |

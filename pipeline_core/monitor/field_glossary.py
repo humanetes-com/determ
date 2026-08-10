@@ -26,8 +26,9 @@ FIELDS: list[tuple[str, str]] = [
     ("tdd", "Per-cluster TDD trajectory: pass=/fail= test counts, ↑/↓ change vs previous iteration, iter=iteration count, stall=iterations with no forward progress, trailing arrow chain = pass-count history."),
     ("stall=", "Consecutive TDD iterations with no improvement in this cluster's passing-test count — a rising stall is the stuck-loop signal."),
     ("err", "Most recent rustc error code the fill loop hit, its plain-English name, and the top 4 error codes by frequency this run."),
-    ("progress", "Cumulative bar: fraction of the cluster's fns filled (not stub) out of its total."),
-    ("frontier:", "A/B on the progress row = fill attempts made this pass (A) out of stubs queued for this pass (B)."),
+    ("iter", "Inside the CURRENT TDD iteration: pace bar = elapsed vs the median sweep-to-sweep gap this run (caps at full — overrunning is legitimate; a pace reference, not an ETA). fills = completed fill units this iteration (per-fn, impl-block members, whole-file fns; re-fills included), `last N ago` = age of the newest fill — a growing age while RUNNING is the finest-grain stall signal. frontier = fns this iteration works through; fills routinely exceed it (file-first touches non-frontier fns)."),
+    ("sweep", "Fill units completed against the frontier batch this sweep opened with (the pipeline log's N/M counter): bar = units/batch, ✓ = landed, ✗ = kept-or-reverted after exhausting fixes. File/impl passes count members, so the count can pass the batch size — the excess is shown as `+K beyond frontier`, never folded into the bar."),
+    ("bodies", "Fns with a body out of the cluster total — shown only while the initial fill is still climbing. Disappears once every fn has a body: from there the loop rewrites wrong bodies and progress is only measurable by the tdd row's pass count, once per sweep."),
     ("fills", "Outcome counts this run: ✓first = passed on the first attempt, ↻recovered = passed after a fix-loop retry, ✗failed = exhausted retries and reverted to stub, ⊘skip = not attempted."),
     ("in-flight", "Fns/impls the LLM is generating right now, up to PIPELINE_PARALLELISM at once, longest-running first. (Ns) = seconds since dispatch. ↻ = behavioral re-fill, ⊞ = whole impl block, ▤ = whole file, no tag = single fn."),
     ("notes=", "Count of 'Model Notes — Confusions to Avoid' entries the model has written to functional_requirements_{crate}.md this run — its own anti-hallucination notes, re-fed into later prompts."),
@@ -46,7 +47,7 @@ FIELDS: list[tuple[str, str]] = [
 # meaning from the label alone (unlike cluster/attempt/file/test/docs, which
 # read fine cold). Everything is still covered in FIELDS for the [f] view.
 CORE_TAGS: set[str] = {
-    "in-flight", "notes=", "hot fn", "frontier:", "stall=", "fills", "err", "≈ tokens/s",
+    "in-flight", "notes=", "hot fn", "stall=", "fills", "err", "≈ tokens/s",
 }
 
 
