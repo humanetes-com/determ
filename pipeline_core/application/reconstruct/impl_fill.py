@@ -38,6 +38,7 @@ from pipeline_core.application.reconstruct.unit_pool import run_units_concurrent
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
     escalation_refusal_note,
+    invariance_refusal_note,
     may_escalate_to_last_resort,
 )
 from pipeline_core.domain.attribution import FailureFrontier
@@ -46,6 +47,10 @@ from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
     refills_deferred_by_impl_route,
+)
+from pipeline_core.domain.failure_signature import (
+    attempt_invariant,
+    structural_group_note,
 )
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.identity import ContainerId, RetroKey
@@ -110,6 +115,12 @@ from pipeline_core.domain.test_results import (
     RegressionComparison,
     TestStateReading,
     strip_ansi,
+)
+from pipeline_core.domain.verdict import (
+    Disposition,
+    GateOutcome,
+    ValidityVector,
+    VerdictRecord,
 )
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
@@ -393,6 +404,31 @@ def fill_impl_blocks(
     # together at the end of the sweep: when one site blocked every landed
     # block, this route provably moved no verdict.
     block_outcomes: list[UnitOutcome] = []
+    # Failing signatures shared ACROSS blocks this pass (guarded by
+    # `_counters_lock`). Three sibling `From<Error>` impls each burned a full
+    # episode plus a ~48k-char last resort on the same single failing test in
+    # one pass, twice in consecutive runs (2026-08-10) — a set that many
+    # units share implicates what they share, not any member, so the third
+    # arrival makes the signature structural and later arrivals stop at
+    # their first failed round: no retro, no conviction, no escalation.
+    _shared_failing: dict[frozenset[str], set[str]] = {}
+    _structural_sigs: set[frozenset[str]] = set()
+
+    def _verdict_row(unit: str, disposition: Disposition, reason: str, *,
+                     outcome: GateOutcome | None = None, attempt: int = 0,
+                     evidence: tuple[str, ...] = (),
+                     validity: ValidityVector | None = None,
+                     model_calls: int = 0, prompt_chars: int = 0,
+                     route: str = "impl") -> None:
+        _emit("phase_c.verdict", data={
+            **VerdictRecord(
+                unit=unit, route=route, attempt=attempt,
+                disposition=disposition, reason=reason, outcome=outcome,
+                validity=validity or ValidityVector(),
+                evidence_keys=evidence, model_calls=model_calls,
+                prompt_chars=prompt_chars).to_json_dict(),
+            "cluster": cluster_name,
+        })
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
@@ -980,11 +1016,34 @@ def fill_impl_blocks(
                     _log(f"  [phase-c/file] GUARD {glabel}: crash-evidence "
                          "re-fill KEPT on non-regression — judged for real "
                          "at the next sweep, in the joint tree.")
+                # The same keep WITHOUT crash evidence: a REJECT whose every
+                # self-failure was already failing at baseline is not
+                # implicating — the attempt regressed nothing and the old
+                # bodies fail the same tests, so reverting to them buys
+                # nothing and re-charges the group for the tree's standing
+                # debt. Run `2219473` (2026-08-10) reverted `src/error.rs
+                # [group 1/3]` (20 re-fills) three times and `src/lib.rs`,
+                # `src/chain.rs`, `src/kind.rs` behind it, all "U2 test
+                # failure (no strict improvement)", all with zero newly-red —
+                # 72 model calls, 137 net bytes, pass 88 → 88. Keep the
+                # bodies; the next sweep judges the joint tree, and a body
+                # that actually costs tests is clawed back by the batch
+                # ratchet from its pre-fill snapshot.
+                _nonregr_keep_file = (rc == 0 and _u2_reject
+                                      and not _crash_keep_file
+                                      and _joint is not None
+                                      and not _joint.new_failures)
+                if _nonregr_keep_file:
+                    _log(f"  [phase-c/file] GUARD {glabel}: re-fill KEPT on "
+                         "non-regression — no self-failure is newly red "
+                         "(all were failing at baseline); judged at the "
+                         "next sweep in the joint tree.")
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
                     if rc == 0 else None)
                 if rc == 0 and (not _u2_reject or _bank is not None
-                                or _crash_keep_file) and _regr_file is None:
+                                or _crash_keep_file or _nonregr_keep_file
+                                ) and _regr_file is None:
                     fns_filled_total += spliced_now
                     _log(f"  [phase-c/file] {glabel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass"
@@ -1011,6 +1070,20 @@ def fill_impl_blocks(
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,
                         "banked": _bank is not None})
+                    _verdict_row(
+                        glabel,
+                        (Disposition.KEEP_DEFERRED
+                         if (_crash_keep_file or _nonregr_keep_file)
+                         else Disposition.ACCEPT),
+                        ("kept on non-regression — no newly-red self-failure"
+                         if (_crash_keep_file or _nonregr_keep_file)
+                         else "accepted on own tests"),
+                        outcome=(GateOutcome.UNMEASURABLE
+                                 if (_crash_keep_file or _nonregr_keep_file)
+                                 else GateOutcome.POSITIVE),
+                        attempt=_attempt,
+                        validity=ValidityVector(binary_completed=True),
+                        model_calls=_attempt, route="file")
                     return
                 file_path.write_text(snapshot, encoding="utf-8")
                 if _regr_file is not None:
@@ -1022,6 +1095,12 @@ def fill_impl_blocks(
                 else:
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
+                _verdict_row(
+                    glabel, Disposition.REVERT, _revert_reason,
+                    outcome=GateOutcome.NEGATIVE,
+                    attempt=_attempt,
+                    validity=ValidityVector(binary_completed=rc == 0),
+                    model_calls=_attempt, route="file")
                 _more = _attempt < _FILE_FIRST_MAX_ATTEMPTS
                 _log(f"  [phase-c/file] {glabel}: reverted "
                      f"({_revert_reason}) — "
@@ -1294,6 +1373,12 @@ def fill_impl_blocks(
         # Non-empty iff the latest revert was a crash-only regression blamed
         # wholly outside this block — holds the crash-block mark to persist.
         _crash_blocked_mark: list[str] = []
+        # Failing signature per judged failed attempt (compile `code:message`
+        # set, U2 failing-test-name set, or regression signature), in attempt
+        # order. Read for two structural checks: two consecutive identical
+        # entries withhold the budget-off escalation, and a signature three
+        # blocks share this pass stops the group (`_shared_failing`).
+        _sig_history: list[frozenset[str]] = []
         # B3: baseline = the crate's error signature with THIS block's
         # stubs still unimplemented. A fill is "non-regressing" if it adds no
         # error beyond this baseline and none on the filled fns — then we keep
@@ -1590,7 +1675,25 @@ def fill_impl_blocks(
                              "sibling's localized fault; re-prompting this "
                              "block buys the same crash until the blamed "
                              "file changes.")
+                        _verdict_row(
+                            block_id, Disposition.REVERT,
+                            "crash-only regression, blame wholly outside "
+                            "the block — revert stands, unit crash-blocked",
+                            outcome=GateOutcome.UNMEASURABLE,
+                            attempt=fix_attempt,
+                            validity=ValidityVector(
+                                binary_completed=False,
+                                blame_outside_unit=True),
+                            evidence=tuple(sorted(_cmp.newly_crashed)))
                         return FixOutcome("stop")
+                    _verdict_row(
+                        block_id, Disposition.REVERT,
+                        f"regressed sibling test(s): {_cmp.summary}",
+                        outcome=GateOutcome.NEGATIVE,
+                        attempt=fix_attempt,
+                        validity=ValidityVector(
+                            binary_completed=not _cmp.newly_crashed),
+                        evidence=tuple(sorted(_rsig)))
                     # rc==0 got us here, so the block COMPILES — its regression
                     # is a test-tier loss, never a compile-tier one.
                     return FixOutcome("failed", err_sig=_rsig,
@@ -1638,6 +1741,20 @@ def fill_impl_blocks(
                          f"(attempt {fix_attempt})"
                          + (f" — banked improvement: {_bank_impl.summary}."
                             if _bank_impl is not None else "."))
+                    _verdict_row(
+                        block_id,
+                        (Disposition.KEEP_DEFERRED
+                         if (_u2_external_only or _crash_keep)
+                         else Disposition.ACCEPT),
+                        ("kept deferred — every failing test blocked or "
+                         "crash-evidenced" if (_u2_external_only or _crash_keep)
+                         else "accepted on own tests"),
+                        outcome=(GateOutcome.UNMEASURABLE
+                                 if (_u2_external_only or _crash_keep)
+                                 else GateOutcome.POSITIVE),
+                        attempt=fix_attempt,
+                        validity=ValidityVector(binary_completed=True),
+                        model_calls=fix_attempt)
                     _emit("phase_c.impl.fill.done", duration_ms=int(
                         (time.monotonic() - _t0) * 1000),
                         data={
@@ -1736,6 +1853,16 @@ def fill_impl_blocks(
         def _on_impl_failure(attempt_n: int, outcome: FixOutcome,
                              gauge: FloorStall) -> None:
             _codes = sorted(ecodes_in_text(last_error_excerpt))
+            # TEST-tier signatures only (failing-test sets; no rustc E-codes
+            # in the excerpt). A compile-tier repeat stays OUT of the
+            # invariance history on purpose: "the model was shown too
+            # little" is real at the compile tier — a type or sibling
+            # defined outside the budgeted window — and the wider window is
+            # exactly the fix, so the escalation must stay available there.
+            # A failing-TEST set that survives attempts unchanged is the
+            # tier where the wider window re-purchases the same answer.
+            if outcome.err_sig and not _codes:
+                _sig_history.append(frozenset(outcome.err_sig))
             _kind = "U2 test" if not _codes and last_error_excerpt else "compile"
             _log(f"  [phase-c/impl] {block_id}: {_kind} failed "
                  f"(attempt {attempt_n}); errs={outcome.metric} "
@@ -1781,6 +1908,39 @@ def fill_impl_blocks(
                 # the failure was never about these bodies, and a bigger
                 # prompt buys the identical sibling crash.
                 break
+            # Cross-block structural breaker: a failing signature that a
+            # third block has now produced in this same pass implicates the
+            # shared tree, not any of them. Stop this block's episode here —
+            # before the escalation and before the retrospective — so the
+            # group's members are not each convicted for one shared blocker.
+            # The failing tests stay red, so the next sweep's attribution
+            # gets the set with no conviction standing in its way.
+            _cur_sig = _sig_history[-1] if _sig_history else frozenset()
+            if _cur_sig:
+                with _counters_lock:
+                    _shared_failing.setdefault(_cur_sig, set()).add(block_id)
+                    _is_structural = (_cur_sig in _structural_sigs
+                                      or len(_shared_failing[_cur_sig]) >= 3)
+                    if _is_structural:
+                        _structural_sigs.add(_cur_sig)
+                        _group = frozenset(_shared_failing[_cur_sig])
+                if _is_structural:
+                    _log(f"  [phase-c/impl] GUARD {block_id}: "
+                         + structural_group_note(_cur_sig, _group))
+                    _emit("phase_c.impl.structural_group", data={
+                        "cluster": cluster_name, "file": block.file,
+                        "container": block.container,
+                        "signature": sorted(_cur_sig),
+                        "group": sorted(_group)})
+                    _verdict_row(
+                        block_id, Disposition.KEEP_DEFERRED,
+                        "structural: failing signature shared by "
+                        f"{len(_group)} block(s) this pass",
+                        outcome=GateOutcome.UNMEASURABLE,
+                        attempt=fix_attempt,
+                        evidence=tuple(sorted(_cur_sig)),
+                        model_calls=fix_attempt)
+                    break
             # P6: maximal last-resort — ONE attempt with budgets OFF (round 1
             # only; later rounds change guidance, not budgets): the WHOLE
             # current file, every referencing test verbatim, and the full
@@ -1790,12 +1950,25 @@ def fill_impl_blocks(
             _loss = _last_loss[0] if _last_loss else None
             _maximal_on = (_retro_round == 1
                            and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0")
-            if _maximal_on and _loss is not None and not may_escalate_to_last_resort(_loss):
+            _sig_unchanged = attempt_invariant(_sig_history)
+            if _maximal_on and not may_escalate_to_last_resort(
+                    _loss, signature_unchanged=_sig_unchanged):
+                _note = (invariance_refusal_note(fix_attempt)
+                         if _sig_unchanged
+                         else escalation_refusal_note(
+                             _loss if _loss is not None
+                             else AttemptLoss.MODEL_FAILURE))
                 _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
-                     f"WITHHELD — {escalation_refusal_note(_loss)}.")
+                     f"WITHHELD — {_note}.")
                 _emit("phase_c.impl.fill.maximal_withheld", data={
                     "cluster": cluster_name, "file": block.file,
-                    "container": block.container, "loss": _loss.value})
+                    "container": block.container,
+                    "loss": _loss.value if _loss is not None else "",
+                    "signature_unchanged": _sig_unchanged})
+                _verdict_row(
+                    block_id, Disposition.CAP_REFUSAL,
+                    f"maximal last-resort withheld — {_note}",
+                    attempt=fix_attempt, model_calls=fix_attempt)
             elif _maximal_on:
                 _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
                 _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
@@ -1925,6 +2098,19 @@ def fill_impl_blocks(
                         "last_error_preview": last_error_excerpt[:240],
                     }, _prov, _block_evidence, _blockers)
                     _save_retrospectives(project_dir, retros_cache)
+                _verdict_row(
+                    block_id,
+                    (Disposition.CONVICTION if full_exhaust
+                     else Disposition.REJECT),
+                    f"retro round {_retro_round}: "
+                    f"category={retro.get('category', '')!r} "
+                    f"signal={_signal!r} improved={improved}",
+                    outcome=(GateOutcome.UNMEASURABLE if _downstream
+                             else GateOutcome.NEGATIVE),
+                    attempt=fix_attempt,
+                    evidence=tuple(sorted(_sig_history[-1]))
+                    if _sig_history else (),
+                    model_calls=fix_attempt)
                 _retry_informed = not full_exhaust and not _downstream
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
@@ -1962,6 +2148,15 @@ def fill_impl_blocks(
                 "container": block.container,
                 "mark": _crash_blocked_mark[0],
             })
+            _verdict_row(
+                block_id, Disposition.KEEP_DEFERRED,
+                "crash-blocked on a sibling's fault — no charge, "
+                "re-admitted when the blamed file changes",
+                outcome=GateOutcome.UNMEASURABLE, attempt=fix_attempt,
+                validity=ValidityVector(binary_completed=False,
+                                        blame_outside_unit=True),
+                evidence=(_crash_blocked_mark[0],),
+                model_calls=fix_attempt)
             return
         if members_filled_this_block == 0 and not block_already_complete:
             _salvaged = salvage.best
@@ -1984,6 +2179,13 @@ def fill_impl_blocks(
                              + ("no longer compiles here" if _sv_regr is None
                                 else f"would regress {_sv_regr[0].summary}")
                              + ") — stubs kept.")
+                        _verdict_row(
+                            block_id, Disposition.SALVAGE_REFUSAL,
+                            "best compiling image not salvaged — "
+                            + ("no longer compiles" if _sv_regr is None
+                               else "would regress"),
+                            outcome=GateOutcome.NEGATIVE,
+                            attempt=fix_attempt)
                     else:
                         _log(f"  [phase-c/impl] {block_id}: fix loop exhausted "
                              f"— KEEPING best compiling image "
@@ -1995,6 +2197,12 @@ def fill_impl_blocks(
                             "container": block.container,
                             "failing_tests": _salvaged.metric.failing_tests,
                         })
+                        _verdict_row(
+                            block_id, Disposition.KEEP_DEFERRED,
+                            "fix loop exhausted — best compiling image kept, "
+                            "judged at the next sweep",
+                            outcome=GateOutcome.UNMEASURABLE,
+                            attempt=fix_attempt, model_calls=fix_attempt)
             with _counters_lock:
                 impls_failed += 1
                 errors.append(f"{block.file}::{block.container}: "

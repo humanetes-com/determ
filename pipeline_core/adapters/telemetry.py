@@ -56,8 +56,17 @@ class JsonlEventEmitter:
             for k, v in fields.items():
                 if v is not None:
                     record[k] = v
+            line = json.dumps(record, default=str) + "\n"
             with open(self._events_log(), "a") as fh:
-                fh.write(json.dumps(record, default=str) + "\n")
+                fh.write(line)
+            # The verdict ledger: every judging-gate decision doubles into a
+            # dedicated sibling file, so "what was judged, on what evidence,
+            # at what cost" is one grep instead of a session-long audit of a
+            # 100 MB event stream. Same row, same crash-safety contract.
+            if event == "phase_c.verdict":
+                _vpath = Path(self._events_log()).with_name("verdicts.jsonl")
+                with open(_vpath, "a") as fh:
+                    fh.write(line)
         except Exception:
             pass  # observability must never crash the pipeline
 

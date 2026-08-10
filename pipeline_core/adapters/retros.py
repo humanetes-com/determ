@@ -76,7 +76,7 @@ def retro_key(file_rel: str, fn_name: str, container: str) -> RetroKey:
     return RetroKey(f"{file_rel}::{fn_name}::{canon_container(container)}")
 
 
-def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
+def reset_exhaustion_flags(project_dir: Path, reason: str) -> list[str]:
     """Clear `fully_exhausted` flags (keep the lessons — category, guidance,
     history all stay) at a phase boundary where the evidence context changed
     (e.g. the merged tree landed dozens of fills). The cross-iteration skip
@@ -93,12 +93,20 @@ def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
     time — live-observed on anyhow (iter 3 re-admitted 16 fns, net
     `improved=False`, right after iter 2's 43-fn batch DID pay off) — the
     unconditional version can't tell "first informed retry" from "the same
-    fn getting its Nth futile one." Returns the number of flags cleared."""
+    fn getting its Nth futile one."
+
+    Returns the RELEASED KEYS (`file::fn::container` strings), not a count:
+    a release is only real if it opens every gate that holds the unit, and
+    the TDD driver keeps its own in-process exhaustion set (`refill_attempts`
+    + `permanently_exhausted`) that this disk write cannot reach — run
+    `2219473` (2026-08-10) re-admitted 11 units here and dispatched zero,
+    because all of them sat refill-capped in that other store. The caller
+    needs the identities to open its side."""
     max_attempts = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
     retros = load_retrospectives(project_dir)
-    cleared = 0
+    released: list[str] = []
     capped = 0
-    for rec in retros.values():
+    for key, rec in retros.items():
         if not (isinstance(rec, dict) and rec.get("fully_exhausted")):
             continue
         attempts = int(rec.get("reset_attempts", 0))
@@ -107,14 +115,15 @@ def reset_exhaustion_flags(project_dir: Path, reason: str) -> int:
             continue
         rec["fully_exhausted"] = False
         rec["reset_attempts"] = attempts + 1
-        cleared += 1
-    if cleared or capped:
+        released.append(str(key))
+    if released or capped:
         save_retrospectives(project_dir, retros)
-        log(f"  [phase-c] reset {cleared} fully_exhausted flag(s) "
+        log(f"  [phase-c] reset {len(released)} fully_exhausted flag(s) "
             f"({capped} at the {max_attempts}-attempt cap, left exhausted) — {reason}")
         emit("phase_c.exhaustion.reset",
-             data={"cleared": cleared, "capped": capped, "reason": reason})
-    return cleared
+             data={"cleared": len(released), "capped": capped,
+                   "reason": reason})
+    return released
 
 
 

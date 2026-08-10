@@ -192,7 +192,7 @@ def test_refill_window_survives_only_while_re_fills_land() -> None:
 def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  frontier=None, fills_per_iter=0, graceful_stop=None, fill=None,
                  best_mark=None, checkpoints=None, resets=None, stubs=None,
-                 retires=None, logs=None):
+                 retires=None, logs=None, reset_returns=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -212,9 +212,11 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
     def _reset(pd, reason):
         # The reason names the iter and the two pass counts it compared, so a
         # test can pin WHICH sweep bought the release, not merely that one did.
+        # `reset_returns` are the RELEASED KEYS the disk store reports — the
+        # driver reopens its loop-local gates for exactly these identities.
         if resets is not None:
             resets.append(reason)
-        return 0
+        return list(reset_returns or [])
 
     return PhaseCTddDeps(
         attribute_failures=lambda *a, **k: AttributionResult(

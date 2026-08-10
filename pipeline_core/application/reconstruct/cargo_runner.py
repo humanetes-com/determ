@@ -255,6 +255,30 @@ def test_regression_gate(
                   "scoring deferred until the stub(s) fill (cost withheld: "
                   f"{cmp.crash_lost_pass} baseline pass(es))")
             return None
+        # No stub panic in the capture, but the shape is the same: every
+        # COMPLETED binary held, and the only loss is a binary that produced
+        # no verdicts at all. A crash is not a newly-red verdict from an
+        # attributed test in a completed binary — it implicates nothing this
+        # gate can name, and charging it here is how one latent fault taxed
+        # every sibling: four `src/context.rs::StdErrorforE` re-fills were
+        # reverted `net -6, binary crashed` in run `1824387` (2026-08-10)
+        # for a crash the localizer could not attribute at all ("no native
+        # fault under gdb, no ASAN report"). Keep the fill; the sweep-level
+        # machinery owns crashes — the oracle counts the vanished tests as
+        # failing, the localizer/retrigger aim at the fault with stack
+        # evidence this gate never sees, and a fill that itself introduced
+        # the crash drops the next sweep's pass count, which the batch
+        # ratchet confirms and claws back from its pre-fill snapshot. The
+        # stub-restore NOTE above applies here identically.
+        guard("phase-c/crash_only_unmeasurable_kept",
+              f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
+              f"{list(cmp.newly_crashed)} crashed with no newly-red verdict "
+              "in any completed binary and no panic the capture can locate — "
+              "a crash implicates no unit by itself; fill KEPT on "
+              "non-regression of the measured scope, judged at the next "
+              "sweep in the joint tree (cost withheld: "
+              f"{cmp.crash_lost_pass} baseline pass(es))")
+        return None
     return cmp, render_regression_detail(cmp)
 
 

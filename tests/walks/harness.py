@@ -126,6 +126,7 @@ def scripted_retrigger(src: Path, walk: dict[str, Any]):
 
 def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            events: list[tuple[str, dict]], max_stalls: str = "3",
+           refill_max: str = "99", reset_returns: list[str] | None = None,
            ) -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
@@ -160,8 +161,9 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
     # One-fn frontier: without a raised cap the behavioural re-fill limit
     # exhausts it two iterations in and every later iteration skips the fill
     # phase, starving the re-admission gate of the "fills landed" half of its
-    # rule for reasons that have nothing to do with the walk.
-    monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "99")
+    # rule for reasons that have nothing to do with most walks. A walk that IS
+    # about the cap (the two-store re-admission) lowers it via `refill_max`.
+    monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", refill_max)
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
     (src / "a.rs").write_text("orig", encoding="utf-8")
@@ -171,7 +173,7 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
         _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (inventory, names),
                      events, scripted_retrigger(src, walk), logs=logs,
                      frontier={FnLocator("src/a.rs", "f"): {"t2"}},
-                     fills_per_iter=2),
+                     fills_per_iter=2, reset_returns=reset_returns),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=BuildCluster(

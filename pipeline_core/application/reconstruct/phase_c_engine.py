@@ -19,6 +19,7 @@ import threading as _threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -622,6 +623,14 @@ class PhaseCFillEngine:
                                 fns_to_retry = list(filled_this_pass)
 
                             any_progress = False
+                            # Pre-splice images of every file this attempt
+                            # touches: this loop splices with
+                            # allow_nonstub=True under NO gate, and its
+                            # check-break exit used to leave the broken tree
+                            # in place ("leaving for next pass") — the one
+                            # site in the fill machinery that could destroy a
+                            # compiling tree and keep the wreck.
+                            _touched: dict[Path, str] = {}
                             # P5.1 parity: map (file, fn) → container via the syn
                             # enumerator so the self-type's definition gets injected.
                             _retry_containers = self.ws.fn_container_index(target_src_dir)
@@ -695,6 +704,11 @@ class PhaseCFillEngine:
                                 # always rejected and the whole loop is a no-op.
                                 # Container-scoped so a same-named sibling in
                                 # another impl is never overwritten.
+                                if fp not in _touched:
+                                    with suppress(OSError):
+                                        _touched[fp] = fp.read_text(
+                                            encoding="utf-8",
+                                            errors="replace")
                                 ok2 = self.mut.splice_body_scoped(
                                     fp, fn, container_for_fn, sig_t, new_body,
                                     allow_nonstub=True).ok
@@ -718,8 +732,15 @@ class PhaseCFillEngine:
                             # Re-run cargo check (cheap) then cargo test.
                             rc_c, out_c = self.cargo.run(check_cmd, target_src_dir, cluster_env)
                             if rc_c != 0:
-                                self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: test-fix "
-                                             f"broke cargo check; leaving for next pass.")
+                                for _tfp, _timg in _touched.items():
+                                    with suppress(OSError):
+                                        _tfp.write_text(_timg,
+                                                        encoding="utf-8")
+                                self.tel.log(
+                                    f"  [phase-c/per-fn] pass {pass_n}: "
+                                    "test-fix broke cargo check; restored "
+                                    f"{len(_touched)} pre-splice file(s) "
+                                    "and stopping.")
                                 return FixOutcome("stop")
                             rc, test_out = self.cargo.run(test_cmd, target_src_dir,
                                                           cluster_env, timeout=300)

@@ -1,0 +1,35 @@
+{
+  "run_id": "2219473-e43ea61c",
+  "cluster": "stable",
+  "entry_best": 0,
+  "iterations": [
+    {
+      "iter": 1,
+      "passed": 88,
+      "failed": 18,
+      "oracle": 106,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 15,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 2,
+      "passed": 88,
+      "failed": 18,
+      "oracle": 106,
+      "improved": false,
+      "stall": 1,
+      "max_stall": 3,
+      "frontier": 38,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmitted": 11
+    }
+  ]
+}

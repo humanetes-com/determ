@@ -76,9 +76,23 @@ def test_wrong_compiling_fill_rejected_by_u2_gate(monkeypatch, tmp_path):
     # _run_cargo: distinguishes compile run ("cargo check") from U2 test run
     # ("cargo test") by inspecting the command string AND the file content.
     def _cargo_run(cmd, *_a, **_k):
+        # Well-formed libtest output: named failure WITH its body and the
+        # trailer. The earlier truncated form (no body, no trailer) parsed
+        # as a process abort, so `test_add` landed in `no_verdict` and the
+        # wrong body was only ever caught by the regression gate's
+        # crash-only revert — the charge that gate no longer makes. The
+        # gate THIS test pins is U2's self-failure REJECT, which needs a
+        # verdict to reject on.
         if "test" in cmd:
             return (
-                (101, "test test_add ... FAILED\nassertion `left == right` failed")
+                (101,
+                 "running 1 test\n"
+                 "test test_add ... FAILED\n"
+                 "\nfailures:\n\n"
+                 "---- test_add stdout ----\n"
+                 "assertion `left == right` failed\n"
+                 "\nfailures:\n    test_add\n"
+                 "\ntest result: FAILED. 0 passed; 1 failed; 0 ignored")
                 if "a - b" in lib.read_text(encoding="utf-8")
                 else (0, "test result: ok. 1 passed; 0 failed; 0 ignored")
             )

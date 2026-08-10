@@ -1076,16 +1076,20 @@ def test_file_first_u2_gate_runs_the_refill_members_tests(monkeypatch, tmp_path,
                             FnLocator("lib.rs", "name"): {"name_is_wrong"}}))
     out = capsys.readouterr().out
     assert "file-first fill (2 block(s), 0 stub(s), 2 re-fill(s)" in out
-    # The defect boundary: with an empty test set the gate was an unconditional
-    # ACCEPT and this file reported FILE FILLED. It must now reach the gate,
-    # fail it, and hand the file to the per-block loop (whose own gate already
-    # counted refills — that fallback is not what this pins).
-    assert "[phase-c/file] lib.rs: FILE FILLED" not in out
-    # The comparative verdict must not bank here either: `name_is_wrong` is
-    # absent from the scoped output (unmeasured), and absence is not positive
-    # pass evidence — so the reject stands, with the comparative reason named.
+    # The defect boundary this test was written for is unchanged: the U2 gate
+    # RUNS the refill members' tests — the keep below is the gate's REJECT
+    # being downgraded on evidence, not the old empty-test-set unconditional
+    # accept (an unconditional accept prints no non-regression guard).
+    assert "re-fill KEPT on non-regression" in out
+    # What changed on top of it: a REJECT whose every self-failure was
+    # already failing at baseline is no longer chargeable — the old bodies
+    # fail the same test, so reverting to them re-purchases nothing (the
+    # live instance: `src/error.rs[group 1/3]`'s 20 re-fills reverted three
+    # times on this exact reason, 72 calls for 137 net bytes). The group is
+    # KEPT and judged at the next sweep in the joint tree; a body that costs
+    # tests there is clawed back by the batch ratchet.
     assert ("[phase-c/file] lib.rs: reverted "
-            "(U2 test failure (no strict improvement))") in out
+            "(U2 test failure (no strict improvement))") not in out
     del res
 
 

@@ -43,3 +43,24 @@ def test_losses_are_their_wire_strings() -> None:
     """StrEnum, like `FailureKind` — the event payload carries the member."""
     assert AttemptLoss.ROUTING_DROP == "routing_drop"
     assert f"{AttemptLoss.SPLICE_REFUSAL}" == "splice_refusal"
+
+
+def test_unchanged_signature_withholds_whatever_the_loss() -> None:
+    """The second provably wasted escalation: identical error signature
+    across the budgeted attempts. `src/error.rs::ErrorImpl` fired 19
+    maximal prompts life-to-date on a `7 failing` signature that never
+    moved across three consecutive runs (audited 2026-08-10)."""
+    from pipeline_core.domain.attempt_loss import invariance_refusal_note
+    for loss in (None, AttemptLoss.MODEL_FAILURE, AttemptLoss.ROUTING_DROP):
+        assert not may_escalate_to_last_resort(loss, signature_unchanged=True)
+    note = invariance_refusal_note(3)
+    assert "3 attempt(s)" in note
+    assert "identical" in note
+
+
+def test_changed_signature_leaves_the_old_rule_intact() -> None:
+    assert may_escalate_to_last_resort(None, signature_unchanged=False)
+    assert may_escalate_to_last_resort(AttemptLoss.MODEL_FAILURE,
+                                       signature_unchanged=False)
+    assert not may_escalate_to_last_resort(AttemptLoss.SPLICE_REFUSAL,
+                                           signature_unchanged=False)

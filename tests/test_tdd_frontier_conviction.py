@@ -57,7 +57,7 @@ def _deps(handoffs: list[Any]) -> PhaseCTddDeps:
         log=lambda *a, **k: None,
         order_frontier=lambda eligible, counts: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
-        reset_exhaustion_flags=lambda *a, **k: 0,
+        reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=lambda *a, **k: (
             101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed"),
         scan_unimplemented_for_cluster=lambda *a, **k: [],

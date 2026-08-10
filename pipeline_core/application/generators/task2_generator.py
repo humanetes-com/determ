@@ -1818,8 +1818,18 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # later signal meaningless — 0 passing with no localizable culprit — and
         # the run burns a full pass before anyone notices.
         if _round and not _clean:
+            # RED and named as a budget matter, not just a state report: the
+            # nightly cluster of run `2219473` (2026-08-10) entered its TDD
+            # phase in exactly this state and spent three iterations at
+            # 0/113 under an unchanged pair of rustc errors before exiting.
+            # The TDD loop now refuses after 3 identical-digest red sweeps
+            # (its red-build budget); this line is the entry-side warning
+            # that the phase is starting inside that budget.
             self.tel.log(f"  {tag} [pre-pass-heal] STILL BROKEN after {_round} "
-                         f"round(s) — cluster cannot compile: {_last_msg[:160]}")
+                         f"round(s) — cluster cannot compile: {_last_msg[:160]} "
+                         "— RED: the fill phase starts on a tree where no "
+                         "test can report a verdict; the TDD loop's red-build "
+                         "budget (3 identical-digest sweeps) bounds it.")
             self.tel.emit("phase_c.cluster.prepass_heal_failed", data={
                 "cluster": cluster.name, "rounds": _round,
                 "error": _last_msg[:400],

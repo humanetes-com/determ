@@ -330,11 +330,11 @@ def test_measure_test_state_counts_and_inconclusive() -> None:
     assert measure_test_state(_const_run_cargo(-1, ""), "cargo test", Path("."), {}) is None
 
 
-def _regr(run_cargo_fn, baseline, enabled=True):
+def _regr(run_cargo_fn, baseline, enabled=True, guard=lambda *_: None):
     from pipeline_core.application.reconstruct.cargo_runner import test_regression_gate
     return test_regression_gate(
         run_cargo_fn, "cargo test", Path("."), {}, baseline,
-        enabled=enabled, timeout=120, guard=lambda *_: None)
+        enabled=enabled, timeout=120, guard=guard)
 
 
 def test_regression_gate_accepts_when_no_new_red() -> None:
@@ -416,10 +416,17 @@ def test_regression_gate_binary_scoped_crash_exclusion() -> None:
     assert "tests/b.rs" in fired[0][1]
 
 
-def test_regression_gate_flags_newly_crashed_binary() -> None:
-    # A binary COMPLETE at baseline that crashes after the fill is a real,
-    # attributable regression — detail names the binary and the historical
-    # prefix stays absent (new crash message class).
+def test_regression_gate_detects_but_does_not_charge_a_bare_crash() -> None:
+    # A binary COMPLETE at baseline that crashes after the fill, with no
+    # newly-red verdict in any completed binary: DETECTED (the comparison
+    # names the crash) but no longer CHARGED — a crash is not a verdict from
+    # an attributed test, so the gate keeps the fill and the sweep-level
+    # machinery (oracle accounting, localizer, batch ratchet) owns it. The
+    # rendering pins move to `compare_readings` directly, which still feeds
+    # the revert log lines on the paths that DO charge.
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        compare_readings,
+    )
     from pipeline_core.domain.test_results import TestStateReading, parse_binary_results
     base_out = (
         "    Running tests/a.rs (t/a-1)\n"
@@ -429,15 +436,19 @@ def test_regression_gate_flags_newly_crashed_binary() -> None:
         "    Running tests/a.rs (t/a-1)\n"
         "running 2 tests\ntest x ... ok\ntest y ...\n")
     base = TestStateReading(parse_binary_results(base_out))
-    res = _regr(_const_run_cargo(101, cur_out), base)
-    assert res is not None
-    cmp, msg = res
+    after = TestStateReading(parse_binary_results(cur_out))
+    cmp = compare_readings(base, after)
     assert cmp.newly_red == frozenset()
     assert cmp.newly_crashed == ("tests/a.rs",)
     # the log summary must name the CRASH, not fall back to "pass-count drop"
     assert cmp.summary == "binary crashed: ['tests/a.rs'] (net -2 test(s))"
     assert cmp.signature == frozenset({"__binary_crash__:tests/a.rs"})
-    assert "CRASH" in msg and "tests/a.rs" in msg
+    fired: list[tuple[str, str]] = []
+    res = _regr(_const_run_cargo(101, cur_out), base,
+                guard=lambda loc, m: fired.append((loc, m)))
+    assert res is None
+    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
+               and "tests/a.rs" in m for loc, m in fired)
 
 
 def test_u2_gate_rc_zero_missing_test_is_a_filter_miss_not_an_abort() -> None:
@@ -550,18 +561,28 @@ def test_regression_gate_keeps_fill_when_crash_is_stub_panic_only() -> None:
     assert any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired)
 
 
-def test_regression_gate_still_reverts_crash_without_stub_evidence() -> None:
-    # Negative controls: a segfault (no panic text) and an assertion panic
-    # followed by a stub panic both keep the revert — partial attribution
-    # must not exonerate.
+def test_regression_gate_keeps_crash_without_stub_evidence_as_unmeasurable() -> None:
+    # The inversion at this gate: a crash-only regression with NO stub-panic
+    # attribution — a segfault, or an assertion panic beside a stub panic —
+    # is UNMEASURABLE, not chargeable. Four `src/context.rs::StdErrorforE`
+    # re-fills were reverted `net -6, binary crashed` (run `1824387`,
+    # 2026-08-10) for a crash the localizer attributed to nothing; the gate
+    # now keeps such fills under its own guard tag and the sweep-level
+    # machinery judges the joint tree. The stub-panic case keeps its more
+    # specific tag; everything crash-only lands in one of the two.
     from pipeline_core.application.reconstruct.cargo_runner import (
         test_regression_gate,
     )
+    fired: list[tuple[str, str]] = []
     res = test_regression_gate(
         _const_run_cargo(101, _crashed_after("Segmentation fault\n")),
         "cargo test", Path("."), {}, _completed_baseline(),
-        enabled=True, timeout=120, guard=lambda *_: None)
-    assert res is not None and res[0].newly_crashed
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired.append((loc, m)))
+    assert res is None
+    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
+               for loc, _m in fired)
+    fired2: list[tuple[str, str]] = []
     res2 = test_regression_gate(
         _const_run_cargo(
             101, _crashed_after(
@@ -570,5 +591,26 @@ def test_regression_gate_still_reverts_crash_without_stub_evidence() -> None:
                 "thread 'x' panicked at src/error.rs:64:17:\n"
                 "not implemented\n")),
         "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired2.append((loc, m)))
+    assert res2 is None
+    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
+               for loc, _m in fired2)
+
+
+def test_regression_gate_still_reverts_on_newly_red_verdict() -> None:
+    # The control that keeps the inversion honest: implicating evidence — a
+    # previously-passing test reporting a RED VERDICT in a COMPLETED binary —
+    # still reverts absolutely, crash or no crash beside it.
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    cur_out = ("    Running unittests src/lib.rs (t/lib-1)\n"
+               "running 2 tests\ntest x ... ok\ntest y ... FAILED\n"
+               "test result: FAILED. 1 passed; 1 failed; 0 ignored\n")
+    res = test_regression_gate(
+        _const_run_cargo(101, cur_out),
+        "cargo test", Path("."), {}, _completed_baseline(),
         enabled=True, timeout=120, guard=lambda *_: None)
-    assert res2 is not None and res2[0].newly_crashed
+    assert res is not None
+    assert "y" in res[0].newly_red

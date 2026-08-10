@@ -13,7 +13,7 @@ test list.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnLocator
@@ -393,6 +393,64 @@ def blame_outside_unit(
     with nothing localized there is no evidence the unit is innocent."""
     return bool(blamed) and not any(
         b.file == unit_file and b.fn_name in unit_fns for b in blamed)
+
+
+def crash_signal_hint(output: str, *, max_lines: int = 4) -> str:
+    """The raw crash symptoms a sweep capture carries when the localizer
+    finds nothing — the lines naming a signal, an abort or an overflow.
+
+    Recorded so an unlocalizable crash leaves SOMETHING checkable behind:
+    `error::gen_tests_4::test_no_backtrace_fallback` crashed every sweep of
+    run `2219473` (2026-08-10) and after four "no native fault under gdb, no
+    ASAN report" lines the logs held no record of what the sweep binary
+    actually died of."""
+    _marks = ("signal:", "SIGSEGV", "SIGABRT", "SIGBUS", "SIGILL",
+              "stack overflow", "core dumped", "process didn't exit "
+              "successfully", "misaligned pointer")
+    keep: list[str] = []
+    for line in (output or "").splitlines():
+        if any(m in line for m in _marks):
+            _s = line.strip()
+            if _s and _s not in keep:
+                keep.append(_s)
+        if len(keep) >= max_lines:
+            break
+    return " | ".join(keep)
+
+
+def vanished_subject_fns(
+    vanished: frozenset[str],
+    reverse_map: Mapping[str, Collection[tuple[str, str]]],
+    *, max_subjects: int = 3,
+) -> dict[FnLocator, frozenset[str]]:
+    """The SUBJECT fns of vanished tests, for the case native localization
+    returned nothing: `{fn: tests naming it}`, narrowed hard.
+
+    A vanished test statically reaches most of the crate, so the reverse map
+    alone must never become blame — that is the mass-revert mistake one
+    level down. Two narrowings make the result a subject rather than a
+    suspect list: only tests whose name carries a module path contribute
+    (``error::gen_tests_4::test_x`` names ``src/error.rs``; a bare
+    ``test_downcast`` anchors nothing), and only reverse-map hits in that
+    module's own file survive. A test whose narrowed set still exceeds
+    `max_subjects` contributes nothing — a subject that wide is not a
+    subject. The output arms the crash-evidence channel (prompt section,
+    exhaustion void, keep-on-non-regression); it deliberately produces no
+    BLAME, so nothing here can crash-block or mass-revert anyone."""
+    out: dict[FnLocator, set[str]] = {}
+    for test in vanished:
+        parts = test.split("::")
+        if len(parts) < 2:
+            continue
+        module_file = f"src/{parts[0]}.rs"
+        bare = parts[-1]
+        hits = [FnLocator(*k) for k in reverse_map.get(bare, ())]
+        subjects = [loc for loc in hits if str(loc.file) == module_file]
+        if not subjects or len(subjects) > max_subjects:
+            continue
+        for loc in subjects:
+            out.setdefault(loc, set()).add(test)
+    return {loc: frozenset(tests) for loc, tests in out.items()}
 
 
 def _parse_asan_frame_line(line: str) -> dict[str, object] | None:

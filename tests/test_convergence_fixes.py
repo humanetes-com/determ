@@ -90,14 +90,16 @@ def test_reset_exhaustion_flags_keeps_lessons(tmp_path: Path) -> None:
               "guidance": "try a vtable"},
     })
     cleared = pipeline._reset_exhaustion_flags(tmp_path, "test boundary")
-    assert cleared == 1
+    # Returns the RELEASED KEYS now, not a count — the caller must open its
+    # own in-process exhaustion gates for exactly these units.
+    assert cleared == [key]
     retros = load_retrospectives(tmp_path)
     rec = retros[key]
     assert rec["fully_exhausted"] is False
     assert rec["guidance"] == "try a vtable"          # lesson survives
     assert not is_fn_fully_exhausted(retros, "src/error.rs", "new", "impl Error")
     # Idempotent: nothing left to clear.
-    assert pipeline._reset_exhaustion_flags(tmp_path, "again") == 0
+    assert pipeline._reset_exhaustion_flags(tmp_path, "again") == []
 
 
 def test_reset_exhaustion_flags_caps_repeat_offenders(
@@ -115,20 +117,20 @@ def test_reset_exhaustion_flags_caps_repeat_offenders(
               "guidance": "stuck"},
     })
     # Attempt 1: cleared, reset_attempts becomes 1.
-    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 1") == 1
+    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 1") == [key]
     retros = load_retrospectives(tmp_path)
     assert retros[key]["reset_attempts"] == 1
     # Simulate the fn immediately re-exhausting with no improvement.
     retros[key]["fully_exhausted"] = True
     save_retrospectives(tmp_path, retros)
     # Attempt 2: still under the cap (1 < 2) — cleared again.
-    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 2") == 1
+    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 2") == [key]
     retros = load_retrospectives(tmp_path)
     assert retros[key]["reset_attempts"] == 2
     retros[key]["fully_exhausted"] = True
     save_retrospectives(tmp_path, retros)
     # Attempt 3: now AT the cap (2 >= 2) — refused, stays exhausted.
-    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 3") == 0
+    assert pipeline._reset_exhaustion_flags(tmp_path, "boundary 3") == []
     retros = load_retrospectives(tmp_path)
     assert retros[key]["fully_exhausted"] is True
     assert is_fn_fully_exhausted(

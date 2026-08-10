@@ -52,9 +52,17 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
         log=lambda *a, **k: None,
         order_frontier=lambda eligible, counts: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
-        reset_exhaustion_flags=lambda *a, **k: 0,
+        reset_exhaustion_flags=lambda *a, **k: [],
+        # Verdict-consistent output: the counters and the printed names must
+        # agree, or the driver's reconciliation (correctly) refuses to charge
+        # the sweep and the refill cap under test here never arms.
         run_cargo=lambda *a, **k: (
-            101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed"),
+            101,
+            "    Running tests/t.rs (t/t-1)\n"
+            "running 4 tests\n"
+            "test a ... ok\ntest b ... ok\ntest c ... ok\n"
+            "test t1 ... FAILED\n"
+            "test result: FAILED. 3 passed; 1 failed"),
         scan_unimplemented_for_cluster=lambda *a, **k: [],
         scan_unimplemented_functions=lambda *a, **k: [],   # wrongfn is NOT a stub
         task2_fill_fns_one_by_one=_fill,
@@ -112,7 +120,7 @@ def test_reset_exhaustion_fires_once_after_progress_then_stays_quiet(
 
     def _reset_exhaustion_flags(pd, reason):
         reset_reasons.append(reason)
-        return 1
+        return ["src/lib.rs::released::"]
 
     deps = replace(
         _deps([]),

@@ -359,3 +359,61 @@ def test_blamed_locators_are_the_origin_not_every_frame() -> None:
     # …and no blame at all exonerates nobody.
     assert not blame_outside_unit(frozenset(), "src/context.rs",
                                   frozenset({"ext_context"}))
+
+
+# --- the unlocalizable deterministic crasher -------------------------------
+# `error::gen_tests_4::test_no_backtrace_fallback` vanished on every sweep of
+# run `2219473` (2026-08-10) and every localization returned "no native fault
+# under gdb, no ASAN report" — so `blamed_fns` stayed empty and the whole
+# crash-evidence machinery (keep, block, prompt section) had nothing to act
+# on. `vanished_subject_fns` is the weaker evidence grade for exactly that
+# case: subject attribution from the test's own module file, never blame.
+
+
+def test_vanished_subject_fns_narrows_to_the_module_file() -> None:
+    from pipeline_core.domain.crash_site import vanished_subject_fns
+    from pipeline_core.domain.models import FnLocator
+    rmap = {"test_no_backtrace_fallback": [
+        ("src/error.rs", "no_backtrace"),
+        ("src/context.rs", "ext_context"),   # reachable, wrong module
+    ]}
+    out = vanished_subject_fns(
+        frozenset({"error::gen_tests_4::test_no_backtrace_fallback"}), rmap)
+    assert out == {FnLocator("src/error.rs", "no_backtrace"):
+                   frozenset({"error::gen_tests_4::test_no_backtrace_fallback"})}
+
+
+def test_bare_test_name_anchors_nothing() -> None:
+    from pipeline_core.domain.crash_site import vanished_subject_fns
+    rmap = {"test_downcast": [("src/error.rs", "downcast")]}
+    assert vanished_subject_fns(frozenset({"test_downcast"}), rmap) == {}
+
+
+def test_too_wide_a_subject_set_contributes_nothing() -> None:
+    from pipeline_core.domain.crash_site import vanished_subject_fns
+    rmap = {"test_x": [("src/error.rs", f"fn{i}") for i in range(4)]}
+    assert vanished_subject_fns(
+        frozenset({"error::gen_tests_1::test_x"}), rmap) == {}
+
+
+def test_unknown_test_contributes_nothing() -> None:
+    from pipeline_core.domain.crash_site import vanished_subject_fns
+    assert vanished_subject_fns(
+        frozenset({"error::gen_tests_1::test_y"}), {}) == {}
+
+
+def test_crash_signal_hint_extracts_symptom_lines() -> None:
+    from pipeline_core.domain.crash_site import crash_signal_hint
+    out = ("running 3 tests\n"
+           "test a ... ok\n"
+           "error: test failed. process didn't exit successfully: "
+           "`t/lib-1` (signal: 6, SIGABRT: process abort signal)\n"
+           "some unrelated line\n")
+    hint = crash_signal_hint(out)
+    assert "SIGABRT" in hint
+    assert "unrelated" not in hint
+
+
+def test_crash_signal_hint_empty_when_no_symptoms() -> None:
+    from pipeline_core.domain.crash_site import crash_signal_hint
+    assert crash_signal_hint("running 2 tests\ntest a ... ok\n") == ""

@@ -105,9 +105,13 @@ def test_retry_stall_exits_after_three_nonimproving_iters(monkeypatch, tmp_path)
     assert cargo["run"].calls == 8                # 1 fill + 1 pass-test + 3×(check+test)
 
 
-def test_retry_broken_check_stops_and_keeps_splice(monkeypatch, tmp_path):
-    # Re-splice breaks cargo check → "leaving for next pass": loop stops
-    # after ONE iteration and the (broken) splice is kept — C never reverts.
+def test_retry_broken_check_restores_the_presplice_tree(monkeypatch, tmp_path):
+    # Re-splice breaks cargo check → the loop stops after ONE iteration and
+    # RESTORES the pre-splice file. This loop splices with allow_nonstub=True
+    # under no U2 and no regression gate, so its old "leaving for next pass"
+    # exit was the one site in the fill machinery that could break a
+    # compiling tree and keep the wreck — every sibling judged after it
+    # inherited manufactured compile errors.
     ws = _setup(monkeypatch, tmp_path)
     bodies = iter(["41", "broken_body"])
     install_scripted_model(monkeypatch,
@@ -118,7 +122,8 @@ def test_retry_broken_check_stops_and_keeps_splice(monkeypatch, tmp_path):
              (101, "error[E0308]: broken\n --> src/lib.rs:2:5")])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert "broken_body" in text
+    assert "broken_body" not in text
+    assert "41" in text                        # the compiling fill survives
     assert res.attempts == 2
     assert cargo["run"].calls == 3                # no cargo test after broken check
 

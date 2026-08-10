@@ -35,7 +35,14 @@ from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.crash_site import (
     blamed_locators,
     crash_evidence_by_locator,
+    crash_signal_hint,
     vanish_is_stub_confounded,
+    vanished_subject_fns,
+)
+from pipeline_core.domain.destruction_epoch import (
+    EpochedBaseline,
+    ProgressComparison,
+    compare_progress,
 )
 from pipeline_core.domain.dispatch import (
     defer_blocked_consumers,
@@ -50,6 +57,7 @@ from pipeline_core.domain.layout_retrigger import (
 )
 from pipeline_core.domain.measurement import (
     Measurement,
+    VerdictReconciliation,
     code_identity,
     qualified_verdicts,
     tree_content_sha,
@@ -102,7 +110,7 @@ class PhaseCTddDeps:
     log: Callable[[str], None]
     order_frontier: Callable[..., list[tuple[FnLocator, set[str]]]]
     record_tdd_regression: Callable[..., str]
-    reset_exhaustion_flags: Callable[..., int]
+    reset_exhaustion_flags: Callable[..., list[str]]
     run_cargo: Callable[..., tuple[int, str]]
     scan_unimplemented_for_cluster: Callable[..., list[FnLocator]]
     scan_unimplemented_functions: Callable[..., list[FnLocator]]
@@ -309,6 +317,26 @@ def run_phase_c_tdd(
     # notes / cluster-wide progress — same escape hatch as stubs).
     refill_attempts: dict[FnLocator, int] = {}
     _refill_max = int(os.getenv("TDD_REFILL_MAX_ATTEMPTS", "2"))
+    # Destruction epoch: bumped at every deliberate destruction this loop
+    # performs (retrigger re-stub, charged ratchet restore), so any baseline
+    # taken before it answers INCOMPARABLE instead of NOT_IMPROVED. The
+    # re-admission watermark carries the epoch it was set in.
+    _destruction_epoch = 0
+    _reset_epoch = 0
+    # Whether the previous iter's FINAL reading reconciled (counters vs
+    # binary-qualified verdicts). A tainted score charges nothing.
+    _last_sweep_reconciled = True
+    # The fns each fill pass actually dispatched, most recent last — the
+    # stall exit may convict only units that were dispatched AND judged
+    # inside the stalled window, not everything left standing.
+    _dispatched_window: list[frozenset[FnLocator]] = []
+    # Consecutive red-build sweeps with an IDENTICAL compile digest. Three in
+    # a row means two full fill passes changed nothing about why the cluster
+    # cannot compile — spending the stall budget on it buys 0/oracle sweeps
+    # (nightly, run `2219473`, 2026-08-10: three iterations at 0/113 under
+    # the same two E0605 casts at src/backtrace.rs:21).
+    _red_digest = ""
+    _red_streak = 0
 
     total_filled = 0
     total_attempts = 0
@@ -700,6 +728,18 @@ def run_phase_c_tdd(
             failed_ = set(failed_) | set(oracle.vanished)
         return SweepReading(fail_n, failed_, oracle, _passing)
 
+    def _sweep_reconciliation(
+            output_: str, pass_n: int, fail_n: int) -> VerdictReconciliation:
+        """The counters-vs-qualified-verdicts check for one reading, computed
+        where the score is about to be USED rather than where it is logged —
+        so the ratchet, the floor, the checkpoint and the refill charge can
+        each decline a tainted number instead of acting on it."""
+        _pp, _fp, _inc = qualified_verdicts(parse_binary_results(output_))
+        return VerdictReconciliation(
+            counter_pass=pass_n, qualified_pass=len(_pp),
+            counter_fail=fail_n, qualified_fail=len(_fp),
+            incomplete=_inc, has_qualified=bool(_pp or _fp))
+
     iter_n = 0
     # Hard cap removed — the sole non-success terminator is `stall >=
     # max_stalls` on the pass_count floor. The 10k backstop here mirrors
@@ -722,37 +762,78 @@ def run_phase_c_tdd(
             _restore_abandoned_bet("stopped at the iter boundary")
             raise
         # One fresh, informed retry per iteration boundary for fns/blocks
-        # marked fully_exhausted (a DIFFERENT, disk-persisted gate than this
-        # loop's own local `permanently_exhausted` — this one lives in the
-        # retrospective cache and is checked INSIDE the per-fn fill engine
-        # itself, so `permanently_exhausted`'s own re-admission logic below
-        # cannot reach it). Comment-preservation already keeps the failed
-        # attempt + cargo error visible in source
-        # (fill_one_fn.py's make_failed_attempt_body), and normal per-fn
-        # retrospective accounting already re-exhausts on no improvement —
-        # this just re-admits them so that machinery gets to run again.
-        # Gated on real progress since the LAST reset (not blind per-iter),
-        # so a crate that's genuinely plateaued doesn't keep paying for
-        # retries with no new context — same bound the debt-46 refill-cap
-        # test below this loop protects for a different exhaustion path.
-        #
-        # "Progress" is PAYOFF, not activity — the rule and its evidence live
+        # marked fully_exhausted. TWO stores hold exhaustion: the
+        # disk-persisted flags in the retrospective cache (checked inside the
+        # fill engines) and this loop's own `permanently_exhausted` +
+        # `refill_attempts` (the frontier's eligibility filter). A release
+        # must open BOTH: run `2219473` (2026-08-10, stable iter 3) printed
+        # "re-admitted 11 previously-exhausted fn(s)/block(s)" and dispatched
+        # ZERO fills, because all 15 frontier candidates sat refill-capped in
+        # the in-process set the disk reset never reached — the loop's only
+        # self-recovery valve, spent on a store nobody consults.
+        # Gated on real progress since the LAST reset (not blind per-iter);
+        # "progress" is PAYOFF, not activity — the rule and its evidence live
         # in `refine.readmission_warranted`.
         _new_fills = total_filled - _filled_at_last_reset
-        _warranted = readmission_warranted(
-            fills_since_reset=_new_fills, best_metric=best_pass,
-            metric_at_last_reset=_pass_at_last_reset)
-        if iter_n > 1 and _warranted:
-            _cleared = deps.reset_exhaustion_flags(
+        _epoch_cmp = compare_progress(
+            best_pass,
+            baseline=EpochedBaseline(_pass_at_last_reset, _reset_epoch),
+            current_epoch=_destruction_epoch)
+        if iter_n > 1 and _epoch_cmp is ProgressComparison.INCOMPARABLE:
+            # The watermark predates a deliberate destruction (retrigger
+            # re-stub, ratchet restore) — the number describes a tree this
+            # run no longer has, and reading it as NOT_IMPROVED turns the
+            # release gate into a permanent lock. Re-base, then decide THIS
+            # boundary with the re-based values — deferring would spend a
+            # release opportunity on bookkeeping. In the retrigger case the
+            # high-water re-base has usually moved the watermark already
+            # (the value check keeps the log signal-only); the ratchet
+            # restore is the case this stamp newly covers. An unspent free
+            # grant (negative sentinel) stays.
+            if _pass_at_last_reset >= 0 and _pass_at_last_reset != best_pass:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admission "
+                         f"baseline {_pass_at_last_reset} predates a "
+                         "deliberate destruction — re-based to "
+                         f"{best_pass}.")
+                _pass_at_last_reset = best_pass
+            _reset_epoch = _destruction_epoch
+        if iter_n > 1 and not _last_sweep_reconciled and _new_fills > 0:
+            # A tainted score cannot refuse a re-admission: the refusal line
+            # below would name a number the sweep itself disclaimed. Defer
+            # the decision; the watermark and the fill counter stay put.
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: last sweep's "
+                     "score was tainted (counter/verdict mismatch) — "
+                     "re-admission decision deferred, not refused.")
+        elif iter_n > 1 and readmission_warranted(
+                fills_since_reset=_new_fills, best_metric=best_pass,
+                metric_at_last_reset=_pass_at_last_reset):
+            _released = deps.reset_exhaustion_flags(
                 project_dir, f"TDD iter {iter_n} boundary — {_new_fills} "
                              f"new fill(s) and pass {_pass_at_last_reset} -> "
                              f"{best_pass} since the last check")
             _filled_at_last_reset = total_filled
             _pass_at_last_reset = best_pass
-            if _cleared:
+            _reset_epoch = _destruction_epoch
+            # Open the loop-local gates for the released units too —
+            # container-blind on purpose (FnLocator has no container), which
+            # re-admits strictly more than the disk release, the safe
+            # direction.
+            _rel_locs = {
+                FnLocator(_parts[0], _parts[1])
+                for _parts in (str(_k).split("::") for _k in _released)
+                if len(_parts) >= 2}
+            _reopened = _rel_locs & (permanently_exhausted
+                                     | set(refill_attempts))
+            permanently_exhausted -= _rel_locs
+            for _loc in _rel_locs:
+                refill_attempts.pop(_loc, None)
+            if _released:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admitted "
-                         f"{_cleared} previously-exhausted fn(s)/block(s) for "
-                         "one more informed attempt.")
+                         f"{len(_released)} previously-exhausted "
+                         "fn(s)/block(s) for one more informed attempt"
+                         + (f" ({len(_reopened)} also reopened in the "
+                            "loop-local frontier filter)."
+                            if _reopened else "."))
         elif iter_n > 1 and _new_fills > 0:
             # Say WHY the budget was withheld: silence here reads as "nothing
             # was exhausted", which is a different fact.
@@ -771,6 +852,11 @@ def run_phase_c_tdd(
         _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
         fail_count, cur_failed, _oracle = (
             _sweep.fail_count, _sweep.failed, _sweep.oracle)
+        # Reconciliation of THIS reading, before anything charges on it. The
+        # mismatch line below ("Score claims from this sweep are unsafe") was
+        # computed for a session and gated nothing — the ratchet, the floor
+        # and the checkpoint all acted on the same score it disclaimed.
+        _rec0 = _sweep_reconciliation(output, pass_count, fail_count)
         # Batch ratchet. pass_count reflects the PREVIOUS iter's fills;
         # a drop below the best we've measured means that iter net-regressed the
         # cluster (a regression the per-fill guard couldn't catch while the crate
@@ -783,6 +869,14 @@ def run_phase_c_tdd(
         _breach = ratchet_breach(pass_count, _bratchet_best,
                                  _sweep.passing, _bratchet_passing)
         _withheld = breach_withheld(_breach, _grace)
+        if _breach and not _withheld and not _rec0.reconciled:
+            # A tainted score cannot charge a breach: the counters and the
+            # binary-qualified verdicts disagree in the direction no crash
+            # explains, so the number about to convict last iter's fills is
+            # not a measurement of them.
+            _withheld = ("the sweep's counters and its qualified verdicts "
+                         f"disagree ({_rec0.note}) — a tainted score cannot "
+                         "charge a breach")
         if _breach and not _withheld:
             # Second standing withhold: the fill gates KEEP a body whose only
             # cost is a binary aborted by a still-hollow stub's panic, so a
@@ -826,6 +920,13 @@ def run_phase_c_tdd(
                          "keeping the tree (crash-noise reading).")
             else:
                 _rev = restore_src_tree(_bratchet_snap)
+                # Deliberately NOT an epoch bump: the restore returns the
+                # tree TO the snapshot that set the high-water, so every
+                # baseline taken at that high-water describes exactly the
+                # tree now on disk. What it destroys is the unbanked fills
+                # since the snapshot — progress no baseline ever recorded.
+                # The epoch's subjects are the retrigger re-stubs, which
+                # leave a tree NO baseline describes.
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
                          f"{_confirm} (last iter's fills net-regressed, "
                          f"confirmed on re-sweep); reverted {_rev} file(s) to "
@@ -852,6 +953,10 @@ def run_phase_c_tdd(
         # real breach reverts the good fill too and the loop re-fills it
         # forever at zero payoff.
         _tree_sha = tree_content_sha(_src_root)
+        # Reconciliation of the FINAL reading of this iter (the ratchet may
+        # have re-swept above); every consumer below — snapshot, checkpoint,
+        # floor, refill charge, next iter's re-admission — reads this one.
+        _rec = _sweep_reconciliation(output, pass_count, fail_count)
         if _batch_ratchet \
                 and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha):
             _snap = snapshot_src_tree(_src_root)
@@ -878,6 +983,12 @@ def run_phase_c_tdd(
         _snap_due = snapshot_due(
             pass_count, _checkpoint_best, _tree_sha, _checkpoint_sha)
         if deps.checkpoint_fill_tree is not None and _snap_due \
+                and not _rec.reconciled:
+            deps.log(
+                f"  {tag} [phase-c/tdd] durable best tree NOT replaced: the "
+                f"sweep's counters and qualified verdicts disagree "
+                f"({_rec.note}) — a tainted score cannot set a floor.")
+        elif deps.checkpoint_fill_tree is not None and _snap_due \
                 and (_oracle.missing_count == 0
                      or pass_count > _checkpoint_best):
             deps.checkpoint_fill_tree(
@@ -905,7 +1016,7 @@ def run_phase_c_tdd(
         # and a crashed binary breaks the name<->execution mapping in both
         # directions at once. Pairs are what `tools/pass_delta.py` must diff.
         _p_pairs, _f_pairs, _incomplete = qualified_verdicts(
-            parse_binary_results(output))
+            parse_binary_results(output))  # same output `_rec` was read from
         _measure = Measurement(
             cluster=cluster.name, iteration=iter_n,
             tree_sha=_tree_sha,
@@ -921,7 +1032,6 @@ def run_phase_c_tdd(
             oracle_static=_expected_count)
         last_failed = frozenset(_measure.failed)
         last_ran = frozenset(_measure.passed) | last_failed
-        _rec = _measure.reconcile()
         if not _rec.reconciled:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: VERDICT MISMATCH — "
                      f"{_rec.note}. Score claims from this sweep are unsafe.")
@@ -979,6 +1089,41 @@ def run_phase_c_tdd(
         # all above), so the compile verdict is read once and shared by every
         # consumer below rather than re-derived at each.
         _sweep_compile_broke = "could not compile" in (output or "")
+        _last_sweep_reconciled = _rec.reconciled
+        # Red-build budget: identical compile digest across three consecutive
+        # sweeps means two full fill passes moved nothing about why the
+        # cluster cannot compile — the failure is attempt-invariant, so it is
+        # RED now, not after the stall budget finishes paying for it.
+        if _sweep_compile_broke:
+            _err_count, _err_lines = compile_error_digest(output or "")
+            _digest_now = "\n".join(_err_lines)
+            _red_streak = (_red_streak + 1
+                           if _digest_now and _digest_now == _red_digest
+                           else 1)
+            _red_digest = _digest_now
+            if _red_streak >= 3:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: RED — the "
+                         f"cluster cannot compile and the {_err_count} "
+                         "error(s) are IDENTICAL across 3 consecutive "
+                         "sweeps; two full fill passes changed nothing "
+                         "about them. Stopping this cluster instead of "
+                         "spending the stall budget on 0-test sweeps. "
+                         f"First error: {_err_lines[0] if _err_lines else '?'}")
+                deps.emit("phase_c.tdd.red_build_refusal", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "error_count": _err_count,
+                    "digest": _err_lines[:10]})
+                deps.emit("phase_c.verdict", data={
+                    "unit": f"cluster:{cluster.name}", "route": "tdd",
+                    "attempt": iter_n, "disposition": "exhaustion",
+                    "outcome": "unmeasurable",
+                    "reason": "red-build refusal — identical compile digest "
+                              "across 3 sweeps",
+                    "evidence_keys": _err_lines[:10],
+                    "cluster": cluster.name})
+                break
+        else:
+            _red_digest, _red_streak = "", 0
         # Read once here, not at the dispatch site further down: the plateau
         # check below needs it, and nothing between the two mutates the tree
         # (the ratchet's re-sweeps and every splice are outside this span).
@@ -1171,7 +1316,10 @@ def run_phase_c_tdd(
         # the whole point is that the process may not survive to an exit. A
         # compile-broken sweep measured nothing, so it must not overwrite a
         # real floor with its own zero.
-        if deps.save_tdd_floor is not None and not _sweep_compile_broke:
+        # A tainted sweep cannot set a floor either — same rule as the
+        # checkpoint and the ratchet above.
+        if (deps.save_tdd_floor is not None and not _sweep_compile_broke
+                and _rec.reconciled):
             deps.save_tdd_floor(project_dir, cluster.name, TddFloor(
                 cluster=cluster.name, best_pass=best_pass, stall=stall,
                 tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
@@ -1255,9 +1403,54 @@ def run_phase_c_tdd(
                         "origin_unattributed": _site.origin_unattributed,
                         "raw_report": _site.raw_report})
                 if not _sites:
+                    # Leave the raw symptoms behind — "no native fault" with
+                    # no record of what the binary died of is uncheckable.
+                    _hint = crash_signal_hint(output)
                     deps.log(f"  {tag} [phase-c/crash] {len(_oracle.vanished)} "
                              "test(s) vanished but no crash could be localized "
-                             "(no native fault under gdb, no ASAN report).")
+                             "(no native fault under gdb, no ASAN report)."
+                             + (f" Sweep symptoms: {_hint}" if _hint else ""))
+                    deps.emit("phase_c.crash.unlocalized", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "vanished": sorted(_oracle.vanished)[:50],
+                        "signal_hint": _hint,
+                        "vanish_streak": _vanish_streak})
+                    # Deterministic (second consecutive shrunken sweep) with
+                    # EMPTY localization: without this branch the crash
+                    # produces no evidence object anywhere — crash-keep,
+                    # crash-block and the evidence prompt all key on
+                    # localizer output, so an unlocalizable crasher starves
+                    # every route at once (run `2219473`: the whole Error/
+                    # vtable class sat behind exactly this hole). Attribute
+                    # the crash to the vanished tests' SUBJECT fns — module
+                    # file + test name, never the whole reverse map — as
+                    # EVIDENCE (prompt + exhaustion void + keep), not blame.
+                    if _vanish_streak >= 1:
+                        for _loc, _tsts in vanished_subject_fns(
+                                frozenset(_oracle.vanished),
+                                test_reverse_map).items():
+                            _synth = (
+                                f"Test(s) {', '.join(sorted(_tsts))} VANISH "
+                                "from the sweep (their binary crashes with "
+                                "no verdict) on consecutive sweeps, and "
+                                "native localization finds nothing — no gdb "
+                                "fault, no ASAN report"
+                                + (f"; sweep symptoms: {_hint}" if _hint
+                                   else "")
+                                + ". This fn is the vanished test's subject. "
+                                "Treat the crash as evidence about this "
+                                "body: re-derive it from the types, paying "
+                                "attention to memory the body allocates, "
+                                "casts or frees.")
+                            crash_texts.setdefault(_loc, _synth)
+                        if crash_texts:
+                            deps.log(
+                                f"  {tag} [phase-c/crash] localizer empty but "
+                                "the shrink is deterministic — synthesized "
+                                "crash evidence for subject fn(s): "
+                                + ", ".join(
+                                    f"{k.file}::{k.fn_name}"
+                                    for k in sorted(crash_texts)))
                 for _loc in crash_texts:
                     frontier.setdefault(_loc, set()).update(_oracle.vanished)
 
@@ -1444,6 +1637,7 @@ def run_phase_c_tdd(
                     "consecutive_broken_sweeps": _compile_broke_streak,
                 })
                 _compile_broke_streak = 0
+                _destruction_epoch += 1
                 _grace = _grant_grace(_retrig_k.reverted_count)
                 _emit_retrigger_iter("retrigger_build",
                                      _retrig_k.reverted_count)
@@ -1544,6 +1738,7 @@ def run_phase_c_tdd(
                     "cause": _retrig_c.cause,
                     "reverted_count": _retrig_c.reverted_count,
                 })
+                _destruction_epoch += 1
                 _grace = _grant_grace(_retrig_c.reverted_count)
                 _emit_retrigger_iter("retrigger_crash",
                                      _retrig_c.reverted_count)
@@ -1582,21 +1777,43 @@ def run_phase_c_tdd(
                         "cause": _retrig.cause,
                         "reverted_count": _retrig.reverted_count,
                     })
+                    _destruction_epoch += 1
                     _grace = _grant_grace(_retrig.reverted_count)
                     _emit_retrigger_iter("retrigger_stall",
                                          _retrig.reverted_count)
                     state.stalls = 0
                     stall = 0
                     continue
+            # Convict only what was DISPATCHED inside the stalled window — a
+            # unit the window never attempted was refused, not judged, and a
+            # blanket conviction here was the code-surface hole the audit of
+            # 2026-08-10 named: 15 fns convicted at run `2219473`'s stable
+            # exit, of which iters 3-4 had dispatched zero.
+            _window_keys: set[FnLocator] = set()
+            for _dset in _dispatched_window[-max_stalls:]:
+                _window_keys |= _dset
+            _convictable = set(eligible) & _window_keys
+            _spared = set(eligible) - _convictable
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: pass_count plateau "
                  f"{stall} iter(s) at best={render_pass_floor(best_pass)}; stopping "
-                 f"({len(eligible)} fn(s) still on frontier — will be "
-                 "marked exhausted). best pass="
-                 f"{render_pass_floor(best_pass)} fail={best_fail}.")
+                 f"({len(_convictable)} of {len(eligible)} frontier fn(s) "
+                 "were dispatched in the stalled window — those will be "
+                 "marked exhausted"
+                 + (f"; {len(_spared)} never dispatched, left admitted"
+                    if _spared else "")
+                 + f"). best pass={render_pass_floor(best_pass)} "
+                 f"fail={best_fail}.")
             _log_attribution_gap(deps, tag, iter_n, fail_count, cur_failed,
                                  len(frontier), kind)
-            for _stuck_key in eligible:
+            for _stuck_key in _convictable:
                 permanently_exhausted.add(_stuck_key)
+                deps.emit("phase_c.verdict", data={
+                    "unit": f"{_stuck_key.file}::{_stuck_key.fn_name}",
+                    "route": "tdd", "attempt": iter_n,
+                    "disposition": "exhaustion", "outcome": "negative",
+                    "reason": "stall exit — dispatched and judged inside "
+                              "the stalled window with no score movement",
+                    "cluster": cluster.name})
             deps.emit("phase_c.tdd.iter", data={
                 **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
@@ -1692,12 +1909,21 @@ def run_phase_c_tdd(
             recently_filled.append(k)
         if len(recently_filled) > recently_filled_max:
             recently_filled = recently_filled[-recently_filled_max:]
+        # This pass's dispatch set, for the stall exit's conviction window.
+        _dispatched_window.append(frozenset(frontier_keys))
+        if len(_dispatched_window) > max(max_stalls, 1) + 1:
+            _dispatched_window = _dispatched_window[-(max(max_stalls, 1) + 1):]
+        # A re-fill attempt is CHARGEABLE only when the sweep that dispatched
+        # it was measurable — oracle intact and counters reconciled. A
+        # dispatch drawn from a shrunken or self-contradicting reading was
+        # never judgeable evidence against the unit.
+        _charge_ok = _oracle.intact and _rec.reconciled
         for key in frontier_keys:
             if key in cur_stubs:
                 # First-fill attempt left it a stub → exhausted (existing).
                 permanently_exhausted.add(key)
                 last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
-            elif key in _refill_targets:
+            elif key in _refill_targets and _charge_ok:
                 # residual: a behavioral re-fill was attempted (fn was
                 # filled at iter start). It reappears here only while its test
                 # keeps failing → count the attempt and exhaust it at the cap so
@@ -1707,6 +1933,13 @@ def run_phase_c_tdd(
                 if refill_attempts[key] >= _refill_max:
                     permanently_exhausted.add(key)
                     last_notes_count[key] = deps.count_relevant_notes(fr_path, key)
+                    deps.emit("phase_c.verdict", data={
+                        "unit": f"{key.file}::{key.fn_name}",
+                        "route": "tdd", "attempt": refill_attempts[key],
+                        "disposition": "cap_refusal", "outcome": "negative",
+                        "reason": "re-fill cap reached on measurable "
+                                  "sweeps — exhausted until re-admission",
+                        "cluster": cluster.name})
         last_total_filled = total_filled
 
     # Every `break` above lands here — backstop, timeout, stall exit, and the

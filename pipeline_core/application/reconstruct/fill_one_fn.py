@@ -72,6 +72,12 @@ from pipeline_core.domain.retro_gate import (
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import U2Decision
 from pipeline_core.domain.type_refs import types_referenced_in_text
+from pipeline_core.domain.verdict import (
+    Disposition,
+    GateOutcome,
+    ValidityVector,
+    VerdictRecord,
+)
 from pipeline_core.ports.fill_engine import (
     Cargo,
     EngineTelemetry,
@@ -256,6 +262,14 @@ class FillOneFn:
                 "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                 "file": rel_file, "fn": fn_name,
                 "reason": "fully_exhausted",
+            })
+            self.tel.emit("phase_c.verdict", data={
+                **VerdictRecord(
+                    unit=str(_unit_key), route="per-fn", attempt=0,
+                    disposition=Disposition.CAP_REFUSAL,
+                    reason="skipped — prior conviction stands "
+                           "(fully exhausted)").to_json_dict(),
+                "cluster": ctx.cluster_name,
             })
             return fill_skip(rec, attempts)
         self.tel.check_stop(f"per-fn pass {ctx.pass_n} fn {fn_name}")
@@ -771,6 +785,21 @@ class FillOneFn:
                     "recovered": fix_attempt > 1,
                     "success": True,
                 })
+                self.tel.emit("phase_c.verdict", data={
+                    **VerdictRecord(
+                        unit=str(_unit_key), route="per-fn",
+                        attempt=fix_attempt,
+                        disposition=(Disposition.KEEP_DEFERRED if _blocked_by
+                                     else Disposition.ACCEPT),
+                        reason=("kept — every attributed test blocked by a "
+                                "still-stubbed sibling" if _blocked_by
+                                else "accepted on own tests"),
+                        outcome=(GateOutcome.UNMEASURABLE if _blocked_by
+                                 else GateOutcome.POSITIVE),
+                        validity=ValidityVector(binary_completed=True),
+                        model_calls=fix_attempt).to_json_dict(),
+                    "cluster": ctx.cluster_name,
+                })
                 # Recovered fix-loop → extract a self-note (model writes
                 # for itself). High-signal moment: we know the lesson
                 # actually worked.
@@ -1060,6 +1089,24 @@ class FillOneFn:
                         "fully_exhausted": _full_exhaust,
                         "preview": _retro.get("guidance", "")[:200],
                     })
+                    self.tel.emit("phase_c.verdict", data={
+                        **VerdictRecord(
+                            unit=str(_unit_key), route="per-fn",
+                            attempt=fix_attempt,
+                            disposition=(Disposition.CONVICTION
+                                         if _full_exhaust
+                                         else Disposition.REJECT),
+                            reason=f"retro round {_retro_round}: "
+                                   f"category="
+                                   f"{_retro.get('category', '')!r} "
+                                   f"signal={_signal!r} "
+                                   f"improved={_improved}",
+                            outcome=(GateOutcome.UNMEASURABLE
+                                     if _downstream
+                                     else GateOutcome.NEGATIVE),
+                            model_calls=fix_attempt).to_json_dict(),
+                        "cluster": ctx.cluster_name,
+                    })
             except Exception as _re:
                 self.tel.log(f"  [phase-c/retro] failed for {fn_name}: {_re}")
             if not (_retry_informed and _retro_round < _retro_rounds_max):
@@ -1092,6 +1139,19 @@ class FillOneFn:
                 "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                 "file": rel_file, "fn": fn_name, "container": container,
                 "mark": _crash_blocked_mark[0],
+            })
+            self.tel.emit("phase_c.verdict", data={
+                **VerdictRecord(
+                    unit=str(_unit_key), route="per-fn", attempt=attempts,
+                    disposition=Disposition.KEEP_DEFERRED,
+                    reason="crash-blocked on a sibling's fault — no charge, "
+                           "re-admitted when the blamed file changes",
+                    outcome=GateOutcome.UNMEASURABLE,
+                    validity=ValidityVector(binary_completed=False,
+                                            blame_outside_unit=True),
+                    evidence_keys=(_crash_blocked_mark[0],),
+                    model_calls=attempts).to_json_dict(),
+                "cluster": ctx.cluster_name,
             })
             return FillResult(file=rec.file, fn_name=fn_name,
                               filled=False, attempts=attempts)
