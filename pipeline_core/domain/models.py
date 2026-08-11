@@ -414,6 +414,16 @@ class Diagnostic:
     # call-site — the real culprit a fn-granular revert must reach. Empty for a
     # non-macro error. Each entry is (file_rel, line) of one call-site.
     macro_call_sites: tuple[tuple[str, int], ...] = ()
+    # Every NON-primary labelled span, in rustc's order. A cross-file error
+    # names both of its ends and only one of them is primary: `E0592`
+    # ("duplicate definitions with name `debug`") rendered its primary span at
+    # `src/error.rs:301` and the definition it collides with at
+    # `src/fmt.rs:11`, under `:::`. Carrying only the primary made the second
+    # file unreachable to every consumer — the frontier attributed one fn, the
+    # repair rewrote its body, and the error re-checked byte-identical, which
+    # is how one duplicate definition survived two full repair passes on
+    # 2026-08-11. Each entry is (file_rel, line).
+    secondary_spans: tuple[tuple[str, int], ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Diagnostic:
@@ -427,6 +437,8 @@ class Diagnostic:
                 ImportFix(**f) for f in d.get("import_fixes", ())),
             macro_call_sites=tuple(
                 (str(f), int(ln)) for f, ln in d.get("macro_call_sites", ())),
+            secondary_spans=tuple(
+                (str(f), int(ln)) for f, ln in d.get("secondary_spans", ())),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -444,6 +456,8 @@ class Diagnostic:
                 for f in self.import_fixes]
         if self.macro_call_sites:  # wire-compat: absent key ⇔ no expansion
             d["macro_call_sites"] = [[f, ln] for f, ln in self.macro_call_sites]
+        if self.secondary_spans:  # wire-compat: absent key ⇔ single-span error
+            d["secondary_spans"] = [[f, ln] for f, ln in self.secondary_spans]
         return d
 
 

@@ -3,6 +3,7 @@ whole-file delegate, and the per-impl one-shot fill on a clean-compile/failing
 -test frontier."""
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from threading import Lock
@@ -26,7 +27,7 @@ from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.enums import FillUnit, FixStrategy
 from pipeline_core.domain.fix_report import FixKind, FixReport
 from pipeline_core.domain.fix_session import FixSession
-from pipeline_core.domain.models import FnRecord, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
@@ -268,3 +269,38 @@ def test_per_impl_stall_escalates_to_whole_file(tmp_path: Path) -> None:
                   summary="w", files_changed_str="x", error_preview="")))
     PerImplFix(_session(tmp_path), d).attempt("E0308 stuck", [])
     assert whole_calls == ["E0308 stuck"]
+
+
+# --- StructuralFirst: the rung whose action is not "rewrite a body" ---------
+
+def test_structural_repair_short_circuits_the_model(tmp_path: Path) -> None:
+    """A duplicate definition is unreachable from every unit the strategies
+    can pick, so the deletion runs before the model and the attempt ends
+    there — the pre-fix loop spent three splices and four whole-file rewrites
+    on one, across two full passes, and re-checked to the identical error."""
+    asked: list[str] = []
+    deps = _deps(_Frontiers(compile_fr={FnLocator("src/a.rs", "f"): {"<compile>"}}),
+                 whole=lambda o, h, r: (asked.append("model"),
+                                        FixReport.changed(summary="whole",
+                                                          files_changed_str="x",
+                                                          error_preview=""))[1])
+    deps = replace(deps, structural_repair=lambda: FixReport.changed(
+        summary="deleted duplicate ErrorImpl::debug",
+        files_changed_str="src/error.rs", error_preview=""))
+
+    strategy = select_strategy(FixStrategy.WHOLE_FILE, FillUnit.FN,
+                               _session(tmp_path), deps)
+    report = strategy.attempt("error[E0592]", [])
+
+    assert "deleted duplicate" in (report.summary or "")
+    assert asked == []
+
+
+def test_no_structural_repair_defers_to_the_strategy(tmp_path: Path) -> None:
+    """The control: with nothing structural to do, the attempt is exactly the
+    strategy's own — every error the deletion rung does not own is unaffected."""
+    deps = replace(
+        _deps(_Frontiers()), structural_repair=lambda: None)
+    strategy = select_strategy(FixStrategy.WHOLE_FILE, FillUnit.FN,
+                               _session(tmp_path), deps)
+    assert strategy.attempt("error[E0308]", []).summary == "whole"

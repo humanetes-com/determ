@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from pipeline_core.application.reconstruct.reconstruction_step import StepOutcome
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.failure_classification import pass_count_is_measured
 from pipeline_core.domain.reconstruction import IterationState
 from pipeline_core.ports.reconstruct import (
     Analyst,
@@ -113,10 +114,24 @@ class FailureAnalysisStep:
         src_rel = [rel for rel in self._artifacts.load_manifest(ctx.module_manifest)
                    if rel not in ctx.existing_test_files]
         best = self._ratchet.best_tree_pass_count(ctx.project_dir)
-        if current_pass > (best if best is not None else -1):
+        # The SAVE arm requires a pass count that was actually measured; the
+        # RESTORE arm deliberately does not, because an unmeasurable iteration
+        # (a tree that no longer compiles) is exactly when a good snapshot is
+        # worth having back. See `pass_count_is_measured` for the run that
+        # stored a non-parsing tree as "best" at 0 passing and locked its own
+        # restore arm shut.
+        measured = pass_count_is_measured(failure_type)
+        if measured and current_pass > (best if best is not None else -1):
             saved_n = self._ratchet.save_best_tree(ctx.project_dir, src_rel, current_pass, iteration=it)
             self._tel.emit("ratchet.save", data={"pass_count": current_pass,
                                                   "files": saved_n, "iter": it})
+        elif not measured and best is None:
+            self._tel.log(f"  [ratchet] NOT snapshotting: failure is "
+                          f"'{failure_type}' — {current_pass} passing is the "
+                          f"absence of a measurement, not a floor.")
+            self._tel.emit("ratchet.save_refused", data={
+                "failure_type": failure_type, "pass_count": current_pass,
+                "iter": it})
         elif best is not None and current_pass < best:
             restored = self._ratchet.restore_best_tree(ctx.project_dir)
             self._tel.emit("ratchet.restore", data={"best": best, "current": current_pass,

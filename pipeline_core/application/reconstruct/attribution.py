@@ -345,6 +345,17 @@ def frontier_from_diags(deps: AttributionDeps,
         if loc is None:
             continue
         frontier.setdefault(loc, set()).add("<compile>")
+        # A cross-file error has a second end, and a repair that cannot see it
+        # can only rewrite the body of the end it can. `E0592`'s two
+        # definitions (`src/error.rs:301` + `src/fmt.rs:11` on the merged tree
+        # of 2026-08-11) are both culprits and neither is fixable from the
+        # other's file. Attribute every labelled secondary span that resolves
+        # to a fn record; a span pointing into a type or a `use` resolves to
+        # nothing and is skipped, so single-file errors are unaffected.
+        for s_file, s_line in d.secondary_spans:
+            s_loc = _locate(s_file or "", int(s_line or 0))
+            if s_loc is not None and s_loc != loc:
+                frontier.setdefault(s_loc, set()).add("<compile>")
     return frontier
 
 def compile_error_frontier(

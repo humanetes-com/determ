@@ -528,3 +528,68 @@ def splice_fn_with_where(
     if not out.ok and pre_image is not None:
         file_path.write_bytes(pre_image)   # undo the dangling where-clause insert
     return out
+
+
+def delete_fn_item(
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+    file_path: Path, fn_name: str, container: str, sig_text: str = "",
+    validate_parse: ParseValidator | None = None,
+) -> SpliceOutcome:
+    """Remove one associated item — signature, body, and the attributes and doc
+    comments attached to it — from `file_path`.
+
+    Every other mutation in this module REPLACES a body, which is the correct
+    default: the pipeline fills stubs, and a repair that can delete definitions
+    can delete work. There is exactly one defect class a body rewrite provably
+    cannot reach, and it is why this exists: two definitions of the same item on
+    the same type (`E0592`). No text written between one definition's braces
+    changes the fact that the other exists, so every attempt re-checks to a
+    byte-identical error — observed for two full repair passes across runs
+    `3274139-76ff8d08` and `3337398-fbf7e143` on 2026-08-11.
+
+    The caller owns the choice of WHICH definition dies (see
+    `domain/associated_items.py::removal_target`, which answers only when the
+    authored layouts name exactly one of them as unauthored) and owns re-probing
+    afterwards. This function refuses anything it cannot locate exactly, and
+    `parse_guarded_write` restores the pre-image if the cut leaves the file
+    unparseable."""
+    if not file_path.exists():
+        return SpliceOutcome(False, "file_missing", 0)
+    loc = locate_fn_by_record(enumerate_fns, file_path, fn_name, container, sig_text)
+    if loc is None:
+        return SpliceOutcome(False, "fn_not_found", 0)
+    try:
+        raw = file_path.read_bytes()
+    except OSError:
+        return SpliceOutcome(False, "read_failed", 0)
+    end = loc.body_byte_end + 1          # body_byte_end indexes the closing brace
+    if not 0 <= loc.sig_byte_start < end <= len(raw):
+        return SpliceOutcome(False, "bad_offsets", 0)
+    # A body splice that lands on stale offsets writes a wrong body; a DELETION
+    # that lands on stale offsets removes whatever happens to sit there. Prove
+    # the bytes are the item they claim to be before cutting them.
+    header = raw[loc.sig_byte_start:loc.body_byte_start].decode("utf-8", "replace")
+    if not declares_fn(header, fn_name):
+        return SpliceOutcome(False, "bad_offsets", 0)
+
+    # Back up to the start of the signature's own line, then keep swallowing
+    # preceding attribute / doc-comment lines: `#[cfg(...)]` left behind by a
+    # deleted item applies itself to whatever follows, which is a second defect
+    # rather than a repair. Blank lines are NOT consumed — they separate the
+    # neighbours that stay.
+    start = raw.rfind(b"\n", 0, loc.sig_byte_start) + 1
+    while start > 0:
+        prev_start = raw.rfind(b"\n", 0, start - 1) + 1
+        prev_line = raw[prev_start:start - 1].strip()
+        if not (prev_line.startswith(b"#[") or prev_line.startswith(b"///")
+                or prev_line.startswith(b"//!")):
+            break
+        start = prev_start
+    nl = raw.find(b"\n", end)
+    if nl != -1 and not raw[end:nl].strip():
+        end = nl + 1
+
+    new_raw = raw[:start] + raw[end:]
+    if not parse_guarded_write(file_path, new_raw, raw, validate_parse):
+        return SpliceOutcome(False, "parse_broken", 0)
+    return SpliceOutcome(True, "ok", len(new_raw) - len(raw))

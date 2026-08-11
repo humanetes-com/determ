@@ -56,6 +56,52 @@ _refuse_if_running() {
 # every run, so bodies from one run do not compile against another's skeleton
 # (between two 2026-08-07 trees, ErrorImpl lost a whole backtrace field). A seed
 # that carries only the fills restores a tree that cannot build.
+#
+# The pair is not the whole seed. Two more workspace directories carry state the
+# fill loop READS and the comparison is ABOUT, and neither lives under the two
+# above:
+#
+#   .phase_c_logs/retrospectives.json — the conviction store. Its
+#     `fully_exhausted` flags are what `is_fn_fully_exhausted` consults before
+#     offering an fn to the model at all, and `readmission_warranted` releases
+#     them only on a metric that beats the high-water. On 2026-08-11 this file
+#     was 46,415 bytes for tmp/anyhow, holding convictions written by earlier
+#     Qwen runs (`src/error.rs::new::Error`, GENUINELY_HARD, among them). Left
+#     in place across a re-arm, the second model starts already told which fns
+#     not to attempt — by the first model. That is the measurement, deleted.
+#   .best_tree/<cluster>/src — heal's durable restore tier. Left in place, a
+#     tree one arm produced can be restored into the other mid-run.
+#
+# Both are therefore snapshotted with the pair and wiped on restore. They are
+# optional in the tar: a workspace that has not reached phase C yet has neither.
+_seed_paths() {
+    local ws="$1" p out=()
+    for p in .skeleton .skeleton-filled .best_tree .phase_c_logs; do
+        [[ -e "$ws/$p" ]] && out+=("$p")
+    done
+    printf '%s\n' "${out[@]}"
+}
+
+# Printed by snapshot and by restore, so the reset is VISIBLE rather than
+# assumed: an arm that starts with a non-zero count it did not earn is the
+# unfairness this seed set exists to close, and the number is the only cheap
+# way to see it happened.
+_conviction_count() {
+    "$SCRIPT_DIR/.venv/bin/python" - "$1/.phase_c_logs/retrospectives.json" <<'PY' 2>/dev/null || echo "?"
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.exists():
+    print(0); raise SystemExit
+try:
+    store = json.loads(p.read_text())
+except Exception:
+    print("?"); raise SystemExit
+recs = store.values() if isinstance(store, dict) else store
+print(sum(1 for r in recs if isinstance(r, dict) and r.get("fully_exhausted")))
+PY
+}
+
 _workspace() {
     local ws
     ws=$(_env_get WORKSPACE_DIR)
@@ -75,14 +121,17 @@ cmd_snapshot() {
     # tar, not `git checkout`/`git stash`: this workspace is permanently dirty
     # and holds fills newer than any commit, and a git-side restore would
     # discard them. Nothing here reads or writes the object store.
-    tar -C "$ws" -cf "$dst/tree.tar" .skeleton .skeleton-filled
+    local paths=(); mapfile -t paths < <(_seed_paths "$ws")
+    tar -C "$ws" -cf "$dst/tree.tar" "${paths[@]}"
     {
         echo "seed:      $name"
         echo "workspace: $ws"
         echo "project:   $PROJECT"
         echo "taken:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "model_at_snapshot: $(_env_get MODEL)"
+        echo "carried:   ${paths[*]}"
         echo "stubs_remaining:   $(grep -rl 'unimplemented!()' "$ws/.skeleton-filled" 2>/dev/null | wc -l) file(s)"
+        echo "convictions:       $(_conviction_count "$ws") fully_exhausted flag(s)"
     } > "$dst/seed.txt"
     echo "Seed '$name' written to $dst"
     cat "$dst/seed.txt"
@@ -94,10 +143,14 @@ cmd_restore() {
     local ws; ws=$(_workspace)
     local src="$SEED_ROOT/$name/tree.tar"
     [[ -f "$src" ]] || { echo "[error] no seed '$name' at $src" >&2; exit 1; }
-    echo "Restoring seed '$name' into $ws (replaces .skeleton and .skeleton-filled) ..."
-    rm -rf "$ws/.skeleton" "$ws/.skeleton-filled"
+    # Wipe every path the seed can carry, not just the two it used to. A
+    # directory left behind is not neutral: it is the previous arm's state,
+    # surviving into the next arm's run under the seed's name.
+    echo "Restoring seed '$name' into $ws (replaces the tree, the conviction store and .best_tree) ..."
+    rm -rf "$ws/.skeleton" "$ws/.skeleton-filled" "$ws/.best_tree" "$ws/.phase_c_logs"
     tar -C "$ws" -xf "$src"
     echo "   [ok] tree restored from $(grep '^taken:' "$SEED_ROOT/$name/seed.txt")"
+    echo "   [ok] convictions now $(_conviction_count "$ws") fully_exhausted flag(s)"
 }
 
 # FAIR: the arms must see the same context, or the result measures context.

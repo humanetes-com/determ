@@ -299,8 +299,31 @@ def diagnostics_from_json(output: str) -> list[Diagnostic] | None:
             rendered=msg.get("rendered") or "",
             import_fixes=import_fixes_from_message(msg),
             macro_call_sites=macro_call_sites_from_spans(spans),
+            secondary_spans=secondary_spans_from_spans(spans),
         ))
     return out if json_seen else None
+
+
+def secondary_spans_from_spans(
+    spans: list[dict[str, Any]],
+) -> tuple[tuple[str, int], ...]:
+    """Every labelled NON-primary span, deduped, in rustc's order.
+
+    The other end of a cross-file error. `E0592` points its primary span at one
+    definition and prints the other under `:::`; keeping only the primary left
+    the second definition invisible to the frontier, so the repair could only
+    ever rewrite the body of the one it could see."""
+    out: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for span in spans:
+        if not isinstance(span, dict) or span.get("is_primary"):
+            continue
+        key = (str(span.get("file_name") or ""), int(span.get("line_start") or 0))
+        if not key[0] or key[1] < 1 or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return tuple(out)
 
 
 def macro_call_sites_from_spans(

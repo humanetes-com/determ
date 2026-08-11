@@ -65,6 +65,11 @@ class GenerateFixDeps:
     whole_file_fix: WholeFileFn
     behavior_max_fns: int
     src_snip_cap: int
+    # Repairs whose action space is not "rewrite a body" — currently the
+    # duplicate-definition deletion. Runs before the model on every attempt and
+    # returns None when it has nothing to do, so the strategies below are
+    # unchanged for every error it does not own.
+    structural_repair: Callable[[], FixReport | None] | None = None
 
 
 class CompileFixStrategy(Protocol):
@@ -280,13 +285,38 @@ class PerImplFix:
             return d.whole_file_fix(output, history, retro)
 
 
+class StructuralFirst:
+    """Decorator: try the deletion-scoped repairs, then defer to `inner`.
+
+    It wraps every strategy rather than living inside one, because the defect it
+    owns is invariant to which unit the strategy would have picked: an `E0592`
+    is unreachable from a per-fn body, a per-impl body and a whole-file rewrite
+    alike — all three were spent on one, for two full passes, on 2026-08-11."""
+
+    def __init__(self, inner: CompileFixStrategy,
+                 repair: Callable[[], FixReport | None]) -> None:
+        self._inner, self._repair = inner, repair
+
+    def attempt(self, output: str, history: list[dict[str, Any]], *,
+                retro: str = "") -> FixReport:
+        report = self._repair()
+        if report is not None:
+            return report
+        return self._inner.attempt(output, history, retro=retro)
+
+
 def select_strategy(strategy: FixStrategy, unit: FillUnit,
                     session: FixSession, deps: GenerateFixDeps) -> CompileFixStrategy:
     """Map the (strategy, unit) settings to the strategy object."""
+    chosen: CompileFixStrategy
     if strategy is FixStrategy.PER_FN:
-        return PerImplFix(session, deps) if unit is FillUnit.IMPL \
+        chosen = PerImplFix(session, deps) if unit is FillUnit.IMPL \
             else PerFnFix(session, deps)
-    return WholeFileFix(deps)
+    else:
+        chosen = WholeFileFix(deps)
+    if deps.structural_repair is not None:
+        return StructuralFirst(chosen, deps.structural_repair)
+    return chosen
 
 
 def run_generate_fix(

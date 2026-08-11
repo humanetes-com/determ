@@ -9,6 +9,7 @@ __pycache__
 logs/
 tmp
 handover/
+.compare-seeds/
 handover.md
 *.md
 CLAUDE.md~

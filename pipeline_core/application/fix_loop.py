@@ -43,6 +43,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from pipeline_core.settings import Settings
 
+from pipeline_core.application.reconstruct.duplicate_repair import (
+    DuplicateRepairDeps,
+    repair_duplicate_definitions,
+)
 from pipeline_core.application.reconstruct.fix_roles import (
     FixCheckerAdapter,
     FixModelAdapter,
@@ -53,6 +57,10 @@ from pipeline_core.application.reconstruct.fix_roles import (
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     workspace_file_reader,
+)
+from pipeline_core.application.reconstruct.write_gate import (
+    WriteGateDeps,
+    guarded_write,
 )
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
@@ -360,6 +368,31 @@ def generate_fix_loop(
     # the floor-stall in `_improvement_loop`.
     _ = max_fix_attempts
 
+    _check_only_cmd = deps.derive_check_only_cmd(check_cmd)
+
+    def _probe_diag_count() -> int | None:
+        """DISTINCT compile diagnostics under the default cluster, or None when
+        the probe cannot answer. Deduped on (code, file, line, message): a
+        cluster-wide break reprints one lib error per target, so a raw count
+        moves with target coverage while the distinct set is stable."""
+        try:
+            _rc, _out, diags = deps.run_cargo_check_diag(
+                _check_only_cmd, project_dir, env, timeout)
+        except Exception:
+            return None
+        return len({(d.code, d.file, d.line, d.message) for d in diags or []})
+
+    # The duplicate rule reads the tree the writes land in — the common root of
+    # this loop's own source files, not a guessed `src/`, so the task0c test-fix
+    # caller enumerates its own directory rather than someone else's.
+    _src_root = (Path(os.path.commonpath([str(p.parent) for p in source_paths]))
+                 if source_paths else project_dir)
+
+    _gate_deps = WriteGateDeps(
+        probe_diag_count=_probe_diag_count,
+        enumerate_fn_records=lambda: deps.enumerate_fns_via_extractor(_src_root) or [],
+        log=deps.log, emit=deps.emit)
+
     def _run_check() -> tuple[bool, str, int]:
         # Graceful-stop check at the top of each iter — routed through the
         # shared, thread-safe check (pipeline_core.domain.graceful_stop)
@@ -429,7 +462,15 @@ def generate_fix_loop(
             return FixReport.unchanged(
                 summary="no_fixes_produced", error_preview=_err_preview)
         # Whole-file rewrites (legacy strategy — the model returns each broken
-        # file in full and we overwrite it).
+        # file in full and we overwrite it). Admissible files go through the
+        # write gate as ONE transaction: it probes before and after, and puts
+        # every file back if the write raised the diagnostic count or
+        # introduced a definition that already exists elsewhere on the same
+        # type. Before the gate this path wrote straight to disk and read
+        # nothing back — the run that took the merged tree from
+        # `12/12 clean, 197/227 tests passing` to 15 diagnostics in 27 minutes,
+        # then never compiled again for 13h50m, kept every one of those writes.
+        _pending: dict[str, str] = {}
         for rel, content in fixed.items():
             if rel in existing_test_files:
                 continue
@@ -442,13 +483,22 @@ def generate_fix_loop(
             if deps.is_compiler_output_line(stripped):
                 deps.log(f"  [fix loop] REJECTED {rel}: content looks like compiler output, not code.")
                 continue
-            deps.write(project_dir / rel, content)
+            _pending[rel] = content
+
+        _verdict = guarded_write(_pending, project_dir, _gate_deps)
+        if not _verdict.kept:
+            _err_preview = output[-deps.FIX_ERR_CAP:] if len(output) > deps.FIX_ERR_CAP else output
+            return FixReport.unchanged(
+                summary=f"write_refused:{_verdict.outcome.value}",
+                error_preview=_err_preview)
+        for rel in _pending:
             deps.log(f"  [fix loop] Fixed: {rel}")
 
-        _all_changed = sorted(fixed.keys())
+        _all_changed = sorted(_pending)
         _err_preview = output[-deps.FIX_ERR_CAP:] if len(output) > deps.FIX_ERR_CAP else output
 
-        # BL-025: log fix patterns for future prompts.
+        # Record what class of compile error was fixed where, so a later
+        # prompt for the same module can carry the precedent.
         if _all_changed:
             _bl025_module = allowed_dir_prefix.rstrip('/').split('/')[-2] if allowed_dir_prefix else ""
             if _bl025_module:
@@ -574,7 +624,13 @@ def generate_fix_loop(
         log_overview=_log_compile_overview,
         whole_file_fix=lambda o, h, r: _do_fix(o, h, retro=r),
         behavior_max_fns=int(os.getenv("FIX_BEHAVIOR_MAX_FNS", "8")),
-        src_snip_cap=deps.SRC_SNIP_CAP)
+        src_snip_cap=deps.SRC_SNIP_CAP,
+        structural_repair=lambda: repair_duplicate_definitions(
+            project_dir, _src_root, DuplicateRepairDeps(
+                probe=lambda: deps.run_cargo_check_diag(
+                    _check_only_cmd, project_dir, env, timeout),
+                enumerate_fns=lambda d: deps.enumerate_fns_via_extractor(d),
+                log=deps.log, emit=deps.emit)))
 
     _set_cur = deps.set_current
     _on_iter = None

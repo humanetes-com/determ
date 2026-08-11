@@ -349,3 +349,38 @@ def test_reconstructor_stall_refill_disabled_by_default(tmp_path: Path) -> None:
                                 telemetry=fa, plateau_abort=3)
     coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
     assert "module.stall_refill" not in fa.events
+
+
+# --- the best-tree slot only ever holds a MEASURED tree ---------------------
+
+def test_analysis_refuses_to_snapshot_an_unmeasurable_tree(tmp_path: Path) -> None:
+    """A build failure reports 0 passing because nothing compiled, not because
+    the tree is empty. Run `3274139-76ff8d08` snapshotted 12 files at "0
+    passing" while both clusters failed to parse, and the flow audit called it
+    `1 save(s) strictly improving` — 0 beats an empty slot."""
+    fa = FakeAdapter(task4=(True, 0), validate_task4=(True, ""), best=None)
+    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=0),
+                      StepOutcome(False, "build", "error[E0592]: duplicate"),
+                      total_iters=0, coverage_strategy="x")
+    assert "save_best" not in fa.calls
+    assert any("absence of a measurement" in line for line in fa.logs)
+
+
+def test_analysis_negative_control_a_measured_zero_still_snapshots(tmp_path: Path) -> None:
+    """The control: same 0, same empty slot, but the tests RAN. That is a real
+    floor and the pre-fix behaviour is retained for it."""
+    fa = FakeAdapter(task4=(True, 0), validate_task4=(True, ""), best=None)
+    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=0),
+                      StepOutcome(False, "test", "0 passed; 12 failed"),
+                      total_iters=0, coverage_strategy="x")
+    assert "save_best" in fa.calls
+
+
+def test_analysis_restores_the_best_tree_when_the_build_breaks(tmp_path: Path) -> None:
+    """The restore arm must NOT be gated on measurability: a tree that stopped
+    compiling is exactly when a good snapshot is worth having back."""
+    fa = FakeAdapter(task4=(True, 0), validate_task4=(True, ""), best=197)
+    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=197),
+                      StepOutcome(False, "build", "error[E0308]"),
+                      total_iters=0, coverage_strategy="x")
+    assert "restore_best" in fa.calls and "save_best" not in fa.calls
