@@ -1,18 +1,31 @@
-
-#  If it responds cleanly, the model loaded. Then watch nvidia-smi during a pipeline call:
-
-#  watch -n1 nvidia-smi
-
-#  If GPU memory used is well below total (e.g. 38GB used out of 48GB), you have headroom. Each +8192 tokens of context needs
-#  roughly +1-2GB of KV cache across both GPUs at the default KV precision.
-
 #!/usr/bin/env bash
+# The shebang MUST stay on line 1: with anything above it — even a blank line or
+# a comment — the kernel sees no `#!`, execve fails ENOEXEC, and running the file
+# directly from fish exits 1 printing NOTHING at all. Notes go below.
+#
+# If the server responds cleanly, the model loaded. Then watch nvidia-smi during
+# a pipeline call:
+#
+#   watch -n1 nvidia-smi
+#
+# If GPU memory used is well below total (e.g. 38GB used out of 48GB), you have
+# headroom. Each +8192 tokens of context needs roughly +1-2GB of KV cache across
+# both GPUs at the default KV precision.
+#
 # Starts the vLLM Docker container. Reads settings from .env.
 # Saves container ID to /tmp/vllm_container.id for lifecycle management.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-_env() { grep -E "^[[:space:]]*$1=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]'; }
+# A MISSING key is the normal case, not an error: the single-switch design below
+# leaves VLLM_MODEL_NAME, VLLM_IMAGE and both parser keys unset in .env and
+# derives them. grep exits 1 on no match, `set -o pipefail` promotes that to the
+# pipeline's status, and `VAR=$(_env KEY)` takes the substitution's status — so
+# under `set -e` the very first lookup killed the script with NO output at all
+# (.env has MODEL=Qwen/Qwen3.6-27B-FP8 and no VLLM_MODEL_NAME line). The trailing
+# `|| true` makes an absent key echo empty and succeed, which is what every
+# `${VAR:-default}` below already assumes.
+_env() { grep -E "^[[:space:]]*$1=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true; }
 
 # True (rc 0) when the HF hub cache holds a COMPLETE snapshot for repo id "$1":
 # a real weight file (safetensors/bin/gguf/pt) present, no broken/empty symlink
@@ -150,7 +163,10 @@ if [[ -n "$_pipeline_pids" ]]; then
         echo "WARNING: pipeline.py is running (PIDs: $_pipeline_pids)."
         echo "Restarting vLLM now will crash its in-flight LLM call."
         echo -n "Stop the pipeline and proceed? [y/N] "
-        read -r _reply
+        # `|| _reply=""` : with no tty (invoked from a script, or stdin closed)
+        # read hits EOF and returns 1, which under `set -e` aborts here instead
+        # of taking the safe N branch that prints why it stopped.
+        read -r _reply || _reply=""
         if [[ "$_reply" =~ ^[Yy]$ ]]; then
             echo "Stopping pipeline ..."
             kill $_pipeline_pids 2>/dev/null || true
@@ -190,7 +206,10 @@ if [[ -n "$_running_cid" ]]; then
         docker stop "$_running_cid" > /dev/null
     else
         echo -n "vLLM container is running (ID $_running_cid). Stop and restart? [y/N] "
-        read -r _reply
+        # `|| _reply=""` : with no tty (invoked from a script, or stdin closed)
+        # read hits EOF and returns 1, which under `set -e` aborts here instead
+        # of taking the safe N branch that prints why it stopped.
+        read -r _reply || _reply=""
         if [[ "$_reply" =~ ^[Yy]$ ]]; then
             echo "Stopping existing vLLM container ($_running_cid) ..."
             docker stop "$_running_cid" > /dev/null

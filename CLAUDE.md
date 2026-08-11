@@ -58,6 +58,55 @@ another name; leave them out too.
 reference, remove it and replace it with the fact it stood for. The trackers
 keep their own numbering; the code does not mirror it.
 
+## Never edit the crate the pipeline is filling — you may only edit the pipeline
+
+**The assistant does not write, delete or repair a single line of the crate under
+reconstruction.** That covers `tmp/<project>/src` (the merged tree), every
+`.skeleton-filled/<cluster>/src`, every `.skeleton/<cluster>/src`, `.best_tree`,
+and the generated tests — everything the pipeline authors. No exception for "it is
+one obvious line", "the loop is stuck on it", or "I will put it back". The editable
+surface is `pipeline.py`, `pipeline_core`, `tools`, the extractor's Rust sources,
+the scripts and the trackers. Nothing else.
+
+**Why, in three parts.** The crate IS the measurement: pass counts, verdicts, the
+ratchet and every conviction describe a tree the pipeline produced, and one
+hand-authored line makes every later number a statement about a tree a human
+repaired — unfalsifiable and worthless as evidence that any fix works. The crate is
+also the model's job: the whole point is whether the loop can reconstruct it, so
+doing the loop's work for it converts an open question into a hidden assumption.
+And a broken body is EVIDENCE about a pipeline defect; deleting it destroys the
+reproduction before the defect is understood, which is the fastest known way to
+ship a fix that addresses nothing.
+
+**The instance, 2026-08-11, run `3337398-fbf7e143`.** The merged tree stopped
+compiling on `error[E0592]`: `ErrorImpl::debug` defined twice, at
+`src/error.rs:301` and `src/fmt.rs:11`, identical signature. The fix loop had
+written it — `debug` exists only in `fmt.rs` in both authored layouts and both
+filled cluster trees, `error.rs` carried it nowhere upstream of the merge, and the
+run log holds three `[fix loop/impl] spliced src/error.rs::debug` lines against
+zero in the run before. The loop then could not recover: a unit-scope fix may only
+rewrite a body, never remove a definition, so every attempt re-checked to the
+identical error, escalated to whole-file rewrites of `lib.rs`/`kind.rs`/`chain.rs`/
+`context.rs` — none of which held the duplicate — and cycled 9 → 6 → 10 → 7 → 7 →
+9 → 10 of 12 clean files across two full passes with zero scored sweeps and zero
+verdict rows in 4h45m. The assistant proposed deleting the duplicate by hand. That
+was the wrong instinct twice over: it would have patched the symptom of a splicer
+defect, and it would have contaminated the tree whose numbers were about to be used
+to judge whether the splicer fix worked.
+
+**What to do instead — find the mechanism that already owns the removal.** The
+pipeline has one for most damage, and it is usually cheaper than it looks. Here it
+was the merge: `merge_cluster_outputs` passes the workspace file as
+`--merge-output` only and takes its inputs exclusively from the `--cluster` paths,
+so re-running task2b regenerates `src/` from cluster trees that never held the
+duplicate — the pipeline removes it, by its own rule, with the provenance intact.
+Other owners: the crash/layout retrigger re-stubs, heal restores `.best_tree`, the
+batch ratchet restores an older tree. If no mechanism owns it, that absence IS the
+finding — write the guard that stops the damage being created, and let the next run
+build the tree. State the cost of the in-process route honestly (a re-merge
+discards task2c's merged-tree fills, which live only in the workspace `src/`)
+rather than reaching for an editor because the honest route is expensive.
+
 ## A deliberate destruction invalidates a measurement for EVERY consumer of it
 
 Several mechanisms here destroy progress **on purpose**: the crash/layout
@@ -267,6 +316,91 @@ not fail on the pre-fix code has proved nothing. Run the same walk with the old
 grading injected and assert the bad outcome reproduces. That is the difference
 between "the new code is correct" and "the theory bites on run
 `259637-36db9aad`", which cost nine hours, 148 landed fills and +5 tests.
+
+## Pick the restart lever by the phase your fix lives in
+
+Every launch goes through `continue.sh`, so **`bash pre_run.sh` comes first, always**
+— `restart_from.sh` and `redo.sh` both `exec continue.sh`, which recomputes the
+stamp and exits 3 when it moved. Answer this before choosing: which phase executes
+the code I changed, and does validating it need a tree that has not seen it?
+
+**The phases, and what each lever re-enters.** `task0a/0c` clone + augment,
+`strip` removes the bodies, `task1` synthesises FRs, `t1.5` re-authors the layout,
+`task2a` fills per cluster (the TDD loop, `run_phase_c_tdd`), `task2b` merges,
+`task2c` fills the merged tree, `task3` tests and repairs, `task4` genesis. The
+fills live in `tmp/anyhow/.skeleton-filled/<cluster>/src`, the layout they answer
+to in `.skeleton/<cluster>/src`.
+
+- **`bash continue.sh`** — resume at the first phase `pipeline_state.md` does not
+  mark done. Cheapest and the default; on 2026-08-10 it re-entered a killed run at
+  the merge phase in under two minutes and zero model calls. It validates only what
+  runs AFTER the resume point: a run that died in t3 resumes in t3, and a t2a-phase
+  fix is never executed. Flags: `--y` (stop a running pipeline first), `--force`
+  (SIGTERM+SIGKILL), `--no-tail` (exit after launch), `--no-pre-run` (bypass the
+  gate, prints as the escape hatch it is). `--wipe` is gone and refuses loudly.
+  Never wrap it in `timeout` — coreutils signals the whole process group and
+  SIGTERMs the pipeline it just started.
+- **`bash restart_from.sh <stage>`** (anyhow; `<stage>` ∈ task1|task2|task2a|task2b|
+  task2c|task3|task4, `--force` to skip the graceful stop) — clears the matching
+  `[<key>]` lines from `pipeline_state.md` plus the `passing-*` lock tags, then
+  execs `continue.sh --y`. **It preserves every fill on disk**: the cluster seed is
+  `if not dst.exists()`, so re-entering task2a resumes the TDD loop ON the existing
+  bodies rather than re-stubbing them. This is the lever for a driver-half fix
+  (charging, taint, epochs, re-admission, the red-build budget) that only executes
+  inside `run_phase_c_tdd`. Note the real boundaries are task1 and task2 —
+  task2a…task4 are visibility labels for sub-stages of one atomic `task2-4`
+  reconstruct phase, so task2a/2b/2c all re-run the loop; task3/task4 clear only
+  `task2-4` and go straight to test/fix. `resume_from_t2.sh` is a shim for
+  `restart_from.sh task2`.
+- **`bash run_hardcrate.sh [--complexity=N] [--from=STAGE]`** — the hardcrate smoke
+  in `tmp/hardcrate`, same t1…t4 vocabulary via the shared
+  `lib/restart_from_lib.sh`. Without `--from` it re-assembles the crate and
+  `rm -rf`s the workspace; with `--from` it preserves fills exactly as
+  `restart_from.sh` does. Requires vLLM already up on :8000.
+- **`bash redo.sh [--force] [--full]`** — the only lever that DESTROYS the
+  reconstruction: it wipes `.skeleton-filled`, and with `--full` also `.skeleton`
+  (forcing the bake to re-run), then relaunches `continue.sh --y --keep-augmented`,
+  i.e. `pipeline.py --restart-from-augmented`, whose `git reset --hard` to the
+  task0c tag removed 5,137 tracked files on 2026-08-08.
+
+**When to wipe, and when wiping destroys the measurement.** Wipe when the thing
+under test is the construction of the tree itself — a t1.5 layout change, a bake or
+strip change, an FR-synthesis change — because those cannot be observed on a tree
+already built by the old code (`redo.sh --full --force` skips clone+task0c and is
+what re-arms the bake/pin harvest). Do NOT wipe to validate a loop-behaviour fix:
+the fills ARE the state the gates read, and a from-scratch run spends hours
+re-reaching the position the pathology needs before it can even reproduce. And
+never wipe to "start clean" while a diagnosis is open — the run log and the tree are
+the only two records of what earlier runs achieved, which is why `--wipe` was
+removed from `continue.sh` rather than fixed.
+
+**Comparing two runs means neither of them wipes.** A/B is
+`compare_models.sh snapshot <name>` once, then `arm <seed> <qwen|muse>` per arm —
+`arm` restores the seed by `rm -rf`ing `.skeleton` and `.skeleton-filled` and
+copying the snapshot back, so both arms start from the same tree AND the same
+layout (they are a pair; taking one without the other gives bodies that do not
+compile). A `redo.sh` between arms replaces the seed with a fresh one and the
+comparison is over. Sequence: `snapshot baseline`, then
+`arm baseline qwen && bash pre_run.sh && bash continue.sh`, same for the other arm,
+then `report qwen=<run-id> muse=<run-id>`; `compare_models.sh list` recovers a run
+id you did not note. What is compared is progress per SWEEP and per hour, not
+tokens/sec. Take the cheap validation first — `run_microcrate.sh` on a new model
+before spending anyhow hours, so a model that ignores the FN/FILE output contract
+fails in minutes instead of looking like a slow model six hours in.
+
+**The model and the server.** `MODEL=` in `.env` is the one switch —
+`VLLM_MODEL_NAME` falls back to it, `TaskModels.from_env` defaults every
+`TASK*_MODEL` to it, and `MODEL_CAPS`/`model_tier` key the reasoning dialect and
+prompt tier on the same string. `docker_vllm.sh` derives image, parsers and a
+max-len CEILING from it (`--y` to stop what is running, `--allow-download` to let
+vLLM fetch an uncached model, `--no-pull` for an offline relaunch). **It pulls
+`:latest` on every launch by default**, because `docker run` never re-fetches a tag
+it already holds — this box sat on a 2026-05-08 image serving vLLM 0.20.2 for three
+months, which is how a model needing a newer server fails as "unknown architecture"
+instead of "your image is stale". The corollary: restarting the server also
+upgrades it, so do not restart vLLM in the middle of a measurement you intend to
+compare against an earlier run — check `curl -s localhost:8000/version` and leave a
+healthy container alone.
 
 ## Watch a live run at the iteration boundary, in-session
 
