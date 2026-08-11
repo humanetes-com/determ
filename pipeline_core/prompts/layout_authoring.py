@@ -70,6 +70,45 @@ _RULES = (
 )
 
 
+# The same class of defect as the auto-trait rule below, for traits that are
+# DERIVED rather than inferred, and it was measured rather than guessed.
+#
+# `tests/integration.rs::counter_from_default` calls `Counter::default()`. The
+# authoring prompt shows the item to author and the behaviour spec, but never
+# the test, and never says the trait is needed — so the model has to guess that
+# `Default` belongs on the struct. Across eight authorings on 2026-08-11
+# (microcrate and hardcrate, Qwen3.6 and Muse-Glimmer, at both 32768 and 131072,
+# and at reasoning strengths high and xhigh) the guess came out right 3 times
+# and wrong 5. Every wrong one cost the same thing: the cluster does not
+# compile, `error[E0599]: no function or associated item named 'default' found
+# for struct 'Counter'`, no test binary runs, so NO test reports a verdict and
+# the sweep scores 0 — then the DESIGN_CONFLICT retrigger spends sweeps
+# re-authoring. One run needed the task3 fix loop to recover; one had the
+# re-author come back with `error[E0603]: struct 'Counter' is private`, worse
+# than what it replaced.
+#
+# Neither model and no reasoning strength fixed it, because the information was
+# never in the prompt. Raising Muse from `high` to `xhigh` made it worse, not
+# better. So this states the requirement instead of hoping it is inferred.
+_DERIVED_TRAIT_RULE = (
+    "TRAITS THE TESTS CALL MUST BE DERIVED:\n"
+    "The frozen tests are the specification. If a test constructs or compares a\n"
+    "type through a trait method, that trait must be on the type — deriving it\n"
+    "is your job, and nothing else in this prompt will remind you.\n"
+    "`T::default()` needs `#[derive(Default)]`; `assert_eq!` on a value needs\n"
+    "`PartialEq` and `Debug`; cloning needs `Clone`. A missing derive does not\n"
+    "fail gracefully: the cluster stops compiling, no test binary runs at all,\n"
+    "and every test scores as failing regardless of the bodies.\n"
+    "When in doubt on a plain data-carrying struct or enum, derive the standard\n"
+    "set — it costs nothing and an absent one costs the whole build:\n"
+    "WRONG (a test calls `Counter::default()`):\n"
+    "pub struct Counter { value: u32 }\n"
+    "RIGHT:\n"
+    "#[derive(Debug, Default, Clone, PartialEq, Eq)]\n"
+    "pub struct Counter { value: u32 }\n"
+)
+
+
 # A public type's auto-traits are part of its API even though nothing in the
 # frozen surface spells them out: `Send`/`Sync` are inferred from the FIELDS,
 # so a private layout choice silently removes them and the break surfaces only
@@ -246,6 +285,7 @@ def build_layout_authoring_prompt(
         extra_guidance or None,
         "" if extra_guidance else None,
         _RULES,
+        _DERIVED_TRAIT_RULE,
         _AUTOTRAIT_RULE,
         (_PUB_FIELDS_RULE
          if any(i.kind is SurfaceItemKind.PUB_FIELDS for i in items) else None),

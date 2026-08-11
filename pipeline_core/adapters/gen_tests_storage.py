@@ -66,6 +66,44 @@ def read_all_gen_tests(src_file: Path) -> str:
     return "\n\n".join(parts)
 
 
+def read_frozen_test_sources(project_dir: Path) -> dict[str, str]:
+    """Every WRITE-PROTECTED test the crate carries: the gen_tests siblings PLUS
+    the crate's own `tests/` integration tests, rel path → text.
+
+    `read_oracle_sibling_sources` deliberately sees only the siblings, because
+    what it feeds — the member-path constraint — is about the private members
+    those generated tests read. That filter is wrong for any question about what
+    the FROZEN SPECIFICATION demands, because the crate's hand-written
+    integration tests are equally write-protected and equally unable to be
+    edited to fit a layout.
+
+    Measured cost of the gap, 2026-08-11: the derive requirement that broke five
+    of eight layout authorings is `Counter::default()` in
+    `tmp/hardcrate/tests/baseline.rs:14` and `tests/integration.rs:22` — both
+    integration tests, neither a `gen_tests` sibling. A scan wired to the
+    siblings alone returned nothing and the requirement never reached the
+    prompt, which reads exactly like the scan not working.
+
+    Same dot-directory and `target/` exclusions as the sibling reader, and for
+    the same reason: `.skeleton/`, `.skeleton-filled/` and `.best_tree/` each
+    hold a copy of these files.
+    """
+    out = read_oracle_sibling_sources(project_dir)
+    root = Path(project_dir)
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return out
+    for f in sorted(tests_dir.rglob("*.rs")):
+        rel_parts = f.relative_to(root).parts
+        if any(p.startswith(".") or p == "target" for p in rel_parts[:-1]):
+            continue
+        try:
+            out[str(f.relative_to(root))] = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return out
+
+
 def read_oracle_sibling_sources(project_dir: Path) -> dict[str, str]:
     """Every gen_tests sibling under `project_dir`, rel path → text.
 

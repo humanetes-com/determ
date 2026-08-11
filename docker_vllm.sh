@@ -91,7 +91,14 @@ VLLM_TP=$(_env VLLM_TENSOR_PARALLEL); VLLM_TP="${VLLM_TP:-1}"
 case "$VLLM_MODEL" in
     *Muse-Glimmer*)
         _def_image="vllm/vllm-openai:muse-glimmer"
-        _def_reasoning="muse_glimmer"; _def_tool="muse_glimmer"; _max_len_ceiling=32768 ;;
+        # 32768 was a conservative guess, never a measurement. Measured
+        # 2026-08-11 from the engine's own startup line at TP=2 on 2x RTX 3090:
+        #   GPU KV cache size: 189,405 tokens
+        #     (Qwen3.6-27B-FP8 on the same box reports 136,533)
+        # A single 131,072-token sequence therefore fits with room to spare, and
+        # the old ceiling was forcing every comparison against Qwen to run at a
+        # quarter of Qwen's native window for no reason the hardware supports.
+        _def_reasoning="muse_glimmer"; _def_tool="muse_glimmer"; _max_len_ceiling=131072 ;;
     *Qwen3.6*|*qwen3*)
         _def_image="vllm/vllm-openai:latest"
         _def_reasoning="qwen3"; _def_tool=""; _max_len_ceiling=131072 ;;

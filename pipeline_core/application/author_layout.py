@@ -40,6 +40,10 @@ from pipeline_core.domain.layout_probe import (
     strip_probe_region,
 )
 from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+from pipeline_core.domain.oracle_derives import (
+    derive_requirements_text,
+    scan_required_derives,
+)
 from pipeline_core.domain.oracle_field_paths import (
     FieldPath,
     field_path_requirements_text,
@@ -62,6 +66,13 @@ from pipeline_core.domain.type_header import (
     parse_type_header,
 )
 from pipeline_core.prompts.layout_authoring import build_layout_authoring_prompt
+
+# Item kinds that can carry a `#[derive(...)]`. A trait, a type alias or a fn
+# signature whose name a test happens to call is not a derive target, and
+# asking for one authors a layout that cannot compile.
+_DERIVABLE_KINDS = frozenset({
+    SurfaceItemKind.STRUCT, SurfaceItemKind.ENUM, SurfaceItemKind.PUB_FIELDS,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +99,16 @@ class AuthorLayoutDeps:
     # so the authoring prompt carries those names and the compile gate enforces
     # them. Absent ⇒ no field-path constraint, exactly as before it existed.
     oracle_sources: Callable[[], Mapping[str, str]] | None = None
+    # The crate's write-protected tests INCLUDING its `tests/` integration
+    # tests, for the derive requirement below. Deliberately separate from
+    # `oracle_sources`: that one feeds the member-path compile gate and is
+    # scoped to the generated siblings on purpose, and widening it would add
+    # constraints to a gate whose rejection costs a whole authoring attempt.
+    # The derive scan needs the wider view because the requirement that broke
+    # five of eight authorings on 2026-08-11 lives in `tests/baseline.rs` and
+    # `tests/integration.rs`, neither of which is a `gen_tests` sibling.
+    # Absent ⇒ falls back to `oracle_sources`, i.e. siblings only.
+    frozen_test_sources: Callable[[], Mapping[str, str]] | None = None
     max_attempts: int = 3
     # M6 chunking: components above `single_shot_max` items are authored in
     # chunks (types first, then fns) instead of demanding one 40-block reply.
@@ -293,6 +314,7 @@ def author_layout(
     component is left FROZEN (gated), loud in the log, never authored blind."""
     results: list[ComponentResult] = []
     oracle = _oracle_sources(deps)
+    frozen_tests = _frozen_test_sources(deps) or oracle
     for comp in surface.components:
         names = tuple(i.name for i in comp)
         pins = select_pins(comp)
@@ -318,6 +340,16 @@ def author_layout(
             root=pin_probe,
             in_file=_calibrated_field_path_probes(surface, comp, paths, deps))
         paths_note = field_path_requirements_text(paths)
+        # Same shape as the member paths above and for the same reason: the
+        # tests are the specification, the prompt does not contain them, and a
+        # trait the tests reach for is otherwise left to inference. A general
+        # rule was tried first and is not enough on a large component — the
+        # hardcrate authors ~100 items and dropped `Default` on `Counter`
+        # anyway, where the microcrate with a handful of items did not.
+        # Restricted to the types this component actually declares, so the note
+        # names items the reply is expected to emit.
+        derives_note = derive_requirements_text(scan_required_derives(
+            frozen_tests, [i.name for i in comp if i.kind in _DERIVABLE_KINDS]))
 
         # ADOPTION BEFORE AUTHORING. A private type authored by an earlier
         # cfg-cluster is already this crate's definition of that type, and this
@@ -372,12 +404,13 @@ def author_layout(
                     chunk_uids: tuple[str, ...], scheme: str, hint: str,
                     *, _pins: list[BehaviourSpec] = pins,
                     _anchors: dict[str, str] = anchors,
-                    _shared: str = shared, _paths: str = paths_note) -> str:
+                    _shared: str = shared, _paths: str = paths_note,
+                    _derives: str = derives_note) -> str:
             return build_layout_authoring_prompt(
                 module_name=module_name, cfg_cluster=surface.cfg_cluster,
                 items=chunk_items, public_surface=public_surface,
                 layout_pins=_pins, symbol_inventory=symbol_inventory,
-                extra_guidance=extra_guidance + _shared + _paths,
+                extra_guidance=extra_guidance + _shared + _paths + _derives,
                 authored_scheme=scheme,
                 item_uids=chunk_uids, item_anchors=_anchors) + hint
         committed = False
@@ -649,6 +682,21 @@ def _oracle_sources(deps: AuthorLayoutDeps) -> Mapping[str, str]:
     except Exception as e:      # noqa: BLE001 — degrade, never fail authoring
         deps.log(f"  [t1.5] could not read the crate's in-crate tests for "
                  f"field-path constraints ({e}) — authoring without them.")
+        return {}
+
+
+def _frozen_test_sources(deps: AuthorLayoutDeps) -> Mapping[str, str]:
+    """The wider write-protected test set, or {} to fall back to the oracle.
+
+    Degrades exactly like `_oracle_sources`: a read failure must never fail
+    authoring — the requirement is an aid to attempt 1, not a gate."""
+    if deps.frozen_test_sources is None:
+        return {}
+    try:
+        return deps.frozen_test_sources()
+    except Exception as e:      # noqa: BLE001 — degrade, never fail authoring
+        deps.log(f"  [t1.5] could not read the crate's frozen tests for derive "
+                 f"requirements ({e}) — authoring without them.")
         return {}
 
 

@@ -240,6 +240,9 @@ def make_layout_phase_runner(
     # The crate's write-protected in-crate tests (rel path → text). Their member
     # paths are a constraint on the authored layout — see AuthorLayoutDeps.
     read_oracle_sources: Callable[[Path], dict[str, str]] | None = None,
+    # Wider write-protected set (siblings + the crate's `tests/`), for the
+    # derive requirement only — see AuthorLayoutDeps.frozen_test_sources.
+    read_frozen_tests: Callable[[Path], dict[str, str]] | None = None,
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None,
     # Crate-wide layout registry — see LayoutPhaseDeps.
     load_registry: Callable[[Path], dict[str, AuthoredItem]] | None = None,
@@ -289,7 +292,10 @@ def make_layout_phase_runner(
                     else (lambda src: write_pin_probe(pd, cluster, src))),
                 oracle_sources=(
                     None if read_oracle_sources is None
-                    else (lambda: read_oracle_sources(pd))))
+                    else (lambda: read_oracle_sources(pd))),
+                frozen_test_sources=(
+                    None if read_frozen_tests is None
+                    else (lambda: read_frozen_tests(pd))))
 
         def _recompute_leaf_order(pd: Path, cluster: str) -> None:
             src = skeleton_src_dir_for(pd, cluster)
