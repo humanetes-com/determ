@@ -599,7 +599,13 @@ def _run_layout_attempt(
         select_pins=select_pins,
         symbol_inventory=deps.symbol_inventory_text(project_dir, cfg_cluster),
         deps=replace(deps.author_deps_for(project_dir, cfg_cluster),
-                     filled_bodies=lambda: filled),
+                     filled_bodies=lambda: filled,
+                     # A re-author answers to the layout it replaces: reject a
+                     # replacement that drops its derives or its visibility
+                     # (observed non-monotone on 2026-08-11: attempt 1 carried
+                     # `#[derive(Debug, Default, Clone, PartialEq, Eq)]`, a
+                     # later attempt none, another a private struct).
+                     guard_replaced_layout=True),
         extra_guidance=guidance)
 
     if not res.all_authored:

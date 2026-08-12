@@ -451,6 +451,71 @@ def test_bake_time_has_no_filled_bodies_and_so_no_veto():
     assert res.all_authored
 
 
+# --- the re-author regression guard ------------------------------------------
+# A re-author is a fresh model call; live on 2026-08-11 (arm C, microcrate)
+# attempt 1 re-authored `Counter` WITH `#[derive(Debug, Default, Clone,
+# PartialEq, Eq)]` and a later attempt on the same item produced no derive at
+# all (and another a private struct, `error[E0603]`). Nothing compared the
+# replacement against the layout it replaced, so the repair could hand back
+# something worse than what it was fixing.
+
+_DERIVED_CURRENT = ("#[derive(Debug, Default, Clone, PartialEq, Eq)]\n"
+                    "struct Counter { count: u32 }")
+
+_NO_DERIVE_REPLY = ('<LAYOUT_ITEM name="Counter" kind="struct">'
+                    'struct Counter { count: u32 }</LAYOUT_ITEM>')
+
+_KEPT_DERIVE_REPLY = ('<LAYOUT_ITEM name="Counter" kind="struct">'
+                      '#[derive(Debug, Default, Clone, PartialEq, Eq)]\n'
+                      'struct Counter { count: u32, cap: u32 }</LAYOUT_ITEM>')
+
+
+def _counter_deps(reply, compiles=(True, True, True)):
+    d = _Deps(reply, compiles)
+    d.files = {"src/counter.rs": _DERIVED_CURRENT + "\n"}
+    return d
+
+
+def _counter_surface():
+    types = [TypeRecord(file="src/counter.rs", kind="struct", name="Counter",
+                        is_pub=False, definition=_DERIVED_CURRENT)]
+    return classify_private_surface(types, [], cfg_cluster="stable")
+
+
+def test_reauthor_dropping_a_derive_the_current_layout_carries_is_refused():
+    d = _counter_deps(_NO_DERIVE_REPLY)
+    deps = dataclasses.replace(d.deps(), guard_replaced_layout=True)
+    res = author_layout(_counter_surface(), module_name="m", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=deps)
+    assert not res.all_authored
+    why = next(c.reason for c in res.components if not c.authored)
+    assert "strictly worse" in why and "Default" in why
+    # nothing half-landed
+    assert d.files["src/counter.rs"] == _DERIVED_CURRENT + "\n"
+    # and the retry prompt names the constraint back to the model
+    assert len(d.prompts) > 1 and "derive" in d.prompts[1]
+
+
+def test_reauthor_keeping_the_derives_passes_the_guard():
+    d = _counter_deps(_KEPT_DERIVE_REPLY)
+    deps = dataclasses.replace(d.deps(), guard_replaced_layout=True)
+    res = author_layout(_counter_surface(), module_name="m", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="", deps=deps)
+    assert res.all_authored
+
+
+def test_initial_authoring_is_not_held_to_the_frozen_derives():
+    """NEGATIVE CONTROL: without the flag (bake time), the same derive-dropping
+    reply is accepted exactly as before — the reference there is the frozen
+    original and a redesign may legitimately not carry its every derive (the
+    test-required ones are computed by `oracle_derives` into the prompt)."""
+    d = _counter_deps(_NO_DERIVE_REPLY)
+    res = author_layout(_counter_surface(), module_name="m", public_surface="",
+                        select_pins=_has_pins, symbol_inventory="",
+                        deps=d.deps())
+    assert res.all_authored
+
+
 # --- the oracle's member paths as an authoring constraint ---------------------
 # t1.5 elides the private fields of a public struct and asks the model to design
 # them. The in-crate augmented tests are generated BEFORE that, from the original

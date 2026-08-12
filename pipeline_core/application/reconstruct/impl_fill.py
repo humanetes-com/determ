@@ -399,6 +399,11 @@ def fill_impl_blocks(
     fns_filled_total = 0
     attempts_total = 0
     errors: list[str] = []
+    # Fns a route genuinely attempted (recorded at the two points a unit is
+    # handed to a fill cycle, AFTER the skip gates) — the caller's exhaustion
+    # charging keys on this, so a member skipped by a refusal gate is spared
+    # the strike a member that was tried and failed earns.
+    dispatched_keys: set[FnLocator] = set()
     # One entry per block that LANDED, carrying the still-stubbed sites that
     # held its tests (empty when the block was judged on its own merits). Read
     # together at the end of the sweep: when one site blocked every landed
@@ -432,7 +437,7 @@ def fill_impl_blocks(
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
-        return ClusterFillResult()
+        return ClusterFillResult(dispatched_fns=())
 
     # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
@@ -695,6 +700,8 @@ def fill_impl_blocks(
         wanted = [*stub_names, *refill_names]
         if not wanted:
             return
+        with _counters_lock:
+            dispatched_keys.update(FnLocator(file_rel, n) for n in wanted)
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
         test_blocks: list[tuple[str, str]] = []
         for fn_name in wanted[:6]:
@@ -1235,6 +1242,12 @@ def fill_impl_blocks(
                 return
             if len(_fresh_members) < len(block.stub_members):
                 block = replace(block, stub_members=_fresh_members)
+        # Past every skip gate — this block's members are now genuinely being
+        # attempted, so they are chargeable if they end the pass still stubs.
+        with _counters_lock:
+            dispatched_keys.update(
+                FnLocator(block.file, m.fn_name)
+                for m in (*block.stub_members, *block.refill_members))
         # Related blocks (same trait, different generic) for the prompt.
         all_blocks_by_id = {_impl_block_id(b.file, b.container): b for b in blocks}
         related_blocks: list[ImplBlock] = []
@@ -2356,4 +2369,5 @@ def fill_impl_blocks(
         remaining=remaining_n,
         impls_filled=impls_filled,
         impls_failed=impls_failed,
+        dispatched_fns=tuple(sorted(dispatched_keys)),
     )

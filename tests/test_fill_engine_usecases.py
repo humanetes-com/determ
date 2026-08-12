@@ -496,6 +496,115 @@ def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
                for m in fake.logs)
 
 
+def test_stale_refill_dropped_when_its_test_passes_after_earlier_fills(
+        tmp_path: Path) -> None:
+    """The re-fill list is computed from the PREVIOUS iteration's test run; the
+    impl/file routes write bodies in the SAME engine call before the per-fn
+    pass consumes it. Measured 2026-08-11/12: the per-fn route re-derived
+    `checked_div` for 99 s to a byte-identical body seconds after the file
+    route had already fixed its test — 11-27% of every A/B/C run's wall. The
+    probe (one cargo test between routes) must drop a target whose attributed
+    tests all pass now."""
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    key = FnLocator("src/a.rs", "wrongfn")
+    fake = FakeFill(
+        # Impl route landed 2 fills and left work → falls through to per-fn.
+        impl_stats=ClusterFillResult(remaining=1, fns_filled=2,
+                                     dispatched_fns=()),
+        stub_records=[], stub_tuples=[],
+        fns=[{"file": "src/a.rs", "fn_name": "wrongfn",
+              "container": "impl A", "sig_text": "fn wrongfn()"}],
+        run=(0, "test t1 ... ok\ntest result: ok. 1 passed; 0 failed"),
+    )
+    out = _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key},
+        tdd_frontier_tests=FailureFrontier.of_direct({key: {"t1"}}),
+        tdd_test_cmd="cargo test", skip_end_pass_test=True)
+    assert "phase_c.refill.stale_dropped" in fake.events
+    assert any("re-fill target(s) dropped" in m and "src/a.rs::wrongfn" in m
+               for m in fake.logs)
+    # Nothing left to do: the per-fn pass never dispatched the stale target.
+    assert out.fns_filled == 2  # the impl carryover only
+
+
+def test_refill_kept_when_its_test_still_fails_at_the_probe(
+        tmp_path: Path) -> None:
+    """NEGATIVE CONTROL for the stale-refill probe: the attributed test still
+    fails after the earlier fills → the target stays a re-fill candidate (the
+    pre-probe behaviour for a genuinely-wrong body must be unchanged)."""
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    key = FnLocator("src/a.rs", "wrongfn")
+    fake = FakeFill(
+        impl_stats=ClusterFillResult(remaining=1, fns_filled=2,
+                                     dispatched_fns=()),
+        stub_records=[], stub_tuples=[],
+        fns=[{"file": "src/a.rs", "fn_name": "wrongfn",
+              "container": "impl A", "sig_text": "fn wrongfn()"}],
+        run=(101, "test t1 ... FAILED\n"
+                  "test result: FAILED. 0 passed; 1 failed"),
+    )
+    _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key},
+        tdd_frontier_tests=FailureFrontier.of_direct({key: {"t1"}}),
+        tdd_test_cmd="cargo test", skip_end_pass_test=True)
+    assert "phase_c.refill.stale_dropped" not in fake.events
+    assert any("behavioral re-fill target(s)" in m for m in fake.logs)
+
+
+def _cluster(name: str = "stable"):
+    from pipeline_core.domain.models import BuildCluster
+    return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],
+                        excluded_cfg=[], active_cfg=[], prompt_nightly_rule="")
+
+
+def test_cfg_dead_stub_is_refused_at_dispatch(tmp_path: Path) -> None:
+    """One cfg policy across routes. The impl/file routes refuse a splice at a
+    fn whose every stub occurrence is cfg-gated out of the cluster; on
+    2026-08-11/12 the per-fn DISPATCH side never consulted that verdict and
+    every A/B/C arm spent 90-147 s filling `src/lib.rs::cap_limit` into a
+    build that never compiles it (the same run's file route refused the
+    identical target as `not_in_cluster_cfg`). The dispatch refusal keys on
+    the same `cluster_inactive_stub_names` verdict the splice uses."""
+    ws = _mk_ws(tmp_path)
+    dead = {"file": "src/lib.rs", "fn_name": "cap_limit",
+            "sig_text": "fn cap_limit()"}
+    fake = FakeFill(stub_tuples=[])
+    # Call sequence: cluster_inactive_stub_names scans (every, then active —
+    # the verdict says cap_limit is inactive), then the pass scan returns the
+    # record anyway (the observed record-source drift that produced the live
+    # fill). The dispatch filter must refuse it.
+    seq: list[list[dict[str, Any]]] = [[dead], [], [dead]]
+    fake.scan_stub_records = (  # type: ignore[method-assign]
+        lambda d, c: list(seq.pop(0)) if seq else [])
+    out = _engine(fake, FillUnit.FN).run(
+        ws, ws / "src", [], "m", "stable", cluster=_cluster(),
+        cluster_env={}, skip_end_pass_test=True)
+    assert "phase_c.dispatch.cfg_dead_refused" in fake.events
+    assert any("refused 1 dispatch(es) at cfg-dead stub(s)" in m and
+               "src/lib.rs::cap_limit" in m for m in fake.logs)
+    assert out.fns_filled == 0 and out.attempts == 0  # no call was spent
+
+
+def test_cfg_live_stub_is_not_refused_at_dispatch(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL: when the verdict and the pass scan agree the stub is
+    active, the dispatch filter stays out of the way."""
+    ws = _mk_ws(tmp_path)
+    live = {"file": "src/lib.rs", "fn_name": "answer",
+            "sig_text": "fn answer()"}
+    fake = FakeFill(stub_tuples=[], run=(0, ""))
+    seq: list[list[dict[str, Any]]] = [[live], [live], [live]]
+    fake.scan_stub_records = (  # type: ignore[method-assign]
+        lambda d, c: list(seq.pop(0)) if seq else [])
+    _engine(fake, FillUnit.FN).run(
+        ws, ws / "src", [], "m", "stable", cluster=_cluster(),
+        cluster_env={}, skip_end_pass_test=True)
+    assert "phase_c.dispatch.cfg_dead_refused" not in fake.events
+
+
 def test_engine_defers_impl_route_for_a_free_fn_stub(tmp_path: Path) -> None:
     """A frontier stub the impl route never attempts (free fn) must be filled
     BEFORE any impl-route re-fill: its panic aborts the test binary, so every

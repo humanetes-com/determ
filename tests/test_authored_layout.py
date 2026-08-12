@@ -137,3 +137,31 @@ def test_derive_locate_keys_none_on_any_miss():
     items2 = (PrivateSurfaceItem(kind=SurfaceItemKind.TRAIT, name="Own",
                                  file="src/ptr.rs", definition="d"),)
     assert derive_locate_keys(items2, [], types) is None
+
+
+def test_derive_traits_reads_every_plain_derive_attr():
+    from pipeline_core.domain.authored_layout import derive_traits
+    d = ("#[derive(Debug, Default)]\n"
+         "#[derive(Clone)]\n"
+         "struct Counter { count: u32 }")
+    assert derive_traits(d) == frozenset({"Debug", "Default", "Clone"})
+    # cfg_attr-wrapped derives are conditional and deliberately not read
+    assert derive_traits(
+        '#[cfg_attr(feature = "x", derive(Serialize))]\nstruct S;'
+    ) == frozenset()
+    assert derive_traits("struct S;") == frozenset()
+
+
+def test_layout_regressions_names_lost_derives_and_lost_visibility():
+    from pipeline_core.domain.authored_layout import layout_regressions
+    cur = ("#[derive(Debug, Default, Clone, PartialEq, Eq)]\n"
+           "pub struct Counter { count: u32 }")
+    worse = "struct Counter { count: u32 }"
+    regs = layout_regressions(cur, worse)
+    assert any("Default" in r for r in regs)
+    assert any("pub" in r and "private" in r for r in regs)
+    # a superset of derives with the same visibility is not a regression,
+    # whatever else the redesign changes
+    better = ("/// doc\n#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]\n"
+              "pub struct Counter { count: u64, cap: u32 }")
+    assert layout_regressions(cur, better) == ()

@@ -663,6 +663,21 @@ class ClusterFillResult:
     # its plateau exit: the fns it tried and could not make pass.
     exhausted: bool = False
     exhausted_fns: tuple[tuple[str, str], ...] = ()
+    # The fns a fill route ACTUALLY attempted this call (a model attempt was
+    # made, or a body landed) — as opposed to the frontier the caller asked
+    # for. The two differ whenever a route stands down: the impl route defers
+    # itself while free-fn blockers remain, and the per-fn route takes only
+    # free fns, so an impl member can sit in the frontier of every iteration
+    # and never be dispatched by anyone. The TDD driver used to charge an
+    # exhaustion strike to every frontier key still a stub after the pass;
+    # on 2026-08-11/12 that marked the `impl Counter` members exhausted at
+    # iteration 1 in all six A/B/C cluster runs — before any route had seen
+    # them — which made their block "not viable" from iteration 2 on and left
+    # every cluster plateaued below its oracle on fns the post-merge impl
+    # route then filled on attempt 1. `None` (the default) means the engine
+    # did not report dispatch — legacy callers and test stubs — and the
+    # driver falls back to treating the whole frontier as dispatched.
+    dispatched_fns: tuple[tuple[str, str], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

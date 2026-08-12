@@ -37,6 +37,7 @@ class StructureCache:
         self._log = log
         self._mod_records: dict[str, list[ModRecord]] = {}
         self._cluster_specific_syms: dict[str, frozenset[str]] = {}
+        self._last_membership_line: str = ""
 
     def invalidate(self) -> None:
         """Clear both caches. Call after any operation that changes the on-disk
@@ -103,13 +104,23 @@ class StructureCache:
             target_src_dir, file_rel, fn_name, cluster, fn_cfg_predicates,
             mod_records=self.mod_records)
 
+    def _membership_log(self, msg: str) -> None:
+        """The membership report re-prints on every scan of an unchanged tree
+        — 29 identical `skipped N of M stub(s) not active` lines in one
+        hardcrate run (2026-08-12). One line per distinct verdict is signal;
+        a repeat of the previous line is not."""
+        if msg == self._last_membership_line:
+            return
+        self._last_membership_line = msg
+        self._log(msg)
+
     def scan_unimplemented_for_cluster(
         self, target_src_dir: Path, cluster: Any,
     ) -> list[FnLocator]:
         return _membership.scan_unimplemented_for_cluster(
             target_src_dir, cluster,
             enumerate_fns=self._enumerate_fns,
-            mod_records=self.mod_records, log=self._log)
+            mod_records=self.mod_records, log=self._membership_log)
 
     def scan_unimplemented_records_for_cluster(
         self, target_src_dir: Path, cluster: Any,
@@ -117,7 +128,7 @@ class StructureCache:
         return _membership.scan_unimplemented_records_for_cluster(
             target_src_dir, cluster,
             scan_records=self.scan_unimplemented_records,
-            fn_belongs=self.fn_belongs_to_cluster, log=self._log)
+            fn_belongs=self.fn_belongs_to_cluster, log=self._membership_log)
 
     def collect_impl_blocks_for_cluster(
         self, target_src_dir: Path, cluster: Any,

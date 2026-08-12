@@ -181,6 +181,69 @@ def carry_frozen_repr(frozen: str, authored: str) -> str:
     return authored[:decl.start()] + carried + authored[decl.start():]
 
 
+def derive_traits(definition: str) -> frozenset[str]:
+    """The trait names inside every plain ``#[derive(...)]`` attribute of
+    ``definition``. Token scan; ``cfg_attr``-wrapped derives are deliberately
+    not read — they are conditional, and a guard that treats a conditional
+    derive as unconditional would demand it where its cfg is off."""
+    out: set[str] = set()
+    i = 0
+    while True:
+        j = definition.find("#[derive", i)
+        if j < 0:
+            return frozenset(out)
+        k = definition.find("(", j)
+        if k < 0:
+            return frozenset(out)
+        depth = 0
+        e = k
+        while e < len(definition):
+            if definition[e] == "(":
+                depth += 1
+            elif definition[e] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            e += 1
+        out.update(t.strip() for t in definition[k + 1:e].split(",")
+                   if t.strip())
+        i = e + 1
+
+
+def _head_is_pub(definition: str) -> bool:
+    """True when the item's declaration line begins with ``pub`` (any form),
+    skipping doc comments and attributes."""
+    for line in definition.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#[") or s.startswith("//"):
+            continue
+        return s.startswith("pub ") or s.startswith("pub(")
+    return False
+
+
+def layout_regressions(current: str, authored: str) -> tuple[str, ...]:
+    """The ways ``authored`` is strictly worse than the ``current`` definition
+    it would replace: derives lost, or a ``pub`` item made private.
+
+    For the RE-author path only. The current layout is one that COMPILED and
+    was accepted carrying these properties, so a replacement dropping one is a
+    regression, not a design choice — observed live on 2026-08-11 (arm C,
+    microcrate): re-author attempt 1 produced `Counter` with
+    `#[derive(Debug, Default, Clone, PartialEq, Eq)]`, a later attempt on the
+    same item produced no derive at all, and another produced a private
+    struct (`error[E0603]`). Nothing compared the replacement against what it
+    replaced; each regression cost a sweep to rediscover by compile error —
+    or, for a derive only a test binary needs, was not a compile error at
+    all. Initial authoring deliberately does NOT run this: there the
+    reference text is the frozen original, and a redesigned layout may
+    legitimately not carry its every derive."""
+    out = [f"dropped `#[derive({t})]` the replaced layout carries"
+           for t in sorted(derive_traits(current) - derive_traits(authored))]
+    if _head_is_pub(current) and not _head_is_pub(authored):
+        out.append("made a `pub` item private")
+    return tuple(out)
+
+
 def definition_replacements(
     items: tuple[PrivateSurfaceItem, ...],
     authored: Mapping[str, AuthoredItem],

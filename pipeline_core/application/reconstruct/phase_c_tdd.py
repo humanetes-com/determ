@@ -1467,16 +1467,61 @@ def run_phase_c_tdd(
                 prev = prev_test_units.get(tname)
                 if (tname not in escalated_tests and prev is not None
                         and prev == frozenset(units)):
+                    # An accessor that is STILL A STUB was never served by any
+                    # rewrite — it is the target, not futile. On 2026-08-11/12
+                    # `display_formats_error` escalated past the still-stubbed
+                    # `Display for MathError::fmt` to the already-correct
+                    # `checked_div`; three arms spent 172-293 s rewriting it
+                    # for zero movement while the real culprit sat unfilled.
+                    _stub_accessors = sorted(u for u in units
+                                             if u in _stub_keys)
+                    if _stub_accessors:
+                        deps.log(
+                            f"  {tag} [attribution/escalate] {tname}: NOT "
+                            "escalating — "
+                            f"{len(_stub_accessors)} attributed unit(s) are "
+                            "still stubs and no rewrite ever served them; "
+                            "the stub is the target: " + ", ".join(
+                                f"{u.file}::{u.fn_name}"
+                                for u in _stub_accessors))
+                        deps.emit(
+                            "phase_c.attribution.escalation_withheld", data={
+                                "test": tname,
+                                "stub_accessors": sorted(
+                                    f"{u.file}::{u.fn_name}"
+                                    for u in _stub_accessors)})
+                        prev_test_units[tname] = frozenset(units)
+                        continue
                     extra = deps.escalate_to_producers(
                         src_dir, tname, set(units))
                     if extra:
                         escalated_tests.add(tname)
+                        # The escalation IS new evidence about its targets: a
+                        # producer convicted before anyone knew this test
+                        # needed it was judged on a different question. An
+                        # exhausted target silently swallowed by the D3 filter
+                        # is how arm A's hardcrate stable stopped at 46 while
+                        # B/C (whose filter never caught it) reached 47.
+                        _re_admitted = set(extra) & permanently_exhausted
+                        if _re_admitted:
+                            permanently_exhausted -= _re_admitted
+                            for _k in _re_admitted:
+                                refill_attempts.pop(_k, None)
+                            deps.log(
+                                f"  {tag} [attribution/escalate] {tname}: "
+                                f"{len(_re_admitted)} escalation target(s) "
+                                "were exhausted — re-admitted on the new "
+                                "evidence: " + ", ".join(
+                                    sorted(f"{k.file}::{k.fn_name}"
+                                           for k in _re_admitted)))
                         for k, ts in extra.items():
                             frontier.setdefault(k, set()).update(ts)
                         deps.emit("phase_c.attribution.escalated", data={
                             "test": tname,
                             "futile_units": sorted(str(u) for u in units),
                             "added": sorted(str(k) for k in extra),
+                            "re_admitted": sorted(
+                                str(k) for k in _re_admitted),
                         })
                 prev_test_units[tname] = frozenset(units)
 
@@ -1909,8 +1954,19 @@ def run_phase_c_tdd(
             recently_filled.append(k)
         if len(recently_filled) > recently_filled_max:
             recently_filled = recently_filled[-recently_filled_max:]
+        # What the engine ACTUALLY dispatched, when it reports it. The frontier
+        # is what the driver asked for; the engine narrows it (the impl route
+        # defers itself behind free-fn blockers, the per-fn route takes only
+        # free fns), so an impl member can sit in every iteration's frontier
+        # and never be attempted by any route. `None` = engine did not report
+        # (legacy/stub engines): fall back to the old frontier==dispatched.
+        _sub_dispatched: set[FnLocator] | None = (
+            None if sub.dispatched_fns is None
+            else {FnLocator(*t) for t in sub.dispatched_fns})
         # This pass's dispatch set, for the stall exit's conviction window.
-        _dispatched_window.append(frozenset(frontier_keys))
+        _dispatched_window.append(frozenset(
+            frontier_keys if _sub_dispatched is None
+            else _sub_dispatched & set(frontier_keys)))
         if len(_dispatched_window) > max(max_stalls, 1) + 1:
             _dispatched_window = _dispatched_window[-(max(max_stalls, 1) + 1):]
         # A re-fill attempt is CHARGEABLE only when the sweep that dispatched
@@ -1918,7 +1974,18 @@ def run_phase_c_tdd(
         # dispatch drawn from a shrunken or self-contradicting reading was
         # never judgeable evidence against the unit.
         _charge_ok = _oracle.intact and _rec.reconciled
+        _spared_undispatched: list[FnLocator] = []
         for key in frontier_keys:
+            if _sub_dispatched is not None and key not in _sub_dispatched:
+                # NO route attempted this fn — it was refused (deferred,
+                # narrowed out, skip-gated), not judged. Charging it here is
+                # what locked every A/B/C cluster out of its impl members on
+                # 2026-08-11/12: exhausted at iter 1 undispatched, their block
+                # read "not viable" from iter 2 on. Left admitted; the stall
+                # budget still bounds the loop if nothing ever dispatches it.
+                if key in cur_stubs:
+                    _spared_undispatched.append(key)
+                continue
             if key in cur_stubs:
                 # First-fill attempt left it a stub → exhausted (existing).
                 permanently_exhausted.add(key)
@@ -1940,6 +2007,17 @@ def run_phase_c_tdd(
                         "reason": "re-fill cap reached on measurable "
                                   "sweeps — exhausted until re-admission",
                         "cluster": cluster.name})
+        if _spared_undispatched:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                     f"{len(_spared_undispatched)} frontier stub(s) were "
+                     "dispatched by NO route this iter — left admitted, no "
+                     "exhaustion charge: " + ", ".join(
+                         sorted(f"{k.file}::{k.fn_name}"
+                                for k in _spared_undispatched)))
+            deps.emit("phase_c.charge.undispatched_spared", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "fns": sorted(f"{k.file}::{k.fn_name}"
+                              for k in _spared_undispatched)})
         last_total_filled = total_filled
 
     # Every `break` above lands here — backstop, timeout, stall exit, and the

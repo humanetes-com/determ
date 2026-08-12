@@ -2693,6 +2693,39 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 })
                 if pass_count > best_pass:
                     _snapshot_merged(pass_count, fail_count)
+                # The default-env run measures ONLY the default cluster's
+                # cfg-set: on 2026-08-12 every A/B/C microcrate run logged
+                # `PASSED (13 passed)` here with the 17 extra_cap tests
+                # unmeasured — they happened to be fixed by the same bodies,
+                # so task3 read 30/30, but a merge fill that fixed the default
+                # cluster while breaking a sibling's would have been handed on
+                # as a green build. Sweep every cluster under its own
+                # toolchain+env (the same authority task3 gates on) before
+                # standing behind the tree; each run is sub-second on a green
+                # tree.
+                for _c in sorted(clusters, key=lambda c: c.name):
+                    _c_parts = ["cargo"]
+                    if getattr(_c, "toolchain", ""):
+                        _c_parts.append(f"+{_c.toolchain}")
+                    _c_parts += ["test", "--no-fail-fast"]
+                    _c_env = self.cargo.env()
+                    _c_env.update(_c.env_extra or {})
+                    _rc_c, _out_c = self.cargo.run(
+                        shlex.join(_c_parts), project_dir, _c_env,
+                        timeout=test_timeout)
+                    if _rc_c != 0:
+                        _p_c, _f_c, _ = parse_test_counts(_out_c)
+                        self.tel.log(
+                            f"  {tag} post-merge iter {iter_n}: default-env "
+                            f"tests pass but cluster '{_c.name}' is RED under "
+                            f"its own cfg ({_p_c} passed, {_f_c} failed) — "
+                            "the union oracle was never green; NOT standing "
+                            "behind the merged tree.")
+                        self.tel.emit("post_merge.cluster_oracle_red", data={
+                            "iter": iter_n, "cluster": _c.name,
+                            "pass_count": _p_c, "fail_count": _f_c,
+                        })
+                        return False
                 return not gap
             if rc == -1:
                 self.tel.log(f"  {tag} post-merge cargo test TIMED OUT. Stopping.")

@@ -30,6 +30,9 @@ from pipeline_core.application.reconstruct.cluster_membership import (
 )
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
+from pipeline_core.application.reconstruct.impl_fill import (
+    cluster_inactive_stub_names,
+)
 from pipeline_core.application.reconstruct.scheduling import (
     group_priority_levels,
     match_records_to_order,
@@ -39,6 +42,7 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.dispatch import stubs_deferred_by_impl_route
 from pipeline_core.domain.enums import FillUnit
+from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -197,6 +201,27 @@ class PhaseCFillEngine:
         # re-enters next iter with them filled and the impl route resumes. Only
         # under the TDD driver — the fn_walk driver gets one call and must not
         # have it narrowed.
+        # Union of fns any route genuinely attempted this call — returned to
+        # the TDD driver, whose exhaustion charging must not outrun dispatch
+        # (an undispatched frontier fn is refused, not judged).
+        _dispatched: set[FnLocator] = set()
+        # One cfg policy across routes. The impl/file routes refuse a splice
+        # at a fn whose every stub occurrence is cfg-gated out of this cluster
+        # (`cluster_scoped_splice`), but the DISPATCH side never consulted
+        # that verdict: on 2026-08-11/12 every A/B/C arm spent 90-147 s
+        # filling `src/lib.rs::cap_limit` via the per-fn route (the deferral
+        # narrowing had carried it) and the body went into a build that never
+        # compiles it — the same run in which the file route refused the
+        # identical target as `not_in_cluster_cfg`. Dispatch consults the
+        # same verdict now, at the same source of truth.
+        _cfg_dead: frozenset[tuple[str, str]] = frozenset()
+        if cluster is not None:
+            _cfg_dead = cluster_inactive_stub_names(
+                target_src_dir, cluster, self.ws.scan_stub_records)
+
+        def _is_cfg_dead(key: FnLocator) -> bool:
+            return (norm_src_rel(key.file), key.fn_name) in _cfg_dead
+
         _impl_deferred_stubs: frozenset[FnLocator] = frozenset()
         if self.config.fill_unit is FillUnit.IMPL and tdd_frontier_keys is not None:
             # Refill members stamped first: the impl route's unit-size cap
@@ -205,9 +230,11 @@ class PhaseCFillEngine:
             _blocks_now = collect_impl_refill_targets(
                 self.ws.collect_impl_blocks_for_cluster(target_src_dir, cluster) or [],
                 tdd_frontier_keys, tdd_frontier_tests)
-            _impl_deferred_stubs = stubs_deferred_by_impl_route(
-                _blocks_now, max_stubs=self.config.per_impl_max_stubs,
-            ) & tdd_frontier_keys
+            _impl_deferred_stubs = frozenset(
+                k for k in (stubs_deferred_by_impl_route(
+                    _blocks_now, max_stubs=self.config.per_impl_max_stubs,
+                ) & tdd_frontier_keys)
+                if not _is_cfg_dead(k))
         if _impl_deferred_stubs:
             self.tel.log(
                 f"  [phase-c/impl] cluster {cluster_name}: deferring the impl "
@@ -239,6 +266,9 @@ class PhaseCFillEngine:
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
             )
+            if _impl_stats.dispatched_fns is not None:
+                _dispatched.update(
+                    FnLocator(*t) for t in _impl_stats.dispatched_fns)
             # If there are still stub members the per-impl path didn't cover
             # (free fns or oversized blocks), fall through to the per-fn path.
             if _impl_stats.remaining == 0:
@@ -308,6 +338,22 @@ class PhaseCFillEngine:
             # Plan 4 — restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
+            # Same cfg verdict the splice enforces, applied before any call is
+            # spent (see `_cfg_dead` above) — a stub this cluster never
+            # compiles is refused at dispatch, not after a 90-147 s fill.
+            _dead_here = [s for s in stubs if _is_cfg_dead(s.key)]
+            if _dead_here:
+                self.tel.log(
+                    f"  [phase-c/per-fn] cluster {cluster_name}: refused "
+                    f"{len(_dead_here)} dispatch(es) at cfg-dead stub(s) — "
+                    "every occurrence is gated out of this cluster's build: "
+                    + ", ".join(sorted(f"{s.file}::{s.fn_name}"
+                                       for s in _dead_here)))
+                self.tel.emit("phase_c.dispatch.cfg_dead_refused", data={
+                    "cluster": cluster_name,
+                    "fns": sorted(f"{s.file}::{s.fn_name}"
+                                  for s in _dead_here)})
+                stubs = [s for s in stubs if not _is_cfg_dead(s.key)]
             # behavioral RE-FILL targets: frontier fns that are NOT
             # stubs (already filled with a compiling-but-wrong body) yet have a
             # failing attributed test. Under `driver=tdd` these were previously
@@ -317,6 +363,38 @@ class PhaseCFillEngine:
             # the frontier's failing-test map.
             _refill_recs = self._collect_refill_targets(
                 target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests)
+            # The re-fill list was computed from the PREVIOUS iteration's test
+            # run, and the impl/file routes have already written bodies this
+            # call — so a target's failing test may already be fixed. Re-fills
+            # dispatched off that stale reading rewrite bodies written seconds
+            # earlier: measured on 2026-08-11/12, 11-27% of every A/B/C run's
+            # wall (one provable byte-identical 99 s no-op re-fill of
+            # `checked_div` behind a file-route fill of the same fn). One
+            # cargo test (0.0-0.2 s on the fixtures) is the cheap probe: drop
+            # every target whose attributed tests all pass now.
+            _landed_before = (_carryover.get("fns_filled_via_impl", 0)
+                              + fns_filled)
+            if (_refill_recs and _landed_before > 0
+                    and tdd_test_cmd and tdd_frontier_tests is not None):
+                _rc_probe, _out_probe = self.cargo.run(
+                    tdd_test_cmd, target_src_dir, cluster_env, timeout=300)
+                _still_failing = (parse_failed_tests(_out_probe)
+                                  if _rc_probe != 0 else set())
+                _fresh_recs = [
+                    r for r in _refill_recs
+                    if tdd_frontier_tests.tests_for(r.key) & _still_failing]
+                _stale = [r for r in _refill_recs if r not in _fresh_recs]
+                if _stale:
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {len(_stale)} re-fill target(s) "
+                        "dropped — their attributed test(s) already pass "
+                        "after this call's earlier fills: " + ", ".join(
+                            sorted(f"{r.file}::{r.fn_name}" for r in _stale)))
+                    self.tel.emit("phase_c.refill.stale_dropped", data={
+                        "cluster": cluster_name,
+                        "targets": sorted(f"{r.file}::{r.fn_name}"
+                                          for r in _stale)})
+                    _refill_recs = _fresh_recs
             if not stubs and not _refill_recs:
                 break
             # D: leaf-first order — most-referenced fns first. Stubs first
@@ -456,6 +534,10 @@ class PhaseCFillEngine:
                     with _counters_lock:
                         attempts += res.attempts
                         results_this_pass.append(res)
+                        # A unit is DISPATCHED only when a model attempt was
+                        # spent on it (attempts==0 is a pre-call skip gate).
+                        if res.attempts > 0 or res.filled:
+                            _dispatched.add(FnLocator(res.file, res.fn_name))
                         if res.filled:
                             fns_filled += 1
                             progress_this_pass += 1
@@ -872,4 +954,5 @@ class PhaseCFillEngine:
             remaining=remaining,
             impls_filled=_carryover.get("impls_filled", 0),
             impls_failed=_carryover.get("impls_failed", 0),
+            dispatched_fns=tuple(sorted(_dispatched)),
         )

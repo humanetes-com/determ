@@ -85,7 +85,24 @@ fi
 echo "Pipeline started (PID $PID). Following the log until it exits (Ctrl-C only stops the tail)."
 echo "----------------------------------------------------------------------"
 tail --pid="$PID" -f "$LOG" || true
-wait "$PID" 2>/dev/null || true
+set +e; wait "$PID" 2>/dev/null; PIPE_RC=$?; set -e
+
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '-')"
+
+# A killed pipeline is an ABORT, not a measurement. The ledger append and the
+# ratchet used to run unconditionally after the pipeline exited, so a run
+# stopped mid-pass wrote a durable `converged=RED recovered=0/5` row and a
+# REGRESSION exit — four of the eleven rows appended on 2026-08-11 are such
+# aborts (their logs end mid `[phase-c/per-fn]` with no completion marker and
+# no Traceback). rc>=128 is death by signal.
+if (( PIPE_RC >= 128 )); then
+    printf '%s complexity=%s recovered=-/5 converged=ABORTED(sig%d) git=%s log=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LEVEL" "$((PIPE_RC - 128))" "$GIT_SHA" "$(basename "$LOG")" \
+        | tee -a "$LEDGER"
+    echo "ABORTED — the pipeline was killed before completing; no recovery"
+    echo "measurement was taken and the ratchet is untouched."
+    exit "$PIPE_RC"
+fi
 
 # --- recovery measurement (NOT a pass/fail gate) ----------------------------
 echo "======================================================================"
@@ -94,10 +111,21 @@ AUDIT_OUT="$(.venv/bin/python tools/flow_audit.py --log "$LOG" --project "$WS" |
 echo "$AUDIT_OUT"
 
 # recovered = how many of the 5 recovery invariants have real PASS evidence.
+# evaluated = how many produced ANY verdict (PASS or FAIL). A SKIP is "the
+# run gave this invariant nothing to measure" — C1-C6 measure recovery FROM
+# DAMAGE, and a run that converges on iteration 1 produces none, so all five
+# SKIP precisely BECAUSE the run went well. 28 of the 33 ledger rows up to
+# 2026-08-12 are recovered=0/5 for that reason, every one exiting 1 against a
+# baseline a complexity-2 run set on 2026-06-17; the exit code carried no
+# information for ~2 months.
 RECOVERED=0
+EVALUATED=0
 for c in C1 C2 C3 C4 C6; do
     if printf '%s\n' "$AUDIT_OUT" | grep -qE "^${c} .*  PASS "; then
         RECOVERED=$((RECOVERED + 1))
+        EVALUATED=$((EVALUATED + 1))
+    elif printf '%s\n' "$AUDIT_OUT" | grep -qE "^${c} .*  FAIL "; then
+        EVALUATED=$((EVALUATED + 1))
     fi
 done
 
@@ -107,22 +135,48 @@ if grep -q "complete — all tests pass iter" "$LOG"; then
 else
     CONVERGED="RED"
 fi
-GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '-')"
-printf '%s complexity=%s recovered=%d/5 converged=%s git=%s log=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LEVEL" "$RECOVERED" "$CONVERGED" "$GIT_SHA" "$(basename "$LOG")" \
+printf '%s complexity=%s recovered=%d/5 evaluated=%d/5 converged=%s git=%s log=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LEVEL" "$RECOVERED" "$EVALUATED" "$CONVERGED" "$GIT_SHA" "$(basename "$LOG")" \
     | tee -a "$LEDGER"
 
 # --- ratchet: recovery capability may only go UP ----------------------------
-BASELINE=0
-[[ -f "$RATCHET" ]] && BASELINE="$(.venv/bin/python -c "import json,sys;print(json.load(open('$RATCHET')).get('recovered_audits',0))" 2>/dev/null || echo 0)"
+# Per-complexity baseline: the legacy flat `recovered_audits` (4, set by a
+# complexity-2 run that took three iterations) is deliberately not read — a
+# high-water from an easier crate is not a capability claim about this one.
+BASELINE="$(.venv/bin/python -c "
+import json, sys
+try:
+    data = json.load(open('$RATCHET'))
+except Exception:
+    data = {}
+print(int((data.get('per_complexity') or {}).get('$LEVEL', 0)))
+" 2>/dev/null || echo 0)"
 echo "----------------------------------------------------------------------"
-echo "recovery ratchet: this run ${RECOVERED}/5   baseline ${BASELINE}/5"
+if (( EVALUATED == 0 )); then
+    echo "recovery ratchet: NOT EVALUATED — every invariant SKIPPED for want of"
+    echo "evidence (the run produced no damage to recover from). Convergence:"
+    echo "${CONVERGED}. Raising the traps is what re-arms this measurement."
+    exit 0
+fi
+echo "recovery ratchet: this run ${RECOVERED}/5 (evaluated ${EVALUATED})   baseline ${BASELINE}/5 (complexity ${LEVEL})"
 if (( RECOVERED > BASELINE )); then
-    printf '{\n  "recovered_audits": %d,\n  "_comment": "max C1/C2/C3/C4/C6 PASS on the hardcrate; raise the traps once this hits 5"\n}\n' "$RECOVERED" > "$RATCHET"
-    echo "RATCHET UP → ${RECOVERED}/5 (commit $RATCHET). The pipeline got better."
+    .venv/bin/python -c "
+import json
+try:
+    data = json.load(open('$RATCHET'))
+except Exception:
+    data = {}
+per = data.get('per_complexity') or {}
+per['$LEVEL'] = $RECOVERED
+json.dump({'per_complexity': per,
+           '_comment': 'max C1/C2/C3/C4/C6 PASS per complexity level; '
+                       'raise the traps once a level hits 5'},
+          open('$RATCHET', 'w'), indent=2)
+"
+    echo "RATCHET UP → ${RECOVERED}/5 at complexity ${LEVEL} (commit $RATCHET). The pipeline got better."
 elif (( RECOVERED == BASELINE )); then
     echo "HOLD — no regression. $(( 5 - RECOVERED )) recovery audit(s) still to unlock (= pipeline tasks)."
 else
-    echo "REGRESSION — recovery dropped ${BASELINE} → ${RECOVERED}. A capability we HAD is gone."
+    echo "REGRESSION — recovery dropped ${BASELINE} → ${RECOVERED} at complexity ${LEVEL}. A capability we HAD is gone."
     exit 1
 fi

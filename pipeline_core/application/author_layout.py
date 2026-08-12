@@ -24,6 +24,7 @@ from pipeline_core.domain.authored_layout import (
     carry_frozen_repr,
     component_uids,
     definition_replacements,
+    layout_regressions,
     parse_authored_layout,
     shared_definitions_text,
 )
@@ -115,6 +116,13 @@ class AuthorLayoutDeps:
     single_shot_max: int = 14
     fns_per_chunk: int = 10
     chunk_coverage_retries: int = 2
+    # RE-author only (set by the retrigger): reject a replacement that is
+    # strictly worse than the definition it replaces — lost derives, a `pub`
+    # item made private (`domain.authored_layout.layout_regressions`). At bake
+    # time the reference is the frozen original and a redesign may
+    # legitimately not carry its every derive, so the initial pass leaves
+    # this False.
+    guard_replaced_layout: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +224,18 @@ def _splice_component(
         carried = carry_frozen_repr(it.definition, block.definition)
         if carried != block.definition:
             authored[uid] = replace(block, definition=carried)
+    if deps.guard_replaced_layout:
+        for uid, it in zip(component_uids(items), items, strict=True):
+            block = authored.get(uid)
+            if block is None:
+                continue
+            regressions = layout_regressions(it.definition, block.definition)
+            if regressions:
+                return {}, (
+                    f"authored {uid} is strictly worse than the layout it "
+                    "replaces: " + "; ".join(regressions) + " — the current "
+                    "layout compiled and was accepted with these; keep every "
+                    "derive and the visibility it carries")
     for uid, it in zip(component_uids(items), items, strict=True):
         block = authored.get(uid)
         if it.kind is SurfaceItemKind.PUB_FIELDS:

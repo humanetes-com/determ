@@ -603,6 +603,43 @@ def test_post_merge_pass_first_iter(tmp_path: Path) -> None:
     assert "post_merge.fill.iter" in fake.events
 
 
+def test_post_merge_green_exit_sweeps_every_cluster_oracle(
+        tmp_path: Path) -> None:
+    """The default-env run measures only the default cluster's cfg-set — on
+    2026-08-12 this loop logged `PASSED (13 passed)` with the 17 extra_cap
+    tests unmeasured. A sibling cluster RED under its own env must stop the
+    stage from standing behind the tree (no task2c `done` marker)."""
+    c1, c2 = _cluster(), _cluster("extra_cap")
+    fake = FakeAdapter(
+        clusters_list=[c1, c2],
+        # default-env sweep green; per-cluster sweep: default green,
+        # extra_cap RED under its own cfg.
+        run_results=[(0, "ok"), (0, "ok"),
+                     (101, "test t9 ... FAILED\n"
+                           "test result: FAILED. 3 passed; 1 failed; 0 ignored")])
+    pd = _make_project(tmp_path, [c1, c2])
+    ok = _gen(fake, _cfg(per_fn=True, tdd=True))._post_merge_fill_pass(
+        project_dir=pd, clusters=fake.clusters_list, module="crate",
+        functional_req="")
+    assert ok is False
+    assert "post_merge.cluster_oracle_red" in fake.events
+
+
+def test_post_merge_green_exit_returns_true_when_all_clusters_green(
+        tmp_path: Path) -> None:
+    # NEGATIVE CONTROL: both clusters green under their own env → unchanged
+    # green exit.
+    c1, c2 = _cluster(), _cluster("extra_cap")
+    fake = FakeAdapter(clusters_list=[c1, c2],
+                       run_results=[(0, "ok"), (0, "ok"), (0, "ok")])
+    pd = _make_project(tmp_path, [c1, c2])
+    ok = _gen(fake, _cfg(per_fn=True, tdd=True))._post_merge_fill_pass(
+        project_dir=pd, clusters=fake.clusters_list, module="crate",
+        functional_req="")
+    assert ok is True
+    assert "post_merge.cluster_oracle_red" not in fake.events
+
+
 def test_post_merge_timeout(tmp_path: Path) -> None:
     c = _cluster()
     fake = FakeAdapter(clusters_list=[c], run_results=[(-1, "")])
