@@ -45,9 +45,11 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
+    file_route_units,
     impl_route_covers,
     refills_deferred_by_impl_route,
 )
+from pipeline_core.domain.enums import RouteOrder
 from pipeline_core.domain.failure_signature import (
     attempt_invariant,
     structural_group_note,
@@ -70,6 +72,7 @@ from pipeline_core.domain.llm_output import (
     extract_fn_bodies,
     fn_tag_occurrences,
 )
+from pipeline_core.domain.model_defaults import resolve_route_order
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -464,15 +467,6 @@ def fill_impl_blocks(
     # Drop empty / free-fn / oversized blocks (handled by per-fn fallback).
     viable_blocks = [b for b in blocks
                      if impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)]
-    # …except that for a RE-FILL the per-fn fallback is not a fallback: it is
-    # handed the deferred STUBS only, and a filled fn is not a stub. Those
-    # blocks are carried to the file-first route below, which is the only route
-    # that can name a free fn at all. Kept out of `viable_blocks` so the
-    # per-impl loop's unit — one impl header — is unchanged.
-    _refill_only_deferred = [
-        b for b in blocks
-        if not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)
-        and b.refill_members]
     _refill_block_count = sum(1 for b in viable_blocks if b.refill_members)
     _log(f"  [phase-c/impl] cluster {cluster_name}: "
          f"{len(viable_blocks)} impl block(s) viable "
@@ -2233,32 +2227,26 @@ def fill_impl_blocks(
                     "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
                 })
 
-    # P5: file-first pass for multi-block files — one prompt designs the
-    # file's impls together; the per-block loop below handles the remainder
-    # (the #42 freshness gate skips blocks the file pass completed).
+    # P5: file-first pass — one prompt designs a file's frontier together;
+    # the per-block loop below handles the remainder (the freshness gate
+    # skips blocks the file pass completed). Unit selection is
+    # `file_route_units` (domain): the historical multi-block-only selection
+    # by default; every frontier file — free fns and single-block files
+    # included — under file_primary. Unset env resolves to the model's
+    # validated default (`model_defaults.py`), explicit env always wins.
+    _route_env = os.getenv("PHASE_C_ROUTE_ORDER")
+    _route_order = resolve_route_order(_route_env, _TASK2_MODEL)
     if os.getenv("PHASE_C_FILE_FIRST", "1") != "0":
-        _by_file: dict[str, list[ImplBlock]] = {}
-        for b in viable_blocks:
-            _by_file.setdefault(b.file, []).append(b)
-        # Re-fill targets the per-impl route defers join their file's group.
-        # `_plan_line` already renders an empty container as `free fns`, and
-        # `route_fn_bodies` already routes a body whose block names no impl —
-        # the plan was the only thing withholding them, which is why the
-        # crate's 13 filled free fns were rewritable by nothing. Appended AFTER
-        # the viable blocks so `containers[0]`, the routing target, stays an
-        # impl header for every file that has one.
-        for b in _refill_only_deferred:
-            _by_file.setdefault(b.file, []).append(b)
-        # `>= 2` is there because a lone block is the per-block route's own
-        # unit — which is false of a block that route does not iterate. A file
-        # whose only frontier work is a free-fn or oversized re-fill gets this
-        # route or none.
-        _ff_units = [
-            (_file_rel, _fblocks) for _file_rel, _fblocks in _by_file.items()
-            if len(_fblocks) >= 2 or any(
-                not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)
-                for b in _fblocks)
-        ]
+        _ff_units = file_route_units(
+            blocks, max_stubs=_PER_IMPL_MAX_STUBS,
+            file_primary=_route_order is RouteOrder.FILE_PRIMARY)
+        if _route_order is RouteOrder.FILE_PRIMARY and _ff_units:
+            _src = "env" if (_route_env or "").strip() else (
+                f"model default for {_TASK2_MODEL}")
+            _log(f"  [phase-c/file] route order file_primary ({_src}): "
+                 f"{len(_ff_units)} file unit(s) dispatch first "
+                 f"({sum(len(bs) for _, bs in _ff_units)} block(s), "
+                 "free fns and single-block files included).")
         # One FILE is this route's unit, so independent files dispatch to a
         # pool for exactly the reasons the per-block route below already
         # states: `_splice_check_lock` and `_counters_lock` serialise

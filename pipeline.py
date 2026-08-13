@@ -118,6 +118,7 @@ from pipeline_core.domain.llm_output import (
 from pipeline_core.domain.model_caps import (
     model_tier as _model_tier,
 )
+from pipeline_core.domain.model_defaults import resolve_route_order
 from pipeline_core.domain.models import (
     BuildCluster,
     Diagnostic,
@@ -1218,6 +1219,8 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
         pass_max_stalls=int(os.getenv("PHASE_C_PASS_MAX_STALLS", "2")),
         fix_err_cap=_FIX_ERR_CAP,
         per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
+        route_order=resolve_route_order(
+            os.getenv("PHASE_C_ROUTE_ORDER"), SETTINGS.task_models.task2),
     )
     return PhaseCFillEngine(tel=roles.tel, mut=roles.mut, cargo=roles.cargo, prompt=roles.prompt,
                             ws=ws, retros=roles.retros, tests=roles.tests, stall=roles.stall,

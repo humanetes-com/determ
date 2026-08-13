@@ -75,6 +75,26 @@ class PhaseCMode(_Coercible):
     PER_FN = "per_fn"
 
 
+class RouteOrder(_Coercible):
+    """Phase-C fill-route sequencing (``PHASE_C_ROUTE_ORDER``).
+
+    DEFAULT is the historical ladder: the file-first pass takes only files
+    holding >=2 viable impl blocks (plus refill-deferred free-fn/oversized
+    blocks), the per-impl loop takes viable blocks, the per-fn route takes
+    everything else — measured on the 2026-08-12 fixture validation runs,
+    that sent 37 of 41 hardcrate fills and 9 of 13 microcrate fills through
+    the per-fn route at one fn per LLM call.
+
+    FILE_PRIMARY widens the file-first pass to EVERY file with frontier work
+    — single-block files and blocks the impl route never attempts (free fns,
+    oversized) included — so one call designs a whole file's frontier
+    together and the per-impl/per-fn routes become the fallback for what it
+    leaves. Acceptance gates are unchanged; only dispatch grouping moves."""
+
+    DEFAULT = "default"
+    FILE_PRIMARY = "file_primary"
+
+
 class PhaseCDriver(_Coercible):
     """Phase-C outer-loop driver (``PHASE_C_DRIVER``)."""
 

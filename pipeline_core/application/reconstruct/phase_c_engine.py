@@ -40,8 +40,11 @@ from pipeline_core.application.reconstruct.scheduling import (
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
-from pipeline_core.domain.dispatch import stubs_deferred_by_impl_route
-from pipeline_core.domain.enums import FillUnit
+from pipeline_core.domain.dispatch import (
+    impl_route_deferral_applies,
+    stubs_deferred_by_impl_route,
+)
+from pipeline_core.domain.enums import FillUnit, RouteOrder
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -88,6 +91,11 @@ class EngineConfig:
     # Impl-route unit cap; the engine needs it to know which frontier stubs
     # that route will never attempt (see `stubs_deferred_by_impl_route`).
     per_impl_max_stubs: int = 12
+    # Fill-route sequencing. Under FILE_PRIMARY the file-first pass takes
+    # every frontier file (free fns included), which changes when the
+    # stubs-first deferral below is warranted — see
+    # `impl_route_deferral_applies` for the exact hazard it keeps guarding.
+    route_order: RouteOrder = RouteOrder.DEFAULT
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +231,7 @@ class PhaseCFillEngine:
             return (norm_src_rel(key.file), key.fn_name) in _cfg_dead
 
         _impl_deferred_stubs: frozenset[FnLocator] = frozenset()
+        _has_refill_targets = False
         if self.config.fill_unit is FillUnit.IMPL and tdd_frontier_keys is not None:
             # Refill members stamped first: the impl route's unit-size cap
             # counts stubs + refills, so a block only looks coverable here if it
@@ -230,12 +239,15 @@ class PhaseCFillEngine:
             _blocks_now = collect_impl_refill_targets(
                 self.ws.collect_impl_blocks_for_cluster(target_src_dir, cluster) or [],
                 tdd_frontier_keys, tdd_frontier_tests)
+            _has_refill_targets = any(b.refill_members for b in _blocks_now)
             _impl_deferred_stubs = frozenset(
                 k for k in (stubs_deferred_by_impl_route(
                     _blocks_now, max_stubs=self.config.per_impl_max_stubs,
                 ) & tdd_frontier_keys)
                 if not _is_cfg_dead(k))
-        if _impl_deferred_stubs:
+        if impl_route_deferral_applies(
+                _impl_deferred_stubs, _has_refill_targets,
+                file_primary=self.config.route_order is RouteOrder.FILE_PRIMARY):
             self.tel.log(
                 f"  [phase-c/impl] cluster {cluster_name}: deferring the impl "
                 f"route this iter — {len(_impl_deferred_stubs)} frontier stub(s) "

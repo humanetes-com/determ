@@ -147,3 +147,75 @@ def test_nothing_implicated_yields_an_empty_frontier() -> None:
         {_LIB: {"t1"}}, frozenset())
     assert actionable == {}
     assert withheld == frozenset({_LIB})
+
+
+# ---- file-route unit selection: which files the file-first pass dispatches,
+# ---- and how PHASE_C_ROUTE_ORDER=file_primary widens it
+
+from pipeline_core.domain.dispatch import (  # noqa: E402
+    file_route_units,
+    impl_route_deferral_applies,
+)
+
+
+def _fblk(file: str, container: str, stubs: tuple[str, ...] = (),
+          refills: tuple[str, ...] = ()) -> ImplBlock:
+    mk = tuple(FnRecord(file=file, fn_name=n) for n in stubs)
+    rf = tuple(FnRecord(file=file, fn_name=n) for n in refills)
+    return ImplBlock(file=file, container=container,
+                     members=mk + rf, stub_members=mk, refill_members=rf)
+
+
+def test_default_takes_multiblock_files_and_refill_deferred_only() -> None:
+    """The historical selection, pinned: a lone viable block is the per-block
+    route's own unit (running it here too doubles its attempts); a free-fn
+    block with only STUBS is the per-fn route's; a free-fn RE-fill joins its
+    file because no other route can name it."""
+    lone = _fblk("src/a.rs", "impl A", ("a1",))
+    multi1 = _fblk("src/b.rs", "impl B", ("b1",))
+    multi2 = _fblk("src/b.rs", "impl B2", ("b2",))
+    free_stub = _fblk("src/c.rs", "", ("c_free",))
+    free_refill = _fblk("src/d.rs", "", (), ("d_refill",))
+    units = dict(file_route_units(
+        [lone, multi1, multi2, free_stub, free_refill], max_stubs=2))
+    assert "src/a.rs" not in units          # single viable block
+    assert units["src/b.rs"] == [multi1, multi2]
+    assert "src/c.rs" not in units          # stub-only free fn -> per-fn route
+    assert units["src/d.rs"] == [free_refill]
+
+
+def test_file_primary_takes_every_frontier_file() -> None:
+    lone = _fblk("src/a.rs", "impl A", ("a1",))
+    free_stub = _fblk("src/c.rs", "", ("c_free",))
+    no_work = _fblk("src/e.rs", "impl E")
+    units = dict(file_route_units(
+        [lone, free_stub, no_work], max_stubs=2, file_primary=True))
+    assert units["src/a.rs"] == [lone]      # single-block file now dispatches
+    assert units["src/c.rs"] == [free_stub]  # stub-only free fn now dispatches
+    assert "src/e.rs" not in units          # a block with no work never does
+
+
+def test_file_units_keep_impl_headers_before_free_fn_blocks() -> None:
+    """`containers[0]` is the file's routing target and must stay an impl
+    header wherever the file has one — free-fn blocks are appended after the
+    viable blocks in both modes, whatever order the caller supplied."""
+    free = _fblk("src/x.rs", "", (), ("f1",))
+    viable = _fblk("src/x.rs", "impl X", ("x1",))
+    for primary in (False, True):
+        units = dict(file_route_units([free, viable], max_stubs=2,
+                                      file_primary=primary))
+        assert units["src/x.rs"][0] is viable
+
+
+def test_deferral_unchanged_by_default_and_narrowed_by_file_primary() -> None:
+    """DEFAULT: any impl-route-deferred frontier stub forces the stubs-first
+    iteration (that route never attempts free fns). FILE_PRIMARY: the file
+    pass names them itself, so the deferral applies only when re-fill targets
+    share the dispatch — the judged-against-an-aborting-binary hazard."""
+    stubs = frozenset({FnLocator("src/e.rs", "free1")})
+    assert impl_route_deferral_applies(stubs, False, file_primary=False)
+    assert impl_route_deferral_applies(stubs, True, file_primary=False)
+    assert not impl_route_deferral_applies(stubs, False, file_primary=True)
+    assert impl_route_deferral_applies(stubs, True, file_primary=True)
+    assert not impl_route_deferral_applies(frozenset(), True, file_primary=False)
+    assert not impl_route_deferral_applies(frozenset(), True, file_primary=True)

@@ -125,6 +125,71 @@ def stubs_deferred_by_impl_route(
         for m in b.stub_members)
 
 
+def file_route_units(
+    blocks: list[ImplBlock], *, max_stubs: int, file_primary: bool = False,
+) -> list[tuple[str, list[ImplBlock]]]:
+    """The file-first route's dispatch units: ``(file, blocks)`` pairs, one
+    prompt per file.
+
+    Default mode is the historical selection, stated here so the impl path
+    stops deriving it inline: viable blocks grouped per file, refill-carrying
+    blocks the impl route never attempts (free fn / oversized) appended AFTER
+    them — appended last so ``containers[0]``, the file's routing target,
+    stays an impl header wherever the file has one — and only files holding
+    >=2 blocks or at least one such non-viable block qualify. A lone viable
+    block is exactly the per-block route's unit, and running it through both
+    routes doubles its attempts.
+
+    ``file_primary`` widens the same selection to every block with work,
+    including non-viable blocks that carry only stubs (free fns were reachable
+    here only as RE-fills before) and single-block files. The per-block loop
+    behind it is unchanged — its freshness gate skips whatever the file pass
+    completed, so a file-pass failure falls back down the existing ladder."""
+    _viable = [b for b in blocks if impl_route_covers(b, max_stubs=max_stubs)]
+    if file_primary:
+        _extra = [b for b in blocks
+                  if not impl_route_covers(b, max_stubs=max_stubs)
+                  and b.needs_fill]
+    else:
+        _extra = [b for b in blocks
+                  if not impl_route_covers(b, max_stubs=max_stubs)
+                  and b.refill_members]
+    by_file: dict[str, list[ImplBlock]] = {}
+    for b in (*_viable, *_extra):
+        by_file.setdefault(b.file, []).append(b)
+    if file_primary:
+        return list(by_file.items())
+    return [
+        (f, bs) for f, bs in by_file.items()
+        if len(bs) >= 2 or any(
+            not impl_route_covers(b, max_stubs=max_stubs) for b in bs)
+    ]
+
+
+def impl_route_deferral_applies(
+    deferred_stubs: frozenset[FnLocator], has_refill_targets: bool,
+    *, file_primary: bool,
+) -> bool:
+    """Whether the engine narrows this iteration to the impl-route-deferred
+    stubs before letting the impl path run at all.
+
+    The hazard the deferral guards is specific: an ``unimplemented!()`` free
+    fn reached from drop glue or a vtable slot ABORTS the test binary, so a
+    behavioural re-fill judged against that binary is reverted as a sibling
+    crash however good the body was. Under the DEFAULT route order the impl
+    path never attempts those stubs, so any deferred frontier stub forces the
+    stubs-first iteration. Under FILE_PRIMARY the file pass names free fns
+    and oversized blocks itself, so the premise "no route attempts them"
+    fails — the deferral is kept only when re-fill targets are actually in
+    the same dispatch (the judged-against-an-aborting-binary hazard), and an
+    all-stub frontier proceeds straight to the file pass."""
+    if not deferred_stubs:
+        return False
+    if not file_primary:
+        return True
+    return has_refill_targets
+
+
 def refills_deferred_by_impl_route(
     blocks: list[ImplBlock], *, max_stubs: int,
 ) -> frozenset[FnLocator]:

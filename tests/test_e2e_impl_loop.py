@@ -64,6 +64,12 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     # B3 is env-driven and .env sets it ON for live runs — pin it OFF here so
     # the revert-path tests are environment-independent; the B3 test pins it ON.
     monkeypatch.setenv("PHASE_C_KEEP_NONREGRESSING", "0")
+    # Route order resolves from the task2 MODEL when the env is silent
+    # (domain/model_defaults.py), and the operator's .env may name a model
+    # whose default is file_primary — which dispatches the file route ahead
+    # of the per-block loop these tests assert on. The model here is a
+    # scripted fake, so pin the historical ladder explicitly.
+    monkeypatch.setenv("PHASE_C_ROUTE_ORDER", "default")
     install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: [_block()])
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     # fns passes through to the REAL reader (these tests exercise the syn
