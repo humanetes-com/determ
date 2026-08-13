@@ -58,7 +58,17 @@ another name; leave them out too.
 reference, remove it and replace it with the fact it stood for. The trackers
 keep their own numbering; the code does not mirror it.
 
-## Never edit the crate the pipeline is filling — you may only edit the pipeline
+## `technical_debt.md` holds only open work — implemented entries move to `completed_tech_debt.md`
+
+When every point of a debt entry is implemented (or refuted / withdrawn),
+move the entry **verbatim** to `completed_tech_debt.md` — never reworded,
+never summarized, so its run ids and measurements stay quotable. An entry
+with ANY open remainder — an unshipped sub-item, an open question, a pending
+live validation — stays in `technical_debt.md` until the remainder closes or
+is split into its own entry. A validation/amendment section moves with the
+entry it validates. Group headings whose children split (some shipped, some
+open) stay in `technical_debt.md` while any child does; copy the intro into
+the archive alongside the moved children.
 
 **The assistant does not write, delete or repair a single line of the crate under
 reconstruction.** That covers `tmp/<project>/src` (the merged tree), every

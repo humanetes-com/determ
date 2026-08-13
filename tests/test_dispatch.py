@@ -219,3 +219,61 @@ def test_deferral_unchanged_by_default_and_narrowed_by_file_primary() -> None:
     assert impl_route_deferral_applies(stubs, True, file_primary=True)
     assert not impl_route_deferral_applies(frozenset(), True, file_primary=False)
     assert not impl_route_deferral_applies(frozenset(), True, file_primary=True)
+
+
+# ---- sibling-blocked U2 failures: the post-fill counterpart of the
+# ---- dispatch-time deferral (a hub's first body fails tests that also need
+# ---- still-stubbed spokes — attempt-invariant, so the fix loop must not run)
+
+from pipeline_core.domain.dispatch import (  # noqa: E402
+    sibling_blocked_u2_failures,
+)
+
+HUB = FnLocator("src/error.rs", "error")
+SPOKE = FnLocator("src/error.rs", "msg")
+SPOKE2 = FnLocator("src/ptr.rs", "boxed")
+
+
+def test_all_failures_held_by_stubbed_siblings_returns_the_blockers() -> None:
+    dispatch = {HUB: {"t_a", "t_b"}, SPOKE: {"t_a"}, SPOKE2: {"t_b"}}
+    held = sibling_blocked_u2_failures(
+        frozenset({"t_a", "t_b"}), HUB, dispatch,
+        frozenset({HUB, SPOKE, SPOKE2}))
+    assert held == frozenset({SPOKE, SPOKE2})
+
+
+def test_one_unheld_failure_means_the_unit_owns_it() -> None:
+    # t_b is attributed to no still-stubbed sibling -> the unit's own failure;
+    # the fix loop must run (returns None, not a partial blocker set).
+    dispatch = {HUB: {"t_a", "t_b"}, SPOKE: {"t_a"}}
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a", "t_b"}), HUB, dispatch,
+        frozenset({HUB, SPOKE})) is None
+
+
+def test_the_unit_itself_never_counts_as_its_own_blocker() -> None:
+    # HUB is still in the stub scan (it was a stub at pass start; the body
+    # under judgment just landed) — its own attribution must not read as
+    # "blocked by a sibling".
+    dispatch = {HUB: {"t_a"}}
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a"}), HUB, dispatch, frozenset({HUB})) is None
+
+
+def test_a_filled_sibling_no_longer_blocks() -> None:
+    # SPOKE left the stub set (filled earlier in the pass) -> its test is
+    # winnable now; the fix loop runs.
+    dispatch = {HUB: {"t_a"}, SPOKE: {"t_a"}}
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a"}), HUB, dispatch, frozenset({HUB})) is None
+
+
+def test_unattributed_and_empty_failures_are_the_units_own() -> None:
+    # A test absent from the frontier attribution is unattributed evidence —
+    # conservative direction is to fix, not defer. No failures: nothing to
+    # defer either.
+    dispatch = {HUB: {"t_a"}, SPOKE: {"t_a"}}
+    stubs = frozenset({HUB, SPOKE})
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_unknown"}), HUB, dispatch, stubs) is None
+    assert sibling_blocked_u2_failures(frozenset(), HUB, dispatch, stubs) is None

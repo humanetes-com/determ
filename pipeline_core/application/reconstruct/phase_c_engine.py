@@ -347,6 +347,12 @@ class PhaseCFillEngine:
                          for f, fn in self.ws.scan_stub_tuples(target_src_dir, cluster)]
             # True remaining stub count BEFORE the frontier filter.
             _all_stubs_count = len(stubs)
+            # Pass-start stub keys, also pre-filter: the sibling-blocked U2
+            # check needs every cluster-active stub, INCLUDING the
+            # exhaustion-skipped ones the frontier no longer carries — those
+            # are exactly the blockers the recorded re-admission deadlock
+            # (`259637-36db9aad`) was locked behind.
+            _pass_stub_keys = frozenset(s.key for s in stubs)
             # Plan 4 — restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
@@ -510,6 +516,7 @@ class PhaseCFillEngine:
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
+                still_stubbed=_pass_stub_keys,
             )
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,

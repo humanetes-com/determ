@@ -11,7 +11,7 @@ from typing import Any
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
-from pipeline_core.domain.models import FillResult, ImplBlock, Stub
+from pipeline_core.domain.models import FillResult, FnLocator, ImplBlock, Stub
 from pipeline_core.domain.retro_gate import RetroGateTally
 
 
@@ -72,6 +72,13 @@ class PerFnPassCtx:
     # once per pass so "retires everything" and "retires nothing" are
     # distinguishable — both look like silence in per-unit lines alone.
     retro_gate: RetroGateTally = field(default_factory=RetroGateTally)
+    # Pass-start stub keys from the cluster-active TREE scan, BEFORE the
+    # frontier filter — exhaustion-skipped stubs must stay visible here (they
+    # left the frontier but still abort the test binary). Read by the
+    # sibling-blocked check before the U2 fix loop: a unit whose every
+    # failing attributed test needs one of these is kept-and-deferred instead
+    # of re-prompted (`domain/dispatch.sibling_blocked_u2_failures`).
+    still_stubbed: frozenset[FnLocator] = frozenset()
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

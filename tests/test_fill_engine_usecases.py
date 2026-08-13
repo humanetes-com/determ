@@ -797,3 +797,128 @@ def test_a_real_regression_reverts_even_with_crash_evidence(
                          regr_base=baseline, body=("Ok(())", "R"))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
     assert not res.filled
+
+
+# ---- sibling-blocked U2 rejection: keep-and-defer BEFORE the fix loop ----
+# The dispatch-time deferral cannot cover a hub: a stub unit is always ACTIVE
+# (producers must fill), so its first body is judged while the spokes its
+# tests also need are still hollow — that failure is attempt-invariant and
+# the fix loop must not spend calls on it (3.73 call-hours across 6 units on
+# the anyhow run `298540-f792975a`, 2026-08-12).
+
+def _hub_ctx(ws: Path) -> PerFnPassCtx:
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+        FnLocator("lib.rs", "spoke"): {"t_hub"},
+    })
+    return replace(_ctx(ws), tdd_frontier_tests=frontier,
+                   still_stubbed=frozenset({FnLocator("lib.rs", "answer"),
+                                            FnLocator("lib.rs", "spoke")}))
+
+
+def _hub_reject() -> Any:
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    return U2Verdict(U2Decision.REJECT,
+                     self_failures=frozenset({"t_hub"}), detail="red")
+
+
+def test_sibling_blocked_rejection_is_kept_with_one_call(
+        tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_hub_ctx(ws))
+    assert res.filled, "the compiling body is kept, not re-prompted"
+    assert res.blocked_by, "the deferral is recorded on the result"
+    assert fake.ask_calls == 1, "zero further calls — the fix loop never ran"
+    assert fake.diagnose_calls == 0 and not fake.saved, (
+        "no retrospective, no conviction during a sibling-blocked window")
+    assert "phase_c.fn.u2_sibling_blocked" in fake.events
+    assert any("fix loop skipped" in m for m in fake.logs)
+
+
+def test_the_same_rejection_unblocked_still_burns_the_fix_loop(
+        tmp_path: Path) -> None:
+    """Negative control, by injection: with `still_stubbed` empty (spoke
+    filled) the same REJECT re-enters the fix loop and the pre-fix burn
+    reproduces. If this stops failing U2 repeatedly, the test above proves
+    nothing."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+        FnLocator("lib.rs", "spoke"): {"t_hub"},
+    })
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
+                  still_stubbed=frozenset({FnLocator("lib.rs", "answer")}))
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=ctx)
+    assert not res.filled
+    assert fake.ask_calls > 1, "the fix loop re-prompted (the measured burn)"
+
+
+def test_a_partially_blocked_rejection_still_enters_the_fix_loop(
+        tmp_path: Path) -> None:
+    """One failing test the unit owns outright -> the loop has real work; the
+    deferral must not fire on a partial block."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    ws = _mk_ws(tmp_path)
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub", "t_own"},
+        FnLocator("lib.rs", "spoke"): {"t_hub"},
+    })
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
+                  still_stubbed=frozenset({FnLocator("lib.rs", "answer"),
+                                           FnLocator("lib.rs", "spoke")}))
+    reject = U2Verdict(U2Decision.REJECT,
+                       self_failures=frozenset({"t_hub", "t_own"}),
+                       detail="red")
+    fake = RecordingFill(run=(0, ""), u2=reject, regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=ctx)
+    assert not res.filled and fake.ask_calls > 1
+
+
+# ---- the exhaustion summary agrees with the salvage decision ----
+# On the anyhow run `298540-f792975a` (2026-08-12), `src/chain.rs::new`
+# logged `KEEPING best compiling body` immediately followed by
+# `reverted after 2 attempt(s)` while the on-disk file held the body.
+
+def test_exhaustion_summary_says_kept_when_the_salvage_kept(
+        tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert not res.filled, "exhaustion still reports no verdict-worthy fill"
+    _summaries = [m for m in fake.logs if "fix loop exhausted after" in m]
+    assert any("best compiling body KEPT" in m for m in _summaries)
+    assert not any("reverted after" in m for m in fake.logs), (
+        "the disposition summary must not contradict the salvage keep")
+
+
+def test_exhaustion_summary_says_reverted_when_the_salvage_failed(
+        tmp_path: Path) -> None:
+    """Control: a salvage that would regress reverts, and the summary says
+    so — the old line is correct exactly when the keep did not happen."""
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=_regressed(),
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert not res.filled
+    assert any("reverted after" in m for m in fake.logs)
+    assert not any("best compiling body KEPT" in m for m in fake.logs)

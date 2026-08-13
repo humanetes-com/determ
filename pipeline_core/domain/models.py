@@ -592,11 +592,15 @@ class FillResult:
     pass's errors list; None for success, skips, and silent early exits.
 
     `blocked_by` names the still-stubbed sites that held every test attributed
-    to this fn — non-empty only when the body COMPILED and was kept
-    external-only (`U2Decision.ACCEPT_EXTERNAL_ONLY`), i.e. it landed but could
-    not be judged. Empty means the unit was judged on its own merits, or landed
-    nothing at all. `domain.pass_payoff` reads these together: a pass in which
-    one site blocks every landed body cannot move a verdict."""
+    to this fn — non-empty only when the body COMPILED and was kept without a
+    verdict on its own merits: either the tests could not run at all
+    (`U2Decision.ACCEPT_EXTERNAL_ONLY`, sites from the panic location, with
+    container), or they ran and failed but every failure also needs a
+    still-stubbed sibling (`sibling_blocked_u2_failures`, sites from the
+    frontier attribution, container unknown and left ``""``). Empty means the
+    unit was judged on its own merits, or landed nothing at all.
+    `domain.pass_payoff` reads these together: a pass in which one site blocks
+    every landed body cannot move a verdict."""
     file: str = ""
     fn_name: str = ""
     filled: bool = False

@@ -51,6 +51,47 @@ def defer_blocked_consumers(
     return active, deferred
 
 
+def sibling_blocked_u2_failures(
+    failing_tests: frozenset[str], unit: FnLocator,
+    dispatch: Frontier, still_stubbed: frozenset[FnLocator],
+) -> frozenset[FnLocator] | None:
+    """The still-stubbed producers holding EVERY test in `failing_tests`, or
+    None when at least one failure is this unit's own to fix.
+
+    The post-fill counterpart of :func:`defer_blocked_consumers`. That check
+    runs at dispatch, where a stub unit is always ACTIVE (producers must be
+    filled), so a hub fn is dispatched while the rest of its producer chain
+    is still hollow. Its first body then fails the per-unit test gate — the
+    attributed tests also need the still-stubbed siblings — and that failure
+    is attempt-invariant: a correct body panics inside the sibling's
+    ``unimplemented!()``, and a body that avoids calling the sibling fails
+    the assertion instead. Re-prompting cannot change either outcome, so a
+    fix loop entered on this evidence burns its whole budget. Measured on
+    the anyhow run `298540-f792975a` (2026-08-12): of a 58-unit per-fn
+    batch, exactly 6 units had attributed tests actually RUN at fill time,
+    every one failed this way, and the fix loop spent 3.73 call-hours
+    re-prompting them (2-13 calls each) against 2.72 call-hours for all 24
+    fills that landed.
+
+    Conservative on ignorance, in both directions: a failing test absent
+    from `dispatch` is unattributed, and an attributed test held by no
+    still-stubbed sibling is the unit's own — either one returns None and
+    the fix loop runs. `still_stubbed` must be the pass-start TREE scan, not
+    the frontier: exhaustion-skipped stubs leave the frontier but still
+    abort the binary, and they are exactly the blockers the recorded
+    deadlock (`259637-36db9aad`) was locked behind."""
+    if not failing_tests:
+        return None
+    blockers: set[FnLocator] = set()
+    for t in failing_tests:
+        held_by = {k for k, tests in dispatch.items()
+                   if t in tests and k != unit and k in still_stubbed}
+        if not held_by:
+            return None
+        blockers |= held_by
+    return frozenset(blockers)
+
+
 def restrict_to_compile_blockers(
     frontier: Frontier, implicated: frozenset[FnLocator],
 ) -> tuple[Frontier, frozenset[FnLocator]]:

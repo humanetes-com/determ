@@ -48,6 +48,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.crash_site import blame_outside_unit
+from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
@@ -712,6 +713,47 @@ class FillOneFn:
                             "passing at baseline) — judged for real at the "
                             "next sweep, in the joint tree.")
                         _u2_fail_sig = None
+                    # Sibling-blocked pre-check, BEFORE the fix loop spends a
+                    # call: when every failing attributed test also needs a
+                    # still-stubbed sibling, no rewrite of THIS fn alone can
+                    # pass it — a correct body panics inside the sibling's
+                    # stub, an avoiding body fails the assertion. The loop
+                    # already knows this before (`defer_blocked_consumers`)
+                    # and after (`_salvage_compiling_body`) the burn; this is
+                    # the during. Keep the compiling body and defer — the
+                    # regression gate below still runs, so a body that
+                    # reddens siblings still reverts.
+                    if (_u2_fail_sig is not None
+                            and ctx.tdd_frontier_tests is not None):
+                        _held = sibling_blocked_u2_failures(
+                            _v.self_failures, FnLocator(rel_file, fn_name),
+                            ctx.tdd_frontier_tests.dispatch,
+                            ctx.still_stubbed)
+                        if _held:
+                            _blocked_by[:] = sorted(
+                                FnSite(k.file, k.fn_name, "")
+                                for k in _held)
+                            _names = ", ".join(
+                                f"{k.file}::{k.fn_name}"
+                                for k in sorted(_held))
+                            self.tel.log(
+                                f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
+                                f"{rel_file}::{fn_name} (compiles; every "
+                                f"failing attributed test needs still-stubbed "
+                                f"sibling(s): {_names} — no rewrite of this "
+                                "fn alone can pass them; fix loop skipped, "
+                                "deferred to outer loop).")
+                            self.tel.emit(
+                                "phase_c.fn.u2_sibling_blocked", data={
+                                    "cluster": ctx.cluster_name,
+                                    "pass_n": ctx.pass_n,
+                                    "file": rel_file, "fn": fn_name,
+                                    "failing_tests": sorted(_v.self_failures),
+                                    "blocked_on": sorted(
+                                        f"{k.file}::{k.fn_name}"
+                                        for k in _held),
+                                })
+                            _u2_fail_sig = None
                 elif _v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY:
                     # Compiles, but every attributed failure panics inside a
                     # DIFFERENT still-stubbed fn — not this fn's fault. Keep the
@@ -1197,6 +1239,7 @@ class FillOneFn:
                 "file": rel_file, "fn": fn_name,
                 "fix_attempts": fix_attempt,
                 "retro_rounds": _retro_round,
+                "salvaged_body_kept": bool(_salvaged),
                 "last_error_chars": len(error_excerpt),
                 "last_error_preview": error_excerpt[:200],
                 "error_codes": sorted(ecodes_in_text(
@@ -1238,9 +1281,23 @@ class FillOneFn:
                 )
             except Exception:
                 pass
-            self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} {rel_file}::{fn_name}: "
-                         f"reverted after {fix_attempt} attempt(s) "
-                         f"({_retro_round} retro round(s)).")
+            # The disposition summary must agree with the salvage decision it
+            # follows: on the anyhow run `298540-f792975a` (2026-08-12),
+            # `src/chain.rs::new` logged `KEEPING best compiling body`
+            # immediately followed by `reverted after 2 attempt(s)` while the
+            # on-disk file held the compiling body — and the summary is what
+            # exhaustion charging and retro readers quote.
+            if _salvaged:
+                self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} "
+                             f"{rel_file}::{fn_name}: fix loop exhausted after "
+                             f"{fix_attempt} attempt(s) ({_retro_round} retro "
+                             "round(s)) — best compiling body KEPT, deferred "
+                             "to the outer loop.")
+            else:
+                self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} "
+                             f"{rel_file}::{fn_name}: "
+                             f"reverted after {fix_attempt} attempt(s) "
+                             f"({_retro_round} retro round(s)).")
             return FillResult(file=rel_file, fn_name=fn_name, filled=False,
                               attempts=attempts, error=exhaust_error)
 
