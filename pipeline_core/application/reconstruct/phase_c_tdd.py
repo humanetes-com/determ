@@ -40,9 +40,9 @@ from pipeline_core.domain.crash_site import (
     vanished_subject_fns,
 )
 from pipeline_core.domain.destruction_epoch import (
+    BoundaryDecision,
     EpochedBaseline,
-    ProgressComparison,
-    compare_progress,
+    readmission_boundary,
 )
 from pipeline_core.domain.dispatch import (
     defer_blocked_consumers,
@@ -73,7 +73,6 @@ from pipeline_core.domain.pass_highwater import PassHighWater
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
-    readmission_warranted,
 )
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
@@ -323,9 +322,6 @@ def run_phase_c_tdd(
     # re-admission watermark carries the epoch it was set in.
     _destruction_epoch = 0
     _reset_epoch = 0
-    # Whether the previous iter's FINAL reading reconciled (counters vs
-    # binary-qualified verdicts). A tainted score charges nothing.
-    _last_sweep_reconciled = True
     # The fns each fill pass actually dispatched, most recent last — the
     # stall exit may convict only units that were dispatched AND judged
     # inside the stalled window, not everything left standing.
@@ -761,87 +757,16 @@ def run_phase_c_tdd(
         except BaseException:
             _restore_abandoned_bet("stopped at the iter boundary")
             raise
-        # One fresh, informed retry per iteration boundary for fns/blocks
-        # marked fully_exhausted. TWO stores hold exhaustion: the
-        # disk-persisted flags in the retrospective cache (checked inside the
-        # fill engines) and this loop's own `permanently_exhausted` +
-        # `refill_attempts` (the frontier's eligibility filter). A release
-        # must open BOTH: run `2219473` (2026-08-10, stable iter 3) printed
-        # "re-admitted 11 previously-exhausted fn(s)/block(s)" and dispatched
-        # ZERO fills, because all 15 frontier candidates sat refill-capped in
-        # the in-process set the disk reset never reached — the loop's only
-        # self-recovery valve, spent on a store nobody consults.
-        # Gated on real progress since the LAST reset (not blind per-iter);
-        # "progress" is PAYOFF, not activity — the rule and its evidence live
-        # in `refine.readmission_warranted`.
-        _new_fills = total_filled - _filled_at_last_reset
-        _epoch_cmp = compare_progress(
-            best_pass,
-            baseline=EpochedBaseline(_pass_at_last_reset, _reset_epoch),
-            current_epoch=_destruction_epoch)
-        if iter_n > 1 and _epoch_cmp is ProgressComparison.INCOMPARABLE:
-            # The watermark predates a deliberate destruction (retrigger
-            # re-stub, ratchet restore) — the number describes a tree this
-            # run no longer has, and reading it as NOT_IMPROVED turns the
-            # release gate into a permanent lock. Re-base, then decide THIS
-            # boundary with the re-based values — deferring would spend a
-            # release opportunity on bookkeeping. In the retrigger case the
-            # high-water re-base has usually moved the watermark already
-            # (the value check keeps the log signal-only); the ratchet
-            # restore is the case this stamp newly covers. An unspent free
-            # grant (negative sentinel) stays.
-            if _pass_at_last_reset >= 0 and _pass_at_last_reset != best_pass:
-                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admission "
-                         f"baseline {_pass_at_last_reset} predates a "
-                         "deliberate destruction — re-based to "
-                         f"{best_pass}.")
-                _pass_at_last_reset = best_pass
-            _reset_epoch = _destruction_epoch
-        if iter_n > 1 and not _last_sweep_reconciled and _new_fills > 0:
-            # A tainted score cannot refuse a re-admission: the refusal line
-            # below would name a number the sweep itself disclaimed. Defer
-            # the decision; the watermark and the fill counter stay put.
-            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: last sweep's "
-                     "score was tainted (counter/verdict mismatch) — "
-                     "re-admission decision deferred, not refused.")
-        elif iter_n > 1 and readmission_warranted(
-                fills_since_reset=_new_fills, best_metric=best_pass,
-                metric_at_last_reset=_pass_at_last_reset):
-            _released = deps.reset_exhaustion_flags(
-                project_dir, f"TDD iter {iter_n} boundary — {_new_fills} "
-                             f"new fill(s) and pass {_pass_at_last_reset} -> "
-                             f"{best_pass} since the last check")
-            _filled_at_last_reset = total_filled
-            _pass_at_last_reset = best_pass
-            _reset_epoch = _destruction_epoch
-            # Open the loop-local gates for the released units too —
-            # container-blind on purpose (FnLocator has no container), which
-            # re-admits strictly more than the disk release, the safe
-            # direction.
-            _rel_locs = {
-                FnLocator(_parts[0], _parts[1])
-                for _parts in (str(_k).split("::") for _k in _released)
-                if len(_parts) >= 2}
-            _reopened = _rel_locs & (permanently_exhausted
-                                     | set(refill_attempts))
-            permanently_exhausted -= _rel_locs
-            for _loc in _rel_locs:
-                refill_attempts.pop(_loc, None)
-            if _released:
-                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admitted "
-                         f"{len(_released)} previously-exhausted "
-                         "fn(s)/block(s) for one more informed attempt"
-                         + (f" ({len(_reopened)} also reopened in the "
-                            "loop-local frontier filter)."
-                            if _reopened else "."))
-        elif iter_n > 1 and _new_fills > 0:
-            # Say WHY the budget was withheld: silence here reads as "nothing
-            # was exhausted", which is a different fact.
-            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: {_new_fills} fill(s) "
-                     f"since the last check moved pass no further than "
-                     f"{_pass_at_last_reset} — NOT re-admitting exhausted fn(s); "
-                     "a retry with no new evidence is the same attempt again.")
-            _filled_at_last_reset = total_filled
+        # The re-admission boundary decision used to run HERE, before the
+        # sweep. That ordering is what let run `58819-ee78a1d1`'s iter-6
+        # epoch re-base adopt a pre-destruction 79 while the tree measured
+        # 74 — the retrigger fires after a sweep, so at the NEXT boundary
+        # `best_pass` still describes the tree it deleted — and the release
+        # iter 5's genuine 74 -> 79 re-climb had earned was consumed by
+        # bookkeeping (79 > 79 never fires). The decision now runs after this
+        # iteration's sweep and after the high-water's own destruction
+        # re-base, in `readmission_boundary` — order is that function's
+        # documented contract.
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: running cargo test...")
         t0 = time.monotonic()
         rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
@@ -1089,7 +1014,6 @@ def run_phase_c_tdd(
         # all above), so the compile verdict is read once and shared by every
         # consumer below rather than re-derived at each.
         _sweep_compile_broke = "could not compile" in (output or "")
-        _last_sweep_reconciled = _rec.reconciled
         # Red-build budget: identical compile digest across three consecutive
         # sweeps means two full fill passes moved nothing about why the
         # cluster cannot compile — the failure is attempt-invariant, so it is
@@ -1311,6 +1235,89 @@ def run_phase_c_tdd(
                 and _saved_floor is not None
                 and _saved_floor.code_id == _code_id):
             _pass_at_last_reset = best_pass
+
+        # One fresh, informed retry per iteration boundary for fns/blocks
+        # marked fully_exhausted. TWO stores hold exhaustion: the
+        # disk-persisted flags in the retrospective cache (checked inside the
+        # fill engines) and this loop's own `permanently_exhausted` +
+        # `refill_attempts` (the frontier's eligibility filter). A release
+        # must open BOTH: run `2219473` (2026-08-10, stable iter 3) printed
+        # "re-admitted 11 previously-exhausted fn(s)/block(s)" and dispatched
+        # ZERO fills, because all 15 frontier candidates sat refill-capped in
+        # the in-process set the disk reset never reached — the loop's only
+        # self-recovery valve, spent on a store nobody consults.
+        # Gated on real progress since the LAST reset (not blind per-iter);
+        # "progress" is PAYOFF, not activity — the rule and its evidence live
+        # in `refine.readmission_warranted`. Decided HERE — after this
+        # iteration's sweep and after the high-water's destruction re-base
+        # above — because the epoch re-base inside adopts `best_pass`, and
+        # before those two steps that number can still describe a tree a
+        # retrigger deleted (`readmission_boundary`'s docstring holds the
+        # measured instance). The release still lands before this iteration's
+        # frontier is built, so re-admitted units dispatch this iteration.
+        _new_fills = total_filled - _filled_at_last_reset
+        if iter_n > 1:
+            _boundary = readmission_boundary(
+                best_pass=best_pass,
+                baseline=EpochedBaseline(_pass_at_last_reset, _reset_epoch),
+                destruction_epoch=_destruction_epoch,
+                new_fills=_new_fills,
+                sweep_measured=not _sweep_compile_broke,
+                sweep_reconciled=_rec.reconciled)
+            if _boundary.rebased_from is not None:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admission "
+                         f"baseline {_boundary.rebased_from} predates a "
+                         "deliberate destruction — re-based to "
+                         f"{_boundary.baseline.value}.")
+            if _boundary.decision is BoundaryDecision.DEFER_UNMEASURED:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admission "
+                         "baseline predates a deliberate destruction and this "
+                         "sweep measured nothing (compile-broken) — decision "
+                         "deferred to the next measured sweep.")
+            elif _boundary.decision is BoundaryDecision.DEFER_TAINTED:
+                # A tainted score cannot refuse a re-admission: the refusal
+                # line would name a number the sweep itself disclaimed. Defer
+                # the decision; the watermark and the fill counter stay put.
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: this sweep's "
+                         "score was tainted (counter/verdict mismatch) — "
+                         "re-admission decision deferred, not refused.")
+            elif _boundary.decision is BoundaryDecision.RELEASE:
+                _released = deps.reset_exhaustion_flags(
+                    project_dir, f"TDD iter {iter_n} boundary — {_new_fills} "
+                                 f"new fill(s) and pass {_pass_at_last_reset} "
+                                 f"-> {best_pass} since the last check")
+                _filled_at_last_reset = total_filled
+                # Open the loop-local gates for the released units too —
+                # container-blind on purpose (FnLocator has no container),
+                # which re-admits strictly more than the disk release, the
+                # safe direction.
+                _rel_locs = {
+                    FnLocator(_parts[0], _parts[1])
+                    for _parts in (str(_k).split("::") for _k in _released)
+                    if len(_parts) >= 2}
+                _reopened = _rel_locs & (permanently_exhausted
+                                         | set(refill_attempts))
+                permanently_exhausted -= _rel_locs
+                for _loc in _rel_locs:
+                    refill_attempts.pop(_loc, None)
+                if _released:
+                    deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-admitted "
+                             f"{len(_released)} previously-exhausted "
+                             "fn(s)/block(s) for one more informed attempt"
+                             + (f" ({len(_reopened)} also reopened in the "
+                                "loop-local frontier filter)."
+                                if _reopened else "."))
+            elif _boundary.decision is BoundaryDecision.REFUSE:
+                # Say WHY the budget was withheld: silence here reads as
+                # "nothing was exhausted", which is a different fact.
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: {_new_fills} "
+                         "fill(s) since the last check moved pass no further "
+                         f"than {_boundary.baseline.value} — NOT re-admitting "
+                         "exhausted fn(s); a retry with no new evidence is "
+                         "the same attempt again.")
+                _filled_at_last_reset = total_filled
+            _pass_at_last_reset = _boundary.baseline.value
+            _reset_epoch = _boundary.baseline.epoch
 
         # Stage A — persist the floor AFTER every sweep, not only at the exit:
         # the whole point is that the process may not survive to an exit. A

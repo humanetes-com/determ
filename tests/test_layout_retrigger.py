@@ -5,6 +5,7 @@ from pipeline_core.domain.layout_retrigger import (
     PAYOFF_HIGH_KEY,
     PAYOFF_ZERO_KEY,
     CompileEvidence,
+    CrashEvidence,
     LayoutRetriggerCause,
     classify_compile_retrigger,
     classify_layout_retrigger,
@@ -613,3 +614,127 @@ def test_a_fault_no_component_declares_still_reaches_the_ones_it_references():
     # A component nothing implicates stays out of the tier entirely.
     assert crash_candidate_grade(
         ev, records, frozenset({"Quoted"})) is BlameGrade.NONE
+
+
+# --- cause C's own memory: signature refutation and signature payoff -----------
+# The recorded instance (run `58819-ee78a1d1`, 2026-08-13, iters 3-6):
+# `Quoted` landed attempt 1 against the deterministic `test_downcast` UAF, the
+# identical crash reproduced two iterations later, and the walk re-picked
+# `Quoted` on registry order — nothing remembered the crash had already
+# survived its re-author. Pass oscillated 79/74/79/74 (~2.1h per cycle).
+
+
+def _uaf_evidence(blamed: frozenset[FnLocator] = frozenset()) -> CrashEvidence:
+    return CrashEvidence(
+        vanished=frozenset({"test_large_alignment",
+                            "test_no_backtrace_fallback"}),
+        suspect_fns=frozenset({FnLocator("src/error.rs", "downcast")}),
+        blamed_fns=blamed)
+
+
+def test_the_signature_is_stable_across_fires_of_the_same_crash() -> None:
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    # `consecutive_sweeps` and `suspect_fns` are excluded on purpose: the
+    # first is a counter, the second widens as fills land — neither means the
+    # crash changed.
+    a = _uaf_evidence()
+    b = CrashEvidence(vanished=a.vanished, suspect_fns=frozenset(),
+                      consecutive_sweeps=3)
+    assert crash_signature(a) == crash_signature(b)
+
+
+def test_a_new_localizer_blame_changes_the_signature() -> None:
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    # An origin-path blame arriving is NEW evidence; the refutations recorded
+    # against the blameless signature must not carry over.
+    assert crash_signature(_uaf_evidence()) != crash_signature(
+        _uaf_evidence(frozenset({FnLocator("src/error.rs", "object_drop")})))
+
+
+def test_a_landed_fire_refutes_its_component_for_that_signature_only() -> None:
+    from pipeline_core.domain.layout_retrigger import (
+        crash_component_refuted,
+        crash_signature,
+        record_crash_fire,
+    )
+    sig = crash_signature(_uaf_evidence())
+    attempts = record_crash_fire({}, sig, "Quoted")
+    assert crash_component_refuted(attempts, sig, "Quoted")
+    assert not crash_component_refuted(attempts, sig, "Backtrace|Error")
+    other = crash_signature(_uaf_evidence(
+        frozenset({FnLocator("src/error.rs", "object_drop")})))
+    assert not crash_component_refuted(attempts, other, "Quoted")
+
+
+def test_the_identical_crash_back_settles_the_fire_as_zero_payoff() -> None:
+    from pipeline_core.domain.layout_retrigger import (
+        crash_payoff_budget_spent,
+        crash_signature,
+        record_crash_fire,
+        settle_crash_payoff,
+    )
+    sig = crash_signature(_uaf_evidence())
+    # Fire 1 lands (Quoted), crash reproduces; fire 2 lands (another
+    # component), crash reproduces again: two zero-payoff fires and the walk
+    # stops — the recorded cycle's projected iter-7 mega-component fire is
+    # exactly what this refuses.
+    attempts = settle_crash_payoff(record_crash_fire({}, sig, "Quoted"), sig)
+    assert not crash_payoff_budget_spent(attempts)
+    attempts = settle_crash_payoff(
+        record_crash_fire(attempts, sig, "Backtrace|Error"), sig)
+    assert crash_payoff_budget_spent(attempts)
+
+
+def test_a_changed_signature_clears_the_streak_even_after_refusals() -> None:
+    from pipeline_core.domain.layout_retrigger import (
+        crash_payoff_budget_spent,
+        crash_signature,
+        record_crash_fire,
+        settle_crash_payoff,
+    )
+    sig = crash_signature(_uaf_evidence())
+    attempts = settle_crash_payoff(record_crash_fire({}, sig, "Quoted"), sig)
+    attempts = settle_crash_payoff(
+        record_crash_fire(attempts, sig, "Backtrace|Error"), sig)
+    assert crash_payoff_budget_spent(attempts)
+    # Budget spent -> later walks refuse WITHOUT firing, so no pending claim
+    # exists any more. The identical crash keeps the budget spent...
+    attempts = settle_crash_payoff(attempts, sig)
+    assert crash_payoff_budget_spent(attempts)
+    # ...and a CHANGED crash clears it — the reset keys on the last-seen
+    # signature, never on a pending claim a refused walk cannot have opened.
+    new_sig = crash_signature(_uaf_evidence(
+        frozenset({FnLocator("src/error.rs", "object_drop")})))
+    attempts = settle_crash_payoff(attempts, new_sig)
+    assert not crash_payoff_budget_spent(attempts)
+
+
+def test_settlement_is_idempotent_per_fire() -> None:
+    from pipeline_core.domain.layout_retrigger import (
+        PAYOFF_CRASH_ZERO_KEY,
+        crash_signature,
+        record_crash_fire,
+        settle_crash_payoff,
+    )
+    sig = crash_signature(_uaf_evidence())
+    once = settle_crash_payoff(record_crash_fire({}, sig, "Quoted"), sig)
+    twice = settle_crash_payoff(once, sig)
+    assert once.get(PAYOFF_CRASH_ZERO_KEY) == 1
+    assert twice.get(PAYOFF_CRASH_ZERO_KEY) == 1
+
+
+def test_sig_rows_are_never_mistaken_for_a_component() -> None:
+    """`sig:` shares the attempts file with the component counters, on the
+    same rule as `mech:` and `payoff:` — an interrupted-attempt marker naming
+    a sig row must not be refunded as if it were a component."""
+    from pipeline_core.domain.layout_retrigger import (
+        crash_signature,
+        reconcile_interrupted_attempts,
+        record_crash_fire,
+    )
+    sig = crash_signature(_uaf_evidence())
+    attempts = record_crash_fire({}, sig, "Quoted")
+    attempts[f"inflight:sig:{sig}:Quoted"] = 1
+    settled, refunded = reconcile_interrupted_attempts(attempts)
+    assert refunded == ()
+    assert f"inflight:sig:{sig}:Quoted" not in settled

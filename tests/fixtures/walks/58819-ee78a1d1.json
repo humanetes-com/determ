@@ -1,0 +1,85 @@
+{
+  "run_id": "58819-ee78a1d1",
+  "cluster": "stable",
+  "entry_best": 11,
+  "iterations": [
+    {
+      "iter": 1,
+      "passed": 67,
+      "failed": 39,
+      "oracle": 106,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 21,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 2,
+      "readmitted": 15,
+      "passed": 68,
+      "failed": 33,
+      "oracle": 101,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 61,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmitted": 9,
+      "retrigger": {
+        "cause": "RUNTIME_CRASH",
+        "reverted": 3
+      },
+      "crash_passed": 79
+    },
+    {
+      "iter": 4,
+      "readmission_rebased": {
+        "from": 68,
+        "to": 79
+      },
+      "breach_withheld_against": 79,
+      "passed": 74,
+      "failed": 27,
+      "oracle": 101,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 11,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 5,
+      "readmission_refused_against": 74,
+      "fills": 16,
+      "retrigger": {
+        "cause": "RUNTIME_CRASH",
+        "reverted": 3
+      },
+      "crash_passed": 79
+    },
+    {
+      "iter": 6,
+      "readmission_rebased": {
+        "from": 74,
+        "to": 79
+      },
+      "breach_withheld_against": 79,
+      "passed": 74,
+      "failed": 27,
+      "oracle": 101,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 11,
+      "kind": "merged",
+      "exhausted": 0
+    }
+  ]
+}

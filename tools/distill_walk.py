@@ -70,12 +70,31 @@ _REFUSED = re.compile(
     r"fill\(s\) since the last check moved pass no further than (?P<against>\d+) "
     r"— NOT re-admitting")
 
+# The per-binary breakdown, printed every iteration. Its only fixture use is
+# recovering the READING of an iteration whose summary line a retrigger
+# swallowed (`continue` before the emit): run `58819-ee78a1d1`'s iters 3 and 5
+# each read 79 — visible only here and in the checkpoint line — and the
+# 79 -> 74 destruction lineage is unreconstructable without them.
+_BINARIES = re.compile(
+    r"\[(?P<cluster>[^\]]+)\] \[phase-c/tdd\] iter (?P<iter>\d+) binaries: "
+    r"(?P<rest>.+)$")
+_BINARY_PAIR = re.compile(r" (\d+)/(\d+)")
+
+# The re-admission baseline's epoch re-base. Recorded because it is a DECISION
+# — and on run `58819-ee78a1d1` it was the defective one: iters 4 and 6 each
+# adopted a pre-destruction 79 while the tree measured 74.
+_REBASED = re.compile(
+    r"\[(?P<cluster>[^\]]+)\] \[phase-c/tdd\] iter (?P<iter>\d+): re-admission "
+    r"baseline (?P<frm>-?\d+) predates a deliberate destruction — re-based to "
+    r"(?P<to>\d+)")
+
 
 def _blank(iter_n: int) -> dict[str, Any]:
     return {"iter": iter_n}
 
 
-def distill(paths: list[Path], cluster: str, run: str | None) -> dict[str, Any]:
+def distill(paths: list[Path], cluster: str, run: str | None,
+            entry_best: int | None = None) -> dict[str, Any]:
     """Read `paths` in order and return the fixture for `cluster`.
 
     When `run` is given, lines before that run's START banner are skipped and
@@ -106,7 +125,8 @@ def distill(paths: list[Path], cluster: str, run: str | None) -> dict[str, Any]:
                         elif active:
                             # The next run's banner. Anything after it belongs
                             # to a different tree.
-                            return _assemble(by_iter, order, cluster, seen_run)
+                            return _assemble(by_iter, order, cluster, seen_run,
+                             entry_best=entry_best)
                     continue
                 if not active:
                     continue
@@ -144,21 +164,47 @@ def distill(paths: list[Path], cluster: str, run: str | None) -> dict[str, Any]:
                     s = slot(int(m.group("iter")))
                     s["readmission_refused_against"] = int(m.group("against"))
                     s["fills"] = int(m.group("fills"))
-    return _assemble(by_iter, order, cluster, seen_run)
+                    continue
+                m = _BINARIES.search(line)
+                if m is not None and m.group("cluster") == cluster:
+                    pairs = _BINARY_PAIR.findall(" " + m.group("rest"))
+                    if pairs:
+                        slot(int(m.group("iter")))["binaries_passed"] = sum(
+                            int(p) for p, _f in pairs)
+                    continue
+                m = _REBASED.search(line)
+                if m is not None and m.group("cluster") == cluster:
+                    slot(int(m.group("iter")))["readmission_rebased"] = {
+                        "from": int(m.group("frm")), "to": int(m.group("to"))}
+    return _assemble(by_iter, order, cluster, seen_run,
+                     entry_best=entry_best)
 
 
 def _assemble(by_iter: dict[int, dict[str, Any]], order: list[int],
-              cluster: str, run: str | None) -> dict[str, Any]:
+              cluster: str, run: str | None,
+              entry_best: int | None = None) -> dict[str, Any]:
     iterations = [by_iter[n] for n in sorted(order)]
+    # A binaries sum matters only for an iteration whose summary a retrigger
+    # swallowed — there it is the sweep's reading (`crash_passed`, served by
+    # the harness over a shrunken oracle). Beside a summary it is redundant
+    # and dropped.
+    for it in iterations:
+        n = it.pop("binaries_passed", None)
+        if n is not None and "passed" not in it:
+            it["crash_passed"] = n
     # The high-water the run was already holding when its first recorded
     # iteration ran. The withheld-breach line carries it verbatim (`21<81`),
     # and it is the whole premise of a re-stub walk: without it the collapse
-    # has nothing to have fallen FROM.
-    entry_best = 0
-    for it in iterations:
-        for key in ("breach_withheld_against", "readmission_refused_against"):
-            if key in it:
-                entry_best = max(entry_best, int(it[key]))
+    # has nothing to have fallen FROM. The heuristic reads mid-run marks too
+    # (a breach against a mid-run 79 is not an ENTRY fact), so a walk whose
+    # run measured its own entry passes the value explicitly instead.
+    if entry_best is None:
+        entry_best = 0
+        for it in iterations:
+            for key in ("breach_withheld_against",
+                        "readmission_refused_against"):
+                if key in it:
+                    entry_best = max(entry_best, int(it[key]))
     return {
         "run_id": run,
         "cluster": cluster,
@@ -173,10 +219,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--cluster", required=True)
     ap.add_argument("--run", default=None,
                     help="run_id to isolate; omit to read every line given")
+    ap.add_argument("--entry-best", type=int, default=None,
+                    help="override the derived entry high-water (use when the run's\nfirst recorded sweep IS its entry measurement — the heuristic\nreads mid-run breach marks as entry facts)")
     ap.add_argument("-o", "--out", type=Path, default=None)
     args = ap.parse_args(argv)
 
-    fixture = distill(args.logs, args.cluster, args.run)
+    fixture = distill(args.logs, args.cluster, args.run,
+                      entry_best=args.entry_best)
     if not fixture["iterations"]:
         print(f"no iterations for cluster {args.cluster!r} in "
               f"{[str(p) for p in args.logs]}", file=sys.stderr)

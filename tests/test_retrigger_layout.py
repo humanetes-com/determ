@@ -928,3 +928,89 @@ def test_a_crash_no_component_declares_still_reaches_the_ones_it_mentions():
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
                            f.deps(), crash_evidence=ev)
     assert res.fired and res.succeeded and res.cause == "RUNTIME_CRASH"
+
+
+# --- cause C fires remember the crash they were spent on -----------------------
+# Run `58819-ee78a1d1` (2026-08-13), iters 3-6: `Quoted` landed attempt 1
+# against a deterministic UAF, the identical crash reproduced two iterations
+# later, and the walk re-picked `Quoted` on registry order — pass oscillated
+# 79/74/79/74 at ~2.1h a cycle until the operator killed the run. The pins
+# below are that cycle, replayed against the action.
+
+def _uaf_ev():
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    return CrashEvidence(
+        vanished=frozenset({"test_boxed_str"}),
+        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+
+
+def test_a_landed_fire_is_refuted_when_the_same_crash_comes_back():
+    """Fire 1 lands; the identical crash survives it; fire 2 on the same
+    component is REFUSED. On the pre-fix code this second call landed attempt
+    2 of the destruction cap — the recorded limit cycle."""
+    f = _Fakes()
+    res1 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f.deps(), crash_evidence=_uaf_ev())
+    assert res1.fired and res1.succeeded
+    f2 = _Fakes(attempts=f.saved_attempts)
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f2.deps(), crash_evidence=_uaf_ev())
+    assert not res2.fired
+    assert not f2.committed          # no checkpoint: no attempt was charged
+    assert any("refuted for this signature" in ln for ln in f2.logs)
+
+
+def test_a_rejected_fire_does_not_immunize_its_component():
+    """A rejection changed nothing in the tree, so it proves nothing about
+    the crash: the same component must stay eligible for the same signature.
+    (Run `58819-ee78a1d1` iter 1: the mega component's 3 authorings were all
+    rejected — treating that as refutation would have retired the plausible
+    owner of the drop-glue fault untested.)"""
+    f = _Fakes(compiles=False)
+    res1 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f.deps(), crash_evidence=_uaf_ev())
+    assert res1.fired and res1.rejected and not res1.succeeded
+    f2 = _Fakes(attempts=f.saved_attempts)
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f2.deps(), crash_evidence=_uaf_ev())
+    assert res2.fired and res2.succeeded
+    assert not any("refuted for this signature" in ln for ln in f2.logs)
+
+
+def test_a_new_localizer_blame_reopens_a_refuted_component():
+    """The refutation is per-signature: an origin-path blame arriving is new
+    evidence, and the component may be re-authored on it (still bounded by
+    the destruction cap)."""
+    from dataclasses import replace as dc_replace
+    f = _Fakes()
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                     "", f.deps(), crash_evidence=_uaf_ev())
+    ev2 = dc_replace(_uaf_ev(), blamed_fns=frozenset(
+        {FnLocator("src/error.rs", "fmt")}))
+    f2 = _Fakes(attempts=f.saved_attempts)
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f2.deps(), crash_evidence=ev2)
+    assert res2.fired and res2.succeeded
+
+
+def test_two_landed_fires_on_one_signature_close_the_whole_walk():
+    """The signature payoff budget bounds the WALK: with two landed cause-C
+    re-authors each survived by the identical crash, a third fire is refused
+    before any component is graded — the projected iter-7 mega-component
+    destruction is exactly what this stops."""
+    from pipeline_core.domain.layout_retrigger import (
+        crash_signature,
+        record_crash_fire,
+        settle_crash_payoff,
+    )
+    sig = crash_signature(_uaf_ev())
+    attempts = settle_crash_payoff(record_crash_fire({}, sig, "Quoted"), sig)
+    attempts = settle_crash_payoff(
+        record_crash_fire(attempts, sig, "Backtrace|Error"), sig)
+    f = _Fakes(attempts=attempts)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                           "", f.deps(), crash_evidence=_uaf_ev())
+    assert not res.fired
+    assert res.reason == "cause-C signature payoff budget spent"
+    assert not f.committed
+    assert any("left this exact crash reproducing" in ln for ln in f.logs)

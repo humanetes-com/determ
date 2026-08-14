@@ -64,7 +64,10 @@ from pipeline_core.domain.layout_retrigger import (
     classify_compile_retrigger,
     classify_layout_retrigger,
     crash_candidate_grade,
+    crash_component_refuted,
     crash_evidence_confounded,
+    crash_payoff_budget_spent,
+    crash_signature,
     filled_body_text,
     find_fns_referencing,
     inflight_key,
@@ -73,8 +76,10 @@ from pipeline_core.domain.layout_retrigger import (
     mechanical_key,
     payoff_budget_spent,
     reconcile_interrupted_attempts,
+    record_crash_fire,
     rejected_key,
     rejection_budget_spent,
+    settle_crash_payoff,
     settle_retrigger_payoff,
     should_retrigger,
     top_blame_tier,
@@ -367,6 +372,29 @@ def retrigger_layout(
                 "exit stands. Clears itself if any sweep beats that count.")
             return RetriggerResult(
                 fired=False, reason="cluster payoff budget spent")
+    # Cause C settles in its own currency: signature reproduction. The plateau
+    # exemption above rests on "a crash is a new event with its own streak",
+    # which is true of the FIRST fire and false of every fire after a landed
+    # re-author the crash then survived — run `58819-ee78a1d1` (2026-08-13)
+    # re-picked `Quoted` on registry order two iterations after its landed
+    # re-author changed nothing, and oscillated 79/74/79/74 for ~2.1h a cycle.
+    _crash_sig: str | None = None
+    if crash_evidence is not None:
+        _crash_sig = crash_signature(crash_evidence)
+        _settled = settle_crash_payoff(attempts, _crash_sig)
+        if _settled != attempts:
+            attempts = _settled
+            deps.save_attempts(project_dir, cfg_cluster, attempts)
+        if crash_payoff_budget_spent(attempts):
+            deps.log(
+                f"  [layout-retrigger] {cfg_cluster}: the last "
+                f"{DEFAULT_MAX_ZERO_PAYOFF} landed cause-C re-author(s) each "
+                "left this exact crash reproducing — a further component is "
+                "aimed by evidence that has already failed, so the walk stops "
+                "here and the stall exit stands. A changed crash or a new "
+                "localizer blame changes the signature and clears it.")
+            return RetriggerResult(
+                fired=False, reason="cause-C signature payoff budget spent")
     starv_cause, _evidence = classify_starvation("", "", error_text)
     _live_records: list[FnRecord] | None = None
 
@@ -415,6 +443,14 @@ def retrigger_layout(
             continue
 
         key = _component_key(names)
+        if _crash_sig is not None and crash_component_refuted(
+                attempts, _crash_sig, key):
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                     "this component's re-author was already spent on this "
+                     "exact crash and the crash survived it — refuted for "
+                     "this signature, skipping. A changed crash or a new "
+                     "localizer blame re-opens the aim.")
+            continue
         if attempts.get(key, 0) >= deps.max_attempts:
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: cap "
                      f"({deps.max_attempts}) reached — not retriggering again.")
@@ -491,6 +527,14 @@ def retrigger_layout(
         # opens can only ever settle against the cluster's zero-payoff cap.
         if plateau_walk and not outcome.refunded and not outcome.rejected:
             attempts = mark_retrigger_pending(attempts, best_pass)
+        # A LANDED cause-C fire is booked against its crash signature: the
+        # component is refuted for this exact crash the moment it is seen
+        # again, and the fire's payoff claim settles on signature
+        # reproduction (`settle_crash_payoff`). Landed only — a rejection or
+        # refund changed nothing in the tree and proves nothing about the
+        # crash.
+        if _crash_sig is not None and outcome.succeeded:
+            attempts = record_crash_fire(attempts, _crash_sig, key)
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         return outcome
 
@@ -507,7 +551,10 @@ def retrigger_layout(
             f"  [layout-retrigger] {cfg_cluster}: the fault's own component(s) "
             "cannot be re-authored again this run — NOT re-authoring a "
             "component the fault merely references; the blamed fn stays in the "
-            "fill frontier with its crash report instead.")
+            "fill frontier with its crash report instead. With no localizer "
+            "blame, the crash's tests stay counted as failing — an ACCEPTED, "
+            "bounded loss until an origin-path blame or a changed crash "
+            "re-opens the aim.")
         return RetriggerResult(
             fired=False, reason="the faulting component is not re-authorable")
     return RetriggerResult(fired=False, reason="no component matched the evidence")

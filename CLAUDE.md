@@ -258,6 +258,24 @@ keying on the loudness and ship its replacement **in the same change**. The
 question to ask of any such fix is not "is the new state valid" but "what used to
 fire here, and what fires now".
 
+## A script the assistant writes goes in `scripts/`, with a usage-and-interpretation header
+
+Every durable script the assistant creates lives in `scripts/` — never the
+repo root, which holds the user-owned launchers (`continue.sh`, `pre_run.sh`,
+`redo.sh`, ...), and never `tools/` unless it is part of the pipeline itself
+(`tools/` is inside the tree stamp, so adding a helper there invalidates the
+pre-run gate for no reason; `scripts/` is outside it). One-off working files
+still go to the session scratchpad, not `scripts/`.
+
+Each script opens with a header comment that answers, in this order: WHY the
+script exists (the measured fact or defect that motivated it, with run ids);
+USAGE (arguments, env knobs, preconditions — especially GPU/vLLM ownership
+and cost); and HOW TO INTERPRET THE OUTPUT — every field of the summary it
+prints, and the decision rule the numbers feed (e.g. "place the cap above the
+healthy cell's max; would-hit-cap(X)=k/N is how many healthy calls the
+current cap would have broken"). A script whose output needs its author to
+read is not finished. `scripts/measure_muse_reasoning.sh` is the template.
+
 ## A final summary of changes ends with a suggested commit message
 
 Commits are user-owned and the tree is permanently dirty: the assistant never

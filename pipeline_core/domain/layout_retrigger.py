@@ -22,6 +22,7 @@ Typed, not string-matched: the trigger reason is an enum a caller acts on.
 """
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -50,6 +51,7 @@ MECHANICAL_KEY_PREFIX = "mech:"
 INFLIGHT_KEY_PREFIX = "inflight:"
 PAYOFF_KEY_PREFIX = "payoff:"
 REJECTED_KEY_PREFIX = "rejected:"
+CRASH_SIG_KEY_PREFIX = "sig:"
 DEFAULT_MAX_MECHANICAL = 2
 DEFAULT_MAX_REJECTIONS = 3
 
@@ -60,6 +62,15 @@ PAYOFF_HIGH_KEY = f"{PAYOFF_KEY_PREFIX}high"      # best pass_count seen so far
 PAYOFF_PENDING_KEY = f"{PAYOFF_KEY_PREFIX}pending"  # a fire awaiting its verdict
 PAYOFF_ZERO_KEY = f"{PAYOFF_KEY_PREFIX}zero"      # consecutive fires that bought nothing
 DEFAULT_MAX_ZERO_PAYOFF = 2
+
+# Cause C's own settlement currency (below). A crash fire is settled by
+# SIGNATURE REPRODUCTION, never by the pass_count the plateau budget reads: a
+# landed re-author opens a per-signature pending claim, and the next cause-C
+# classification settles it — the same signature back is a zero-payoff fire, a
+# changed signature is new evidence and clears the streak.
+PAYOFF_CRASH_PENDING_PREFIX = f"{PAYOFF_KEY_PREFIX}crashsig:"
+PAYOFF_CRASH_LAST_PREFIX = f"{PAYOFF_KEY_PREFIX}crashlast:"
+PAYOFF_CRASH_ZERO_KEY = f"{PAYOFF_KEY_PREFIX}crash_zero"
 
 
 def mechanical_key(component_key: str) -> str:
@@ -79,7 +90,7 @@ def inflight_key(component_key: str) -> str:
 def _is_bookkeeping_key(key: str) -> bool:
     return key.startswith(
         (MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, PAYOFF_KEY_PREFIX,
-         REJECTED_KEY_PREFIX))
+         REJECTED_KEY_PREFIX, CRASH_SIG_KEY_PREFIX))
 
 
 def rejected_key(component_key: str) -> str:
@@ -211,6 +222,120 @@ def payoff_budget_spent(
     Self-clearing: any sweep that beats the high-water mark resets the streak,
     so a cluster that starts moving again gets its retriggers back."""
     return attempts.get(PAYOFF_ZERO_KEY, 0) >= cap
+
+
+def crash_signature(evidence: CrashEvidence) -> str:
+    """Stable fingerprint of a crash, for cross-fire memory.
+
+    Two cause-C fires are aimed at THE SAME crash when the same expected tests
+    vanished and the localizer blames the same fns (for the recorded cycle,
+    run `58819-ee78a1d1` 2026-08-13: `test_large_alignment` +
+    `test_no_backtrace_fallback` vanishing from `test_downcast`, blame empty,
+    at iterations 3 and 5 identically). The blamed set is part of the
+    signature on purpose: a localizer that finally produces an origin-path
+    blame CHANGES the signature, which re-opens the component walk
+    legitimately — new evidence is exactly what a repeat fire is supposed to
+    require. `consecutive_sweeps` and `suspect_fns` are excluded: the first is
+    a counter, the second is static reachability that can widen as fills land
+    without the crash itself changing."""
+    vanished = ",".join(sorted(evidence.vanished))
+    blamed = ",".join(sorted(
+        f"{b.file}::{b.fn_name}" for b in evidence.blamed_fns))
+    raw = f"v={vanished};b={blamed}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def crash_sig_key(sig: str, component_key: str) -> str:
+    """Attempts-store key counting LANDED cause-C re-authors of one component
+    against one crash signature. Same prefixing rule as `mechanical_key`."""
+    return f"{CRASH_SIG_KEY_PREFIX}{sig}:{component_key}"
+
+
+def crash_component_refuted(
+    attempts: Mapping[str, int], sig: str, component_key: str,
+) -> bool:
+    """Whether this component's re-author was already spent on THIS crash and
+    the crash survived it.
+
+    Counts LANDED fires only. A REJECTED or REFUNDED fire changed nothing in
+    the tree, so it proves nothing about the crash and must not immunize its
+    component: run `58819-ee78a1d1` iter 1 fired on the 33-name mega component
+    and had all three authorings rejected (dropped `ptr`, 25 live reads) —
+    treating that as a refutation would have retired the one component that
+    plausibly OWNS the drop-glue fault without a single landed test of it.
+
+    The refutation this DOES record is the recorded limit cycle: `Quoted`
+    landed attempt 1 at iter 3, the same 3 bodies re-filled, and the identical
+    crash reproduced at iter 5 — at which point the walk re-picked `Quoted` on
+    registry order, because nothing remembered that the crash had already
+    survived its re-author. Iterations 3-6 oscillated 79/74/79/74 for it."""
+    return attempts.get(crash_sig_key(sig, component_key), 0) > 0
+
+
+def record_crash_fire(
+    attempts: Mapping[str, int], sig: str, component_key: str,
+) -> dict[str, int]:
+    """Book a LANDED cause-C fire: the component is refuted for this signature
+    the moment the crash is seen again, and the fire's payoff claim is opened
+    against signature reproduction (see `settle_crash_payoff`)."""
+    out = dict(attempts)
+    key = crash_sig_key(sig, component_key)
+    out[key] = out.get(key, 0) + 1
+    out[f"{PAYOFF_CRASH_PENDING_PREFIX}{sig}"] = 1
+    return out
+
+
+def settle_crash_payoff(
+    attempts: Mapping[str, int], sig: str,
+) -> dict[str, int]:
+    """Charge previous cause-C fires with what they bought, in crash survival.
+
+    The plateau budget settles in pass_count and deliberately exempts cause C
+    ("a cluster whose binaries do not build cannot move best_pass") — a
+    rationale that is true of cause A and FALSE of cause C: 13 of 14 binaries
+    kept reporting verdicts through the recorded cycle, so the crash channel
+    needed its own settlement currency, and it has one — the crash itself. A
+    pending claim whose signature is BACK settles as a zero-payoff fire; a
+    changed signature clears the streak (the evidence moved, so the walk is no
+    longer aimed by evidence that already failed).
+
+    The streak reset keys on the LAST-SEEN signature, never on a pending
+    claim: once the budget refuses the walk, no further fire opens a claim, so
+    a pending-keyed reset could never clear the streak again — a changed crash
+    would arrive to find the budget permanently spent by its predecessor. The
+    `crashlast:` marker is what a refused walk still updates."""
+    out = dict(attempts)
+    last = [k for k in out if k.startswith(PAYOFF_CRASH_LAST_PREFIX)]
+    changed = bool(last) and all(
+        k[len(PAYOFF_CRASH_LAST_PREFIX):] != sig for k in last)
+    for key in last:
+        del out[key]
+    out[f"{PAYOFF_CRASH_LAST_PREFIX}{sig}"] = 1
+    for key in [k for k in out if k.startswith(PAYOFF_CRASH_PENDING_PREFIX)]:
+        old_sig = key[len(PAYOFF_CRASH_PENDING_PREFIX):]
+        del out[key]
+        if old_sig == sig:
+            out[PAYOFF_CRASH_ZERO_KEY] = out.get(PAYOFF_CRASH_ZERO_KEY, 0) + 1
+    if changed:
+        out.pop(PAYOFF_CRASH_ZERO_KEY, None)
+    return out
+
+
+def crash_payoff_budget_spent(
+    attempts: Mapping[str, int], cap: int = DEFAULT_MAX_ZERO_PAYOFF,
+) -> bool:
+    """Whether this cluster's last `cap` LANDED cause-C re-authors each left
+    the identical crash reproducing.
+
+    Bounds the WALK across components on an unchanged signature — the
+    per-signature refutation above already stops a repeat of the same
+    component, but with 6 components in the recorded OWNS tier the walk could
+    still land up to one destruction per candidate (~2.1h per cycle measured
+    on run `58819-ee78a1d1`, and one of those candidates re-stubs every body
+    spelling 33 names) before the tier emptied. Self-clearing: a changed
+    signature resets the streak in `settle_crash_payoff`, so the budget only
+    ever refuses aim by evidence that has already failed twice."""
+    return attempts.get(PAYOFF_CRASH_ZERO_KEY, 0) >= cap
 
 
 def reconcile_interrupted_attempts(

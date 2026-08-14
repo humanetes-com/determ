@@ -22,9 +22,13 @@ stated here rather than hidden in the fixture:
   a re-climb — is identical either way.
 * *The iteration the retrigger swallowed.* Every retrigger path `continue`s
   before the loop's own iteration emit, so the iteration a crash fired in
-  printed no `cargo test rc=` line. The replay serves it a sweep that holds the
-  previous score over a SHRUNKEN oracle, which is what a crashed binary is and
-  what the retrigger fires on.
+  printed no `cargo test rc=` line. When the distiller recovered that
+  iteration's reading from its `binaries:` breakdown the fixture carries it as
+  `crash_passed` and the replay serves THAT score over a SHRUNKEN oracle —
+  run `58819-ee78a1d1`'s 79 -> 74 destruction lineage exists only in those
+  readings. Without one, the replay falls back to holding the previous score
+  over the shrunken oracle, which is what a crashed binary is and what the
+  retrigger fires on.
 * *Test identity.* The oracle is `t1..tN` here, not the crate's real test names.
   A walk asserts on counts and decisions; nothing in it turns on which test.
 
@@ -86,6 +90,12 @@ def build_sweeps(walk: dict[str, Any]) -> list[str]:
         if "passed" in it:
             held = it["passed"]
             sweeps.append(render_sweep(it["passed"], it["passed"] + it["failed"]))
+        elif "crash_passed" in it:
+            # The iteration whose emit a retrigger swallowed, with its reading
+            # recovered from the recorded `binaries:` breakdown: the recorded
+            # score over a short oracle.
+            held = it["crash_passed"]
+            sweeps.append(render_sweep(min(held, inventory - 1), inventory - 1))
         else:
             # The iteration whose emit a retrigger swallowed: a crashed binary
             # holding the previous score over a short oracle.
@@ -101,22 +111,38 @@ def retrigger_iteration(walk: dict[str, Any]) -> int | None:
     return None
 
 
-def scripted_retrigger(src: Path, walk: dict[str, Any]):
-    """A retrigger that fires once and re-stubs the recorded number of bodies.
+def scripted_retrigger(src: Path, walk: dict[str, Any], logs: list[str]):
+    """A retrigger that fires each RECORDED fire, at its recorded iteration.
 
     It re-stubs by rewriting the tree, exactly as the real one does: the point
     of the walk is that the loop's own destruction invalidates its high-water,
     and a retrigger that fired without reverting anything invalidates nothing.
-    """
+
+    Fires are consumed in recorded order, each no earlier than its recorded
+    LOOP iteration (walk iteration + 1, per `build_sweeps`'s synthetic entry).
+    The iteration key is what keeps a multi-fire walk on the recording: run
+    `58819-ee78a1d1` fired at walk iters 3 and 5 with an unrecorded REJECTED
+    fire (no destruction, no fixture line) absorbing the earlier crash sweeps
+    — a stub firing on the first call would land walk iter 3's destruction one
+    iteration early and drift every baseline after it. `>=` rather than `==`
+    tolerates a call arriving a grace-iteration late; a call before the next
+    recorded fire's iteration is simply not armed, which is also what the
+    recorded run's rejected/capped walks amounted to."""
     from pipeline_core.application.retrigger_layout import RetriggerResult
-    fired: list[int] = []
-    recorded = next((it["retrigger"] for it in walk["iterations"]
-                     if "retrigger" in it), None)
+    queue = [(offset, it["retrigger"])
+             for offset, it in enumerate(walk["iterations"], start=2)
+             if "retrigger" in it]
+
+    def _cur_iter() -> int:
+        for line in reversed(logs):
+            if "running cargo test" in line and "iter " in line:
+                return int(line.split("iter ", 1)[1].split(":", 1)[0])
+        return 0
 
     def _retrig(*a: Any, **k: Any) -> RetriggerResult:
-        if recorded is None or fired:
-            return RetriggerResult(fired=False, reason="capped")
-        fired.append(1)
+        if not queue or _cur_iter() < queue[0][0]:
+            return RetriggerResult(fired=False, reason="not armed")
+        _, recorded = queue.pop(0)
         (src / "a.rs").write_text("RESTUBBED", encoding="utf-8")
         return RetriggerResult(fired=True, succeeded=True,
                                reverted_count=int(recorded["reverted"]),
@@ -171,7 +197,7 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
     cluster_name = walk["cluster"]
     run_phase_c_tdd(
         _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (inventory, names),
-                     events, scripted_retrigger(src, walk), logs=logs,
+                     events, scripted_retrigger(src, walk, logs), logs=logs,
                      frontier={FnLocator("src/a.rs", "f"): {"t2"}},
                      fills_per_iter=2, reset_returns=reset_returns),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
