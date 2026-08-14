@@ -102,10 +102,12 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    impossibility_claim_is_unfounded,
     judge_guidance,
     stamp_conviction,
 )
 from pipeline_core.domain.rust_idents import canon_container, signature_fixed_by_trait
+from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
     JointImprovement,
@@ -1167,6 +1169,19 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: retro guidance contradicts the "
                  "current layout — guidance withheld, exhaustion not honoured "
                  "(layout-contradicted).")
+        # The second way stored guidance goes bad, and the one the layout sieve
+        # above cannot see: a claim that the crate CANNOT do this, made against
+        # a tree that has since moved (or against no recorded tree at all). This
+        # route is where it matters — the store's `*impl*` keys are dispatched
+        # from here, and all three live instances on `anyhow`/`stable` are
+        # `*impl*` records that steered every re-fill of a whole-impl block.
+        elif impossibility_claim_is_unfounded(
+                _retro_rec, stubbed_fn_names(_cur_text)):
+            _poisoned_retro = True
+            _log(f"  [phase-c/impl] {block_id}: retro guidance asserts this "
+                 "cannot be done, on a tree premise that has since moved (or "
+                 "that it never recorded) — guidance withheld, exhaustion not "
+                 "honoured (impossibility-unfounded).")
         # A verdict earned in another context (other cluster's layout, the
         # absolute acceptance gate, the pre-group route set) sampled a
         # different problem — it cannot convict this block. Neither can one

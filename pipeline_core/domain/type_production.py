@@ -140,3 +140,77 @@ def constructs_type(body_text: str, type_name: str) -> bool:
 
 def _is_ident_char(c: str) -> bool:
     return c.isalnum() or c == "_"
+
+
+def called_method_names(body_text: str) -> frozenset[str]:
+    """The bare names of METHODS the body calls on a value — the `foo` of
+    `x.foo(`. Token scan, same discipline as `constructs_type`: a name is only
+    a call when an identifier ends at an open paren and is preceded by a dot.
+
+    Field accesses (`self.ptr`), paths (`Type::foo()`) and free calls (`foo()`)
+    are all excluded on purpose. The first two are not dispatch, and the third
+    names a fn the caller already reaches by ordinary reachability."""
+    out: set[str] = set()
+    i = 0
+    n = len(body_text)
+    while True:
+        dot = body_text.find(".", i)
+        if dot == -1 or dot + 1 >= n:
+            break
+        i = dot + 1
+        # `..` (range) and `.0` (tuple index) are not method names.
+        j = i
+        while j < n and _is_ident_char(body_text[j]):
+            j += 1
+        name = body_text[i:j]
+        if not name or name[0].isdigit():
+            continue
+        rest = body_text[j:].lstrip()
+        # A turbofish still calls the method: `.parse::<u32>()`.
+        if rest.startswith("::<"):
+            close = rest.find(">")
+            if close != -1:
+                rest = rest[close + 1:].lstrip()
+        if rest.startswith("("):
+            out.add(name)
+    return frozenset(out)
+
+
+def trait_impl_fns_named(
+    fn_records: Iterable[Any], names: Iterable[str],
+) -> list[tuple[str, str]]:
+    """(file, fn_name) of every fn in `fn_records` that implements one of
+    `names` inside a TRAIT impl (`impl Trait for Type`).
+
+    The traversal half of producer escalation. A chain iterator does not
+    produce the types it walks and it does not call their constructors: it
+    calls one method on each link and follows the result. `producers_for_types`
+    can never name that method's impls — they neither return nor construct the
+    walked type — so a defect in one of them is invisible to the escalation
+    that is supposed to explain why the walk's accessors are futile.
+
+    Measured (`anyhow`, cluster `stable`, 2026-08-14): the four chain tests
+    escalated to `chain.rs::new`, `chain.rs::default`, `error.rs::construct`,
+    `error.rs::chain` and `error.rs::erase` on every run, while the fn that
+    actually severed the chain — the `source` of
+    `impl<C> StdError for ContextError<C, Error>`, returning `None` — was in
+    no escalated set on either run.
+
+    Restricted to TRAIT impls because that is what a walked link dispatches
+    through; an inherent method of the same name is reached by ordinary
+    reachability and would widen the set for nothing."""
+    wanted = {n for n in names if n}
+    if not wanted:
+        return []
+    out: list[tuple[str, str]] = []
+    for r in fn_records:
+        fn_name = _field(r, "fn_name")
+        if fn_name not in wanted:
+            continue
+        container = _field(r, "container")
+        if not container.strip().startswith("impl") or " for " not in container:
+            continue
+        file = _field(r, "file")
+        if file and (file, fn_name) not in out:
+            out.append((file, fn_name))
+    return out

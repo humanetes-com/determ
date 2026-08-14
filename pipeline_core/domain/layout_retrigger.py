@@ -52,8 +52,20 @@ INFLIGHT_KEY_PREFIX = "inflight:"
 PAYOFF_KEY_PREFIX = "payoff:"
 REJECTED_KEY_PREFIX = "rejected:"
 CRASH_SIG_KEY_PREFIX = "sig:"
+CONTRACT_KEY_PREFIX = "contract:"
 DEFAULT_MAX_MECHANICAL = 2
 DEFAULT_MAX_REJECTIONS = 3
+# The authoring prompt's CONSTRAINT SET, as an epoch. Bumped whenever a
+# constraint the accept path enforces gains (or loses) an up-front statement in
+# the prompt — a rejection streak earned before the model was ever told a rule
+# is not evidence about a prompt that now states it. Same principle as
+# `RetroProvenance`: a verdict earned in another context cannot convict in this
+# one.
+#   1 — pre-2026-08-14: member eviction was enforced by the accept path only,
+#       and reached the model as a past-violation checklist entry or not at all.
+#   2 — `members_in_use_text`: the members the filled bodies read are stated as
+#       a requirement of the task, beside the member paths the tests read.
+REJECTION_CONTRACT_EPOCH = 2
 
 # Attempts-store keys for the CLUSTER-wide payoff budget (below). Prefixed on
 # the same rule as `mechanical_key`: a component key is Rust idents joined by
@@ -90,7 +102,31 @@ def inflight_key(component_key: str) -> str:
 def _is_bookkeeping_key(key: str) -> bool:
     return key.startswith(
         (MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, PAYOFF_KEY_PREFIX,
-         REJECTED_KEY_PREFIX, CRASH_SIG_KEY_PREFIX))
+         REJECTED_KEY_PREFIX, CRASH_SIG_KEY_PREFIX, CONTRACT_KEY_PREFIX))
+
+
+def contract_key(component_key: str) -> str:
+    """Attempts-store key recording the prompt-constraint epoch a component's
+    rejection streak was earned under. Same prefixing rule as
+    `mechanical_key`."""
+    return f"{CONTRACT_KEY_PREFIX}{component_key}"
+
+
+def rejection_streak_is_stale(
+    attempts: Mapping[str, int], component_key: str,
+) -> bool:
+    """Whether the stored rejection streak predates the current constraint set.
+
+    A streak is a claim about what the model does when it is TOLD the rules. On
+    run `929616-ee20d540` (2026-08-14) the 34-name `Error` component stood at
+    rejection 2/3, both for dropping `ptr`, earned under a prompt that stated
+    the member-eviction rule nowhere except as one line in a list of past
+    violations. Spending the third and last attempt under a prompt that now
+    states it up front would retire the crashed family's only structural escape
+    on evidence about a different prompt. An absent stamp reads as epoch 0 —
+    legacy, earned in an unknown context — and is therefore also stale."""
+    return (attempts.get(contract_key(component_key), 0)
+            != REJECTION_CONTRACT_EPOCH)
 
 
 def rejected_key(component_key: str) -> str:
@@ -118,7 +154,14 @@ def rejection_budget_spent(
     Rejections still cannot be free: a deterministic crash re-fires every
     iteration and every fire costs authoring calls, so consecutive rejections
     get their own cap, cleared only by an ACCEPTED re-author. Reaching it is
-    attempt-invariant — RED at the moment it prints, not a countdown."""
+    attempt-invariant — RED at the moment it prints, not a countdown.
+
+    A streak earned under an older constraint set does not count
+    (`rejection_streak_is_stale`): this cap answers "does the model keep
+    violating the contract after being told it", and a prompt that never told
+    it cannot answer that."""
+    if rejection_streak_is_stale(attempts, component_key):
+        return False
     return attempts.get(rejected_key(component_key), 0) >= cap
 
 
@@ -932,3 +975,54 @@ def dropped_members_in_use(
         return {}
     gone = declared_members(current_def) - declared_members(authored_def)
     return {n: c for n, c in field_reads(filled_bodies, gone).items() if c}
+
+
+def members_in_use(current_def: str, filled_bodies: str) -> dict[str, int]:
+    """Members the CURRENT definition declares and the crate's filled bodies
+    still read — name → read count. The PROMPT half of
+    `dropped_members_in_use`, computed from the same two texts before the
+    authoring call instead of from the reply after it."""
+    live = declared_members(current_def)
+    return {n: c for n, c in field_reads(filled_bodies, live).items() if c}
+
+
+def members_in_use_text(by_item: Mapping[str, Mapping[str, int]]) -> str:
+    """The in-use members as an authoring instruction, or "" when no filled
+    body reads any of them (which is every t1.5 bake — nothing is filled yet,
+    so this note costs the initial authoring nothing).
+
+    WHY THIS EXISTS AS A PROMPT AND NOT ONLY AS A GATE. `dropped_members_in_use`
+    can only REJECT, and a rejection costs a whole authoring attempt against a
+    budget of three, after which `rejection_budget_spent` refuses the component
+    for good. On run `929616-ee20d540` (2026-08-14) the 34-name `Error`
+    component reached rejection 2/3 with `authored Error drops member(s) this
+    crate's already-written bodies still read: `ptr` (29 reads)` — the same
+    violation as rejection 1/3 (`ptr`, 25 reads), whose text was already in the
+    persisted checklist the fire prepends to the prompt. A constraint appended
+    as one of a dozen past violations was not enough; it is stated here as a
+    requirement of the task instead, next to the member paths the tests read.
+
+    WHAT IT DELIBERATELY DOES NOT SAY. Not "keep these members" — the veto is
+    calibrated to slot COUNT, not to identity, because reverting the fns that
+    read a component is the whole point of a re-author and "a filled body reads
+    this member" is therefore true of every genuine redesign. Re-shaping and
+    re-spelling stay open (`struct Error { ptr: Own<ErrorImpl> }` as
+    `struct Error(NonNull<ErrorImpl>)` is a rename the bodies can follow via
+    `.0`); what is refused is a replacement with fewer storage slots than the
+    live bodies need. The note says exactly that, so a reply that satisfies it
+    is not a reply that gave up on the redesign."""
+    rows = [f"  - `{item}`: " + ", ".join(
+                f"`{n}` ({c} read{'s' if c != 1 else ''})"
+                for n, c in sorted(members.items(), key=lambda kv: (-kv[1], kv[0])))
+            for item, members in sorted(by_item.items()) if members]
+    if not rows:
+        return ""
+    return ("\n\nMEMBERS THIS CRATE'S ALREADY-WRITTEN BODIES READ — these "
+            "bodies are on disk and they compile; they are the data the layout "
+            "has to be able to hold:\n" + "\n".join(rows)
+            + "\nYou are free to re-shape and to re-spell: a tuple struct whose "
+            "bodies reach the same storage through `.0`, a different type for a "
+            "slot, a different name. You are NOT free to emit a definition with "
+            "FEWER storage slots than the one it replaces — a design with "
+            "nowhere left to put this data is rejected before it is compiled, "
+            "and the attempt is spent.\n")

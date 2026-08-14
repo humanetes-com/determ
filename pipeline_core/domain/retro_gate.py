@@ -293,6 +293,86 @@ def cleared_blockers(
     return frozenset(str(s) for s in stored) - still_stubbed
 
 
+# Phrases by which stored guidance stops explaining a failure and starts
+# asserting that the crate CANNOT do the thing. The distinction is the whole
+# point: "deref via the trait instead" is a correction the next attempt can
+# act on, while "the only body-only source is `None`" and "no body can satisfy
+# this" and "Do not retry this fn" are claims about the entire tree, and a
+# false one steers every later re-fill back into the defect it describes.
+#
+# All three live examples on `anyhow`/`stable` (2026-08-14) were earned from
+# REAL compile errors, which is why `GUIDANCE_FROM_HOLLOW_TREE` — keyed on
+# `error_count == 0` — never touched them:
+#   - `context.rs::*impl*::StdErrorforContextError<C,Error>`: the E0277 on
+#     `Some(&self.error)` was real; the conclusion "so the only body-only
+#     source is `None`" is refuted by the frozen tree, where
+#     `ErrorImpl::error` (`.skeleton/stable/src/error.rs:585`) returns a
+#     `&(dyn StdError + Send + Sync + 'static)` that coerces. Four chain tests
+#     and six context tests have failed on that `None` since 2026-08-13.
+#   - `context.rs::*impl*::Context<T,E>forResult<T,E>`: "no body can satisfy
+#     this. ... Do not retry this fn" — and the correct `ext_context` body is
+#     on disk and compiles.
+#   - `error.rs::*impl*::Error`: "The skeleton does not expose the VTable
+#     layout ... the chain cannot be traversed correctly" — `struct
+#     ErrorVTable` is declared at `.skeleton/stable/src/error.rs:509` with
+#     `object_ref` (:511) and `object_downcast` (:516), and `vtable(p)` at
+#     :575.
+IMPOSSIBILITY_MARKERS: tuple[str, ...] = (
+    "do not retry",
+    "cannot be fixed",
+    "cannot be done",
+    "cannot be traversed",
+    "cannot be satisfied",
+    "no body can",
+    "not possible",
+    "is impossible",
+    "the only body-only",
+    "there is no way",
+    "nothing can be done",
+)
+
+
+def asserts_impossibility(guidance: str) -> bool:
+    """Whether stored guidance concludes that the crate cannot do this at all,
+    as opposed to telling the next attempt what to write instead."""
+    low = guidance.lower()
+    return any(m in low for m in IMPOSSIBILITY_MARKERS)
+
+
+def impossibility_claim_is_unfounded(
+    record: Mapping[str, Any] | None, still_stubbed: frozenset[str],
+) -> bool:
+    """Whether an impossibility claim in ``record``'s guidance may no longer be
+    injected into a prompt.
+
+    An impossibility claim is a statement about the WHOLE TREE at the moment it
+    was written, and the tree moves under it every time a sibling fills. Two
+    ways it stops being answerable, and both retire it:
+
+    - a blocker it recorded has since filled. The claim was made against a tree
+      that had a hole in it, the hole is closed, and the claim was never re-put
+      to the compiler. Self-limiting exactly as :class:`BlockedOnStubs` argues:
+      each release is bought by a distinct fn filling, and a stub set only
+      shrinks.
+    - it recorded no tree premise at all (`blocked_on` absent or empty). Then
+      nothing about it is checkable, it can never expire on its own evidence,
+      and it will steer every re-fill of the unit for the life of the store. An
+      unfalsifiable claim about the tree is not a lesson; re-opening the unit
+      costs one attempt and buys the chance to disprove it.
+
+    Corrective guidance is untouched by all of this — only the impossibility
+    class is judged here, and only for INJECTION. The exhaustion verdict has
+    its own gates (`conviction_standing`, `cleared_blockers`)."""
+    if not record:
+        return False
+    if not asserts_impossibility(str(record.get("guidance") or "")):
+        return False
+    stored = record.get("blocked_on")
+    if not isinstance(stored, list) or not stored:
+        return True
+    return bool(cleared_blockers(record, still_stubbed))
+
+
 # Set on a record whose lesson was written from a test outcome that hollow
 # siblings, not the attempted body, decided. `blocked_on` alone cannot carry
 # this: the caller narrows that set as blockers fill, so it empties out and the
@@ -362,6 +442,18 @@ def admissible_guidance(
     if not guidance:
         return ""
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
+        return ""
+    # The fourth way, and the one the three above cannot see: a claim that the
+    # crate CANNOT do this, made against a tree that has since moved (or against
+    # no recorded tree at all). Judged before the evidence rule because it
+    # applies to compiler-taught records too — every live instance of it was
+    # earned from a real compile error, which is exactly what makes the
+    # `error_count == 0` rules above skip it.
+    # `file_text` is the same file `BlockedOnStubs.at_conviction` read the
+    # blockers out of, so its current stub set is the right vocabulary to
+    # compare them against — deriving it here rather than taking it as a
+    # parameter is what keeps the two sides from drifting.
+    if impossibility_claim_is_unfounded(rec, stubbed_fn_names(file_text)):
         return ""
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return ""

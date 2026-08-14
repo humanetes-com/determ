@@ -40,7 +40,11 @@ from pipeline_core.domain.layout_probe import (
     install_probe_region,
     strip_probe_region,
 )
-from pipeline_core.domain.layout_retrigger import dropped_members_in_use
+from pipeline_core.domain.layout_retrigger import (
+    dropped_members_in_use,
+    members_in_use,
+    members_in_use_text,
+)
 from pipeline_core.domain.oracle_derives import (
     derive_requirements_text,
     scan_required_derives,
@@ -335,6 +339,12 @@ def author_layout(
     results: list[ComponentResult] = []
     oracle = _oracle_sources(deps)
     frozen_tests = _frozen_test_sources(deps) or oracle
+    # Read ONCE for the whole surface, not per component: on the retrigger path
+    # this is a lambda over an already-materialised string, but on the bake path
+    # it enumerates the filled tree, and there is one tree per call. Empty at
+    # t1.5 (nothing is filled yet), which is what makes the requirements note
+    # below cost the initial authoring nothing.
+    filled_now = deps.filled_bodies() if deps.filled_bodies is not None else ""
     for comp in surface.components:
         names = tuple(i.name for i in comp)
         pins = select_pins(comp)
@@ -360,6 +370,13 @@ def author_layout(
             root=pin_probe,
             in_file=_calibrated_field_path_probes(surface, comp, paths, deps))
         paths_note = field_path_requirements_text(paths)
+        # Third note, same slot and same rationale as the two around it: the
+        # member-eviction veto can only reject, and the rejection budget is
+        # three. Sourced from the bodies rather than from the tests, so it says
+        # what `dropped_members_in_use` will measure the reply against.
+        members_note = members_in_use_text({
+            i.name: members_in_use(i.definition, filled_now) for i in comp
+        }) if filled_now else ""
         # Same shape as the member paths above and for the same reason: the
         # tests are the specification, the prompt does not contain them, and a
         # trait the tests reach for is otherwise left to inference. A general
@@ -425,12 +442,14 @@ def author_layout(
                     *, _pins: list[BehaviourSpec] = pins,
                     _anchors: dict[str, str] = anchors,
                     _shared: str = shared, _paths: str = paths_note,
-                    _derives: str = derives_note) -> str:
+                    _derives: str = derives_note,
+                    _members: str = members_note) -> str:
             return build_layout_authoring_prompt(
                 module_name=module_name, cfg_cluster=surface.cfg_cluster,
                 items=chunk_items, public_surface=public_surface,
                 layout_pins=_pins, symbol_inventory=symbol_inventory,
-                extra_guidance=extra_guidance + _shared + _paths + _derives,
+                extra_guidance=(extra_guidance + _shared + _paths + _derives
+                                + _members),
                 authored_scheme=scheme,
                 item_uids=chunk_uids, item_anchors=_anchors) + hint
         committed = False

@@ -817,3 +817,61 @@ def test_chain_blame_grades_above_suspects_and_below_frames() -> None:
         chain_blamed=frozenset({FnLocator("src/error.rs",
                                           "construct_from_std")}))
     assert crash_candidate_grade(both, records, comp) is BlameGrade.NONE
+
+
+def test_members_in_use_names_what_the_veto_will_measure() -> None:
+    """The prompt half of `dropped_members_in_use`, from the same two texts.
+    Only members a filled body actually reads are named: a note that lists
+    every declared member teaches the model nothing about which ones carry
+    data."""
+    from pipeline_core.domain.layout_retrigger import members_in_use
+    current = "pub struct Error { ptr: Own<ErrorImpl>, spare: u8 }"
+    bodies = "let p = self.ptr; drop(other.ptr);"
+    assert members_in_use(current, bodies) == {"ptr": 2}
+
+
+def test_members_in_use_text_is_empty_before_anything_is_filled() -> None:
+    """The t1.5 bake authors against a tree with no bodies in it, so the note
+    must cost the initial authoring nothing."""
+    from pipeline_core.domain.layout_retrigger import (
+        members_in_use,
+        members_in_use_text,
+    )
+    current = "pub struct Error { ptr: Own<ErrorImpl> }"
+    assert members_in_use(current, "") == {}
+    assert members_in_use_text({"Error": {}}) == ""
+
+
+def test_members_in_use_text_permits_the_redesign_it_constrains() -> None:
+    """The veto is calibrated to slot COUNT, so the note must not tell the
+    model to keep member identity — that would refuse the re-shaping the
+    re-author exists to obtain."""
+    from pipeline_core.domain.layout_retrigger import members_in_use_text
+    text = members_in_use_text({"Error": {"ptr": 29}})
+    assert "`ptr` (29 reads)" in text
+    assert "FEWER storage slots" in text
+    assert "re-shape" in text and "re-spell" in text
+
+
+def test_a_rejection_streak_from_an_older_prompt_does_not_convict() -> None:
+    """Run `929616-ee20d540` stood at rejection 2/3, both for dropping `ptr`,
+    earned under a prompt that stated the member-eviction rule nowhere but in
+    a list of past violations. Spending the last attempt under a prompt that
+    now states it up front would retire the crashed family's only structural
+    escape on evidence about a different prompt."""
+    from pipeline_core.domain.layout_retrigger import (
+        REJECTION_CONTRACT_EPOCH,
+        contract_key,
+        rejected_key,
+        rejection_budget_spent,
+        rejection_streak_is_stale,
+    )
+    legacy = {rejected_key("Error|ptr"): 2}
+    assert rejection_streak_is_stale(legacy, "Error|ptr")
+    assert not rejection_budget_spent(legacy, "Error|ptr")
+    # Earned under THIS constraint set, the cap still bites — the staleness
+    # rule releases a streak once, it does not remove the budget.
+    current = {rejected_key("Error|ptr"): 3,
+               contract_key("Error|ptr"): REJECTION_CONTRACT_EPOCH}
+    assert not rejection_streak_is_stale(current, "Error|ptr")
+    assert rejection_budget_spent(current, "Error|ptr")

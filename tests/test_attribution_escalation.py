@@ -211,3 +211,82 @@ def test_self_returning_constructor_of_its_own_type_produces() -> None:
     ]
     got = producers_for_types(recs, {"Own"})
     assert got == [("src/ptr.rs", "new")]
+
+
+# The chain-traversal shape, from the live tree: `Chain::next` walks the error
+# chain by calling `.source()` on each link, so the fn that severs the chain
+# produces no `Chain` and constructs no `Chain` — no producer scan can reach it.
+_CHAIN_RECS = [
+    {"file": "src/chain.rs", "fn_name": "next",
+     "container": "impl<'a> Iterator for Chain<'a>",
+     "sig_text": "fn next(&mut self) -> Option<Self::Item>",
+     "body_text": "let cur = next.take()?; *next = cur.source(); Some(cur)"},
+    {"file": "src/chain.rs", "fn_name": "new",
+     "container": "impl<'a> Chain<'a>",
+     "sig_text": "pub fn new(head) -> Self", "body_text": "Chain { state }"},
+    {"file": "src/context.rs", "fn_name": "source",
+     "container": "impl<C> StdError for ContextError<C, Error>",
+     "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+     "body_text": "None"},
+    {"file": "src/error.gen_tests_2.rs", "fn_name": "source",
+     "container": "impl StdError for MyError",
+     "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+     "body_text": "Some(&self.inner)"},
+    {"file": "src/error.rs", "fn_name": "source_helper",
+     "container": "impl ErrorImpl",
+     "sig_text": "fn source_helper(&self) -> u8", "body_text": "0"},
+]
+
+
+def _chain_deps():
+    class _S:
+        def enumerate_fns(self, _sd):
+            return _CHAIN_RECS
+
+        def enumerate_types(self, _sd):
+            return [TypeRecord(kind="struct", name="Chain")]
+    return AttributionDeps(
+        structure=_S(), classify=lambda *a, **k: {},
+        locate_fn=lambda *a, **k: None,
+        run_check_diag=lambda *a, **k: (0, "", []),
+        derive_check_only_cmd=lambda c: c, is_gen_tests_file=lambda n: False,
+        log=lambda m: None,
+    )
+
+
+def test_escalation_names_the_traversal_step_a_walked_chain_dispatches_through():
+    """`test_iter`/`test_len`/`test_rev`/`test_clone` escalated to
+    `chain.rs::new`, `chain.rs::default`, `error.rs::construct`,
+    `error.rs::chain` and `error.rs::erase` on every sweep of two runs, while
+    the fn that severed the chain — `impl<C> StdError for ContextError<C,
+    Error>::source`, returning `None` — was in neither escalated set. It
+    produces no `Chain`, so no producer scan can ever reach it."""
+    extra = escalate_frontier_to_producers(
+        _chain_deps(), Path("src"), "test_iter",
+        futile_units={("src/chain.rs", "next")})
+    assert ("src/context.rs", "source") in extra
+    assert all(tests == {"test_iter"} for tests in extra.values())
+
+
+def test_the_traversal_step_stays_bounded():
+    """Only TRAIT impls of a method the futile accessor actually CALLS, and
+    never an oracle fixture's own impl. An inherent same-named method is
+    reachable already and would widen the set for nothing."""
+    extra = escalate_frontier_to_producers(
+        _chain_deps(), Path("src"), "test_iter",
+        futile_units={("src/chain.rs", "next")})
+    # oracle fixture: a `gen_tests` sibling's `impl StdError for MyError`
+    assert ("src/error.gen_tests_2.rs", "source") not in extra
+    # inherent, and not even a called name
+    assert ("src/error.rs", "source_helper") not in extra
+    # the accessor itself is never re-blamed
+    assert ("src/chain.rs", "next") not in extra
+
+
+def test_negative_control_the_producer_scan_alone_never_names_it():
+    """The pre-fix escalation, run on the same records: producers of `Chain`
+    are found, the traversal step is not. This is the state both runs were in."""
+    got = producers_for_types(_CHAIN_RECS, {"Chain"},
+                              exclude={("src/chain.rs", "next")})
+    assert ("src/chain.rs", "new") in got
+    assert ("src/context.rs", "source") not in got

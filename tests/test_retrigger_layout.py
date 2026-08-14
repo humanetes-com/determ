@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
@@ -24,6 +25,7 @@ from pipeline_core.domain.behaviour import (
 from pipeline_core.domain.layout_retrigger import (
     PAYOFF_PENDING_KEY,
     PAYOFF_ZERO_KEY,
+    REJECTION_CONTRACT_EPOCH,
     CompileEvidence,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
@@ -401,7 +403,10 @@ def test_a_rejected_reauthor_spends_the_rejection_budget_not_the_cap():
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
                            f.deps())
     assert res.fired and not res.succeeded and res.rejected
-    assert f.saved_attempts == {"ErrorImpl": 0, "rejected:ErrorImpl": 1}
+    # `contract:` stamps the constraint set the streak was earned under, so a
+    # later prompt that states a rule this one did not cannot be convicted by it.
+    assert f.saved_attempts == {"ErrorImpl": 0, "rejected:ErrorImpl": 1,
+                                "contract:ErrorImpl": REJECTION_CONTRACT_EPOCH}
     assert any("rejection" in m for m in f.logs)
 
 
@@ -410,12 +415,31 @@ def test_three_consecutive_rejections_close_the_walk_loudly():
     and each fire costs authoring calls, so rejections cannot be free — but
     the refusal is attempt-invariant and the line must read as RED, not as
     a budget ticking down."""
-    f = _Fakes(attempts={"rejected:ErrorImpl": 3})
+    f = _Fakes(attempts={"rejected:ErrorImpl": 3,
+                         "contract:ErrorImpl": REJECTION_CONTRACT_EPOCH})
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
                            f.deps())
     assert not res.fired
     assert not f.committed
     assert any("REJECTED" in m and "3" in m for m in f.logs)
+
+
+def test_a_streak_earned_under_an_older_prompt_does_not_close_the_walk():
+    """The same three rejections WITHOUT the contract stamp are legacy: they
+    were earned under an authoring prompt that stated fewer constraints than
+    this one does. Run `929616-ee20d540` reached 2/3 on two restatements of the
+    same dropped-member violation, under a prompt that named the rule only in a
+    list of past violations; retiring the crashed family's only structural
+    escape on that evidence is what this releases — once, and the budget then
+    counts from zero under the current constraint set."""
+    f = _Fakes(compiles=False, attempts={"rejected:ErrorImpl": 3})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+    assert res.fired and res.rejected
+    assert f.saved_attempts["rejected:ErrorImpl"] == 1
+    assert (f.saved_attempts["contract:ErrorImpl"]
+            == REJECTION_CONTRACT_EPOCH)
+    assert any("retired" in m for m in f.logs)
 
 
 def test_an_accepted_reauthor_clears_the_rejection_streak():
@@ -1014,3 +1038,57 @@ def test_two_landed_fires_on_one_signature_close_the_whole_walk():
     assert res.reason == "cause-C signature payoff budget spent"
     assert not f.committed
     assert any("left this exact crash reproducing" in ln for ln in f.logs)
+
+
+def test_the_rejection_checklist_dedups_by_constraint_not_by_text():
+    """`drops member(s) ... `ptr` (25 reads)` and the same sentence at
+    `(29 reads)` are one constraint restated after four more bodies landed.
+    Exact-text dedup stored both (live store, 2026-08-14); with a bounded list
+    of 12 that is how one stubborn constraint evicts every other one."""
+    from pipeline_core.application.retrigger_layout import _remember_rejections
+
+    saved: dict[str, list[str]] = {}
+    deps = SimpleNamespace(
+        load_rejection_notes=lambda p, c: dict(saved),
+        save_rejection_notes=lambda p, c, n: saved.update(n),
+        log=lambda m: None)
+    first = "authored Error drops member(s) ...: `ptr` (25 reads). Keep them."
+    second = "authored Error drops member(s) ...: `ptr` (29 reads). Keep them."
+    _remember_rejections(Path("/x"), "stable", "K", [first], deps)
+    _remember_rejections(Path("/x"), "stable", "K", [second], deps)
+    assert saved["K"] == [second], "the newest measurement keeps the one slot"
+
+
+def test_a_mechanical_reason_never_becomes_a_constraint_to_satisfy():
+    """The checklist is presented as "each line is a constraint an earlier
+    reply violated; your reply must satisfy ALL of them at once". `could not
+    locate a frozen definition to replace: CastTo in ptr.rs` is not satisfiable
+    by any reply. It reaches the rejection path whenever ONE component of a
+    mixed batch fails mechanically while another is really rejected — the
+    refund branch tests `all()`."""
+    from pipeline_core.application.retrigger_layout import _remember_rejections
+
+    saved: dict[str, list[str]] = {}
+    deps = SimpleNamespace(
+        load_rejection_notes=lambda p, c: dict(saved),
+        save_rejection_notes=lambda p, c, n: saved.update(n),
+        log=lambda m: None)
+    real = "authored Error marks a field `pub`, widening the public API"
+    mech = "could not locate a frozen definition to replace: CastTo in ptr.rs"
+    _remember_rejections(Path("/x"), "stable", "K", [real, mech], deps)
+    assert saved["K"] == [real]
+
+
+def test_negative_control_the_legacy_streak_closes_the_walk_pre_fix(monkeypatch):
+    """The same fixture with the constraint epoch rolled back to the value a
+    stamp-less record reads as: the staleness rule stops discriminating, the
+    2026-08-14 legacy streak convicts again, and the component is refused with
+    no attempt made. Without this the test above proves only that the new code
+    runs, not that the theory bites on run `929616-ee20d540`."""
+    import pipeline_core.domain.layout_retrigger as _lr
+    monkeypatch.setattr(_lr, "REJECTION_CONTRACT_EPOCH", 0)
+    f = _Fakes(compiles=False, attempts={"rejected:ErrorImpl": 3})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+    assert not res.fired
+    assert any("REJECTED" in m for m in f.logs)

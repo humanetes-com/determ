@@ -57,12 +57,14 @@ from pipeline_core.domain.layout_retrigger import (
     DEFAULT_MAX_REJECTIONS,
     DEFAULT_MAX_ZERO_PAYOFF,
     PAYOFF_HIGH_KEY,
+    REJECTION_CONTRACT_EPOCH,
     BlameGrade,
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
     classify_compile_retrigger,
     classify_layout_retrigger,
+    contract_key,
     crash_candidate_grade,
     crash_component_refuted,
     crash_evidence_confounded,
@@ -79,6 +81,7 @@ from pipeline_core.domain.layout_retrigger import (
     record_crash_fire,
     rejected_key,
     rejection_budget_spent,
+    rejection_streak_is_stale,
     settle_crash_payoff,
     settle_retrigger_payoff,
     should_retrigger,
@@ -583,20 +586,59 @@ def _settle_interrupted(
     return settled
 
 
+MECHANICAL_MARKERS = ("could not locate a frozen definition",
+                      "skeleton file unreadable",
+                      "authored blocks missing uid")
+
+
+def _is_mechanical(reason: str) -> bool:
+    """Whether a failure reason describes the splice/locate infrastructure
+    rather than anything the model wrote. Two readers, one definition: the
+    attempt refund below, and the checklist filter in `_remember_rejections` —
+    they disagreed while the markers lived inside the refund branch, and the
+    checklist ended up holding entries no reply can satisfy."""
+    return any(m in reason for m in MECHANICAL_MARKERS)
+
+
+def _constraint_key(reason: str) -> str:
+    """The identity of a CONSTRAINT, as opposed to the identity of one
+    rejection's text. Digits are dropped because the reason embeds a live
+    measurement: `drops member(s) ... \\`ptr\\` (25 reads)` and the same
+    sentence at `(29 reads)` are one constraint restated after four more
+    bodies landed, and exact-text dedup stored both (observed in
+    `_layout_retrigger_rejections_stable.json`, 2026-08-14). With a bounded
+    list of 12 that is how a single stubborn constraint evicts every other one
+    the component has learned."""
+    return "".join(c for c in reason if not c.isdigit())
+
+
 def _remember_rejections(
     project_dir: Path, cfg_cluster: str, key: str,
     reasons: list[str], deps: RetriggerLayoutDeps,
 ) -> None:
     """Append this rejection's violated constraints to the component's
-    persisted checklist (deduplicated, newest last, bounded so a pathological
-    reason string cannot grow the prompt without limit)."""
+    persisted checklist (deduplicated by CONSTRAINT, newest last, bounded so a
+    pathological reason string cannot grow the prompt without limit).
+
+    Mechanical reasons are dropped rather than stored. They reach here whenever
+    ONE component of a mixed batch failed mechanically while another was really
+    rejected — the refund branch tests `all()`, so the batch falls through to
+    the rejection path carrying both — and the prompt presents this list under
+    "each line is a constraint an earlier reply violated; your reply must
+    satisfy ALL of them at once". `could not locate a frozen definition to
+    replace: CastTo in ptr.rs` is not satisfiable by any reply."""
     if deps.load_rejection_notes is None or deps.save_rejection_notes is None:
         return
     notes = deps.load_rejection_notes(project_dir, cfg_cluster)
-    have = notes.get(key) or []
+    have = [r for r in (notes.get(key) or []) if not _is_mechanical(r)]
     for r in reasons:
-        if r and r not in have:
-            have.append(r)
+        if not r or _is_mechanical(r):
+            continue
+        # Newest text wins the slot: the counts in it describe the tree as it
+        # is now, and the older restatement is the same constraint measured
+        # against fewer bodies.
+        have = [h for h in have if _constraint_key(h) != _constraint_key(r)]
+        have.append(r)
     notes[key] = have[-12:]
     deps.save_rejection_notes(project_dir, cfg_cluster, notes)
 
@@ -662,12 +704,8 @@ def _run_layout_attempt(
         # mechanical bug can never exhaust the budget (observed: the mega
         # component's cap spent on "could not locate a frozen definition"
         # before locate-keys were persisted).
-        _mech_markers = ("could not locate a frozen definition",
-                         "skeleton file unreadable",
-                         "authored blocks missing uid")
         _reasons = [c.reason for c in res.components if not c.authored]
-        if _reasons and all(any(m in r for m in _mech_markers)
-                            for r in _reasons):
+        if _reasons and all(_is_mechanical(r) for r in _reasons):
             attempts[key] = max(0, attempts[key] - 1)
             attempts[mechanical_key(key)] = (
                 attempts.get(mechanical_key(key), 0) + 1)
@@ -693,6 +731,19 @@ def _run_layout_attempt(
         # only structural escape on 2026-08-09/10 while ASAN kept blaming
         # `object_drop` every iteration.
         attempts[key] = max(0, attempts[key] - 1)
+        # A streak carried over from an older constraint set is retired here,
+        # at the first rejection earned under the current one, rather than
+        # silently continued — otherwise this rejection reads as "the third
+        # time it was told" when it is the first.
+        if rejection_streak_is_stale(attempts, key):
+            _stale = attempts.pop(rejected_key(key), 0)
+            attempts[contract_key(key)] = REJECTION_CONTRACT_EPOCH
+            if _stale:
+                deps.log(
+                    f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                    f"{_stale} earlier rejection(s) retired — they were earned "
+                    "under an authoring prompt that did not state the "
+                    "constraint set this one does; the budget restarts.")
         attempts[rejected_key(key)] = attempts.get(rejected_key(key), 0) + 1
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         why = next((c.reason for c in res.components if not c.authored), "")

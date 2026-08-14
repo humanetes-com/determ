@@ -286,3 +286,83 @@ def test_compiler_taught_lesson_survives_hollow_callees() -> None:
         prov, NO_TESTS, BlockedOnStubs(frozenset({"backtrace", "source"})))
     assert taught[GUIDANCE_FROM_HOLLOW_TREE] is False
     assert admissible_guidance(taught, VTABLE_LAYOUT, evidence=NO_TESTS)
+
+
+def test_impossibility_guidance_expires_when_a_blocker_fills() -> None:
+    """The live `context.rs::*impl*::StdErrorforContextError<C,Error>` record:
+    the E0277 on `Some(&self.error)` was real, so `error_count` is 1 and every
+    `error_count == 0` rule skips it — but the conclusion it drew ("the only
+    body-only source is `None`") is a claim about the whole tree, refuted by
+    `ErrorImpl::error` in the frozen layout. It recorded `provide` and `source`
+    as blockers; `source` has since filled, so the claim was never re-put to
+    the compiler and may not steer another re-fill. Four chain tests and six
+    context tests had failed on that `None` since 2026-08-13."""
+    from pipeline_core.domain.retro_gate import impossibility_claim_is_unfounded
+    rec = {
+        "guidance": "Change the `source` body to `None`; the frozen `C: "
+                    "Display` bound provides no `Error` value, so the only "
+                    "body-only source is `None`.",
+        "error_count": 1,
+        "blocked_on": ["provide", "source"],
+    }
+    assert impossibility_claim_is_unfounded(rec, frozenset({"provide"}))
+    # While BOTH are still hollow the claim is answerable on its own terms and
+    # stands — the release is bought by a blocker filling, not by time.
+    assert not impossibility_claim_is_unfounded(
+        rec, frozenset({"provide", "source"}))
+
+
+def test_an_impossibility_claim_with_no_tree_premise_cannot_stand() -> None:
+    """`error.rs::*impl*::Error` (GENUINELY_HARD, 5 retrospectives, convicting
+    the whole crashed downcast family) says "The skeleton does not expose the
+    VTable layout ... the chain cannot be traversed correctly" and records
+    `blocked_on: []`. `struct ErrorVTable` is declared at
+    `.skeleton/stable/src/error.rs:509` with `object_ref` and
+    `object_downcast`. A claim that recorded no premise can never expire on its
+    own evidence and would steer every re-fill for the life of the store."""
+    from pipeline_core.domain.retro_gate import impossibility_claim_is_unfounded
+    rec = {"guidance": "The skeleton does not expose the VTable layout, so the "
+                       "chain cannot be traversed correctly with only this.",
+           "error_count": 0, "blocked_on": []}
+    assert impossibility_claim_is_unfounded(rec, frozenset())
+
+
+def test_corrective_guidance_is_untouched_by_the_impossibility_rule() -> None:
+    """The rule must bite on claims about the crate, not on lessons. The live
+    store holds 26 records; only the three diagnosed as poisoned assert
+    impossibility, and a blunt rule that also dropped `WRONG_DEREF_PATTERN`
+    guidance would spend attempts re-learning what the compiler already
+    taught."""
+    from pipeline_core.domain.retro_gate import (
+        asserts_impossibility,
+        impossibility_claim_is_unfounded,
+    )
+    rec = {"guidance": "`this.deref()` resolves to the inherent `deref` on "
+                       "`Ref` which returns `()`. Deref via the trait instead, "
+                       "e.g. `unsafe { *this }`.",
+           "error_count": 2, "blocked_on": []}
+    assert not asserts_impossibility(rec["guidance"])
+    assert not impossibility_claim_is_unfounded(rec, frozenset())
+
+
+def test_negative_control_the_pre_fix_gate_admits_all_three() -> None:
+    """Without the impossibility rule the three records pass every other gate:
+    the layout sieve finds no field lie, `GUIDANCE_FROM_HOLLOW_TREE` is keyed
+    on `error_count == 0` and two of them carry compile errors, and the
+    evidence rule is skipped for the same reason. This is the state both runs
+    were in, and it is why the `None` survived every re-fill."""
+    from pipeline_core.domain.model_notes import layout_safe_guidance
+    from pipeline_core.domain.retro_gate import (
+        GUIDANCE_FROM_HOLLOW_TREE,
+        ConvictionEvidence,
+    )
+    rec = {
+        "guidance": "the compiler requires `E: core::error::Error` but the "
+                    "FROZEN signature only grants `E: ext::StdError`. No body "
+                    "can satisfy this. Do not retry this fn.",
+        "error_count": 1, "blocked_on": [],
+    }
+    layout = "pub struct ContextError<C, E> { context: C, error: E }\n"
+    assert not rec.get(GUIDANCE_FROM_HOLLOW_TREE)
+    assert layout_safe_guidance(rec["guidance"], layout) == rec["guidance"]
+    _ = ConvictionEvidence(frozenset())

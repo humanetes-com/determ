@@ -29,6 +29,7 @@ from pipeline_core.domain.attribution import (
     line_to_fn_record,
 )
 from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite, Frontier
+from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_idents import (
     ascii_word_tokens,
     is_compile_fail_test_source,
@@ -46,8 +47,10 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.domain.type_production import EMPTY as EMPTY_PRODUCIBLE
 from pipeline_core.domain.type_production import (
     ProducibleTypes,
+    called_method_names,
     constructs_type,
     returns_type,
+    trait_impl_fns_named,
 )
 
 
@@ -882,7 +885,10 @@ def escalate_frontier_to_producers(
                      "(generic parameter, foreign type or alias)")
         return {}
     producers = producers_for_types(recs, type_names, exclude=futile_units)
-    if not producers:
+    _all_traversed = _traversal_steps(recs, futile_units,
+                                      exclude=set(producers))
+    traversed = _all_traversed[:_MAX_TRAVERSAL_STEPS]
+    if not producers and not traversed:
         return {}
     dropped = sorted(candidates - type_names)
     deps.log(f"  [attribution/escalate] {test_name}: accessors of "
@@ -891,4 +897,56 @@ def escalate_frontier_to_producers(
              f"{', '.join(f'{f}::{fn}' for f, fn in producers[:5])}"
              + ("..." if len(producers) > 5 else "")
              + (f" (not escalated: {dropped})" if dropped else ""))
-    return {key: {test_name} for key in producers}
+    if traversed:
+        deps.log(f"  [attribution/escalate] {test_name}: + "
+                 f"{len(traversed)} traversal step(s) the futile accessors "
+                 "dispatch through (trait-impl methods they call, which "
+                 "produce none of these types and no producer scan can "
+                 f"name): {', '.join(f'{f}::{fn}' for f, fn in traversed)}"
+                 + (f" (+{len(_all_traversed) - len(traversed)} more over the "
+                    f"cap of {_MAX_TRAVERSAL_STEPS}, NOT escalated)"
+                    if len(_all_traversed) > len(traversed) else ""))
+    return {key: {test_name} for key in [*producers, *traversed]}
+
+
+# The escalation may add at most this many traversal steps. A futile accessor
+# calls a handful of methods and only trait impls of them qualify, so the cap is
+# a backstop against a body that calls `clone`/`fmt`/`next` on everything, not a
+# routine trim. It is LOGGED when it bites: a silent cap reads as "this is the
+# whole set", which is the one thing an escalation must never imply.
+_MAX_TRAVERSAL_STEPS = 8
+
+
+def _traversal_steps(
+    recs: list[dict[str, Any]],
+    futile_units: set[FnLocator],
+    *,
+    exclude: set[FnLocator],
+) -> list[FnLocator]:
+    """Trait-impl methods the futile accessors CALL — the links of a walked
+    chain, which produce none of the walked types.
+
+    `producers_for_types` answers "who makes one of these values". A chain
+    iterator's defect is not there: `Chain::next` follows `.source()` from link
+    to link, and the `source` impl that returns `None` severs the chain while
+    producing nothing at all. On `anyhow`/`stable` the four chain tests
+    escalated to five constructors on every run of two runs, and
+    `context.rs::source` — the fn that actually failed them — appeared in
+    neither set.
+
+    Oracle records are excluded: a test file's own `impl StdError for MyError`
+    is a fixture the reconstruction may not rewrite."""
+    bodies = "\n".join(
+        (r.get("body_text", "") or "") for r in recs
+        if FnLocator(r.get("file", ""), r.get("fn_name", "")) in futile_units)
+    if not bodies.strip():
+        return []
+    called = called_method_names(bodies)
+    out: list[FnLocator] = []
+    for file, fn_name in trait_impl_fns_named(recs, called):
+        key = FnLocator(file, fn_name)
+        if (key in exclude or key in futile_units or key in out
+                or is_oracle_path(file)):
+            continue
+        out.append(key)
+    return out

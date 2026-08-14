@@ -474,6 +474,19 @@ def run_phase_c_tdd(
     # short; at the threshold the frozen component the crashes implicate gets
     # re-authored (see the trigger block below the stall accounting).
     _vanish_streak = 0
+    # Whether the CURRENT crash class has been proved deterministic — by the
+    # accelerated re-sweep or by a completed streak. Separate from
+    # `_vanish_streak` because the streak is fire budget: a fire resets it to 0,
+    # and on run `929616-ee20d540` (2026-08-14) that is what left iter 2 — an
+    # ASAN heap-use-after-free with 27 raw frames and none of them in-crate,
+    # the exact state chain-derived blame exists for — unable to reach the
+    # synthesis at all, because it was nested inside the streak gate. Zero
+    # `CHAIN-DERIVED` lines and zero `phase_c.crash.chain_blame` events in that
+    # run. Cleared only by a sweep in which every expected test name reported.
+    _crash_deterministic = False
+    # The chain set the evidence pack was last armed with, so an unchanged
+    # inference re-arms silently.
+    _chain_blamed_last: frozenset[FnLocator] = frozenset()
     _crash_retrigger_after = int(
         os.getenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2"))
     # The window after a retrigger attempt in which the deliberate re-stub —
@@ -1760,73 +1773,95 @@ def run_phase_c_tdd(
                         "deterministic, retriggering now instead of waiting "
                         "out the sweep streak.")
                     _vanish_streak = _crash_retrigger_after
+            if _vanish_streak >= _crash_retrigger_after:
+                _crash_deterministic = True
         elif not _oracle.vanished:
             # A compile-broken shrink is neutral; only a sweep in which every
             # expected name reported proves the crash class absent and may
             # reset the streak.
             _vanish_streak = 0
-        if (_vanish_streak >= _crash_retrigger_after
-                and deps.retrigger_layout is not None):
-            _vanish_streak = 0   # re-arm only after another full streak
-            _suspects: set[FnLocator] = set()
-            for _vt in _oracle.vanished:
+            # Determinism is a property of the CRASH, not of the fire budget,
+            # so it is cleared by the same evidence that clears the streak —
+            # every expected name reporting — and by nothing else. Keeping it
+            # in its own variable is what lets the evidence half of chain
+            # blame outlive the fire that resets `_vanish_streak` to 0.
+            _crash_deterministic = False
+        # Chain-derived blame: the frame-blind crash class. Three preconditions,
+        # each load-bearing. `_crash_deterministic` — the shrink reproduced on an
+        # immediate re-sweep, or persisted a full streak; a transient must not
+        # synthesize blame. `_unattributed_sites` means an origin-capable
+        # detector LOOKED this sweep and placed no frame in-crate — for refcount
+        # corruption planted in construct/vtable code every ASAN stack resolves
+        # to std/test frames (run `635043-5f7c61f5`, 2026-08-14), so no widening
+        # of the frame parse can ever name the culprit and waiting for one caps
+        # the oracle by design. `not crash_blamed` means no real frame exists —
+        # an observed frame decides alone; the inference must not run beside it.
+        # The chain is the crashed tests' attributed fns plus the producers of
+        # their types (the same escalation the futility path uses): for
+        # `test_drop`, `Error::new` → `construct_from_std` → the vtable
+        # install/drop family.
+        #
+        # TWO CONSUMERS, ONE SYNTHESIS, DIFFERENT GATES. The retrigger's AIM
+        # (signature, component choice) needs a fire and stays behind the fire
+        # gate below. The EVIDENCE PACK — prompt evidence, frontier entry,
+        # exhaustion void, dispatch eligibility — steers ordinary fills and
+        # needs no fire at all; nesting it inside the fire gate is what left the
+        # frame-blind sweep with no crash evidence whatsoever, which is the
+        # starvation the whole mechanism was written to end.
+        _suspects: set[FnLocator] = set()
+        for _vt in _oracle.vanished:
+            _bare = _vt.split("::")[-1]
+            for _k in (test_reverse_map.get(_bare)
+                       or test_reverse_map.get(_vt) or set()):
+                _suspects.add(FnLocator(*_k))
+        _chain_keys: frozenset[FnLocator] = frozenset()
+        _chain_added: frozenset[FnLocator] = frozenset()
+        # `bodies_in_flight`, not `active`: the window suppresses a reading the
+        # re-stub itself produced, and a fired-but-REJECTED attempt re-stubbed
+        # nothing (`restubbed=0`), so its sweep measures the real tree. That is
+        # the distinction `RefillGrace` already draws — the suppression exists
+        # to stop a back-to-back FIRE, not to stop prompt evidence.
+        if (_crash_deterministic and _unattributed_sites and not crash_blamed
+                and not _grace.bodies_in_flight
+                and deps.escalate_to_producers is not None):
+            _chain_fns: set[FnLocator] = set(_suspects)
+            for _vt in sorted(_oracle.vanished):
                 _bare = _vt.split("::")[-1]
-                for _k in (test_reverse_map.get(_bare)
-                           or test_reverse_map.get(_vt) or set()):
-                    _suspects.add(FnLocator(*_k))
-            # Chain-derived blame: the frame-blind crash class. Three
-            # preconditions, each load-bearing. Reaching this branch means the
-            # crash is DETERMINISTIC (the shrink reproduced on an immediate
-            # re-sweep, or persisted a full streak) — a transient must not
-            # synthesize blame. `_unattributed_sites` means an origin-capable
-            # detector LOOKED this sweep and placed no frame in-crate — for
-            # refcount corruption planted in construct/vtable code every ASAN
-            # stack resolves to std/test frames (run `635043-5f7c61f5`,
-            # 2026-08-14), so no widening of the frame parse can ever name
-            # the culprit and waiting for one caps the oracle by design.
-            # `not crash_blamed` means no real frame exists — an observed
-            # frame decides alone; the inference must not run beside it.
-            # The chain is the crashed tests' attributed fns plus the
-            # producers of their types (the same escalation the futility
-            # path uses): for `test_drop`, `Error::new` →
-            # `construct_from_std` → the vtable install/drop family.
-            _chain_keys: frozenset[FnLocator] = frozenset()
-            _chain_added: frozenset[FnLocator] = frozenset()
-            if (_unattributed_sites and not crash_blamed
-                    and deps.escalate_to_producers is not None):
-                _chain_fns: set[FnLocator] = set(_suspects)
-                for _vt in sorted(_oracle.vanished):
-                    _bare = _vt.split("::")[-1]
-                    _units = {FnLocator(*_k) for _k in
-                              (test_reverse_map.get(_bare)
-                               or test_reverse_map.get(_vt) or set())}
-                    _chain_fns.update(
-                        deps.escalate_to_producers(src_dir, _vt, _units))
-                _chain_frontier = deps.filter_test_targets(
-                    {k: set(_oracle.vanished) for k in _chain_fns}, src_dir)
-                _chain_sites = [chain_derived_site(
-                    s.binary_label, s.test_name, s.signal,
-                    sorted(_chain_frontier),
-                    derived_from_tests=sorted(_oracle.vanished),
-                    raw_report=s.raw_report) for s in _unattributed_sites]
-                _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
-                _chain_keys = frozenset(_chain_texts)
-                _chain_added = frozenset(
-                    k for k in _chain_texts if k not in crash_texts)
-                for _loc, _text in _chain_texts.items():
-                    # The full evidence pack, applied here because this
-                    # branch runs AFTER the per-sweep evidence plumbing
-                    # (frontier merge, exhaustion void, eligibility) has
-                    # already consumed `crash_texts` for this iteration:
-                    # prompt evidence, frontier entry, exhaustion void, and
-                    # dispatch eligibility — each the same channel a
-                    # frame-derived blame gets, one grade weaker.
-                    crash_texts[_loc] = (
-                        crash_texts[_loc] + "\n\n" + _text
-                        if _loc in crash_texts else _text)
-                    frontier.setdefault(_loc, set()).update(_oracle.vanished)
-                    permanently_exhausted.discard(_loc)
-                    eligible.setdefault(_loc, set()).update(_oracle.vanished)
+                _units = {FnLocator(*_k) for _k in
+                          (test_reverse_map.get(_bare)
+                           or test_reverse_map.get(_vt) or set())}
+                _chain_fns.update(
+                    deps.escalate_to_producers(src_dir, _vt, _units))
+            _chain_frontier = deps.filter_test_targets(
+                {k: set(_oracle.vanished) for k in _chain_fns}, src_dir)
+            _chain_sites = [chain_derived_site(
+                s.binary_label, s.test_name, s.signal,
+                sorted(_chain_frontier),
+                derived_from_tests=sorted(_oracle.vanished),
+                raw_report=s.raw_report) for s in _unattributed_sites]
+            _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
+            _chain_keys = frozenset(_chain_texts)
+            _chain_added = frozenset(
+                k for k in _chain_texts if k not in crash_texts)
+            for _loc, _text in _chain_texts.items():
+                # The full evidence pack, applied here because this
+                # branch runs AFTER the per-sweep evidence plumbing
+                # (frontier merge, exhaustion void, eligibility) has
+                # already consumed `crash_texts` for this iteration:
+                # prompt evidence, frontier entry, exhaustion void, and
+                # dispatch eligibility — each the same channel a
+                # frame-derived blame gets, one grade weaker.
+                crash_texts[_loc] = (
+                    crash_texts[_loc] + "\n\n" + _text
+                    if _loc in crash_texts else _text)
+                frontier.setdefault(_loc, set()).update(_oracle.vanished)
+                permanently_exhausted.discard(_loc)
+                eligible.setdefault(_loc, set()).update(_oracle.vanished)
+            # The pack re-arms on every frame-blind sweep (it steers that
+            # sweep's fills), but it is only NEWS when the set moves. A line
+            # and an event per sweep for an unchanged inference is how a log
+            # stops being readable at the iteration boundary.
+            if _chain_keys != _chain_blamed_last:
                 if _chain_keys:
                     deps.log(
                         f"  {tag} [phase-c/crash] iter {iter_n}: "
@@ -1840,8 +1875,8 @@ def run_phase_c_tdd(
                             for k in sorted(_chain_keys)[:8])
                         + ("…" if len(_chain_keys) > 8 else "")
                         + ". Evidence pack armed (prompt + exhaustion void "
-                        "+ frontier); the crash signature changes, which "
-                        "re-opens the component walk.")
+                        "+ frontier); on a fire it also marks the crash "
+                        "signature, which re-opens the component walk.")
                 else:
                     deps.log(
                         f"  {tag} [phase-c/crash] iter {iter_n}: "
@@ -1859,6 +1894,13 @@ def run_phase_c_tdd(
                     "provenance": "chain_derived",
                     "suspect_count": len(_suspects),
                     "chain_count": len(_chain_keys)})
+            _chain_blamed_last = _chain_keys
+        # The AIM half stays behind the fire budget: a signature and a
+        # component choice are only meaningful when a re-author is about to
+        # be attempted, and every fire costs an authoring call.
+        if (_vanish_streak >= _crash_retrigger_after
+                and deps.retrigger_layout is not None):
+            _vanish_streak = 0   # re-arm only after another full streak
             _retrig_c = deps.retrigger_layout(
                 project_dir, module, cluster.name, target_src_dir, output,
                 crash_evidence=CrashEvidence(
