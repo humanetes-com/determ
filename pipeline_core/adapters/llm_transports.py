@@ -241,12 +241,18 @@ _MAX_THINK_CHARS  = int(os.getenv("OLLAMA_MAX_THINK_CHARS", "40000"))
 #   [22:03:22] llm/length_truncated hit max_tokens=32768 (content=0, thinking=121,432)
 #   [22:44:43] llm/length_truncated hit max_tokens=32768 (content=0, thinking=124,043)
 #
-# The exact value is immaterial and that is measured, not assumed: across 226
-# recorded traces the reasoning-length distribution is sharply bimodal — one
-# population at 0–36,570 chars, another at 69,830–152,088, and a VERIFIED EMPTY
-# BAND 33,260 chars wide between them. Any cap inside the band separates the two.
-# Healthy reasoning on the fill probe ran 7,000–12,000 chars, and the server's
-# mean is 5,205 output tokens per request, so the median call never reaches this.
+# The exact value is immaterial and that is measured, not assumed: the cap sits
+# in a measured EMPTY BAND between the healthy population and the runaways, so
+# any value inside the band separates the two. The band has moved once as the
+# served model changed. Qwen era: across 226 recorded traces the distribution
+# was sharply bimodal — 0–36,570 chars against 69,830–152,088, healthy fill-probe
+# reasoning at 7,000–12,000. Muse moved the low edge: measured uncapped on
+# retained anyhow prompts (scripts/measure_muse_reasoning.sh, 2026-08-13,
+# logs/reasoning_econ/calls.jsonl), Muse@high finishes naturally at med 46,562 /
+# p90 73,718 / max 77,595 chars — healthy calls populate the old band's lower
+# half, and a 60,000 cap was breaking p90-healthy streams (14.4% of calls on run
+# `298540-f792975a`). The runaways still start at 121,109 (the smallest of the
+# truncated traces above), so the band is now 77,595–121,109.
 #
 # This is NOT the May 2026 `safe_max_tokens` bug rebuilt. That one predicted a
 # token count from `chars // 4`, was off by 8,449 tokens against Qwen3's denser
@@ -261,7 +267,7 @@ _VLLM_MAX_THINK_CHARS = int(os.getenv("VLLM_MAX_THINK_CHARS", str(_MAX_THINK_CHA
 # `_VLLM_MAX_THINK_CHARS` can be checked against the evidence that sized it
 # rather than against a remembered number. `tests/test_think_cap.py` asserts the
 # default lies inside it.
-VLLM_THINK_EMPTY_BAND: tuple[int, int] = (36_570, 69_830)
+VLLM_THINK_EMPTY_BAND: tuple[int, int] = (77_595, 121_109)
 
 
 _GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))

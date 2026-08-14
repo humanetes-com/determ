@@ -34,6 +34,7 @@ from pipeline_core.domain.attribution import (
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.crash_site import (
     blamed_locators,
+    chain_derived_site,
     crash_evidence_by_locator,
     crash_signal_hint,
     vanish_is_stub_confounded,
@@ -1364,6 +1365,12 @@ def run_phase_c_tdd(
         # routes execution into the fault is a key too — any "is the blame
         # outside this unit" test needs the blamed locators, not the keys.
         crash_blamed: frozenset[FnLocator] = frozenset()
+        # Sites where an origin-capable detector looked and placed no frame
+        # in-crate — the precondition for chain-derived blame synthesis at
+        # the determinism gate below. Reset here: a stale list surviving a
+        # stub-confounded (localization-deferred) iteration would synthesize
+        # blame from a sweep the current tree never produced.
+        _unattributed_sites: list[Any] = []
         # Gated on NAMED vanished tests, never the bare missing count: an
         # unnamed shortfall is an inventory gap, and sending gdb + an ASAN
         # rebuild after it burns a sweep to conclude "no native fault".
@@ -1385,13 +1392,16 @@ def run_phase_c_tdd(
                     output, test_cmd, target_src_dir, cluster_env)
                 crash_texts = crash_evidence_by_locator(tuple(_sites))
                 crash_blamed = blamed_locators(tuple(_sites))
+                _unattributed_sites = [
+                    s for s in _sites if s.origin_unattributed]
                 for _site in _sites:
                     _blame = (str(_site.blamed_locator)
                               if _site.blamed_locator is not None
                               else "NOBODY (origin not attributed in-crate)")
                     deps.log(f"  {tag} [phase-c/crash] {_site.binary_label}"
                              f"::{_site.test_name or '?'} {_site.signal} — "
-                             f"blamed {_blame}")
+                             f"blamed {_blame} "
+                             f"(provenance={_site.provenance})")
                     # Access and origin stacks stay SEPARATE on the event: the
                     # old single `frames` list was access+origin concatenated,
                     # so "origin is empty" was only inferrable by counting, and
@@ -1408,6 +1418,7 @@ def run_phase_c_tdd(
                         "blamed": (None if _site.blamed is None else
                                    [_site.blamed.file_rel, _site.blamed.fn_name]),
                         "origin_unattributed": _site.origin_unattributed,
+                        "provenance": _site.provenance,
                         "raw_report": _site.raw_report})
                 if not _sites:
                     # Leave the raw symptoms behind — "no native fault" with
@@ -1422,6 +1433,7 @@ def run_phase_c_tdd(
                         "vanished": sorted(_oracle.vanished)[:50],
                         "signal_hint": _hint,
                         "vanish_streak": _vanish_streak})
+                if not any(s.all_frames for s in _sites):
                     # Deterministic (second consecutive shrunken sweep) with
                     # EMPTY localization: without this branch the crash
                     # produces no evidence object anywhere — crash-keep,
@@ -1432,6 +1444,12 @@ def run_phase_c_tdd(
                     # the crash to the vanished tests' SUBJECT fns — module
                     # file + test name, never the whole reverse map — as
                     # EVIDENCE (prompt + exhaustion void + keep), not blame.
+                    # Keyed on "no site carries a frame", not "no sites": an
+                    # origin-unattributed site with zero in-crate frames now
+                    # survives the localizer (it feeds the chain-derived
+                    # synthesis below), and it must not silence this weaker
+                    # module-anchored channel that fired before it existed.
+                    _hint = crash_signal_hint(output)
                     if _vanish_streak >= 1:
                         for _loc, _tsts in vanished_subject_fns(
                                 frozenset(_oracle.vanished),
@@ -1756,6 +1774,91 @@ def run_phase_c_tdd(
                 for _k in (test_reverse_map.get(_bare)
                            or test_reverse_map.get(_vt) or set()):
                     _suspects.add(FnLocator(*_k))
+            # Chain-derived blame: the frame-blind crash class. Three
+            # preconditions, each load-bearing. Reaching this branch means the
+            # crash is DETERMINISTIC (the shrink reproduced on an immediate
+            # re-sweep, or persisted a full streak) — a transient must not
+            # synthesize blame. `_unattributed_sites` means an origin-capable
+            # detector LOOKED this sweep and placed no frame in-crate — for
+            # refcount corruption planted in construct/vtable code every ASAN
+            # stack resolves to std/test frames (run `635043-5f7c61f5`,
+            # 2026-08-14), so no widening of the frame parse can ever name
+            # the culprit and waiting for one caps the oracle by design.
+            # `not crash_blamed` means no real frame exists — an observed
+            # frame decides alone; the inference must not run beside it.
+            # The chain is the crashed tests' attributed fns plus the
+            # producers of their types (the same escalation the futility
+            # path uses): for `test_drop`, `Error::new` →
+            # `construct_from_std` → the vtable install/drop family.
+            _chain_keys: frozenset[FnLocator] = frozenset()
+            _chain_added: frozenset[FnLocator] = frozenset()
+            if (_unattributed_sites and not crash_blamed
+                    and deps.escalate_to_producers is not None):
+                _chain_fns: set[FnLocator] = set(_suspects)
+                for _vt in sorted(_oracle.vanished):
+                    _bare = _vt.split("::")[-1]
+                    _units = {FnLocator(*_k) for _k in
+                              (test_reverse_map.get(_bare)
+                               or test_reverse_map.get(_vt) or set())}
+                    _chain_fns.update(
+                        deps.escalate_to_producers(src_dir, _vt, _units))
+                _chain_frontier = deps.filter_test_targets(
+                    {k: set(_oracle.vanished) for k in _chain_fns}, src_dir)
+                _chain_sites = [chain_derived_site(
+                    s.binary_label, s.test_name, s.signal,
+                    sorted(_chain_frontier),
+                    derived_from_tests=sorted(_oracle.vanished),
+                    raw_report=s.raw_report) for s in _unattributed_sites]
+                _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
+                _chain_keys = frozenset(_chain_texts)
+                _chain_added = frozenset(
+                    k for k in _chain_texts if k not in crash_texts)
+                for _loc, _text in _chain_texts.items():
+                    # The full evidence pack, applied here because this
+                    # branch runs AFTER the per-sweep evidence plumbing
+                    # (frontier merge, exhaustion void, eligibility) has
+                    # already consumed `crash_texts` for this iteration:
+                    # prompt evidence, frontier entry, exhaustion void, and
+                    # dispatch eligibility — each the same channel a
+                    # frame-derived blame gets, one grade weaker.
+                    crash_texts[_loc] = (
+                        crash_texts[_loc] + "\n\n" + _text
+                        if _loc in crash_texts else _text)
+                    frontier.setdefault(_loc, set()).update(_oracle.vanished)
+                    permanently_exhausted.discard(_loc)
+                    eligible.setdefault(_loc, set()).update(_oracle.vanished)
+                if _chain_keys:
+                    deps.log(
+                        f"  {tag} [phase-c/crash] iter {iter_n}: "
+                        "deterministic crash with no in-crate frame in any "
+                        "stack — synthesized CHAIN-DERIVED blame "
+                        "(provenance=chain_derived; ranks above test "
+                        f"attribution, below an observed frame) for "
+                        f"{len(_chain_keys)} fn(s) on the crashed tests' "
+                        "construction chain: " + ", ".join(
+                            f"{k.file}::{k.fn_name}"
+                            for k in sorted(_chain_keys)[:8])
+                        + ("…" if len(_chain_keys) > 8 else "")
+                        + ". Evidence pack armed (prompt + exhaustion void "
+                        "+ frontier); the crash signature changes, which "
+                        "re-opens the component walk.")
+                else:
+                    deps.log(
+                        f"  {tag} [phase-c/crash] iter {iter_n}: "
+                        "deterministic crash with no in-crate frame, but the "
+                        "construction chain resolved to no fn (no attributed "
+                        "units, no producers) — no chain-derived blame, "
+                        "signature unchanged.")
+                deps.emit("phase_c.crash.chain_blame", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "binaries": sorted({s.binary_label
+                                        for s in _unattributed_sites}),
+                    "tests": sorted(_oracle.vanished)[:50],
+                    "blamed": sorted(f"{k.file}::{k.fn_name}"
+                                     for k in _chain_keys)[:50],
+                    "provenance": "chain_derived",
+                    "suspect_count": len(_suspects),
+                    "chain_count": len(_chain_keys)})
             _retrig_c = deps.retrigger_layout(
                 project_dir, module, cluster.name, target_src_dir, output,
                 crash_evidence=CrashEvidence(
@@ -1767,7 +1870,16 @@ def run_phase_c_tdd(
                     # reachability. Withholding the blame here is what let the
                     # retrigger pick a component in record order that the fault
                     # never touched (§ `classify_crash_retrigger`).
-                    blamed_fns=frozenset(crash_texts)),
+                    # Chain-derived keys are carried in their OWN field: in
+                    # `blamed_fns` they would enter the signature as a fn
+                    # list, and that list includes producers matched against
+                    # live body text — every landed fill could then change
+                    # the signature and re-open the walk on a crash that
+                    # never changed. `chain_blamed` contributes a stable
+                    # marker instead (§ `crash_signature`).
+                    blamed_fns=frozenset(
+                        k for k in crash_texts if k not in _chain_added),
+                    chain_blamed=_chain_keys),
                 best_pass=best_pass)
             if _retrig_c.fired:
                 # Fired but did not land: nothing was re-stubbed, so one iter of

@@ -417,3 +417,57 @@ def test_crash_signal_hint_extracts_symptom_lines() -> None:
 def test_crash_signal_hint_empty_when_no_symptoms() -> None:
     from pipeline_core.domain.crash_site import crash_signal_hint
     assert crash_signal_hint("running 2 tests\ntest a ... ok\n") == ""
+
+
+# --- chain-derived blame: the frame-blind crash class -------------------------
+# The deterministic `test_downcast` heap-use-after-free (run `635043-5f7c61f5`,
+# 2026-08-14, `logs/asan/asan-20260814T025642115609.txt` report at line 3877):
+# access, freed-by and allocated-by stacks all resolve to std/test frames,
+# because an Arc refcount error planted in the crate's construct/vtable code
+# surfaces later, in std's `Arc::drop` at the test's own drop sites. No frame
+# parse can name crate code that is in no stack, so the blame is synthesized
+# from the crashed tests' construction chain instead — marked as such.
+
+
+def test_chain_derived_site_is_marked_and_convicts_nobody() -> None:
+    from pipeline_core.domain.crash_site import (
+        PROVENANCE_CHAIN,
+        blamed_locators,
+        chain_derived_site,
+    )
+    site = chain_derived_site(
+        "tests/test_downcast.rs", "test_drop",
+        "AddressSanitizer: heap-use-after-free",
+        [FnLocator("src/error.rs", "construct_from_std"),
+         FnLocator("src/error.rs", "new")],
+        derived_from_tests=["test_drop", "test_downcast_high"],
+        raw_report="freed by thread T0 here:\n    #0 free asan.cpp:52")
+    assert site.provenance == PROVENANCE_CHAIN
+    assert site.origin_unattributed is True
+    # An inference must never acquire a frame's authority: `blamed`/
+    # `blamed_locator` stay None, so the conviction/crash-block/immunity set
+    # (`blamed_locators`) never contains a chain-derived blame.
+    assert site.blamed is None and site.blamed_locator is None
+    assert blamed_locators((site,)) == frozenset()
+
+
+def test_chain_evidence_keys_by_the_chain_and_says_what_it_is() -> None:
+    from pipeline_core.domain.crash_site import chain_derived_site
+    site = chain_derived_site(
+        "tests/test_downcast.rs", "test_drop",
+        "AddressSanitizer: heap-use-after-free",
+        [FnLocator("src/error.rs", "construct_from_std"),
+         FnLocator("src/error.rs", "new")],
+        derived_from_tests=["test_drop"],
+        raw_report="freed by thread T0 here:\n    #0 free asan.cpp:52")
+    ev = crash_evidence_by_locator((site,))
+    assert set(ev) == {FnLocator("src/error.rs", "construct_from_std"),
+                       FnLocator("src/error.rs", "new")}
+    text = ev[FnLocator("src/error.rs", "new")]
+    # The rendered evidence declares its own grade, names the deriving tests,
+    # and carries the detector's raw report — the only record of WHAT was
+    # freed when every frame is std's.
+    assert "CHAIN-DERIVED" in text
+    assert "test_drop" in text
+    assert "freed by thread T0" in text
+    assert "no such section" not in text

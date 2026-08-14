@@ -738,3 +738,82 @@ def test_sig_rows_are_never_mistaken_for_a_component() -> None:
     settled, refunded = reconcile_interrupted_attempts(attempts)
     assert refunded == ()
     assert f"inflight:sig:{sig}:Quoted" not in settled
+
+
+# --- chain-derived blame: the third evidence grade ----------------------------
+# Synthesized for the frame-blind crash class (run `635043-5f7c61f5`,
+# 2026-08-14): a deterministic memory fault whose every ASAN stack resolves to
+# std/test frames, so no localizer blame can ever land and the closed walk's
+# own unlock — "a new localizer blame changes the signature" — was
+# unsatisfiable by construction.
+
+
+def _chain_evidence(chain: frozenset[FnLocator]) -> CrashEvidence:
+    base = _uaf_evidence()
+    return CrashEvidence(vanished=base.vanished,
+                         suspect_fns=base.suspect_fns,
+                         chain_blamed=chain)
+
+
+def test_chain_blame_changes_the_signature_as_a_marker_not_a_list() -> None:
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    bare = _uaf_evidence()
+    chain_a = _chain_evidence(
+        frozenset({FnLocator("src/error.rs", "construct_from_std")}))
+    chain_b = _chain_evidence(
+        frozenset({FnLocator("src/error.rs", "new"),
+                   FnLocator("src/ptr.rs", "own")}))
+    # The unlock: refutations and the zero-payoff streak were booked under
+    # the blameless signature, and the chain blame landing must clear them.
+    assert crash_signature(bare) != crash_signature(chain_a)
+    # A marker, never the fn list: the chain includes producers matched
+    # against live body text, so the set shifts as fills land — hashing it
+    # would re-open the walk every iteration on a crash that never changed.
+    assert crash_signature(chain_a) == crash_signature(chain_b)
+    # A chain blame must not masquerade as a frame blame of the same fns.
+    framed = _uaf_evidence(
+        frozenset({FnLocator("src/error.rs", "construct_from_std")}))
+    assert crash_signature(chain_a) != crash_signature(framed)
+
+
+def test_legacy_signatures_unchanged_by_the_chain_field() -> None:
+    import hashlib
+
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    # Attempts stores persisted by earlier runs key refutations on the old
+    # format; a payload with no chain blame must hash byte-identically.
+    ev = _uaf_evidence(frozenset({FnLocator("src/error.rs", "object_drop")}))
+    vanished = ",".join(sorted(ev.vanished))
+    blamed = ",".join(sorted(
+        f"{b.file}::{b.fn_name}" for b in ev.blamed_fns))
+    legacy = hashlib.sha256(
+        f"v={vanished};b={blamed}".encode()).hexdigest()[:12]
+    assert crash_signature(ev) == legacy
+
+
+def test_chain_blame_grades_above_suspects_and_below_frames() -> None:
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_candidate_grade,
+    )
+    records = [
+        FnRecord(file="src/error.rs", fn_name="construct_from_std",
+                 sig_text="fn construct_from_std<E>(e: E) -> Error",
+                 body_text="unsafe { vtable install }"),
+    ]
+    comp = frozenset({"ErrorVTable", "construct_from_std", "vtable"})
+    # Above suspects: the chain names the producer the mega component OWNS,
+    # which reachability alone (empty here) never admits.
+    chain_ev = CrashEvidence(
+        vanished=frozenset({"test_drop"}), suspect_fns=frozenset(),
+        chain_blamed=frozenset({FnLocator("src/error.rs",
+                                          "construct_from_std")}))
+    assert crash_candidate_grade(chain_ev, records, comp) is BlameGrade.OWNS
+    # Below frames: an observed frame decides ALONE — with frame blame
+    # present the chain is not consulted, even where it would grade higher.
+    both = CrashEvidence(
+        vanished=frozenset({"test_drop"}), suspect_fns=frozenset(),
+        blamed_fns=frozenset({FnLocator("src/fmt.rs", "fmt")}),
+        chain_blamed=frozenset({FnLocator("src/error.rs",
+                                          "construct_from_std")}))
+    assert crash_candidate_grade(both, records, comp) is BlameGrade.NONE

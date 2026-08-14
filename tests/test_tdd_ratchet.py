@@ -192,7 +192,8 @@ def test_refill_window_survives_only_while_re_fills_land() -> None:
 def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  frontier=None, fills_per_iter=0, graceful_stop=None, fill=None,
                  best_mark=None, checkpoints=None, resets=None, stubs=None,
-                 retires=None, logs=None, reset_returns=None):
+                 retires=None, logs=None, reset_returns=None,
+                 localize=None, escalate=None, reverse_map=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -222,7 +223,7 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         attribute_failures=lambda *a, **k: AttributionResult(
             dict(frontier or {}), FailureKind.NO_FRONTIER,
             dict(frontier or {})),
-        build_test_reverse_map=lambda *a, **k: {},
+        build_test_reverse_map=lambda *a, **k: dict(reverse_map or {}),
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=graceful_stop or (lambda *a, **k: None),
         check_auto_operator=lambda *a, **k: None,
@@ -247,6 +248,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         retire_unblocked_convictions=_retire,
         active_test_inventory=inventory,
         retrigger_layout=retrigger,
+        localize_crashes=localize,
+        escalate_to_producers=escalate,
     )
 
 

@@ -237,11 +237,24 @@ def crash_signature(evidence: CrashEvidence) -> str:
     legitimately — new evidence is exactly what a repeat fire is supposed to
     require. `consecutive_sweeps` and `suspect_fns` are excluded: the first is
     a counter, the second is static reachability that can widen as fills land
-    without the crash itself changing."""
+    without the crash itself changing.
+
+    A chain-derived blame contributes a MARKER, never its fn list. The list
+    would flap: it includes producers, and producers are matched against live
+    body text (`constructs_type`), so every landed fill could change the set
+    and re-open the walk on a crash that never changed — an unbounded
+    destruction license. The marker gives exactly the two transitions the
+    walk's own exit line promises: empty → chain when the synthesis first
+    lands (the unlock — refutations and the zero-payoff streak were booked
+    under the old signature), and chain → frames if a real blame ever
+    arrives. Payloads with no chain blame hash byte-identically to before, so
+    attempts stores written by earlier runs keep their refutations."""
     vanished = ",".join(sorted(evidence.vanished))
     blamed = ",".join(sorted(
         f"{b.file}::{b.fn_name}" for b in evidence.blamed_fns))
     raw = f"v={vanished};b={blamed}"
+    if evidence.chain_blamed:
+        raw += ";c=chain"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
@@ -416,11 +429,23 @@ class CrashEvidence:
     `suspect_fns` says a vanished test *could* have called this fn, `blamed_fns`
     says the fault *was observed* there. Only the second can separate two
     components that the same vanished test reaches, and that is precisely what
-    cause C could not do while it aimed by record order."""
+    cause C could not do while it aimed by record order.
+
+    `chain_blamed` is a THIRD channel between them: the construction chain of
+    the crashed tests (attributed fns plus the producers of their types),
+    synthesized by the TDD driver only when the crash is deterministic AND an
+    origin-capable detector looked and placed no frame in-crate — the
+    refcount-corruption class where every stack resolves to std/test code
+    (run `635043-5f7c61f5`, 2026-08-14). It ranks above `suspect_fns` (it
+    names the producers a vanished test's reachability cannot separate) and
+    below `blamed_fns` (no fault was observed in any of it); the two blame
+    channels never co-exist in one payload — the synthesis refuses to run
+    while a real frame exists."""
     vanished: frozenset[str]
     suspect_fns: frozenset[FnLocator]
     consecutive_sweeps: int = 0
     blamed_fns: frozenset[FnLocator] = frozenset()
+    chain_blamed: frozenset[FnLocator] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +614,13 @@ def crash_candidate_grade(
     if evidence.blamed_fns:
         return crash_blame_grade(
             evidence.blamed_fns, fn_records, component_names)
+    # Chain-derived blame outranks reachability but never a frame: it names
+    # the producers a vanished test's static reach cannot separate (that is
+    # what admits the construct/vtable component the suspects never touch),
+    # while an observed frame above decides alone whenever one exists.
+    if evidence.chain_blamed:
+        return crash_blame_grade(
+            evidence.chain_blamed, fn_records, component_names)
     if not evidence.suspect_fns:
         return BlameGrade.NONE
     return crash_blame_grade(

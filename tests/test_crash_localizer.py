@@ -227,3 +227,41 @@ def test_non_memory_crash_survives_alongside_origin_site() -> None:
     blamed = {s.blamed_locator for s in sites}
     assert FnLocator("src/error.rs", "construct_from_std") in blamed
     assert FnLocator("src/x.rs", "spin") in blamed
+
+
+_ASAN_OUT_NO_CRATE_FRAME = """\
+    Running tests/test_downcast.rs (target-asan/debug/deps/test_downcast-555)
+running 2 tests
+test test_drop ... ==7==ERROR: AddressSanitizer: heap-use-after-free on address 0x50
+WRITE of size 8 at 0x50 thread T0
+    #0 0x1 in core::sync::atomic::AtomicUsize::fetch_sub /rustc/lib/core/sync/atomic.rs:3060
+    #1 0x2 in test_downcast::test_drop /w/tests/test_downcast.rs:85:1
+freed by thread T0 here:
+    #0 0x3 in free /rustc/asan/asan_malloc_linux.cpp:52
+    #1 0x4 in test_downcast::test_drop /w/tests/test_downcast.rs:83:9
+SUMMARY: AddressSanitizer: heap-use-after-free /rustc/lib/core/sync/atomic.rs
+"""
+
+
+def test_origin_unattributed_site_survives_with_zero_crate_frames() -> None:
+    # The frame-blind crash class (run `635043-5f7c61f5`, 2026-08-14): a
+    # refcount error planted in construct/vtable code surfaces in std's
+    # `Arc::drop` at the test's own drop sites, so EVERY stack — access, free,
+    # allocation — filters to nothing in-crate. The old `all_frames`-only
+    # return dropped the site entirely, the driver saw no evidence object,
+    # and the chain-derived synthesis it keys on could never arm. The site
+    # must survive: it names the binary, the in-flight test and carries the
+    # raw report, and "an origin-capable detector looked and attributed
+    # nothing" is itself the finding.
+    logged: list[str] = []
+    deps, _ = _deps(gdb_result=None,
+                    asan_result=(101, _ASAN_OUT_NO_CRATE_FRAME),
+                    log=logged.append)
+    (site,) = _run(deps)
+    assert site.origin_unattributed is True
+    assert site.all_frames == ()
+    assert site.blamed_locator is None       # convicts nobody, as before
+    assert site.binary_label == "tests/test_downcast.rs"
+    assert site.test_name == "test_drop"
+    assert "heap-use-after-free" in site.raw_report
+    assert any("blaming NOBODY" in m for m in logged)

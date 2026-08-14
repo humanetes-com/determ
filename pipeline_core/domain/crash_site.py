@@ -52,6 +52,24 @@ def is_memory_fault_signal(signal: str) -> bool:
     return any(s in up for s in _MEMORY_FAULT_SIGNALS)
 
 
+# Blame provenance. A frame-derived blame is an OBSERVED fault location — a
+# stack frame a detector printed. A chain-derived blame is an INFERENCE: the
+# fns on the construction chain the crashed test exercises, synthesized only
+# when an origin-capable detector looked and placed nothing in-crate. The two
+# must never be confusable, because they warrant different force: frame blame
+# may convict and crash-block; chain blame only prompts, voids exhaustion and
+# re-aims the layout walk. Measured case for the second kind: the
+# deterministic `test_downcast` heap-use-after-free (run `635043-5f7c61f5`,
+# 2026-08-14, `logs/asan/asan-20260814T025642115609.txt` report at line 3877)
+# — access, freed-by and allocated-by stacks all resolve to std/test frames
+# only, because an Arc refcount error planted in the crate's construct/vtable
+# machinery surfaces later, in std's `Arc::drop` at the test's own drop
+# sites. No widening of the frame parse can name crate code that is not in
+# any stack.
+PROVENANCE_FRAME = "frame_derived"
+PROVENANCE_CHAIN = "chain_derived"
+
+
 @dataclass(frozen=True, slots=True)
 class CrashSite:
     """A localized binary crash: which test was in flight, what signal, the
@@ -77,6 +95,16 @@ class CrashSite:
     # evidence — and the difference decides whether an absent origin means
     # "unknown detector capability" or "looked, and could not attribute it".
     origin_capable: bool = False
+    # See PROVENANCE_* above. Every log line and event that shows a site's
+    # blame shows this beside it, so a chain-derived blame can never
+    # masquerade as an observed frame.
+    provenance: str = PROVENANCE_FRAME
+    # Chain-derived sites only: the fns of the crashed tests' construction
+    # chain (attributed fns plus producers of their types), supplied by the
+    # caller — this module cannot derive them, attribution lives above it.
+    chain_blamed: tuple[FnLocator, ...] = ()
+    # The tests the chain was derived from, for rendering.
+    chain_tests: tuple[str, ...] = ()
 
     @property
     def is_memory_fault(self) -> bool:
@@ -132,6 +160,8 @@ class CrashSite:
     def render_evidence(self) -> str:
         """Prompt-ready description of the crash. Concrete frames only — the
         model acts on the actual faulting path, not on prose about crashes."""
+        if self.provenance == PROVENANCE_CHAIN:
+            return self._render_chain_evidence()
         where = f" while running `{self.test_name}`" if self.test_name else ""
         lines = [
             f"Test binary `{self.binary_label}` died with {self.signal}"
@@ -178,6 +208,77 @@ class CrashSite:
                 "construction, a wrong cast target), which may not appear "
                 "above at all.")
         return "\n".join(lines)
+
+    def _render_chain_evidence(self) -> str:
+        """The chain-derived variant: no frame is shown because none exists —
+        saying so, and saying the blame is an inference, is the point."""
+        where = f" while running `{self.test_name}`" if self.test_name else ""
+        tests = ", ".join(f"`{t}`" for t in self.chain_tests)
+        lines = [
+            f"Test binary `{self.binary_label}` died with {self.signal}"
+            f"{where} — it never reported its remaining tests, and the crash "
+            "reproduces deterministically.",
+            "The sanitizer looked for the memory's origin and found NO "
+            "in-crate frame in any stack: access, free and allocation all "
+            "resolve to std/test code. That is the fingerprint of a REFCOUNT "
+            "or ownership-bookkeeping error (an Arc/Box under-increment, a "
+            "double `ptr::read`, a missing `mem::forget`) planted earlier: "
+            "the corrupted count only surfaces later, in std's drop glue at "
+            "the test's own drop sites.",
+            "This blame is CHAIN-DERIVED, not an observed frame: this fn is "
+            "on the construction chain the crashed test(s) "
+            f"({tests or 'unnamed'}) exercise. Re-derive this body from the "
+            "types, paying attention to every place it moves, clones, casts "
+            "or forgets an owned pointer or a reference count.",
+        ]
+        if self.raw_report:
+            lines.append(
+                "The detector's own report (std frames included — they show "
+                "WHAT was freed and dropped, which the crate code alone does "
+                "not):")
+            lines.append(self.raw_report)
+        return "\n".join(lines)
+
+
+def chain_derived_site(
+    binary_label: str,
+    test_name: str | None,
+    signal: str,
+    blamed: Iterable[FnLocator],
+    *,
+    derived_from_tests: Iterable[str] = (),
+    raw_report: str = "",
+) -> CrashSite:
+    """A :class:`CrashSite` whose blame is the crashed tests' construction
+    chain, for the crash class where frame filtering is structurally blind.
+
+    Built by the TDD driver ONLY when both hold: the oracle shrink reproduced
+    on an immediate re-sweep (the crash is deterministic — a transient must
+    not synthesize blame), and an origin-capable detector looked and placed
+    no frame in-crate (`origin_unattributed` — while a real frame exists,
+    frame blame decides and this constructor must not run). The blamed fns
+    are supplied by the caller because deriving them is attribution's job:
+    the union of fns attributed to the crashed tests plus the producers of
+    those fns' types — for `test_drop`, `Error::new` → `construct_from_std`
+    → the vtable install/drop family.
+
+    The site carries no frames on purpose. `blamed`/`blamed_locator` stay
+    None, so `blamed_locators()` — the set that convicts, crash-blocks and
+    immunizes other units — never contains a chain-derived blame: an
+    inference from attribution must rank below an observed frame and must
+    not acquire a frame's authority by riding its type."""
+    return CrashSite(
+        binary_label=binary_label,
+        test_name=test_name,
+        signal=signal or "fatal signal",
+        frames=(),
+        origin_frames=(),
+        raw_report=raw_report,
+        origin_capable=True,
+        provenance=PROVENANCE_CHAIN,
+        chain_blamed=tuple(sorted(set(blamed))),
+        chain_tests=tuple(sorted(set(derived_from_tests))),
+    )
 
 
 def _strip_generics(symbol: str) -> str:
@@ -358,12 +459,16 @@ def crash_evidence_by_locator(
     """Map every fn appearing in any site's frames to that site's rendered
     evidence — the innermost (blamed) frame first, but callers up the stack
     also receive the evidence: when the blamed fn's fix requires a consistent
-    scheme across its callers, each of them sees the same concrete crash."""
+    scheme across its callers, each of them sees the same concrete crash.
+    A chain-derived site has no frames; its keys are the chain-blamed fns —
+    the same evidence channel, one grade weaker, and the rendered text says
+    so."""
     out: dict[FnLocator, str] = {}
     for site in sites:
         text = site.render_evidence()
-        for fr in site.all_frames:
-            key = FnLocator(fr.file_rel, fr.fn_name)
+        keys = [FnLocator(fr.file_rel, fr.fn_name)
+                for fr in site.all_frames] + list(site.chain_blamed)
+        for key in keys:
             if key in out and text in out[key]:
                 continue
             out[key] = (out[key] + "\n\n" + text) if key in out else text
@@ -380,7 +485,12 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     unit' test written against the keys reads the blame as inside the caller
     and never fires — live 2026-08-09/10, `ext_context` (src/context.rs) was
     an access frame of the very `object_drop` (src/error.rs) fault it was
-    being charged for."""
+    being charged for.
+
+    Chain-derived sites contribute NOTHING here, by construction (their
+    `blamed_locator` is None): this set carries a frame's authority — it
+    convicts, crash-blocks and immunizes other units — and a blame inferred
+    from test attribution must not acquire that authority."""
     return frozenset(
         s.blamed_locator for s in sites if s.blamed_locator is not None)
 

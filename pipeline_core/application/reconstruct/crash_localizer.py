@@ -86,7 +86,18 @@ def _asan_site(
                  f"({len(origin)} raw frame(s)) — blaming NOBODY. The access "
                  "path is recorded; the fn that invalidated the memory is not "
                  "identified.")
-    return site if site.all_frames else None
+    # An origin-unattributed site survives even with ZERO in-crate frames:
+    # it still names the binary, the in-flight test and the raw report, and
+    # "an origin-capable detector looked and placed nothing in-crate" is the
+    # precondition the TDD driver's chain-derived blame synthesis keys on.
+    # Dropping it here is what starved that channel on the deterministic
+    # `test_downcast` heap-use-after-free (run `635043-5f7c61f5`, 2026-08-14):
+    # every stack resolved to std/tests frames, `all_frames` was empty, the
+    # driver saw no site at all, and the walk closed with the crash's only
+    # evidence living in a log line. A frame-less site that is NOT
+    # origin-unattributed is still dropped — it carries no evidence of any
+    # grade.
+    return site if (site.all_frames or site.origin_unattributed) else None
 
 
 def localize_crashes(

@@ -17,7 +17,11 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
     run_phase_c_tdd,
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
-from pipeline_core.domain.models import BuildCluster, ClusterFillResult
+from pipeline_core.domain.models import (
+    BuildCluster,
+    ClusterFillResult,
+    FnLocator,
+)
 from pipeline_core.domain.oracle_ledger import reconcile_sweep
 
 
@@ -83,6 +87,7 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
                 attribution_kwargs: list[dict[str, Any]],
                 checkpoints: list[int], events: list[tuple[str, dict]],
                 retrigger=None, reverse_map=None, localize=None,
+                escalate=None, fill=None, logs=None,
                 target_src_dir: Path | None = None,
                 ) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
@@ -102,18 +107,20 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         count_relevant_notes=lambda *a, **k: 0,
         effective_stalls=lambda budget, module: budget,
         emit=lambda ev, **k: events.append((ev, k.get("data") or {})),
-        log=lambda *a, **k: None,
+        log=(logs.append if logs is not None else (lambda *a, **k: None)),
         order_frontier=lambda eligible, counts: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=run_cargo,
         scan_unimplemented_for_cluster=lambda *a, **k: [],
         scan_unimplemented_functions=lambda *a, **k: [],
-        task2_fill_fns_one_by_one=lambda **kw: ClusterFillResult(attempts=1),
+        task2_fill_fns_one_by_one=fill or (
+            lambda **kw: ClusterFillResult(attempts=1)),
         checkpoint_fill_tree=lambda pd, cl, d, m: checkpoints.append(m.pass_count),
         active_test_inventory=inventory,
         retrigger_layout=retrigger,
         localize_crashes=localize,
+        escalate_to_producers=escalate,
     )
     return run_phase_c_tdd(
         deps, project_dir=tmp_path,
@@ -551,3 +558,133 @@ def test_inventory_is_walked_over_the_cluster_tree_not_the_workspace_root(
     assert seen, "the sweep never consulted the inventory"
     assert seen[0] == cluster_tree, (
         f"inventory walked {seen[0]}, not the cluster tree {cluster_tree}")
+
+
+def _unattributed_uaf_site(test_name: str = "t3"):
+    """A frames-empty origin-unattributed site — what the localizer returns
+    for the frame-blind crash class since it stopped dropping them."""
+    from pipeline_core.domain.crash_site import CrashSite
+    return CrashSite(
+        binary_label="tests/test_downcast.rs", test_name=test_name,
+        signal="AddressSanitizer: heap-use-after-free",
+        frames=(), origin_frames=(), origin_capable=True,
+        raw_report="freed by thread T0 here:\n    #0 free asan.cpp:52")
+
+
+def test_deterministic_unattributed_crash_synthesizes_chain_blame(
+        tmp_path: Path, monkeypatch) -> None:
+    # The frame-blind crash class end to end (run `635043-5f7c61f5`,
+    # 2026-08-14): shrink reproduces on the immediate re-sweep (deterministic)
+    # + the localizer's site is origin-unattributed with zero frames → the
+    # driver synthesizes a chain-derived blame (attributed fns + producers),
+    # arms the evidence pack, and hands the retrigger a CrashEvidence whose
+    # signature CHANGES — the closed walk's own stated unlock.
+    from dataclasses import replace as _dc_replace
+
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    evidences: list[Any] = []
+    fills: list[dict[str, Any]] = []
+    logs: list[str] = []
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
+        evidences.append(crash_evidence)
+        return RetriggerResult(fired=False, reason="walk closed")
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig,
+                reverse_map={"t3": {("src/error.rs", "new")}},
+                localize=lambda *a, **k: (_unattributed_uaf_site(),),
+                escalate=lambda src, tname, units: {
+                    FnLocator("src/error.rs", "construct_from_std"): {tname}},
+                fill=_fill, logs=logs)
+
+    chain_evs = [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
+    assert chain_evs, "chain-derived synthesis never fired"
+    assert chain_evs[0]["provenance"] == "chain_derived"
+    assert set(chain_evs[0]["blamed"]) == {
+        "src/error.rs::construct_from_std", "src/error.rs::new"}
+    assert any("CHAIN-DERIVED" in ln for ln in logs)
+
+    # The retrigger received the chain in its OWN field, and the signature
+    # moved off the blameless one the walk's refutations were booked under.
+    with_chain = [e for e in evidences
+                  if e is not None and e.chain_blamed]
+    assert with_chain, "no CrashEvidence carried the chain"
+    ev0 = with_chain[0]
+    assert ev0.chain_blamed == frozenset({
+        FnLocator("src/error.rs", "construct_from_std"),
+        FnLocator("src/error.rs", "new")})
+    assert FnLocator("src/error.rs", "construct_from_std") \
+        not in ev0.blamed_fns
+    assert crash_signature(ev0) != crash_signature(
+        _dc_replace(ev0, chain_blamed=frozenset()))
+
+    # The evidence pack armed: dispatch received the chain keys with the
+    # CHAIN-DERIVED text and the raw report, and the conviction channel
+    # (`crash_blamed`) stayed empty — an inference must not convict.
+    armed = [kw for kw in fills if kw.get("crash_evidence")]
+    assert armed, "no fill call carried crash evidence"
+    ce = armed[0]["crash_evidence"]
+    key = FnLocator("src/error.rs", "construct_from_std")
+    assert key in ce and "CHAIN-DERIVED" in ce[key]
+    assert "freed by thread T0" in ce[key]
+    assert key in armed[0]["tdd_frontier_keys"]
+    assert not armed[0].get("crash_blamed")
+
+
+def test_no_chain_blame_without_the_unattributed_site(
+        tmp_path: Path, monkeypatch) -> None:
+    # Negative control — the pre-fix driver input, reproduced by injection:
+    # the old localizer DROPPED the frames-empty site, so the driver saw an
+    # empty localization. Same deterministic crash, no synthesis, no armed
+    # evidence, and every CrashEvidence stays on the blameless signature the
+    # walk closed under (the recorded outcome of run `635043-5f7c61f5`).
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    evidences: list[Any] = []
+    fills: list[dict[str, Any]] = []
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
+        evidences.append(crash_evidence)
+        return RetriggerResult(fired=False, reason="walk closed")
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                retrigger=_retrig,
+                reverse_map={"t3": {("src/error.rs", "new")}},
+                localize=lambda *a, **k: (),
+                escalate=lambda src, tname, units: {
+                    FnLocator("src/error.rs", "construct_from_std"): {tname}},
+                fill=_fill)
+
+    assert not [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
+    assert all(e is None or not e.chain_blamed for e in evidences)
+    # One unchanged signature across every gate arrival = the walk's
+    # refutations and zero-payoff streak keep applying; nothing re-opens.
+    sigs = {crash_signature(e) for e in evidences if e is not None}
+    assert len(sigs) == 1
+    assert not any(kw.get("crash_evidence") for kw in fills)

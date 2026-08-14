@@ -190,10 +190,12 @@ def test_vllm_ships_a_cap_at_all() -> None:
 
 
 def test_the_default_cap_lies_in_the_measured_empty_band() -> None:
-    """Across 226 traces the reasoning-length distribution is bimodal: 0-36,570
-    and 69,830-152,088, with a verified empty band between. A cap inside it
-    separates the two populations, so the exact value does not matter — which is
-    the claim this test keeps true as the value moves."""
+    """The reasoning-length distribution is bimodal: healthy calls end below
+    the band's low edge (Muse@high natural finishes max 77,595 chars, measured
+    2026-08-13 uncapped on retained anyhow prompts), runaways start above its
+    high edge (smallest recorded truncation 121,109 chars). A cap inside the
+    band separates the two populations, so the exact value does not matter —
+    which is the claim this test keeps true as the value moves."""
     low, high = VLLM_THINK_EMPTY_BAND
     cap = VLLMTransport().spec().thinking_char_cap
     assert cap is not None and low <= cap <= high, \

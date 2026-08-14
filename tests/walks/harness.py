@@ -31,6 +31,16 @@ stated here rather than hidden in the fixture:
   retrigger fires on.
 * *Test identity.* The oracle is `t1..tN` here, not the crate's real test names.
   A walk asserts on counts and decisions; nothing in it turns on which test.
+* *Chronic vanished names.* `oracle_size` reads the largest oracle any
+  iteration REPORTED, which under-counts a run whose crash never heals: run
+  `635043-5f7c61f5` reported 101 on every intact sweep because 5 of the
+  106-test inventory vanished on EVERY sweep (the deterministic
+  `test_downcast` fault — debt 167's "capped at 101 by design"). Replaying
+  that run at inventory 101 serves sweeps with nothing vanished, so the
+  crash machinery under test is never armed. A walk about that machinery
+  passes `inventory=` (the true count) and `chronic_vanished=` (how many
+  names never report) to `replay`; recorded pass/fail rows are still served
+  verbatim — the model only adds the names that never appear.
 
 Past the first iteration where the fix changes what the loop does, the recording
 stops describing anything real — the pipeline would have filled different fns
@@ -77,14 +87,22 @@ def oracle_size(walk: dict[str, Any]) -> int:
                default=0)
 
 
-def build_sweeps(walk: dict[str, Any]) -> list[str]:
+def build_sweeps(walk: dict[str, Any], *, inventory: int | None = None,
+                 chronic_vanished: int = 0) -> list[str]:
     """One cargo output per LOOP iteration, in order.
 
     Index 0 is the synthetic entry sweep at `entry_best`; the walk's own
     iterations follow, so loop iteration N+1 replays walk iteration N.
+
+    `inventory`/`chronic_vanished` are the chronic-crash model (see the
+    module docstring): recorded rows are served verbatim — a recorded
+    `passed`/`failed` pair already reflects the chronic shrink — while the
+    synthetic entry sweep and the swallowed crash iterations are rendered
+    against the reporting ceiling `inventory - chronic_vanished`.
     """
-    inventory = oracle_size(walk)
-    sweeps = [render_sweep(walk["entry_best"], inventory)]
+    inv = inventory if inventory is not None else oracle_size(walk)
+    reporting = inv - chronic_vanished
+    sweeps = [render_sweep(min(walk["entry_best"], reporting), reporting)]
     held = walk["entry_best"]
     for it in walk["iterations"]:
         if "passed" in it:
@@ -95,11 +113,11 @@ def build_sweeps(walk: dict[str, Any]) -> list[str]:
             # recovered from the recorded `binaries:` breakdown: the recorded
             # score over a short oracle.
             held = it["crash_passed"]
-            sweeps.append(render_sweep(min(held, inventory - 1), inventory - 1))
+            sweeps.append(render_sweep(min(held, reporting - 1), reporting - 1))
         else:
             # The iteration whose emit a retrigger swallowed: a crashed binary
             # holding the previous score over a short oracle.
-            sweeps.append(render_sweep(min(held, inventory - 1), inventory - 1))
+            sweeps.append(render_sweep(min(held, reporting - 1), reporting - 1))
     return sweeps
 
 
@@ -153,7 +171,9 @@ def scripted_retrigger(src: Path, walk: dict[str, Any], logs: list[str]):
 def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            events: list[tuple[str, dict]], max_stalls: str = "3",
            refill_max: str = "99", reset_returns: list[str] | None = None,
-           ) -> list[str]:
+           retrigger=None, localize=None, escalate=None, reverse_map=None,
+           fill=None, inventory: int | None = None,
+           chronic_vanished: int = 0) -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
     The cargo stub reads the loop's own `iter N: running cargo test` line to
@@ -169,8 +189,9 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
     # imported by collection, and the driver deps helper lives in a test module.
     from tests.test_tdd_ratchet import _driver_deps
 
-    sweeps = build_sweeps(walk)
-    inventory = oracle_size(walk)
+    sweeps = build_sweeps(walk, inventory=inventory,
+                          chronic_vanished=chronic_vanished)
+    inventory = inventory if inventory is not None else oracle_size(walk)
     names = frozenset(f"t{i}" for i in range(1, inventory + 1))
     logs: list[str] = []
     cur = [0]
@@ -197,9 +218,13 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
     cluster_name = walk["cluster"]
     run_phase_c_tdd(
         _driver_deps(_cargo, lambda pd, cl, stems, lib=False: (inventory, names),
-                     events, scripted_retrigger(src, walk, logs), logs=logs,
+                     events,
+                     retrigger if retrigger is not None
+                     else scripted_retrigger(src, walk, logs), logs=logs,
                      frontier={FnLocator("src/a.rs", "f"): {"t2"}},
-                     fills_per_iter=2, reset_returns=reset_returns),
+                     fills_per_iter=2, reset_returns=reset_returns,
+                     localize=localize, escalate=escalate,
+                     reverse_map=reverse_map, fill=fill),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
         cluster=BuildCluster(
