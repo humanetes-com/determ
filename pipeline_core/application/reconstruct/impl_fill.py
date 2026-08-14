@@ -102,6 +102,7 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    honoured_guidance_line,
     impossibility_claim_is_unfounded,
     judge_guidance,
     stamp_conviction,
@@ -1362,10 +1363,17 @@ def fill_impl_blocks(
         # clusters with different private layouts, so guidance naming a field
         # this layout lacks is withheld rather than shown (it would steer every
         # attempt into the same E0609/E0560 on the field that does not exist).
+        # Honoured records are LOGGED: the store steers prompts silently, and a
+        # poisoned record's only other trace is its downstream test failures.
+        _prior_key = _retro_key(block.file, "*impl*", block.container)
+        _prior_rec = retros_cache.get(_prior_key, {})
         prior_retro = admissible_guidance(
-            retros_cache.get(_retro_key(block.file, "*impl*", block.container), {}),
-            snapshot, evidence=_block_evidence,
+            _prior_rec, snapshot, evidence=_block_evidence,
             anchor_types=anchor_types_for_container(block.container))
+        # The line carries the STORE key so the grep lands on the record.
+        if (_hline := honoured_guidance_line(
+                _prior_key, _prior_rec, prior_retro)):
+            _log(f"  {_hline}")
         notes_section = ""
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
@@ -2139,11 +2147,16 @@ def fill_impl_blocks(
             if not (_retry_informed and _retro_round < _retro_rounds_max):
                 break
             # Fresh guidance for the next round's prompt (the closure reads
-            # this enclosing binding).
+            # this enclosing binding).  Logged like the pass-start read: this
+            # is the record that steers the retry the line below announces.
+            _prior_key = _retro_key(block.file, "*impl*", block.container)
+            _prior_rec = retros_cache.get(_prior_key, {})
             prior_retro = admissible_guidance(
-                retros_cache.get(_retro_key(block.file, "*impl*", block.container), {}),
-                snapshot, evidence=_block_evidence,
+                _prior_rec, snapshot, evidence=_block_evidence,
                 anchor_types=anchor_types_for_container(block.container))
+            if (_hline := honoured_guidance_line(
+                    _prior_key, _prior_rec, prior_retro)):
+                _log(f"  {_hline}")
             _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
                  "kept the error floor improving — re-entering the fix loop "
                  "with the new guidance.")

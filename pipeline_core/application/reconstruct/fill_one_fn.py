@@ -67,6 +67,7 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    honoured_guidance_line,
     judge_guidance,
     stamp_conviction,
 )
@@ -484,6 +485,27 @@ class FillOneFn:
                     fr_path=ctx.fr_path,
                 )
             else:
+                # prior retrospective guidance — start from "what to try
+                # instead" rather than naive retry-with-errors. Judged against
+                # THIS attempt's file text: the store is shared by clusters
+                # with different private layouts, so guidance that names a
+                # field this layout lacks is withheld, not shown. Every
+                # honoured record is LOGGED: the store steers prompts silently,
+                # and a poisoned record's only other trace is its downstream
+                # test failures (the ContextError-source `None` guidance,
+                # 2026-08-13/14, was visible in no log for two days).
+                _retro_key = self.retros.retro_key(rel_file, fn_name, container)
+                _retro_rec = ctx.retros_cache.get(_retro_key, {})
+                _retro_guidance = admissible_guidance(
+                    _retro_rec, cur_text, evidence=_evidence,
+                    anchor_types=_anchor_types)
+                # The line carries the STORE key (file::fn::container), not a
+                # display name: `fn new` exists under three containers, and
+                # the whole point is that the grep lands on the one record
+                # that steered this prompt.
+                if (_hline := honoured_guidance_line(
+                        _retro_key, _retro_rec, _retro_guidance)):
+                    self.tel.log(f"  {_hline}")
                 prompt = build_per_fn_fix_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                     test_blocks=test_blocks, module_name=ctx.module_name,
@@ -493,16 +515,7 @@ class FillOneFn:
                         macros=ctx.macros_section, notes=notes_section,
                         container=container, types=_types_section_eff,
                         invariants=ctx.invariants_section,
-                        # prior retrospective guidance — start from "what to
-                        # try instead" rather than naive retry-with-errors. Judged
-                        # against THIS attempt's file text: the store is shared by
-                        # clusters with different private layouts, so guidance that
-                        # names a field this layout lacks is withheld, not shown.
-                        retrospective_guidance=admissible_guidance(
-                            ctx.retros_cache.get(
-                                self.retros.retro_key(rel_file, fn_name, container),
-                                {}), cur_text, evidence=_evidence,
-                            anchor_types=_anchor_types),
+                        retrospective_guidance=_retro_guidance,
                         # hoist already-filled sibling fn impls (same
                         # name, different container) — best target-body source.
                         siblings=self.prompt.collect_sibling_filled_bodies(

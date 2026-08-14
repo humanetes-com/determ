@@ -92,6 +92,11 @@ from pipeline_core.domain.test_results import (
     parse_test_counts,
     summarize_test_binaries,
 )
+from pipeline_core.domain.zero_payoff import (
+    SweepOutcome,
+    paid_off,
+    zero_payoff_streak,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +492,20 @@ def run_phase_c_tdd(
     # The chain set the evidence pack was last armed with, so an unchanged
     # inference re-arms silently.
     _chain_blamed_last: frozenset[FnLocator] = frozenset()
+    # Shadow zero-payoff detector (domain/zero_payoff.py): the class-general
+    # stall condition — same frontier dispatched K sweeps, nothing bought on
+    # any axis (pass, crash class, frontier). LOGS ONLY; nothing reads it.
+    # `_zp_planned` holds the previous sweep's dispatch set + readings so this
+    # sweep can judge what that spend bought; grace-window sweeps are skipped
+    # entirely (their deltas measure a deliberate re-stub, the same exemption
+    # every score consumer applies). `_zp_fired_on` dedupes the log line per
+    # target set — a standing condition is one line, not one per sweep.
+    _zp_history: tuple[SweepOutcome, ...] = ()
+    _zp_planned: tuple[frozenset[str], int, frozenset[str]] | None = None
+    _zp_fired_on: frozenset[str] | None = None
+    # One name for the window so the fire line always states the count the
+    # streak was actually judged on; tuning happens in step-2 calibration.
+    _zp_window = 3
     _crash_retrigger_after = int(
         os.getenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2"))
     # The window after a retrigger attempt in which the deliberate re-stub —
@@ -2065,6 +2084,39 @@ def run_phase_c_tdd(
             "improved": improved, "stall": stall,
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
         })
+
+        # Shadow zero-payoff reading: judge what the PREVIOUS sweep's dispatch
+        # bought, then record this sweep's plan. Grace sweeps neither judge
+        # nor plan — their deltas measure the retrigger's deliberate re-stub.
+        _zp_targets = frozenset(f"{k[0]}::{k[1]}" for k in frontier_keys)
+        _zp_vanished = frozenset(_oracle.vanished)
+        if _grace.bodies_in_flight:
+            _zp_planned = None
+        else:
+            if _zp_planned is not None:
+                _p_targets, _p_pass, _p_vanished = _zp_planned
+                _zp_history = (*_zp_history[-7:], SweepOutcome(
+                    targets=_p_targets,
+                    paid=paid_off(pass_count - _p_pass,
+                                  _zp_vanished != _p_vanished,
+                                  _zp_targets != _p_targets)))
+                _zp_hit = zero_payoff_streak(_zp_history, window=_zp_window)
+                if _zp_hit is not None and _zp_hit != _zp_fired_on:
+                    _zp_fired_on = _zp_hit
+                    deps.log(
+                        f"  {tag} [phase-c/zero-payoff] SHADOW: {_zp_window} "
+                        f"judged sweep(s) dispatched the identical "
+                        f"{len(_zp_hit)}-fn frontier and none bought pass, "
+                        "crash-class or frontier movement — the "
+                        "class-general stall condition (scripts/"
+                        "pattern_census.py). Shadow mode: logged, no action.")
+                    deps.emit("phase_c.tdd.zero_payoff_shadow", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "targets": sorted(_zp_hit)[:40],
+                        "target_count": len(_zp_hit)})
+                elif _zp_hit is None:
+                    _zp_fired_on = None
+            _zp_planned = (_zp_targets, pass_count, _zp_vanished)
 
         # Re-fill targets this iter = frontier fns already filled at iter start
         # (not stubs) → the engine will behaviorally re-fill them.

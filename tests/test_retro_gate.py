@@ -366,3 +366,33 @@ def test_negative_control_the_pre_fix_gate_admits_all_three() -> None:
     assert not rec.get(GUIDANCE_FROM_HOLLOW_TREE)
     assert layout_safe_guidance(rec["guidance"], layout) == rec["guidance"]
     _ = ConvictionEvidence(frozenset())
+
+
+# ---------------------------------------------------------------------------
+# The honoured-record log line: the observability floor for silently-steering
+# guidance. A record with no log signature steered the ContextError `source`
+# body to `None` for two days (2026-08-13/14) and was visible only through
+# its downstream test failures.
+
+def test_honoured_guidance_line_names_record_and_premise() -> None:
+    from pipeline_core.domain.retro_gate import honoured_guidance_line
+    rec = {"category": "TRAIT_BOUND_VIOLATION", "retrospective_count": 2,
+           "blocked_on": ["provide", "source"]}
+    line = honoured_guidance_line("src/context.rs::source", rec,
+                                  "Change the body to X because Y")
+    assert "[phase-c/retro-honoured]" in line
+    assert "src/context.rs::source" in line
+    assert "TRAIT_BOUND_VIOLATION" in line
+    assert "blocked_on[2]" in line
+    assert "Change the body to X" in line
+
+
+def test_honoured_guidance_line_marks_a_missing_tree_premise() -> None:
+    from pipeline_core.domain.retro_gate import honoured_guidance_line
+    line = honoured_guidance_line("u", {"category": "X"}, "do the thing")
+    assert "NO tree premise" in line
+
+
+def test_no_line_when_nothing_was_honoured() -> None:
+    from pipeline_core.domain.retro_gate import honoured_guidance_line
+    assert honoured_guidance_line("u", {"category": "X"}, "") == ""

@@ -189,6 +189,45 @@ vtable functions referenced in the body ... are not implemented in the crate", a
 `context_chain_drop_rest` and `construct` were all filled on disk by the time it
 mattered. Check a conviction's stated premise against the tree before believing it.
 
+## A recurring finding is not a finding — check the record before diagnosing
+
+The costliest loop in this project is not in the pipeline; it is the working
+ritual around it: a run stalls → the stall is diagnosed from scratch → the
+diagnosis is confirmed as "recurring" → a bespoke mechanism ships → the next
+instance of the same class starts the ritual over. Measured 2026-08-14
+(`scripts/pattern_census.py` over 34 runs): the frame-blind crash blamed NOBODY
+in 8 runs across ten days before it was named; the four chain tests escalated
+to the identical producer set in 11 consecutive runs; `test_large_alignment`
+in 29 of 34 runs across 18 days. Every one of those instances was individually
+"detected", discussed, and agreed to be recurring — the detection itself
+recurred, and each pass through the ritual cost a session and shipped one more
+run-scoped mechanism against a pathology that lives across runs.
+
+**The rule.** Before diagnosing any stall, crash class, burn, or lockout as
+new, interrogate the record first — it costs two commands:
+
+    python scripts/pattern_census.py        # the five classes + cross-run chronics
+    grep -n "<symptom>" technical_debt.md   # the entry that already names it
+
+If the class is already recorded, the deliverables CHANGE. Do not re-derive
+the diagnosis; cite the entry. Do not confirm "yes, this recurs"; the census
+row already proves it, and restating it is the ritual. Do not design a sibling
+mechanism; the standing consolidation program (debt 171: observability →
+shadow detector → lever vocabulary → diagnostician) exists precisely so that
+recurring classes get one answer — advance it, or state concretely why the
+instance falls outside it. The one genuinely new question a recurrence raises
+is: **why did the existing answer not fire?** That gap — a detector that
+missed, a reaction scoped to the wrong lifetime, a class with no log
+signature — is the finding. Everything else is re-reading.
+
+The tells that the ritual has started: a diagnosis that re-derives from raw
+logs a conclusion the tracker already states with run ids; the sentence "this
+is the same issue as ..." arriving as a discovery rather than as the premise;
+a proposed fix whose trigger condition matches a census class. On any of
+them, stop and run the census. A new pathology no census detector catches is
+real work twice over: fix it AND extend `pattern_census.py` so its next
+instance is a lookup, not an investigation.
+
 ## The crate under reconstruction is not in `src/`, and a path-scoped negative proves nothing
 
 `src/` in the workspace is a shell: after strip it holds `*.gen_tests_*.rs` and a

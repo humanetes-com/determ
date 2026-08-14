@@ -460,6 +460,42 @@ def admissible_guidance(
     return layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
 
 
+def honoured_guidance_line(
+    unit_key: str, record: Mapping[str, Any] | None, guidance: str,
+) -> str:
+    """One log line per HONOURED retro record at prompt-build, or "" when
+    nothing was honoured.
+
+    This is the observability floor for the poisoned-evidence class: a stored
+    record steers every re-fill of its unit silently — the store is consulted
+    at prompt-build and echoed nowhere, so a record whose premise the tree has
+    outgrown has NO log signature at all. The instance that proved it: the
+    `context.rs` ContextError-source guidance forcing the body to `None`
+    (written 2026-08-13, refuted by the frozen tree the whole time) steered
+    ten tests for two days and was visible only through its downstream symptom
+    — the four chain tests escalating to an identical producer set in 11
+    consecutive runs (`scripts/pattern_census.py` chronics table). With this
+    line, "which record steered this prompt" is a grep instead of a forensic
+    reconstruction, and a stalled unit's log carries the record key to check
+    against the tree.
+
+    Shows the premise class (recorded blockers vs none) because that is what
+    decides whether the record can ever expire on its own evidence
+    (`impossibility_claim_is_unfounded`), and the guidance HEAD verbatim so a
+    reader recognizes the record without opening the store."""
+    if not guidance:
+        return ""
+    rec = record or {}
+    blocked = rec.get("blocked_on")
+    premise = (f"blocked_on[{len(blocked)}]" if isinstance(blocked, list)
+               and blocked else "NO tree premise")
+    head = " ".join(guidance.split())[:90]
+    return (f"[phase-c/retro-honoured] {unit_key}: "
+            f"category={rec.get('category') or '?'} "
+            f"rounds={rec.get('retrospective_count') or 0} {premise} "
+            f"guidance: {head}")
+
+
 def stamp_conviction(
     record: dict[str, Any],
     provenance: RetroProvenance,
