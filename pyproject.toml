@@ -103,9 +103,9 @@ layers = [
 ]
 
 [[tool.mypy.overrides]]
-# The extracted package is new and clean — held to the FULL strict flag set (P0 of
-# the FINAL-RESULT PLAN). `strict = true` isn't valid in a per-module override, so
-# the flags are enumerated. This is now the complete `--strict` set for the package.
+# The extracted package is new and clean — held to the FULL strict flag set.
+# `strict = true` isn't valid in a per-module override, so the flags are
+# enumerated. This is the complete `--strict` set for the package.
 module = "pipeline_core.*"
 strict_optional = true
 disallow_untyped_defs = true
@@ -118,7 +118,33 @@ no_implicit_optional = true
 warn_unused_ignores = true
 strict_equality = true
 extra_checks = true
-no_implicit_reexport = true  # P0 complete (P5 done): every cross-module name must be
-                             # an explicit re-export; pipeline.py still imports only
-                             # names the package genuinely defines/re-exports.
+no_implicit_reexport = true  # every cross-module name must be an explicit re-export;
+                             # pipeline.py imports only names the package genuinely
+                             # defines or re-exports.
 warn_unreachable = true  # beyond strict: dead branches (e.g. impossible isinstance) are bugs
+
+[[tool.mypy.overrides]]
+# The OPTIONAL backends are typed as Any for everyone, whether or not the box
+# they run on has them installed.
+#
+# Why: mypy's answer for these modules otherwise depends on what happens to be in
+# site-packages, and `warn_unused_ignores` (above) turns that into a hard error on
+# one machine and silence on another. On 2026-08-15 the GitHub push failed the
+# `mypy` step alone: CI installs `requirements-base.txt` (openai, python-dotenv,
+# huggingface_hub) and nothing else, so `transformers` was missing there,
+# `BitsAndBytesConfig(...)` in adapters/llm_transports.py was a call on Any, and
+# the `# type: ignore[no-untyped-call]` the local venv needs became an unused
+# ignore. `bash check.sh` was green on the same commit — the local venv carries
+# torch and transformers for the HF transport, so the ignore was live there.
+#
+# `follow_imports = "skip"` (not just `ignore_missing_imports`) is what makes the
+# two environments agree: an INSTALLED module is skipped too, so the types are
+# identical either way. The cost is deliberate — no type checking of our calls
+# into torch/transformers/ollama/grep_ast. Installing them in CI is the other
+# way to close the gap and it costs a multi-gigabyte torch download per run.
+#
+# `gdb` is the debugger's embedded module: it exists only inside a gdb process
+# and is never installable, so it is Any everywhere by construction.
+module = ["torch.*", "transformers.*", "ollama.*", "grep_ast.*", "gdb"]
+ignore_missing_imports = true
+follow_imports = "skip"

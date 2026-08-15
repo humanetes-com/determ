@@ -4,7 +4,7 @@
 # Tool config (ruff rule set, mypy strictness) lives in pyproject.toml; this script just
 # runs the gates and FAILS on any finding. For the slower cargo coverage smoke, see test.sh.
 #
-# Parallel layout: the four static gates run concurrently (outputs buffered to temp
+# Parallel layout: the static gates run concurrently (outputs buffered to temp
 # files so the log stays readable), then pytest runs on all cores via xdist
 # (--dist loadfile: tests in one file share a worker — file-local fixtures stay safe).
 set -euo pipefail
@@ -36,7 +36,20 @@ PID_EXTRACTION=$!
 PID_LOC=$!
 # The extractor's own unit tests ran in NO gate before — a rendering regression
 # there (e.g. definitions the t1.5 splice can never locate) only surfaced live.
-(cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo test --quiet) \
+#
+# The other three gates mirror the `rust` job of .github/workflows/ci.yml exactly,
+# because nothing local ran them and the push of 2026-08-15 failed on `cargo fmt
+# --check` with 21 diff hunks across 5 files (src/lib.rs alone held 15) that had
+# accumulated unseen. clippy/test/doc share one cargo build lock, so they run in
+# sequence inside a single gate rather than fighting each other for it; fmt needs
+# no build at all and gets its own, so a formatting failure reads on its own line.
+(cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo fmt --check) \
+    > "$GATE_TMP/rustfmt.out" 2>&1 &
+PID_RUSTFMT=$!
+(cd "$SCRIPT_DIR/tools/skeleton_extractor" \
+    && cargo clippy --all-targets --quiet -- -D warnings \
+    && cargo test --quiet \
+    && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --quiet) \
     > "$GATE_TMP/cargo.out" 2>&1 &
 PID_CARGO=$!
 
@@ -52,13 +65,14 @@ gate() {  # gate <name> <pid> <outfile>
     fi
 }
 
-echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants)..."
+echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, rust)..."
 gate "mypy" "$PID_MYPY" "$GATE_TMP/mypy.out"
 gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
 gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
-gate "skeleton-extractor cargo test" "$PID_CARGO" "$GATE_TMP/cargo.out"
+gate "skeleton-extractor cargo fmt --check" "$PID_RUSTFMT" "$GATE_TMP/rustfmt.out"
+gate "skeleton-extractor cargo clippy + test + doc" "$PID_CARGO" "$GATE_TMP/cargo.out"
 [ "$FAILED" -eq 0 ] || exit 1
 
 echo ""

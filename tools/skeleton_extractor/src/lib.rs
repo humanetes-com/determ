@@ -141,11 +141,8 @@ mod tests {
     fn a_plain_const_is_not_mistaken_for_a_block() {
         // Only a block initializer holds items; a value initializer must not
         // be walked into, and nothing about ordinary consts may change.
-        let recs = enumerate_fns_in_source(
-            "const N: usize = 3; pub fn f() -> usize { N }",
-            "t.rs",
-        )
-        .unwrap();
+        let recs = enumerate_fns_in_source("const N: usize = 3; pub fn f() -> usize { N }", "t.rs")
+            .unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].fn_name, "f");
     }
@@ -170,7 +167,10 @@ mod tests {
         let mut types2 = std::collections::BTreeMap::new();
         collect_types_and_methods(&b.items, "lib.rs", &mut types2);
         collect_types_and_methods(&a.items, "chain.rs", &mut types2);
-        assert!(types2.get("Chain").unwrap().is_exactly_pub, "walk order decided");
+        assert!(
+            types2.get("Chain").unwrap().is_exactly_pub,
+            "walk order decided"
+        );
     }
 
     #[test]
@@ -207,7 +207,10 @@ mod tests {
         for name in ["Counter", "Reason"] {
             let def = &out[name].definition;
             assert!(def.contains("///"), "{name}: doc comment lost:\n{def}");
-            assert!(!def.contains("doc ="), "{name}: token-soup doc attr:\n{def}");
+            assert!(
+                !def.contains("doc ="),
+                "{name}: token-soup doc attr:\n{def}"
+            );
             assert!(
                 strip(&rendered).contains(&strip(def)),
                 "{name}: definition not locatable in skeleton rendering:\n{def}\n---\n{rendered}"
@@ -292,13 +295,19 @@ mod tests {
                    #[cfg(test)] mod tests { #[test] fn t() { assert_eq!(super::a(), 1); } }";
         let out = skeletonise_str(src);
         assert!(out.contains("mod tests"), "test mod kept: {out}");
-        assert!(out.contains("assert_eq"), "test body intact (not stubbed): {out}");
-        assert!(out.contains("unimplemented"), "impl fn `a` IS stubbed: {out}");
+        assert!(
+            out.contains("assert_eq"),
+            "test body intact (not stubbed): {out}"
+        );
+        assert!(
+            out.contains("unimplemented"),
+            "impl fn `a` IS stubbed: {out}"
+        );
     }
 
     #[test]
     fn detects_test_attributes() {
-        use syn::{parse_str, ItemFn};
+        use syn::{ItemFn, parse_str};
         let cases = [
             ("#[test] fn t() {}", true),
             ("#[tokio::test] async fn t() {}", true),
@@ -493,14 +502,27 @@ mod tests {
         ])
         .unwrap();
         // Exactly two cap_limit defs survive.
-        assert_eq!(out.matches("fn cap_limit").count(), 2, "two cfg-variant defs: {out}");
+        assert_eq!(
+            out.matches("fn cap_limit").count(),
+            2,
+            "two cfg-variant defs: {out}"
+        );
         // The filled body from each live cluster is kept; no stub survives.
         assert!(out.contains("255"), "extra_cap body kept: {out}");
         assert!(out.contains("64"), "stable body kept: {out}");
-        assert!(!out.contains("unimplemented"), "no stub may survive merge: {out}");
+        assert!(
+            !out.contains("unimplemented"),
+            "no stub may survive merge: {out}"
+        );
         // No OR-combined garbage cfg, and the correct per-variant gates are present.
-        assert!(!out.replace(' ', "").contains("any(any("), "no any(x, not(x)) garbage: {out}");
-        assert!(out.contains("not(any(extra_cap"), "not-variant gate kept: {out}");
+        assert!(
+            !out.replace(' ', "").contains("any(any("),
+            "no any(x, not(x)) garbage: {out}"
+        );
+        assert!(
+            out.contains("not(any(extra_cap"),
+            "not-variant gate kept: {out}"
+        );
     }
 
     #[test]
@@ -520,15 +542,27 @@ mod tests {
             }
         "#;
         let out = merge_cluster_files(vec![
-            ClusterFile { name: "stable".into(), source: tests_src.into(),
-                          cfg_gate: "not(any(extra_cap, feature = \"extra_cap\"))".into() },
-            ClusterFile { name: "extra_cap".into(), source: tests_src.into(),
-                          cfg_gate: "any(extra_cap, feature = \"extra_cap\")".into() },
+            ClusterFile {
+                name: "stable".into(),
+                source: tests_src.into(),
+                cfg_gate: "not(any(extra_cap, feature = \"extra_cap\"))".into(),
+            },
+            ClusterFile {
+                name: "extra_cap".into(),
+                source: tests_src.into(),
+                cfg_gate: "any(extra_cap, feature = \"extra_cap\")".into(),
+            },
         ])
         .unwrap();
         let flat = out.replace([' ', '\n'], "");
-        assert!(flat.contains("assert_eq!(cap_limit(),64)"), "default oracle intact: {out}");
-        assert!(flat.contains("assert_eq!(cap_limit(),255)"), "extra_cap oracle intact: {out}");
+        assert!(
+            flat.contains("assert_eq!(cap_limit(),64)"),
+            "default oracle intact: {out}"
+        );
+        assert!(
+            flat.contains("assert_eq!(cap_limit(),255)"),
+            "extra_cap oracle intact: {out}"
+        );
         assert_eq!(out.matches("fn default_cap_limit").count(), 1);
         assert_eq!(out.matches("fn extra_cap_limit").count(), 1);
     }
@@ -701,8 +735,10 @@ mod tests {
         )
         .unwrap();
         let recs = enumerate_mods_in_file(&tmp.join("lib.rs"), &tmp).unwrap();
-        let by_name: std::collections::BTreeMap<_, _> =
-            recs.iter().map(|m| (m.name.as_str(), m.vis.as_str())).collect();
+        let by_name: std::collections::BTreeMap<_, _> = recs
+            .iter()
+            .map(|m| (m.name.as_str(), m.vis.as_str()))
+            .collect();
         assert_eq!(by_name["pub_mod"], "public");
         assert_eq!(by_name["crate_mod"], "restricted");
         assert_eq!(by_name["private_mod"], "private");
@@ -751,9 +787,11 @@ mod tests {
         );
         // Paths stay crate-relative through the link, which is what the
         // inventory's per-file index is keyed on.
-        let files: std::collections::BTreeSet<_> =
-            recs.iter().map(|r| r.file.as_str()).collect();
-        assert!(files.contains("tests/t.rs"), "unexpected rel paths: {files:?}");
+        let files: std::collections::BTreeSet<_> = recs.iter().map(|r| r.file.as_str()).collect();
+        assert!(
+            files.contains("tests/t.rs"),
+            "unexpected rel paths: {files:?}"
+        );
     }
 
     // ── the cluster axis, the anonymous const, the comments and the preference ──
@@ -793,7 +831,10 @@ mod tests {
         let out = merge_cluster_files(two_clusters(&mk("1"), &mk("2"))).unwrap();
         assert_eq!(out.matches("fn root_cause").count(), 2, "both kept:\n{out}");
         assert!(out.contains('1') && out.contains('2'), "{out}");
-        assert!(out.contains("egma"), "each variant gated by cluster:\n{out}");
+        assert!(
+            out.contains("egma"),
+            "each variant gated by cluster:\n{out}"
+        );
     }
 
     #[test]
@@ -821,7 +862,11 @@ mod tests {
         let src = "#[cfg(probe)]\nconst _: () = { let _x = 1; };\n\
                    #[cfg(probe)]\nconst _: Option<&str> = option_env!(\"BOOTSTRAP\");\n";
         let out = merge_cluster_files(two_clusters(src, src)).unwrap();
-        assert_eq!(out.matches("const _").count(), 2, "both consts kept:\n{out}");
+        assert_eq!(
+            out.matches("const _").count(),
+            2,
+            "both consts kept:\n{out}"
+        );
         assert!(out.contains("BOOTSTRAP"), "{out}");
     }
 
@@ -856,9 +901,18 @@ mod tests {
             prefer_cluster: Some("nightly".into()),
         };
         let out = merge_cluster_files_with(two_clusters(&mk("1"), &mk("2")), &opts).unwrap();
-        assert_eq!(out.text.matches("fn object_downcast").count(), 1, "{}", out.text);
+        assert_eq!(
+            out.text.matches("fn object_downcast").count(),
+            1,
+            "{}",
+            out.text
+        );
         assert!(out.text.contains('1'), "nightly's body:\n{}", out.text);
-        assert!(!out.text.contains('2'), "stable's body survived:\n{}", out.text);
+        assert!(
+            !out.text.contains('2'),
+            "stable's body survived:\n{}",
+            out.text
+        );
         assert_eq!(out.preferred, vec!["fn::object_downcast -> nightly"]);
     }
 
@@ -875,8 +929,16 @@ mod tests {
             prefer_cluster: Some("nightly".into()),
         };
         let out = merge_cluster_files_with(two_clusters(nightly, stable), &opts).unwrap();
-        assert!(out.preferred.is_empty(), "declaration preferred: {:?}", out.preferred);
-        assert!(out.text.contains("egma"), "both variants gated:\n{}", out.text);
+        assert!(
+            out.preferred.is_empty(),
+            "declaration preferred: {:?}",
+            out.preferred
+        );
+        assert!(
+            out.text.contains("egma"),
+            "both variants gated:\n{}",
+            out.text
+        );
     }
 
     #[test]

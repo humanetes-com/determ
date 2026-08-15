@@ -248,7 +248,10 @@ pub(crate) fn attrs_have_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().segments.last().is_some_and(|seg| {
             let id = seg.ident.to_string();
-            id == "test" || id == "rstest" || id == "parameterized" || id == "test_case"
+            id == "test"
+                || id == "rstest"
+                || id == "parameterized"
+                || id == "test_case"
                 || id == "serial"
         })
     })

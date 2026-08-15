@@ -89,9 +89,7 @@ fn item_kind_name(item: &syn::Item) -> (String, String) {
         // anonymous const, and the merged output carried it zero times — an
         // item every input held, emitted never. Identless items are keyed by
         // content, exactly as `Item::Macro` below already does.
-        syn::Item::Const(c) if c.ident == "_" => {
-            ("const".to_string(), token_hash(&quote!(#c)))
-        }
+        syn::Item::Const(c) if c.ident == "_" => ("const".to_string(), token_hash(&quote!(#c))),
         syn::Item::Const(c) => ("const".to_string(), c.ident.to_string()),
         syn::Item::Static(s) => ("static".to_string(), s.ident.to_string()),
         syn::Item::Mod(m) => ("mod".to_string(), m.ident.to_string()),
@@ -705,7 +703,10 @@ pub(crate) fn merge_top_items(
         // An item whose own cfg is orthogonal to the axis is live everywhere
         // and does NOT belong here; see `own_cfg_is_on_axis`.
         if ctx.own_cfg_is_on_axis(&key.2) {
-            let rep = bucket.iter().find(|(_, _, it)| !item_is_stub(it)).unwrap_or(&bucket[0]);
+            let rep = bucket
+                .iter()
+                .find(|(_, _, it)| !item_is_stub(it))
+                .unwrap_or(&bucket[0]);
             out.push(rep.2.clone());
             continue;
         }
@@ -775,10 +776,7 @@ pub(crate) fn merge_impl_block(
     }
 }
 
-pub(crate) fn merge_mod_block(
-    bucket: &[(&str, &str, &syn::Item)],
-    ctx: &MergeCtx,
-) -> syn::ItemMod {
+pub(crate) fn merge_mod_block(bucket: &[(&str, &str, &syn::Item)], ctx: &MergeCtx) -> syn::ItemMod {
     let base = match bucket[0].2 {
         syn::Item::Mod(m) => m.clone(),
         _ => unreachable!("merge_mod_block called on non-mod item"),

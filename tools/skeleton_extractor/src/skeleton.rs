@@ -15,8 +15,8 @@ use syn::{
 /// whole pipeline standardises on). `Ok(())` iff `parse_file` accepts it — the
 /// transactional splice gate's signal that a write left the file well-formed.
 pub fn parse_check(input_file: &Path) -> Result<()> {
-    let source = std::fs::read_to_string(input_file)
-        .map_err(|e| ExtractError::read(input_file, e))?;
+    let source =
+        std::fs::read_to_string(input_file).map_err(|e| ExtractError::read(input_file, e))?;
     parse_file(&source).map_err(|e| ExtractError::parse(input_file, e))?;
     Ok(())
 }

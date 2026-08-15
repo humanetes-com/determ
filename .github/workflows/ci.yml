@@ -13,8 +13,10 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # v5/v6 are the Node-24 releases: GitHub's runners now force Node-20 actions
+      # onto Node 24 anyway and print a deprecation notice on every job.
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"   # code requires 3.12+ (PEP 701 f-strings)
       - name: Install tools + runtime deps
@@ -39,7 +41,7 @@ jobs:
       run:
         working-directory: tools/skeleton_extractor
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

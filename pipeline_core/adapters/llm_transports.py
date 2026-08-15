@@ -574,7 +574,13 @@ class HuggingFaceTransport(_BaseTransport):
 
         quantization_config = None
         if self._load_in_4bit or self._load_in_8bit:
-            quantization_config = BitsAndBytesConfig(  # type: ignore[no-untyped-call]
+            # No `type: ignore[no-untyped-call]` here: transformers is one of the
+            # optional backends pyproject pins to `follow_imports = "skip"`, so this
+            # is a call on Any in every environment. The ignore this line used to
+            # carry was live in the local venv (which has transformers installed for
+            # this transport) and unused in CI (which installs requirements-base.txt
+            # only), and `warn_unused_ignores` failed the push of 2026-08-15 on it.
+            quantization_config = BitsAndBytesConfig(
                 load_in_4bit=self._load_in_4bit,
                 load_in_8bit=self._load_in_8bit,
             )

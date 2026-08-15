@@ -286,11 +286,18 @@ fn emit_block(item: &syn::Item, sources: &Sources) -> Option<String> {
                 content: Some((*brace, Vec::new())),
                 ..m.clone()
             };
-            let header =
-                block_header(sources, m.span(), brace.span.open(), &empty.to_token_stream())?;
+            let header = block_header(
+                sources,
+                m.span(),
+                brace.span.open(),
+                &empty.to_token_stream(),
+            )?;
             // Inner items are top-level items again, so they get the full
             // treatment — including their own nested blocks.
-            let members = items.iter().map(|it| Some(emit_item(it, sources))).collect();
+            let members = items
+                .iter()
+                .map(|it| Some(emit_item(it, sources)))
+                .collect();
             assemble(header, members)
         }
         _ => None,
