@@ -43,13 +43,28 @@ PID_LOC=$!
 # accumulated unseen. clippy/test/doc share one cargo build lock, so they run in
 # sequence inside a single gate rather than fighting each other for it; fmt needs
 # no build at all and gets its own, so a formatting failure reads on its own line.
-(cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo fmt --check) \
+#
+# The TOOLCHAIN is pinned, and pinning it is what makes the gate meaningful: the
+# same push then failed `cargo clippy -D warnings` on two `question_mark` hits in
+# src/cfg.rs that this box could not see, because its default toolchain is 1.95.0
+# (2026-04-14) and CI's `stable` had moved to 1.97.0 (2026-07-07), which added the
+# lint. A gate on a different compiler than CI answers a different question. The
+# other half of the pin is `dtolnay/rust-toolchain@1.97.0` in ci.yml — move both
+# together, then run this gate and fix what the new lints find. `cargo +<version>`
+# fails loudly when the toolchain is absent (rustup toolchain install 1.97.0
+# --profile minimal --component clippy --component rustfmt), which is the intent:
+# an unpinned fallback is how the drift got in.
+#
+# Only the GATE is pinned. The pipeline's own builds of the extractor keep using
+# the default toolchain, so nothing here changes the compiler a live run is using.
+RUST_GATE_TOOLCHAIN="${RUST_GATE_TOOLCHAIN:-1.97.0}"
+(cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo "+$RUST_GATE_TOOLCHAIN" fmt --check) \
     > "$GATE_TMP/rustfmt.out" 2>&1 &
 PID_RUSTFMT=$!
 (cd "$SCRIPT_DIR/tools/skeleton_extractor" \
-    && cargo clippy --all-targets --quiet -- -D warnings \
-    && cargo test --quiet \
-    && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --quiet) \
+    && cargo "+$RUST_GATE_TOOLCHAIN" clippy --all-targets --quiet -- -D warnings \
+    && cargo "+$RUST_GATE_TOOLCHAIN" test --quiet \
+    && RUSTDOCFLAGS="-D warnings" cargo "+$RUST_GATE_TOOLCHAIN" doc --no-deps --quiet) \
     > "$GATE_TMP/cargo.out" 2>&1 &
 PID_CARGO=$!
 
@@ -71,8 +86,8 @@ gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
 gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
-gate "skeleton-extractor cargo fmt --check" "$PID_RUSTFMT" "$GATE_TMP/rustfmt.out"
-gate "skeleton-extractor cargo clippy + test + doc" "$PID_CARGO" "$GATE_TMP/cargo.out"
+gate "skeleton-extractor cargo fmt --check (rust $RUST_GATE_TOOLCHAIN)" "$PID_RUSTFMT" "$GATE_TMP/rustfmt.out"
+gate "skeleton-extractor cargo clippy + test + doc (rust $RUST_GATE_TOOLCHAIN)" "$PID_CARGO" "$GATE_TMP/cargo.out"
 [ "$FAILED" -eq 0 ] || exit 1
 
 echo ""

@@ -1,7 +1,7 @@
 """LLM transports (adapters) — the dumb token pipes behind the LLM port.
 
-Relocated from model_interact.py (P6 / debt #10). Each transport opens a
-connection, streams normalized `Delta` events, and declares a `BudgetSpec`;
+Relocated here from model_interact.py, which stays as a thin shim. Each transport
+opens a connection, streams normalized `Delta` events, and declares a `BudgetSpec`;
 ALL recovery/capping/followup/retry policy lives in `pipeline_core.llm`'s
 `LLMController`. A transport must never reintroduce a private max_tokens cap or
 its own followup. `model_interact.py` is now a thin shim re-exporting these +
@@ -466,7 +466,7 @@ class OllamaTransport(_BaseTransport):
         # Route connection/timeout failures (httpx + the OpenAI SDK's own
         # APIConnectionError wrapper) through TransportUnavailable so the
         # controller's wait_until_ready() readiness poll absorbs a server
-        # restart/warmup instead of aborting the run (debt #30).
+        # restart/warmup instead of aborting the run.
         try:
             with client.chat.completions.create(  # type: ignore[call-overload]
                 model=model,
@@ -782,9 +782,17 @@ class VLLMTransport(_BaseTransport):
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
                meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
-        from openai import APIConnectionError, BadRequestError, OpenAI
+        # `Timeout` comes from the SDK, not from our own `httpx` import: openai
+        # re-exports whichever httpx flavour it was built against, and the two are
+        # not interchangeable. An SDK resolved on the httpx 2.x distribution
+        # annotates this parameter as `httpx2._config.Timeout` and rejects the
+        # `httpx._config.Timeout` a direct `httpx.Timeout(...)` builds — which is
+        # how CI's mypy failed on 2026-08-15 against an unpinned openai while this
+        # box was green. requirements-base.txt now pins the SDK; taking the type
+        # from it as well keeps the line correct across a future bump.
+        from openai import APIConnectionError, BadRequestError, OpenAI, Timeout
         client = OpenAI(base_url=self._base_url, api_key="vllm",
-                        timeout=httpx.Timeout(connect=30, read=900, write=30, pool=30))
+                        timeout=Timeout(connect=30, read=900, write=30, pool=30))
         extra_body: dict[str, Any] = {
             "chat_template_kwargs": reasoning_template_kwargs(self._model_name, enable_thinking),
             "repetition_penalty": self._rep_penalty,

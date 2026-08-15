@@ -56,20 +56,22 @@ impl CfgSet {
                     "all" => {
                         let mut acc = true;
                         for it in &inner.items {
-                            match self.eval(it) {
-                                Some(b) => acc = acc && b,
-                                None => return None,
-                            }
+                            // Bind first, combine second. `acc = acc && self.eval(it)?`
+                            // reads the same but is NOT the same: `&&` short-circuits, so
+                            // once acc is false the remaining operands would never be
+                            // evaluated and an unresolvable one among them would yield
+                            // Some(false) where this yields None. Every operand of a cfg
+                            // predicate has to be resolvable for the predicate to be.
+                            let b = self.eval(it)?;
+                            acc = acc && b;
                         }
                         Some(acc)
                     }
                     "any" => {
                         let mut acc = false;
                         for it in &inner.items {
-                            match self.eval(it) {
-                                Some(b) => acc = acc || b,
-                                None => return None,
-                            }
+                            let b = self.eval(it)?;
+                            acc = acc || b;
                         }
                         Some(acc)
                     }

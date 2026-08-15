@@ -42,7 +42,12 @@ jobs:
         working-directory: tools/skeleton_extractor
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # PINNED, not `@stable`. `@stable` moved from 1.95.0 to 1.97.0 on 2026-07-07
+      # and the new `question_mark` lint failed a push against code no local gate
+      # could flag, since this project's box is on 1.95.0. check.sh runs the same
+      # gates under RUST_GATE_TOOLCHAIN, defaulted to the version below — move the
+      # two together.
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
       - name: fmt

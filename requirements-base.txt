@@ -1,3 +1,20 @@
-openai
+# The SDK is PINNED, and the pin is what CI type-checks against.
+#
+# .github/workflows/ci.yml installs this file and nothing else, so an unpinned
+# `openai` meant CI resolved a different SDK than this box runs on every push.
+# On 2026-08-15 that failed the mypy step alone: the resolved SDK annotates its
+# client with the httpx 2.x distribution (import name `httpx2`), so the
+# `httpx.Timeout` adapters/llm_transports.py hands OpenAI(...) was rejected as
+# `httpx._config.Timeout` where `httpx2._config.Timeout` was expected — an error
+# no local gate could produce, since the box runs openai 2.6.1 on httpx 0.28.1.
+#
+# Bumping is deliberate: raise the pin, `bash check.sh`, and fix what moves. A
+# bump ACROSS the httpx 2.x switch also has to revisit the three
+# `except (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError, ...)`
+# tuples in adapters/llm_transports.py — under an httpx2 SDK those classes are
+# never the ones raised, so the clauses would stop matching in silence and a
+# transient vLLM restart would abort the run instead of being absorbed by the
+# controller's readiness poll.
+openai==2.6.1
 python-dotenv
 huggingface_hub
