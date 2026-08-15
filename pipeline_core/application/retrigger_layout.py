@@ -31,6 +31,7 @@ pass_count this budget clears itself on.
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -56,14 +57,17 @@ from pipeline_core.domain.layout_retrigger import (
     DEFAULT_MAX_MECHANICAL,
     DEFAULT_MAX_REJECTIONS,
     DEFAULT_MAX_ZERO_PAYOFF,
+    INFLIGHT_KEY_PREFIX,
     PAYOFF_HIGH_KEY,
     REJECTION_CONTRACT_EPOCH,
     BlameGrade,
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
+    charge_mechanical_failure,
     classify_compile_retrigger,
     classify_layout_retrigger,
+    code_build_stamp,
     contract_key,
     crash_candidate_grade,
     crash_component_refuted,
@@ -73,9 +77,12 @@ from pipeline_core.domain.layout_retrigger import (
     filled_body_text,
     find_fns_referencing,
     inflight_key,
+    inflight_pid_key,
     mark_retrigger_pending,
     mechanical_budget_spent,
+    mechanical_build_key,
     mechanical_key,
+    mechanical_streak_is_stale,
     payoff_budget_spent,
     reconcile_interrupted_attempts,
     record_crash_fire,
@@ -182,6 +189,19 @@ class RetriggerLayoutDeps:
     # Optional: omitted ⇒ the registry keeps the pre-trigger definitions.
     upsert_layout_registry: Callable[
         [Path, tuple[tuple[str, AuthoredItem], ...]], object] | None = None
+    # The pipeline build asking. A mechanical-failure streak is a claim about
+    # code ("the authoring call does not reach an outcome here"), and the only
+    # path that lowers `mech:` is the accepted re-author the cap itself refuses
+    # to reach — so without a build stamp the streak is permanent for every
+    # future run. Optional: None keeps the streak unstamped, which is the
+    # pre-stamp behaviour.
+    code_id: str | None = None
+    # The pids whose runs ended on a DELIBERATE external stop, from the death
+    # record. Read once per sweep, only to settle interrupted attempts: an
+    # operator restart during an authoring call is not evidence about the
+    # authoring call. Optional: None ⇒ every interrupted attempt is charged,
+    # the behaviour before the death record was consulted.
+    deliberate_stop_pids: Callable[[], frozenset[int]] | None = None
 
 
 def _component_key(names: frozenset[str]) -> str:
@@ -480,7 +500,19 @@ def retrigger_layout(
                      f"({deps.max_attempts}) reached — not retriggering again.")
             _refused += 1
             continue
-        if mechanical_budget_spent(attempts, key):
+        _mech_stamp = code_build_stamp(deps.code_id)
+        if attempts.get(mechanical_key(key), 0) >= DEFAULT_MAX_MECHANICAL \
+                and mechanical_streak_is_stale(attempts, key, _mech_stamp):
+            # A release is a decision too. Silent, this reads in the log as a
+            # component that was never at the cap — and the cap being reached
+            # by two operator SIGTERMs is exactly the history a reader needs
+            # (`anyhow` 2026-08-15, runs `462635-c8369188`/`496645-9b9de7e1`).
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                     f"{attempts.get(mechanical_key(key), 0)} mechanical "
+                     "failure(s) on file were earned by a different build of "
+                     "the pipeline — that streak says nothing about the code "
+                     "asking now, so it is NOT refusing this aim.")
+        if mechanical_budget_spent(attempts, key, code_stamp=_mech_stamp):
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
                      f"{DEFAULT_MAX_MECHANICAL} consecutive mechanical failure(s) "
                      "already refunded here — the model attempt is not what is "
@@ -529,6 +561,11 @@ def retrigger_layout(
         # next process reads a spent attempt it cannot distinguish from one the
         # model actually failed. See `reconcile_interrupted_attempts`.
         attempts[inflight_key(key)] = attempts[key]
+        # …and WHICH process is holding it, so the next run can ask the death
+        # record how this one ended instead of guessing from "the most recent
+        # death" — a guess that is wrong whenever a run dies before it ever
+        # reaches the retrigger.
+        attempts[inflight_pid_key(key)] = os.getpid()
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         deps.git_commit(
             project_dir,
@@ -545,6 +582,7 @@ def retrigger_layout(
         # this must stay the single place that clears it. Any future exit added
         # to `_run_layout_attempt` is settled here for free.
         attempts.pop(inflight_key(key), None)
+        attempts.pop(inflight_pid_key(key), None)
         # …and the same property is what makes this the right place to open the
         # payoff claim: what a fire bought is measured at the NEXT decision
         # point, against the pass_count it fired at, and only a fire that
@@ -631,19 +669,40 @@ def _settle_interrupted(
 
     Read at the top of every sweep, so a restart's stolen attempt is repaid
     before any cap is consulted — and repaid ONCE, because the reconciliation
-    persists the cleared marker."""
+    persists the cleared marker.
+
+    Whether the refund also costs a MECHANICAL failure depends on how the
+    process that opened it died, which the death record already knows: the
+    charge bounds an authoring call that kills its own process, and an operator
+    stop is not that. Both readings are logged by name — reconstructing which
+    one a store row came from cost a session on 2026-08-15."""
     attempts = deps.load_attempts(project_dir, cfg_cluster)
-    settled, refunded = reconcile_interrupted_attempts(attempts)
+    _stopped = (frozenset() if deps.deliberate_stop_pids is None
+                else deps.deliberate_stop_pids())
+    _openers = {k[len(INFLIGHT_KEY_PREFIX):]: attempts.get(inflight_pid_key(
+        k[len(INFLIGHT_KEY_PREFIX):]))
+        for k in attempts if k.startswith(INFLIGHT_KEY_PREFIX)}
+    settled, refunded = reconcile_interrupted_attempts(
+        attempts, stopped_pids=_stopped,
+        code_stamp=code_build_stamp(deps.code_id))
     if not refunded:
         return attempts
     deps.save_attempts(project_dir, cfg_cluster, settled)
     for component in refunded:
+        _pid = _openers.get(component)
+        _spared = _pid is not None and _pid in _stopped
         deps.log(
             f"  [layout-retrigger] {cfg_cluster}/{component.split('|')}: an "
             "attempt was charged and never reached an outcome — the process "
-            "that opened it did not survive the authoring call. No model "
-            "evidence was bought, so the attempt is refunded and counted as a "
-            "mechanical failure.")
+            f"that opened it (pid {_pid if _pid is not None else 'unrecorded'})"
+            " did not survive the authoring call. No model evidence was "
+            "bought, so the attempt is refunded"
+            + (" and NOT counted as a mechanical failure: the death record "
+               "says that process was stopped deliberately, which is evidence "
+               "about the operator and none about this component."
+               if _spared else
+               " and counted as a mechanical failure (no death record says "
+               "that process was stopped deliberately)."))
     return settled
 
 
@@ -768,8 +827,8 @@ def _run_layout_attempt(
         _reasons = [c.reason for c in res.components if not c.authored]
         if _reasons and all(_is_mechanical(r) for r in _reasons):
             attempts[key] = max(0, attempts[key] - 1)
-            attempts[mechanical_key(key)] = (
-                attempts.get(mechanical_key(key), 0) + 1)
+            charge_mechanical_failure(
+                attempts, key, code_build_stamp(deps.code_id))
             deps.save_attempts(project_dir, cfg_cluster, attempts)
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
                      "re-author died in splice/locate infrastructure — "
@@ -844,8 +903,8 @@ def _run_layout_attempt(
         # re-fire spends another authoring call on a bug the model cannot
         # affect.
         attempts[key] = max(0, attempts[key] - 1)
-        attempts[mechanical_key(key)] = (
-            attempts.get(mechanical_key(key), 0) + 1)
+        charge_mechanical_failure(
+            attempts, key, code_build_stamp(deps.code_id))
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         # The SKELETON now holds the authored definitions, so the store must
         # record them: it is what the seed-time layout reconciliation
@@ -867,6 +926,7 @@ def _run_layout_attempt(
                                reason=f"live-tree splice failed: {apply_err}")
 
     attempts.pop(mechanical_key(key), None)   # consecutive-failure counter
+    attempts.pop(mechanical_build_key(key), None)   # …and the build it named
     attempts.pop(rejected_key(key), None)     # an ACCEPTED re-author clears it
     deps.save_attempts(project_dir, cfg_cluster, attempts)
     if deps.load_rejection_notes is not None \

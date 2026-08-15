@@ -14,6 +14,7 @@ from typing import Any
 
 from pipeline_core.adapters.artifacts import api_surface_path
 from pipeline_core.adapters.behaviour_store import load_behaviour_suite
+from pipeline_core.adapters.death_record import deliberate_stop_pids
 from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.adapters.gen_tests_storage import (
     read_frozen_test_sources,
@@ -47,6 +48,7 @@ from pipeline_core.application.retrigger_layout import (
     RetriggerResult,
     retrigger_layout,
 )
+from pipeline_core.domain.measurement import code_identity
 
 
 def build_layout_phase_runner(
@@ -102,6 +104,12 @@ def build_retrigger_layout(
     """The F11 M3 layout re-trigger action, bound to the resident adapters —
     same building blocks `build_layout_phase_runner` uses (this IS t1.5,
     invoked again mid-run for one component instead of the whole surface)."""
+    # Taken ONCE, at composition: it stamps a mechanical-failure streak with the
+    # build that earned it, and the build that earns one is the code this
+    # process imported at start, not whatever is on disk when the sweep reads
+    # it. (`run_phase_c_tdd` re-reads its own copy per entry on purpose — that
+    # one labels a measurement, which a mid-run edit really does invalidate.)
+    code_id = code_identity(Path.cwd())
 
     def _run(project_dir: Path, module_name: str, cfg_cluster: str,
               target_src_dir: Path, error_text: str,
@@ -168,6 +176,8 @@ def build_retrigger_layout(
             load_rejection_notes=load_rejection_notes,
             save_rejection_notes=save_rejection_notes,
             max_attempts=max_attempts,
+            code_id=code_id,
+            deliberate_stop_pids=deliberate_stop_pids,
         )
         return retrigger_layout(
             project_dir, module_name, cfg_cluster, target_src_dir, error_text,

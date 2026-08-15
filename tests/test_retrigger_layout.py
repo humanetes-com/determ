@@ -5,6 +5,7 @@ The classification and the budgets it consults are pinned one layer down, in
 `test_layout_retrigger.py`."""
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,7 +79,13 @@ _FROZEN_DEF = "struct ErrorImpl { vtable: u8 }"
 
 class _Fakes:
     def __init__(self, *, frozen=True, compiles=True, reply=_GOOD_REPLY,
-                 attempts=None, fn_records=None, skeleton_def=_FROZEN_DEF):
+                 attempts=None, fn_records=None, skeleton_def=_FROZEN_DEF,
+                 code_id=None, stopped_pids=None):
+        # `code_id=None` and `stopped_pids=None` are the unwired defaults: no
+        # build stamp on a mechanical streak, and no death record to ask — the
+        # behaviour every test written before 2026-08-15 pins.
+        self.code_id = code_id
+        self.stopped_pids = stopped_pids
         self.compiles = compiles
         self.reply = reply
         self.attempts = dict(attempts or {})
@@ -201,6 +208,9 @@ class _Fakes:
                 k: list(v) for k, v in self.rejection_notes.items()},
             save_rejection_notes=self._save_rejection_notes,
             max_attempts=2,
+            code_id=self.code_id,
+            deliberate_stop_pids=(None if self.stopped_pids is None
+                                  else lambda: frozenset(self.stopped_pids)),
         )
 
     def _save_rejection_notes(self, pd, c, notes):
@@ -685,9 +695,14 @@ def test_checkpoint_marks_the_attempt_in_flight_and_the_outcome_clears_it():
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
     assert res.fired and res.succeeded
     checkpoint = f.attempt_saves[0]
-    assert checkpoint == {"ErrorImpl": 1, "inflight:ErrorImpl": 1}
-    # …and no save after an outcome may still carry it.
+    # The marker names the process holding it, so the next run can ask the death
+    # record how THAT process ended instead of assuming the most recent death
+    # was this one's.
+    assert checkpoint == {"ErrorImpl": 1, "inflight:ErrorImpl": 1,
+                          "inflightpid:ErrorImpl": os.getpid()}
+    # …and no save after an outcome may still carry either row.
     assert "inflight:ErrorImpl" not in f.attempt_saves[-1]
+    assert "inflightpid:ErrorImpl" not in f.attempt_saves[-1]
     assert f.saved_attempts == {"ErrorImpl": 1}
 
 
@@ -702,6 +717,63 @@ def test_a_failed_attempt_also_clears_the_marker():
     assert "inflight:ErrorImpl" not in f.saved_attempts
     assert f.saved_attempts["rejected:ErrorImpl"] == 1
     assert f.saved_attempts["ErrorImpl"] == 0     # measured, not destroyed
+
+
+def test_an_operator_stop_is_refunded_with_no_mechanical_charge():
+    """Live on `anyhow`, 2026-08-15: runs `462635-c8369188` (SIGTERM at 56m56s)
+    and `496645-9b9de7e1` (SIGTERM at 24s) were stopped by the operator while
+    the 34-name construct/vtable component was authoring. Each refund charged a
+    mechanical failure, the cap of 2 filled, and run `500301-6a66bf86` refused
+    that component at iter 1 having just graded it OWNS off an in-crate ASAN
+    origin (`src/error.rs::drop`) — no model attempt had failed at all."""
+    f = _Fakes(attempts={"ErrorImpl": 1, "inflight:ErrorImpl": 1,
+                         "inflightpid:ErrorImpl": 462635},
+               stopped_pids={462635})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert res.fired and res.succeeded
+    assert "mech:ErrorImpl" not in f.attempt_saves[0]
+    assert any("NOT counted as a mechanical failure" in m for m in f.logs)
+    assert any("stopped deliberately" in m for m in f.logs)
+
+
+def test_a_death_no_record_calls_deliberate_still_charges_at_the_seam():
+    """The negative control at the driver seam: identical store, and the pid the
+    death record names is a different process. The charge stands — the case the
+    bound exists for (an authoring call that kills its own process) is exactly
+    the one no death record marks as a stop."""
+    f = _Fakes(attempts={"ErrorImpl": 1, "inflight:ErrorImpl": 1,
+                         "inflightpid:ErrorImpl": 462635},
+               stopped_pids={999999})
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert f.attempt_saves[0]["mech:ErrorImpl"] == 1
+    assert any("counted as a mechanical failure" in m for m in f.logs)
+
+
+def test_a_streak_from_an_earlier_build_no_longer_refuses_the_aim():
+    """The live store's shape on 2026-08-15 — `mech:` at the cap of 2, written
+    by two builds ago, and no path in the code able to lower it (the only clear
+    is the accepted re-author the cap itself refuses to reach). A build that has
+    not failed here yet must be allowed to try; the pre-fix reader, which names
+    no build, is the negative control below."""
+    f = _Fakes(attempts={"mech:ErrorImpl": 2}, code_id="459594789b98")
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert res.fired and res.succeeded
+
+    unstamped = _Fakes(attempts={"mech:ErrorImpl": 2})
+    blocked = retrigger_layout(
+        Path("/x"), "anyhow", "stable", _CRATE, _ERR, unstamped.deps())
+    assert not blocked.fired
+    assert any("mechanical failure(s) already refunded" in m
+               for m in unstamped.logs)
+
+
+def test_a_streak_this_build_earned_still_refuses_the_aim():
+    f = _Fakes(attempts={"mech:ErrorImpl": 2,
+                         "mechbuild:ErrorImpl": int("459594789b98", 16)},
+               code_id="459594789b98")
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, f.deps())
+    assert not res.fired
+    assert any("mechanical failure(s) already refunded" in m for m in f.logs)
 
 
 def test_an_interrupted_attempt_is_refunded_before_the_cap_is_read():

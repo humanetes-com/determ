@@ -11,12 +11,16 @@ from pipeline_core.domain.layout_retrigger import (
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
+    charge_mechanical_failure,
     classify_compile_retrigger,
     classify_layout_retrigger,
+    code_build_stamp,
     find_fns_referencing,
     inflight_key,
+    inflight_pid_key,
     mark_retrigger_pending,
     mechanical_budget_spent,
+    mechanical_build_key,
     mechanical_key,
     payoff_budget_spent,
     reconcile_interrupted_attempts,
@@ -337,6 +341,88 @@ def test_refund_never_drives_the_counter_negative():
         {_MEGA: 0, inflight_key(_MEGA): 1})
     assert settled[_MEGA] == 0
     assert refunded == (_MEGA,)
+
+
+def test_a_deliberate_stop_refunds_without_a_mechanical_charge():
+    """The 2026-08-15 lockout, in miniature. Two operator SIGTERMs during the
+    34-name construct/vtable component's re-author took `mech:` to its cap of 2,
+    and the run after them refused a component it had just graded OWNS off an
+    in-crate ASAN origin. The charge answers "does this authoring call kill its
+    own process"; a stop typed by the operator answers nothing about it."""
+    attempts = {_MEGA: 1, inflight_key(_MEGA): 1, inflight_pid_key(_MEGA): 4242}
+    settled, refunded = reconcile_interrupted_attempts(
+        attempts, stopped_pids=frozenset({4242}))
+    assert refunded == (_MEGA,)
+    assert settled[_MEGA] == 0                     # the attempt is still repaid
+    assert mechanical_key(_MEGA) not in settled    # …and nothing else is spent
+    assert inflight_pid_key(_MEGA) not in settled  # settled once, like the marker
+
+
+def test_a_death_the_record_does_not_call_deliberate_still_charges():
+    """The negative control for the case above, and the case the bound was
+    written for: an OOM kill or an abort leaves the same marker, and nothing may
+    read it as an operator decision."""
+    attempts = {_MEGA: 1, inflight_key(_MEGA): 1, inflight_pid_key(_MEGA): 4242}
+    settled, _ = reconcile_interrupted_attempts(
+        attempts, stopped_pids=frozenset({9999}))
+    assert settled[mechanical_key(_MEGA)] == 1
+
+
+def test_a_marker_with_no_recorded_pid_charges_as_before():
+    # Stores written before the pid row existed: there is no process to ask
+    # about, so the pre-2026-08-15 behaviour stands.
+    settled, _ = reconcile_interrupted_attempts(
+        {_MEGA: 1, inflight_key(_MEGA): 1}, stopped_pids=frozenset({4242}))
+    assert settled[mechanical_key(_MEGA)] == 1
+
+
+_BUILD_A = code_build_stamp("459594789b98")
+_BUILD_B = code_build_stamp("27883c3b25e4")
+
+
+def test_a_streak_from_another_build_does_not_refuse():
+    """`mech:` has exactly one clear — the accepted-re-author path, which sits
+    downstream of the refusal — so without this the cap is permanent for every
+    later run. The live store on 2026-08-15 read `mech:<34-name key>: 2` with no
+    build row at all, and that is the shape that must release."""
+    live = {mechanical_key(_MEGA): 2}
+    assert not mechanical_budget_spent(live, _MEGA, code_stamp=_BUILD_A)
+    # The negative control is the reader that has no build to name: unstamped
+    # store, unstamped reader, and the cap still refuses — which is what every
+    # pre-2026-08-15 caller does and what the existing pins assert.
+    assert mechanical_budget_spent(live, _MEGA)
+
+
+def test_a_streak_this_build_earned_still_refuses():
+    attempts = charge_mechanical_failure(
+        charge_mechanical_failure({}, _MEGA, _BUILD_A), _MEGA, _BUILD_A)
+    assert attempts[mechanical_key(_MEGA)] == 2
+    assert mechanical_budget_spent(attempts, _MEGA, code_stamp=_BUILD_A)
+
+
+def test_charging_under_a_new_build_restarts_the_streak():
+    # Not "adds to it": the earlier failures were a claim about code that no
+    # longer runs, and a streak mixing two builds says nothing about either.
+    attempts = charge_mechanical_failure(
+        {mechanical_key(_MEGA): 2, mechanical_build_key(_MEGA): _BUILD_A},
+        _MEGA, _BUILD_B)
+    assert attempts[mechanical_key(_MEGA)] == 1
+    assert attempts[mechanical_build_key(_MEGA)] == _BUILD_B
+    assert not mechanical_budget_spent(attempts, _MEGA, code_stamp=_BUILD_B)
+
+
+def test_an_unstamped_charge_writes_no_build_row():
+    # Build 0 is what an absent row already reads as, so an unwired caller must
+    # leave the store as it found it rather than assert an unknown build.
+    attempts = charge_mechanical_failure({}, _MEGA)
+    assert attempts == {mechanical_key(_MEGA): 1}
+
+
+def test_code_build_stamp_is_total():
+    assert code_build_stamp(None) == 0
+    assert code_build_stamp("") == 0
+    assert code_build_stamp("not-hex-at-all") == 0
+    assert code_build_stamp("459594789b98") == int("459594789b98", 16)
 
 
 def test_bookkeeping_rows_are_never_mistaken_for_a_component():

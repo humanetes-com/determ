@@ -121,6 +121,20 @@ RE_REVERTED_AFTER = re.compile(
 RE_DEATH = re.compile(
     r"\[death-watch\] pipeline \d+ ended after (?P<dur>\S+) —"
     r" exit=(?P<exit>\d+)(?: signal=(?P<sig>\w+))?")
+# A cause-C aim that REACHED a component and was refused by one of the
+# retrigger's capped budgets. Each of these caps is cleared only by an outcome
+# the refusal itself prevents, so every one of them is a candidate permanent
+# lock — and the store they read is on disk, so the charge that spent the cap
+# may have been made by a run that is not in this log at all.
+RE_BUDGET_REFUSAL = re.compile(
+    r"\[layout-retrigger\] [^:]+: (?P<why>"
+    r"\d+ consecutive mechanical failure\(s\) already refunded"
+    r"|\d+ consecutive re-author\(s\) REJECTED at validation"
+    r"|cap \(\d+\) reached"
+    r"|this component's re-author was already spent on this exact crash)")
+RE_OWNS_GRADE = re.compile(r"the observed fault is inside code \d+ component")
+RE_INTERRUPTED = re.compile(
+    r"an attempt was charged and never reached an outcome")
 
 # Reaction markers: a line matching one of these is the pipeline ANSWERING a
 # pattern (the value is the short name shown as REACTED(<name>)).  Grouped by
@@ -153,6 +167,17 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P5": [
         ("zero-payoff", "payoff"),
         ("refuted for this signature", "sig-refuted"),
+    ],
+    "P6": [
+        # The refund that costs nothing: the death record says the process was
+        # stopped, so the streak does not move (2026-08-15).
+        ("NOT counted as a mechanical failure", "stop-not-charged"),
+        # …and a streak already on file, earned by a build that is no longer
+        # running, announces that it is standing down rather than releasing in
+        # silence. Deliberately NOT keyed on "re-authored successfully": a
+        # DIFFERENT component firing later in the run is not an answer to the
+        # one that was refused.
+        ("were earned by a different build", "stale-streak-released"),
     ],
 }
 
@@ -412,11 +437,46 @@ def detect_p5(run: Run, iters: list[dict]) -> list[dict]:
     return hits
 
 
+def detect_p6(run: Run, iters: list[dict]) -> list[dict]:
+    """Budget lockout: the aim REACHED a component — graded it on observed
+    blame — and a capped budget refused it. Distinct from P3, where the aim
+    finds no candidate at all: here the evidence was good enough and the
+    refusal is bookkeeping.
+
+    Worth its own class because every one of these caps is cleared only by an
+    outcome the refusal prevents, and the store is on disk, so the charge that
+    spent it may predate this run entirely. Measured 2026-08-15: two operator
+    SIGTERMs during the 34-name construct/vtable component's re-author (runs
+    `462635-c8369188`, `496645-9b9de7e1`) each booked a mechanical failure
+    through the interrupted-attempt refund, and run `500301-6a66bf86` then
+    refused that component at iteration 1 having just graded it OWNS off an
+    in-crate ASAN origin — three runs, no model attempt failed anywhere in the
+    sequence."""
+    refusals = run.find(RE_BUDGET_REFUSAL)
+    if not refusals:
+        return []
+    graded = run.find(RE_OWNS_GRADE)
+    refunds = run.find(RE_INTERRUPTED)
+    hits = []
+    for why in sorted({m["why"] for _ref, m in refusals}):
+        refs = [ref for ref, m in refusals if m["why"] == why]
+        hits.append({
+            "evidence": f"aim refused {len(refs)}x by a capped budget: {why}"
+                        + (f"; the same run graded a component on observed "
+                           f"blame {len(graded)}x" if graded else "")
+                        + (f"; {len(refunds)} interrupted attempt(s) refunded "
+                           "in this run — a charge nothing measured"
+                           if refunds else ""),
+            "refs": refs[:4]})
+    return hits
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
-             "P4": detect_p4, "P5": detect_p5}
+             "P4": detect_p4, "P5": detect_p5, "P6": detect_p6}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
-    "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle"}
+    "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
+    "P6": "budget lockout"}
 
 
 # -------------------------------------------------------------------- report

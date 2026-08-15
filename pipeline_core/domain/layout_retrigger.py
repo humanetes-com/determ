@@ -23,7 +23,7 @@ Typed, not string-matched: the trigger reason is an enum a caller acts on.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -49,6 +49,8 @@ _LAYOUT_ATTRIBUTABLE_CODES = (
 
 MECHANICAL_KEY_PREFIX = "mech:"
 INFLIGHT_KEY_PREFIX = "inflight:"
+INFLIGHT_PID_KEY_PREFIX = "inflightpid:"
+MECH_BUILD_KEY_PREFIX = "mechbuild:"
 PAYOFF_KEY_PREFIX = "payoff:"
 REJECTED_KEY_PREFIX = "rejected:"
 CRASH_SIG_KEY_PREFIX = "sig:"
@@ -99,10 +101,99 @@ def inflight_key(component_key: str) -> str:
     return f"{INFLIGHT_KEY_PREFIX}{component_key}"
 
 
+def inflight_pid_key(component_key: str) -> str:
+    """Attempts-store key recording WHICH PROCESS opened the in-flight attempt.
+
+    Written beside `inflight_key` and cleared with it, so a marker that outlived
+    its process names the process to ask about. Without it the only available
+    match is "the most recently ended run", which is wrong as soon as a run dies
+    before it reaches the retrigger at all. Same prefixing rule as
+    `mechanical_key`."""
+    return f"{INFLIGHT_PID_KEY_PREFIX}{component_key}"
+
+
+def mechanical_build_key(component_key: str) -> str:
+    """Attempts-store key recording WHICH BUILD of the pipeline earned a
+    component's mechanical streak. Same prefixing rule as `mechanical_key`."""
+    return f"{MECH_BUILD_KEY_PREFIX}{component_key}"
+
+
+def code_build_stamp(code_id: str | None) -> int:
+    """`code_identity`'s 12-hex-char digest as the int the attempts store holds
+    (the file is `dict[str, int]`). 0 means "no build known", which is also what
+    an absent row reads as — a legacy streak, earned under an unknown build."""
+    if not code_id:
+        return 0
+    try:
+        return int(code_id[:12], 16)
+    except ValueError:
+        return 0
+
+
+def mechanical_streak_is_stale(
+    attempts: Mapping[str, int], component_key: str, code_stamp: int,
+) -> bool:
+    """Whether the stored mechanical streak was earned by a DIFFERENT build of
+    the pipeline than the one asking.
+
+    A mechanical failure is a claim about the code: "this component's authoring
+    call does not reach an outcome under this build". Edit the pipeline and the
+    claim is untested again — the same principle as `rejection_streak_is_stale`,
+    which asks "does the model keep violating a contract it has now been told".
+
+    This exists because the streak can otherwise never be lowered. The only
+    clear is `attempts.pop(mechanical_key(...))` on the ACCEPTED-re-author path,
+    which sits downstream of the refusal, so `mech: 2` refuses every future run
+    forever — the "a gate governing a RETRY becomes a permanent lock" shape.
+    Measured on `anyhow` 2026-08-15: runs `462635-c8369188` (SIGTERM at 56m56s)
+    and `496645-9b9de7e1` (SIGTERM at 24s) were both stopped by the operator
+    while the 34-name construct/vtable component was mid-authoring; each charged
+    one mechanical failure through `reconcile_interrupted_attempts`, and the
+    next run (`500301-6a66bf86`) localized the crash to an in-crate origin,
+    graded that component OWNS, and refused it at the cap with no model attempt
+    having failed at all.
+
+    An absent stamp reads as build 0 — legacy, earned under an unknown build —
+    and is therefore stale, which is what releases a store poisoned before this
+    row existed. A caller that passes `code_stamp=0` (build unknown) opts out:
+    0 == 0 keeps the streak, so an unstamped store still refuses under an
+    unstamped reader."""
+    return attempts.get(mechanical_build_key(component_key), 0) != code_stamp
+
+
+def charge_mechanical_failure(
+    attempts: dict[str, int], component_key: str, code_stamp: int = 0,
+) -> dict[str, int]:
+    """Book one mechanical failure against `component_key`, stamped with the
+    build that earned it. A streak from another build is REPLACED, not extended:
+    the earlier failures were a claim about code that no longer runs."""
+    if mechanical_streak_is_stale(attempts, component_key, code_stamp) \
+            and attempts.get(mechanical_key(component_key), 0):
+        attempts[mechanical_key(component_key)] = 0
+    attempts[mechanical_key(component_key)] = (
+        attempts.get(mechanical_key(component_key), 0) + 1)
+    # Build 0 is "unknown", which is what an absent row already reads as — so an
+    # unstamped caller leaves the store exactly as it found it rather than
+    # writing a row that asserts nothing.
+    if code_stamp:
+        attempts[mechanical_build_key(component_key)] = code_stamp
+    else:
+        attempts.pop(mechanical_build_key(component_key), None)
+    return attempts
+
+
+# Every prefix the attempts store uses for a row that is NOT a component's
+# destruction counter. One definition, because two readers already disagreed:
+# `tools/reset_retrigger_attempts.py` filtered on `mech:`/`inflight:` alone and
+# would have matched a `mechbuild:`/`rejected:`/`sig:` row as a component.
+BOOKKEEPING_KEY_PREFIXES = (
+    MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, INFLIGHT_PID_KEY_PREFIX,
+    MECH_BUILD_KEY_PREFIX, PAYOFF_KEY_PREFIX, REJECTED_KEY_PREFIX,
+    CRASH_SIG_KEY_PREFIX, CONTRACT_KEY_PREFIX)
+
+
 def _is_bookkeeping_key(key: str) -> bool:
-    return key.startswith(
-        (MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, PAYOFF_KEY_PREFIX,
-         REJECTED_KEY_PREFIX, CRASH_SIG_KEY_PREFIX, CONTRACT_KEY_PREFIX))
+    return key.startswith(BOOKKEEPING_KEY_PREFIXES)
 
 
 def contract_key(component_key: str) -> str:
@@ -415,7 +506,8 @@ def crash_payoff_budget_spent(
 
 
 def reconcile_interrupted_attempts(
-    attempts: Mapping[str, int],
+    attempts: Mapping[str, int], *,
+    stopped_pids: Collection[int] = (), code_stamp: int = 0,
 ) -> tuple[dict[str, int], tuple[str, ...]]:
     """`(repaired attempts, component keys refunded)` — settle every attempt
     that was charged and never resolved.
@@ -438,23 +530,38 @@ def reconcile_interrupted_attempts(
 
     Counted as a mechanical failure rather than erased, on the same bound the
     splice/locate refunds use: an authoring call that reliably kills the process
-    would otherwise re-fire for ever on a budget nothing can exhaust."""
+    would otherwise re-fire for ever on a budget nothing can exhaust.
+
+    …EXCEPT when the process was stopped from outside. `stopped_pids` holds the
+    pids the death record says ended on a deliberate stop (SIGTERM/SIGINT), and
+    the pid that opened each attempt is on file beside its marker
+    (`inflight_pid_key`). Such an attempt is refunded with NO mechanical charge:
+    the bound above answers "this component's authoring call kills the process",
+    and an operator restart is not evidence about the authoring call at all.
+    Measured on `anyhow` 2026-08-15 — two operator SIGTERMs during the 34-name
+    construct/vtable component's re-author (runs `462635-c8369188` and
+    `496645-9b9de7e1`) took `mech:` to its cap of 2, and the next run refused a
+    component it had just graded OWNS off an in-crate ASAN origin. A death with
+    no record, or one killed by a signal an OOM also sends, keeps the charge:
+    that is the case the bound was written for."""
     out = dict(attempts)
     refunded: list[str] = []
     for key in sorted(k for k in out if k.startswith(INFLIGHT_KEY_PREFIX)):
         component = key[len(INFLIGHT_KEY_PREFIX):]
         del out[key]
+        opener = out.pop(inflight_pid_key(component), None)
         if not component or _is_bookkeeping_key(component):
             continue
         out[component] = max(0, out.get(component, 0) - 1)
-        out[mechanical_key(component)] = out.get(mechanical_key(component), 0) + 1
+        if opener is None or opener not in stopped_pids:
+            charge_mechanical_failure(out, component, code_stamp)
         refunded.append(component)
     return out, tuple(refunded)
 
 
 def mechanical_budget_spent(
     attempts: Mapping[str, int], component_key: str,
-    cap: int = DEFAULT_MAX_MECHANICAL,
+    cap: int = DEFAULT_MAX_MECHANICAL, code_stamp: int = 0,
 ) -> bool:
     """Whether this component has already failed mechanically `cap` times in a
     row without the model being at fault.
@@ -465,7 +572,13 @@ def mechanical_budget_spent(
     same failure re-fires on the next sweep, and every re-fire spends a full
     layout-authoring model call on a bug no model output can change. This
     bounds the refund: unbounded retries of an attempt-invariant failure is the
-    burn the refund was supposed to prevent, aimed at a different budget."""
+    burn the refund was supposed to prevent, aimed at a different budget.
+
+    A streak earned under another BUILD does not count
+    (`mechanical_streak_is_stale`): this cap answers "does this code reach an
+    outcome here", and code that has since been edited has not answered it."""
+    if mechanical_streak_is_stale(attempts, component_key, code_stamp):
+        return False
     return attempts.get(mechanical_key(component_key), 0) >= cap
 
 
