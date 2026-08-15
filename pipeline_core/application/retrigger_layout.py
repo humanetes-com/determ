@@ -344,7 +344,19 @@ def retrigger_layout(
     locate failure. GATED stays excluded — authoring blind is still refused."""
     records = deps.load_layout_records(project_dir, cfg_cluster)
     candidates = [r for r in records if r.outcome is not LayoutOutcome.GATED]
+    non_gated = len(candidates)
     if not candidates:
+        # Both `fired=False` returns in this function used to be SILENT, and
+        # silence at this gate is indistinguishable from a walk that was
+        # never called: run `263217-d41a5bb5` (2026-08-15) printed zero
+        # `[layout-retrigger]` lines in 308 minutes while its crash aim was
+        # graded out of every candidate. Every other exit here logs; these
+        # two now do too.
+        deps.log(
+            f"  [layout-retrigger] {cfg_cluster}: no re-authorable component "
+            f"recorded — {len(records)} layout record(s) loaded, "
+            f"{len(records) - non_gated} of them GATED. Nothing to aim at; "
+            "the caller's own exit stands.")
         return RetriggerResult(fired=False, reason="no re-authorable component recorded")
 
     attempts = _settle_interrupted(project_dir, cfg_cluster, deps)
@@ -423,6 +435,13 @@ def retrigger_layout(
                 " — so no component that merely references the faulting fn is "
                 "a candidate this sweep.")
 
+    # Candidates the evidence DID implicate and a budget (or the confound
+    # check) then refused. Counted apart from `candidates` because the two
+    # answers this function can end on are different facts: "the evidence
+    # named nobody" and "it named someone who may not be re-authored again"
+    # — the second is the OWNS tier's exit reason at every tier, and reporting
+    # it as the first is the same misreading the declined line was added for.
+    _refused = 0
     for rec in candidates:
         names = rec.names
         if compile_evidence is not None:
@@ -437,6 +456,7 @@ def retrigger_layout(
                     "crash evidence confounded — most of the component's own "
                     "fns are still stubs (stub panics abort binaries too); "
                     "letting fills run before spending an attempt.")
+                _refused += 1
                 continue
         else:
             cause = classify_layout_retrigger(
@@ -453,10 +473,12 @@ def retrigger_layout(
                      "exact crash and the crash survived it — refuted for "
                      "this signature, skipping. A changed crash or a new "
                      "localizer blame re-opens the aim.")
+            _refused += 1
             continue
         if attempts.get(key, 0) >= deps.max_attempts:
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: cap "
                      f"({deps.max_attempts}) reached — not retriggering again.")
+            _refused += 1
             continue
         if mechanical_budget_spent(attempts, key):
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
@@ -464,6 +486,7 @@ def retrigger_layout(
                      "already refunded here — the model attempt is not what is "
                      "failing, so another authoring call would burn on the same "
                      "bug; not retriggering until it is fixed.")
+            _refused += 1
             continue
         if rejection_budget_spent(attempts, key):
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
@@ -473,6 +496,7 @@ def retrigger_layout(
                      "contract and only an ACCEPTED re-author clears the "
                      "streak. The rejection budget refused (the destruction "
                      "cap counts landed re-authors only). Not retriggering.")
+            _refused += 1
             continue
 
         surface = deps.load_surface(project_dir, cfg_cluster)
@@ -494,6 +518,7 @@ def retrigger_layout(
                     "AUTHORED component has no stored locate-keys and they "
                     "could not be derived from the scaffold — cannot "
                     "re-author safely; skipping.")
+                _refused += 1
                 continue
             narrowed = with_defs
 
@@ -560,6 +585,42 @@ def retrigger_layout(
             "re-opens the aim.")
         return RetriggerResult(
             fired=False, reason="the faulting component is not re-authorable")
+    # The DECLINED walk. Every per-candidate refusal above logs from inside
+    # the loop, so an empty candidate list — the state a NONE tier produces —
+    # took this exit having printed nothing at all. On run `263217-d41a5bb5`
+    # the line below would have read `tier NONE, 0 of 16 candidate(s); crash
+    # evidence: 2 blamed frame(s), 67 chain-blamed, 36 suspect(s), 19
+    # vanished` at iteration 1, which is the whole diagnosis: blame that
+    # implicates nobody, standing in front of a chain that implicates the
+    # construct/vtable component.
+    _route = ("compile" if compile_evidence is not None else
+              "crash" if crash_evidence is not None else "plateau")
+    _shape = ""
+    if crash_evidence is not None:
+        _shape = (f"; crash evidence: {len(crash_evidence.blamed_fns)} blamed "
+                  f"frame(s), {len(crash_evidence.chain_blamed)} chain-blamed, "
+                  f"{len(crash_evidence.suspect_fns)} suspect(s), "
+                  f"{len(crash_evidence.vanished)} vanished")
+    if _refused:
+        # Below the OWNS tier the walk ends here on refusals too, and "no
+        # component matched" is then false in the direction that matters: the
+        # evidence named someone, a budget refused them, and each refusal
+        # printed its own line above. Say which of the two happened, so the
+        # next reader does not go looking for missing evidence when the answer
+        # is a spent budget (or the reverse).
+        deps.log(
+            f"  [layout-retrigger] {cfg_cluster}: {_refused} candidate(s) the "
+            f"evidence implicated were all refused above ({_route} route, "
+            f"blame tier {_blame_tier.name}, {len(candidates)} of {non_gated} "
+            f"non-GATED record(s) at that tier){_shape}. Nothing re-authored, "
+            "no attempt charged.")
+        return RetriggerResult(
+            fired=False, reason="every matching component was refused")
+    deps.log(
+        f"  [layout-retrigger] {cfg_cluster}: no component matched the "
+        f"evidence ({_route} route, blame tier {_blame_tier.name}) — "
+        f"{len(candidates)} of {non_gated} non-GATED record(s) reached the "
+        f"walk{_shape}. Nothing re-authored, no attempt charged.")
     return RetriggerResult(fired=False, reason="no component matched the evidence")
 
 

@@ -1,0 +1,32 @@
+{
+  "run_id": "263217-d41a5bb5",
+  "cluster": "stable",
+  "entry_best": 0,
+  "iterations": [
+    {
+      "iter": 1,
+      "passed": 39,
+      "failed": 40,
+      "oracle": 79,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 69,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 2,
+      "readmitted": 7,
+      "passed": 39,
+      "failed": 40,
+      "oracle": 79,
+      "improved": false,
+      "stall": 1,
+      "max_stall": 3,
+      "frontier": 69,
+      "kind": "merged",
+      "exhausted": 0
+    }
+  ]
+}

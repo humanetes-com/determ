@@ -290,8 +290,28 @@ def crash_signature(evidence: CrashEvidence) -> str:
     walk's own exit line promises: empty → chain when the synthesis first
     lands (the unlock — refutations and the zero-payoff streak were booked
     under the old signature), and chain → frames if a real blame ever
-    arrives. Payloads with no chain blame hash byte-identically to before, so
-    attempts stores written by earlier runs keep their refutations."""
+    arrives.
+
+    ONE-TIME MIGRATION, 2026-08-15. The hashing rule below never changed;
+    what the TDD driver PUTS in `blamed_fns` did. It used to hand the crash
+    evidence keys minus the chain keys — that is every frame of every site
+    (`crash_evidence_by_locator` keys by access frames too) plus the
+    unlocalizable branch's synthesized subject fns — and now hands
+    `blamed_locators`, the origin blame alone. So every cause-C signature
+    moves once: frame-derived from an all-frames list to origin-only,
+    frame-blind from a frame residue to empty (the `;c=chain` marker
+    unchanged), subject-synthesis from a subject list to empty. Stores
+    written before that edit therefore re-key, and the exposure was measured
+    on the live one (`_layout_retrigger_attempts_stable.json`, cluster
+    `stable`, read 2026-08-15): four `sig:` refutation rows are orphaned, of
+    which `StdError`'s two are moot (that component sits at attempts 2 of a
+    cap of 2) and `Buf`/`Indented` are at 1 of 2 — at most one extra fire
+    each, and only if their old crash recurs. One `payoff:crashlast:` row
+    re-keys, restarting the crash zero-payoff streak from 0 of
+    DEFAULT_MAX_ZERO_PAYOFF. That is the sanctioned "new evidence changes the
+    signature" transition rather than an accident: what the signature reads
+    genuinely changed, and it changed because the old reading was the
+    crashing test's own frames."""
     vanished = ",".join(sorted(evidence.vanished))
     blamed = ",".join(sorted(
         f"{b.file}::{b.fn_name}" for b in evidence.blamed_fns))
@@ -466,13 +486,20 @@ class CrashEvidence:
     statically reach (reverse-map targets), and for how many consecutive
     sweeps the shrink persisted.
 
-    `blamed_fns` is a SECOND, stronger channel: the fns the crash localizer put
-    in the faulting stack (gdb frames, or ASAN's use-after-free origin). The two
-    are different grades of evidence and must not be merged into one set —
-    `suspect_fns` says a vanished test *could* have called this fn, `blamed_fns`
-    says the fault *was observed* there. Only the second can separate two
-    components that the same vanished test reaches, and that is precisely what
-    cause C could not do while it aimed by record order.
+    `blamed_fns` is a SECOND, stronger channel: the ORIGIN blame locators —
+    where the localizer placed the fault itself (`blamed_locators`: one
+    locator per site, gdb's faulting frame or ASAN's use-after-free origin).
+    Not the crash EVIDENCE keys, which are a different set for a different
+    purpose: `crash_evidence_by_locator` keys by every frame so that callers
+    up the stack receive the report too, and a set built that way names the
+    innocent router of execution — or, when the origin is unattributed and
+    the only frames are the crashed test's own, names nobody in the crate at
+    all (run `263217-d41a5bb5`, 2026-08-15). The two are different grades of
+    evidence and must not be merged into one set — `suspect_fns` says a
+    vanished test *could* have called this fn, `blamed_fns` says the fault
+    *was observed* there. Only the second can separate two components that
+    the same vanished test reaches, and that is precisely what cause C could
+    not do while it aimed by record order.
 
     `chain_blamed` is a THIRD channel between them: the construction chain of
     the crashed tests (attributed fns plus the producers of their types),
@@ -623,6 +650,13 @@ def classify_crash_retrigger(
     it. Blame is absent (empty) whenever localization was skipped or found no
     native fault, and then this is exactly the reachability rule it always was.
 
+    One qualification, from the 2026-08-15 defect: "the blame decides" holds
+    wherever the blame implicates SOMETHING. A frame set that implicates no
+    component at all decides nothing — it merely empties the tier — so when a
+    chain inference exists `crash_candidate_grade` reads that instead. The
+    replaced rule was: two locators in a generated test file silenced a 67-fn
+    chain for 308 minutes.
+
     Admitting a component is NOT choosing it. This still returns RUNTIME_CRASH
     for every component the fault so much as mentions, and the caller walks them
     in registry order — see `crash_candidate_grade` and `top_blame_tier` for the
@@ -655,8 +689,33 @@ def crash_candidate_grade(
     if not evidence.vanished:
         return BlameGrade.NONE
     if evidence.blamed_fns:
-        return crash_blame_grade(
+        frame_grade = crash_blame_grade(
             evidence.blamed_fns, fn_records, component_names)
+        # An observed frame decides ALONE wherever it implicates this
+        # component at any grade, and still decides — as NONE — when no
+        # chain inference exists. The one case that falls through is "a
+        # frame that implicates nothing at all, while a chain inference
+        # does": returning NONE there hands the caller an empty candidate
+        # list and silences a channel that had an answer.
+        #
+        # Live instance, run `263217-d41a5bb5` (2026-08-15): the driver
+        # handed the crashing test's OWN frames — two locators in the
+        # generated `src/error.gen_tests_4.rs` — as `blamed_fns`. Every one
+        # of the cluster's 16 non-GATED components graded NONE on them, the
+        # 67-fn chain (which grades OWNS on the construct/vtable component,
+        # since the chain holds `src/error.rs::construct` and that component
+        # declares `construct`) was never consulted, and the walk returned
+        # silently for 308 minutes.
+        #
+        # After the driver fix that supplies the ORIGIN blame here, this
+        # co-occurrence is unreachable from the live driver — the chain
+        # synthesis is guarded by `not crash_blamed`, so a non-empty
+        # `chain_blamed` implies an empty `blamed_fns` at the only
+        # construction site. This is seam hardening: the function is a
+        # public domain seam, the co-occurrence is one driver edit away from
+        # returning, and it is what makes the defect unit-pinnable.
+        if frame_grade is not BlameGrade.NONE or not evidence.chain_blamed:
+            return frame_grade
     # Chain-derived blame outranks reachability but never a frame: it names
     # the producers a vanished test's static reach cannot separate (that is
     # what admits the construct/vtable component the suspects never touch),

@@ -1,4 +1,8 @@
-"""Pins for the F11 M3 layout re-trigger ACTION (application/retrigger_layout.py)."""
+"""Pins for the layout re-trigger ACTION (`application/retrigger_layout.py`):
+the walk that grades every non-GATED component against the evidence, picks one,
+spends an authoring attempt on it and reverts the bodies that referenced it.
+The classification and the budgets it consults are pinned one layer down, in
+`test_layout_retrigger.py`."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -1077,6 +1081,187 @@ def test_a_mechanical_reason_never_becomes_a_constraint_to_satisfy():
     mech = "could not locate a frozen definition to replace: CastTo in ptr.rs"
     _remember_rejections(Path("/x"), "stable", "K", [real, mech], deps)
     assert saved["K"] == [real]
+
+
+# --- the declined walk says why, and the corrected live expectation ------------
+# Run `263217-d41a5bb5` (2026-08-15): the crash aim was handed the crashing
+# test's own two `src/error.gen_tests_4.rs` frames as `blamed_fns`, they graded
+# NONE against all 16 non-GATED components, `candidates` emptied, and the walk
+# took `return RetriggerResult(fired=False, reason="no component matched the
+# evidence")` — the one exit in this module that logged nothing. 308 minutes,
+# zero `[layout-retrigger]` lines, while the prompt/void/frontier consumers of
+# the same crash kept printing. Silence at this gate now reads as a regression
+# signal because every reachable outcome prints.
+
+# The live component key, verbatim from
+# `tmp/anyhow/.skeleton/_layout_retrigger_attempts_stable.json` (2026-08-15).
+_MEGA_KEY = (
+    "Backtrace|CastTo|Error|ErrorImpl|ErrorVTable|Mut|Own|Ref|backtrace|chain|"
+    "construct|construct_from_adhoc|construct_from_boxed|"
+    "construct_from_context|construct_from_display|construct_from_std|"
+    "context_backtrace|context_chain_downcast|context_chain_drop_rest|"
+    "context_downcast|context_drop_rest|debug|display|erase|error|error_mut|"
+    "no_backtrace|object_boxed|object_downcast|object_drop|object_drop_front|"
+    "object_reallocate_boxed|object_ref|vtable")
+_MEGA_NAMES = frozenset(_MEGA_KEY.split("|"))
+_RESIDUE = frozenset({
+    FnLocator("src/error.gen_tests_4.rs",
+              "test_reallocate_into_boxed_dyn_error_without_backtrace"),
+    FnLocator("src/error.gen_tests_4.rs", "{closure#0}"),
+})
+_CHAIN_CONSTRUCT = FnLocator("src/error.rs", "construct")
+
+
+def _mega_fakes(**kw) -> _Fakes:
+    """The cluster reduced to the component the chain implicates, with the
+    live tree's `construct` present so nothing reads as confounded. The
+    surface's `ErrorImpl` is inside the mega key, so the component is
+    genuinely authorable. `file` is SRC-relative like every other fixture
+    here — `_fns_for` re-bases it onto whichever dir the caller enumerates.
+
+    `fn_records` is a DEFAULT the caller may replace (a component graded
+    against a different set of filled bodies is the obvious next variation);
+    setting it as a keyword rather than positionally is what keeps that call
+    an override instead of a duplicate-argument TypeError."""
+    kw.setdefault("fn_records", [
+        FnRecord(file="error.rs", fn_name="construct",
+                 sig_text=("unsafe fn construct<E>(error: E, vtable: &'static "
+                           "ErrorVTable, backtrace: Option<Backtrace>) -> Self"),
+                 body_text=("let inner = Box::new(ErrorImpl { vtable, "
+                            "backtrace, _object: error });")),
+    ])
+    f = _Fakes(**kw)
+    f._records = [LayoutComponentRecord(_MEGA_NAMES, LayoutOutcome.FROZEN)]
+    return f
+
+
+def _chain_evidence(blamed=frozenset()):
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    return CrashEvidence(
+        vanished=frozenset(
+            {"test_reallocate_into_boxed_dyn_error_without_backtrace"}),
+        suspect_fns=frozenset({FnLocator("src/chain.rs", "next")}),
+        blamed_fns=blamed,
+        chain_blamed=frozenset({_CHAIN_CONSTRUCT}))
+
+
+def test_a_declined_crash_walk_prints_its_tier_and_its_evidence_shape():
+    """The 308-minute silence, in miniature: evidence that grades NONE
+    everywhere. It still declines — that is correct — but it now says which
+    route asked, which tier the grading reached, how many records survived,
+    and what the evidence was made of, which is the whole diagnosis."""
+    f = _Fakes()
+    f._records = [LayoutComponentRecord(frozenset({f"Comp{i}"}),
+                                        LayoutOutcome.FROZEN)
+                  for i in range(16)]
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=_chain_evidence(_RESIDUE))
+    assert not res.fired
+    assert res.reason == "no component matched the evidence"
+    assert not f.committed
+    declined = [ln for ln in f.logs if "no component matched the evidence" in ln]
+    assert len(declined) == 1
+    line = declined[0]
+    assert "crash route" in line and "blame tier NONE" in line
+    assert "0 of 16 non-GATED record(s)" in line
+    assert ("2 blamed frame(s), 1 chain-blamed, 1 suspect(s), 1 vanished"
+            in line)
+
+
+def test_a_refused_candidate_is_not_reported_as_evidence_that_matched_nothing():
+    """The other half of the declined line. Below the OWNS tier the walk also
+    ends after the loop, and one line for both outcomes said "no component
+    matched the evidence" — false in the direction a reader acts on: the
+    evidence named this component, the destruction cap refused it, and that
+    refusal printed one line above. `fmt` REFERENCES `ErrorImpl` without
+    declaring it, so the tier is REFERENCES and the OWNS exit does not catch
+    this path."""
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+    f = _Fakes()                      # canonical records: `fmt` references it
+    f.attempts = {"ErrorImpl": 2}     # == the `max_attempts` deps() hands over
+    ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
+                       suspect_fns=frozenset(),
+                       blamed_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=ev)
+    assert not res.fired
+    assert res.reason == "every matching component was refused"
+    assert f.committed == [] and f.prompts == []
+    assert any("cap (2) reached" in ln for ln in f.logs)
+    refused = [ln for ln in f.logs if "were all refused above" in ln]
+    assert len(refused) == 1
+    assert "1 candidate(s)" in refused[0]
+    assert "blame tier REFERENCES" in refused[0]
+    # The line that would have sent the reader looking for missing evidence.
+    assert not any("no component matched the evidence" in ln for ln in f.logs)
+
+
+def test_a_walk_with_nothing_to_aim_at_says_how_many_records_were_gated():
+    """The other silent return. `no re-authorable component recorded` cannot
+    be told from `the walk was never called` unless it prints."""
+    f = _Fakes(frozen=False)
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+    assert not res.fired
+    assert any("no re-authorable component recorded" in ln
+               and "0 layout record(s) loaded" in ln for ln in f.logs)
+    # …and a cluster whose only rows are GATED reports the reason it has none.
+    g = _Fakes()
+    g._records = [LayoutComponentRecord(frozenset({"ErrorImpl"}),
+                                        LayoutOutcome.GATED)]
+    assert not retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                                g.deps()).fired
+    assert any("1 layout record(s) loaded, 1 of them GATED" in ln
+               for ln in g.logs)
+
+
+def test_the_chain_aims_the_walk_at_the_mega_component_and_charges_attempt_1():
+    """The corrected live expectation for the first post-fix sweep whose
+    vanish streak reaches 2 (the original entry predicted a rejection-budget
+    refusal; that was wrong twice — the cap is 3, the store holds 2, and the
+    streak carries no `contract:` stamp so it reads as stale by design).
+
+    With `blamed_fns` empty and the chain naming `src/error.rs::construct`,
+    the mega component grades OWNS, no `sig:` key refutes it (the signature
+    moved), the destruction cap is at 0 of 2, and the stale-epoch release
+    admits it past the 2/3 rejection streak: the walk FIRES and charges
+    attempt 1. The authoring is stubbed to reject here, so what is pinned is
+    the aim reaching the component, not what the model then writes."""
+    f = _mega_fakes(compiles=False,
+                    attempts={f"rejected:{_MEGA_KEY}": 2})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=_chain_evidence())
+    assert res.fired and res.rejected
+    assert any("the observed fault is inside code 1 component(s) declare" in ln
+               for ln in f.logs)
+    assert f.committed and "attempt 1" in f.committed[0]
+    # The stale streak was retired at this first rejection under the current
+    # constraint set and re-counted from 1, with the epoch now stamped.
+    assert f.saved_attempts is not None
+    assert f.saved_attempts[f"rejected:{_MEGA_KEY}"] == 1
+    assert (f.saved_attempts[f"contract:{_MEGA_KEY}"]
+            == REJECTION_CONTRACT_EPOCH)
+    assert any("retired" in ln for ln in f.logs)
+    # Nothing declined: the silent exit is not on this path at all.
+    assert not any("no component matched the evidence" in ln for ln in f.logs)
+
+
+def test_a_streak_stamped_at_this_epoch_is_the_red_lock_the_entry_predicted():
+    """The companion. Three rejections STAMPED at the current epoch are a
+    current-contract lock: the walk refuses before any attempt is charged and
+    says so as RED. This is what run `263217-d41a5bb5`'s successor would print
+    if the re-authors keep violating a contract the prompt now states."""
+    f = _mega_fakes(compiles=False, attempts={
+        f"rejected:{_MEGA_KEY}": 3,
+        f"contract:{_MEGA_KEY}": REJECTION_CONTRACT_EPOCH})
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=_chain_evidence())
+    assert not res.fired
+    assert not f.committed and f.prompts == []
+    assert any("REJECTED at validation" in ln for ln in f.logs)
+    # The tier was still reached — the refusal is the budget's, not the aim's,
+    # so the declined-walk line must NOT claim the evidence matched nothing.
+    assert res.reason == "the faulting component is not re-authorable"
 
 
 def test_negative_control_the_legacy_streak_closes_the_walk_pre_fix(monkeypatch):

@@ -1872,7 +1872,6 @@ def run_phase_c_tdd(
                        or test_reverse_map.get(_vt) or set()):
                 _suspects.add(FnLocator(*_k))
         _chain_keys: frozenset[FnLocator] = frozenset()
-        _chain_added: frozenset[FnLocator] = frozenset()
         # `bodies_in_flight`, not `active`: the window suppresses a reading the
         # re-stub itself produced, and a fired-but-REJECTED attempt re-stubbed
         # nothing (`restubbed=0`), so its sweep measures the real tree. That is
@@ -1904,8 +1903,6 @@ def run_phase_c_tdd(
                 raw_report=s.raw_report) for s in _unattributed_sites]
             _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
             _chain_keys = frozenset(_chain_texts)
-            _chain_added = frozenset(
-                k for k in _chain_texts if k not in crash_texts)
             for _loc, _text in _chain_texts.items():
                 # The full evidence pack, applied here because this
                 # branch runs AFTER the per-sweep evidence plumbing
@@ -1970,20 +1967,48 @@ def run_phase_c_tdd(
                     vanished=frozenset(_oracle.vanished),
                     suspect_fns=frozenset(_suspects),
                     consecutive_sweeps=_crash_retrigger_after,
-                    # The localizer ran ~200 lines above on THIS sweep and
-                    # named the faulting fns; `_suspects` above is only static
-                    # reachability. Withholding the blame here is what let the
-                    # retrigger pick a component in record order that the fault
-                    # never touched (§ `classify_crash_retrigger`).
-                    # Chain-derived keys are carried in their OWN field: in
+                    # The ORIGIN blame, never the evidence keys.
+                    # `crash_texts` is keyed by EVERY frame plus every
+                    # synthesized-evidence locator, so what survives a
+                    # subtraction of the chain keys is not blame at all: on
+                    # run `263217-d41a5bb5` (2026-08-15) it was the crashing
+                    # TEST's own two frames — a fn and a `{closure#0}` in
+                    # the generated `src/error.gen_tests_4.rs`, from an
+                    # `AddressSanitizer: SEGV` whose origin was
+                    # unattributed. They graded NONE against all 16
+                    # non-GATED components, `crash_candidate_grade` returned
+                    # on `blamed_fns` before it could consult the chain, the
+                    # candidate list emptied, and the walk fell to its
+                    # unlogged "no component matched the evidence" exit for
+                    # 308 minutes — zero `[layout-retrigger]` lines — while
+                    # the three loud consumers (prompt evidence, exhaustion
+                    # void, frontier) kept firing on 67 chain-derived keys.
+                    # `blamed_locators` is the origin blame alone and is
+                    # what every "is the blame outside this unit" test in
+                    # this file already uses.
+                    #
+                    # What each crash class hands the aim, all three
+                    # deliberate: frame-derived with an in-crate origin
+                    # narrows from access+origin frames to the origin
+                    # locators (sharper aim, one component per fault);
+                    # frame-blind hands EMPTY, which is what makes the
+                    # `chain_blamed` branch of the grade reachable at all —
+                    # the fix's target; unlocalizable subject-synthesis
+                    # (~500 lines above) stops leaking its synthesized
+                    # subject fns into blame, as that branch's own comment
+                    # already promised ("as EVIDENCE …, not blame"), and
+                    # aims by `suspect_fns` reachability instead.
+                    #
+                    # Chain keys stay in their OWN field regardless: in
                     # `blamed_fns` they would enter the signature as a fn
                     # list, and that list includes producers matched against
                     # live body text — every landed fill could then change
                     # the signature and re-open the walk on a crash that
                     # never changed. `chain_blamed` contributes a stable
-                    # marker instead (§ `crash_signature`).
-                    blamed_fns=frozenset(
-                        k for k in crash_texts if k not in _chain_added),
+                    # marker instead (§ `crash_signature`), and the origin
+                    # blame carries no chain key by construction, so no
+                    # subtraction is needed to keep them out.
+                    blamed_fns=crash_blamed,
                     chain_blamed=_chain_keys),
                 best_pass=best_pass)
             if _retrig_c.fired:

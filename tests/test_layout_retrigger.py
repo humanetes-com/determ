@@ -1,4 +1,8 @@
-"""Pins for the t1.5 re-trigger classifier (F11 M3)."""
+"""Pins for the layout re-trigger DOMAIN (`domain/layout_retrigger.py`): which
+cause a stalled or crashed cluster classifies as, how strongly an observed
+fault implicates one component (`BlameGrade`), and the attempt, payoff,
+mechanical and rejection budgets the walk spends. The ACTION that walks the
+components lives one layer up and is pinned in `test_retrigger_layout.py`."""
 from __future__ import annotations
 
 from pipeline_core.domain.layout_retrigger import (
@@ -809,14 +813,25 @@ def test_chain_blame_grades_above_suspects_and_below_frames() -> None:
         chain_blamed=frozenset({FnLocator("src/error.rs",
                                           "construct_from_std")}))
     assert crash_candidate_grade(chain_ev, records, comp) is BlameGrade.OWNS
-    # Below frames: an observed frame decides ALONE — with frame blame
-    # present the chain is not consulted, even where it would grade higher.
+    # Below frames: an observed frame that IMPLICATES this component decides
+    # ALONE — the chain is not consulted even where it would grade higher.
+    # (This pin used to use a frame implicating NOTHING and assert NONE; that
+    # case is the 2026-08-15 defect and now falls through to the chain, which
+    # `test_a_frame_that_implicates_nothing_no_longer_silences_the_chain`
+    # pins. What "a frame decides alone" means is unchanged wherever the
+    # frame has anything to say about this component.)
+    records = records + [
+        FnRecord(file="src/fmt.rs", fn_name="fmt",
+                 container="impl Display for Indented",
+                 sig_text="fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+                 body_text="let v = vtable(self.ptr); write!(f, \"{:?}\", v)"),
+    ]
     both = CrashEvidence(
         vanished=frozenset({"test_drop"}), suspect_fns=frozenset(),
         blamed_fns=frozenset({FnLocator("src/fmt.rs", "fmt")}),
         chain_blamed=frozenset({FnLocator("src/error.rs",
                                           "construct_from_std")}))
-    assert crash_candidate_grade(both, records, comp) is BlameGrade.NONE
+    assert crash_candidate_grade(both, records, comp) is BlameGrade.REFERENCES
 
 
 def test_members_in_use_names_what_the_veto_will_measure() -> None:
@@ -875,3 +890,185 @@ def test_a_rejection_streak_from_an_older_prompt_does_not_convict() -> None:
                contract_key("Error|ptr"): REJECTION_CONTRACT_EPOCH}
     assert not rejection_streak_is_stale(current, "Error|ptr")
     assert rejection_budget_spent(current, "Error|ptr")
+
+
+# --- the aim: a frame that implicates NOBODY must not silence the chain --------
+# Run `263217-d41a5bb5` (2026-08-15), cluster `stable`, both iterations
+# identical: `unittests src/lib.rs` died of `AddressSanitizer: SEGV`, the
+# origin was unattributed, and the only two frames in the whole report were
+# the crashing TEST's own — a fn and its closure in the generated
+# `src/error.gen_tests_4.rs`. The driver handed those two locators to the aim
+# as `blamed_fns` (the crash evidence keys minus the chain keys), they graded
+# NONE against every one of the cluster's 16 non-GATED components, and the
+# grade returned on `blamed_fns` before the 67-fn chain — which grades OWNS
+# on the construct/vtable component — could be read. 308 minutes, zero
+# `[layout-retrigger]` lines.
+
+# The live component key, verbatim from
+# `tmp/anyhow/.skeleton/_layout_retrigger_attempts_stable.json` (2026-08-15).
+_MEGA_KEY = (
+    "Backtrace|CastTo|Error|ErrorImpl|ErrorVTable|Mut|Own|Ref|backtrace|chain|"
+    "construct|construct_from_adhoc|construct_from_boxed|"
+    "construct_from_context|construct_from_display|construct_from_std|"
+    "context_backtrace|context_chain_downcast|context_chain_drop_rest|"
+    "context_downcast|context_drop_rest|debug|display|erase|error|error_mut|"
+    "no_backtrace|object_boxed|object_downcast|object_drop|object_drop_front|"
+    "object_reallocate_boxed|object_ref|vtable")
+_MEGA_NAMES = frozenset(_MEGA_KEY.split("|"))
+
+# The two frames the localizer reported, and the residue the pre-fix
+# subtraction left in `blamed_fns`.
+_RESIDUE = frozenset({
+    FnLocator("src/error.gen_tests_4.rs",
+              "test_reallocate_into_boxed_dyn_error_without_backtrace"),
+    FnLocator("src/error.gen_tests_4.rs", "{closure#0}"),
+})
+# One fn out of the 67 the chain synthesis emitted. `construct` is the one
+# that decides: the mega component DECLARES it, so `crash_blame_grade`'s first
+# clause grades OWNS — and the ASAN fault is a reallocate-into-boxed-dyn-error.
+_CHAIN_CONSTRUCT = FnLocator("src/error.rs", "construct")
+
+
+def _aim_records() -> list[FnRecord]:
+    """Enough of the live tree to grade: the declared `construct`, and a
+    `src/fmt.rs::fmt` that only SPELLS a component name (its self type is
+    `Indented`, which the mega component does not hold)."""
+    return [
+        FnRecord(file="src/error.rs", fn_name="construct",
+                 sig_text=("unsafe fn construct<E>(error: E, vtable: &'static "
+                           "ErrorVTable, backtrace: Option<Backtrace>) -> Self"),
+                 body_text=("let inner = Box::new(ErrorImpl { vtable, "
+                            "backtrace, _object: error });")),
+        FnRecord(file="src/fmt.rs", fn_name="fmt",
+                 container="impl Display for Indented",
+                 sig_text="fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+                 body_text="let v = vtable(self.ptr); write!(f, \"{:?}\", v)"),
+    ]
+
+
+def _aim_evidence(blamed: frozenset[FnLocator],
+                  chain: frozenset[FnLocator] = frozenset(),
+                  suspects: frozenset[FnLocator] = frozenset()) -> CrashEvidence:
+    """The run's payload shape: 19 vanished names, reduced to the one the
+    ASAN report is about."""
+    return CrashEvidence(
+        vanished=frozenset(
+            {"test_reallocate_into_boxed_dyn_error_without_backtrace"}),
+        suspect_fns=suspects, blamed_fns=blamed, chain_blamed=chain)
+
+
+def test_a_frame_that_implicates_nothing_no_longer_silences_the_chain() -> None:
+    """Variant A→B of the 2026-08-15 probe. Same evidence, same records, same
+    component: with the gen_tests residue in `blamed_fns` the aim graded NONE
+    and emptied the candidate list; consulting the chain grades OWNS and puts
+    the construct/vtable component back in the walk."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        classify_crash_retrigger,
+        crash_blame_grade,
+        crash_candidate_grade,
+        top_blame_tier,
+    )
+    records = _aim_records()
+    ev = _aim_evidence(_RESIDUE, frozenset({_CHAIN_CONSTRUCT}))
+    assert crash_candidate_grade(ev, records, _MEGA_NAMES) is BlameGrade.OWNS
+    assert top_blame_tier([BlameGrade.OWNS]) is BlameGrade.OWNS
+    assert classify_crash_retrigger(
+        ev, records, _MEGA_NAMES) is LayoutRetriggerCause.RUNTIME_CRASH
+
+    # NEGATIVE CONTROL — the pre-fix decision, which was exactly
+    # `return crash_blame_grade(evidence.blamed_fns, …)` the moment
+    # `blamed_fns` was non-empty. On this fixture that is NONE, which is the
+    # 308-minute silence in one line: no candidate, no tier, no log.
+    assert crash_blame_grade(
+        ev.blamed_fns, records, _MEGA_NAMES) is BlameGrade.NONE
+    # …and it was NONE for every component, not just this one, which is why
+    # `top_blame_tier` came back NONE and the walk fell to its silent exit.
+    assert crash_blame_grade(
+        ev.blamed_fns, records,
+        frozenset({"Indented", "Quoted"})) is BlameGrade.NONE
+
+
+def test_an_observed_frame_still_decides_alone_when_it_implicates_anything(
+) -> None:
+    """The ranking contract is unchanged wherever the frame has something to
+    say: a REFERENCES frame beats an OWNS chain, and an OWNS frame is not
+    diluted by a chain that grades NONE. Only a frame implicating NOTHING
+    falls through."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_candidate_grade,
+    )
+    records = _aim_records()
+    # Frame REFERENCES (`fmt` spells `vtable`), chain OWNS: the frame wins.
+    weaker_frame = _aim_evidence(
+        frozenset({FnLocator("src/fmt.rs", "fmt")}),
+        frozenset({_CHAIN_CONSTRUCT}))
+    assert crash_candidate_grade(
+        weaker_frame, records, _MEGA_NAMES) is BlameGrade.REFERENCES
+    # Frame OWNS, chain grades NONE here: still OWNS, chain never read.
+    owning_frame = _aim_evidence(
+        frozenset({_CHAIN_CONSTRUCT}),
+        frozenset({FnLocator("src/nowhere.rs", "unknown")}))
+    assert crash_candidate_grade(
+        owning_frame, records, _MEGA_NAMES) is BlameGrade.OWNS
+
+
+def test_a_frame_grading_none_with_no_chain_still_decides_and_skips_suspects(
+) -> None:
+    """The fall-through is scoped to "a chain inference exists". With no
+    chain, a frame that implicates nothing keeps deciding — NONE, suspects
+    unread — which is the rule `classify_crash_retrigger` has always stated:
+    a component the observed fault does not touch is not a candidate."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_candidate_grade,
+    )
+    ev = _aim_evidence(_RESIDUE, frozenset(),
+                       suspects=frozenset({_CHAIN_CONSTRUCT}))
+    assert crash_candidate_grade(ev, _aim_records(), _MEGA_NAMES) is BlameGrade.NONE
+    # The same suspects DO decide once no blame of any kind exists.
+    bare = _aim_evidence(frozenset(), frozenset(),
+                         suspects=frozenset({_CHAIN_CONSTRUCT}))
+    assert crash_candidate_grade(bare, _aim_records(), _MEGA_NAMES) is BlameGrade.OWNS
+
+
+def test_the_cause_c_signature_migrates_once_and_only_where_the_payload_moved(
+) -> None:
+    """`crash_signature` hashes `blamed_fns` verbatim, so changing WHAT the
+    driver puts there moves the fingerprint. Three transitions, each asserted
+    so the release of the live store's four `sig:` rows is a tested fact:
+    frame-blind (residue → empty), frame-derived (all frames → origin only),
+    and the class that does not move (already empty)."""
+    from pipeline_core.domain.layout_retrigger import crash_signature
+    # (a) frame-blind: the residue leaves, the `;c=chain` marker stays.
+    chain = frozenset({_CHAIN_CONSTRUCT})
+    pre = _aim_evidence(_RESIDUE, chain)
+    post = _aim_evidence(frozenset(), chain)
+    assert crash_signature(pre) != crash_signature(post)
+    vanished = ",".join(sorted(post.vanished))
+    import hashlib
+    assert crash_signature(post) == hashlib.sha256(
+        f"v={vanished};b=;c=chain".encode()).hexdigest()[:12]
+
+    # (b) the unchanged class: a payload whose `blamed_fns` was already empty
+    # pre-fix — no site carried a frame and no chain was synthesized — hashes
+    # what it always hashed, so the attempts stores that class wrote keep
+    # their refutations across this edit. Pinned by VALUE on purpose: an
+    # assertion comparing the payload to a second copy of itself proves only
+    # that `crash_signature` is a function of its fields, which no migration
+    # could break, and would stay green through a change that moved this
+    # class too.
+    assert crash_signature(_aim_evidence(frozenset())) == hashlib.sha256(
+        f"v={vanished};b=".encode()).hexdigest()[:12]
+
+    # (c) frame-derived: the old payload carried every frame — the origin AND
+    # the access frames `crash_evidence_by_locator` also keys — so narrowing
+    # to the origin locator moves this signature too. Deliberate: the aim gets
+    # sharper, and the refutation it releases was booked against a blame that
+    # named an innocent caller (`ext_context` of the `object_drop` fault,
+    # 2026-08-09/10).
+    origin = FnLocator("src/error.rs", "object_drop")
+    access = FnLocator("src/context.rs", "ext_context")
+    assert crash_signature(_aim_evidence(frozenset({origin, access}))) != \
+        crash_signature(_aim_evidence(frozenset({origin})))
