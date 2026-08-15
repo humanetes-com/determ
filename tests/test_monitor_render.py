@@ -162,7 +162,46 @@ def test_iteration_progress_rows_sweep_bar_tracks_the_batch() -> None:
     text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
     assert "34/34 unit(s)" in text and "+15 beyond frontier" in text
     assert "49/34" not in text
-    # No batch snapshot (per-fn short-circuit emits no pass.start) → no row.
+    # Neither batch known (no pass.start, no frontier) → no row: there is
+    # nothing to divide by, and a bar over a guessed denominator is worse
+    # than no bar.
     state["pass_stubs_total"] = 0
+    state["tdd_frontier"] = None
     text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
     assert "sweep" not in text
+
+
+def test_iteration_progress_rows_sweep_bar_falls_back_to_the_frontier() -> None:
+    """A fully-bodied tree emits no pass.start, and the sweep bar was keyed
+    to it alone — so the one row that is supposed to keep moving after the
+    `bodies` bar retires vanished exactly there.
+
+    Run 500301-6a66bf86 (2026-08-15) iter 1: 61-fn frontier, all behavioural
+    re-fills, dispatched through the file-first route as nine file units each
+    logging `0 stub(s), N re-fill(s)`. The per-fn engine never ran, so
+    `pass_stubs_total` was 0 with 35 fills landed and 16 minutes elapsed, and
+    the panel rendered ONE row and no bar of any kind. The frontier is the
+    batch that sweep opened with; the row must use it, and must say so — the
+    two denominators count different populations.
+    """
+    state = {
+        "tdd_iter_ts": ["2026-08-15T08:48:51+00:00"], "tdd_frontier": 61,
+        "total_fns_in_cluster": 0, "filled_count_at_pass_start": 0,
+        "all_stubs_remaining_at_pass_start": 0,
+        "pass_fills_done": 35, "pass_fills_failed": 0, "pass_stubs_total": 0,
+    }
+    from datetime import datetime
+    now = datetime.fromisoformat("2026-08-15T09:04:51+00:00").timestamp()
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "sweep" in text
+    assert "35/61 frontier fn(s)" in text and "35 ✓" in text
+    # Named apart from the stub-snapshot batch, which counts fill units.
+    assert "35/61 unit(s)" not in text
+    # The snapshot is genuinely absent here (0/0) — no bodies bar may be
+    # fabricated from it, and none may be inferred either.
+    assert "bodies" not in text
+    # A real snapshot still wins the denominator: same state, pass.start seen.
+    state["pass_stubs_total"] = 21
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "21/21 unit(s)" in text and "+14 beyond frontier" in text
+    assert "frontier fn(s)" not in text

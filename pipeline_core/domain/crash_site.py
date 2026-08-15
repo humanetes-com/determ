@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 
+from pipeline_core.domain.generation import is_gen_tests_sibling_name
 from pipeline_core.domain.models import FnLocator
 
 
@@ -68,6 +69,37 @@ def is_memory_fault_signal(signal: str) -> bool:
 # any stack.
 PROVENANCE_FRAME = "frame_derived"
 PROVENANCE_CHAIN = "chain_derived"
+
+
+def authorable_frames(
+    frames: tuple[CrashFrame, ...],
+) -> tuple[CrashFrame, ...]:
+    """`frames` minus the pipeline's OWN generated test siblings.
+
+    The in-crate filter keeps a frame iff its file starts with `src/`, and the
+    generated tests live at `src/<stem>.gen_tests_<N>.rs` — so a frame in a
+    crashing test's own body passes it. That is not a bug in the filter: those
+    frames ARE the access path, they belong in the rendered evidence, and
+    `crash_evidence_by_locator` should keep keying by them. It is a bug
+    wherever the frame becomes BLAME, because blame is a claim about a body
+    the loop can rewrite and no fill ever writes a generated test.
+
+    Measured, run `263217-d41a5bb5` (2026-08-15): the only two frames in the
+    whole ASAN report were `src/error.gen_tests_4.rs:14
+    test_reallocate_into_boxed_dyn_error_without_backtrace` and its
+    `{closure#0}` at `:11`. That report's origin was unattributed, so nothing
+    was blamed and the chain-derived channel armed correctly. A gdb backtrace
+    of the same shape does not get that far: gdb is not origin-capable, so
+    `blamed` falls back to the innermost access frame, and without this filter
+    the crashing test's own fn becomes the ORIGIN blame — a name the crate
+    declares nowhere. Three things then break at once: the chain synthesis
+    stands down (its precondition is "no real frame exists"), the layout aim
+    grades NONE against every component, and `blame_outside_unit` reads True
+    for every unit, so a newly-crashed block is crash-blocked against a file
+    fingerprint that cannot change during the fill phase — a permanent lock.
+    """
+    return tuple(f for f in frames
+                 if not is_gen_tests_sibling_name(f.file_rel.rsplit("/", 1)[-1]))
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,20 +165,34 @@ class CrashSite:
         says nothing and the innermost faulting frame still stands: on a host
         with no sanitizer that backtrace is the only evidence there is, and
         weak blame beats none. Likewise for any non-memory signal (a stub's
-        `unimplemented!()` abort), where the faulting frame IS the site."""
-        if self.origin_frames:
-            return self.origin_frames[0]
+        `unimplemented!()` abort), where the faulting frame IS the site.
+
+        Whichever stack it comes from, the blamed frame is drawn from
+        `authorable_frames` — a generated test sibling is an access path, never
+        a body the loop can be asked to fix (see that function for the run this
+        cost). Blaming nobody is the honest answer there too."""
+        origin = authorable_frames(self.origin_frames)
+        if origin:
+            return origin[0]
         if self.origin_unattributed:
             return None
-        return self.frames[0] if self.frames else None
+        access = authorable_frames(self.frames)
+        return access[0] if access else None
 
     @property
     def origin_unattributed(self) -> bool:
         """A memory fault whose origin a detector that LOOKED for one could not
         place in-crate. The site is still evidence — it names the binary, the
-        test and the access path — it simply convicts nobody."""
+        test and the access path — it simply convicts nobody.
+
+        "In-crate" means a file the loop can author: an origin stack whose only
+        surviving frames are the crashing test's own generated siblings has
+        attributed the fault to nothing answerable, and reads as unattributed
+        here so the chain-derived channel — whose whole precondition is "an
+        origin-capable detector looked and placed no frame in-crate" — still
+        arms."""
         return (self.is_memory_fault and self.origin_capable
-                and not self.origin_frames)
+                and not authorable_frames(self.origin_frames))
 
     @property
     def blamed_locator(self) -> FnLocator | None:
@@ -207,6 +253,15 @@ class CrashSite:
                 "frees or fabricates the pointer (drop glue, vtable "
                 "construction, a wrong cast target), which may not appear "
                 "above at all.")
+        elif self.all_frames and not authorable_frames(self.all_frames):
+            # Every surviving frame is in a generated test sibling, so there is
+            # no body here to name. Without this the site would render its
+            # frames and then say nothing at all about what to do with them.
+            lines.append(
+                "Every frame above is in a generated test file, which no fill "
+                "may rewrite — so this crash names no fn to change. Treat the "
+                "frames as the access path only: the defect is in whatever "
+                "crate code produced the memory those tests touch.")
         return "\n".join(lines)
 
     def _render_chain_evidence(self) -> str:

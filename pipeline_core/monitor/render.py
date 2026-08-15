@@ -226,8 +226,10 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
       "65 out of 22".
     - the sweep bar — fill units completed against the batch the sweep
       opened with, the in-iteration progress that keeps moving after the
-      `bodies` bar retires. Overflow past the denominator is labeled, not
-      folded in.
+      `bodies` bar retires. The batch is the pass.start stub snapshot when
+      there is one and the sweep's own frontier otherwise; which of the two
+      is on screen is named in the row. Overflow past the denominator is
+      labeled, not folded in.
 
     A second `bodies` row — filled fns out of the cluster's FILLABLE count
     (cfg-gated fns excluded from both sides), straight from the pass.start
@@ -262,20 +264,39 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
                     f"{dim(' · '.join(bits))}".rstrip())
 
     # The sweep bar — completed fill units against the frontier batch the
-    # sweep opened with (pass.start's stub snapshot). This is the counter
-    # the pipeline log prints as `N/34`, and it is the only within-iteration
-    # progress signal that survives once every fn has a body (the `bodies`
-    # bar below hides itself then) — without it the panel showed no forward
-    # motion for the whole 9-hour iter 3 of run 1159463-b1e352e5. Fill units
-    # from the file/impl passes count members, so the numerator can pass the
-    # denominator; the bar caps and the excess is labeled instead of
-    # slash-joining two different populations.
+    # sweep opened with. This is the counter the pipeline log prints as
+    # `N/34`, and it is the only within-iteration progress signal that
+    # survives once every fn has a body (the `bodies` bar below hides itself
+    # then) — without it the panel showed no forward motion for the whole
+    # 9-hour iter 3 of run 1159463-b1e352e5. Fill units from the file/impl
+    # passes count members, so the numerator can pass the denominator; the
+    # bar caps and the excess is labeled instead of slash-joining two
+    # different populations.
+    #
+    # The batch has two sources and needs both, because pass.start's stub
+    # snapshot is not always emitted. The per-fn engine emits it only when it
+    # has something to fill (`if not stubs and not _refill_recs: break`,
+    # application/reconstruct/phase_c_engine.py), so a tree whose every fn
+    # already has a body publishes no snapshot at all: on run
+    # 500301-6a66bf86 (2026-08-15) iter 1 opened a 61-fn frontier of pure
+    # behavioural re-fills and dispatched all of it through the file-first
+    # route — nine file units, every one logging `0 stub(s), N re-fill(s)` —
+    # so `pass_stubs_total` stayed 0 and 35 landed fills drew no bar of any
+    # kind, on the same iteration this row exists to measure. The frontier
+    # (phase_c.tdd.iter's `frontier_size`) is the honest batch there: it IS
+    # the set the sweep opened with. The two denominators count different
+    # things, so the row names which one it is rather than letting a reader
+    # assume stubs.
     queue_total = state.get("pass_stubs_total", 0) or 0
-    if queue_total > 0:
+    _frontier = state.get("tdd_frontier")
+    frontier = _frontier if isinstance(_frontier, int) else 0
+    denom, denom_unit = ((queue_total, "unit(s)") if queue_total > 0
+                         else (frontier, "frontier fn(s)"))
+    if denom > 0:
         units = done + failed
-        spct = min(100.0, units / queue_total * 100)
-        over = units - queue_total
-        seg = [f"{min(units, queue_total)}/{queue_total} unit(s)",
+        spct = min(100.0, units / denom * 100)
+        over = units - denom
+        seg = [f"{min(units, denom)}/{denom} {denom_unit}",
                green(f"{done} ✓") + " " + (red(f"{failed} ✗") if failed
                                            else dim("0 ✗"))]
         if over > 0:
@@ -296,8 +317,11 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
     # denominator is the FILLABLE count: the cluster total also counts fns
     # cfg-gated to other clusters (14 for anyhow/stable), which no amount of
     # filling here ever closes, so a bar over the total can never honestly
-    # complete. The snapshot refreshes each tdd iter (one pass.start per
-    # iter); a drop is the crash/layout retrigger's deliberate re-stub.
+    # complete. The snapshot refreshes on each pass.start, which is at most
+    # once per tdd iter and on a fully-bodied tree is never (see the sweep
+    # bar above) — so it can be one iteration stale, deliberately: a slow
+    # whole-cluster reading from last iter beats no reading. A drop in it is
+    # the crash/layout retrigger's deliberate re-stub.
     fillable = filled_start + hollow_start
     if fillable > 0:
         if hollow_start > 0:

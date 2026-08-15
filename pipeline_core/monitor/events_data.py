@@ -348,8 +348,10 @@ def phase_c_state() -> dict[str, Any]:
         "pass_stubs_total": 0,
         # pass_fills_done/failed count each per-fn fill, each impl-block MEMBER,
         # and each whole-file fn — so the `frontier: A/B` progress segment stays
-        # correct across all three fill paths (not just per-fn). Reset per pass
-        # (= per tdd iter, since the tdd driver emits one pass.start per iter).
+        # correct across all three fill paths (not just per-fn). Reset per
+        # sweep: on tdd.iter, and again on any pass.start within it. tdd.iter
+        # is the one that always arrives — a fully-bodied tree emits no
+        # pass.start at all (see the tdd.iter handler).
         "pass_fills_done": 0,
         "pass_fills_failed": 0,
         # In-flight fills (parallel — up to PIPELINE_PARALLELISM at once): each is
@@ -548,10 +550,26 @@ def phase_c_state() -> dict[str, Any]:
             out["tdd_iter"] = d.get("iter", out["tdd_iter"])
             if e.get("ts"):
                 out["tdd_iter_ts"].append(e["ts"])
-            # Fresh iter → drop any in-flight units left dangling from the prior
-            # iter's sweep (pass_fills_done resets separately on the pass.start
-            # the tdd driver emits at the head of each iter).
+            # Fresh iter → drop any in-flight units left dangling from the
+            # prior iter's sweep, and reset the per-sweep fill counters and
+            # their batch denominator here rather than trusting a pass.start
+            # to arrive and do it. The tdd driver does NOT emit one at the
+            # head of every iter, which is what this comment used to assume:
+            # the per-fn engine emits pass.start only when it has something to
+            # fill, so an iteration whose frontier is all behavioural re-fills
+            # emits none at all (run 500301-6a66bf86, 2026-08-15, iter 1: a
+            # 61-fn frontier, nine file units at `0 stub(s)` each, zero
+            # pass.start). Without this reset those counters run cumulative
+            # across every such iteration while the frontier they are rendered
+            # against is per-iteration, so the sweep bar would read further
+            # past its own batch on each one. The cluster-scope snapshot
+            # (filled_count / all_stubs_remaining) is deliberately NOT reset —
+            # it is a slow whole-cluster reading, and last iteration's is worth
+            # more than none.
             in_flight_units.clear()
+            out["pass_fills_done"] = 0
+            out["pass_fills_failed"] = 0
+            out["pass_stubs_total"] = 0
             _pc = d.get("pass_count")
             if _pc is not None:
                 out["tdd_pass"] = _pc

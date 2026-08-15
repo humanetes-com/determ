@@ -345,6 +345,57 @@ def test_phase_c_tdd_iter_clears_stale_in_flight(tmp_path, monkeypatch):
     assert s["fills_done"] == 1 and s["in_flight"] == []
 
 
+def test_phase_c_tdd_iter_resets_the_per_sweep_counters(tmp_path, monkeypatch):
+    """The per-sweep counters must reset on tdd.iter, not wait for a
+    pass.start that a fully-bodied tree never emits.
+
+    On run 500301-6a66bf86 (2026-08-15) the per-fn engine — the only emitter
+    of pass.start — short-circuited on a frontier of pure behavioural
+    re-fills, so nothing reset these counters at all. They are rendered
+    against the per-iteration frontier, so left cumulative they read further
+    past their own batch every iteration. The cluster-scope snapshot is
+    deliberately kept: it is a slow whole-cluster reading, and a stale one
+    beats none.
+    """
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        # Iter 1: a pass.start (stubs still exist) + two landed fills.
+        {"ts": "2026-06-10T00:00:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 1, "frontier_size": 9}},
+        {"ts": "2026-06-10T00:00:01+00:00", "event": "phase_c.pass.start",
+         "data": {"cluster": "stable", "pass_n": 1, "stubs": 4,
+                  "total_fns_in_cluster": 20, "filled_count": 16,
+                  "all_stubs_remaining": 4}},
+        {"ts": "2026-06-10T00:00:02+00:00", "event": "phase_c.fn.fill.done",
+         "data": {"fn": "a", "fix_attempts": 1}},
+        {"ts": "2026-06-10T00:00:03+00:00", "event": "phase_c.fn.fill.fail",
+         "data": {"fn": "b"}},
+        # Iter 2: every fn now has a body, so the frontier is all re-fills and
+        # NO pass.start follows. One whole-file fill lands 3 fns.
+        {"ts": "2026-06-10T00:01:00+00:00", "event": "phase_c.tdd.iter",
+         "data": {"cluster": "stable", "iter": 2, "frontier_size": 6}},
+        {"ts": "2026-06-10T00:01:01+00:00", "event": "phase_c.file.fill.start",
+         "data": {"cluster": "stable", "file": "src/fmt.rs", "blocks": 2,
+                  "stubs": 0, "refills": 3}},
+        {"ts": "2026-06-10T00:01:02+00:00", "event": "phase_c.file.fill.done",
+         "data": {"file": "src/fmt.rs", "fns_filled": 3}},
+    )
+    _patch(monkeypatch, ev)
+    s = ed.phase_c_state()
+    # Iter 2's units only — not 3+1 done / 1 failed carried from iter 1.
+    assert s["pass_fills_done"] == 3 and s["pass_fills_failed"] == 0
+    # Iter 1's stub batch must not be reused as iter 2's denominator; with it
+    # cleared the sweep bar falls back to iter 2's own frontier.
+    assert s["pass_stubs_total"] == 0 and s["tdd_frontier"] == 6
+    # The cluster-scope snapshot survives the iteration boundary.
+    assert s["filled_count_at_pass_start"] == 16
+    assert s["all_stubs_remaining_at_pass_start"] == 4
+    # Cumulative counters are untouched by the per-sweep reset: iter 1's one
+    # per-fn fill plus iter 2's three whole-file fns.
+    assert s["fills_done"] == 4 and s["fills_failed"] == 1
+
+
 def test_phase_c_state_empty(tmp_path, monkeypatch):
     ev = tmp_path / "events.jsonl"
     _write(ev, {"ts": "2026-06-10T00:00:00+00:00", "event": "other", "data": {}})

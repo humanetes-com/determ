@@ -471,3 +471,101 @@ def test_chain_evidence_keys_by_the_chain_and_says_what_it_is() -> None:
     assert "test_drop" in text
     assert "freed by thread T0" in text
     assert "no such section" not in text
+
+
+# --- a generated test sibling is an access path, never blame ------------------
+# The in-crate filter keeps `src/…` frames, and the pipeline's own generated
+# tests live at `src/<stem>.gen_tests_<N>.rs` — so the crashing test's own body
+# passes it. Run `263217-d41a5bb5` (2026-08-15) is the measured case: the whole
+# ASAN report held exactly two frames, `test_reallocate_into_boxed_dyn_error_
+# without_backtrace` at `src/error.gen_tests_4.rs:14` and its `{closure#0}` at
+# `:11`. That report's origin was unattributed so nothing was blamed; a gdb
+# backtrace of the same shape is not origin-capable and used to fall back to
+# the innermost access frame, making the crashing test its own culprit.
+
+def _gen_tests_frames() -> list[dict[str, object]]:
+    return [
+        {"file": "src/error.gen_tests_4.rs", "line": 14,
+         "func": "test_reallocate_into_boxed_dyn_error_without_backtrace"},
+        {"file": "src/error.gen_tests_4.rs", "line": 11, "func": "{closure#0}"},
+    ]
+
+
+def test_a_gdb_backtrace_of_only_generated_test_frames_blames_nobody() -> None:
+    """The pre-fix fallback made the crashing test its own culprit. Nothing in
+    the crate declares that name, so the layout aim graded NONE against every
+    component and `blame_outside_unit` read True for every real unit — which
+    crash-blocks a block against a file fingerprint the fill phase never
+    changes. Blaming nobody is the honest answer, and it is the one that lets
+    the chain-derived channel run."""
+    from pipeline_core.domain.crash_site import blame_outside_unit, blamed_locators
+    site = site_from_frames(
+        "unittests src/lib.rs", "error::gen_tests_4::test_x",
+        "SIGSEGV", _gen_tests_frames())          # gdb: not origin-capable
+    assert site.frames, "the frames are still evidence and must survive"
+    assert site.blamed is None
+    assert blamed_locators((site,)) == frozenset()
+    # The consequence that made this expensive: with the test frame as blame,
+    # every real unit reads as exonerated and gets crash-blocked.
+    assert not blame_outside_unit(
+        blamed_locators((site,)), "src/error.rs", frozenset({"construct"}))
+    # NEGATIVE CONTROL — the pre-fix rule, verbatim: `origin_frames[0]` if any,
+    # else `frames[0]`. On this site that is the generated test fn.
+    pre_fix = site.origin_frames[0] if site.origin_frames else site.frames[0]
+    assert pre_fix.file_rel == "src/error.gen_tests_4.rs"
+    assert blame_outside_unit(
+        frozenset({FnLocator(pre_fix.file_rel, pre_fix.fn_name)}),
+        "src/error.rs", frozenset({"construct"}))
+
+
+def test_an_origin_stack_of_only_generated_frames_reads_as_unattributed() -> None:
+    """`origin_unattributed` is the chain channel's precondition — "a detector
+    that CAN report an origin looked and placed no frame in-crate". An origin
+    stack that resolves only into the crashing test's own generated file has
+    attributed the fault to nothing answerable, so it must read the same way;
+    otherwise the strongest evidence channel stands down for a blame no fill
+    can act on."""
+    site = site_from_frames(
+        "unittests src/lib.rs", "error::gen_tests_4::test_x",
+        "AddressSanitizer: heap-use-after-free", _gen_tests_frames(),
+        origin_raw_frames=_gen_tests_frames(), origin_capable=True)
+    assert site.origin_unattributed
+    assert site.blamed is None
+    # Pre-fix: origin_frames non-empty → NOT unattributed, and blamed was the
+    # generated test fn — the chain synthesis never armed.
+    assert site.origin_frames
+    # A real crate origin still decides, unchanged.
+    real = site_from_frames(
+        "unittests src/lib.rs", "error::gen_tests_4::test_x",
+        "AddressSanitizer: heap-use-after-free", _gen_tests_frames(),
+        origin_raw_frames=[{"file": "src/error.rs", "line": 9,
+                            "func": "construct"}],
+        origin_capable=True)
+    assert not real.origin_unattributed
+    assert real.blamed is not None and real.blamed.fn_name == "construct"
+
+
+def test_a_mixed_stack_blames_the_innermost_authorable_frame() -> None:
+    """Not a wholesale drop of the frames: the generated ones stay in the site
+    (they are the access path the prompt renders), and the blame skips past
+    them to the innermost frame that names a body a fill can rewrite."""
+    site = site_from_frames(
+        "unittests src/lib.rs", "error::gen_tests_4::test_x", "SIGSEGV",
+        _gen_tests_frames() + [{"file": "src/error.rs", "line": 40,
+                                "func": "object_drop"}])
+    assert len(site.frames) == 3
+    assert site.blamed is not None and site.blamed.fn_name == "object_drop"
+    text = site.render_evidence()
+    assert "src/error.gen_tests_4.rs:14" in text      # access path kept
+    assert "`object_drop`" in text
+
+
+def test_a_test_only_crash_says_it_names_no_fn_to_change() -> None:
+    """With no authorable frame and no origin claim, the rendered evidence
+    would otherwise list frames and give no instruction at all."""
+    site = site_from_frames(
+        "unittests src/lib.rs", "error::gen_tests_4::test_x",
+        "SIGSEGV", _gen_tests_frames())
+    text = site.render_evidence()
+    assert "names no fn to change" in text
+    assert "Fix the pointer/lifetime scheme" not in text
