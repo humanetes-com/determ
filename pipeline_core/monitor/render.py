@@ -200,6 +200,45 @@ def _fmt_dur(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def score_row(state: dict[str, Any]) -> str | None:
+    """The target, as a bar: tests passing out of the oracle the sweep could run.
+
+    The panel had every component of this number (`pass=9 fail=94` on the tdd
+    row, `oracle_size` nowhere) and no picture of the distance left, so the one
+    quantity the whole run exists to move was the only one with no gauge.
+
+    Two denominators, and the difference is the finding, not a detail. The bar
+    is drawn against `oracle_size` — the tests the last sweep could execute —
+    while `oracle_static` is what the tree declares. On run 669347-cf33eae3
+    (2026-08-15) a crash took ten test binaries down and the runnable oracle
+    fell to 103 of 107 declared: filling every remaining fn cannot reach the
+    difference, so it is reported as unreachable rather than folded into a
+    denominator that would make the score look worse than the work.
+
+    The delta is against the previous sweep of this cluster, and it is signed:
+    a re-stub by the crash/layout retrigger is a deliberate, expected drop, and
+    a drop that reads as a drop is the point.
+    """
+    passed = state.get("tdd_pass")
+    oracle = state.get("tdd_oracle")
+    if passed is None or not oracle:
+        return None
+    pct = min(100.0, passed / oracle * 100)
+    seg = [f"{passed}/{oracle} passing ({pct:.0f}%)"]
+    hist = state.get("tdd_pass_hist") or []
+    if len(hist) >= 2:
+        delta = hist[-1] - hist[-2]
+        seg.append(green(f"↑{delta}") if delta > 0
+                   else red(f"↓{-delta}") if delta < 0 else dim("="))
+    failing = state.get("tdd_fail")
+    if failing is not None:
+        seg.append(red(f"{failing} failing") if failing else green("0 failing"))
+    static = state.get("tdd_oracle_static")
+    if isinstance(static, int) and static > oracle:
+        seg.append(yellow(f"{static - oracle} unreachable (crashed binaries)"))
+    return f"           score    [{progress_bar(pct, 24)}]  {'  '.join(seg)}"
+
+
 def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
     """Progress INSIDE the current TDD iteration — where the hours go.
 
@@ -263,15 +302,22 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
         rows.append(f"           iter     {head}   "
                     f"{dim(' · '.join(bits))}".rstrip())
 
-    # The sweep bar — completed fill units against the frontier batch the
+    # The sweep row — completed fill units against the frontier batch the
     # sweep opened with. This is the counter the pipeline log prints as
     # `N/34`, and it is the only within-iteration progress signal that
     # survives once every fn has a body (the `bodies` bar below hides itself
     # then) — without it the panel showed no forward motion for the whole
     # 9-hour iter 3 of run 1159463-b1e352e5. Fill units from the file/impl
-    # passes count members, so the numerator can pass the denominator; the
-    # bar caps and the excess is labeled instead of slash-joining two
-    # different populations.
+    # passes count members, so the numerator can pass the denominator.
+    #
+    # PAST the denominator there is no bar. A bar pinned at 100% is not a
+    # progress reading, it is a decoration that outlives its own measurement:
+    # on run 669347-cf33eae3 (2026-08-15) the row read `69/69 frontier fn(s)
+    # … +10 beyond frontier` for the whole of a 46-minute iteration, which is
+    # what "the monitor shows nothing but 69/69" means. Once the units exceed
+    # the batch the honest reading is throughput — units landed, units in
+    # flight, and the rate they are landing at — so that is what replaces it,
+    # and the batch it has passed is named rather than divided into.
     #
     # The batch has two sources and needs both, because pass.start's stub
     # snapshot is not always emitted. The per-fn engine emits it only when it
@@ -292,17 +338,26 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
     frontier = _frontier if isinstance(_frontier, int) else 0
     denom, denom_unit = ((queue_total, "unit(s)") if queue_total > 0
                          else (frontier, "frontier fn(s)"))
-    if denom > 0:
-        units = done + failed
-        spct = min(100.0, units / denom * 100)
-        over = units - denom
-        seg = [f"{min(units, denom)}/{denom} {denom_unit}",
-               green(f"{done} ✓") + " " + (red(f"{failed} ✗") if failed
-                                           else dim("0 ✗"))]
-        if over > 0:
-            seg.append(dim(f"+{over} beyond frontier"))
+    units = done + failed
+    verdict = (green(f"{done} ✓") + " "
+               + (red(f"{failed} ✗") if failed else dim("0 ✗")))
+    in_flight = len(state.get("in_flight") or [])
+    if denom > 0 and units < denom:
+        spct = units / denom * 100
         rows.append(f"           sweep    [{progress_bar(spct, 24)}]  "
-                    f"{'  '.join(seg)}")
+                    f"{units}/{denom} {denom_unit}  {verdict}"
+                    + (f"  {dim(f'{in_flight} in flight')}" if in_flight else ""))
+    elif units > 0 or in_flight:
+        seg = [f"{units} unit(s)", verdict]
+        if in_flight:
+            seg.append(cyan(f"{in_flight} in flight"))
+        if stamps:
+            mins = max(0.0, now - stamps[-1]) / 60
+            if mins >= 1 and units:
+                seg.append(dim(f"{units / mins:.1f}/min"))
+        if denom > 0:
+            seg.append(dim(f"past this iter's {denom} {denom_unit}"))
+        rows.append(f"           sweep    {'  '.join(seg)}")
 
     total = state.get("total_fns_in_cluster", 0) or 0
     filled_start = state.get("filled_count_at_pass_start", 0) or 0

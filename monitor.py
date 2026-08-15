@@ -90,11 +90,17 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
+from pipeline_core.monitor.engine_metrics import (  # noqa: E402
+    engine_rows as _engine_rows,
+)
 from pipeline_core.monitor.field_glossary import (  # noqa: E402
     field_glossary_window as _field_glossary_window,
 )
 from pipeline_core.monitor.field_glossary import (
     hint_lines as _hint_lines,
+)
+from pipeline_core.monitor.generation_panel import (  # noqa: E402
+    generation_rows as _generation_rows,
 )
 from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
@@ -112,9 +118,6 @@ from pipeline_core.monitor.render import (
     yellow,
 )
 from pipeline_core.monitor.render import (
-    call_start_value as _call_start_value,
-)
-from pipeline_core.monitor.render import (
     driver_counter as _driver_counter,
 )
 from pipeline_core.monitor.render import (
@@ -130,10 +133,19 @@ from pipeline_core.monitor.render import (
     plain as _plain,
 )
 from pipeline_core.monitor.render import (
+    score_row as _score_row,
+)
+from pipeline_core.monitor.render import (
     state_done_key as _state_done_key,
 )
 from pipeline_core.monitor.vllm_status import (  # noqa: E402
     vllm_status_rows as _vllm_status,
+)
+from pipeline_core.monitor.worker_streams import (  # noqa: E402
+    worker_rows as _worker_rows,
+)
+from pipeline_core.monitor.worker_streams import (
+    worker_snapshots as _worker_snapshots,
 )
 
 _ed.configure(events_log=EVENTS_LOG)
@@ -155,6 +167,7 @@ _current_stage_label = _rd.current_stage_label
 _task_progression = _ed.task_progression       # debt#7: structured-event sources
 _pipeline_log_facts = _ed.pipeline_log_facts
 _vllm_runtime = _ed.vllm_runtime
+_vllm_budget_by_thread = _ed.vllm_budget_by_thread
 _log_tail_meta = _rd.log_tail_meta
 _read_backend = _rd.read_backend
 _pipeline_running = _rd.pipeline_running
@@ -415,29 +428,54 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
         rows.append(f"           err      {yellow(_ec)} "
                     f"{dim('(' + _ERR_NAMES.get(_ec, '?') + ')')}   {dim('top: ' + _top)}")
 
+    # The console rows, ordered by how fast each one moves: the score is the
+    # target and steps once per sweep; the iteration/sweep rows move every few
+    # minutes as fill units land; the engine and worker rows move on every
+    # refresh. A panel whose slowest reading is its only reading cannot tell a
+    # working run from a hung one, which is what `69/69` for 46 minutes meant on
+    # run 669347-cf33eae3.
+    _score = _score_row(state)
+    if _score:
+        rows.append(_score)
     # Intra-iteration progress (render.iteration_progress_rows): pace bar
     # (elapsed vs median iteration length — moves every refresh), fills
     # counter with last-fill age, frontier context; plus a `bodies` bar only
     # while the initial fill is still climbing. The pass count itself is NOT
     # repeated here — the tdd row above already carries it with its history.
-    rows.extend(_iteration_progress_rows(state, time.time()))
+    _now = time.time()
+    rows.extend(_iteration_progress_rows(state, _now))
+    rows.extend(_engine_rows(_now))
+    _vr = _vllm_runtime()
+    _flight = state.get("in_flight") or []
+    _snaps = _worker_snapshots(base_log=STREAM_LOG, now=_now)
+    rows.extend(_worker_rows(
+        _snaps, units_by_thread={u["thread"]: u for u in _flight if u.get("thread")},
+        cpt=_vr.get("cpt"), request_max=_vr.get("max_tokens"),
+        budget_by_thread=_vllm_budget_by_thread(), width=_w() - 4))
+    _covered = {s["thread"] for s in _snaps}
 
     first = state.get("fills_first", 0)
     rec = state.get("fills_recovered", 0)
     failed = state.get("fills_failed", 0)
     skip = state.get("fills_skipped", 0)
     total_done = first + rec
+    notes = state.get("notes", 0)
     rows.append(f"           fills  "
                 f"{green(f'✓ first={first}')}  "
                 f"{yellow(f'↻ recovered={rec}')}  "
                 f"{red(f'✗ failed={failed}')}  "
                 f"{dim(f'⊘ skip={skip}')}  "
-                f"{dim(f'(done={total_done})')}")
-    notes = state.get("notes", 0)
+                f"{dim(f'(done={total_done})')}  {dim(f'notes={notes}')}")
     # In-flight fills — the parallel set (up to PIPELINE_PARALLELISM at once),
     # longest-running first (the block eating the iter). ↻ = behavioral re-fill,
     # ⊞ = impl block, plain = per-fn; each annotated with elapsed.
-    flight = state.get("in_flight") or []
+    #
+    # Only the units NO worker row covers: a worker row carries the same unit
+    # with its live token count, so listing both printed every in-flight fill
+    # twice on four consecutive rows. A unit whose thread has no live stream
+    # file (an older event without a thread, or a call that has not opened its
+    # log yet) still belongs here — that is the case this row now exists for.
+    flight = [u for u in _flight if u.get("thread") not in _covered]
     if flight:
         _ifb = []
         for u in flight[:4]:
@@ -449,15 +487,20 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
             _lab = (u.get("label") or "?").splitlines()[0][:30]
             _ifb.append(f"{_tag}{_lab}({_age})")
         _more = f"  +{len(flight) - 4}" if len(flight) > 4 else ""
-        rows.append(f"           in-flight {cyan('  '.join(_ifb))}{dim(_more)}   notes={notes}")
-    else:
-        rows.append(f"           in-flight {dim('idle')}   notes={notes}")
+        rows.append(f"           in-flight {cyan('  '.join(_ifb))}{dim(_more)}")
+    elif not _flight:
+        rows.append(f"           in-flight {dim('idle')}")
     hot = state.get("hot_fn")
     if hot:
         rows.append(f"           hot fn   {dim(hot[0])} ({hot[1]} attempts)")
     recent = state.get("recent_fills") or []
     if recent:
-        bits = "  ".join(f"{fn}:{body}c×{a}" for fn, body, a in recent)
+        # First line, bounded: an impl-block label is the container's whole
+        # signature, and a generic one carries its `where` clause across three
+        # lines — pasted in raw they broke the box open on run 669347-cf33eae3
+        # (`impl<A, B> BothDebug for (A, B)\nwhere\n    A: Debug,`).
+        bits = "  ".join(f"{fn.splitlines()[0][:32]}:{body}c×{a}"
+                         for fn, body, a in recent)
         rows.append(f"           recent   {dim(bits)}")
     test_rc = state.get("last_test_rc")
     if test_rc is not None:
@@ -771,79 +814,24 @@ def pipeline_status():
     return rows
 
 
-_prev_len        = 0
+# The think-phase bar's denominator. Not a server limit — a display ceiling for
+# a phase with no declared budget, kept here because it is a presentation
+# choice; the rest of the box's state (the char counter, the ETA smoothing)
+# moved into the panel module with the code that reads it.
 _THINK_CAP_CHARS = 40_000
 
-def _fmt_eta(secs):
-    if secs < 60:   return f"{int(secs)}s"
-    if secs < 3600: return f"{int(secs/60)}m{int(secs%60):02d}s"
-    return f"{int(secs/3600)}h{int((secs%3600)/60):02d}m"
 
 def generation():
-    global _prev_len
-    try:
-        stat = os.stat(STREAM_LOG)
-        with open(STREAM_LOG) as f:
-            content = f.read()
-    except FileNotFoundError:
-        return [dim("no stream log yet")]
-    except Exception as e:
-        return [red(f"stream log error: {e}")]
-    if not content.strip():
-        return [dim("stream log empty")]
-    now     = time.time()
-    age     = now - stat.st_mtime
-    age_s   = f"{int(age)}s" if age < 60 else f"{int(age/60)}m{int(age%60):02d}s"
-    started = 0.0
-    if (cs := _call_start_value(content)) is not None:
-        started = float(cs)
-    elapsed     = max(1.0, now - started) if started > 0 else max(1.0, age)
-    ela_s       = f"{int(elapsed/60)}m{int(elapsed%60):02d}s" if elapsed >= 60 else f"{int(elapsed)}s"
-    cur_chars   = len(content)
-    inst_rate   = max(0, cur_chars - _prev_len) / REFRESH / 4
-    smooth_rate = cur_chars / 4 / elapsed
-    _prev_len   = cur_chars
-    rate_str    = f"~{inst_rate:.0f} tok/s" if inst_rate > 0.5 else dim("no new tokens")
-    in_think    = '<think>' in content and '</think>' not in content
-    had_think   = '</think>' in content
-    if   "[TIMEOUT"  in content:                                    phase = red("TIMEOUT")
-    elif "[FOLLOWUP" in content:                                    phase = cyan("FOLLOWUP")
-    elif "[CONTENT]" in content:                                    phase = green("CODE")
-    elif in_think:                                                  phase = yellow("THINKING")
-    elif had_think or ("[CALL:" in content and cur_chars > 60):     phase = green("CODE")
-    else:                                                           phase = yellow("THINKING")
-    _vr = _vllm_runtime()  # debt#7: {max_tokens, cpt, retries} from structured events
-    progress_rows = []
-    if in_think:
-        tc   = max(0, cur_chars - content.find('<think>') - 7)
-        pct  = min(100, tc / _THINK_CAP_CHARS * 100)
-        eta  = _fmt_eta(max(0, _THINK_CAP_CHARS - tc) / smooth_rate) if smooth_rate > 0.1 else "?"
-        progress_rows.append(
-            f"  think [{bar(pct, 20)}] {pct:4.0f}%  {tc:,}/{_THINK_CAP_CHARS:,} chars"
-            f"  {rate_str}  ETA {eta}  elapsed {ela_s}")
-    else:
-        max_tok = _vr["max_tokens"]
-        tg      = cur_chars / 4
-        if max_tok:
-            pct = min(100, tg / max_tok * 100)
-            eta = _fmt_eta(max(0, max_tok - tg) / smooth_rate) if smooth_rate > 0.1 else "?"
-            progress_rows.append(
-                f"  budget [{bar(pct, 20)}] {pct:4.0f}%  {tg:,.0f}/{max_tok:,} tok"
-                f"  avg {smooth_rate:.1f} tok/s  ETA ≤ {eta}  elapsed {ela_s}")
-    display = content
-    for marker in ("[FOLLOWUP", "[CONTENT]", "</think>"):
-        if marker in display:
-            display = display.split(marker)[-1].lstrip("\n")
-            break
-    w      = _w() - 4
-    dlines = [ln for ln in display.splitlines() if ln.strip()][-5:]
-    cpt, retries = _vr["cpt"], _vr["retries"]
-    cpt_s    = f"cpt={cpt:.2f}" if cpt else dim("cpt=?")
-    retry_s  = f"  {red(f'400-retries={retries}')}" if retries else ""
-    rows  = [f"phase={phase}   {cur_chars:,} chars   last-tok {age_s} ago   {rate_str}   {cpt_s}{retry_s}"]
-    rows += progress_rows
-    rows += [dim((ln[:w-2] + "…") if len(ln) > w else ln) for ln in dlines] or [dim("(empty)")]
-    return rows
+    """The Generation box — see pipeline_core.monitor.generation_panel.
+
+    It follows the freshest stream file rather than the base one: under the
+    parallel fill engine every token goes to a per-thread sibling and the base
+    file is the idle main thread's.
+    """
+    return _generation_rows(
+        stream_log=STREAM_LOG, width=_w(), now=time.time(),
+        runtime=_vllm_runtime(), refresh=REFRESH,
+        think_cap_chars=_THINK_CAP_CHARS)
 
 # ── State ─────────────────────────────────────────────────────────────────────
 

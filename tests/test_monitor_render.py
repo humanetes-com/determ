@@ -34,9 +34,12 @@ def test_call_start_value_matches_old_regex() -> None:
         mm = old_re.search(c)
         return mm.group(1) if mm else None
 
+    # Called through the render module, not a monitor.py alias: the marker is
+    # read by the generation panel and the worker rows now, and monitor.py
+    # itself no longer imports it.
     for c in ["[CALL_START: 12.34]", "x [CALL_START: 5] y", "[CALL_START: ]",
               "[CALL_START: 1.2.3]", "no marker", "[CALL_START: abc]", "[CALL_START: 9"]:
-        assert m._call_start_value(c) == old(c), repr(c)
+        assert _render.call_start_value(c) == old(c), repr(c)
 
 
 def test_driver_counter_prefers_the_live_outer_loop() -> None:
@@ -157,18 +160,32 @@ def test_iteration_progress_rows_sweep_bar_tracks_the_batch() -> None:
     now = datetime.fromisoformat("2026-08-09T10:01:00+00:00").timestamp()
     text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
     assert "31/34 unit(s)" in text and "22 ✓" in text and "9 ✗" in text
-    # Numerator can pass the batch size: bar caps, excess labeled apart.
+    # Past the batch there is NO bar. Capping it and labelling the excess (what
+    # this assertion used to require) leaves a row pinned at 100% for the rest
+    # of the iteration: run 669347-cf33eae3 (2026-08-15) held `69/69 frontier
+    # fn(s) … +10 beyond frontier` for 46 minutes with four workers busy, which
+    # is indistinguishable from a hung loop. Throughput replaces it.
     state["pass_fills_done"] = 40
-    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
-    assert "34/34 unit(s)" in text and "+15 beyond frontier" in text
-    assert "49/34" not in text
-    # Neither batch known (no pass.start, no frontier) → no row: there is
-    # nothing to divide by, and a bar over a guessed denominator is worse
-    # than no bar.
+    sweep = next(ln for ln in _render.plain(
+        "\n".join(_render.iteration_progress_rows(state, now))).splitlines()
+        if "sweep" in ln)
+    assert "49 unit(s)" in sweep and "40 ✓" in sweep and "9 ✗" in sweep
+    assert "49.0/min" in sweep                      # 49 units in the 1 min elapsed
+    assert "past this iter's 34 unit(s)" in sweep   # the batch is named, not divided into
+    assert "34/34" not in sweep and "49/34" not in sweep
+    assert "█" not in sweep and "░" not in sweep    # no bar at all past the batch
+    # Neither batch known (no pass.start, no frontier) → still no BAR: there is
+    # nothing to divide by, and a bar over a guessed denominator is worse than
+    # no bar. The counts and the rate do not need a denominator and stay — a
+    # row that vanishes is the "the monitor shows nothing" complaint, and
+    # "49 units, 40 ✓, 49/min" claims no total.
     state["pass_stubs_total"] = 0
     state["tdd_frontier"] = None
-    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
-    assert "sweep" not in text
+    sweep = next(ln for ln in _render.plain(
+        "\n".join(_render.iteration_progress_rows(state, now))).splitlines()
+        if "sweep" in ln)
+    assert "49 unit(s)" in sweep and "49.0/min" in sweep
+    assert "█" not in sweep and "░" not in sweep and "past this iter" not in sweep
 
 
 def test_iteration_progress_rows_sweep_bar_falls_back_to_the_frontier() -> None:
@@ -201,7 +218,10 @@ def test_iteration_progress_rows_sweep_bar_falls_back_to_the_frontier() -> None:
     # fabricated from it, and none may be inferred either.
     assert "bodies" not in text
     # A real snapshot still wins the denominator: same state, pass.start seen.
+    # 35 units against a 21-unit batch is past it, so the row is the throughput
+    # form and names the batch it passed — with the stub-snapshot's unit(s),
+    # never the frontier's fns.
     state["pass_stubs_total"] = 21
     text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
-    assert "21/21 unit(s)" in text and "+14 beyond frontier" in text
-    assert "frontier fn(s)" not in text
+    assert "35 unit(s)" in text and "past this iter's 21 unit(s)" in text
+    assert "frontier fn(s)" not in text and "21/21" not in text

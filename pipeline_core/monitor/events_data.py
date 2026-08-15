@@ -238,6 +238,28 @@ def vllm_runtime() -> dict[str, Any]:
     return {"max_tokens": max_tokens, "cpt": cpt, "retries": retries}
 
 
+def vllm_budget_by_thread() -> dict[str, int]:
+    """thread -> the `max_tokens` of the request that thread most recently made.
+
+    :func:`vllm_runtime` returns the last budget seen by ANY thread, which was
+    fine while one thread generated at a time. Under the parallel fill engine
+    four workers hold four requests at once and the budget adapts per request,
+    so a per-worker bar drawn against the global last reading is drawn against
+    another worker's ceiling. The per-thread map is what each worker's own row
+    divides by; the global stays the fallback for a thread with no budget event
+    in the window.
+    """
+    out: dict[str, int] = {}
+    for ev in read_recent_events(lambda n: n == "vllm.budget"):
+        thread = ev.get("thread")
+        raw = (ev.get("data") or {}).get("request_max")
+        if not thread or raw is None:
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            out[str(thread)] = int(raw)
+    return out
+
+
 def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:
     """Tail events.jsonl (last 1 MB) → this run's records whose event name passes `want`.
 
@@ -370,6 +392,13 @@ def phase_c_state() -> dict[str, Any]:
         "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
         "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
         "tdd_max_stalls": None,
+        # The oracle the last sweep could actually RUN (`oracle_size`) and the
+        # oracle the tree declares (`oracle_static`). They differ exactly when
+        # tests are unreachable — a crashed test binary takes its whole file's
+        # tests with it — so the gap is the part of the target no fill can move
+        # until the crash is gone, and the score bar is drawn against the
+        # runnable one with the gap named beside it.
+        "tdd_oracle": None, "tdd_oracle_static": None,
         # ISO ts of each tdd.iter event this run, in arrival order. Consecutive
         # gaps are whole-iteration durations (the summary prints once per
         # iter), which is what the panel's `~N/iter` median is computed from.
@@ -450,6 +479,10 @@ def phase_c_state() -> dict[str, Any]:
             in_flight_units[fn] = {
                 "kind": "fn", "refill": bool(d.get("refill")),
                 "start_iso": e.get("ts"), "file": d.get("file"),
+                # The emitting thread, so the console can join this unit to the
+                # per-thread stream log the transport writes for it
+                # (adapters/llm_transports.py::_stream_path_for_thread).
+                "thread": e.get("thread"),
             }
             out["cluster"] = d.get("cluster") or out["cluster"]
         elif ev == "phase_c.fn.fill.done":
@@ -483,9 +516,10 @@ def phase_c_state() -> dict[str, Any]:
                 in_flight_units.pop(_k, None)
             _lbl = d.get('container') or '?'
             in_flight_units[_lbl] = {
-                "kind": "impl", "refill": False,
+                "kind": "impl", "refill": bool(d.get("refill_count")),
                 "start_iso": e.get("ts"), "file": d.get("file"),
                 "members": int(d.get("stub_count", 0)),
+                "thread": e.get("thread"),
             }
             out["cluster"] = d.get("cluster") or out["cluster"]
         elif ev == "phase_c.file.fill.start":
@@ -493,6 +527,7 @@ def phase_c_state() -> dict[str, Any]:
             in_flight_units[_lbl] = {
                 "kind": "file", "refill": False,
                 "start_iso": e.get("ts"), "file": d.get("file"),
+                "thread": e.get("thread"),
             }
             out["cluster"] = d.get("cluster") or out["cluster"]
         elif ev == "phase_c.file.fill.done":
@@ -578,6 +613,8 @@ def phase_c_state() -> dict[str, Any]:
             out["tdd_frontier"] = d.get("frontier_size", out["tdd_frontier"])
             out["tdd_stall"] = d.get("stall", out["tdd_stall"])
             out["tdd_kind"] = d.get("kind", out["tdd_kind"])
+            out["tdd_oracle"] = d.get("oracle_size", out["tdd_oracle"])
+            out["tdd_oracle_static"] = d.get("oracle_static", out["tdd_oracle_static"])
             if _tcl:
                 _cs = out["tdd_by_cluster"].setdefault(
                     _tcl, {"iter": 0, "pass": None, "fail": None,
@@ -603,7 +640,8 @@ def phase_c_state() -> dict[str, Any]:
                 _age = None
         _flight.append({"label": _lbl, "kind": _u["kind"],
                         "refill": _u.get("refill", False),
-                        "age_s": _age, "file": _u.get("file")})
+                        "age_s": _age, "file": _u.get("file"),
+                        "thread": _u.get("thread")})
     # Longest-running first — that's the block eating the iter.
     _flight.sort(key=lambda x: (x["age_s"] is None, -(x["age_s"] or 0)))
     out["in_flight"] = _flight
