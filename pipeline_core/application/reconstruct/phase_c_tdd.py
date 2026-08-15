@@ -492,6 +492,9 @@ def run_phase_c_tdd(
     # The chain set the evidence pack was last armed with, so an unchanged
     # inference re-arms silently.
     _chain_blamed_last: frozenset[FnLocator] = frozenset()
+    # The grant iter of the last window whose within-grant vanish was logged,
+    # so the standing condition prints once per window rather than per sweep.
+    _predates_noted_for = -1
     # Shadow zero-payoff detector (domain/zero_payoff.py): the class-general
     # stall condition — same frontier dispatched K sweeps, nothing bought on
     # any axis (pass, crash class, frontier). LOGS ONLY; nothing reads it.
@@ -524,7 +527,9 @@ def run_phase_c_tdd(
     _grace_max_iters = int(os.getenv("PHASE_C_REFILL_GRACE_MAX_ITERS",
                                      str(DEFAULT_REFILL_GRACE_MAX_ITERS)))
 
-    def _grant_grace(reverted: int) -> RefillGrace:
+    def _grant_grace(reverted: int,
+                     vanished_at_grant: frozenset[str] = frozenset(),
+                     ) -> RefillGrace:
         """Open a window for a landed re-stub, and SAY SO. Logged here rather
         than at the three fire sites so the window's size is on the record the
         moment it is granted: without it a window is only visible once it
@@ -537,7 +542,8 @@ def run_phase_c_tdd(
         nonlocal _highwater
         _g = RefillGrace.for_restub(
             reverted, total_filled, per_iter=_grace_per_iter,
-            max_iters=_grace_max_iters, granted_at=iter_n)
+            max_iters=_grace_max_iters, granted_at=iter_n,
+            vanished_at_grant=vanished_at_grant)
         if _g.restubbed:
             _highwater = _highwater.voided_by_restub(iter_n)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window open for "
@@ -551,6 +557,10 @@ def run_phase_c_tdd(
             "cluster": cluster.name, "iter": iter_n,
             "restubbed": _g.restubbed, "iters_granted": _g.iters_left,
             "per_iter": _grace_per_iter, "clipped": _g.clipped,
+            # The pre-revert vanished reading the window can never explain —
+            # a graced sweep vanishing ONLY these names keeps crash evidence
+            # armed (see `RefillGrace.explains_vanish`).
+            "vanished_at_grant": sorted(_g.vanished_at_grant)[:50],
         })
         return _g
 
@@ -1740,7 +1750,8 @@ def run_phase_c_tdd(
                 })
                 _compile_broke_streak = 0
                 _destruction_epoch += 1
-                _grace = _grant_grace(_retrig_k.reverted_count)
+                _grace = _grant_grace(_retrig_k.reverted_count,
+                                      frozenset(_oracle.vanished))
                 _emit_retrigger_iter("retrigger_build",
                                      _retrig_k.reverted_count)
                 state.stalls = 0
@@ -1767,7 +1778,34 @@ def run_phase_c_tdd(
             # (observed live: attempts 1 and 2 in back-to-back iters). The
             # streak is left untouched rather than reset: this sweep is silent
             # about the crash, not proof of its absence.
-            pass
+            #
+            # One reading the window can NEVER explain: a vanished set that
+            # adds nothing beyond the reading the fire itself acted on. That
+            # reading was taken on the pre-revert tree — every re-stubbed body
+            # still filled — so a stub cannot be its cause, and it is the
+            # deterministic crash still standing, already proven by the streak
+            # or re-sweep that authorized the fire. Arm `_crash_deterministic`
+            # (the EVIDENCE half only; the streak stays 0, so the fire budget
+            # cannot re-fire off this). Without it, a 25-body window starved
+            # chain-derived blame for ceil(25/3)=9 iterations on run
+            # `3368-753757e6` (2026-08-15) while every graced sweep printed
+            # the same 3 binaries `already crashed at baseline` and two
+            # consecutive sweeps measured 156 fills moving pass 39 -> 39.
+            if (_oracle.vanished and not _sweep_compile_broke
+                    and not _grace.explains_vanish(_oracle.vanished)):
+                # Once per window (keyed by its grant iter), not per sweep —
+                # the condition is standing, the news is the window entering
+                # this state.
+                if _predates_noted_for != _grace.granted_at:
+                    _predates_noted_for = _grace.granted_at
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: vanished set "
+                        f"({len(_oracle.vanished)} test(s)) is within the "
+                        "reading the re-fill window's own fire acted on — the "
+                        "crash predates the re-stub and stubs cannot explain "
+                        "it; crash evidence stays armed through the window "
+                        "(fires stay suppressed).")
+                _crash_deterministic = True
         elif _oracle.vanished and not _sweep_compile_broke:
             _vanish_streak += 1
             # A shrunk oracle with a clean compile is either the frozen-scheme
@@ -1839,9 +1877,15 @@ def run_phase_c_tdd(
         # re-stub itself produced, and a fired-but-REJECTED attempt re-stubbed
         # nothing (`restubbed=0`), so its sweep measures the real tree. That is
         # the distinction `RefillGrace` already draws — the suppression exists
-        # to stop a back-to-back FIRE, not to stop prompt evidence.
+        # to stop a back-to-back FIRE, not to stop prompt evidence. And a
+        # reading the window cannot explain (`explains_vanish`: no vanished
+        # name beyond the fire's own pre-revert reading) is admissible even
+        # with bodies in flight — the re-fills the window protects are exactly
+        # the fills this evidence pack should steer.
         if (_crash_deterministic and _unattributed_sites and not crash_blamed
-                and not _grace.bodies_in_flight
+                and (not _grace.bodies_in_flight
+                     or (_oracle.vanished
+                         and not _grace.explains_vanish(_oracle.vanished)))
                 and deps.escalate_to_producers is not None):
             _chain_fns: set[FnLocator] = set(_suspects)
             for _vt in sorted(_oracle.vanished):
@@ -1951,8 +1995,9 @@ def run_phase_c_tdd(
                 # this iter's own `_score_grace` spends the window before the
                 # next iter's streak check can read it (verified: the crash site
                 # then fired in five consecutive iters, one authoring call each).
-                _grace = RefillGrace.for_failed_attempt(total_filled,
-                                                        granted_at=iter_n)
+                _grace = RefillGrace.for_failed_attempt(
+                    total_filled, granted_at=iter_n,
+                    vanished_at_grant=frozenset(_oracle.vanished))
             if _retrig_c.fired and _retrig_c.succeeded:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: CRASH layout "
                          f"retrigger fired (cause={_retrig_c.cause}) — reverted "
@@ -1964,7 +2009,8 @@ def run_phase_c_tdd(
                     "reverted_count": _retrig_c.reverted_count,
                 })
                 _destruction_epoch += 1
-                _grace = _grant_grace(_retrig_c.reverted_count)
+                _grace = _grant_grace(_retrig_c.reverted_count,
+                                      frozenset(_oracle.vanished))
                 _emit_retrigger_iter("retrigger_crash",
                                      _retrig_c.reverted_count)
                 state.stalls = 0
@@ -2003,7 +2049,8 @@ def run_phase_c_tdd(
                         "reverted_count": _retrig.reverted_count,
                     })
                     _destruction_epoch += 1
-                    _grace = _grant_grace(_retrig.reverted_count)
+                    _grace = _grant_grace(_retrig.reverted_count,
+                                          frozenset(_oracle.vanished))
                     _emit_retrigger_iter("retrigger_stall",
                                          _retrig.reverted_count)
                     state.stalls = 0

@@ -1,0 +1,55 @@
+{
+  "run_id": "3368-753757e6",
+  "cluster": "stable",
+  "entry_best": 39,
+  "iterations": [
+    {
+      "iter": 1,
+      "retrigger": {
+        "cause": "RUNTIME_CRASH",
+        "reverted": 25
+      },
+      "crash_passed": 39
+    },
+    {
+      "iter": 2,
+      "breach_withheld_against": 39,
+      "passed": 32,
+      "failed": 73,
+      "oracle": 105,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 21,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmitted": 8,
+      "passed": 39,
+      "failed": 48,
+      "oracle": 87,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 81,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 4,
+      "readmission_refused_against": 39,
+      "fills": 156,
+      "passed": 39,
+      "failed": 40,
+      "oracle": 79,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 59,
+      "kind": "merged",
+      "exhausted": 0
+    }
+  ]
+}

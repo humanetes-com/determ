@@ -229,11 +229,11 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
       `bodies` bar retires. Overflow past the denominator is labeled, not
       folded in.
 
-    A second `bodies` row — fns with a body out of the cluster total —
-    appears only while that count is still climbing (the initial fill of a
-    fresh tree). Once every fn has a body it disappears: the saturated bar
-    it replaced sat at 100% for hours while the loop rewrote wrong bodies,
-    teaching nothing.
+    A second `bodies` row — filled fns out of the cluster's FILLABLE count
+    (cfg-gated fns excluded from both sides), straight from the pass.start
+    snapshot — shows while any fillable fn is still hollow, and disappears
+    once every one has a body: the saturated bar it replaced sat at 100%
+    for hours while the loop rewrote wrong bodies, teaching nothing.
     """
     rows: list[str] = []
     stamps = [t for t in (_iso_ts_seconds(s)
@@ -287,13 +287,28 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
     filled_start = state.get("filled_count_at_pass_start", 0) or 0
     hollow_start = state.get("all_stubs_remaining_at_pass_start", 0) or 0
     queue = state.get("pass_stubs_total", 0) or 0
-    if total > 0 and (filled_start + hollow_start) > 0:
-        cum = min(total, filled_start + done)
-        hollow = total - cum
-        if hollow > 0:
-            bpct = cum / total * 100
-            rows.append(f"           bodies   [{progress_bar(bpct, 24)}]  "
-                        f"{cum}/{total} fns ({int(bpct)}%) · {hollow} hollow")
+    # The pass.start snapshot alone — never `filled_start + done`. `done`
+    # counts fill UNITS, and a behavioral re-fill of an already-filled body is
+    # a unit too: on run 3368-753757e6 iter 3 (2026-08-15, 197 filled of 209
+    # fillable, 12 hollow) the re-fill sweep pushed done to 130, so
+    # filled+done capped at the 223 total, "hollow" read 0, and the bar hid
+    # itself exactly while the user was asking where the fill bar went. The
+    # denominator is the FILLABLE count: the cluster total also counts fns
+    # cfg-gated to other clusters (14 for anyhow/stable), which no amount of
+    # filling here ever closes, so a bar over the total can never honestly
+    # complete. The snapshot refreshes each tdd iter (one pass.start per
+    # iter); a drop is the crash/layout retrigger's deliberate re-stub.
+    fillable = filled_start + hollow_start
+    if fillable > 0:
+        if hollow_start > 0:
+            bpct = filled_start / fillable * 100
+            gated = max(0, total - fillable)
+            line = (f"           bodies   [{progress_bar(bpct, 24)}]  "
+                    f"{filled_start}/{fillable} fillable ({int(bpct)}%) "
+                    f"· {hollow_start} hollow")
+            if gated:
+                line += f" · {gated} cfg-gated elsewhere"
+            rows.append(line)
     elif total > 0 and queue > 0:
         # Events predate the filled_count snapshot: infer from the queue. The
         # inference undercounts when the TDD driver narrows the queue to a

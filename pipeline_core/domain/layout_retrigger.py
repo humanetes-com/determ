@@ -827,6 +827,12 @@ class RefillGrace:
     fills_at_grant: int
     granted_at: int = 0
     clipped: bool = False
+    # The vanished-test reading of the sweep the fire acted on — a reading
+    # taken on the PRE-revert tree, where every body the fire re-stubbed was
+    # still filled. It bounds the window's explanatory power (see
+    # `explains_vanish`): a crash recorded here cannot be a stub artifact of
+    # this window, because it happened before the stubs existed.
+    vanished_at_grant: frozenset[str] = frozenset()
 
     @classmethod
     def none(cls) -> RefillGrace:
@@ -838,6 +844,7 @@ class RefillGrace:
         per_iter: int = DEFAULT_REFILL_PER_ITER,
         max_iters: int = DEFAULT_REFILL_GRACE_MAX_ITERS,
         granted_at: int = 0,
+        vanished_at_grant: frozenset[str] = frozenset(),
     ) -> RefillGrace:
         """A window for `restubbed` bodies: one iter per `per_iter` bodies,
         never fewer than one (the smallest re-stub keeps the original
@@ -851,14 +858,18 @@ class RefillGrace:
                    restubbed=max(restubbed, 0),
                    fills_at_grant=fills_so_far,
                    granted_at=granted_at,
-                   clipped=sized > bound)
+                   clipped=sized > bound,
+                   vanished_at_grant=vanished_at_grant)
 
     @classmethod
     def for_failed_attempt(cls, fills_so_far: int,
-                           granted_at: int = 0) -> RefillGrace:
+                           granted_at: int = 0,
+                           vanished_at_grant: frozenset[str] = frozenset(),
+                           ) -> RefillGrace:
         """One iter, nothing re-stubbed — a fired attempt that did not land."""
         return cls(iters_left=1, restubbed=0, fills_at_grant=fills_so_far,
-                   granted_at=granted_at)
+                   granted_at=granted_at,
+                   vanished_at_grant=vanished_at_grant)
 
     @property
     def active(self) -> bool:
@@ -877,6 +888,27 @@ class RefillGrace:
         ratchet's breach, the stall budget, the abandon-the-bet restore) key on
         this; only `active` keys on the shrink."""
         return self.active and self.restubbed > 0
+
+    def explains_vanish(self, vanished: Iterable[str]) -> bool:
+        """Whether this sweep's vanished set could be the window's own doing.
+
+        The window's suppression premise is that a stub panic inside the
+        re-stubbed bodies aborts test binaries, so a shrink during the window
+        proves nothing about the layout. That premise is checkable per test:
+        a name already vanished at the moment the window was granted crashed
+        on the pre-revert tree, where every re-stubbed body was still filled —
+        a stub cannot explain it. Only NEW vanished names beyond the grant
+        reading are within the window's explanatory power. On run
+        `3368-753757e6` (2026-08-15) the same 3 binaries were `already crashed
+        at baseline` on every graced sweep while the 25-body window suppressed
+        the crash-evidence machinery for ceil(25/3)=9 iterations — ~20h of
+        re-fill sweeps that two consecutive readings had already measured as
+        zero-payoff (156 fills, pass 39 flat).
+
+        An empty grant reading (a compile-broke fire, older callers) keeps
+        the old behavior: every vanish is within the window's power."""
+        return bool(set(vanished) - set(self.vanished_at_grant)) \
+            or not self.vanished_at_grant
 
     def consume(self, fills_so_far: int) -> RefillGrace:
         """The window after one graced iter has run its fills. Survives only
@@ -897,7 +929,8 @@ class RefillGrace:
                            restubbed=self.restubbed,
                            fills_at_grant=fills_so_far,
                            granted_at=self.granted_at,
-                           clipped=self.clipped)
+                           clipped=self.clipped,
+                           vanished_at_grant=self.vanished_at_grant)
 
 
 def find_fns_referencing(

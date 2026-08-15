@@ -113,8 +113,10 @@ def _fire_once(*, reverted: int):
     return _retrig, seen
 
 
-def _run(monkeypatch, tmp_path, *, reverted: int):
+def _run(monkeypatch, tmp_path, *, reverted: int, mutate=None):
     walk = load_walk("929616-ee20d540")
+    if mutate is not None:
+        mutate(walk)
     retrig, seen = _fire_once(reverted=reverted)
     fills: list[dict[str, Any]] = []
 
@@ -159,15 +161,28 @@ def test_a_rejected_fire_does_not_suppress_the_next_sweeps_chain_evidence(
     assert not armed[0].get("crash_blamed")
 
 
-def test_negative_control_a_landed_restub_still_suppresses_it(
+def _stub_shrink_after_fire(walk: dict) -> None:
+    """Model the shrink a landed re-stub CAUSES: after the fire, every sweep
+    reports 3 fewer tests than recorded — stub panics aborting a binary the
+    fire's own reading never saw crash. The vanished set then holds names
+    beyond the grant reading, which is the one thing `explains_vanish` treats
+    as within the window's power."""
+    for it in walk["iterations"]:
+        if "passed" in it and it.get("failed", 0) >= 3:
+            it["failed"] -= 3
+
+
+def test_negative_control_a_restub_that_adds_shrink_still_suppresses_it(
         tmp_path: Path, monkeypatch) -> None:
     """The other side of the seam. A LANDED re-author reverted bodies to
-    `unimplemented!()`; until they re-fill, a stub panic aborts the binary and
-    the oracle shrinks REGARDLESS of the tree's quality, so that sweep is not
-    evidence about the crash. `bodies_in_flight` is what tells the two windows
-    apart — a rejection re-stubbed nothing — and a fix that armed on every
-    sweep would synthesize blame from its own re-stub."""
-    _logs, events, fills, _seen = _run(monkeypatch, tmp_path, reverted=8)
+    `unimplemented!()`; a stub panic aborts binaries the fire's own reading
+    never saw crash, so a sweep that vanishes NEW names beyond that reading
+    is not evidence about the crash — the window explains it, and a fix that
+    armed on it would synthesize blame from its own re-stub. Suppression is
+    scoped to exactly those sweeps: a vanish that adds nothing beyond the
+    grant reading is the pre-existing crash and stays armed (next test)."""
+    _logs, events, fills, _seen = _run(monkeypatch, tmp_path, reverted=8,
+                                       mutate=_stub_shrink_after_fire)
 
     chain_evs = [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
     armed_at = {d["iter"] for d in chain_evs}
@@ -177,3 +192,24 @@ def test_negative_control_a_landed_restub_still_suppresses_it(
     # that measures a re-filled tree is evidence again.
     assert 2 not in armed_at, "synthesized blame from its own re-stub"
     assert armed_at and min(armed_at) > 2
+
+
+def test_a_restub_whose_sweep_adds_no_shrink_keeps_the_evidence_armed(
+        tmp_path: Path, monkeypatch) -> None:
+    """A landed re-author whose graced sweeps vanish EXACTLY the names the
+    fire's own pre-revert reading already held: the crash predates the stubs,
+    so the stubs cannot explain it, and the evidence pack arms inside the
+    window — the fills the window protects are the fills the pack should
+    steer. This is the seam run `3368-753757e6` (2026-08-15) hit live: a
+    25-body window suppressed chain blame for 9 iterations while every sweep
+    printed the same 3 binaries `already crashed at baseline` and 156 fills
+    moved pass 39 -> 39."""
+    _logs, events, fills, _seen = _run(monkeypatch, tmp_path, reverted=8)
+
+    chain_evs = [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
+    armed_at = {d["iter"] for d in chain_evs}
+    assert 2 in armed_at, "unchanged vanish suppressed inside the window"
+    # And the pack reached a fill inside the window, not only after it.
+    armed = [kw for kw in fills if kw.get("crash_evidence")
+             and _CHAIN_PRODUCER in kw["crash_evidence"]]
+    assert armed, "the evidence pack never armed"

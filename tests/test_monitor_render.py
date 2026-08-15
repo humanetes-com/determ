@@ -75,8 +75,32 @@ def test_iteration_progress_rows_move_inside_the_iteration() -> None:
     assert "fills 35" in text and "last 2m ago" in text
     assert "frontier 34 fn(s)" in text
     assert "passing" not in text and "76" not in text
-    # Initial fill still climbing → bodies bar present.
-    assert "190/223 fns (85%) · 33 hollow" in text
+    # Initial fill still climbing → bodies bar present, straight from the
+    # pass.start snapshot (never snapshot + fill units — see the re-fill
+    # inflation test below). 180+43 fillable == the 223 total here, so no
+    # cfg-gated suffix.
+    assert "180/223 fillable (80%) · 43 hollow" in text
+    assert "cfg-gated" not in text
+
+
+def test_iteration_progress_rows_refill_units_never_hide_the_bodies_bar() -> None:
+    """Fill units count behavioral re-fills of already-filled bodies, so
+    snapshot + units overflows the total: on run 3368-753757e6 iter 3
+    (2026-08-15, 197 filled of 209 fillable, 12 hollow, 14 cfg-gated to the
+    nightly cluster) done reached 130, min(223, 197+130) read 223, "hollow"
+    read 0, and the bodies bar hid itself with 12 fns genuinely hollow. The
+    bar must render the snapshot over the FILLABLE denominator and stay
+    visible while any fillable fn is hollow."""
+    state = {
+        "tdd_iter_ts": ["2026-08-09T10:00:00+00:00"], "tdd_frontier": 81,
+        "total_fns_in_cluster": 223, "filled_count_at_pass_start": 197,
+        "all_stubs_remaining_at_pass_start": 12,
+        "pass_fills_done": 130, "pass_fills_failed": 6, "pass_stubs_total": 21,
+    }
+    from datetime import datetime
+    now = datetime.fromisoformat("2026-08-09T12:00:00+00:00").timestamp()
+    text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
+    assert "197/209 fillable (94%) · 12 hollow · 14 cfg-gated elsewhere" in text
 
 
 def test_iteration_progress_rows_saturated_tree_drops_the_bodies_bar() -> None:

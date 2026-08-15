@@ -87,6 +87,14 @@ Per-iteration columns, grouped by what owns them:
            reading landed in this window and the previous one is carried
            forward. This is the reconstruction's real remaining work; it
            floors at the cfg-inactive count (14 for anyhow/stable), never 0.
+    filled cumulative fill bar `K/M fillable filled` from the per-fn pass
+           header — M is the cluster's fillable total (cfg-gated stubs
+           excluded), K the bodies currently on disk. This is the number the
+           `stubs` column cannot give: once a pass is down to cfg-gated
+           stubs the last `skipped K of N` reading is `14 of 14` and `stubs`
+           pins at the floor while K keeps moving. A DROP in K mid-run is a
+           retrigger re-stub (206/209 -> 197/209 on run `3368-753757e6`),
+           not a parse error. `~` carries the last reading forward.
     fills  bodies that LANDED this iteration, summed across the three fill
            routes (`file.fill.done.fns_filled` + `impl.fill.done.
            members_filled` + successful `fn.fill.done`) — not
@@ -174,6 +182,13 @@ def read_run_events(path: Path, run_id: str | None) -> tuple[str, list[dict]]:
 ITER_RE = re.compile(r"\[phase-c/tdd\] iter (\d+): cargo test rc=")
 EXH_RE = re.compile(r"(\d+) skipped as exhausted")
 STUB_RE = re.compile(r"cluster (\w+): skipped (\d+) of (\d+) stub\(s\)")
+# The per-fn pass header is the only line that prints the cluster's cumulative
+# fill bar. STUB_RE alone cannot reconstruct it: once every fillable stub is
+# filled or deferred the last reading in a window is `skipped 14 of 14`, which
+# pins the column at the cfg-inactive floor while `197/209 fillable filled`
+# (the number a human calls "progress") never enters the vector.
+FILLED_RE = re.compile(
+    r"(\d+) stub\(s\) remaining in cluster '(\w+)' \((\d+)/(\d+) fillable filled")
 START_RE = re.compile(r"PIPELINE STARTED .*run_id=(\S+)")
 CODE_RE = re.compile(r"code=(\w+)\s+git=(\w+)")
 HW_RE = re.compile(r"iter (\d+): high-water re-based (\d+) -> (\d+)")
@@ -199,7 +214,7 @@ def read_log(run_id: str) -> tuple[dict[int, dict], str]:
     # Readings taken before the first iteration summary describe the tree the
     # first iteration entered on — key them to it rather than dropping them.
     cur, code = 0, "?"
-    pre: dict[str, int] = {}
+    pre: dict[str, object] = {}
     for line in lines:
         if START_RE.search(line):
             if run_id not in line:
@@ -227,6 +242,14 @@ def read_log(run_id: str) -> tuple[dict[int, dict], str]:
                 out[cur]["stubs"] = int(m.group(3))
             else:
                 pre["stubs"] = int(m.group(3))
+            continue
+        m = FILLED_RE.search(line)
+        if m:
+            reading = (int(m.group(3)), int(m.group(4)))
+            if cur:
+                out[cur]["filled"] = reading
+            else:
+                pre["filled"] = reading
     return out, code
 
 
@@ -316,7 +339,7 @@ def route_table(evs: list[dict]) -> list[tuple[str, int, int, int, float]]:
 COLS = [
     ("iter", 4), ("rc", 4), ("pass", 5), ("fail", 5), ("meas", 5), ("full", 5),
     ("miss", 5), ("%full", 6), ("best", 5), ("impr", 5), ("stall", 6),
-    ("front", 6), ("exh", 4), ("stubs", 6), ("fills", 6), ("acc", 4),
+    ("front", 6), ("exh", 4), ("stubs", 6), ("filled", 9), ("fills", 6), ("acc", 4),
     ("rej", 4), ("calls", 6),
 ]
 
@@ -363,6 +386,7 @@ def main() -> int:
 
     rows, best, ranges = [], 0, defaultdict(list)
     last_stubs: int | None = None
+    last_filled: tuple[int, int] | None = None
     for idx, ev in enumerate(iters):
         d = ev.get("data") or {}
         it = d.get("iter", 0)
@@ -382,13 +406,20 @@ def main() -> int:
             stubs: object = last_stubs
         else:
             stubs = f"{last_stubs}~" if last_stubs is not None else "-"
+        if "filled" in lg:
+            last_filled = lg["filled"]
+            filled_col = f"{last_filled[0]}/{last_filled[1]}"
+            ranges["filled"].append(last_filled[0])
+        else:
+            filled_col = (f"{last_filled[0]}/{last_filled[1]}~"
+                          if last_filled is not None else "-")
         row = {
             "iter": it, "rc": d.get("rc", ""), "pass": p, "fail": f, "meas": meas,
             "full": full, "miss": max(0, full - meas),
             "%full": f"{100.0 * p / full:.0f}%" if full else "-",
             "best": best, "impr": "yes" if d.get("improved") else "no",
             "stall": f"{d.get('stall', '?')}/3", "front": d.get("frontier_size", 0),
-            "exh": lg.get("exh", "-"), "stubs": stubs,
+            "exh": lg.get("exh", "-"), "stubs": stubs, "filled": filled_col,
             "fills": landed(win),
             "acc": verdicts.get("accept", 0),
             "rej": sum(v for k, v in verdicts.items() if k != "accept"),
@@ -436,10 +467,11 @@ def main() -> int:
         "pass": "up", "fail": "down", "meas": "up (toward full)", "full": "fixed",
         "miss": "down to 0", "best": "up (re-based on purpose after a retrigger)",
         "front": "context", "exh": "down", "stubs": "down (floors at cfg-inactive)",
+        "filled": "up (numerator; a drop is a retrigger re-stub)",
         "fills": "context", "acc": "up", "rej": "down", "calls": "cost",
     }
-    for k in ("pass", "fail", "meas", "full", "miss", "best", "stubs", "exh",
-              "front", "fills", "acc", "rej", "calls"):
+    for k in ("pass", "fail", "meas", "full", "miss", "best", "stubs", "filled",
+              "exh", "front", "fills", "acc", "rej", "calls"):
         v = ranges.get(k) or []
         if not v:
             print(f"  {k:<6} (not observed)")
