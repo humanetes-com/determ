@@ -261,7 +261,17 @@ _MAX_THINK_CHARS  = int(os.getenv("OLLAMA_MAX_THINK_CHARS", "40000"))
 # and breaks on the running total. No tokenizer, no context arithmetic, and the
 # error is one-sided — breaking early strictly reduces tokens used, so it cannot
 # overflow. A wrong value costs answer quality, visible as `llm/think_cap`.
-_VLLM_MAX_THINK_CHARS = int(os.getenv("VLLM_MAX_THINK_CHARS", str(_MAX_THINK_CHARS)))
+# The default is the measured value, NOT `_MAX_THINK_CHARS`. Falling back to the
+# Ollama cap put 40,000 — mid-healthy-population — into every environment that
+# does not set `VLLM_MAX_THINK_CHARS`, and `.env` is untracked, so that was every
+# fresh clone and the CI runner. It went unseen because this box's `.env` carries
+# `VLLM_MAX_THINK_CHARS=120000` (set 2026-08-13 from the measurement above), which
+# is also what made `tests/test_think_cap.py` green here and red anywhere else:
+# the band assertion was reading the operator's config, not the shipped default.
+# 120,000 sits above every healthy call observed in both measured cells (max
+# 77,595) and below the smallest recorded runaway (121,109), consistent with the
+# 32,768-token request ceiling. `.env` still overrides.
+_VLLM_MAX_THINK_CHARS = int(os.getenv("VLLM_MAX_THINK_CHARS", "120000"))
 
 # The measured empty band, kept next to the value so a future change to
 # `_VLLM_MAX_THINK_CHARS` can be checked against the evidence that sized it

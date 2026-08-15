@@ -32,6 +32,21 @@ jobs:
         run: lint-imports --config pyproject.toml
       - name: extraction invariants
         run: python tools/check_extraction_invariants.py
+      # pytest needs the extractor binary, not just the Rust gates in the job below.
+      # 35 tests locate a fn through the syn record — the whole same-name splice
+      # collision class (`fn not` x3, `fn from` x6, `fn fmt` x8) plus the file-first
+      # and impl-block fill loops. `splice_body_scoped` falls back to the bare-name
+      # path when the record locator returns nothing, and the bare-name path refuses
+      # `ambiguous_name` by design, so without the binary those tests do not skip —
+      # they FAIL. They are 35 of the 38 failures in the 2026-08-15 run, reproduced
+      # by running the suite against a bare `git archive HEAD` checkout and cleared
+      # by staging the binary into it. Only test_pipeline_smoke.py carried the
+      # `needs_extractor` guard. Same pin as the rust job: the two toolchain
+      # versions move together. 17.6s cold on the dev box with a warm crate
+      # registry; CI pays the crate downloads on top.
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - name: build skeleton-extractor (pytest dependency)
+        run: cargo build --release --manifest-path tools/skeleton_extractor/Cargo.toml
       - name: pytest + domain coverage floor
         run: pytest --cov=pipeline_core.domain --cov-report=term-missing:skip-covered --cov-fail-under=95
 

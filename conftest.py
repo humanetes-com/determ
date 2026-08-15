@@ -25,3 +25,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 _TEST_OBS_DIR = Path(tempfile.mkdtemp(prefix="pipeline-test-obs-"))
 os.environ.setdefault("PIPELINE_EVENTS_LOG", str(_TEST_OBS_DIR / "events.jsonl"))
 os.environ.setdefault("PIPELINE_PROMPTS_DIR", str(_TEST_OBS_DIR / "prompts"))
+
+# The SERVING config the suite runs against, pinned for the same reason and in the
+# same window — `pipeline.MODEL_CONTEXT_CHARS` is `Settings.from_env(...)`
+# snapshotted at import and baked into the frozen `_ASK_CLIENT`, so no fixture can
+# move it afterwards. Left to the ambient environment it is resolved from `.env`,
+# which is UNTRACKED: on a bare checkout `Backend.coerce` falls back to OLLAMA and
+# its 8,192-token default, the context guard then middle-trims prompts these tests
+# assert on ("dropped 5,481 chars from middle"), and
+# tests/test_e2e_impl_loop.py::test_file_first_retries_with_the_compiler_errors_from_the_failed_attempt
+# saw one file-first prompt where it requires two. That test is one of the 3
+# failures in the 2026-08-15 CI run that survive building the extractor; all 3 pass
+# on this box, and all 3 reproduce on a bare checkout with `.env` removed.
+# The values match what `.env` carries here, so the suite's behaviour is unchanged;
+# what changes is that it no longer VARIES with the operator's serving config.
+# `setdefault`, so an explicit override on the command line still wins.
+os.environ.setdefault("BACKEND", "vllm")
+os.environ.setdefault("VLLM_MAX_MODEL_LEN", "131072")

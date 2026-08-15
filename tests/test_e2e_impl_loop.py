@@ -70,6 +70,11 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     # of the per-block loop these tests assert on. The model here is a
     # scripted fake, so pin the historical ladder explicitly.
     monkeypatch.setenv("PHASE_C_ROUTE_ORDER", "default")
+    # The prompt-size budget is the same class of dependency but CANNOT be pinned
+    # here: `pipeline.MODEL_CONTEXT_CHARS` is snapshotted at import (pipeline.py,
+    # `SETTINGS = Settings.from_env(...)`) and baked into the frozen `_ASK_CLIENT`,
+    # so a monkeypatch.setenv at call time changes nothing. It is pinned in the
+    # root conftest.py instead, before `import pipeline` binds it.
     install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: [_block()])
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     # fns passes through to the REAL reader (these tests exercise the syn

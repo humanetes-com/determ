@@ -11,6 +11,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "env_value.sh"
 
 
@@ -84,10 +86,19 @@ def test_a_prefix_of_the_key_does_not_match(tmp_path: Path):
     assert _resolve("OPERATOR_MODEL", "opus", env_file=f) == "opus"
 
 
+_REPO_ENV = Path(__file__).resolve().parent.parent / ".env"
+
+
+# `.env` is untracked — it holds this box's model and server settings and is not
+# distributed with the repo. Every other test here builds its own `.env` under
+# tmp_path; this one is deliberately about the REAL file, so it can only run
+# where that file exists. Unguarded it raised FileNotFoundError on
+# `/home/runner/work/determ/determ/.env` on every CI push.
+@pytest.mark.skipif(not _REPO_ENV.exists(), reason="no repo .env (untracked; absent on CI)")
 def test_repo_env_configures_the_operator_pass():
     # The settings operator_run.sh reads must actually be present, or the pass
     # silently falls back to the script's defaults.
-    text = (Path(__file__).resolve().parent.parent / ".env").read_text()
+    text = _REPO_ENV.read_text()
     rows = [ln.strip() for ln in text.splitlines()
             if ln.strip().startswith(("OPERATOR_MODEL=", "OPERATOR_EFFORT="))]
     assert any(r.startswith("OPERATOR_MODEL=") for r in rows)
