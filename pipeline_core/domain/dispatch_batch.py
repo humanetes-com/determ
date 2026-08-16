@@ -36,10 +36,41 @@ the loop already carries scar tissue for. Tracking which units this pass has
 already attempted is stable under that churn: units that leave the frontier
 simply never come back for their turn, and units that arrive mid-pass are
 picked up before the pass closes.
+
+THE PASS CLOSES OVER A COHORT, NOT OVER A MOVING TARGET. "Picked up before the
+pass closes" was the sentence that had to change. A pass whose closure condition
+is "every unit CURRENTLY in the frontier has been attempted" cannot close while
+the frontier gains more units per sweep than the cap retires — and the frontier
+legitimately grows, because futility escalation adds a crashed test's producers
+(36, 39 and 25 fns on one iteration of run `1692702-94e6163a`, 2026-08-16) and
+crash evidence adds its subjects. That run's frontier went 35 -> 57 -> 63 against
+a cursor at 12 -> 21 -> 36 and closed nothing in 3h36m.
+
+Two terminators are denominated in completed traversals — the flat-score GPU
+guard (`domain/flat_score.py`, which needs `first_traversal < traversal`) and
+the plateau budget (`TDD_MAX_STALLS`, which charges only after a completed
+pass) — so a traversal index stuck at 0 disables BOTH, and that run had no
+self-terminating path at all: `stall` read 0 of 3 at every iteration while the
+same 79/101 came back three times. A gate whose unlock condition is progress the
+situation prevents is the deadlock shape `domain/pass_highwater.py` documents;
+this was another instance of it, arriving through a precondition rather than
+through a rule.
+
+So a pass is opened over the frontier AS IT STOOD when the pass opened — its
+COHORT — and closes when every cohort member has been attempted or has left the
+frontier. Units arriving mid-pass are still dispatched in rank order (that is
+what keeps freshly-blamed crash subjects immediate), they simply do not extend
+the traversal they arrived in; they belong to the next cohort. Closure is then
+bounded: every iteration retires `cap` distinct units and no unit is retired
+twice, so the pass ends after at most (cohort + arrivals ranked above it) / cap
+iterations instead of never.
+
+`cohort=None` keeps the pre-cohort behaviour exactly (the cohort is the current
+frontier), which is what every caller that does not track a pass does.
 """
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 #: Frontier units dispatched per iteration when the cap is left at its default.
@@ -82,7 +113,9 @@ class DispatchBatch[K: Hashable]:
 
 
 def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
-                            cap: int) -> DispatchBatch[K]:
+                            cap: int,
+                            cohort: Iterable[K] | None = None,
+                            ) -> DispatchBatch[K]:
     """Next slice of `ordered` this pass has not attempted yet.
 
     `ordered` is the frontier in dispatch rank (leaf-first), `attempted` is what
@@ -91,6 +124,13 @@ def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
     behaviour — keep that available, because a small crate whose frontier is
     already under the cap should not pay for the machinery.
 
+    `cohort` is the frontier the CURRENT pass opened over. The pass closes when
+    every one of those units has been attempted or has left the frontier —
+    never when the frontier as it stands now is exhausted, which a growing
+    frontier makes unreachable (see the module docstring). `None` means "the
+    frontier as it stands is the cohort", which is the pre-cohort behaviour and
+    what a caller that does not track passes wants.
+
     When the pass has nothing pending (every frontier unit already attempted, or
     the frontier shrank below what was attempted) the pass has closed: a fresh
     one starts here, over the frontier as it stands NOW rather than as it stood
@@ -98,16 +138,66 @@ def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
     """
     seen = set(attempted)
     pending = [k for k in ordered if k not in seen]
+    live = set(ordered)
+    outstanding = (live if cohort is None else live & set(cohort)) - seen
     if not pending:
         # Pass closed. Reopen on the current frontier; `attempted_before` is 0
         # because none of THIS pass's traversal has happened yet.
         pending = list(ordered)
         seen = set()
+        outstanding = live
     attempted_before = len(ordered) - len(pending)
-    if cap <= 0 or len(pending) <= cap:
-        return DispatchBatch(keys=tuple(pending), completes_pass=True,
-                             attempted_before=attempted_before,
-                             frontier_size=len(ordered))
-    return DispatchBatch(keys=tuple(pending[:cap]), completes_pass=False,
+    keys = tuple(pending) if cap <= 0 or len(pending) <= cap \
+        else tuple(pending[:cap])
+    return DispatchBatch(keys=keys,
+                         completes_pass=not (outstanding - set(keys)),
                          attempted_before=attempted_before,
                          frontier_size=len(ordered))
+
+
+def promote_crash_evidence[K: Hashable, V](
+    ordered: Sequence[tuple[K, V]], grades: Mapping[K, int],
+) -> list[tuple[K, V]]:
+    """`ordered` with crash-evidence units moved to the front, best grade first,
+    each grade keeping the ranking it already had.
+
+    WHY THIS IS NOT PART OF `order_frontier`. That ranking answers "which unit
+    is most likely to unblock others" from static shape — panic depth, how many
+    failing tests attribute it, how many callers reference it. Crash evidence
+    answers a different question: THIS fn, on THIS sweep, is named by a fault
+    the tree just produced. The two were being compared on the first ranking's
+    scale, so the loop's strongest signal was ordered as if it were its weakest.
+
+    The measurement, run `1692702-94e6163a` (2026-08-16). The chain-derived
+    blame named `src/error.rs::context_chain_drop_rest`, `::context_drop_rest`,
+    `::drop`, `::object_drop` and `::object_drop_front` on iterations 2 and 3
+    off a double drop of `Arc<Atomic<bool>>` (freed `tests/test_downcast.rs:83`,
+    touched `:85`). The evidence pack gave all five a prompt, a frontier entry,
+    an exhaustion void and dispatch ELIGIBILITY — and nothing gave them
+    priority, so iteration 2's batch of 12 out of 57 logged `0 skipped — free
+    fns` while four of the five are free fns. `object_drop_front`, byte-
+    identical to `object_drop` since the 79-passing checkpoint and the only one
+    of the five that is wrong, sorted last of them on the `(file, fn)` tiebreak
+    and has not been dispatched in any run since `2219473-e43ea61c`.
+
+    Grades are `0` best (an observed faulting frame), then chain-derived
+    inference, then a synthesized subject — an inference must not outrank an
+    observation. Units absent from `grades` keep their order behind every graded
+    one. Stable within a grade, so the family of one fault dispatches together
+    in the batch that found it rather than one iteration apart in name order.
+    """
+    if not grades:
+        return list(ordered)
+    graded: dict[int, list[tuple[K, V]]] = {}
+    rest: list[tuple[K, V]] = []
+    for item in ordered:
+        grade = grades.get(item[0])
+        if grade is None:
+            rest.append(item)
+        else:
+            graded.setdefault(grade, []).append(item)
+    out: list[tuple[K, V]] = []
+    for grade in sorted(graded):
+        out.extend(graded[grade])
+    out.extend(rest)
+    return out

@@ -57,7 +57,7 @@ def _clear_stop() -> Any:
 def _run(tmp_path: Path, monkeypatch, sweeps: list[str],
          events: list[tuple[str, dict]], *, stubs: list[int] | None = None,
          guard: str = "2", stalls: str = "9", targets: int = 1,
-         refill_max: str = "",
+         refill_max: str = "", no_verdict_sweeps: str = "0",
          best_mark: Any = None, restore: Any = None,
          fill_result: Any = None) -> ClusterFillResult:
     """Drive the loop over `sweeps` (the last repeats forever) with a stub count
@@ -85,6 +85,14 @@ def _run(tmp_path: Path, monkeypatch, sweeps: list[str],
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", guard)
+    # The protector's SECOND clock is OFF here, and this suite is why it exists.
+    # These fixtures land bodies against a byte-identical per-binary vector
+    # forever — exactly what `UnmovedVerdicts` stops on — so leaving it armed
+    # would decide every case below at its third sweep and none of them would
+    # reach the traversal-denominated guard they were written to pin. The two
+    # clocks share one stop site, so each suite arms one and silences the other;
+    # the second clock's own cases live in `test_tdd_no_verdict_clock.py`.
+    monkeypatch.setenv("TDD_NO_VERDICT_SWEEPS", no_verdict_sweeps)
     # Only when a case asks: raising it keeps a behavioural frontier admitted
     # across a traversal, and leaving it raised everywhere would silently let
     # every other case run past the sweeps it scripted.

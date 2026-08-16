@@ -55,9 +55,14 @@ from pipeline_core.domain.dispatch import (
 )
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    promote_crash_evidence,
     take_batch,
 )
-from pipeline_core.domain.flat_score import FlatScoreGuard, ScoreReading
+from pipeline_core.domain.flat_score import (
+    FlatScoreGuard,
+    ScoreReading,
+    UnmovedVerdicts,
+)
 from pipeline_core.domain.graceful_stop import request_graceful_stop
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_REFILL_GRACE_MAX_ITERS,
@@ -315,6 +320,16 @@ def run_phase_c_tdd(
     _flat_guard = FlatScoreGuard(
         window=int(os.getenv("TDD_FLAT_SCORE_WINDOW", "5")),
         repeats=int(os.getenv("TDD_FLAT_SCORE_REPEATS", "2")))
+    # The protector's SECOND clock, and the reason there is one: the guard
+    # above and the plateau budget are both denominated in completed traversals,
+    # and on run `1692702-94e6163a` (2026-08-16) that unit stopped ticking —
+    # frontier 35 -> 57 -> 63 against a cursor at 12 -> 21 -> 36, no pass
+    # closed, `_traversals` stuck at 0, so the guard's `first < traversal` read
+    # `0 < 0` and `stall` read 0 of 3 while 79/101 came back three times. This
+    # clock counts judged sweeps that landed bodies and moved no test's
+    # verdict, which is independent of the frontier, the cap and the pass.
+    _unmoved = UnmovedVerdicts(
+        limit=int(os.getenv("TDD_NO_VERDICT_SWEEPS", "3")))
     # The previous sweep's per-binary vector and the fill count at that point,
     # for the "N bodies landed and no test changed verdict" line below.
     _prev_bins: list[tuple[str, int, int]] = []
@@ -421,6 +436,13 @@ def run_phase_c_tdd(
     # closes and whenever the score improves — a better tree reopens the whole
     # frontier rather than resuming a traversal taken against the old one.
     _pass_attempted: set[FnLocator] = set()
+    # The frontier the current pass OPENED over. A traversal is over this set,
+    # not over the frontier as it stands now: escalation and crash evidence add
+    # units mid-pass, and a closure condition that waits for them cannot be met
+    # while they arrive faster than the cap retires them (`domain/
+    # dispatch_batch.py` carries the run that measured it). None between passes
+    # — the next iteration opens a cohort on whatever the frontier is then.
+    _pass_cohort: tuple[FnLocator, ...] | None = None
     # Did the PREVIOUS iteration's batch close a pass? The sweep at the top of
     # this iteration measures that batch's fills, and only a completed pass may
     # charge the stall budget. True at entry so the first sweep behaves exactly
@@ -1174,15 +1196,31 @@ def run_phase_c_tdd(
         _landed_since = total_filled - _filled_at_prev_sweep
         if (_prev_bins and _bins == _prev_bins and _landed_since > 0
                 and not _grace.bodies_in_flight):
+            _unmoved = _unmoved.unmoved(_landed_since)
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: {_landed_since} "
                 "body(ies) landed since the last sweep and NO test changed "
                 "verdict — the per-binary vector is byte-identical. The fills "
-                "compile and are kept; on this evidence they bought nothing.")
+                "compile and are kept; on this evidence they bought nothing."
+                + (f" That is {_unmoved.streak} consecutive such sweep(s) "
+                   f"({_unmoved.landed} body(ies) in total) against a limit of "
+                   f"{_unmoved.limit}." if _unmoved.enabled else ""))
             deps.emit("phase_c.tdd.no_verdict_moved", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "filled_since": _landed_since,
+                "unmoved_streak": _unmoved.streak,
+                "unmoved_landed": _unmoved.landed,
+                "unmoved_limit": _unmoved.limit,
                 "pass_count": pass_count})
+        elif (_prev_bins and _bins != _prev_bins
+                and not _grace.bodies_in_flight):
+            # A verdict moved somewhere. Whichever direction it moved in, the
+            # loop is demonstrably doing something to the crate, which is all
+            # this clock claims to measure — restart it. A sweep that landed
+            # nothing, and a sweep inside the grace window, are NOT judgements
+            # of a dispatch and leave the streak untouched (same exemptions the
+            # flat-score guard applies).
+            _unmoved = _unmoved.moved()
         _prev_bins, _filled_at_prev_sweep = _bins, total_filled
         if rc == 0 and not _oracle.intact:
             # cargo says green but part of the expected oracle never reported —
@@ -1332,6 +1370,7 @@ def run_phase_c_tdd(
         # worth re-offering now that the evidence moved.
         if improved:
             _pass_attempted.clear()
+            _pass_cohort = None
         # `best_metric` is -inf until some iter improves, and a compile-broken
         # sweep no longer does — so a cluster whose FIRST sweep cannot build
         # keeps the loop's own initial floor instead of overflowing on
@@ -2478,8 +2517,39 @@ def run_phase_c_tdd(
         # never dispatched. `take_batch` is pure, so computing it early costs
         # nothing and changes nothing.
         ordered = deps.order_frontier(eligible, leaf_counts)
+        # CRASH EVIDENCE OUTRANKS EVERYTHING, and until now it outranked
+        # nothing. `order_frontier` ranks on static shape — panic depth, how
+        # many failing tests attribute a unit, how many callers reference it —
+        # which is the right question for an attribution-built frontier and the
+        # wrong scale for "this fn is named by a fault the tree produced on THIS
+        # sweep". The pack gave its subjects a prompt, a frontier entry, an
+        # exhaustion void and eligibility, and then let them queue behind units
+        # chosen on a different question: run `1692702-94e6163a` (2026-08-16)
+        # named the five-fn destruction family on iterations 2 and 3 and
+        # dispatched a batch of 12 out of 57 with `0 skipped — free fns` while
+        # four of the five are free fns. Grades keep an observed frame above an
+        # inference: blamed frames first, then chain-derived, then any other
+        # evidence key (producer aim, synthesized subject).
+        _crash_grades: dict[FnLocator, int] = {
+            **dict.fromkeys(crash_texts, 2),
+            **dict.fromkeys(_chain_keys, 1),
+            **dict.fromkeys(crash_blamed, 0),
+        }
+        ordered = promote_crash_evidence(ordered, _crash_grades)
+        if _pass_cohort is None:
+            _pass_cohort = tuple(key for key, _ in ordered)
         _batch = take_batch([key for key, _ in ordered], _pass_attempted,
-                            _dispatch_cap)
+                            _dispatch_cap, cohort=_pass_cohort)
+        if _crash_grades:
+            _aimed = [k for k in _batch.keys if k in _crash_grades]
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                f"{len(_crash_grades)} unit(s) carry crash evidence this "
+                f"sweep and rank ahead of the frontier; {len(_aimed)} of them "
+                "are in this batch"
+                + (": " + ", ".join(f"{k.file}::{k.fn_name}"
+                                    for k in _aimed[:8]) if _aimed else
+                   " — the batch is full of higher-graded evidence."))
 
         # GPU protector, half 2 of 2 — the only thing below this line that costs
         # GPU is the dispatch, and this reading says the last one bought nothing
@@ -2493,7 +2563,48 @@ def run_phase_c_tdd(
         # `request_graceful_stop` sets the process-wide event the operator's
         # sentinel sets, so the exit that follows is the one every worker pool
         # already knows how to take.
-        if not _flat_excuse and _flat_guard.trips_on(_flat_reading, _traversals):
+        # THE PRECONDITION, REPORTED. A guard that is silent when it does not
+        # trip cannot be told apart from a guard that has nothing to say, and
+        # that is how run `1692702-94e6163a` spent 3h36m with its repeat clause
+        # satisfied since iteration 2 and its traversal clause unsatisfiable.
+        # One line per sweep, only while the guard is actually withheld.
+        if not _flat_excuse and _flat_guard.withheld_by_traversal(
+                _flat_reading, _traversals):
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: the flat-score guard is "
+                f"ARMED and WITHHELD — {_flat_reading} has been read "
+                f"{_flat_guard.repeated(_flat_reading)} time(s) (limit "
+                f"{_flat_guard.repeats}) but all of them inside traversal "
+                f"{_traversals}, and a stop needs one completed traversal "
+                "behind the repeat. This pass has attempted "
+                f"{_batch.attempted_before + len(_batch.keys)} of "
+                f"{len(_pass_cohort or ())} cohort unit(s). The plateau budget "
+                f"({stall}/{max_stalls}) charges on the same condition.")
+            deps.emit("phase_c.tdd.flat_score_withheld", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count,
+                "oracle_size": _measure.oracle_size,
+                "repeats": _flat_guard.repeated(_flat_reading),
+                "traversals": _traversals,
+                "cohort_size": len(_pass_cohort or ()),
+                "attempted_this_pass": (_batch.attempted_before
+                                        + len(_batch.keys)),
+                "stall": stall})
+        # TWO CLOCKS, ONE STOP. The second clock (`UnmovedVerdicts`) asks a
+        # question no frontier bookkeeping can disable — have the last `limit`
+        # judged sweeps landed bodies and moved not one test's verdict — and on
+        # the run it was written for that was true from iteration 3 while every
+        # traversal-denominated terminator sat at zero. It routes through THIS
+        # branch rather than getting its own: the durable-tree rescue below is
+        # the one thing that should happen before any stop, and a second exit
+        # that skipped it would be a second way to end a run on a tree worse
+        # than one already on disk.
+        _stop_clock = (
+            "flat_score" if (not _flat_excuse
+                             and _flat_guard.trips_on(_flat_reading,
+                                                      _traversals))
+            else "no_verdict" if _unmoved.trips else "")
+        if _stop_clock:
             # BEFORE stopping: is there a better tree on disk that this run has
             # not tried? A flat reading is the loop saying its re-climb has
             # failed, and the durable mark is the one number that survives the
@@ -2571,42 +2682,68 @@ def run_phase_c_tdd(
                     permanently_exhausted.clear()
                     _stubs_prev = -1
                     _pass_attempted = set()
+                    _pass_cohort = None
+                    _unmoved = _unmoved.moved()
                     _prev_pass_completed = True
                     _zp_history, _zp_planned, _zp_fired_on = (), None, None
                     continue
-            deps.log(
-                f"  {tag} [phase-c/tdd] iter {iter_n}: GPU_GUARD_STOP — this "
-                f"sweep reads {_flat_reading}, which the last "
-                f"{len(_flat_guard.readings)} judged sweep(s) have already "
-                f"produced {_flat_guard.repeated(_flat_reading)} time(s): "
-                f"{_flat_guard.render(_flat_reading)}"
-                + (f"; {_flat_guard.gap} sweep(s) in between were not judged "
-                   "(grace window / still filling / red build)"
-                   if _flat_guard.gap else "")
-                + f". {_traversals} completed traversal(s) of this frontier "
-                "stand behind that reading. Stopping the RUN before "
-                f"dispatching {_batch.rendered} — the batch it was about to "
-                "spend, out of the frontier it was drawn from. Nothing is "
-                "convicted and every fill is on disk — `bash continue.sh` "
-                "resumes here.")
-            deps.emit("phase_c.tdd.flat_score_stop", data={
-                "cluster": cluster.name, "iter": iter_n,
-                "pass_count": pass_count,
-                "oracle_size": _measure.oracle_size,
-                "repeats": _flat_guard.repeated(_flat_reading),
-                "limit": _flat_guard.repeats,
-                "window": _flat_guard.window,
-                "skipped": _flat_guard.gap,
-                "readings": [[o.reading.pass_count, o.reading.oracle_size,
-                              o.traversal] for o in _flat_guard.readings],
-                "traversals": _traversals,
-                "frontier_size": len(eligible),
-                "withheld_dispatch": len(_batch.keys),
-            })
+            if _stop_clock == "flat_score":
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: GPU_GUARD_STOP — "
+                    f"this sweep reads {_flat_reading}, which the last "
+                    f"{len(_flat_guard.readings)} judged sweep(s) have already "
+                    f"produced {_flat_guard.repeated(_flat_reading)} time(s): "
+                    f"{_flat_guard.render(_flat_reading)}"
+                    + (f"; {_flat_guard.gap} sweep(s) in between were not "
+                       "judged (grace window / still filling / red build)"
+                       if _flat_guard.gap else "")
+                    + f". {_traversals} completed traversal(s) of this "
+                    "frontier stand behind that reading. Stopping the RUN "
+                    f"before dispatching {_batch.rendered} — the batch it was "
+                    "about to spend, out of the frontier it was drawn from. "
+                    "Nothing is convicted and every fill is on disk — `bash "
+                    "continue.sh` resumes here.")
+                deps.emit("phase_c.tdd.flat_score_stop", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count,
+                    "oracle_size": _measure.oracle_size,
+                    "repeats": _flat_guard.repeated(_flat_reading),
+                    "limit": _flat_guard.repeats,
+                    "window": _flat_guard.window,
+                    "skipped": _flat_guard.gap,
+                    "readings": [[o.reading.pass_count, o.reading.oracle_size,
+                                  o.traversal] for o in _flat_guard.readings],
+                    "traversals": _traversals,
+                    "frontier_size": len(eligible),
+                    "withheld_dispatch": len(_batch.keys),
+                })
+            else:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: NO_VERDICT_STOP — "
+                    f"{_unmoved.streak} consecutive judged sweep(s) landed "
+                    f"{_unmoved.landed} body(ies) between them and moved NO "
+                    "test's verdict; the per-binary vector is byte-identical "
+                    f"across all of them. Reading {_flat_reading}, "
+                    f"{_traversals} completed traversal(s) — this stop does "
+                    "NOT depend on that number, which is the point of it. "
+                    f"Stopping the RUN before dispatching {_batch.rendered}. "
+                    "Nothing is convicted and every fill is on disk — `bash "
+                    "continue.sh` resumes here.")
+                deps.emit("phase_c.tdd.no_verdict_stop", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count,
+                    "oracle_size": _measure.oracle_size,
+                    "streak": _unmoved.streak, "limit": _unmoved.limit,
+                    "landed": _unmoved.landed,
+                    "traversals": _traversals,
+                    "frontier_size": len(eligible),
+                    "withheld_dispatch": len(_batch.keys),
+                })
             deps.emit("phase_c.tdd.iter", data={
                 **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                "frontier_size": len(eligible), "kind": "flat_score_stop",
+                "frontier_size": len(eligible),
+                "kind": f"{_stop_clock}_stop",
                 "pass_count": pass_count, "fail_count": fail_count,
                 "improved": improved, "stall": stall,
             })
@@ -2621,6 +2758,11 @@ def run_phase_c_tdd(
         # traversal exactly where it found it.
         _pass_attempted = (set() if _batch.completes_pass
                            else _pass_attempted | set(_batch.keys))
+        # A closed pass releases its cohort; the next iteration opens one over
+        # the frontier as it stands then. Units that arrived during this pass
+        # are in that next cohort — they were dispatchable all along, they just
+        # did not extend the traversal they arrived in.
+        _pass_cohort = None if _batch.completes_pass else _pass_cohort
         _prev_pass_completed = _batch.completes_pass
         if _batch.completes_pass:
             _traversals += 1

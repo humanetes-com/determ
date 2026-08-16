@@ -90,6 +90,7 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
                 escalate=None, fill=None, logs=None,
                 enumerate_fns=None, test_files=None,
                 target_src_dir: Path | None = None,
+                frontier: dict[FnLocator, set[str]] | None = None,
                 ) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "2")
@@ -102,6 +103,9 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
 
     def _attr(*a: Any, **k: Any):
         attribution_kwargs.append(k)
+        if frontier:
+            return AttributionResult(dict(frontier), FailureKind.RUNTIME,
+                                     dict(frontier))
         return AttributionResult({}, FailureKind.NO_FRONTIER, {})
 
     deps = PhaseCTddDeps(
@@ -1081,3 +1085,55 @@ def test_an_ordinary_crash_aims_at_callees_without_a_placeholder_claim(
     armed = [kw for kw in fills if kw.get("crash_evidence")][0]
     text = armed["crash_evidence"][FnLocator("src/error.rs", "object_downcast")]
     assert "PRODUCER CANDIDATE" in text and "PLACEHOLDER POINTER" not in text
+
+
+def test_crash_subjects_are_dispatched_in_the_sweep_that_named_them(
+        tmp_path: Path, monkeypatch) -> None:
+    """180.2. The evidence pack gave its subjects a prompt, a frontier entry,
+    an exhaustion void and ELIGIBILITY — and nothing gave them PRIORITY, so
+    they queued behind a frontier ranked on a different question and the batch
+    cap decided how many years later they would be reached.
+
+    Run `1692702-94e6163a` (2026-08-16) is the measurement: the chain blame
+    named the five-fn destruction family on iterations 2 and 3, and iteration
+    2's batch of 12 out of 57 carried `0 skipped — free fns` while four of the
+    five are free fns. `object_drop_front` — byte-identical to `object_drop`
+    since the 79-passing checkpoint, and the only one of the five that is wrong
+    — has not been dispatched in any run since `2219473-e43ea61c`.
+
+    Here the frontier attribution hands over is 30 units wide and the crash
+    subject is appended after all of them, so the pre-fix ranking cannot reach
+    it inside a batch of 12."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict[str, Any]] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    wide = {FnLocator("src/other.rs", f"u{i}"): {"t2"} for i in range(30)}
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, _MISALIGNED_OUT),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={}, frontier=wide,
+                localize=lambda *a, **k: (_frame_blamed_site(),),
+                enumerate_fns=lambda src: list(_LIVE_FNS),
+                fill=_fill)
+
+    dispatched = [kw for kw in fills if kw.get("tdd_frontier_keys")]
+    assert dispatched, "no batch was dispatched at all"
+    keys = dispatched[0]["tdd_frontier_keys"]
+    # The blamed frame itself, and the producer the frame cannot name.
+    assert FnLocator("src/error.rs", "downcast_ref") in keys
+    assert FnLocator("src/error.rs", "object_downcast") in keys, \
+        "the producer was eligible and still did not make the batch"
+    # NEGATIVE CONTROL, the pre-fix behaviour on the same frontier: ranked
+    # after 30 attributed units, neither is inside a batch of 12.
+    from pipeline_core.domain.dispatch_batch import take_batch
+    unpromoted = [*wide, FnLocator("src/error.rs", "downcast_ref"),
+                  FnLocator("src/error.rs", "object_downcast")]
+    assert FnLocator("src/error.rs", "object_downcast") not in \
+        take_batch(unpromoted, set(), 12).keys

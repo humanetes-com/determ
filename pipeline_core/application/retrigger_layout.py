@@ -50,6 +50,7 @@ from pipeline_core.domain.authored_layout import (
     component_uids,
     definition_replacements,
     derive_locate_keys,
+    unlocatable_items,
     unlocatable_private_fns,
 )
 from pipeline_core.domain.behaviour import BehaviourSuite
@@ -98,6 +99,7 @@ from pipeline_core.domain.layout_retrigger import (
 from pipeline_core.domain.models import FnLocator, FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
+    PrivateSurfaceItem,
     SurfaceItemKind,
 )
 from pipeline_core.domain.scaffold_rewrite import DefReplacement
@@ -236,24 +238,140 @@ def _with_stored_defs(
         public_direct_refs=narrowed.public_direct_refs)
 
 
+def _unlocatable(
+    surface: PrivateSurface, project_dir: Path, cfg_cluster: str,
+    deps: RetriggerLayoutDeps,
+) -> tuple[str, ...]:
+    """Item names whose locate-key is not in the SKELETON file the splice will
+    read. Asked before the model call, against the same reader `author_layout`
+    splices through, so the answer describes the splice that is about to
+    happen rather than a guess about it."""
+    read = deps.author_deps_for(project_dir, cfg_cluster).read_skeleton
+    return unlocatable_items(surface.replaceable, read)
+
+
+def _component_touches(
+    surface: PrivateSurface, item: PrivateSurfaceItem,
+    names: frozenset[str],
+) -> bool:
+    """Whether `item`'s connected component contains any of `names`.
+
+    The unit of authoring is the COMPONENT, not the item: its members are
+    spliced in one batch and rejected in one batch, so dropping a single
+    unlocatable item would leave its siblings authoring against a component the
+    model was told is whole. Drop the component or keep it."""
+    return any(any(i.name in names for i in comp)
+               for comp in surface.components if item in comp)
+
+
+def _scaffold_keys(
+    project_dir: Path, cfg_cluster: str, narrowed: PrivateSurface,
+    deps: RetriggerLayoutDeps,
+) -> tuple[tuple[str, str], ...] | None:
+    """(uid, locate-key) per item, SLICED from the skeleton for declarations
+    and taken from the parsed signature for fns. None when any item cannot be
+    read out of the file.
+
+    Why the slice rather than `TypeRecord.definition`: syn re-renders a
+    declaration with its own wrapping and trailing commas, so an extractor
+    rendering is not the bytes on disk for any item wide enough to wrap —
+    `application/reconcile_layout.live_definition` says so, and the live tree's
+    own propagation plan has always taken this route. Deriving the SKELETON's
+    keys from the extractor instead is what produced a repaired key for
+    `ErrorVTable` that still could not be located: measured 2026-08-16 at
+    iteration 1 of the relaunch, where the backfill reported 34 keys and one of
+    them, the struct whose body carries `#[cfg(...)]` fields, matched nothing.
+    """
+    fns = deps.enumerate_skeleton_fns(project_dir, cfg_cluster)
+    if fns is None:
+        return None
+    read = deps.author_deps_for(project_dir, cfg_cluster).read_skeleton
+    keys: list[tuple[str, str]] = []
+    for comp in narrowed.components:
+        fn_items = tuple(i for i in comp if i.kind is SurfaceItemKind.FN_SIG)
+        fn_keys = derive_locate_keys(fn_items, fns, []) if fn_items else ()
+        if fn_keys is None:
+            return None
+        pending = list(fn_keys)
+        for uid, it in zip(component_uids(comp), comp, strict=True):
+            if it.kind is SurfaceItemKind.FN_SIG:
+                keys.append((uid, pending.pop(0)[1]))
+                continue
+            text = read(it.file)
+            sliced = None if text is None else live_definition(text, it)
+            if sliced is None:
+                return None
+            keys.append((uid, sliced))
+    return tuple(keys)
+
+
+def _verified_defs(
+    project_dir: Path, cfg_cluster: str, narrowed: PrivateSurface,
+    defs: tuple[tuple[str, str], ...], deps: RetriggerLayoutDeps,
+) -> tuple[tuple[str, str], ...]:
+    """`defs` if every key can be found in the skeleton right now, else the
+    scaffold's own rendering of the same items.
+
+    The write side of the same defect. A locate-key is stored as the text the
+    model AUTHORED, on the assumption that what was authored is what landed —
+    and the two rows that broke cluster `stable` (see `unlocatable_items`) are
+    what that assumption looks like when it fails. Verifying costs one read of
+    a file the splice just wrote; storing a key that cannot be found makes
+    every future fire of this component die attempt-invariantly."""
+    probe = _with_stored_defs(narrowed, dict(defs))
+    if probe is None:
+        return defs
+    missing = _unlocatable(probe, project_dir, cfg_cluster, deps)
+    if not missing:
+        return defs
+    fns = deps.enumerate_skeleton_fns(project_dir, cfg_cluster)
+    types = deps.enumerate_skeleton_types(project_dir, cfg_cluster)
+    derived: list[tuple[str, str]] = []
+    if fns is not None and types is not None:
+        for comp in narrowed.components:
+            keys = derive_locate_keys(comp, fns, types)
+            if keys is None:
+                derived = []
+                break
+            derived.extend(keys)
+    deps.log(f"  [layout-retrigger] {cfg_cluster}: {len(missing)} authored "
+             f"locate-key(s) ({', '.join(missing[:6])}) cannot be found in the "
+             "skeleton they were just spliced into — "
+             + ("storing the scaffold's own rendering instead, so the next "
+                "fire can locate them." if derived else
+                "and the scaffold cannot render them either; the stored keys "
+                "are known-stale and the next fire will have to re-derive."))
+    return tuple(derived) if derived else defs
+
+
 def _backfill_stored_defs(
     project_dir: Path, cfg_cluster: str, names: frozenset[str],
     narrowed: PrivateSurface, deps: RetriggerLayoutDeps,
 ) -> PrivateSurface | None:
-    """Derive an AUTHORED component's missing locate-keys from the scaffold
-    itself (AST-extracted, verbatim) and persist them, migrating a store row
-    written before locate-keys existed. None when derivation is incomplete —
-    the caller skips instead of burning an attempt on a locate failure."""
-    fn_records = deps.enumerate_skeleton_fns(project_dir, cfg_cluster)
-    type_records = deps.enumerate_skeleton_types(project_dir, cfg_cluster)
-    if fn_records is None or type_records is None:
-        return None
-    all_keys: list[tuple[str, str]] = []
-    for comp in narrowed.components:
-        keys = derive_locate_keys(comp, fn_records, type_records)
-        if keys is None:
+    """Derive an AUTHORED component's locate-keys from the scaffold itself and
+    persist them — the migration for a store row written before locate-keys
+    existed, and the repair for a row whose keys the file has outgrown. None
+    when derivation is incomplete: the caller skips or narrows rather than
+    burning an attempt on a locate failure.
+
+    Declarations are SLICED from the skeleton (`_scaffold_keys`); the extractor
+    rendering is the fallback for whatever the slicer cannot find, because a
+    re-rendered declaration is not the bytes on disk and matching it locates
+    nothing."""
+    all_keys_t = _scaffold_keys(project_dir, cfg_cluster, narrowed, deps)
+    if all_keys_t is not None:
+        all_keys = list(all_keys_t)
+    else:
+        fn_records = deps.enumerate_skeleton_fns(project_dir, cfg_cluster)
+        type_records = deps.enumerate_skeleton_types(project_dir, cfg_cluster)
+        if fn_records is None or type_records is None:
             return None
-        all_keys.extend(keys)
+        all_keys = []
+        for comp in narrowed.components:
+            keys = derive_locate_keys(comp, fn_records, type_records)
+            if keys is None:
+                return None
+            all_keys.extend(keys)
     deps.update_layout_outcome(
         project_dir, cfg_cluster,
         ComponentResult(tuple(sorted(names)), authored=True,
@@ -557,6 +675,28 @@ def retrigger_layout(
             if with_defs is None:
                 with_defs = _backfill_stored_defs(
                     project_dir, cfg_cluster, names, narrowed, deps)
+            else:
+                # A key that is PRESENT and WRONG, which the backfill above
+                # cannot see: it fires only on a MISSING key, and these rows
+                # have one. The splice would reject with `could not locate a
+                # frozen definition`, `is_mechanical_reason` would correctly
+                # call that attempt-invariant, and the whole fire would die —
+                # AFTER the model had authored every other component in it.
+                # Re-derive from the scaffold, which is the file the splice is
+                # about to read, and let the verification below judge it.
+                _stale = _unlocatable(with_defs, project_dir, cfg_cluster, deps)
+                if _stale:
+                    deps.log(
+                        f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                        f"{len(_stale)} stored locate-key(s) are NOT in the "
+                        "skeleton they would be spliced into "
+                        f"({', '.join(_stale[:6])}) — the stored text is what "
+                        "the model AUTHORED and that file has been rewritten "
+                        "since. Re-deriving them from the scaffold before "
+                        "spending an authoring call.")
+                    repaired = _backfill_stored_defs(
+                        project_dir, cfg_cluster, names, narrowed, deps)
+                    with_defs = repaired if repaired is not None else with_defs
             if with_defs is None:
                 deps.log(
                     f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
@@ -565,6 +705,67 @@ def retrigger_layout(
                     "re-author safely; skipping.")
                 _refused += 1
                 continue
+            # WHATEVER SURVIVES THE REPAIR DECIDES THE SCOPE, not the fire. A
+            # component whose key still cannot be found is dropped from this
+            # aim and left on its current definition; the rest are authored.
+            # The measured alternative is the whole point of this block: on
+            # 2026-08-16 `('CastTo',)` and `('Mut','error_mut')` — neither
+            # named by the crash — discarded a 31-name `Error` component that
+            # had already authored a layout the skeleton COMPILED, twice in one
+            # run, at 50m41s/14 calls and 20m57s/7 calls.
+            still = frozenset(_unlocatable(with_defs, project_dir,
+                                           cfg_cluster, deps))
+            if still:
+                kept = tuple(i for i in with_defs.replaceable
+                             if not _component_touches(with_defs, i, still))
+                # THE DROP MUST NEVER REMOVE THE COMPONENT THE FAULT NAMED.
+                # A landed re-author REVERTS every body that references the
+                # component, so a fire that drops the aimed component and
+                # authors the remainder destroys filled work in exchange for a
+                # layout change to something the evidence never implicated.
+                # Measured 2026-08-16, first relaunch after this entry shipped:
+                # `ErrorVTable` could not be located, its component is the
+                # 31-name `Error` one, and the drop kept 3 of 34 items —
+                # `('CastTo',)` and `('Mut','error_mut')`, neither named by the
+                # crash — then reverted 79 bodies and took the cluster 79 -> 25.
+                # An unlocatable AIMED component is a reason to fix the store,
+                # never a reason to fire at what is left.
+                _dropped_comps = [c for c in with_defs.components
+                                  if any(i.name in still for i in c)]
+                _implicated = [
+                    c for c in _dropped_comps
+                    if crash_evidence is not None and _live_records is not None
+                    and crash_candidate_grade(
+                        crash_evidence, _live_records,
+                        frozenset(i.name for i in c)) is not BlameGrade.NONE]
+                if _implicated:
+                    deps.log(
+                        f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                        f"{len(still)} item(s) cannot be located "
+                        f"({', '.join(sorted(still)[:6])}) and their "
+                        "component(s) are the ones the fault implicates — NOT "
+                        "firing at the remainder. A re-author reverts every "
+                        "body that references this component, and buying that "
+                        "destruction with a layout change the evidence never "
+                        "asked for is the worst outcome available here.")
+                    _refused += 1
+                    continue
+                deps.log(
+                    f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                    f"{len(still)} item(s) cannot be located even after "
+                    f"re-deriving ({', '.join(sorted(still)[:6])}) — DROPPING "
+                    "their component(s) from this aim and authoring the rest "
+                    f"({len(kept)} of {len(with_defs.replaceable)} item(s)). "
+                    "A component the fault never named must not be able to "
+                    "discard one it did.")
+                if not kept:
+                    deps.log(
+                        f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                        "nothing left to author after the drop — skipping "
+                        "without spending a call.")
+                    _refused += 1
+                    continue
+                with_defs = replace(with_defs, replaceable=kept)
             narrowed = with_defs
 
         attempts[key] = attempts.get(key, 0) + 1
@@ -840,10 +1041,26 @@ def _run_layout_attempt(
             charge_mechanical_failure(
                 attempts, key, code_build_stamp(deps.code_id))
             deps.save_attempts(project_dir, cfg_cluster, attempts)
+            # THE REFUND IS NOT A REPORT, and for two days it read like one.
+            # `is_mechanical_reason` (attempts 2..3 not spent) and this refund
+            # (the cap not charged) are both correct and both make the failure
+            # QUIET: the fire still costs a full authoring round of the biggest
+            # component in the crate, lands nothing, and says only "refunded".
+            # Run `1692702-94e6163a` (2026-08-16) died this way twice —
+            # 50m41s/14 model calls and 20m57s/7 — with the 31-name `Error`
+            # component's layout COMPILING both times before it was discarded.
+            # A streak is the sentence a reader needs, so it is printed here.
+            _mech_streak = attempts.get(mechanical_key(key), 0)
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
                      "re-author died in splice/locate infrastructure — "
                      "attempt refunded (mechanical failure, no model "
-                     "evidence).")
+                     "evidence)."
+                     + (f" NEVER LANDED: {_mech_streak} consecutive mechanical "
+                        "death(s) of this component, each one an authoring "
+                        "round spent for nothing. The refund protects the "
+                        "budget; it does not make the fire free."
+                        if _mech_streak > 1 else "")
+                     + f" Reason: {_reasons[0] if _reasons else '?'}")
             return RetriggerResult(fired=True, succeeded=False,
                                    cause=cause.name, refunded=True,
                                    reason="mechanical splice failure "
@@ -900,7 +1117,9 @@ def _run_layout_attempt(
     written, apply_err = (
         (0, plan_err) if plan_err
         else deps.apply_layout_to_tree(plan, live_src_dir))
-    merged_defs = tuple(d for c in res.components for d in c.authored_defs)
+    merged_defs = _verified_defs(
+        project_dir, cfg_cluster, narrowed,
+        tuple(d for c in res.components for d in c.authored_defs), deps)
     if apply_err:
         # The model DID produce a layout that compiles; only the propagation
         # failed. That is mechanical, so the attempt is refunded on the same
@@ -955,7 +1174,16 @@ def _run_layout_attempt(
     # — three different states, one of which is a silent failure. Report the
     # enumeration and the scope beside it so a zero is attributable.
     fn_records = deps.enumerate_fns(filled_crate_dir)
-    referencing = find_fns_referencing(fn_records or [], names)
+    # THE SCOPE IS WHAT CHANGED, not what the fire was named after. A revert
+    # exists to re-fill bodies written against a layout that just moved, so a
+    # name whose definition this attempt did not touch has no business in it:
+    # the fire's `names` is the whole store row, and after the locate-key drop
+    # above it can be much wider than the set actually authored. On 2026-08-16
+    # the two were 34 names against 3, and reverting on the wide one cost 79
+    # filled bodies for a re-author of `CastTo` and `Mut`.
+    _authored_names = frozenset(
+        n for c in res.components if c.authored for n in c.item_names) or names
+    referencing = find_fns_referencing(fn_records or [], _authored_names)
     reverted = deps.revert_fns(referencing, filled_crate_dir)
     scope = ("live tree could not be parsed (extractor unavailable) — "
              "revert scope is empty for that reason, not because no fn "

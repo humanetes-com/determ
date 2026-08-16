@@ -272,6 +272,12 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
     # measuring what they were written to measure. `tests/test_tdd_gpu_guard.py`
     # owns the guard itself.
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
+    # Same reason, the protector's other clock: these fixtures land bodies
+    # against a per-binary vector that never moves, so `UnmovedVerdicts` would
+    # stop the run at its third judged sweep — correctly, and before the
+    # plateau budget and the ratchet this module pins have had their say.
+    # `tests/test_tdd_no_verdict_clock.py` owns that clock.
+    monkeypatch.setenv("TDD_NO_VERDICT_SWEEPS", "0")
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
     (src / "a.rs").write_text("orig", encoding="utf-8")

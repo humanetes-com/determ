@@ -165,3 +165,91 @@ def test_layout_regressions_names_lost_derives_and_lost_visibility():
     better = ("/// doc\n#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]\n"
               "pub struct Counter { count: u64, cap: u32 }")
     assert layout_regressions(cur, better) == ()
+
+
+# --- the locate-key verification that runs BEFORE an authoring call ---
+#
+# Both fixtures below are the live bytes of `tmp/anyhow` on 2026-08-16: the
+# stored keys come from `.skeleton/_layout_outcomes_stable.json`, the file text
+# from `.skeleton/stable/src/ptr.rs`. Those two rows are why every layout
+# retrigger of cluster `stable` died in splice/locate infrastructure while the
+# component the crash named had already authored a compiling layout.
+
+_PTR_RS = (
+    "#![allow(unused)]\n"
+    "use core::marker::PhantomData;\n"
+    "use core::ptr::NonNull;\n"
+    "#[repr(transparent)]\n"
+    "pub struct Own<T>\nwhere\n    T: ?Sized,\n{\n"
+    "    pub ptr: core::ptr::NonNull<T>,\n}\n"
+    "#[repr(transparent)]\n"
+    "pub struct Mut<'a, T>\nwhere\n    T: ?Sized,\n{\n"
+    "    pub ptr: NonNull<T>,\n"
+    "    lifetime: PhantomData<&'a mut T>,\n}\n"
+    "pub trait CastTo {\n    type Target;\n}\n"
+)
+
+
+def _item(name: str, definition: str, kind=None):
+    from pipeline_core.domain.private_surface import SurfaceItemKind as K
+    return PrivateSurfaceItem(
+        name=name, file="ptr.rs", kind=kind or K.STRUCT, definition=definition)
+
+
+def test_a_stored_key_carrying_an_item_the_file_lacks_is_unlocatable():
+    """`CastTo`'s stored key is the trait FOLLOWED BY `impl<T> CastTo for T`.
+    The skeleton holds the trait alone — the blanket impl exists only in the
+    filled tree, where a fill wrote it — so a two-item key can never match."""
+    from pipeline_core.domain.authored_layout import unlocatable_items
+    from pipeline_core.domain.private_surface import SurfaceItemKind as K
+    stale = ("pub trait CastTo {\n    type Target;\n}\n\n"
+             "impl<T> CastTo for T {\n    type Target = T;\n}")
+    assert unlocatable_items([_item("CastTo", stale, K.TRAIT)],
+                             lambda rel: _PTR_RS) == ("CastTo",)
+    # The trait alone — what the scaffold re-derivation produces — locates.
+    assert unlocatable_items(
+        [_item("CastTo", "pub trait CastTo {\n    type Target;\n}", K.TRAIT)],
+        lambda rel: _PTR_RS) == ()
+
+
+def test_a_qualified_path_does_not_match_the_imported_spelling():
+    """`Mut`'s stored key spells `core::ptr::NonNull<T>` and the file, which
+    imports `NonNull`, reads `NonNull<T>`. The matcher is whitespace-tolerant,
+    not name-resolving — and it must not become so: two different paths CAN be
+    two different types."""
+    from pipeline_core.domain.authored_layout import unlocatable_items
+    qualified = ("#[repr(transparent)]\npub struct Mut<'a, T>\nwhere\n"
+                 "    T: ?Sized,\n{\n    pub ptr: core::ptr::NonNull<T>,\n"
+                 "    lifetime: core::marker::PhantomData<&'a mut T>,\n}")
+    assert unlocatable_items([_item("Mut", qualified)],
+                             lambda rel: _PTR_RS) == ("Mut",)
+
+
+def test_the_siblings_that_do_match_are_the_negative_control():
+    """`Own` in the SAME file carries the qualified spelling in the skeleton
+    too, so its stored key matches and its component authored fine every time.
+    A verification that flagged it would be flagging the whole crate."""
+    from pipeline_core.domain.authored_layout import unlocatable_items
+    own = ("#[repr(transparent)]\npub struct Own<T>\nwhere\n    T: ?Sized,\n{\n"
+           "    pub ptr: core::ptr::NonNull<T>,\n}")
+    assert unlocatable_items([_item("Own", own)], lambda rel: _PTR_RS) == ()
+
+
+def test_two_items_sharing_one_definition_need_two_occurrences():
+    """Occurrence-stepped exactly like `replace_surface_definitions`: checking
+    each item independently would pass a file holding one copy of a definition
+    two items are going to be spliced into."""
+    from pipeline_core.domain.authored_layout import unlocatable_items
+    text = "fn helper() -> u8;\n"
+    one = _item("helper", "fn helper() -> u8")
+    assert unlocatable_items([one], lambda rel: text) == ()
+    assert unlocatable_items([one, one], lambda rel: text) == ("helper",)
+
+
+def test_an_unreadable_file_is_unlocatable_not_an_exception():
+    """A missing skeleton file is the same finding as a missing definition —
+    the splice cannot land — and it must be reported, never raised: this runs
+    on the path that decides whether to spend a model call."""
+    from pipeline_core.domain.authored_layout import unlocatable_items
+    assert unlocatable_items([_item("Own", "struct Own;")],
+                             lambda rel: None) == ("Own",)

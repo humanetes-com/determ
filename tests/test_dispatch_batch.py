@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    promote_crash_evidence,
     take_batch,
 )
 
@@ -105,6 +106,107 @@ def test_a_frontier_that_shrank_below_the_cursor_reopens_the_pass():
     assert b.keys == ("a", "b")
     assert b.completes_pass
     assert b.attempted_before == 0
+
+
+def test_a_growing_frontier_never_closes_a_pass_without_a_cohort():
+    """THE NEGATIVE CONTROL for the cohort, and the whole of run
+    `1692702-94e6163a`'s failure to terminate.
+
+    Its frontier grew 35 -> 57 -> 63 while the cursor advanced 12 -> 21 -> 36,
+    because futility escalation adds a crashed test's producers and crash
+    evidence adds its subjects. With closure judged against the frontier AS IT
+    STANDS, the pending set never empties: `completes_pass` is False forever,
+    `_traversals` stays 0, and BOTH terminators denominated in traversals — the
+    flat-score guard and the plateau budget — are disabled by arithmetic."""
+    sizes = [35, 57, 63, 69, 75]
+    attempted: set[str] = set()
+    completions: list[bool] = []
+    for n in sizes:
+        ordered = [f"u{i}" for i in range(n)]
+        b = take_batch(ordered, attempted, 12)
+        completions.append(b.completes_pass)
+        attempted = set() if b.completes_pass else attempted | set(b.keys)
+    assert completions == [False] * len(sizes)
+
+
+def test_the_cohort_closes_the_pass_even_while_the_frontier_grows():
+    """The same growth, judged against the cohort the pass OPENED over: 35
+    units at 12 a sweep closes on the third batch, and the units that arrived
+    while it ran belong to the NEXT cohort rather than extending this one."""
+    cohort = [f"u{i}" for i in range(35)]
+    attempted: set[str] = set()
+    completions: list[bool] = []
+    for n in (35, 57, 63):
+        ordered = [f"u{i}" for i in range(n)]
+        b = take_batch(ordered, attempted, 12, cohort=cohort)
+        completions.append(b.completes_pass)
+        attempted = set() if b.completes_pass else attempted | set(b.keys)
+    assert completions == [False, False, True]
+
+
+def test_a_cohort_unit_that_left_the_frontier_does_not_block_closure():
+    """A cohort member that filled and left can never be attempted again, so
+    waiting for it would be the same unsatisfiable condition in a smaller
+    disguise: closure asks about cohort units STILL in the frontier."""
+    cohort = ["a", "b", "c"]
+    b = take_batch(["a", "c"], {"a"}, 12, cohort=cohort)
+    assert b.keys == ("c",)
+    assert b.completes_pass
+
+
+def test_cohort_none_is_exactly_the_pre_cohort_behaviour():
+    """The default must not change for a caller that does not track passes —
+    the cohort is then the frontier as it stands, which is what every existing
+    case above asserts."""
+    ordered = [f"u{i}" for i in range(30)]
+    for attempted in (set(), {"u0", "u1"}, set(ordered[:29])):
+        a = take_batch(ordered, attempted, 12)
+        b = take_batch(ordered, attempted, 12, cohort=ordered)
+        assert (a.keys, a.completes_pass) == (b.keys, b.completes_pass)
+
+
+def test_crash_evidence_is_promoted_ahead_of_the_static_ranking():
+    """The 180.2 defect: the evidence pack granted eligibility and the ranking
+    decided WHEN, so the five fns a double drop named waited for their
+    alphabetical turn. Promotion puts every graded unit ahead of the frontier,
+    best grade first — an observed frame above an inference above a synthesized
+    subject — and leaves the rest in the order `order_frontier` chose."""
+    ordered = [(f"u{i}", {"t"}) for i in range(6)]
+    out = promote_crash_evidence(ordered, {"u4": 1, "u5": 0, "u2": 2})
+    assert [k for k, _ in out] == ["u5", "u4", "u2", "u0", "u1", "u3"]
+
+
+def test_promotion_is_stable_so_one_fault_s_family_dispatches_together():
+    """Within a grade the ranking is untouched, so the five subjects of one
+    fault occupy consecutive slots of the batch that found them instead of
+    arriving one iteration apart in name order — which is how
+    `object_drop_front`, last of its family on the `(file, fn)` tiebreak, went
+    undispatched while `object_drop` (correct on disk) took the slot."""
+    fam = ["context_chain_drop_rest", "context_drop_rest", "drop",
+           "object_drop", "object_drop_front"]
+    # The frontier as run `1692702-94e6163a` had it: the family ranked behind
+    # the units attribution had already collected, on a frontier well over the
+    # cap of 12.
+    ordered = [(f"u{i}", {"t"}) for i in range(20)] + [(k, {"t"}) for k in fam]
+    grades = dict.fromkeys(fam, 1)
+    # NEGATIVE CONTROL — the pre-fix ordering. Every one of the five is
+    # eligible and none of them is dispatched: iteration 2 of that run took 12
+    # of 57 and logged `0 skipped — free fns` while four of the five are free
+    # fns.
+    before = take_batch([k for k, _ in ordered], set(), 12).keys
+    assert not set(before) & set(fam)
+    out = promote_crash_evidence(ordered, grades)
+    assert [k for k, _ in out][:5] == fam
+    assert take_batch([k for k, _ in out], set(), 12).keys[:5] == tuple(fam)
+
+
+def test_promotion_without_evidence_changes_nothing():
+    """No crash this sweep must mean no reordering at all: the static ranking
+    is correct for an attribution-built frontier and this function must not
+    become a second opinion about it."""
+    ordered = [(f"u{i}", {"t"}) for i in range(5)]
+    assert promote_crash_evidence(ordered, {}) == ordered
+    assert promote_crash_evidence(ordered, {"absent": 0}) == ordered
 
 
 def test_rendered_marks_a_mid_pass_batch_for_the_iteration_line():

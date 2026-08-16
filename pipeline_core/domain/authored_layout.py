@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import html
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnRecord, TypeRecord
@@ -27,7 +27,10 @@ from pipeline_core.domain.private_surface import (
     SurfaceItemKind,
 )
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
-from pipeline_core.domain.scaffold_rewrite import DefReplacement
+from pipeline_core.domain.scaffold_rewrite import (
+    DefReplacement,
+    find_definition_span,
+)
 
 _OPEN = "<LAYOUT_ITEM"
 _CLOSE = "</LAYOUT_ITEM>"
@@ -343,6 +346,55 @@ def unlocatable_private_fns(
         if need[k] > len(private_fn_matches(fn_records, it)):
             out.append(it.name)
     return tuple(out)
+
+
+def unlocatable_items(
+    items: Sequence[PrivateSurfaceItem],
+    read_file: Callable[[str], str | None],
+) -> tuple[str, ...]:
+    """Names of `items` whose locate-key text is NOT in the file it names —
+    i.e. the splice that is about to be attempted will reject, whatever the
+    model replies.
+
+    WHY THIS RUNS BEFORE THE MODEL CALL. A stored locate-key is the text a
+    re-author matches against the LIVE skeleton, and it can be stale: it is
+    written from what the model AUTHORED, and any later rewrite of that file
+    (a re-bake, a reconciliation, a splice that landed something else) moves
+    the bytes out from under it. `replace_surface_definitions` then reports
+    `could not locate a frozen definition to replace`, which
+    `is_mechanical_reason` correctly calls attempt-invariant — and the whole
+    fire dies, including the components that authored perfectly.
+
+    MEASURED, cluster `stable` of `tmp/anyhow` on 2026-08-16. Two rows of
+    `.skeleton/_layout_outcomes_stable.json` cannot be found in
+    `.skeleton/stable/src/ptr.rs`: `CastTo`'s key is the trait FOLLOWED BY
+    `impl<T> CastTo for T`, and the skeleton holds the trait alone (the blanket
+    impl exists only in the filled tree, where a fill wrote it); `Mut`'s key
+    spells `core::ptr::NonNull<T>` / `core::marker::PhantomData` where the
+    skeleton — which imports both — reads `NonNull<T>` / `PhantomData`. Their
+    siblings `Own` and `Ref` in the same file carry the qualified spelling and
+    match, which is why only those two components failed. Every layout
+    retrigger of that cluster had died on them since at least run
+    `669347-cf33eae3` (2026-08-15), each costing a 31-name component's
+    authoring round and landing nothing.
+
+    Occurrence-stepped like the splice itself (`replace_surface_definitions`):
+    two items sharing one definition text need two occurrences in the file, and
+    checking them independently would pass a file that has only one."""
+    missing: list[str] = []
+    cursor: dict[tuple[str, str], int] = {}
+    for it in items:
+        text = read_file(it.file)
+        if text is None:
+            missing.append(it.name)
+            continue
+        at = cursor.get((it.file, it.definition), 0)
+        span = find_definition_span(text, it.definition, start_at=at)
+        if span is None:
+            missing.append(it.name)
+            continue
+        cursor[(it.file, it.definition)] = span[1]
+    return tuple(missing)
 
 
 def derive_locate_keys(

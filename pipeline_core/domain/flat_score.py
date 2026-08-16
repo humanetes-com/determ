@@ -85,6 +85,64 @@ from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
+class UnmovedVerdicts:
+    """The SECOND clock: consecutive judged sweeps that landed bodies and moved
+    no test's verdict.
+
+    WHY A SECOND ONE. The guard below and the plateau budget are both
+    denominated in completed frontier traversals, and run `1692702-94e6163a`
+    (2026-08-16) showed that unit can stop ticking: its frontier grew 35 -> 57
+    -> 63 against a cursor at 12 -> 21 -> 36, so no pass closed, `_traversals`
+    stayed 0, `trips_on`'s `first_traversal < traversal` test read `0 < 0`, and
+    `stall` read 0 of 3 at every iteration. Three sweeps of `79/101`, 84 model
+    calls, 3h36m, and no exit the loop could take by itself. The cohort fix in
+    `domain/dispatch_batch.py` makes traversals tick again; this clock is what
+    makes the stop independent of whether they do.
+
+    WHAT IT READS, and why that is the right quantity. The per-binary verdict
+    vector is the axis `domain/zero_payoff.py` already settled on: unchanged
+    exactly when no test anywhere took a different verdict, immune to the
+    loop's own bookkeeping about frontiers, caps and passes. The sweep line
+    that reports it (`N body(ies) landed since the last sweep and NO test
+    changed verdict`) was printing on this run at iterations 2 and 3 — 18 and
+    28 bodies — while every terminator sat blind. Counting it is free.
+
+    WHAT IS NOT COUNTED, on the same rule the guard below uses: a sweep inside
+    a re-fill grace window (the vector is expected to move DOWN — the loop
+    destroyed work on purpose), and a sweep with nothing landed since the last
+    one (it judges no dispatch). Those leave the streak exactly as they found
+    it rather than resetting it, so a plateau interrupted by an idle sweep is
+    still a plateau. Any sweep where the vector MOVED resets it, whichever
+    direction it moved in: a changed verdict is the loop demonstrably doing
+    something, which is all this clock claims to measure.
+    """
+
+    limit: int = 3
+    streak: int = 0
+    landed: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        """`limit <= 0` disables the clock (the env knob's off switch)."""
+        return self.limit > 0
+
+    def moved(self) -> UnmovedVerdicts:
+        """A judged sweep whose vector changed — the streak restarts."""
+        return replace(self, streak=0, landed=0) if self.enabled else self
+
+    def unmoved(self, landed: int) -> UnmovedVerdicts:
+        """A judged sweep that landed `landed` bodies and moved no verdict."""
+        if not self.enabled:
+            return self
+        return replace(self, streak=self.streak + 1,
+                       landed=self.landed + max(0, landed))
+
+    @property
+    def trips(self) -> bool:
+        return self.enabled and self.streak >= self.limit
+
+
+@dataclass(frozen=True, slots=True)
 class ScoreReading:
     """One sweep's measurement: how many tests passed, out of how many ran.
 
@@ -197,6 +255,21 @@ class FlatScoreGuard:
             return False
         first = self.first_traversal_of(reading)
         return first is not None and first < traversal
+
+    def withheld_by_traversal(self, reading: ScoreReading,
+                              traversal: int) -> bool:
+        """True when the REPEAT clause is already satisfied and only the
+        traversal clause is holding the stop back.
+
+        This state is the whole of run `1692702-94e6163a`'s failure to
+        terminate and it printed nothing at the time: the guard is silent when
+        it does not trip, so "the terminator is armed but cannot charge" and
+        "the loop is making progress" looked identical in the log. The driver
+        reports it per sweep; the arithmetic lives here beside the rule it is
+        the negative of."""
+        if not self.enabled or self.repeated(reading) < self.repeats:
+            return False
+        return not self.trips_on(reading, traversal)
 
     def render(self, reading: ScoreReading) -> str:
         """The window as a log line: oldest → newest, each reading stamped with

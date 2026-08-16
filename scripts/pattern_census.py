@@ -44,6 +44,18 @@ REACTED.  The classes and their defining instances:
      pass landing after the last sweep is never scored at all, so the
      regression it caused ships to the next run as that run's baseline.
 
+  P8 fire that never lands — the layout retrigger SPENDS a full authoring
+     round and the re-author dies in splice/locate infrastructure, so nothing
+     reaches the tree.  Distinct from P6, which declines to spend.  Invisible
+     until now because the two guards that meet it both work and both suppress
+     its noise: `is_mechanical_reason` stops attempts 2..3, the refund keeps it
+     off the destruction cap, and what remains is one line reading "attempt
+     refunded".  Runs 669347-cf33eae3 (2026-08-15) and 1692702-94e6163a
+     (2026-08-16, twice: 50m41s/14 model calls and 20m57s/7 of an 84-call run),
+     both on `could not locate a frozen definition to replace: CastTo in
+     ptr.rs` — a component neither crash named — after the 31-name `Error`
+     component had authored a layout the skeleton COMPILED.
+
 USAGE.
   python scripts/pattern_census.py [LOG ...] [--min-iters N] [--json OUT]
     LOG ...      log files in CHRONOLOGICAL order.  Default: the rotation
@@ -155,6 +167,10 @@ RE_BUDGET_REFUSAL = re.compile(
 RE_OWNS_GRADE = re.compile(r"the observed fault is inside code \d+ component")
 RE_INTERRUPTED = re.compile(
     r"an attempt was charged and never reached an outcome")
+RE_MECHANICAL_DEATH = re.compile(
+    r"re-author died in splice/locate infrastructure")
+RE_LOCATE_MISS = re.compile(
+    r"could not locate a frozen definition to replace: (?P<item>[^\s(]+)")
 
 # Reaction markers: a line matching one of these is the pipeline ANSWERING a
 # pattern (the value is the short name shown as REACTED(<name>)).  Grouped by
@@ -207,6 +223,16 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # the last ordinary sweep is scored by the run that caused it rather
         # than inherited unscored by the next one.
         ("final sweep (stopped", "final-sweep"),
+    ],
+    "P8": [
+        # The stale key is recognised before the model is asked, and repaired
+        # from the file the splice will actually read.
+        ("Re-deriving them from the scaffold", "locate-keys-repaired"),
+        # …and when the repair cannot help, the unlocatable component is
+        # dropped instead of discarding the one the evidence named.
+        ("DROPPING", "scope-narrowed"),
+        # The streak, said out loud: a refund is not a report.
+        ("NEVER LANDED", "never-landed-reported"),
     ],
 }
 
@@ -630,13 +656,51 @@ def detect_p7(run: Run, iters: list[dict]) -> list[dict]:
     return hits
 
 
+def detect_p8(run: Run, iters: list[dict]) -> list[dict]:
+    """Fire that never lands: the retrigger spends a full authoring round and
+    the re-author dies in splice/locate infrastructure, so nothing reaches the
+    tree — repeatedly, and QUIETLY.
+
+    WHY IT IS ITS OWN CLASS, and not P6. A budget refusal (P6) declines to
+    spend; this SPENDS and then discards. It is invisible to every other
+    detector because the two guards that meet it both behave correctly and both
+    suppress the noise it used to make: `is_mechanical_reason` stops attempts
+    2..3 being spent on an attempt-invariant reason, and the refund keeps the
+    mechanical failure off the destruction cap. What is left in the log is one
+    line reading "attempt refunded", which is indistinguishable from a cheap
+    no-op.
+
+    MEASURED. Run `1692702-94e6163a` (2026-08-16) fired twice, at 13:00:47Z and
+    16:16:17Z, and both died on `could not locate a frozen definition to
+    replace: CastTo in ptr.rs` — a component the crash never named — AFTER the
+    31-name `Error` component had authored a layout the skeleton COMPILED.
+    50m41s/14 model calls and 20m57s/7, out of a 3h36m run's 84 calls. Run
+    `669347-cf33eae3` (2026-08-15) died the same way, which is the run
+    `is_mechanical_reason`'s docstring was written from — the class is at least
+    two runs old and had no census row until it cost a third."""
+    deaths = run.find(RE_MECHANICAL_DEATH)
+    if not deaths:
+        return []
+    locate = run.find(RE_LOCATE_MISS)
+    hits = [{
+        "evidence": f"{len(deaths)} fire(s) spent an authoring round and "
+                    "landed nothing (re-author died in splice/locate "
+                    "infrastructure, attempt refunded)"
+                    + (f"; {len(locate)} unlocatable frozen definition(s): "
+                       + ", ".join(sorted({m['item'] for _r, m in locate})[:4])
+                       if locate else ""),
+        "refs": [ref for ref, _m in deaths[:4]]}]
+    return hits
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
-             "P7": detect_p7}
+             "P7": detect_p7, "P8": detect_p8}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
-    "P6": "budget lockout", "P7": "sampling starvation"}
+    "P6": "budget lockout", "P7": "sampling starvation",
+    "P8": "fire that never lands"}
 
 
 # -------------------------------------------------------------------- report

@@ -1349,3 +1349,214 @@ def test_negative_control_the_legacy_streak_closes_the_walk_pre_fix(monkeypatch)
                            f.deps())
     assert not res.fired
     assert any("REJECTED" in m for m in f.logs)
+
+
+# --- 180.1: a stale locate-key must be repaired, and must not kill the fire ---
+#
+# THE MEASUREMENT. `.skeleton/_layout_outcomes_stable.json` of `tmp/anyhow`
+# stores, for `CastTo`, the trait FOLLOWED BY `impl<T> CastTo for T` — and
+# `.skeleton/stable/src/ptr.rs` holds the trait alone. For `Mut` it stores
+# `core::ptr::NonNull<T>` where the file (which imports `NonNull`) reads
+# `NonNull<T>`. Their siblings `Own` and `Ref` in the same file carry the
+# qualified spelling and match, which is why only those two components failed.
+# Every layout retrigger of that cluster died on them — twice in run
+# `1692702-94e6163a` (2026-08-16) alone, at 50m41s/14 model calls and
+# 20m57s/7 — each time AFTER the 31-name `Error` component had authored a
+# layout that compiled.
+
+_PTR_SKELETON = (
+    "use core::ptr::NonNull;\n"
+    "pub trait CastTo {\n    type Target;\n}\n"
+)
+#: What the store holds: the text the model AUTHORED, two items wide.
+_CASTTO_STALE = ("pub trait CastTo {\n    type Target;\n}\n\n"
+                 "impl<T> CastTo for T {\n    type Target = T;\n}")
+
+
+def _two_component_surface():
+    """`ErrorImpl` (layout-sensitive, in error.rs) and `CastTo` (its own
+    component, in ptr.rs) — the live shape: one fire, several components, and
+    the crash names only one of them."""
+    types = [
+        TypeRecord(file="lib.rs", kind="struct", name="Error", is_pub=True,
+                   definition="pub struct Error { inner: Box<ErrorImpl> }"),
+        TypeRecord(file="error.rs", kind="struct", name="ErrorImpl",
+                   is_pub=False, definition="struct ErrorImpl { vtable: u8 }"),
+        TypeRecord(file="ptr.rs", kind="trait", name="CastTo", is_pub=False,
+                   definition="pub trait CastTo {\n    type Target;\n}"),
+    ]
+    return classify_private_surface(types, [], cfg_cluster="stable")
+
+
+def _authored_record(names, defs):
+    return LayoutComponentRecord(frozenset(names), LayoutOutcome.AUTHORED,
+                                 tuple(sorted(defs.items())))
+
+
+def test_a_stale_locate_key_is_re_derived_from_the_scaffold_before_the_call():
+    """The repair. The stored key is not in the file the splice will read, so
+    it is re-derived from the scaffold — which IS that file — and the fire goes
+    ahead instead of dying attempt-invariantly after the model has answered."""
+    f = _Fakes(reply='<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                     'struct ErrorImpl { inner: Box<dyn StdError> }'
+                     '</LAYOUT_ITEM>')
+    f._records = [_authored_record({"ErrorImpl"},
+                                   {"ErrorImpl": "struct ErrorImpl { GONE: u8 }"})]
+    # The scaffold as it actually stands — what the splice matches against.
+    f.files = {"error.rs": _FROZEN_DEF + "\n"}
+    f.skeleton_fns = []
+    f.skeleton_types = [
+        TypeRecord(file="error.rs", kind="struct", name="ErrorImpl",
+                   is_pub=False, definition=_FROZEN_DEF)]
+
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+
+    assert res.fired and res.succeeded, \
+        "a stale key killed the fire that the repair exists to save"
+    assert not res.refunded
+    assert any("Re-deriving them from the scaffold" in ln for ln in f.logs)
+    assert f.prompts, "the model was never asked"
+
+
+def test_an_unrepairable_component_is_dropped_not_allowed_to_kill_the_fire():
+    """180.1's scope fix. `CastTo` cannot be located and cannot be re-derived
+    (the scaffold has no record for it either). It is dropped from the aim and
+    `ErrorImpl` — the component the evidence actually named — still authors.
+    Pre-fix, `res.all_authored` was False and the whole fire refunded."""
+    f = _Fakes(reply='<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                     'struct ErrorImpl { inner: Box<dyn StdError> }'
+                     '</LAYOUT_ITEM>')
+    f._records = [_authored_record(
+        {"ErrorImpl", "CastTo"},
+        {"ErrorImpl": _FROZEN_DEF, "CastTo": _CASTTO_STALE})]
+    # The skeleton's ptr.rs no longer declares `CastTo` at all, so neither the
+    # stored key nor a re-derivation can find it — the case the drop exists
+    # for. (A file that still holds the item is repaired by the slice instead,
+    # which is the case above.)
+    f.files = {"error.rs": _FROZEN_DEF + "\n", "ptr.rs": "use core::ptr;\n"}
+    f.live_files = {"error.rs": _FROZEN_DEF + "\n", "ptr.rs": "use core::ptr;\n"}
+    f.skeleton_fns = []
+    f.skeleton_types = [
+        TypeRecord(file="error.rs", kind="struct", name="ErrorImpl",
+                   is_pub=False, definition=_FROZEN_DEF)]
+    deps = replace(f.deps(), load_surface=lambda pd, c: _two_component_surface())
+
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, deps)
+
+    assert res.fired and res.succeeded, \
+        "a component the evidence never named discarded one it did"
+    assert any("DROPPING" in ln for ln in f.logs)
+    # The dropped component was never authored, and the kept one was.
+    assert f.prompts and "CastTo" not in "".join(f.prompts)
+
+
+def test_a_fire_with_nothing_locatable_spends_no_call_at_all():
+    """The floor of the same rule: when the drop empties the aim there is
+    nothing to author, so the fire must not spend the authoring round it was
+    spending before — it refuses and says why."""
+    f = _Fakes()
+    f._records = [_authored_record({"ErrorImpl"},
+                                   {"ErrorImpl": "struct ErrorImpl { GONE: u8 }"})]
+    # The item is in neither the file nor the records: nothing to slice, nothing
+    # to re-derive.
+    f.files = {"error.rs": "use core::fmt;\n"}
+    f.skeleton_fns = []
+    f.skeleton_types = []
+
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+
+    assert not f.prompts, "an unauthorable fire still called the model"
+    assert not res.succeeded
+
+
+def test_a_wrapped_declaration_is_repaired_by_slicing_not_by_the_extractor():
+    """The correction the first relaunch measured. The scaffold repair used to
+    take a type's key from `TypeRecord.definition`, which syn RE-RENDERS — its
+    own wrapping, trailing commas the source never had — so for any
+    declaration wide enough to wrap the "repaired" key still located nothing.
+    Live at iteration 1 of run `1896714`: the backfill reported 34 keys and
+    `ErrorVTable`, whose body carries `#[cfg(...)]` fields, matched none of the
+    file. Slicing the declaration out of the skeleton is what the live tree's
+    own propagation plan has always done, and it is byte-exact by
+    construction."""
+    wrapped = ("struct ErrorImpl {\n"
+               "    #[cfg(feature = \"std\")]\n"
+               "    vtable: u8,\n}")
+    f = _Fakes(reply='<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                     'struct ErrorImpl { inner: u8 }</LAYOUT_ITEM>',
+               skeleton_def=wrapped)
+    f._records = [_authored_record({"ErrorImpl"},
+                                   {"ErrorImpl": "struct ErrorImpl { GONE: u8 }"})]
+    f.files = {"error.rs": wrapped + "\n"}
+    f.live_files = {"error.rs": wrapped + "\n"}
+    f.skeleton_fns = []
+    # The extractor's rendering — one line, no attribute — is what the old
+    # repair stored, and it does not occur in the file.
+    f.skeleton_types = [
+        TypeRecord(file="error.rs", kind="struct", name="ErrorImpl",
+                   is_pub=False, definition="struct ErrorImpl { vtable: u8 }")]
+
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+
+    assert res.fired and res.succeeded, \
+        "the re-derived key still could not be located — the slice is the fix"
+    assert not any("DROPPING" in ln for ln in f.logs)
+
+
+def test_an_unlocatable_component_the_fault_NAMED_refuses_the_whole_fire():
+    """The drop's guard, and the reason it exists. A landed re-author reverts
+    every body that references the component, so firing at the REMAINDER after
+    dropping the aimed component buys that destruction with a layout change the
+    evidence never asked for. Measured 2026-08-16 on the first relaunch:
+    `ErrorVTable` was unlocatable, its component is the 31-name `Error` one,
+    the drop kept 3 of 34 items (`CastTo`, `Mut`, `error_mut` — none named by
+    the crash), and the fire reverted 79 bodies and took the cluster 79 -> 25."""
+    from pipeline_core.domain.layout_retrigger import CrashEvidence
+
+    f = _Fakes(reply='<LAYOUT_ITEM name="CastTo" kind="trait">'
+                     'pub trait CastTo { type Target; }</LAYOUT_ITEM>')
+    f._records = [_authored_record(
+        {"ErrorImpl", "CastTo"},
+        {"ErrorImpl": "struct ErrorImpl { GONE: u8 }", "CastTo": _CASTTO_STALE})]
+    # `ErrorImpl` is in neither the skeleton file nor the records; `CastTo` is
+    # in ptr.rs and repairs by slicing. So the drop would keep CastTo alone.
+    f.files = {"error.rs": "use core::fmt;\n", "ptr.rs": _PTR_SKELETON}
+    f.live_files = {"error.rs": "use core::fmt;\n", "ptr.rs": _PTR_SKELETON}
+    f.skeleton_fns = []
+    f.skeleton_types = []
+    deps = replace(f.deps(), load_surface=lambda pd, c: _two_component_surface())
+
+    # An ORIGIN blame inside the component that cannot be located: the fault
+    # was OBSERVED in the very code the drop is about to discard.
+    ev = CrashEvidence(vanished=frozenset({"test_drop"}),
+                       suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}),
+                       consecutive_sweeps=2,
+                       blamed_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR, deps,
+                           crash_evidence=ev)
+
+    assert not res.succeeded
+    assert not f.reverted_calls, \
+        "bodies were reverted for a re-author of what the fault never named"
+    assert any("NOT firing at the remainder" in ln for ln in f.logs), \
+        "the fire stopped for some other reason — the guard did not decide it"
+
+
+def test_the_revert_scope_is_what_was_authored_not_the_fire_s_name_set():
+    """A revert exists to re-fill bodies written against a layout that MOVED,
+    so a name this attempt never touched has no business in its scope. After
+    the locate-key drop the fire's name set can be much wider than the set
+    actually authored — 34 against 3 on the live tree — and reverting on the
+    wide one is how 79 filled bodies were spent on a three-item re-author."""
+    f = _Fakes(reply='<LAYOUT_ITEM name="ErrorImpl" kind="struct">'
+                     'struct ErrorImpl { inner: Box<dyn StdError> }'
+                     '</LAYOUT_ITEM>')
+    # `fmt` reads ErrorImpl; `next` (chain.rs) reads nothing of it.
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, _ERR,
+                           f.deps())
+    assert res.succeeded
+    assert f.reverted_calls == [[FnLocator("src/error.rs", "fmt")]]
