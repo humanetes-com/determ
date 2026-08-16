@@ -38,6 +38,14 @@ def _run(monkeypatch, tmp_path: Path, events, logs, *,
     from pipeline_core.domain.models import BuildCluster
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
+    # The flat-score GPU guard would stop these runs at their second
+    # identical reading, which is exactly what it is for and exactly what
+    # this module is not about: the mechanisms under test here sit BELOW
+    # it in the same iteration (the plateau budget, the ratchet, the
+    # conviction rules), so the guard is off and their controls keep
+    # measuring what they were written to measure. `tests/test_tdd_gpu_guard.py`
+    # owns the guard itself.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
     (src / "a.rs").write_text("orig", encoding="utf-8")

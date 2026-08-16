@@ -158,3 +158,70 @@ def test_merged_best_tree_is_scoped_and_does_not_wipe_cluster_snapshots(tmp_path
     assert restore_merged_best_tree(tmp_path) == ["src/error.rs"]
     assert (tmp_path / "src/error.rs").read_text() == "good merged body"
     assert (tmp_path / ".best_tree/nightly/src/lib.rs").exists()
+
+
+def test_the_best_tree_slot_stores_and_restores_the_PAIR(tmp_path) -> None:
+    """A cluster's durable best tree was write-only AS A TREE: the mark reader
+    returns a score, heal's tier returns ONE file. So a re-climb that failed
+    after a deliberate re-stub was permanent — measured over runs
+    `1082156-4da4faf7` → `669347-cf33eae3` (2026-08-14/15), where a retrigger
+    traded a reproducible 79/101 for two tests that have never passed and eight
+    of the next twelve sweeps read exactly 39.
+
+    Both halves or neither: t1.5 re-authors the layout every run, so bodies
+    restored against a different skeleton do not compile."""
+    from pipeline_core.application.workspace_lifecycle import (
+        cluster_best_tree_has_layout,
+        restore_cluster_best_tree,
+        save_cluster_best_tree,
+    )
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+
+    filled = tmp_path / ".skeleton-filled" / "stable"
+    layout = tmp_path / ".skeleton" / "stable"
+    (filled / "src").mkdir(parents=True)
+    (layout / "src").mkdir(parents=True)
+    (filled / "src" / "error.rs").write_text("fn good() { 79 }")
+    (layout / "src" / "error.rs").write_text("fn good() { unimplemented!() }")
+
+    saved = save_cluster_best_tree(
+        tmp_path, "stable", filled,
+        BestTreeMark(pass_count=79, iteration=3, tree_sha="a" * 16,
+                     oracle_size=101),
+        layout_dir=layout)
+    assert saved == 1
+    assert cluster_best_tree_has_layout(tmp_path, "stable")
+
+    # The destruction this exists to undo, and a file created after the mark.
+    (filled / "src" / "error.rs").write_text("fn bad() { 39 }")
+    (layout / "src" / "error.rs").write_text("fn bad() { unimplemented!() }")
+    (filled / "src" / "later.rs").write_text("fn added_after() {}")
+
+    bodies, layout_n, leftovers = restore_cluster_best_tree(
+        tmp_path, "stable", filled, layout_dir=layout)
+    assert (bodies, layout_n) == (1, 1)
+    assert (filled / "src" / "error.rs").read_text() == "fn good() { 79 }"
+    assert (layout / "src" / "error.rs").read_text() \
+        == "fn good() { unimplemented!() }"
+    # Never deletes: a file the snapshot does not have is REPORTED, not removed
+    # — deleting is how a restore becomes a second destruction.
+    assert leftovers == ["src/later.rs"]
+    assert (filled / "src" / "later.rs").exists()
+
+
+def test_a_slot_saved_without_a_layout_declines_to_call_itself_a_pair(
+        tmp_path) -> None:
+    """The pre-fix slot shape. A caller must be able to ask before restoring,
+    not discover it from a tree that no longer compiles."""
+    from pipeline_core.application.workspace_lifecycle import (
+        cluster_best_tree_has_layout,
+        save_cluster_best_tree,
+    )
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    filled = tmp_path / ".skeleton-filled" / "stable"
+    (filled / "src").mkdir(parents=True)
+    (filled / "src" / "a.rs").write_text("fn a() {}")
+    save_cluster_best_tree(tmp_path, "stable", filled,
+                           BestTreeMark(pass_count=1, iteration=1,
+                                        tree_sha="b" * 16, oracle_size=2))
+    assert not cluster_best_tree_has_layout(tmp_path, "stable")

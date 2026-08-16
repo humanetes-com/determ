@@ -6,12 +6,17 @@ from __future__ import annotations
 from pipeline_core.domain.crash_site import (
     asan_stack_excerpt,
     bare_fn_name,
+    chain_derived_site,
     crash_evidence_by_locator,
+    crate_file_for_test_file,
+    destruction_path_subjects,
     origin_stack_text,
     parse_asan_report,
+    read_destruction_fault,
     relativize_frame_files,
     site_from_frames,
     vanish_is_stub_confounded,
+    vanished_subject_fns,
 )
 from pipeline_core.domain.models import FnLocator
 
@@ -569,3 +574,167 @@ def test_a_test_only_crash_says_it_names_no_fn_to_change() -> None:
     text = site.render_evidence()
     assert "names no fn to change" in text
     assert "Fix the pointer/lifetime scheme" not in text
+
+
+# Trimmed verbatim from `logs/asan/asan-20260815T215316630991.txt` — the report
+# run `1064759-0f23fb68` produced on every one of its seven sweeps, and blamed
+# NOBODY on every one. Frames dropped only from the middles of the two stacks;
+# the header, the drop frames and the test frames are as ASAN printed them.
+_DOUBLE_DROP = """\
+==1122932==ERROR: AddressSanitizer: heap-use-after-free on address 0x7bb97a9e1c60 at pc 0x55d76d1779da bp 0x7b89783fe240 sp 0x7b89783fe238
+WRITE of size 8 at 0x7bb97a9e1c60 thread T5
+    #0 0x55d76d1779d9 in core::sync::atomic::atomic_sub::<usize, usize> /rustc/9eb3be/library/core/src/sync/atomic.rs:3956:24
+    #2 0x55d76d1779d9 in <alloc::sync::Arc<core::sync::atomic::Atomic<bool>> as core::ops::drop::Drop>::drop /rustc/9eb3be/library/alloc/src/sync.rs:2831:32
+    #4 0x55d76d1772f9 in core::ptr::drop_glue::<test_downcast::drop::Flag> /rustc/9eb3be/library/core/src/ptr/mod.rs:825:1
+    #5 0x55d76d172ee4 in test_downcast::test_drop /w/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:85:1
+0x7bb97a9e1c60 is located 0 bytes inside of 16-byte region
+freed by thread T5 here:
+    #0 0x55d76d141cb6 in free /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #4 0x55d76d176134 in <alloc::alloc::Global as core::alloc::Allocator>::deallocate /rustc/9eb3be/library/alloc/src/alloc.rs:462:23
+    #5 0x55d76d177a0f in <alloc::sync::Arc<core::sync::atomic::Atomic<bool>> as core::ops::drop::Drop>::drop /rustc/9eb3be/library/alloc/src/sync.rs:2874:18
+    #6 0x55d76d173003 in test_downcast::test_drop /w/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:83:5
+previously allocated by thread T5 here:
+    #0 0x55d76d142a3e in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:69:3
+    #3 0x55d76d1728a4 in test_downcast::drop::Flag::new /w/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:20:9
+SUMMARY: AddressSanitizer: heap-use-after-free /rustc/9eb3be/library/core/src/sync/atomic.rs:3956:24
+"""
+
+
+def test_a_double_drop_is_read_from_the_stacks_the_frame_filter_discards() -> None:
+    """Neither stack holds a `src/` frame, so `blamed` is None and always will
+    be: the fault is a MISSING `ManuallyDrop`, and an absence has no frame.
+    The two stacks still say exactly what happened."""
+    fault = read_destruction_fault(_DOUBLE_DROP)
+    assert fault is not None
+    assert fault.freed_type == "alloc::sync::Arc<core::sync::atomic::Atomic<bool>>"
+    assert fault.free_site == "tests/test_downcast.rs:83"
+    assert fault.access_site == "tests/test_downcast.rs:85"
+    text = fault.render()
+    assert "DOUBLE DROP" in text and "dropped twice" in text
+    # The negative control for the whole channel: the localizer's own verdict
+    # on this identical report, which is what the run acted on for 7h48m.
+    site = site_from_frames(
+        "tests/test_downcast.rs", "test_drop",
+        "AddressSanitizer: heap-use-after-free", [],
+        origin_raw_frames=[], origin_capable=True, raw_report=_DOUBLE_DROP)
+    assert site.blamed is None and site.origin_unattributed
+
+
+def test_a_use_after_return_is_not_a_double_drop() -> None:
+    """A different fault class with a different remedy — a stack lifetime, not
+    an ownership count. Returning a reading here would put a false statement
+    of fact into a prompt."""
+    assert read_destruction_fault(_ASAN) is None
+
+
+def test_a_use_after_free_that_is_not_two_drops_reads_nothing() -> None:
+    """Only when BOTH stacks run through a drop. A free from an ordinary
+    deallocation path is an ownership bug of some other shape."""
+    single = _DOUBLE_DROP.replace(
+        "    #5 0x55d76d177a0f in <alloc::sync::Arc<core::sync::atomic::Atomic"
+        "<bool>> as core::ops::drop::Drop>::drop /rustc/9eb3be/library/alloc/"
+        "src/sync.rs:2874:18\n", "")
+    assert read_destruction_fault(single) is None
+
+
+def test_a_chain_site_carries_the_double_drop_into_its_evidence() -> None:
+    """The reading is derived at construction, so no caller can forget it."""
+    site = chain_derived_site(
+        "tests/test_downcast.rs", "test_drop",
+        "AddressSanitizer: heap-use-after-free",
+        [FnLocator("src/error.rs", "object_drop_front")],
+        derived_from_tests=["test_drop"], raw_report=_DOUBLE_DROP)
+    text = site.render_evidence()
+    assert "DOUBLE DROP" in text
+    assert "alloc::sync::Arc<core::sync::atomic::Atomic<bool>>" in text
+    assert "tests/test_downcast.rs:83" in text
+
+
+_FNS = [
+    {"file": "src/error.rs", "fn_name": "object_drop", "body_text": "Box::from_raw(p)"},
+    {"file": "src/error.rs", "fn_name": "object_drop_front",
+     "body_text": "let _ = Box::from_raw(e.ptr.as_ptr() as *mut ErrorImpl<E>);"},
+    {"file": "src/error.rs", "fn_name": "context_chain_drop_rest", "body_text": "{}"},
+    {"file": "src/error.rs", "fn_name": "drop", "body_text": "unsafe { (vtable(self).object_drop)(self.inner) }"},
+    {"file": "src/error.rs", "fn_name": "downcast", "body_text": "let val = ptr::read(r);"},
+    {"file": "src/context.rs", "fn_name": "context", "body_text": "Error::from_context(c, e)"},
+]
+
+
+def test_destruction_subjects_are_the_crates_own_drop_family() -> None:
+    """The set the construction chain cannot reach. On the live tree the chain
+    named 50 fns on 2026-08-15 and not one of them was in this family."""
+    subs = destruction_path_subjects(_FNS)
+    assert subs == frozenset({
+        FnLocator("src/error.rs", "object_drop"),
+        FnLocator("src/error.rs", "object_drop_front"),
+        FnLocator("src/error.rs", "context_chain_drop_rest"),
+        FnLocator("src/error.rs", "drop"),
+    })
+    # `downcast` holds `ptr::read` and is deliberately NOT in it: the body rule
+    # is the fallback for a crate that does not name its drop family, never a
+    # widening of a set the names already resolved.
+    assert FnLocator("src/error.rs", "downcast") not in subs
+
+
+def test_the_body_rule_only_fires_when_no_name_matches() -> None:
+    unnamed = [f for f in _FNS if "drop" not in f["fn_name"]]
+    subs = destruction_path_subjects(unnamed)
+    assert subs == frozenset({FnLocator("src/error.rs", "downcast")})
+
+
+def test_a_subject_set_wider_than_the_cap_contributes_nothing() -> None:
+    """`vanished_subject_fns`' precedent: a subject that names half the crate
+    names none of it."""
+    wide = [{"file": "src/a.rs", "fn_name": f"drop_{i}", "body_text": ""}
+            for i in range(13)]
+    assert destruction_path_subjects(wide) == frozenset()
+    assert len(destruction_path_subjects(wide, max_subjects=13)) == 13
+
+
+def test_the_subject_channel_anchors_on_the_inventory_not_a_module_path() -> None:
+    """The channel had never fired once since it shipped 2026-08-10. Its only
+    anchor was `test.split("::")`, and its only production caller passes
+    `SweepOracle.vanished` — bare by construction (`reconcile_sweep` builds it
+    through `bare_test_name`, and the bare form is load-bearing for the
+    duplicate-name dedup that set's docstring defends). A green unit test over
+    an input the caller never produces is the shape this was."""
+    rmap = {"test_x": {("src/error.rs", "construct")},
+            "test_y": {("src/ptr.rs", "new")}}
+    bare = frozenset({"test_x"})
+    # Pre-fix: a bare name anchors nothing, so the channel contributes nothing.
+    assert vanished_subject_fns(bare, rmap) == {}
+    # With the inventory's file index the anchor is the crate file the test's
+    # generated sibling belongs to.
+    out = vanished_subject_fns(
+        bare, rmap, test_files={"test_x": "src/error.gen_tests_4.rs"})
+    assert out == {FnLocator("src/error.rs", "construct"): frozenset({"test_x"})}
+
+
+def test_an_integration_test_anchors_nothing() -> None:
+    """`tests/test_downcast.rs` answers for the crate's public surface, not for
+    one file — a subject that wide is not a subject."""
+    assert crate_file_for_test_file("tests/test_downcast.rs") is None
+    assert crate_file_for_test_file("src/error.gen_tests_4.rs") == "src/error.rs"
+    assert crate_file_for_test_file("src/error.rs") == "src/error.rs"
+    assert vanished_subject_fns(
+        frozenset({"test_x"}), {"test_x": {("src/error.rs", "construct")}},
+        test_files={"test_x": "tests/test_downcast.rs"}) == {}
+
+
+def test_a_subject_may_never_be_a_test_file() -> None:
+    """Measured on the live anyhow cluster tree 2026-08-16: enumerating 323
+    fns, the drop-name rule matches `tests/drop/mod.rs::drop`,
+    `tests/test_downcast.rs::test_drop` and `tests/test_repr.rs::test_drop`
+    beside the five real ones. No fill writes a test, so such a subject lands
+    in the frontier and buys a dispatch that cannot change anything — the
+    defect 173.1 shipped `authorable_frames` for, arriving through records
+    instead of frames."""
+    recs = [
+        {"file": "src/error.rs", "fn_name": "object_drop_front", "body_text": ""},
+        {"file": "tests/drop/mod.rs", "fn_name": "drop", "body_text": ""},
+        {"file": "tests/test_downcast.rs", "fn_name": "test_drop", "body_text": ""},
+        {"file": "src/error.gen_tests_4.rs", "fn_name": "drop", "body_text": ""},
+    ]
+    assert destruction_path_subjects(recs) == frozenset({
+        FnLocator("src/error.rs", "object_drop_front")})

@@ -88,10 +88,17 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
                 checkpoints: list[int], events: list[tuple[str, dict]],
                 retrigger=None, reverse_map=None, localize=None,
                 escalate=None, fill=None, logs=None,
+                enumerate_fns=None, test_files=None,
                 target_src_dir: Path | None = None,
                 ) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "2")
+    # The flat-score GPU guard off: these sweeps repeat a reading on purpose
+    # (the oracle shrink has to reproduce before the crash counts as
+    # deterministic), so the guard would stop the run at the second reading —
+    # correctly, and one iteration before the evidence this module is about
+    # reaches a dispatch. `tests/test_tdd_gpu_guard.py` owns the guard.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
 
     def _attr(*a: Any, **k: Any):
         attribution_kwargs.append(k)
@@ -121,6 +128,9 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         retrigger_layout=retrigger,
         localize_crashes=localize,
         escalate_to_producers=escalate,
+        enumerate_fns=enumerate_fns,
+        test_file_index=((lambda *a, **k: dict(test_files))
+                         if test_files is not None else None),
     )
     return run_phase_c_tdd(
         deps, project_dir=tmp_path,
@@ -643,6 +653,202 @@ def test_deterministic_unattributed_crash_synthesizes_chain_blame(
     assert "freed by thread T0" in ce[key]
     assert key in armed[0]["tdd_frontier_keys"]
     assert not armed[0].get("crash_blamed")
+
+
+_DOUBLE_DROP_REPORT = """\
+==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x7b at pc 0x55
+WRITE of size 8 at 0x7b thread T5
+    #2 0x1 in <alloc::sync::Arc<core::sync::atomic::Atomic<bool>> as core::ops::drop::Drop>::drop /rustc/9e/library/alloc/src/sync.rs:2831:32
+    #5 0x2 in test_downcast::test_drop /w/tests/test_downcast.rs:85:1
+freed by thread T5 here:
+    #0 0x3 in free /rustc/llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #5 0x4 in <alloc::sync::Arc<core::sync::atomic::Atomic<bool>> as core::ops::drop::Drop>::drop /rustc/9e/library/alloc/src/sync.rs:2874:18
+    #6 0x5 in test_downcast::test_drop /w/tests/test_downcast.rs:83:5
+SUMMARY: AddressSanitizer: heap-use-after-free
+"""
+
+
+def _double_drop_site(test_name: str = "test_drop"):
+    from pipeline_core.domain.crash_site import CrashSite
+    return CrashSite(
+        binary_label="tests/test_downcast.rs", test_name=test_name,
+        signal="AddressSanitizer: heap-use-after-free",
+        frames=(), origin_frames=(), origin_capable=True,
+        raw_report=_DOUBLE_DROP_REPORT)
+
+
+def test_the_subject_channel_fires_with_the_inventory_anchor(
+        tmp_path: Path, monkeypatch) -> None:
+    """The pin 173.2 asked for and could not write: nothing localizes, the
+    shrink is deterministic, and the subject channel ARMS — the log line plus
+    the subject fn reaching a fill's `crash_evidence`.
+
+    Its negative control is the wiring as it stood: with no file index the
+    anchor is a module path, the vanished set is bare by construction, and the
+    channel produces nothing — which is why it had never fired once since it
+    shipped 2026-08-10."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    logs: list[str] = []
+    fills: list[dict[str, Any]] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=[],
+                reverse_map={"t3": {("src/error.rs", "construct")}},
+                localize=lambda *a, **k: (),
+                test_files={"t3": "src/error.gen_tests_4.rs"},
+                fill=_fill, logs=logs)
+
+    assert any("synthesized crash evidence for subject fn(s)" in ln
+               for ln in logs), "the channel never armed"
+    armed = [kw for kw in fills if kw.get("crash_evidence")]
+    assert armed
+    assert FnLocator("src/error.rs", "construct") in armed[0]["crash_evidence"]
+
+
+def test_without_the_anchor_the_subject_channel_stays_silent(
+        tmp_path: Path, monkeypatch) -> None:
+    """The negative control — the pre-fix wiring, reproduced by omission."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    logs: list[str] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=[],
+                reverse_map={"t3": {("src/error.rs", "construct")}},
+                localize=lambda *a, **k: (), logs=logs)
+
+    assert not [ln for ln in logs
+                if "synthesized crash evidence for subject" in ln]
+
+
+def test_the_chain_is_derived_from_the_crashed_test_not_only_the_vanished_set(
+        tmp_path: Path, monkeypatch) -> None:
+    """Run `1064759-0f23fb68`: `vanished` named `test_large_alignment` and
+    `test_no_backtrace_fallback` while every site named `test_drop` — the one
+    test whose chain holds the fault. The oracle drops that name for a sound
+    reason (its bare name also lives in a surviving binary, so it is not
+    PROVABLY missing) which says nothing about its value as a crash subject."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    escalated: list[str] = []
+    events: list[tuple[str, dict]] = []
+
+    def _escalate(src, tname, units):
+        escalated.append(tname)
+        return {FnLocator("src/error.rs", f"producer_of_{tname}"): {tname}}
+
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (
+                    _unattributed_uaf_site(test_name="test_drop"),),
+                escalate=_escalate)
+
+    assert "test_drop" in escalated, \
+        "the test the binary died running never reached the derivation"
+    assert "t3" in escalated, "the vanished set must still contribute"
+    chain = [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
+    assert chain and "src/error.rs::producer_of_test_drop" in chain[0]["blamed"]
+
+
+def test_a_double_drop_narrows_the_pack_to_the_destruction_family(
+        tmp_path: Path, monkeypatch) -> None:
+    """A construction chain is the set of fns that BUILD the value; this fault
+    class is a value destroyed twice, so the culprit is on a teardown path no
+    producer escalation reaches. Live, the chain named 50 fns and the only
+    drop-family member among them was `Error::drop`."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict[str, Any]] = []
+    logs: list[str] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (_double_drop_site(),),
+                escalate=lambda src, tname, units: {
+                    FnLocator("src/error.rs", f"construct_{i}"): {tname}
+                    for i in range(20)},
+                enumerate_fns=lambda src: [
+                    {"file": "src/error.rs", "fn_name": "object_drop_front",
+                     "body_text": "Box::from_raw(p)"},
+                    {"file": "src/error.rs", "fn_name": "object_drop",
+                     "body_text": "Box::from_raw(p)"},
+                    {"file": "src/error.rs", "fn_name": "construct_0",
+                     "body_text": "{}"},
+                ],
+                fill=_fill, logs=logs)
+
+    narrowed = [d for ev, d in events
+                if ev == "phase_c.crash.destruction_narrowed"]
+    assert narrowed, "the double-drop reading never narrowed the pack"
+    assert narrowed[0]["chain_count"] == 20
+    assert narrowed[0]["subjects"] == [
+        "src/error.rs::object_drop", "src/error.rs::object_drop_front"]
+    assert "Arc<core::sync::atomic::Atomic<bool>>" in narrowed[0]["freed_type"]
+    assert narrowed[0]["free_site"] == "tests/test_downcast.rs:83"
+
+    chain = [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
+    assert chain and set(chain[0]["blamed"]) == {
+        "src/error.rs::object_drop", "src/error.rs::object_drop_front"}, \
+        "the construction closure must be REPLACED, not widened"
+    armed = [kw for kw in fills if kw.get("crash_evidence")]
+    assert armed
+    key = FnLocator("src/error.rs", "object_drop_front")
+    assert key in armed[0]["crash_evidence"]
+    assert "DOUBLE DROP" in armed[0]["crash_evidence"][key]
+    assert not armed[0].get("crash_blamed"), "an inference must not convict"
+
+
+def test_without_the_fn_enumerator_the_chain_is_unchanged(
+        tmp_path: Path, monkeypatch) -> None:
+    """The negative control for the narrowing, and the pre-fix behaviour: the
+    same double-drop report with no way to read the crate's own declarations
+    leaves the full construction closure in place."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    out = ("test t1 ... ok\ntest t2 ... FAILED\n"
+           "test result: FAILED. 1 passed; 1 failed; 0 ignored")
+    events: list[tuple[str, dict]] = []
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, out),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (_double_drop_site(),),
+                escalate=lambda src, tname, units: {
+                    FnLocator("src/error.rs", f"construct_{i}"): {tname}
+                    for i in range(20)})
+
+    assert not [d for ev, d in events
+                if ev == "phase_c.crash.destruction_narrowed"]
+    chain = [d for ev, d in events if ev == "phase_c.crash.chain_blame"]
+    assert chain and len(chain[0]["blamed"]) == 20
 
 
 def test_no_chain_blame_without_the_unattributed_site(

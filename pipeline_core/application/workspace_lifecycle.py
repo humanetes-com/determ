@@ -130,6 +130,8 @@ def wipe_module_sources(
 
 BEST_TREE_DIR = ".best_tree"
 _BEST_META = "_meta.json"
+# Where the authored layout half of a cluster snapshot lives.
+_BEST_LAYOUT = "_layout"
 
 
 def best_tree_pass_count(project_dir: Path) -> int | None:
@@ -191,6 +193,7 @@ def load_cluster_best_tree_mark(
 
 def save_cluster_best_tree(
     project_dir: Path, cluster: str, filled_dir: Path, mark: BestTreeMark,
+    layout_dir: Path | None = None,
 ) -> int:
     """Snapshot a cluster's fill tree (``.skeleton-filled/<cluster>/``) into
     ``.best_tree/<cluster>/`` so heal's BEST_TREE_COPY tier has a parseable
@@ -236,6 +239,21 @@ def save_cluster_best_tree(
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         saved += 1
+    # The LAYOUT half, under `_layout/`. Bodies from one run do not compile
+    # against another run's skeleton — t1.5 re-authors it every run, and
+    # between two 2026-08-14 commits `ErrorImpl` lost a whole field — so a
+    # snapshot of the filled tree alone is not a restorable tree, only a
+    # per-file donor for heal. Storing the pair is what makes
+    # `restore_cluster_best_tree` possible without going to the object store.
+    # `_layout` cannot collide with a restored path: the filled tree's files
+    # all live under `src/`.
+    if layout_dir is not None and Path(layout_dir).is_dir():
+        for src in sorted(Path(layout_dir).rglob("*.rs")):
+            if not src.is_file():
+                continue
+            dst = staging / _BEST_LAYOUT / src.relative_to(layout_dir)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
     if not saved:
         # Nothing to store. Leave whatever is already in the slot alone: an
         # empty fill tree is not evidence that the stored one is stale.
@@ -256,6 +274,73 @@ def save_cluster_best_tree(
     if retired.exists():
         shutil.rmtree(retired, ignore_errors=True)
     return saved
+
+
+def restore_cluster_best_tree(
+    project_dir: Path, cluster: str, filled_dir: Path,
+    layout_dir: Path | None = None,
+) -> tuple[int, int, list[str]]:
+    """Put a cluster's durable best tree back — BOTH halves — and report what
+    it cost. Returns (bodies restored, layout files restored, leftovers).
+
+    The absence this fills. `.best_tree/<cluster>` had exactly two readers and
+    neither could return the tree: `load_cluster_best_tree_mark` reads the
+    score to decide whether a sweep may REPLACE the slot, and heal's
+    `BEST_TREE_COPY` tier reads ONE file when that file is unparseable.
+    `restore_best_tree` exists but is module scope over the whole `.best_tree/`
+    dir inside a task3/task4 repair. So a cluster's durable best tree was
+    write-only AS A TREE, and a re-climb that failed after a deliberate
+    re-stub was permanent by construction: measured over runs
+    `1082156-4da4faf7` → `669347-cf33eae3` (2026-08-14/15), the retrigger
+    traded a reproducible 79/101 for two tests that have never passed in any
+    run, eight of the next twelve scored sweeps read exactly 39, and nothing in
+    the loop could take the 79 back.
+
+    Restores by OVERWRITE and never deletes: a `.rs` file the live tree has and
+    the snapshot does not is reported as a leftover for the caller to log, not
+    removed. Deleting is how a restore turns into a second destruction, and the
+    leftover case (t1.5 added a file after the snapshot) is rare enough to be
+    worth a line in the log instead."""
+    import shutil
+    best = project_dir / BEST_TREE_DIR / cluster
+    if not best.is_dir():
+        return 0, 0, []
+    bodies = 0
+    stored: set[Path] = set()
+    for src in sorted(best.rglob("*.rs")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(best)
+        if rel.parts and rel.parts[0] == _BEST_LAYOUT:
+            continue
+        dst = Path(filled_dir) / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        stored.add(rel)
+        bodies += 1
+    layout = 0
+    layout_root = best / _BEST_LAYOUT
+    if layout_dir is not None and layout_root.is_dir():
+        for src in sorted(layout_root.rglob("*.rs")):
+            if not src.is_file():
+                continue
+            dst = Path(layout_dir) / src.relative_to(layout_root)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            layout += 1
+    leftovers = sorted(
+        str(p.relative_to(filled_dir))
+        for p in Path(filled_dir).rglob("*.rs")
+        if p.is_file() and p.relative_to(filled_dir) not in stored)
+    return bodies, layout, leftovers
+
+
+def cluster_best_tree_has_layout(project_dir: Path, cluster: str) -> bool:
+    """Whether the slot holds the LAYOUT half, i.e. whether a restore of it
+    would be a pair. A slot written before the layout half was stored holds
+    bodies only, and restoring those alone gives a tree that does not compile
+    — the caller must be able to decline rather than discover it afterwards."""
+    return (project_dir / BEST_TREE_DIR / cluster / _BEST_LAYOUT).is_dir()
 
 
 # The merged tree gets its own slot under the same root. It cannot use

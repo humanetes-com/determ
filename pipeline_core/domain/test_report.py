@@ -369,8 +369,21 @@ class U2Verdict:
     self_passed: frozenset[str] = frozenset()
 
     @classmethod
-    def accept(cls) -> U2Verdict:
-        return cls(U2Decision.ACCEPT)
+    def accept(cls, self_passed: frozenset[str] = frozenset()) -> U2Verdict:
+        """ACCEPT covers three different states — the unit's tests PASSED, the
+        gate was off or had no tests to run, and the run was inconclusive
+        (timeout, exception, fail-safe). They are one decision (keep the
+        compiling body) and they are NOT one measurement, so the caller that
+        records a verdict has to be able to tell them apart: `self_passed`
+        non-empty is the only one that saw an attributed test pass.
+
+        Run `1064759-0f23fb68` (2026-08-15/16) is the cost of conflating them:
+        50 fills recorded `accept`/POSITIVE while the per-binary verdict vector
+        stayed byte-identical across the whole run. Every ledger consumer —
+        the retro round, the payoff detector, the calibration this project owes
+        its shadow detector — was reading "50 successes" off a night that
+        changed nothing."""
+        return cls(U2Decision.ACCEPT, self_passed=self_passed)
 
     @classmethod
     def accept_external_only(

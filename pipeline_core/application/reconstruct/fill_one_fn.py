@@ -686,6 +686,11 @@ class FillOneFn:
             # failure it routes through the same fix loop as a compile error
             # (failing-test set as the stall signature).
             _u2_fail_sig: frozenset[str] | None = None
+            # The POSITIVE evidence the gate saw, kept beside the decision.
+            # ACCEPT means "tests pass / gate off / inconclusive" — three
+            # states, one branch — and only the first is a measurement of this
+            # fill. Empty here means the accept below is a KEEP, not a win.
+            _u2_passed: frozenset[str] = frozenset()
             if rc == 0:
                 # Container-qualified own-site: a test panicking in a same-named
                 # sibling (e.g. this fn is a `Bool` impl's `not`, the panic is in
@@ -697,6 +702,7 @@ class FillOneFn:
                     frozenset({FnSite(rel_file, fn_name, container)}),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
                     _attempt_baseline_test)
+                _u2_passed = _v.self_passed
                 if _v.decision is U2Decision.REJECT:
                     # A real self-failure (assertion/behavior). Route through the
                     # normal fix path: revert + re-prompt with the failing tests
@@ -840,6 +846,15 @@ class FillOneFn:
                     "recovered": fix_attempt > 1,
                     "success": True,
                 })
+                # POSITIVE only with a test observed PASSING. Without one the
+                # fill is KEPT on a gate that convicted nobody — the tests were
+                # never failing, or ran inconclusively, or the gate was off —
+                # and recording that as a win is what let a 7h48m run report 50
+                # successes against a byte-identical verdict vector (run
+                # `1064759-0f23fb68`, 2026-08-15/16). The joint routes already
+                # bank on positive evidence only (`assess_joint_improvement`:
+                # "counting absence as progress fabricated improvement"); this
+                # is that rule at the per-fn ledger.
                 self.tel.emit("phase_c.verdict", data={
                     **VerdictRecord(
                         unit=str(_unit_key), route="per-fn",
@@ -848,9 +863,15 @@ class FillOneFn:
                                      else Disposition.ACCEPT),
                         reason=("kept — every attributed test blocked by a "
                                 "still-stubbed sibling" if _blocked_by
-                                else "accepted on own tests"),
-                        outcome=(GateOutcome.UNMEASURABLE if _blocked_by
-                                 else GateOutcome.POSITIVE),
+                                else f"accepted — {len(_u2_passed)} attributed "
+                                "test(s) observed passing" if _u2_passed
+                                else "kept — compiles, but no attributed test "
+                                "was observed passing (none were failing, or "
+                                "the scoped run was inconclusive)"),
+                        outcome=(GateOutcome.POSITIVE
+                                 if _u2_passed and not _blocked_by
+                                 else GateOutcome.UNMEASURABLE),
+                        evidence_keys=tuple(sorted(_u2_passed)),
                         validity=ValidityVector(binary_completed=True),
                         model_calls=fix_attempt).to_json_dict(),
                     "cluster": ctx.cluster_name,

@@ -33,6 +33,16 @@ REACTED.  The classes and their defining instances:
   P5 limit cycle — the score revisits the same small value set with
      destructions in between (79/74/79/74 across runs 58819-ee78a1d1 and
      929616-ee20d540).
+  P7 sampling starvation — the sweep is the only measurement of the tree and
+     the run took it once, or barely more often than never, because the fill
+     batch between two sweeps is the whole frontier.  Measured 2026-08-15 from
+     phase_c.tdd.iter timestamps: gaps of 198/253 min (3368-753757e6) and 243
+     min (263217-d41a5bb5) against lives of 458m05s and 308m29s; one iteration
+     each for 500301-6a66bf86 (214m10s) and 669347-cf33eae3 (4h17m).  Every
+     sweep-boundary lever — batch ratchet, re-admission, crash retrigger,
+     plateau exit — gets that many chances to fire in a whole run, and a fill
+     pass landing after the last sweep is never scored at all, so the
+     regression it caused ships to the next run as that run's baseline.
 
 USAGE.
   python scripts/pattern_census.py [LOG ...] [--min-iters N] [--json OUT]
@@ -41,7 +51,9 @@ USAGE.
                  (only those that exist).  A run that spans a rotation boundary
                  is stitched back together by concatenating in this order.
     --min-iters  only report runs with at least N iteration summaries
-                 (default 2; launches that died in setup are skipped).
+                 (default 1: a launch that never reached phase-c has none and
+                 is skipped, but a run that swept ONCE is reported — it is the
+                 P7 case, and a default of 2 hid it).
     --json OUT   also write the full census (all runs, all evidence refs) as
                  JSON for downstream tooling.
   Read-only: no GPU, no model calls, no writes outside --json OUT.
@@ -118,6 +130,14 @@ RE_EXH_CONVICTED = re.compile(
     r" \(retrospective marked")
 RE_REVERTED_AFTER = re.compile(
     r"(?P<fn>src/\S+): reverted after \d+ attempt\(s\)")
+# The honoured-record line the prompt-build seams emit since 2026-08-14. It is
+# what turns P4 from a proxy into a direct read: the record that steered a
+# prompt, its category, how many rounds it has survived, and whether it has a
+# TREE PREMISE — recorded blockers it can be released against — or none, in
+# which case nothing in the loop can ever expire it on its own evidence.
+RE_RETRO_HONOURED = re.compile(
+    r"\[phase-c/retro-honoured\] (?P<unit>\S+?):? category=(?P<cat>\S+) "
+    r"rounds=(?P<rounds>\d+) (?P<premise>blocked_on\[\d+\]|NO tree premise)")
 RE_DEATH = re.compile(
     r"\[death-watch\] pipeline \d+ ended after (?P<dur>\S+) —"
     r" exit=(?P<exit>\d+)(?: signal=(?P<sig>\w+))?")
@@ -179,10 +199,24 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # one that was refused.
         ("were earned by a different build", "stale-streak-released"),
     ],
+    "P7": [
+        # The batch cap: the loop stopped to measure instead of spending the
+        # whole frontier before looking (2026-08-15).
+        ("mid-pass)", "batch-capped"),
+        # …and the sweep taken on the way out, so a fill pass that landed after
+        # the last ordinary sweep is scored by the run that caused it rather
+        # than inherited unscored by the next one.
+        ("final sweep (stopped", "final-sweep"),
+    ],
 }
 
+# GPU_GUARD_STOP is a terminal the LOOP chose: the flat-score guard stopped
+# the run before spending a dispatch on a reading the window already held.
+# A run that ends this way is a run whose burn was cut short, so it belongs
+# beside the other terminals when a segment is judged — the census reads it
+# as "ended by decision", not as a crash.
 TERMINALS = ("MODULE_PLATEAU_ABORT", "VERDICT MISMATCH", "TIMED OUT",
-             "Traceback (most recent call last)")
+             "Traceback (most recent call last)", "GPU_GUARD_STOP")
 
 
 def default_logs() -> list[Path]:
@@ -394,9 +428,44 @@ def detect_p3(run: Run, iters: list[dict]) -> list[dict]:
 
 
 def detect_p4(run: Run, iters: list[dict]) -> list[dict]:
-    """Poisoned evidence (proxy): the same unit either skipped-as-exhausted
-    under a standing conviction on ≥3 iterations, or reverted-after-attempts
-    ≥3 times — the attempts keep converging to the recorded verdict."""
+    """Poisoned evidence.
+
+    DIRECT read where the log carries it: a stored record steered ≥3 prompts
+    for one unit while carrying NO tree premise. Both halves matter. The count
+    says the record is not a one-off nudge but the standing instruction for
+    that unit; "no tree premise" says it records no blockers, so
+    `impossibility_claim_is_unfounded` — the one gate that can retire a record
+    on evidence rather than on a score move — has nothing to test it against
+    and the record cannot expire on its own. That is the class exactly: not "a
+    conviction exists" but "a conviction that cannot be checked keeps steering".
+    Measured on `logs/pipeline_anyhow.log` 2026-08-16: 76 honoured lines, 71 of
+    them with no tree premise.
+
+    The two PROXIES below (skipped-under-conviction, reverted-after-attempts)
+    are kept for segments recorded before the honoured line existed — every run
+    before 2026-08-14 — and are skipped when the direct signal is available,
+    because they infer from downstream symptoms what the line now states."""
+    direct: dict[str, list[str]] = defaultdict(list)
+    meta: dict[str, tuple[str, int]] = {}
+    for ref, m in run.find(RE_RETRO_HONOURED):
+        if m["premise"] != "NO tree premise":
+            continue
+        unit = m["unit"]
+        direct[unit].append(ref)
+        meta[unit] = (m["cat"], int(m["rounds"]))
+    if direct:
+        hits = []
+        for unit, refs in sorted(direct.items(), key=lambda kv: -len(kv[1])):
+            if len(refs) < 3:
+                continue
+            cat, rounds = meta[unit]
+            hits.append({
+                "evidence": f"{unit} steered {len(refs)} prompt(s) on a "
+                            f"{cat} record with NO tree premise "
+                            f"(rounds={rounds}) — nothing can expire it",
+                "refs": refs[:4]})
+        if hits:
+            return hits[:4]
     hits = []
     for regex, what in ((RE_EXH_CONVICTED, "skipped under conviction"),
                         (RE_REVERTED_AFTER, "reverted after attempts")):
@@ -471,12 +540,103 @@ def detect_p6(run: Run, iters: list[dict]) -> list[dict]:
     return hits
 
 
+#: A run whose mean iteration costs at least this many minutes is sampling its
+#: own tree more slowly than the levers that read the samples can act. Set from
+#: the measured spread: healthy multi-iteration runs on anyhow sit well under
+#: it, while the starved ones measured 198-253 minutes per iteration.
+P7_MINUTES_PER_ITER = 90
+#: …and a run that produced exactly one iteration is starved regardless of the
+#: mean (there is no gap to average) once it lived long enough to have taken a
+#: second reading. That precondition has to be MEASURED, never assumed: the
+#: first version of this detector read `life is None or life >= 60`, which
+#: inverts the guard — the one case where the run's life is unknown is the one
+#: case where "it lived long enough" cannot be established. Measured over the
+#: live logs on 2026-08-16 it produced 19 of P7's 35 hits, all of them runs
+#: with no death record, and they are dominated by launches that died in setup:
+#: `1527710-e72c9dd0` started 16:20:36 and its successor started 16:28:01, one
+#: sweep, `pass: 0`. A false row in this census is expensive out of proportion
+#: to its size, because CLAUDE.md makes the census the FIRST step of every
+#: diagnosis precisely so that a known class is a lookup instead of an
+#: investigation; a class whose majority is noise sends the next reader back to
+#: the raw log, which is the ritual the census exists to end.
+P7_MIN_LIFE_MINUTES = 60
+
+
+def _life_minutes(run: Run) -> float | None:
+    """MEASURED wall-clock minutes from the death-watch line, or None.
+
+    None means "this run's life is not established by the log", and every
+    caller must treat that as a reason to stay silent rather than as a reason
+    to report. There is no fallback on purpose: the only other bound available
+    here is the NEXT run's start time, which is an upper bound on how long this
+    run lived, and P7 needs a LOWER one — the question is whether the run lived
+    long enough to have taken a second reading. An upper bound can refute that
+    and can never confirm it, so a detector leaning on one would be asserting
+    exactly what it cannot see."""
+    for _ref, m in run.find(RE_DEATH):
+        mm = re.fullmatch(r"(?:(\d+)m)?(?:(\d+)s)?", m["dur"] or "")
+        if mm and (mm.group(1) or mm.group(2)):
+            return int(mm.group(1) or 0) + int(mm.group(2) or 0) / 60
+    return None
+
+
+def detect_p7(run: Run, iters: list[dict]) -> list[dict]:
+    """Sampling starvation: the sweep is the only measurement of the tree and
+    the run took it once, or barely more often than never.
+
+    The sweep costs about a second of cargo; what separates two of them is the
+    fill batch between them. When that batch is the whole frontier the period
+    is hours, so a run's whole life fits inside one or two readings — and every
+    gate that acts at a sweep boundary (batch ratchet, re-admission, crash
+    retrigger, plateau exit) gets one or two chances to fire. Measured
+    2026-08-15: gaps of 198/253 minutes in `3368-753757e6`, 243 in
+    `263217-d41a5bb5`, and single-iteration lives of 214m10s
+    (`500301-6a66bf86`) and 4h17m (`669347-cf33eae3`).
+
+    The second-order cost is why this is a census class rather than a note: a
+    fill pass that lands after the last sweep is never scored at all, so a
+    regression it caused ships to the NEXT run as that run's baseline, where it
+    reads as a starting condition instead of as damage something did.
+
+    Both arms require a MEASURED life (`_life_minutes`). Silence on a run whose
+    end the log does not record is deliberate and is the whole calibration of
+    this detector — see `P7_MIN_LIFE_MINUTES`.
+    """
+    if not iters:
+        return []
+    life = _life_minutes(run)
+    hits = []
+    if len(iters) == 1:
+        # A measured life or nothing. A run whose end the log does not record
+        # is usually one that died in setup, and those are exactly what
+        # `--min-iters` is for; reporting them as starvation buries the two
+        # runs the class was written from.
+        if life is not None and life >= P7_MIN_LIFE_MINUTES:
+            hits.append({
+                "evidence": f"ONE sweep in the whole run ({life:.0f}m of "
+                            "wall-clock) — the score is a single reading, and "
+                            "any fill pass after it left unmeasured",
+                "refs": [iters[0]["ref"]]})
+        return hits
+    if life is not None:
+        per = life / len(iters)
+        if per >= P7_MINUTES_PER_ITER:
+            hits.append({
+                "evidence": f"{len(iters)} sweep(s) in {life:.0f}m — "
+                            f"{per:.0f}m per iteration, so every "
+                            "sweep-boundary lever got at most "
+                            f"{len(iters)} chance(s) to fire",
+                "refs": [d["ref"] for d in iters[:4]]})
+    return hits
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
-             "P4": detect_p4, "P5": detect_p5, "P6": detect_p6}
+             "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
+             "P7": detect_p7}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
-    "P6": "budget lockout"}
+    "P6": "budget lockout", "P7": "sampling starvation"}
 
 
 # -------------------------------------------------------------------- report
@@ -634,7 +794,13 @@ def print_chronics(ch: dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("logs", nargs="*", type=Path)
-    ap.add_argument("--min-iters", type=int, default=2)
+    # Default 1, not 2. At 2 the census skipped exactly the runs P7 is about:
+    # a run that swept once is not "a launch that died in setup", it is a run
+    # whose whole life fit inside one iteration — and on 2026-08-15 that hid
+    # both `500301-6a66bf86` and `669347-cf33eae3`, the two most recent runs
+    # and the ones whose tree every current number describes. A launch that
+    # never reached phase-c still has 0 iterations and is still skipped.
+    ap.add_argument("--min-iters", type=int, default=1)
     ap.add_argument("--json", type=Path)
     args = ap.parse_args()
     paths = args.logs or default_logs()

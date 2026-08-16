@@ -173,7 +173,8 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            refill_max: str = "99", reset_returns: list[str] | None = None,
            retrigger=None, localize=None, escalate=None, reverse_map=None,
            fill=None, inventory: int | None = None,
-           chronic_vanished: int = 0) -> list[str]:
+           chronic_vanished: int = 0, gpu_guard: str = "0",
+           dispatch_cap: str = "0") -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
     The cargo stub reads the loop's own `iter N: running cargo test` line to
@@ -205,6 +206,22 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
 
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
+    # The flat-score GPU guard is OFF by default here, and that is a property of
+    # what a walk IS: a fixed observation sequence recorded from a run that had
+    # no guard. Left on, it would stop most replays at their second identical
+    # reading and every assertion after that point would be about a decision the
+    # recorded run never faced. A walk ABOUT the guard turns it on.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", gpu_guard)
+    # The dispatch cap is OFF here for the identical reason, and leaving it at
+    # its production default was an asymmetry rather than a decision: a walk is
+    # a fixed observation sequence recorded from runs whose iterations spent the
+    # whole frontier, so a cap that withholds part of it makes every later
+    # assertion describe a dispatch the recorded run never made. It happens to
+    # be inert today — every walk drives the one-fn frontier below, where the
+    # batch always completes the pass — which is exactly why it has to be
+    # PINNED: the first walk to widen its frontier would otherwise change replay
+    # silently. A walk ABOUT the cap sets it.
+    monkeypatch.setenv("PHASE_C_TDD_MAX_DISPATCH", dispatch_cap)
     # One-fn frontier: without a raised cap the behavioural re-fill limit
     # exhausts it two iterations in and every later iteration skips the fill
     # phase, starving the re-admission gate of the "fills landed" half of its

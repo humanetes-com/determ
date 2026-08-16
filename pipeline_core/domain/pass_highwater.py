@@ -44,11 +44,13 @@ back, so the 81-passing copy stays the best copy however far the live tree has
 fallen. This type answers "how good is the tree the loop is working on"; those
 two answer "what would we put back".
 
-Termination is unaffected. The re-base only ever follows a retrigger fire, the
-retrigger is capped per component and the component set is finite, so the number
-of re-bases in a run is bounded; and once the re-climb genuinely flattens,
-``improved`` goes false against the RE-BASED figure and the plateau exit fires on
-schedule — against a number that describes the tree it is exiting on.
+Termination is unaffected. A re-base follows one of exactly two events, and both
+are bounded: a retrigger fire, which is capped per component over a finite
+component set, and the TDD driver's durable best-tree restore, which is spent
+once per process. So the number of re-bases in a run is bounded; and once the
+re-climb genuinely flattens, ``improved`` goes false against the RE-BASED figure
+and the plateau exit fires on schedule — against a number that describes the
+tree it is exiting on.
 """
 from __future__ import annotations
 
@@ -79,13 +81,23 @@ class PassHighWater:
         return self if pass_count <= self.best else PassHighWater(
             best=pass_count, voided_at=self.voided_at)
 
-    def voided_by_restub(self, iteration: int) -> PassHighWater:
-        """Mark `best` as describing a tree the pipeline has just re-stubbed.
+    def lineage_replaced(self, iteration: int) -> PassHighWater:
+        """Mark `best` as describing a tree the pipeline has just replaced.
 
-        Called only where bodies actually went back to `unimplemented!()`. A
-        fired-but-failed retrigger attempt re-stubbed nothing and voids nothing:
-        its sweep measures the same tree as the last one, so a re-base there
-        would hand the loop a free reset of a floor it has not lost."""
+        TWO producers, and the name says neither of them specifically on
+        purpose. The first is the retrigger's re-stub, and it is called only
+        where bodies actually went back to `unimplemented!()`: a fired-but-
+        failed attempt re-stubbed nothing and voids nothing, so its sweep
+        measures the same tree as the last one and a re-base there would hand
+        the loop a free reset of a floor it has not lost. The second is the
+        durable best-tree restore in the TDD driver, which overwrites every body
+        and every layout file from `.best_tree/<cluster>`; it moves the score UP
+        rather than down, and it is still a different tree, so `best` still
+        stops describing what the loop is working on. The method was called
+        `voided_by_restub` while only the first existed, and the restore shipped
+        without calling it at all — on the argument that a higher score reads as
+        an improvement anyway, which holds against the sweep it replaces and not
+        against a monotone `best_pass`."""
         return PassHighWater(best=self.best, voided_at=iteration)
 
     def rebase_due(self, iteration: int) -> bool:

@@ -78,6 +78,7 @@ from pipeline_core.domain.layout_retrigger import (
     find_fns_referencing,
     inflight_key,
     inflight_pid_key,
+    is_mechanical_reason,
     mark_retrigger_pending,
     mechanical_budget_spent,
     mechanical_build_key,
@@ -706,18 +707,15 @@ def _settle_interrupted(
     return settled
 
 
-MECHANICAL_MARKERS = ("could not locate a frozen definition",
-                      "skeleton file unreadable",
-                      "authored blocks missing uid")
-
-
 def _is_mechanical(reason: str) -> bool:
     """Whether a failure reason describes the splice/locate infrastructure
-    rather than anything the model wrote. Two readers, one definition: the
-    attempt refund below, and the checklist filter in `_remember_rejections` —
-    they disagreed while the markers lived inside the refund branch, and the
-    checklist ended up holding entries no reply can satisfy."""
-    return any(m in reason for m in MECHANICAL_MARKERS)
+    rather than anything the model wrote. Readers, one definition: the attempt
+    refund below, the checklist filter in `_remember_rejections` — they
+    disagreed while the markers lived inside the refund branch, and the
+    checklist ended up holding entries no reply can satisfy — and the authoring
+    retry loop in `author_layout`, which is why the markers now live in
+    `domain/layout_retrigger`."""
+    return is_mechanical_reason(reason)
 
 
 def _constraint_key(reason: str) -> str:

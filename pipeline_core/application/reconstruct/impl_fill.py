@@ -1074,17 +1074,30 @@ def fill_impl_blocks(
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,
                         "banked": _bank is not None})
+                    # POSITIVE needs a test observed PASSING (see the per-fn
+                    # site for the run this cost). `_bank` is the joint route's
+                    # own positive-evidence object; its `resolved` set is the
+                    # same question asked one level up, so the ledger reads it
+                    # rather than restating the rule.
+                    _passed_f = (frozenset(_bank.resolved) if _bank is not None
+                                 else (_u2_file.self_passed
+                                       if _u2_file is not None else frozenset()))
+                    _kept_f = _crash_keep_file or _nonregr_keep_file
                     _verdict_row(
                         glabel,
-                        (Disposition.KEEP_DEFERRED
-                         if (_crash_keep_file or _nonregr_keep_file)
+                        (Disposition.KEEP_DEFERRED if _kept_f
                          else Disposition.ACCEPT),
                         ("kept on non-regression — no newly-red self-failure"
-                         if (_crash_keep_file or _nonregr_keep_file)
-                         else "accepted on own tests"),
-                        outcome=(GateOutcome.UNMEASURABLE
-                                 if (_crash_keep_file or _nonregr_keep_file)
-                                 else GateOutcome.POSITIVE),
+                         if _kept_f
+                         else f"accepted — {len(_passed_f)} attributed test(s) "
+                         "observed passing" if _passed_f
+                         else "kept — compiles, but no attributed test was "
+                         "observed passing (none were failing, or the scoped "
+                         "run was inconclusive)"),
+                        outcome=(GateOutcome.POSITIVE
+                                 if _passed_f and not _kept_f
+                                 else GateOutcome.UNMEASURABLE),
+                        evidence=tuple(sorted(_passed_f)),
                         attempt=_attempt,
                         validity=ValidityVector(binary_completed=True),
                         model_calls=_attempt, route="file")
@@ -1771,17 +1784,26 @@ def fill_impl_blocks(
                          f"(attempt {fix_attempt})"
                          + (f" — banked improvement: {_bank_impl.summary}."
                             if _bank_impl is not None else "."))
+                    _passed_i = (frozenset(_bank_impl.resolved)
+                                 if _bank_impl is not None
+                                 else (_u2_impl.self_passed
+                                       if _u2_impl is not None else frozenset()))
+                    _kept_i = _u2_external_only or _crash_keep
                     _verdict_row(
                         block_id,
-                        (Disposition.KEEP_DEFERRED
-                         if (_u2_external_only or _crash_keep)
+                        (Disposition.KEEP_DEFERRED if _kept_i
                          else Disposition.ACCEPT),
                         ("kept deferred — every failing test blocked or "
-                         "crash-evidenced" if (_u2_external_only or _crash_keep)
-                         else "accepted on own tests"),
-                        outcome=(GateOutcome.UNMEASURABLE
-                                 if (_u2_external_only or _crash_keep)
-                                 else GateOutcome.POSITIVE),
+                         "crash-evidenced" if _kept_i
+                         else f"accepted — {len(_passed_i)} attributed test(s) "
+                         "observed passing" if _passed_i
+                         else "kept — compiles, but no attributed test was "
+                         "observed passing (none were failing, or the scoped "
+                         "run was inconclusive)"),
+                        outcome=(GateOutcome.POSITIVE
+                                 if _passed_i and not _kept_i
+                                 else GateOutcome.UNMEASURABLE),
+                        evidence=tuple(sorted(_passed_i)),
                         attempt=fix_attempt,
                         validity=ValidityVector(binary_completed=True),
                         model_calls=fix_attempt)

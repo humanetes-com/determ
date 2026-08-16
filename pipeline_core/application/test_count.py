@@ -102,6 +102,7 @@ def active_test_inventory_for_cluster(
     *,
     tests_dir_stems: frozenset[str] | None = None,
     include_lib_sources: bool = False,
+    file_index: dict[str, str] | None = None,
 ) -> tuple[int, frozenset[str]]:
     """(expected_count, expected_names) over the same walk as
     `count_active_tests_for_cluster`. Names come from the typed-record path
@@ -184,6 +185,15 @@ def active_test_inventory_for_cluster(
         n, nm = _count_file(rel, text)
         total += n
         names.update(nm)
+        # Optional out-parameter: which FILE declares each test name. An
+        # out-parameter rather than a third return value because the pair
+        # `(count, names)` is destructured at a dozen call sites and in as many
+        # test fakes, and none of them wants this. First writer wins — a bare
+        # name defined in two binaries is exactly the ambiguity the anchor
+        # cannot resolve, and overwriting would make it depend on walk order.
+        if file_index is not None:
+            for n_ in nm:
+                file_index.setdefault(n_, rel)
     # 1. tests/**/*.rs — cfg-filtered per-test.
     tests_dir = project_dir / "tests"
     if tests_dir.is_dir():

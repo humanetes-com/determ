@@ -72,6 +72,14 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
 def _run(deps: PhaseCTddDeps, tmp_path: Path, monkeypatch) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")   # isolate the residual
     monkeypatch.setenv("TDD_MAX_STALLS", "3")
+    # The flat-score GPU guard would stop these runs at their second
+    # identical reading, which is exactly what it is for and exactly what
+    # this module is not about: the mechanisms under test here sit BELOW
+    # it in the same iteration (the plateau budget, the ratchet, the
+    # conviction rules), so the guard is off and their controls keep
+    # measuring what they were written to measure. `tests/test_tdd_gpu_guard.py`
+    # owns the guard itself.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "2")
     return run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
@@ -93,6 +101,8 @@ def test_refill_target_exhausts_after_cap(tmp_path: Path, monkeypatch) -> None:
 def test_refill_cap_env_raises_attempts(tmp_path: Path, monkeypatch) -> None:
     fill_calls: list[frozenset[FnLocator]] = []
     monkeypatch.setenv("TDD_MAX_STALLS", "10")   # let more iters run
+    # Guard off — see the note at the module's other driver helper.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "4")
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     run_phase_c_tdd(

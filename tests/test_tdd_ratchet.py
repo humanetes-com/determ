@@ -264,6 +264,14 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
     from pipeline_core.domain.models import BuildCluster
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
+    # The flat-score GPU guard would stop these runs at their second
+    # identical reading, which is exactly what it is for and exactly what
+    # this module is not about: the mechanisms under test here sit BELOW
+    # it in the same iteration (the plateau budget, the ratchet, the
+    # conviction rules), so the guard is off and their controls keep
+    # measuring what they were written to measure. `tests/test_tdd_gpu_guard.py`
+    # owns the guard itself.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
     (src / "a.rs").write_text("orig", encoding="utf-8")
@@ -828,6 +836,8 @@ def _run_per_iter(monkeypatch, tmp_path: Path, sweeps, events, retrigger=None,
     from pipeline_core.domain.models import BuildCluster, FnLocator
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
     monkeypatch.setenv("TDD_MAX_STALLS", kw.pop("max_stalls", "3"))
+    # Guard off — see the note at the module's other driver helper.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     # The harness frontier is one fn, so the per-locator behavioural re-fill cap
     # would exhaust it two iterations in and every later iteration would skip
     # the fill phase — starving the re-admission gate of the "fills landed"

@@ -53,7 +53,8 @@ def test_the_streak_is_judged_on_the_tail():
 
 
 def test_payoff_axes():
-    """Any single axis moving is payoff: score, crash class, or frontier."""
+    """Any single axis moving is payoff: score, crash class, or the per-binary
+    verdict vector."""
     assert paid_off(1, False, False)
     assert paid_off(0, True, False)
     assert paid_off(0, False, True)
@@ -62,3 +63,47 @@ def test_payoff_axes():
     # excluded upstream (grace sweeps are never recorded), and an undeliberate
     # drop with nothing else moving is the pathology, not progress.
     assert not paid_off(-5, False, False)
+
+
+def test_a_moving_frontier_is_not_payoff_by_itself():
+    """The counterexample the axis was changed for. Run `1064759-0f23fb68`
+    (2026-08-15/16) took its frontier 60 -> 59 -> 59 -> 30 -> 30 while six of
+    its seven sweeps carried a byte-identical per-binary vector, so every sweep
+    scored as PAYING and the detector fired 0 times across the whole 7h48m.
+    The frontier shrinks when units are judged resolved, which is bookkeeping
+    about the loop's plan, not evidence about the crate."""
+    assert not paid_off(0, False, False, True)
+
+
+def test_the_frontier_counts_only_across_the_loops_own_destruction():
+    """The one place the plan legitimately moves for a reason the loop caused:
+    a retrigger re-stubbed bodies between the two readings, so the frontier
+    HAD to change and its movement is not re-planning."""
+    assert paid_off(0, False, False, True, restub_between=True)
+    assert not paid_off(0, False, False, False, restub_between=True)
+
+
+def test_the_binary_vector_catches_what_the_score_hides():
+    """A cluster whose score is flat because one test flipped each way has
+    moved; the pass count alone cannot see it, and a producer chain closing
+    shows up here long before it shows up in the score."""
+    assert paid_off(0, False, True)
+
+
+def test_the_unpaid_streak_fires_on_a_rotating_aim():
+    """The rule a BATCHED loop needs. Run `1064759-0f23fb68` dispatched 12 of
+    59, 12 of 59, then 10 of 30 with a byte-identical per-binary vector
+    throughout: nothing was bought for five sweeps and no two of them aimed at
+    the same set, so the identity rule cannot fire."""
+    from pipeline_core.domain.zero_payoff import unpaid_streak
+    rotating = (_o(A, False), _o(B, False), _o(frozenset({"x"}), False))
+    assert zero_payoff_streak(rotating) is None, "the aims differ"
+    assert unpaid_streak(rotating) == 3
+
+
+def test_the_unpaid_streak_resets_on_any_payoff():
+    from pipeline_core.domain.zero_payoff import unpaid_streak
+    assert unpaid_streak((_o(A, False), _o(A, True), _o(A, False))) is None
+    assert unpaid_streak((_o(A, False), _o(A, False)), window=2) == 2
+    assert unpaid_streak((_o(A, False), _o(A, False))) is None, \
+        "two unpaid sweeps do not reach the default window of three"

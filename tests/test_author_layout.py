@@ -892,13 +892,21 @@ def test_the_fallback_fires_once_per_component_not_once_per_attempt():
     three attempts: two calibrations, then one apiece, with the extra
     re-decision only on attempt 1. Reading the demoted gate as still-probing
     cost a compile per attempt and wrote the same explanation three times, twice
-    about a probe region that was not in the tree."""
+    about a probe region that was not in the tree.
+
+    The E0616s name a DIFFERENT field each time on purpose. This test is about
+    compile accounting across three attempts, and the retry loop now stops when
+    a diagnostic it already answered for comes back byte-identical — scripting
+    one repeated string would end the loop at attempt 2 and quietly stop
+    measuring the per-attempt invariant this test exists for. The repeat rule
+    has its own test below."""
     oracle = {"src/error.gen_tests_1.rs":
               "let e: ErrorImpl = make();\nlet _ = e.vtable.raw;\n"}
     d = _ScriptedDeps(_GOOD, [
         (True, ""),
         (False, "error[E0609]: no field `raw` on type `u8`"),
-    ] + [(False, "error[E0616]: field `raw` of `Vtable` is private")] * 4, oracle)
+    ] + [(False, f"error[E0616]: field `raw{i}` of `Vtable` is private")
+         for i in range(4)], oracle)
     author_layout(_surface(), module_name="anyhow", public_surface="",
                   select_pins=_has_pins, symbol_inventory="", deps=d.deps())
     assert len(d.at_compile) == 6
@@ -908,3 +916,72 @@ def test_the_fallback_fires_once_per_component_not_once_per_attempt():
     assert probed == [1, 2], (
         "only the path calibration and attempt 1 carry a probe region; every "
         "compile after the demotion runs on a tree without one")
+
+
+# --- the authoring retry loop stops on failures the next attempt cannot fix ---
+
+
+def test_locate_failure_ends_the_loop_at_the_attempt_that_found_it():
+    """A frozen definition that is not in the file to be replaced is not a
+    prompting problem, and three samples of the model cannot make it one.
+
+    Run `669347-cf33eae3` (2026-08-15) spent all three attempts on each of
+    `('CastTo',)` and `('Mut', 'error_mut')` logging `could not locate a frozen
+    definition to replace: … in ptr.rs` — six authoring calls against a lookup
+    that had already reported the definition absent. The fire's mechanical
+    budget already refuses on exactly this reason, but it is consulted once per
+    FIRE and all three attempts happen underneath it."""
+    d = _Deps(_GOOD, [True, True, True])
+    # The frozen definition the surface wants replaced is not in the file.
+    d.files["src/error.rs"] = "struct Unrelated { x: u8 }\n"
+    author_layout(_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert len(d.prompts) == 1, (
+        "the locate failure is attempt-invariant, so exactly one authoring "
+        f"call may be spent on it (spent {len(d.prompts)})")
+    assert any("attempt-invariant" in ln for ln in d.logs), (
+        "the stop must say why it stopped — a silent early exit reads as a "
+        "component that was never tried")
+
+
+def test_locate_failure_burned_every_attempt_before_the_stop(monkeypatch):
+    """Negative control for the test above: with the mechanical classifier
+    blinded, the pre-fix behaviour reproduces — three model calls, one per
+    attempt, on a failure none of them can move."""
+    monkeypatch.setattr("pipeline_core.application.author_layout"
+                        ".is_mechanical_reason", lambda _r: False)
+    d = _Deps(_GOOD, [True, True, True])
+    d.files["src/error.rs"] = "struct Unrelated { x: u8 }\n"
+    author_layout(_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert len(d.prompts) == 3
+    assert not any("attempt-invariant" in ln for ln in d.logs)
+
+
+def test_a_repeated_compile_diagnostic_ends_the_loop():
+    """The model was told and wrote the same thing again.
+
+    The 34-name construct/vtable component on run `669347-cf33eae3` returned
+    `error[E0255]: the name `Backtrace` is defined multiple times` on attempt 1
+    and again on attempt 3, with the retry hint carrying it in between. The
+    per-impl fill route already stops on an identical signature and says a
+    bigger prompt re-purchases the same answer; this route did not."""
+    d = _Deps(_GOOD, [False, False, False])   # same E0308 text every compile
+    author_layout(_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert len(d.prompts) == 2, (
+        "attempt 1 records the diagnostic, attempt 2 reproduces it and stops; "
+        f"attempt 3 re-purchases it (spent {len(d.prompts)})")
+    assert any("already answered for" in ln for ln in d.logs)
+
+
+def test_a_repeated_diagnostic_burned_the_third_attempt_before_the_stop(monkeypatch):
+    """Negative control: blind the diagnostic reader and the loop runs all
+    three attempts against one unchanging compile error, as it did before."""
+    monkeypatch.setattr("pipeline_core.application.author_layout"
+                        ".first_diagnostic", lambda _t: "")
+    d = _Deps(_GOOD, [False, False, False])
+    author_layout(_surface(), module_name="anyhow", public_surface="",
+                  select_pins=_has_pins, symbol_inventory="", deps=d.deps())
+    assert len(d.prompts) == 3
+    assert not any("already answered for" in ln for ln in d.logs)

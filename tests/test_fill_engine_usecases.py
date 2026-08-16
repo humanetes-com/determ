@@ -42,13 +42,16 @@ class FakeFill:
     def __init__(self, **scripted: Any) -> None:
         self.s = scripted
         self.events: list[str] = []
+        self.event_data: list[tuple[str, dict[str, Any]]] = []
         self.logs: list[str] = []
         self.lock = threading.Lock()
 
     # EngineTelemetry
     def log(self, msg: str) -> None: self.logs.append(msg)
     def emit(self, event: str, *, duration_ms: int | None = None,
-             data: dict[str, Any] | None = None) -> None: self.events.append(event)
+             data: dict[str, Any] | None = None) -> None:
+        self.events.append(event)
+        self.event_data.append((event, data or {}))
     def check_stop(self, context: str) -> None: ...
 
     # Mutator
@@ -922,3 +925,43 @@ def test_exhaustion_summary_says_reverted_when_the_salvage_failed(
     assert not res.filled
     assert any("reverted after" in m for m in fake.logs)
     assert not any("best compiling body KEPT" in m for m in fake.logs)
+
+
+def _verdicts(fake: FakeFill) -> list[dict[str, Any]]:
+    return [d for ev, d in fake.event_data if ev == "phase_c.verdict"]
+
+
+def test_a_fill_with_no_test_observed_passing_is_not_a_positive_verdict(
+        tmp_path: Path) -> None:
+    """`U2Decision.ACCEPT` is "tests pass / gate off / inconclusive" — three
+    states, one branch. Stamping POSITIVE on all three is how run
+    `1064759-0f23fb68` (2026-08-15/16) recorded 50 successes across 7h48m in
+    which the per-binary verdict vector never changed and no test flipped."""
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run=(0, ""), regr=None)
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert res.filled
+    rows = _verdicts(fake)
+    assert rows and rows[0]["disposition"] == "accept"
+    assert rows[0]["outcome"] == "unmeasurable"
+    assert "no attributed test was observed passing" in rows[0]["reason"]
+    assert rows[0]["evidence_keys"] == []
+
+
+def test_a_fill_that_turned_a_test_green_is_positive_and_names_it(
+        tmp_path: Path) -> None:
+    """The other half: with an attributed test observed PASSING in the fill's
+    own scoped run, the row is POSITIVE and carries the name — which is what
+    makes a per-unit payoff measurable at all."""
+    from pipeline_core.domain.test_report import U2Verdict
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run=(0, ""), regr=None,
+                    u2=U2Verdict.accept(frozenset({"test_alpha"})))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert res.filled
+    rows = _verdicts(fake)
+    assert rows and rows[0]["outcome"] == "positive"
+    assert rows[0]["evidence_keys"] == ["test_alpha"]
+    assert "1 attributed test(s) observed passing" in rows[0]["reason"]

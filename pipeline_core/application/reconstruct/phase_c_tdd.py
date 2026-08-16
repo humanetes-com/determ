@@ -37,6 +37,7 @@ from pipeline_core.domain.crash_site import (
     chain_derived_site,
     crash_evidence_by_locator,
     crash_signal_hint,
+    destruction_path_subjects,
     vanish_is_stub_confounded,
     vanished_subject_fns,
 )
@@ -49,6 +50,12 @@ from pipeline_core.domain.dispatch import (
     defer_blocked_consumers,
     restrict_to_compile_blockers,
 )
+from pipeline_core.domain.dispatch_batch import (
+    DEFAULT_MAX_DISPATCH,
+    take_batch,
+)
+from pipeline_core.domain.flat_score import FlatScoreGuard, ScoreReading
+from pipeline_core.domain.graceful_stop import request_graceful_stop
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_REFILL_GRACE_MAX_ITERS,
     DEFAULT_REFILL_PER_ITER,
@@ -95,6 +102,7 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
     paid_off,
+    unpaid_streak,
     zero_payoff_streak,
 )
 
@@ -132,6 +140,13 @@ class PhaseCTddDeps:
     # cannot see the slot and every sweep may replace it — the pre-seed
     # behaviour, and what a unit test not exercising the tier wants.
     load_best_tree_mark: Callable[..., Any] | None = None
+    # Put the cluster's durable best tree back, BOTH halves:
+    # (project_dir, cluster, filled_dir) -> (bodies, layout_files, leftovers)
+    # or None when the slot cannot supply a pair. None here (or a None return)
+    # means the loop cannot take a failed re-climb back and the flat-score
+    # guard stops the run instead — the pre-restore behaviour.
+    restore_best_tree_pair: Callable[..., tuple[int, int, list[str]] | None] \
+        | None = None
     # Release the disk-persisted exhaustion verdicts whose recorded blocking
     # stubs have filled:
     # (project_dir, {file: still-stubbed fn names}, cluster) -> count.
@@ -153,6 +168,12 @@ class PhaseCTddDeps:
     # expected_names) — the cfg-aware static test inventory. None disables
     # oracle reconciliation — sweeps then trust whatever cargo reported.
     active_test_inventory: Callable[..., tuple[int, frozenset[str]]] | None = None
+    # Which FILE declares each active test name: (project_dir, cluster, stems,
+    # lib) -> {test name: rel path}. The anchor the subject-synthesis channel
+    # needs — its only other anchor is a module path, and the set it is handed
+    # is bare by construction, which is why that channel had never fired once
+    # since it shipped. None disables the anchor (the module-path parse alone).
+    test_file_index: Callable[..., dict[str, str]] | None = None
     # Crash localizer: (sweep_output, test_cmd, workspace_root, env) ->
     # tuple[CrashSite, ...] — gdb fast path + ASAN fallback. None disables
     # localization (no CRASH_EVIDENCE prompts, no crash-first frontier).
@@ -170,6 +191,13 @@ class PhaseCTddDeps:
     # frontier at what the compiler names. None disables the narrowing — a red
     # sweep then dispatches from the behavioural frontier, as it used to.
     implicated_fns: Callable[..., list[FnLocator]] | None = None
+    # Every fn the tree declares, as extractor records (`file`, `fn_name`,
+    # `body_text`, …): (src_dir) -> records | None. Read for ONE question — the
+    # crate's own destruction family, when a crash reads as a double drop and
+    # the construction chain therefore cannot contain the fault. None disables
+    # that narrowing; the chain-derived pack is then the full producer closure
+    # it always was.
+    enumerate_fns: Callable[..., list[dict[str, Any]] | None] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -274,9 +302,29 @@ def run_phase_c_tdd(
     max_stalls = deps.effective_stalls(int(os.getenv("TDD_MAX_STALLS", "3")),
                                    deps.converge_in_cluster(cluster) or module)
 
+    # The GPU protector (domain/flat_score.py). The plateau budget above charges
+    # only on a COMPLETED frontier traversal, which under the dispatch cap is
+    # ~5 iterations — run `1064759-0f23fb68` therefore stood at stall 1 of 3
+    # after 7h48m of sweeps that all read pass=79 oracle=101, and ended on an
+    # operator's SIGTERM rather than on any decision of the loop's. This guard
+    # is the other terminator: it stops the RUN before spending model calls on a
+    # score the last `window` judged sweeps have already seen `repeats` times.
+    _flat_guard = FlatScoreGuard(
+        window=int(os.getenv("TDD_FLAT_SCORE_WINDOW", "5")),
+        repeats=int(os.getenv("TDD_FLAT_SCORE_REPEATS", "2")))
+    # The previous sweep's per-binary vector and the fill count at that point,
+    # for the "N bodies landed and no test changed verdict" line below.
+    _prev_bins: list[tuple[str, int, int]] = []
+    _filled_at_prev_sweep = 0
+    # One durable-tree restore per process (see the guard's trip site).
+    _restore_spent = False
+
     deps.log(f"  {tag} [phase-c/tdd] driver=tdd, "
          f"max_stalls={max_stalls}, timeout={test_timeout}s, "
-         f"stems={len(test_stems)}")
+         f"stems={len(test_stems)}, "
+         + (f"gpu-guard={_flat_guard.repeats} repeat(s) of a reading in "
+            f"{_flat_guard.window}" if _flat_guard.enabled
+            else "gpu-guard=off"))
 
     if deps.migrate_retro_evidence is not None:
         _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
@@ -357,6 +405,32 @@ def run_phase_c_tdd(
     stall = 0
     best_pass = UNSET_PASS
     best_fail = None
+    # Dispatch batching. The sweep is the only measurement and it costs ~1s of
+    # cargo; what separated two of them was a batch of the WHOLE frontier, which
+    # put run `669347-cf33eae3` at one `phase_c.tdd.iter` in 4h17m. The cap
+    # slices the frontier so the loop looks every few units at the same model
+    # cost — see `domain/dispatch_batch.py` for the measurement and for why the
+    # cursor is a set rather than an index. 0 disables batching (pre-cap
+    # behaviour); a frontier already under the cap never notices it.
+    _dispatch_cap = int(os.getenv("PHASE_C_TDD_MAX_DISPATCH",
+                                  str(DEFAULT_MAX_DISPATCH)))
+    # Units this PASS has already handed to the engine. Cleared when a pass
+    # closes and whenever the score improves — a better tree reopens the whole
+    # frontier rather than resuming a traversal taken against the old one.
+    _pass_attempted: set[FnLocator] = set()
+    # Did the PREVIOUS iteration's batch close a pass? The sweep at the top of
+    # this iteration measures that batch's fills, and only a completed pass may
+    # charge the stall budget. True at entry so the first sweep behaves exactly
+    # as it did before batching existed.
+    _prev_pass_completed = True
+    # How many COMPLETE passes over the frontier this cluster has finished. The
+    # stall budget above needs only "did the last batch close one"; the GPU
+    # guard needs the running count, because its question is whether two
+    # identical readings are separated by a traversal or are two slices of the
+    # same one (`domain/flat_score.py`). Never reset — the window it stamps is
+    # cleared wholesale wherever the lineage changes, so a monotone counter
+    # cannot make two unrelated readings look like the same traversal.
+    _traversals = 0
     # The high-water's account of WHICH TREE it describes. A retrigger's
     # deliberate re-stub makes `best_pass` a fact about a tree the pipeline
     # deleted, and four consumers read it — see `domain/pass_highwater.py` for
@@ -475,6 +549,12 @@ def run_phase_c_tdd(
         deps.active_test_inventory(
             target_src_dir, cluster, frozenset(test_stems), _sweep_lib)
         if deps.active_test_inventory is not None else (0, frozenset()))
+    # Walked once per cluster beside the inventory, not per sweep: the same
+    # files, and the channel that reads it fires at most a handful of times.
+    _test_files: dict[str, str] = (
+        deps.test_file_index(target_src_dir, cluster, frozenset(test_stems),
+                             _sweep_lib)
+        if deps.test_file_index is not None else {})
     # Cause-C (runtime crash) retrigger: consecutive sweeps whose oracle was
     # short; at the threshold the frozen component the crashes implicate gets
     # re-authored (see the trigger block below the stall accounting).
@@ -504,8 +584,13 @@ def run_phase_c_tdd(
     # every score consumer applies). `_zp_fired_on` dedupes the log line per
     # target set — a standing condition is one line, not one per sweep.
     _zp_history: tuple[SweepOutcome, ...] = ()
-    _zp_planned: tuple[frozenset[str], int, frozenset[str]] | None = None
+    _zp_planned: tuple[
+        frozenset[str], int, frozenset[str],
+        tuple[tuple[str, int, int], ...]] | None = None
     _zp_fired_on: frozenset[str] | None = None
+    # Whether the loop destroyed work between the last judged sweep and this
+    # one — the only condition under which a moving frontier counts as payoff.
+    _zp_restub_since = False
     # One name for the window so the fire line always states the count the
     # streak was actually judged on; tuning happens in step-2 calibration.
     _zp_window = 3
@@ -545,7 +630,7 @@ def run_phase_c_tdd(
             max_iters=_grace_max_iters, granted_at=iter_n,
             vanished_at_grant=vanished_at_grant)
         if _g.restubbed:
-            _highwater = _highwater.voided_by_restub(iter_n)
+            _highwater = _highwater.lineage_replaced(iter_n)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window open for "
                  f"{_g.iters_left} iter(s) — {_g.restubbed} body(ies) re-stubbed "
                  f"at ~{_grace_per_iter} re-fill(s)/iter"
@@ -635,6 +720,55 @@ def run_phase_c_tdd(
             "cluster": cluster.name, "restubbed": _grace.restubbed,
             "files_reverted": _rev, "best_pass": _bratchet_best, "how": how,
         })
+    _final_swept = False
+
+    def _final_sweep(how: str) -> None:
+        """Score the tree the run is about to LEAVE, on the way out.
+
+        A cluster's fills are judged only at the next sweep, and a run that
+        stops between a fill pass and that sweep hands its successor a tree
+        nobody measured. Run `500301-6a66bf86` (2026-08-15) did exactly that:
+        its last sweep read `pass=39 fail=48 oracle=87` with 3 crashed
+        binaries, it then landed its behavioural re-fills, and it left on the
+        stop sentinel — `[graceful] stop sentinel detected at impl-fill pool
+        joined`, `exit=0` — with no sweep in between. Its own tail guard lines
+        already carried the damage (`already crashed at baseline` naming TEN
+        binaries), but nothing had scored it, so the batch ratchet, whose whole
+        job is that drop, never got a reading to fire on. The next run opened
+        on the result and read `pass=9 fail=94 oracle=103`.
+
+        Cheap enough to be unconditional: the sweep costs about a second
+        (`rc=101 (0.4s)`, `(1.0s)`, `(1.1s)` on the iteration lines) against the
+        hours the fill pass just spent. It DELIBERATELY does not act on what it
+        finds — no ratchet, no revert, no floor write. The tree is already being
+        abandoned and a restore here would race `_restore_abandoned_bet`, which
+        has its own rules about which tree is the right one to leave. This
+        records the number so the drop is attributable to the run that caused
+        it rather than to the one that inherits it.
+
+        Never lets a stop become a crash: a failure to measure is logged and
+        swallowed, because this runs inside the `except` on the way to `raise`
+        and must not replace the original exception."""
+        nonlocal _final_swept
+        if _final_swept:
+            return
+        _final_swept = True
+        try:
+            _rc, _out = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
+                                       timeout=test_timeout)
+            _p, _f, _ = parse_test_counts(_out)
+            deps.log(f"  {tag} [phase-c/tdd] final sweep ({how}): "
+                     f"rc={_rc} pass={_p} fail={_f} — the tree this run leaves "
+                     "behind, measured so the next one does not inherit an "
+                     "unscored fill pass.")
+            deps.emit("phase_c.tdd.final_sweep", data={
+                "cluster": cluster.name, "iter": iter_n, "rc": _rc,
+                "pass_count": _p, "fail_count": _f, "how": how,
+                "best_pass": best_pass})
+        except BaseException as _e:   # noqa: BLE001 - must not mask the stop
+            deps.log(f"  {tag} [phase-c/tdd] final sweep ({how}) could not "
+                     f"complete: {type(_e).__name__}: {_e}")
+
     def _emit_retrigger_iter(kind_: str, reverted: int) -> None:
         """Emit this iter's outcome from a retrigger path.
 
@@ -799,6 +933,10 @@ def run_phase_c_tdd(
             deps.check_auto_operator(stall, f"TDD iter {iter_n}")
         except BaseException:
             _restore_abandoned_bet("stopped at the iter boundary")
+            # The boundary sits BEFORE this iteration's sweep, so the previous
+            # iteration's fills are unmeasured here too — the same hole as the
+            # fill-pass exit, one statement earlier in the loop.
+            _final_sweep("stopped at the iter boundary")
             raise
         # The re-admission boundary decision used to run HERE, before the
         # sweep. That ordering is what let run `58819-ee78a1d1`'s iter-6
@@ -1021,6 +1159,28 @@ def run_phase_c_tdd(
         if _bins:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n} binaries: "
                      + ", ".join(f"{lbl} {p}/{f}" for lbl, p, f in _bins))
+        # THE CONTRADICTION, printed. A fill pass that landed bodies against a
+        # per-binary vector that did not move by one test is the loop's own
+        # measurement disagreeing with its own activity, and until now nothing
+        # said so on the line where both numbers are in hand: run
+        # `1064759-0f23fb68` (2026-08-15/16) landed ~70 fills across six sweeps
+        # whose vectors were byte-identical and printed no such line once.
+        # Cheap and unconditional — a sweep with nothing landed since the last
+        # one says nothing, and the grace window's own sweeps are excluded
+        # because a re-stub is expected to move the vector down.
+        _landed_since = total_filled - _filled_at_prev_sweep
+        if (_prev_bins and _bins == _prev_bins and _landed_since > 0
+                and not _grace.bodies_in_flight):
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: {_landed_since} "
+                "body(ies) landed since the last sweep and NO test changed "
+                "verdict — the per-binary vector is byte-identical. The fills "
+                "compile and are kept; on this evidence they bought nothing.")
+            deps.emit("phase_c.tdd.no_verdict_moved", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "filled_since": _landed_since,
+                "pass_count": pass_count})
+        _prev_bins, _filled_at_prev_sweep = _bins, total_filled
         if rc == 0 and not _oracle.intact:
             # cargo says green but part of the expected oracle never reported —
             # a shrunken suite must not close the cluster. Fall through to the
@@ -1161,8 +1321,14 @@ def run_phase_c_tdd(
         # pass_count — "higher is better" here, so NO negation). record()
         # updates the floor + stall streak; mirror them into the scalars the
         # log/emit lines below read.
+        _stalls_before_record = state.stalls
         state.record(Attempt(metric=float(pass_count), iteration=state.iteration,
                               improved=improved, note=_regr_note))
+        # An improvement reopens the frontier: the traversal in progress was
+        # planned against a worse tree, and the units it had already spent are
+        # worth re-offering now that the evidence moved.
+        if improved:
+            _pass_attempted.clear()
         # `best_metric` is -inf until some iter improves, and a compile-broken
         # sweep no longer does — so a cluster whose FIRST sweep cannot build
         # keeps the loop's own initial floor instead of overflowing on
@@ -1202,6 +1368,21 @@ def run_phase_c_tdd(
                 "restubbed": _grace.restubbed,
             })
         stall = state.stalls
+        # FOURTH consumer of "have the last N iterations of fills failed to move
+        # the score", and the one the dispatch cap creates. With the frontier
+        # sliced, an iteration attempts only part of it, so a non-improving sweep
+        # that followed a MID-PASS batch has not yet run the fills the question
+        # is about. Charging it would fire the plateau exit (frontier/cap) times
+        # sooner in wall-clock than the uncapped loop — converting the sampling
+        # defect the cap exists to fix into a premature-exit one. Charge only
+        # after a completed traversal; the streak is restored, not zeroed, so a
+        # genuine plateau still closes at `max_stalls` completed passes.
+        if not improved and not _prev_pass_completed:
+            state.stalls = _stalls_before_record
+            stall = _stalls_before_record
+            deps.emit("phase_c.tdd.stall_not_charged_midpass", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count, "stall": stall})
         if _grace.bodies_in_flight:
             # THIRD consumer of the re-stub's depressed count, and the one that
             # bites only once the window can outlive the stall budget (16 iters
@@ -1256,6 +1437,28 @@ def run_phase_c_tdd(
             })
             state.stalls = 0
             stall = 0
+        # GPU protector, half 1 of 2 — RECORD here, TRIP at the dispatch site.
+        # Split on purpose: this is the only place that holds all three reasons
+        # a reading cannot judge the last dispatch (grace window, shrinking stub
+        # set, a tree that did not compile), while the decision belongs
+        # immediately before the model calls are spent — so an iteration that
+        # ends in a retrigger's `continue` still puts its reading in the window
+        # but never has the run stopped out from under an escape that had not
+        # taken its turn yet. On the recorded run that ordering is worth 6.4 GPU
+        # hours: iters 1 and 3 both read 79/101 and both left through a crash
+        # retrigger, so the window is already at two by iter 4's dispatch.
+        _flat_excuse = (
+            "a re-fill grace window is open — the reading measures the "
+            "retrigger's re-stub" if _grace.bodies_in_flight
+            else "the sweep did not compile — a 0 nothing ran for is not a "
+            "measurement" if _sweep_compile_broke
+            else f"the tree is still filling ({_stubs_prev} -> "
+            f"{len(_stub_keys)} stub(s))"
+            if _stubs_prev >= 0 and len(_stub_keys) < _stubs_prev
+            else "")
+        _flat_reading = ScoreReading(pass_count, _measure.oracle_size)
+        _flat_guard = (_flat_guard.excused() if _flat_excuse
+                       else _flat_guard.observed(_flat_reading, _traversals))
         _stubs_prev = len(_stub_keys)
 
         # The re-admission baseline starts at a sentinel any score beats, so
@@ -1495,7 +1698,8 @@ def run_phase_c_tdd(
                     if _vanish_streak >= 1:
                         for _loc, _tsts in vanished_subject_fns(
                                 frozenset(_oracle.vanished),
-                                test_reverse_map).items():
+                                test_reverse_map,
+                                test_files=_test_files).items():
                             _synth = (
                                 f"Test(s) {', '.join(sorted(_tsts))} VANISH "
                                 "from the sweep (their binary crashes with "
@@ -1886,20 +2090,71 @@ def run_phase_c_tdd(
                      or (_oracle.vanished
                          and not _grace.explains_vanish(_oracle.vanished)))
                 and deps.escalate_to_producers is not None):
+            # WHICH TESTS the chain is derived from. The oracle's vanished set
+            # and "the test the binary was running when it died" are different
+            # questions, and on run `1064759-0f23fb68` they had no answer in
+            # common: `vanished` was `test_large_alignment` +
+            # `test_no_backtrace_fallback` (the two names the oracle could
+            # prove missing) while every site named `test_drop` — the one test
+            # whose chain actually holds the fault. The site's name is dropped
+            # by the oracle for a good reason (its bare name also exists in a
+            # surviving binary, so it is not provably missing) and that reason
+            # says nothing about its value as a crash subject. This block's own
+            # docstring above works the example through `test_drop`; until now
+            # the derivation could not see it.
+            _chain_from = frozenset(_oracle.vanished) | frozenset(
+                s.test_name for s in _unattributed_sites if s.test_name)
             _chain_fns: set[FnLocator] = set(_suspects)
-            for _vt in sorted(_oracle.vanished):
+            for _vt in sorted(_chain_from):
                 _bare = _vt.split("::")[-1]
                 _units = {FnLocator(*_k) for _k in
                           (test_reverse_map.get(_bare)
                            or test_reverse_map.get(_vt) or set())}
                 _chain_fns.update(
                     deps.escalate_to_producers(src_dir, _vt, _units))
+            # DOUBLE DROP: narrow to the destruction family instead of widening.
+            # A construction chain is the set of fns that BUILD the value, and
+            # this fault class is a value destroyed twice — the culprit is on
+            # the teardown path, which no producer escalation reaches. Measured
+            # on the same run: the chain named 50 fns, nearly the whole crate,
+            # and the only member of the drop family among them was
+            # `Error::drop`; `object_drop_front` — whose body was `object_drop`
+            # with a second parameter it never read — was never dispatched once
+            # in 7h48m. Replacing rather than unioning is the point: a 50-fn
+            # evidence pack aims at nothing, and the loop spent the night
+            # re-filling it.
+            _destruction = next((s.destruction for s in _unattributed_sites
+                                 if s.destruction is not None), None)
+            _dsubjects: frozenset[FnLocator] = frozenset()
+            if _destruction is not None and deps.enumerate_fns is not None:
+                _dsubjects = destruction_path_subjects(
+                    deps.enumerate_fns(target_src_dir) or [])
+            if _dsubjects:
+                deps.log(
+                    f"  {tag} [phase-c/crash] iter {iter_n}: the report reads "
+                    f"as a DOUBLE DROP ({_destruction.freed_type if _destruction else '?'} "
+                    f"freed at {_destruction.free_site if _destruction else '?'}, "
+                    f"touched at {_destruction.access_site if _destruction else '?'}) "
+                    f"— narrowing the chain from {len(_chain_fns)} construction "
+                    f"fn(s) to the {len(_dsubjects)} fn(s) of this crate's own "
+                    "destruction family, which a producer escalation cannot "
+                    "reach: " + ", ".join(f"{k.file}::{k.fn_name}"
+                                          for k in sorted(_dsubjects)))
+                deps.emit("phase_c.crash.destruction_narrowed", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "freed_type": _destruction.freed_type if _destruction else "",
+                    "free_site": _destruction.free_site if _destruction else "",
+                    "access_site": _destruction.access_site if _destruction else "",
+                    "chain_count": len(_chain_fns),
+                    "subjects": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _dsubjects)})
+                _chain_fns = set(_dsubjects)
             _chain_frontier = deps.filter_test_targets(
-                {k: set(_oracle.vanished) for k in _chain_fns}, src_dir)
+                {k: set(_chain_from) for k in _chain_fns}, src_dir)
             _chain_sites = [chain_derived_site(
                 s.binary_label, s.test_name, s.signal,
                 sorted(_chain_frontier),
-                derived_from_tests=sorted(_oracle.vanished),
+                derived_from_tests=sorted(_chain_from),
                 raw_report=s.raw_report) for s in _unattributed_sites]
             _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
             _chain_keys = frozenset(_chain_texts)
@@ -2140,55 +2395,244 @@ def run_phase_c_tdd(
             _score_grace(iter_n)
             continue
 
+        # The batch is decided BEFORE the guard, and committed after it. Two
+        # reasons, both about honesty at the stop: the stop line has to name
+        # what it declined to spend (`len(eligible)` is the frontier, and under
+        # the cap the next dispatch is at most `PHASE_C_TDD_MAX_DISPATCH` of
+        # it), and the traversal cursor must not advance on an iteration that
+        # never dispatched. `take_batch` is pure, so computing it early costs
+        # nothing and changes nothing.
         ordered = deps.order_frontier(eligible, leaf_counts)
-        frontier_keys = {key for key, _ in ordered}
+        _batch = take_batch([key for key, _ in ordered], _pass_attempted,
+                            _dispatch_cap)
+
+        # GPU protector, half 2 of 2 — the only thing below this line that costs
+        # GPU is the dispatch, and this reading says the last one bought nothing
+        # the crate can show. Deliberately NOT a plateau exit: no unit is
+        # convicted, no exhaustion flag is written, no tree is restored and
+        # `pipeline_state.md` still reads `current: task2a`, because the guard
+        # judges the SPEND, not the units — a conviction written here would
+        # travel to the next run as evidence nobody produced. It stops the whole
+        # run rather than this cluster: a plateau exit hands control to the merge
+        # and the merged-tree fill, which spend the GPU this exists to protect.
+        # `request_graceful_stop` sets the process-wide event the operator's
+        # sentinel sets, so the exit that follows is the one every worker pool
+        # already knows how to take.
+        if not _flat_excuse and _flat_guard.trips_on(_flat_reading, _traversals):
+            # BEFORE stopping: is there a better tree on disk that this run has
+            # not tried? A flat reading is the loop saying its re-climb has
+            # failed, and the durable mark is the one number that survives the
+            # process boundary the re-base destroys — every instance of this
+            # crossed one, and four consecutive runs each re-derived a baseline
+            # from the tree they inherited. Measured over runs
+            # `1082156-4da4faf7` → `669347-cf33eae3` (2026-08-14/15): a
+            # retrigger traded a reproducible 79/101 for two tests that have
+            # never passed in any run, eight of the next twelve scored sweeps
+            # read exactly 39, and no mechanism could take the 79 back.
+            #
+            # Once per process. A restore that does not help must not become a
+            # loop, and the guard behind it still stops the run on the sweep
+            # after — with the restored tree in place, which is the better
+            # place to stop.
+            _mark_now = (deps.load_best_tree_mark(project_dir, cluster.name)
+                         if deps.load_best_tree_mark is not None else None)
+            if (not _restore_spent and deps.restore_best_tree_pair is not None
+                    and _mark_now is not None
+                    and _mark_now.pass_count > pass_count):
+                _restored = deps.restore_best_tree_pair(
+                    project_dir, cluster.name, target_src_dir)
+                if _restored is not None:
+                    _restore_spent = True
+                    _bodies, _layout_n, _leftover = _restored
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: the re-climb "
+                        f"failed — this sweep reads {_flat_reading} for the "
+                        f"{_flat_guard.repeated(_flat_reading)}(nd/rd) time "
+                        f"and the durable mark is {_mark_now.pass_count}/"
+                        f"{_mark_now.oracle_size}. RESTORING that tree "
+                        f"({_bodies} body file(s) + {_layout_n} layout "
+                        "file(s), the pair). THE COST, stated: every fill "
+                        "landed since the mark is discarded"
+                        + (f"; {len(_leftover)} file(s) present here and not "
+                           f"in the snapshot are left in place ({_leftover[:3]})"
+                           if _leftover else "")
+                        + ". The guard is now spent for this process: if the "
+                        "restored tree also goes flat, the run stops.")
+                    deps.emit("phase_c.tdd.best_tree_restored", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "pass_count": pass_count,
+                        "oracle_size": _measure.oracle_size,
+                        "mark_pass": _mark_now.pass_count,
+                        "mark_oracle": _mark_now.oracle_size,
+                        "bodies": _bodies, "layout_files": _layout_n,
+                        "leftovers": _leftover[:20]})
+                    # Every consumer of the score, told in the same breath —
+                    # the tree under all of them was just replaced. The guard's
+                    # window holds readings of a tree that no longer exists;
+                    # the convictions in `permanently_exhausted` were earned
+                    # against bodies that are gone; the stub set is the old
+                    # tree's; the traversal in progress was planned against it.
+                    #
+                    # AND THE HIGH-WATER, which an earlier version of this block
+                    # argued needed no reset because "the restored tree scores
+                    # HIGHER, so they read an improvement". That is true against
+                    # THIS sweep — the branch is guarded on
+                    # `_mark_now.pass_count > pass_count` — and not against
+                    # `best_pass`, which is a monotone maximum. Where a
+                    # retrigger re-based first (79 → re-stub → 32 → 39 → restore)
+                    # it happens to hold; where the drop was an ordinary
+                    # regression (79 → 75 → 75 → restore) the post-restore sweep
+                    # reads 79 against a `best_pass` of 79, so `improved` is
+                    # False, `readmission_warranted`'s
+                    # `best_metric > metric_at_last_reset` is unsatisfiable, and
+                    # the loop sits in the deadlock `domain/pass_highwater.py`
+                    # exists to prevent. A restore is a deliberate replacement of
+                    # the lineage exactly as a re-stub is, so it is recorded the
+                    # same way and the next sweep re-bases through the one path
+                    # every consumer already reads.
+                    _highwater = _highwater.lineage_replaced(iter_n)
+                    _flat_guard = FlatScoreGuard(
+                        window=_flat_guard.window, repeats=_flat_guard.repeats)
+                    permanently_exhausted.clear()
+                    _stubs_prev = -1
+                    _pass_attempted = set()
+                    _prev_pass_completed = True
+                    _zp_history, _zp_planned, _zp_fired_on = (), None, None
+                    continue
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: GPU_GUARD_STOP — this "
+                f"sweep reads {_flat_reading}, which the last "
+                f"{len(_flat_guard.readings)} judged sweep(s) have already "
+                f"produced {_flat_guard.repeated(_flat_reading)} time(s): "
+                f"{_flat_guard.render(_flat_reading)}"
+                + (f"; {_flat_guard.gap} sweep(s) in between were not judged "
+                   "(grace window / still filling / red build)"
+                   if _flat_guard.gap else "")
+                + f". {_traversals} completed traversal(s) of this frontier "
+                "stand behind that reading. Stopping the RUN before "
+                f"dispatching {_batch.rendered} — the batch it was about to "
+                "spend, out of the frontier it was drawn from. Nothing is "
+                "convicted and every fill is on disk — `bash continue.sh` "
+                "resumes here.")
+            deps.emit("phase_c.tdd.flat_score_stop", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count,
+                "oracle_size": _measure.oracle_size,
+                "repeats": _flat_guard.repeated(_flat_reading),
+                "limit": _flat_guard.repeats,
+                "window": _flat_guard.window,
+                "skipped": _flat_guard.gap,
+                "readings": [[o.reading.pass_count, o.reading.oracle_size,
+                              o.traversal] for o in _flat_guard.readings],
+                "traversals": _traversals,
+                "frontier_size": len(eligible),
+                "withheld_dispatch": len(_batch.keys),
+            })
+            deps.emit("phase_c.tdd.iter", data={
+                **_prov,
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": len(eligible), "kind": "flat_score_stop",
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
+            })
+            request_graceful_stop()
+            break
+
+        # COMMIT the batch decided above. The slice keeps the ranking untouched
+        # — it is a prefix of what this pass has not attempted yet — so a unit's
+        # dispatch ORDER is what it always was; only the point at which the loop
+        # stops to measure moves. The cursor advances here and not at the
+        # decision, so an iteration that stopped or restored above leaves the
+        # traversal exactly where it found it.
+        _pass_attempted = (set() if _batch.completes_pass
+                           else _pass_attempted | set(_batch.keys))
+        _prev_pass_completed = _batch.completes_pass
+        if _batch.completes_pass:
+            _traversals += 1
+        frontier_keys = set(_batch.keys)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
              f"oracle={_measure.oracle_size} "
              f"(improved={improved}, stall={stall}/{max_stalls}); "
              f"frontier={len(eligible)} fn(s) ({kind}), "
-             f"{skipped_perm} skipped as exhausted.")
+             f"{skipped_perm} skipped as exhausted; "
+             f"dispatching {_batch.rendered}.")
         deps.emit("phase_c.tdd.iter", data={
                 **_prov,
             "cluster": cluster.name, "iter": iter_n, "rc": rc,
             "frontier_size": len(eligible), "kind": kind,
             "pass_count": pass_count, "fail_count": fail_count,
             "improved": improved, "stall": stall,
+            "dispatched": len(_batch.keys),
+            "pass_completed": _batch.completes_pass,
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
         })
 
         # Shadow zero-payoff reading: judge what the PREVIOUS sweep's dispatch
         # bought, then record this sweep's plan. Grace sweeps neither judge
         # nor plan — their deltas measure the retrigger's deliberate re-stub.
-        _zp_targets = frozenset(f"{k[0]}::{k[1]}" for k in frontier_keys)
+        # The AIM, not the slice. This was built from `frontier_keys` — the
+        # dispatched BATCH — which under a dispatch cap rotates every sweep, so
+        # the identity rule below could not hold three sweeps running no matter
+        # how stuck the loop was. `eligible` is what the sweep decided to go
+        # after; the batch is only how much of it fits in one iteration.
+        _zp_targets = frozenset(f"{k.file}::{k.fn_name}" for k in eligible)
         _zp_vanished = frozenset(_oracle.vanished)
+        # The per-binary verdict vector, which is the axis that survives a
+        # frontier the loop is busily re-planning: unchanged exactly when no
+        # test anywhere took a different verdict. Six of run
+        # `1064759-0f23fb68`'s seven sweeps carried a byte-identical one.
+        _zp_bins = tuple((lbl, p, f) for lbl, p, f in _bins)
         if _grace.bodies_in_flight:
             _zp_planned = None
+            # The loop deleted work on purpose since the last judged sweep, so
+            # the NEXT judged sweep's frontier move is the loop's own doing and
+            # is allowed to count. Anywhere else it is re-planning.
+            _zp_restub_since = True
         else:
             if _zp_planned is not None:
-                _p_targets, _p_pass, _p_vanished = _zp_planned
+                _p_targets, _p_pass, _p_vanished, _p_bins = _zp_planned
                 _zp_history = (*_zp_history[-7:], SweepOutcome(
                     targets=_p_targets,
                     paid=paid_off(pass_count - _p_pass,
                                   _zp_vanished != _p_vanished,
-                                  _zp_targets != _p_targets)))
+                                  _zp_bins != _p_bins,
+                                  _zp_targets != _p_targets,
+                                  restub_between=_zp_restub_since)))
                 _zp_hit = zero_payoff_streak(_zp_history, window=_zp_window)
-                if _zp_hit is not None and _zp_hit != _zp_fired_on:
-                    _zp_fired_on = _zp_hit
+                # Two rules, one report. The strict one asks whether the loop
+                # re-aimed at the IDENTICAL set and got nothing; the loose one
+                # asks only whether it got nothing, because a capped dispatch
+                # rotates its slice and can stand still for hours without ever
+                # repeating an aim exactly.
+                _zp_unpaid = unpaid_streak(_zp_history, window=_zp_window)
+                _zp_now = _zp_hit if _zp_hit is not None else (
+                    _zp_targets if _zp_unpaid is not None else None)
+                if _zp_now is not None and _zp_now != _zp_fired_on:
+                    _zp_fired_on = _zp_now
+                    _zp_rule = ("the identical "
+                                f"{len(_zp_now)}-fn frontier"
+                                if _zp_hit is not None
+                                else f"a rotating slice of a {len(_zp_now)}-fn "
+                                "frontier")
                     deps.log(
-                        f"  {tag} [phase-c/zero-payoff] SHADOW: {_zp_window} "
-                        f"judged sweep(s) dispatched the identical "
-                        f"{len(_zp_hit)}-fn frontier and none bought pass, "
-                        "crash-class or frontier movement — the "
+                        f"  {tag} [phase-c/zero-payoff] SHADOW: "
+                        f"{_zp_unpaid or _zp_window} judged sweep(s) "
+                        f"dispatched {_zp_rule} and none moved the pass "
+                        "count, the crash class or any test's verdict — the "
                         "class-general stall condition (scripts/"
                         "pattern_census.py). Shadow mode: logged, no action.")
                     deps.emit("phase_c.tdd.zero_payoff_shadow", data={
                         "cluster": cluster.name, "iter": iter_n,
-                        "targets": sorted(_zp_hit)[:40],
-                        "target_count": len(_zp_hit)})
-                elif _zp_hit is None:
+                        "targets": sorted(_zp_now)[:40],
+                        "target_count": len(_zp_now),
+                        "rule": ("identical_aim" if _zp_hit is not None
+                                 else "unpaid_streak"),
+                        "unpaid_sweeps": _zp_unpaid or 0})
+                elif _zp_now is None:
                     _zp_fired_on = None
-            _zp_planned = (_zp_targets, pass_count, _zp_vanished)
+            _zp_planned = (_zp_targets, pass_count, _zp_vanished, _zp_bins)
+            _zp_restub_since = False
 
         # Re-fill targets this iter = frontier fns already filled at iter start
         # (not stubs) → the engine will behaviorally re-fill them.
@@ -2212,7 +2656,16 @@ def run_phase_c_tdd(
                 leaf_name_counts=leaf_counts,
                 fr_path=fr_path,
                 tdd_frontier_keys=frontier_keys,
-                tdd_frontier_tests=FailureFrontier.build(eligible, convicting),
+                # Both projections are built from the BATCH, not from `eligible`.
+                # `FailureFrontier` exists so dispatch and conviction can never
+                # drift apart; handing it the full frontier while the keys are
+                # capped would reintroduce that drift at the one seam the type
+                # was written to close — and a unit convicted by tests it was
+                # never dispatched against is the fatal direction its own
+                # docstring names.
+                tdd_frontier_tests=FailureFrontier.build(
+                    {k: t for k, t in eligible.items() if k in frontier_keys},
+                    convicting),
                 tdd_test_cmd=test_cmd,     # Plan 10 U2: scoped cluster test cmd
                 skip_end_pass_test=True,
                 crash_evidence=crash_texts or None,
@@ -2221,6 +2674,7 @@ def run_phase_c_tdd(
             )
         except BaseException:
             _restore_abandoned_bet("stopped during the fill pass")
+            _final_sweep("stopped during the fill pass")
             raise
         total_filled += sub.fns_filled
         total_attempts += sub.attempts

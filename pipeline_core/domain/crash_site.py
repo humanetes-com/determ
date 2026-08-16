@@ -102,6 +102,77 @@ def authorable_frames(
                  if not is_gen_tests_sibling_name(f.file_rel.rsplit("/", 1)[-1]))
 
 
+# A drop is running when the symbol is a `Drop::drop` impl, the compiler's drop
+# glue, or `drop_in_place`. Matched on the DEMANGLED symbol, which is what ASAN
+# prints for a Rust binary built with debuginfo.
+_DROP_SYMBOL_MARKS = (
+    "as core::ops::drop::Drop>::drop",
+    "core::ptr::drop_glue",
+    "core::ptr::drop_in_place",
+)
+# Frames from the toolchain's own sources, which name no body anyone can change.
+_TOOLCHAIN_PATH_MARKS = ("/rustc/", "/compiler-rt/", "/library/", "<unknown>")
+# Ownership-transfer primitives. A body holding one of these is a place where a
+# value's owner changes without the type system tracking it, which is the whole
+# vocabulary of a double drop: `ptr::read` copies an owner, `Box::from_raw`
+# creates one, `mem::forget`/`ManuallyDrop` suppress one. The crate's own
+# `object_drop_front` on 2026-08-16 was `Box::from_raw` with no `ManuallyDrop` —
+# `object_drop` with a second parameter it never read.
+_OWNERSHIP_PRIMITIVES = (
+    "ptr::read", "from_raw", "mem::forget", "ManuallyDrop", "transmute",
+    "into_raw", "as_ptr", "cast::<",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DestructionFault:
+    """A use-after-free whose FREE and whose ACCESS are both a DROP: the same
+    allocation was dropped twice.
+
+    Why this reading is worth extracting when the frame filter has already
+    given up: it is derived from the frames the filter DISCARDS. Run
+    `1064759-0f23fb68` (2026-08-15/16) localized `heap-use-after-free` in
+    `tests/test_downcast.rs::test_drop` on all seven sweeps and blamed NOBODY
+    every time, because no frame in either stack is in `src/` — and yet the
+    report is unambiguous about what happened:
+
+        freed by thread T5 here:
+          #5 <alloc::sync::Arc<Atomic<bool>> as Drop>::drop  alloc/src/sync.rs
+          #6 test_downcast::test_drop      tests/test_downcast.rs:83:5
+        use:
+          #2 <alloc::sync::Arc<Atomic<bool>> as Drop>::drop  alloc/src/sync.rs
+          #4 core::ptr::drop_glue::<test_downcast::drop::Flag>
+          #5 test_downcast::test_drop      tests/test_downcast.rs:85:1
+
+    Two drops of one `Arc`, two source lines apart, in a test that holds two
+    handles and should therefore free at neither. Nothing in the crate appears
+    in either stack — the fault is a MISSING call (`ManuallyDrop`, `forget`),
+    and an absence has no frame. That is why waiting for an in-crate frame
+    waits for ever on this class, and why the fault must be read from the
+    shape of the two stacks instead.
+
+    `freed_type` is what was dropped, `free_site`/`access_site` are the two
+    source positions. All three go into the prompt: they say WHICH value is
+    double-owned, which is the one thing the crate's own frames cannot."""
+
+    freed_type: str
+    free_site: str
+    access_site: str
+
+    def render(self) -> str:
+        return (
+            f"DOUBLE DROP: `{self.freed_type}` is dropped twice — freed at "
+            f"{self.free_site}, then touched again by drop glue at "
+            f"{self.access_site}. Both drops run in test code, so no crate "
+            "frame appears in either stack: the defect is a value this crate "
+            "hands to a SECOND owner without giving up the first (a vtable "
+            "drop that also drops a payload another path has already read out, "
+            "a missing `ManuallyDrop`/`mem::forget` after a `ptr::read`, a "
+            "`Box::from_raw` on memory something else still owns). Look for "
+            "the fn that transfers ownership of this value and does not "
+            "suppress the original owner's drop.")
+
+
 @dataclass(frozen=True, slots=True)
 class CrashSite:
     """A localized binary crash: which test was in flight, what signal, the
@@ -137,6 +208,17 @@ class CrashSite:
     chain_blamed: tuple[FnLocator, ...] = ()
     # The tests the chain was derived from, for rendering.
     chain_tests: tuple[str, ...] = ()
+
+    @property
+    def destruction(self) -> DestructionFault | None:
+        """The double-drop reading of `raw_report`, when it supports one.
+
+        A property rather than a constructor argument because every site that
+        carries a report can answer it and a reading a caller has to remember
+        to pass is one that goes missing at whichever construction site nobody
+        updated — the localizer builds sites through `site_from_frames`, the
+        driver through `chain_derived_site`, and the tests directly."""
+        return read_destruction_fault(self.raw_report)
 
     @property
     def is_memory_fault(self) -> bool:
@@ -286,6 +368,11 @@ class CrashSite:
             "types, paying attention to every place it moves, clones, casts "
             "or forgets an owned pointer or a reference count.",
         ]
+        if self.destruction is not None:
+            # Read from the two stacks the frame filter discards, so it is the
+            # one statement here that names a concrete VALUE rather than a
+            # class of mistake. It goes above the raw report, which is long.
+            lines.insert(2, self.destruction.render())
         if self.raw_report:
             lines.append(
                 "The detector's own report (std frames included — they show "
@@ -508,6 +595,164 @@ def origin_stack_text(report: str, *, max_frames: int = 8) -> str:
     return "\n".join(keep) if len(keep) > 1 else ""
 
 
+def _asan_first_report(report: str) -> list[str]:
+    """Lines of the FIRST ASAN error report, header through `SUMMARY:`.
+
+    Scoped exactly as `parse_asan_report` is, and for the same reason: a
+    sanitized run also emits LeakSanitizer reports, whose allocation stacks
+    would otherwise be read as this fault's."""
+    out: list[str] = []
+    started = False
+    for raw in report.splitlines():
+        line = raw.strip()
+        if not started:
+            if "ERROR: AddressSanitizer:" in line:
+                started = True
+                out.append(line)
+            continue
+        out.append(line)
+        if line.startswith("SUMMARY:"):
+            break
+    return out
+
+
+def _drop_symbol_type(symbol: str) -> str:
+    """The type being dropped, from a drop symbol; "" when it is not one.
+
+    `<alloc::sync::Arc<X> as core::ops::drop::Drop>::drop` -> `alloc::sync::Arc<X>`
+    `core::ptr::drop_glue::<test_downcast::drop::Flag>`    -> `test_downcast::drop::Flag`
+    """
+    if " as core::ops::drop::Drop>" in symbol:
+        return symbol.split(" as core::ops::drop::Drop>", 1)[0].lstrip("<").strip()
+    for mark in ("core::ptr::drop_glue::<", "core::ptr::drop_in_place::<"):
+        if mark in symbol:
+            tail = symbol.split(mark, 1)[1]
+            return tail.rsplit(">", 1)[0].strip()
+    return ""
+
+
+def _authored_site(frames: list[dict[str, object]]) -> str:
+    """`file:line` of the innermost frame that is NOT toolchain source — the
+    position a human or a model can actually open."""
+    for rec in frames:
+        f = str(rec.get("file") or "")
+        if not f or any(m in f for m in _TOOLCHAIN_PATH_MARKS):
+            continue
+        tail = "/".join(f.rsplit("/", 2)[-2:]) if "/" in f else f
+        line = rec.get("line")
+        return f"{tail}:{line}" if isinstance(line, int) and line else tail
+    return ""
+
+
+def read_destruction_fault(report: str) -> DestructionFault | None:
+    """The double-drop reading of an ASAN report, or None.
+
+    Requires a use-after-free (a use-after-RETURN is a stack-lifetime error,
+    a different fault class with a different remedy) whose access stack AND
+    whose free stack each run through a drop. Anything less is not this
+    reading and must produce None rather than a weaker guess: this text goes
+    into a prompt as a statement of fact."""
+    lines = _asan_first_report(report)
+    if not lines or "use-after-free" not in lines[0]:
+        return None
+    access: list[dict[str, object]] = []
+    freed: list[dict[str, object]] = []
+    target: list[dict[str, object]] | None = access
+    for line in lines[1:]:
+        if line.startswith("SUMMARY:"):
+            break
+        if line.startswith("#"):
+            rec = _parse_asan_frame_line(line)
+            if rec is not None and target is not None:
+                target.append(rec)
+            continue
+        low = line.lower()
+        if "freed by" in low:
+            target = freed if not freed else None
+        elif line.endswith("here:") or "is located" in low:
+            target = None
+    if not access or not freed:
+        return None
+
+    def _dropped(frames: list[dict[str, object]]) -> str:
+        for rec in frames:
+            sym = str(rec.get("func") or "")
+            if any(m in sym for m in _DROP_SYMBOL_MARKS):
+                return _drop_symbol_type(sym) or sym
+        return ""
+
+    freed_type = _dropped(freed)
+    if not freed_type or not _dropped(access):
+        return None
+    return DestructionFault(
+        freed_type=freed_type,
+        free_site=_authored_site(freed) or "unknown",
+        access_site=_authored_site(access) or "unknown")
+
+
+def _is_authorable_file(file_rel: str) -> bool:
+    """Whether a fill may rewrite this file at all: crate source, and not one
+    of the pipeline's own generated test siblings.
+
+    The same rule `authorable_frames` applies to frames, applied to records —
+    and it is not theoretical here. Enumerated over the live anyhow cluster
+    tree on 2026-08-16, the drop-name rule below matches `tests/drop/mod.rs::
+    drop`, `tests/test_downcast.rs::test_drop` and `tests/test_repr.rs::
+    test_drop` beside the five real ones, and a subject naming a test file is
+    the defect 173.1 shipped a filter for: no fill writes a test, so the key
+    lands in the frontier and buys a dispatch that cannot change anything."""
+    return (file_rel.startswith("src/")
+            and not is_gen_tests_sibling_name(file_rel.rsplit("/", 1)[-1]))
+
+
+def destruction_path_subjects(
+    fn_records: Iterable[Mapping[str, object]],
+    *, max_subjects: int = 12,
+) -> frozenset[FnLocator]:
+    """The crate's OWN destruction/ownership-transfer family, from extractor
+    records (`file`, `fn_name`, `body_text`).
+
+    Two rules, in this order, because the second is a heuristic and the first
+    is not:
+
+    1. a fn whose bare name carries `drop` as a token (`drop`, `object_drop`,
+       `object_drop_front`, `context_chain_drop_rest`) — the crate declared
+       those names, so this is reading the crate's own vocabulary, not
+       guessing at one;
+    2. if and only if rule 1 finds nothing, a fn whose BODY holds an
+       ownership-transfer primitive.
+
+    Rule 2 is second on purpose. A name-token match on the wrong set is this
+    project's recurring collapse, so the body evidence is the fallback for a
+    crate that does not name its drop family `drop`, never a widening of a set
+    that already resolved.
+
+    A result wider than `max_subjects` contributes NOTHING, on
+    `vanished_subject_fns`' precedent: the point is a subject, and a subject
+    that names half the crate names none of it. On the live anyhow tree rule 1
+    yields five — `Error::drop`, `object_drop`, `object_drop_front`,
+    `context_drop_rest`, `context_chain_drop_rest` — against the 50 fns the
+    construction chain named on 2026-08-15, none of which was any of them."""
+    named: set[FnLocator] = set()
+    bodied: set[FnLocator] = set()
+    for rec in fn_records:
+        file_ = str(rec.get("file") or "")
+        fn_name = str(rec.get("fn_name") or "")
+        if not file_ or not fn_name:
+            continue
+        if not _is_authorable_file(file_):
+            continue
+        loc = FnLocator(file_, fn_name)
+        if "drop" in fn_name.split("_") or fn_name == "drop":
+            named.add(loc)
+            continue
+        body = str(rec.get("body_text") or "")
+        if any(p in body for p in _OWNERSHIP_PRIMITIVES):
+            bodied.add(loc)
+    picked = named or bodied
+    return frozenset(picked) if 0 < len(picked) <= max_subjects else frozenset()
+
+
 def crash_evidence_by_locator(
     sites: tuple[CrashSite, ...],
 ) -> dict[FnLocator, str]:
@@ -583,10 +828,28 @@ def crash_signal_hint(output: str, *, max_lines: int = 4) -> str:
     return " | ".join(keep)
 
 
+def crate_file_for_test_file(test_file: str) -> str | None:
+    """The crate source file a test file's tests answer for, or None.
+
+    `src/error.gen_tests_4.rs` -> `src/error.rs` (the pipeline's own generated
+    sibling, which is where nearly every unit test lives); `src/error.rs` ->
+    itself (an in-source `#[cfg(test)] mod`); `tests/test_downcast.rs` -> None,
+    because an integration test answers for the crate's public surface and
+    anchors no single file."""
+    if not test_file.startswith("src/") or not test_file.endswith(".rs"):
+        return None
+    head, _, base = test_file.rpartition("/")
+    if is_gen_tests_sibling_name(base):
+        stem = base.split(".gen_tests_", 1)[0]
+        return f"{head}/{stem}.rs" if head else f"{stem}.rs"
+    return test_file
+
+
 def vanished_subject_fns(
     vanished: frozenset[str],
     reverse_map: Mapping[str, Collection[tuple[str, str]]],
     *, max_subjects: int = 3,
+    test_files: Mapping[str, str] | None = None,
 ) -> dict[FnLocator, frozenset[str]]:
     """The SUBJECT fns of vanished tests, for the case native localization
     returned nothing: `{fn: tests naming it}`, narrowed hard.
@@ -605,10 +868,19 @@ def vanished_subject_fns(
     out: dict[FnLocator, set[str]] = {}
     for test in vanished:
         parts = test.split("::")
-        if len(parts) < 2:
-            continue
-        module_file = f"src/{parts[0]}.rs"
         bare = parts[-1]
+        # The anchor, from the INVENTORY when the caller can supply one. The
+        # module-path parse below was the only anchor for five days and it
+        # never fired once, because the one production caller passes
+        # `SweepOracle.vanished` and that set is bare by construction
+        # (`reconcile_sweep` builds it through `bare_test_name`, and the bare
+        # form is load-bearing for its duplicate-name dedup). A green unit test
+        # over an input the caller never produces is the shape this is.
+        anchor = (crate_file_for_test_file(test_files.get(bare, ""))
+                  if test_files else None)
+        if anchor is None and len(parts) < 2:
+            continue
+        module_file = anchor or f"src/{parts[0]}.rs"
         hits = [FnLocator(*k) for k in reverse_map.get(bare, ())]
         subjects = [loc for loc in hits if str(loc.file) == module_file]
         if not subjects or len(subjects) > max_subjects:

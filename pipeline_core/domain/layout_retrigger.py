@@ -47,6 +47,30 @@ _LAYOUT_ATTRIBUTABLE_CODES = (
     "E0308", "E0599", "E0609", "E0277", "E0053", "E0046", "E0407")
 
 
+# Failure reasons that describe the splice/locate infrastructure rather than
+# anything the model wrote. Three readers now share the one definition: the
+# attempt refund and the rejection-checklist filter in `retrigger_layout`, and
+# the authoring retry loop in `author_layout` — which is why this lives in the
+# domain rather than beside its first caller (`retrigger_layout` imports
+# `author_layout`, so the dependency cannot run the other way).
+MECHANICAL_MARKERS = ("could not locate a frozen definition",
+                      "skeleton file unreadable",
+                      "authored blocks missing uid")
+
+
+def is_mechanical_reason(reason: str) -> bool:
+    """Whether a failure reason is ATTEMPT-INVARIANT — the same call would fail
+    the same way however the model answered.
+
+    Not a style preference: on run `669347-cf33eae3` (2026-08-15) the component
+    `('CastTo',)` logged `could not locate a frozen definition to replace:
+    CastTo in ptr.rs` on attempts 1, 2 AND 3, and `('Mut', 'error_mut')` did the
+    same — six authoring calls, ~35 minutes, against a definition that is not in
+    the file to be replaced. The reason names the store, not the answer, so a
+    re-prompt buys a re-run of the lookup."""
+    return any(m in reason for m in MECHANICAL_MARKERS)
+
+
 MECHANICAL_KEY_PREFIX = "mech:"
 INFLIGHT_KEY_PREFIX = "inflight:"
 INFLIGHT_PID_KEY_PREFIX = "inflightpid:"

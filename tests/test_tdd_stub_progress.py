@@ -41,6 +41,14 @@ def _run(tmp_path: Path, monkeypatch, counts: list[int],
     `counts`; the last value repeats for any call past the end."""
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "3")
+    # The flat-score GPU guard would stop these runs at their second
+    # identical reading, which is exactly what it is for and exactly what
+    # this module is not about: the mechanisms under test here sit BELOW
+    # it in the same iteration (the plateau budget, the ratchet, the
+    # conviction rules), so the guard is off and their controls keep
+    # measuring what they were written to measure. `tests/test_tdd_gpu_guard.py`
+    # owns the guard itself.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     seq = iter(counts)
     last = [counts[0]]
 

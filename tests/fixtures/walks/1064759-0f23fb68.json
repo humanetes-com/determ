@@ -1,0 +1,91 @@
+{
+  "run_id": "1064759-0f23fb68",
+  "cluster": "stable",
+  "entry_best": 79,
+  "iterations": [
+    {
+      "iter": 1,
+      "retrigger": {
+        "cause": "RUNTIME_CRASH",
+        "reverted": 1
+      },
+      "crash_passed": 79
+    },
+    {
+      "iter": 2,
+      "breach_withheld_against": 79,
+      "passed": 66,
+      "failed": 35,
+      "oracle": 101,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 60,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmitted": 3,
+      "retrigger": {
+        "cause": "RUNTIME_CRASH",
+        "reverted": 0
+      },
+      "crash_passed": 79
+    },
+    {
+      "iter": 4,
+      "passed": 79,
+      "failed": 22,
+      "oracle": 101,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 59,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 5,
+      "readmission_refused_against": 79,
+      "fills": 31,
+      "passed": 79,
+      "failed": 22,
+      "oracle": 101,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 59,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 6,
+      "readmission_refused_against": 79,
+      "fills": 52,
+      "passed": 79,
+      "failed": 22,
+      "oracle": 101,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 3,
+      "frontier": 30,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 7,
+      "readmission_refused_against": 79,
+      "fills": 9,
+      "passed": 79,
+      "failed": 22,
+      "oracle": 101,
+      "improved": false,
+      "stall": 1,
+      "max_stall": 3,
+      "frontier": 30,
+      "kind": "merged",
+      "exhausted": 0
+    }
+  ]
+}

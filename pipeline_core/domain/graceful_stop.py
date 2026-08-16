@@ -41,6 +41,22 @@ def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
         sys.exit(0)
 
 
+def request_graceful_stop() -> None:
+    """Ask for the stop an operator's sentinel asks for, from INSIDE the run.
+
+    A mechanism that has decided the run should end (the flat-score GPU guard in
+    the TDD driver is the first) must not call `sys.exit` where it stands: it
+    runs at a decision point that has bookkeeping left to do — the cluster's
+    checkpoint, its final sweep, the restore of an abandoned bet — and under
+    `PIPELINE_PARALLELISM>1` an exit on one thread ends only that thread. Set the
+    process-wide event instead and return; the caller finishes its own exit path,
+    and the next `check_graceful_stop` anywhere ends the process cleanly with the
+    same code, the same log line and the same worker-pool behaviour a sentinel
+    stop gets. No file is written, so nothing is left behind to stop the NEXT
+    run: the sentinel path is unchanged and this one is process-local."""
+    _STOP_EVENT.set()
+
+
 def reset_for_tests() -> None:
     """Test-only: the event is process-wide state: clear it between cases."""
     _STOP_EVENT.clear()

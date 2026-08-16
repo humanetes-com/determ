@@ -614,3 +614,26 @@ def test_regression_gate_still_reverts_on_newly_red_verdict() -> None:
         enabled=True, timeout=120, guard=lambda *_: None)
     assert res is not None
     assert "y" in res[0].newly_red
+
+
+def test_a_passing_accept_carries_the_names_it_saw_pass() -> None:
+    """ACCEPT is three states — tests passed / gate off / inconclusive — and
+    only the first is a measurement of the fill. The ledger has to be able to
+    tell them apart, so the one accept with positive evidence carries it.
+
+    Run `1064759-0f23fb68` (2026-08-15/16) is the cost of the conflation: 50
+    fills recorded `accept`/POSITIVE while the per-binary verdict vector stayed
+    byte-identical for the whole 7h48m."""
+    ok = _const_run_cargo(0, "test a ... ok\ntest b ... ok\n"
+                             "test result: ok. 2 passed; 0 failed; 0 ignored")
+    v = _gate(ok, {"a"})
+    assert v.decision is U2Decision.ACCEPT
+    assert v.self_passed == frozenset({"a"}), \
+        "only the unit's OWN tests count — `b` is not attributed to it"
+
+    # The three accepts that measured nothing must stay empty, or the ledger
+    # learns to call a timeout a success.
+    boom = _const_run_cargo(101, "test a ... FAILED")
+    assert _gate(boom, {"a"}, enabled=False).self_passed == frozenset()
+    assert _gate(boom, set()).self_passed == frozenset()
+    assert _gate(_const_run_cargo(-1, "timeout"), {"a"}).self_passed == frozenset()

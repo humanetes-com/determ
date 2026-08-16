@@ -42,6 +42,7 @@ from pipeline_core.domain.layout_probe import (
 )
 from pipeline_core.domain.layout_retrigger import (
     dropped_members_in_use,
+    is_mechanical_reason,
     members_in_use,
     members_in_use_text,
 )
@@ -465,6 +466,30 @@ def author_layout(
             if r and r not in _v:
                 _v.append(r)
 
+        # Compile diagnostics this component has already produced. A repeat
+        # means the retry hint did not move the model off the answer, and the
+        # next attempt buys the same one — see `_stop_repeat` below.
+        seen_diags: list[str] = []
+
+        def _stop_mechanical(
+            r: str, n: int, *, _names: tuple[str, ...] = names,
+        ) -> bool:
+            """Attempt-invariant failures end the loop at the attempt that
+            found them. `('CastTo',)` and `('Mut', 'error_mut')` each spent all
+            three attempts on `could not locate a frozen definition to replace:
+            … in ptr.rs` on run `669347-cf33eae3` — the reason names the store,
+            not the model's answer, so attempts 2 and 3 re-ran a lookup that
+            had already reported the definition is not there to replace. The
+            fire's own mechanical budget already refuses on this reason, but it
+            is consulted per FIRE, and all three attempts happen inside one."""
+            if not is_mechanical_reason(r):
+                return False
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{_names}: {r} — "
+                     f"attempt-invariant, so attempts {n + 1}.."
+                     f"{deps.max_attempts} are not spent on it. The splice/"
+                     "locate store is what has to change, not the prompt.")
+            return True
+
         for attempt in range(1, deps.max_attempts + 1):
             hint = _retry_hint(violations) if violations else ""
             authored, reason = _author_component(
@@ -473,6 +498,8 @@ def author_layout(
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 _learned(reason)
+                if _stop_mechanical(reason, attempt):
+                    break
                 continue
             tried = _try_commit(comp, authored, deps, gate, pristine)
             reason, errors = tried.reason, tried.errors
@@ -493,6 +520,8 @@ def author_layout(
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
                          f"(attempt {attempt})")
                 _learned(reason)
+                if _stop_mechanical(reason, attempt):
+                    break
                 continue
             # Name the first diagnostic: an environmental failure that no
             # authored layout can fix (E0554 = nightly `#![feature]` built on
@@ -506,6 +535,25 @@ def author_layout(
                         if gate.gated else "")
                      + (f": {diag}" if diag else "."))
             _learned(reason)
+            # The per-impl fill route already stops here and says why —
+            # "all N attempt(s) failed with an identical signature — the
+            # failure does not depend on what the model wrote; a bigger prompt
+            # re-purchases the same answer". This route had no equivalent, so
+            # the 34-name construct/vtable component on run `669347-cf33eae3`
+            # returned `error[E0255]: the name `Backtrace` is defined multiple
+            # times` on attempt 1 AND attempt 3, having been told about it in
+            # between. Judged on the DIAGNOSTIC rather than consecutively:
+            # attempt 2 there failed a different way (dropped `ptr`), and a
+            # strict consecutive test would have let the repeat through.
+            if diag and diag in seen_diags:
+                deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: attempt "
+                         f"{attempt} reproduced a diagnostic this component "
+                         "already answered for — the retry hint carried it and "
+                         "the model wrote it again, so the remaining attempt(s) "
+                         "re-purchase the same scaffold. Stopping.")
+                break
+            if diag:
+                seen_diags.append(diag)
         results.append(ComponentResult(
             names, committed, reason, authored_defs=committed_defs,
             authored_items=committed_items, refuted_uids=refuted))

@@ -461,7 +461,11 @@ def u2_test_gate(
             frozenset(_aborted) | {f.test_name for f in scoped.failures},
             _render_u2_abort(_aborted, scoped, err_cap))
     if not scoped.failures:
-        return U2Verdict.accept()
+        # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
+        # Carrying the names is what lets the caller's verdict row say so —
+        # the other accepts above (gate off, no tests, timeout, exception) have
+        # nothing to carry and must not be recorded as if they had.
+        return U2Verdict.accept(frozenset(report.passed & fn_tests))
     locate = make_fn_site_locator(structure, target_src_dir)
     blame = partition_blame(scoped, frozenset(unit_sites), locate)
     unjudged = frozenset(f.test_name for f in blame.no_verdict)

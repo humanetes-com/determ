@@ -548,7 +548,9 @@ from pipeline_core.application.validate import (
     validate_task4_output as _validate_task4_output,
 )
 from pipeline_core.application.workspace_lifecycle import (
+    cluster_best_tree_has_layout,
     load_cluster_best_tree_mark,
+    restore_cluster_best_tree,
     save_cluster_best_tree,
 )
 from pipeline_core.application.workspace_lifecycle import (
@@ -1211,11 +1213,20 @@ def build_app(
             project_dir: Path, cluster: Any,
             tests_dir_stems: frozenset[str] | None = None,
             include_lib_sources: bool = False,
+            file_index: dict[str, str] | None = None,
     ) -> tuple[int, frozenset[str]]:
         """Sweep-level strict verdict: (expected_count, expected_names) — same walk
         and deps as `count_active_tests_for_cluster`, scopable to the
         `--test stem…` binaries a TDD sweep runs; `include_lib_sources` adds
-        the gen_tests + src-side unit tests a `--lib` sweep also runs."""
+        the gen_tests + src-side unit tests a `--lib` sweep also runs.
+
+        `file_index`, when given, is filled with {test name: declaring file} on
+        the SAME walk — an out-parameter so the pair every call site
+        destructures keeps its shape. It goes through this closure rather than
+        through a second one that rebuilds `TestCountDeps` by hand, because the
+        anchor's whole promise is that it cannot describe a different set of
+        files from the denominator, and two literal dep blocks are two things to
+        keep in step."""
         sc = app_ref().structure_cache if app_ref is not None else structure_cache
         return _tc_app.active_test_inventory_for_cluster(
             project_dir, cluster, _tc_app.TestCountDeps(
@@ -1224,7 +1235,7 @@ def build_app(
                 file_cfg_predicate=sc.file_cfg_predicate,
                 is_gen_tests_file=_disc_is_gen_tests_file,
             ), tests_dir_stems=tests_dir_stems,
-            include_lib_sources=include_lib_sources)
+            include_lib_sources=include_lib_sources, file_index=file_index)
 
     # More former pipeline delegate defs, bound direct.
     def cluster_cfg_attr(cluster: Any) -> str:
@@ -2039,7 +2050,14 @@ def build_app(
         (best-tree copy → git ancestor) instead of nuking the file to the
         baked skeleton."""
         try:
-            n = save_cluster_best_tree(project_dir, cluster, filled_dir, mark)
+            # The LAYOUT half travels with the bodies. Without it the slot is a
+            # per-file donor for heal and nothing more: t1.5 re-authors the
+            # skeleton every run, so bodies restored against a different
+            # layout do not compile, and the restore this enables would be a
+            # second destruction rather than a recovery.
+            n = save_cluster_best_tree(
+                project_dir, cluster, filled_dir, mark,
+                layout_dir=project_dir / SKELETON_DIR / cluster)
         except Exception as e:  # snapshot must never break the fill loop
             ports.log(f"  [ratchet] cluster best-tree snapshot failed: {e}")
             n = 0
@@ -2072,6 +2090,42 @@ def build_app(
             "best_tree_files": n, "git_committed": committed,
             "tree_path": f"{rel}/src",
             "layout_path": f"{SKELETON_DIR}/{cluster}/src"})
+
+    def _test_file_index(
+        project_dir: Path, cluster: Any, stems: Any = None, lib: bool = False,
+    ) -> dict[str, str]:
+        """{test name: the file that declares it}, from the SAME walk the
+        oracle inventory uses — literally the same function, so the anchor and
+        the denominator cannot describe different sets of files."""
+        idx: dict[str, str] = {}
+        try:
+            active_test_inventory_for_cluster(
+                project_dir, cluster, tests_dir_stems=stems,
+                include_lib_sources=lib, file_index=idx)
+        except Exception as e:  # an anchor is never worth failing a sweep for
+            ports.log(f"  [phase-c/crash] test file index unavailable: {e}")
+            return {}
+        return idx
+
+    def _restore_best_tree_pair(
+        project_dir: Path, cluster: str, filled_dir: Path,
+    ) -> tuple[int, int, list[str]] | None:
+        """Put the cluster's durable best tree back, bodies AND layout.
+
+        Returns None when the slot cannot supply a PAIR — a slot written before
+        the layout half was stored holds bodies that would not compile against
+        the live skeleton, and declining is the only safe answer there; the
+        operator lever (`scripts/restore_cluster_tree_from_sha.sh`) takes the
+        pair out of the object store instead."""
+        if not cluster_best_tree_has_layout(project_dir, cluster):
+            return None
+        try:
+            return restore_cluster_best_tree(
+                project_dir, cluster, filled_dir,
+                layout_dir=project_dir / SKELETON_DIR / cluster)
+        except Exception as e:  # a failed restore must never break the loop
+            ports.log(f"  [ratchet] best-tree restore failed: {e}")
+            return None
 
     def _tdd_floor_path(project_dir: Path, cluster: str) -> Path:
         return project_dir / ".skeleton" / f"_tdd_floor_{cluster}.json"
@@ -2275,15 +2329,18 @@ def build_app(
                 escalate_frontier_to_producers, _attr_deps),
             checkpoint_fill_tree=_checkpoint_fill_tree,
             load_best_tree_mark=load_cluster_best_tree_mark,
+            restore_best_tree_pair=_restore_best_tree_pair,
             load_tdd_floor=_load_tdd_floor,
             save_tdd_floor=_save_tdd_floor,
             retrigger_layout=retrigger_layout,
             active_test_inventory=active_test_inventory_for_cluster,
+            test_file_index=_test_file_index,
             localize_crashes=_localize_crashes,
             migrate_retro_evidence=_migrate_confounded_retros,
             migrate_retro_gate=_migrate_absolute_gate_retros,
             implicated_fns=lambda out, tsd: _implicated_fns_from_cargo_impl(
                 out, tsd, enumerate_fns=enumerate_fns),
+            enumerate_fns=enumerate_fns,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,
