@@ -129,5 +129,15 @@ def derive_requirements_text(reqs: Iterable[RequiredDerive]) -> str:
             "missing derive here does not fail gracefully: the cluster stops "
             "compiling, no test binary is produced, and EVERY test scores as "
             "failing regardless of the bodies.\n" + "\n".join(rows)
-            + "\nPut these on the item's `#[derive(...)]`. Add any others the "
-            "type can support; these are the minimum.\n")
+            + "\nPut these on the item's `#[derive(...)]`, KEEP every derive "
+            "the definition you are replacing already carries, and add NOTHING "
+            "BEYOND those two sources. A derive is an impl, so an invented one "
+            "fails the scaffold exactly as a missing one does: for a trait the "
+            "crate already implements by hand it is `error[E0119]: conflicting "
+            "implementations`, and for a bound the type's own fields do not "
+            "satisfy it is `E0277`/`E0369`. Both were measured on `anyhow` "
+            "(2026-08-09/16): three consecutive re-authors of the `Error`/"
+            "`ErrorImpl`/`Own`/`Ref` component were rejected, two of them for "
+            "`#[derive(Debug, PartialEq)]` on `Error` against the crate's own "
+            "`impl Debug for Error`, and `#[derive(Copy, Clone)]` on `Own`/"
+            "`Ref` against their hand-written impls.\n")

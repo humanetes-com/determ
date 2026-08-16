@@ -161,3 +161,80 @@ def test_the_body_rule_fires_when_the_crate_names_no_drop_family(
 
     assert destruction_path_subjects(_records(root)) == frozenset({
         FnLocator("src/raw.rs", "take")})
+
+
+_SENTINEL_RS = """\
+pub struct Ref<T> { pub p: *const T }
+pub struct Slot { pub p: *mut u8 }
+
+pub unsafe fn object_downcast<E>(target: usize) -> Option<Ref<()>> {
+    if target == 0 {
+        Some(Ref { p: core::ptr::NonNull::<()>::dangling().as_ptr() })
+    } else {
+        None
+    }
+}
+
+pub fn take(s: &mut Slot) -> *mut u8 {
+    core::mem::replace(&mut s.p, core::ptr::null_mut())
+}
+"""
+
+_SENTINEL_TEST_RS = """\
+#[test]
+fn test_sentinel() {
+    let _p: *mut u8 = core::ptr::null_mut();
+}
+"""
+
+_CALLER_RS = """\
+pub fn vtable(x: u8) -> u8 { x }
+pub fn helper(x: u8) -> u8 { x }
+pub fn unrelated(x: u8) -> u8 { x }
+
+pub fn downcast_ref(t: &Table) -> u8 {
+    let v = vtable(1);
+    (t.helper)(v)
+}
+
+pub struct Table { pub helper: fn(u8) -> u8 }
+"""
+
+
+def test_the_sentinel_selector_separates_handing_out_from_placing_in(
+        tmp_path: Path) -> None:
+    """The live discrimination, through the real extractor. `object_downcast`
+    builds a dangling pointer and RETURNS it; `take` builds a null and writes
+    it into a slot in exchange for the value it takes out — the same mark, one
+    defect and one idiom, and only what the occurrence is an argument to tells
+    them apart. The test-side fn is excluded on `authorable_frames`' rule."""
+    from pipeline_core.domain.crash_site import placeholder_pointer_subjects
+
+    root = tmp_path / "sent"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir(parents=True)
+    (root / "src" / "error.rs").write_text(_SENTINEL_RS, encoding="utf-8")
+    (root / "tests" / "test_sentinel.rs").write_text(
+        _SENTINEL_TEST_RS, encoding="utf-8")
+
+    assert placeholder_pointer_subjects(_records(root)) == frozenset({
+        FnLocator("src/error.rs", "object_downcast")})
+
+
+def test_the_callee_selector_returns_frontier_key_paths(tmp_path: Path) -> None:
+    """The half a hand-written record dict cannot check, for the second
+    selector: the locators it returns must be the `src/…` form the frontier is
+    keyed by, and the fn-pointer call shape — `(t.helper)(v)`, which is how the
+    live `(vtbl.object_downcast)(…)` reads — must survive the parse."""
+    from pipeline_core.domain.crash_site import callee_subjects
+
+    root = tmp_path / "call"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "error.rs").write_text(_CALLER_RS, encoding="utf-8")
+
+    subs = callee_subjects(
+        FnLocator("src/error.rs", "downcast_ref"), _records(root))
+    assert subs == frozenset({
+        FnLocator("src/error.rs", "vtable"),
+        FnLocator("src/error.rs", "helper")})
+    assert FnLocator("src/error.rs", "unrelated") not in subs

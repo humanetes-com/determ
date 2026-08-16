@@ -6,13 +6,16 @@ from __future__ import annotations
 from pipeline_core.domain.crash_site import (
     asan_stack_excerpt,
     bare_fn_name,
+    callee_subjects,
     chain_derived_site,
     crash_evidence_by_locator,
     crate_file_for_test_file,
     destruction_path_subjects,
     origin_stack_text,
     parse_asan_report,
+    placeholder_pointer_subjects,
     read_destruction_fault,
+    read_placeholder_pointer_fault,
     relativize_frame_files,
     site_from_frames,
     vanish_is_stub_confounded,
@@ -738,3 +741,154 @@ def test_a_subject_may_never_be_a_test_file() -> None:
     ]
     assert destruction_path_subjects(recs) == frozenset({
         FnLocator("src/error.rs", "object_drop_front")})
+
+
+# The sweep text of run `1408670-3c074ece`, iter 5, trimmed to the lines the
+# reader is asked about. Verbatim: this is the whole of what
+# `tests/test_downcast.rs` printed before SIGABRT, and the localizer read the
+# same bytes and blamed `downcast_ref` — which is the frame, and not the fault.
+_MISALIGNED = """\
+     Running tests/test_downcast.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_downcast-de1f45a040e1a1ee)
+
+thread 'test_drop' panicked at src/error.rs:440:34:
+misaligned pointer dereference: address must be a multiple of 0x8 but is 0x1
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test test_downcast`
+"""
+
+
+def test_a_placeholder_pointer_is_read_from_the_alignment_check() -> None:
+    """`0x1` is `NonNull::<()>::dangling()`. The fn that dereferenced it is in
+    the panic line; the fn that WROTE it is not, and is what has to change."""
+    fault = read_placeholder_pointer_fault(_MISALIGNED)
+    assert fault is not None
+    assert (fault.address, fault.required_align) == (1, 8)
+    assert fault.deref_site == "src/error.rs:440"
+    text = fault.render()
+    assert "PLACEHOLDER POINTER" in text
+    assert "src/error.rs:440" in text
+    assert "FABRICATED" in text
+
+
+def test_a_genuinely_misaligned_heap_pointer_is_not_a_placeholder() -> None:
+    """The discriminator is arithmetic and it must bite: an address at or above
+    the alignment it violates is a real allocation read at a bad offset, a
+    different fault with a different remedy."""
+    assert read_placeholder_pointer_fault(
+        _MISALIGNED.replace("but is 0x1", "but is 0x55eca2d1c009")) is None
+    assert read_placeholder_pointer_fault(
+        _MISALIGNED.replace("multiple of 0x8", "multiple of 0x1")) is None
+
+
+def test_an_ordinary_panic_reads_no_placeholder() -> None:
+    assert read_placeholder_pointer_fault(
+        "thread 'test_x' panicked at src/error.rs:12:5:\n"
+        "assertion `left == right` failed\n") is None
+    assert read_placeholder_pointer_fault("") is None
+
+
+_SENTINEL_FNS = [
+    # The three defective bodies on the live tree, verbatim in shape.
+    {"file": "src/error.rs", "fn_name": "object_downcast",
+     "body_text": "if TypeId::of::<E>() == target {\n"
+                  "    Some(unsafe { Ref::from_raw(core::ptr::NonNull::dangling()) })\n"
+                  "} else { None }"},
+    {"file": "src/error.rs", "fn_name": "context_downcast",
+     "body_text": "Some(unsafe { Ref::from_raw(core::ptr::NonNull::dangling()) })"},
+    # The correct idiom: a sentinel written INTO a slot in exchange for the
+    # value moved out of it. Four of the live tree's seven occurrences.
+    {"file": "src/error.rs", "fn_name": "downcast",
+     "body_text": "let inner = core::mem::replace(&mut self.inner, "
+                  "Own { ptr: core::ptr::NonNull::dangling() });"},
+    {"file": "src/error.rs", "fn_name": "drop",
+     "body_text": "let inner = core::mem::replace(&mut self.inner, "
+                  "Own { ptr: core::ptr::NonNull::dangling() });"},
+    {"file": "src/error.rs", "fn_name": "vtable", "body_text": "unsafe { &*e.vtable }"},
+]
+
+
+def test_placeholder_subjects_are_the_fns_that_hand_a_sentinel_out() -> None:
+    """Measured against `tmp/anyhow/.skeleton-filled/stable` with the real
+    extractor on 2026-08-16: seven `NonNull::dangling()` occurrences over 323
+    fns, four of them `mem::replace` arguments, and the three survivors are
+    exactly the crate's `*_downcast` family — every one of them the body that
+    aborts `tests/test_downcast.rs`, and none of them dispatched once in the
+    six-hour run that read 79/101 on every sweep."""
+    subs = placeholder_pointer_subjects(_SENTINEL_FNS)
+    assert subs == frozenset({
+        FnLocator("src/error.rs", "object_downcast"),
+        FnLocator("src/error.rs", "context_downcast")})
+
+
+def test_the_exchange_idiom_is_excluded_by_use_not_by_name() -> None:
+    """`downcast` holds the sentinel and is correct; `object_downcast` holds
+    the same sentinel and is the fault. Nothing about the fn NAME separates
+    them — only what the occurrence is an argument to."""
+    only_correct = [f for f in _SENTINEL_FNS
+                    if f["fn_name"] in ("downcast", "drop", "vtable")]
+    assert placeholder_pointer_subjects(only_correct) == frozenset()
+
+
+def test_placeholder_subjects_obey_the_cap_and_the_authorable_rule() -> None:
+    wide = [{"file": "src/a.rs", "fn_name": f"f{i}",
+             "body_text": "Some(NonNull::dangling())"} for i in range(13)]
+    assert placeholder_pointer_subjects(wide) == frozenset()
+    assert len(placeholder_pointer_subjects(wide, max_subjects=13)) == 13
+    assert placeholder_pointer_subjects([
+        {"file": "tests/test_downcast.rs", "fn_name": "test_drop",
+         "body_text": "let p = NonNull::dangling();"}]) == frozenset()
+
+
+_CALLEE_FNS = [
+    # `downcast_ref`'s live body, which is where the fault is READ.
+    {"file": "src/error.rs", "fn_name": "downcast_ref",
+     "body_text": "let ref_impl = self.inner.by_ref();\n"
+                  "let vtbl = unsafe { crate::error::vtable(self.inner.ptr) };\n"
+                  "if let Some(down) = unsafe { (vtbl.object_downcast)(ref_impl, target) } {\n"
+                  "    let ptr = down.as_ptr() as *const E;\n"
+                  "    return Some(unsafe { &*ptr });\n"
+                  "}\nNone"},
+    {"file": "src/error.rs", "fn_name": "object_downcast", "body_text": ""},
+    {"file": "src/error.rs", "fn_name": "vtable", "body_text": ""},
+    {"file": "src/ptr.rs", "fn_name": "by_ref", "body_text": ""},
+    {"file": "src/ptr.rs", "fn_name": "as_ptr", "body_text": ""},
+    # A crate fn the body never names — the rule must not reach it.
+    {"file": "src/chain.rs", "fn_name": "next", "body_text": ""},
+    # A module whose name is also a fn name elsewhere. The body says
+    # `crate::error::vtable`, and `error` there is a path qualifier.
+    {"file": "src/lib.rs", "fn_name": "error", "body_text": ""},
+]
+
+
+def test_callee_subjects_reach_the_producer_the_frame_cannot_name() -> None:
+    """The measurement the fix exists for. Blame was `src/error.rs::
+    downcast_ref` on all five sweeps of run `1408670-3c074ece`; the fault was
+    `object_downcast`, called on the line above the one that faulted, and it
+    was never dispatched. Note the call shape: `(vtbl.object_downcast)(…)` puts
+    a `)` after the name, so a `(`-only rule misses exactly this fn."""
+    subs = callee_subjects(FnLocator("src/error.rs", "downcast_ref"), _CALLEE_FNS)
+    assert subs == frozenset({
+        FnLocator("src/error.rs", "object_downcast"),
+        FnLocator("src/error.rs", "vtable"),
+        FnLocator("src/ptr.rs", "by_ref"),
+        FnLocator("src/ptr.rs", "as_ptr")})
+    # The module qualifier is not a call, and the unmentioned fn is not one.
+    assert FnLocator("src/lib.rs", "error") not in subs
+    assert FnLocator("src/chain.rs", "next") not in subs
+
+
+def test_callee_subjects_of_an_unknown_blame_are_empty() -> None:
+    assert callee_subjects(
+        FnLocator("src/nowhere.rs", "missing"), _CALLEE_FNS) == frozenset()
+
+
+def test_callee_subjects_obey_the_cap() -> None:
+    """A blamed fn that names half the crate names none of it — the same rule
+    `destruction_path_subjects` and `vanished_subject_fns` are capped by."""
+    body = " ".join(f"f{i}()" for i in range(13))
+    recs = [{"file": "src/a.rs", "fn_name": "caller", "body_text": body}]
+    recs += [{"file": "src/a.rs", "fn_name": f"f{i}", "body_text": ""}
+             for i in range(13)]
+    blamed = FnLocator("src/a.rs", "caller")
+    assert callee_subjects(blamed, recs) == frozenset()
+    assert len(callee_subjects(blamed, recs, max_subjects=13)) == 13

@@ -34,10 +34,13 @@ from pipeline_core.domain.attribution import (
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.crash_site import (
     blamed_locators,
+    callee_subjects,
     chain_derived_site,
     crash_evidence_by_locator,
     crash_signal_hint,
     destruction_path_subjects,
+    placeholder_pointer_subjects,
+    read_placeholder_pointer_fault,
     vanish_is_stub_confounded,
     vanished_subject_fns,
 )
@@ -1722,6 +1725,78 @@ def run_phase_c_tdd(
                                 + ", ".join(
                                     f"{k.file}::{k.fn_name}"
                                     for k in sorted(crash_texts)))
+                # PRODUCER AIM, on the route where the localizer DID blame
+                # somebody. A frame is where execution faulted; for every fault
+                # whose bad value was made elsewhere, the fn to change is one
+                # call away and appears in no stack. The narrowing shipped for
+                # the blame-NOBODY route does not reach here, and the gap has a
+                # measured cost: run `1408670-3c074ece` (2026-08-16) blamed
+                # `src/error.rs::downcast_ref` on all five sweeps —
+                # frame-derived and correct as a frame — while the fault was
+                # `object_downcast` returning `Some(Ref::from_raw(NonNull::
+                # dangling()))`, which `downcast_ref` calls on the line above
+                # the one that faulted. Six hours, 101 fills, 20 dispatches of
+                # the impl block holding the blamed fn, zero verdict changes,
+                # and `object_downcast` never dispatched once.
+                #
+                # EVIDENCE ONLY. These locators get a prompt, a frontier entry
+                # and an exhaustion void — the same channels `crash_texts`
+                # already carries — and nothing else: `crash_blamed` is left
+                # alone, so nothing here can convict, crash-block or revert on
+                # an inference. `setdefault` for the same reason: a real frame's
+                # evidence outranks a producer guess about the same fn.
+                if crash_blamed and deps.enumerate_fns is not None:
+                    _recs = deps.enumerate_fns(target_src_dir) or []
+                    _placeholder = read_placeholder_pointer_fault(output)
+                    _producers: set[FnLocator] = set()
+                    for _b in sorted(crash_blamed):
+                        _producers |= callee_subjects(_b, _recs)
+                    if _placeholder is not None:
+                        # The reading names the fault as a fabricated pointer,
+                        # so the fns that fabricate one are subjects whether or
+                        # not the blamed fn calls them — the sentinel may be
+                        # handed through any number of hops.
+                        _producers |= placeholder_pointer_subjects(_recs)
+                    _producers -= set(crash_texts)
+                    _blame_txt = ", ".join(f"{b.file}::{b.fn_name}"
+                                           for b in sorted(crash_blamed))
+                    for _loc in _producers:
+                        crash_texts[_loc] = "\n\n".join(filter(None, (
+                            f"A crash was localized to {_blame_txt}, and this "
+                            "fn is named as a PRODUCER CANDIDATE for it — it "
+                            "is called from the faulting fn, or it hands out a "
+                            "pointer of the kind that faulted. It is NOT "
+                            "blamed by any stack frame. The faulting frame "
+                            "READS a value; whatever fabricated that value is "
+                            "what has to change, and it appears in no "
+                            "backtrace. Re-derive this body from its types and "
+                            "its contract, and check what it returns against "
+                            "what its caller does with the result.",
+                            _placeholder.render() if _placeholder else "")))
+                    if _producers:
+                        deps.log(
+                            f"  {tag} [phase-c/crash] iter {iter_n}: blame is "
+                            f"frame-derived ({_blame_txt}) — the faulting frame "
+                            "reads, it does not fabricate. Aimed "
+                            f"{len(_producers)} producer candidate(s) as "
+                            "evidence (never blame): "
+                            + ", ".join(f"{k.file}::{k.fn_name}"
+                                        for k in sorted(_producers))
+                            + (f" | {_placeholder.render().split(':')[0]} read "
+                               f"at {_placeholder.deref_site}"
+                               if _placeholder else ""))
+                        deps.emit("phase_c.crash.producer_aimed", data={
+                            "cluster": cluster.name, "iter": iter_n,
+                            "blamed": sorted(f"{b.file}::{b.fn_name}"
+                                             for b in crash_blamed),
+                            "placeholder_pointer": (
+                                None if _placeholder is None else {
+                                    "address": _placeholder.address,
+                                    "required_align":
+                                        _placeholder.required_align,
+                                    "deref_site": _placeholder.deref_site}),
+                            "subjects": sorted(f"{k.file}::{k.fn_name}"
+                                               for k in _producers)})
                 for _loc in crash_texts:
                     frontier.setdefault(_loc, set()).update(_oracle.vanished)
 

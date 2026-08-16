@@ -59,16 +59,15 @@ from pipeline_core.domain.layout_retrigger import (
     DEFAULT_MAX_ZERO_PAYOFF,
     INFLIGHT_KEY_PREFIX,
     PAYOFF_HIGH_KEY,
-    REJECTION_CONTRACT_EPOCH,
     BlameGrade,
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
     charge_mechanical_failure,
+    charge_rejection,
     classify_compile_retrigger,
     classify_layout_retrigger,
     code_build_stamp,
-    contract_key,
     crash_candidate_grade,
     crash_component_refuted,
     crash_evidence_confounded,
@@ -89,6 +88,7 @@ from pipeline_core.domain.layout_retrigger import (
     record_crash_fire,
     rejected_key,
     rejection_budget_spent,
+    rejection_build_key,
     rejection_streak_is_stale,
     settle_crash_payoff,
     settle_retrigger_payoff,
@@ -521,7 +521,19 @@ def retrigger_layout(
                      "bug; not retriggering until it is fixed.")
             _refused += 1
             continue
-        if rejection_budget_spent(attempts, key):
+        if attempts.get(rejected_key(key), 0) >= DEFAULT_MAX_REJECTIONS \
+                and rejection_streak_is_stale(attempts, key, _mech_stamp):
+            # Released, and said out loud for `mechanical_streak_is_stale`'s
+            # reason: silent, this reads as a component that was never at the
+            # cap, and the history that it WAS is what a reader needs.
+            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                     f"{attempts.get(rejected_key(key), 0)} rejection(s) on "
+                     "file were earned under a different authoring contract or "
+                     "a different build of the pipeline — only an ACCEPTED "
+                     "re-author can clear that counter and this refusal sits "
+                     "upstream of the only path that accepts one, so the "
+                     "streak is NOT refusing this aim.")
+        if rejection_budget_spent(attempts, key, code_stamp=_mech_stamp):
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
                      f"{DEFAULT_MAX_REJECTIONS} consecutive re-author(s) "
                      "REJECTED at validation — RED, this refusal is "
@@ -853,16 +865,13 @@ def _run_layout_attempt(
         # at the first rejection earned under the current one, rather than
         # silently continued — otherwise this rejection reads as "the third
         # time it was told" when it is the first.
-        if rejection_streak_is_stale(attempts, key):
-            _stale = attempts.pop(rejected_key(key), 0)
-            attempts[contract_key(key)] = REJECTION_CONTRACT_EPOCH
-            if _stale:
-                deps.log(
-                    f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
-                    f"{_stale} earlier rejection(s) retired — they were earned "
-                    "under an authoring prompt that did not state the "
-                    "constraint set this one does; the budget restarts.")
-        attempts[rejected_key(key)] = attempts.get(rejected_key(key), 0) + 1
+        _stale = charge_rejection(attempts, key, code_build_stamp(deps.code_id))
+        if _stale:
+            deps.log(
+                f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                f"{_stale} earlier rejection(s) retired — they were earned "
+                "under an authoring prompt or a pipeline build that is not the "
+                "one asking; the budget restarts.")
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         why = next((c.reason for c in res.components if not c.authored), "")
         _remember_rejections(project_dir, cfg_cluster, key, _reasons, deps)
@@ -926,6 +935,7 @@ def _run_layout_attempt(
     attempts.pop(mechanical_key(key), None)   # consecutive-failure counter
     attempts.pop(mechanical_build_key(key), None)   # …and the build it named
     attempts.pop(rejected_key(key), None)     # an ACCEPTED re-author clears it
+    attempts.pop(rejection_build_key(key), None)    # …and the build it named
     deps.save_attempts(project_dir, cfg_cluster, attempts)
     if deps.load_rejection_notes is not None \
             and deps.save_rejection_notes is not None:

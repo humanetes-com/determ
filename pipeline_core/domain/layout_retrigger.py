@@ -77,6 +77,7 @@ INFLIGHT_PID_KEY_PREFIX = "inflightpid:"
 MECH_BUILD_KEY_PREFIX = "mechbuild:"
 PAYOFF_KEY_PREFIX = "payoff:"
 REJECTED_KEY_PREFIX = "rejected:"
+REJ_BUILD_KEY_PREFIX = "rejbuild:"
 CRASH_SIG_KEY_PREFIX = "sig:"
 CONTRACT_KEY_PREFIX = "contract:"
 DEFAULT_MAX_MECHANICAL = 2
@@ -91,7 +92,13 @@ DEFAULT_MAX_REJECTIONS = 3
 #       and reached the model as a past-violation checklist entry or not at all.
 #   2 — `members_in_use_text`: the members the filled bodies read are stated as
 #       a requirement of the task, beside the member paths the tests read.
-REJECTION_CONTRACT_EPOCH = 2
+#   3 — `derive_requirements_text` states the derive list as a LIMIT as well as
+#       a minimum, and says why an invented derive fails the scaffold (E0119
+#       against a hand-written impl, E0277/E0369 against the fields' bounds).
+#       Two of the three rejections on file for the 34-name `Error` component
+#       were exactly that, under a prompt whose closing line was "Add any
+#       others the type can support".
+REJECTION_CONTRACT_EPOCH = 3
 
 # Attempts-store keys for the CLUSTER-wide payoff budget (below). Prefixed on
 # the same rule as `mechanical_key`: a component key is Rust idents joined by
@@ -213,7 +220,7 @@ def charge_mechanical_failure(
 BOOKKEEPING_KEY_PREFIXES = (
     MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, INFLIGHT_PID_KEY_PREFIX,
     MECH_BUILD_KEY_PREFIX, PAYOFF_KEY_PREFIX, REJECTED_KEY_PREFIX,
-    CRASH_SIG_KEY_PREFIX, CONTRACT_KEY_PREFIX)
+    REJ_BUILD_KEY_PREFIX, CRASH_SIG_KEY_PREFIX, CONTRACT_KEY_PREFIX)
 
 
 def _is_bookkeeping_key(key: str) -> bool:
@@ -227,10 +234,17 @@ def contract_key(component_key: str) -> str:
     return f"{CONTRACT_KEY_PREFIX}{component_key}"
 
 
+def rejection_build_key(component_key: str) -> str:
+    """Attempts-store key recording WHICH BUILD of the pipeline earned a
+    component's rejection streak. Same prefixing rule as `mechanical_key`."""
+    return f"{REJ_BUILD_KEY_PREFIX}{component_key}"
+
+
 def rejection_streak_is_stale(
-    attempts: Mapping[str, int], component_key: str,
+    attempts: Mapping[str, int], component_key: str, code_stamp: int = 0,
 ) -> bool:
-    """Whether the stored rejection streak predates the current constraint set.
+    """Whether the stored rejection streak predates the current constraint set
+    OR was earned by a different build of the pipeline.
 
     A streak is a claim about what the model does when it is TOLD the rules. On
     run `929616-ee20d540` (2026-08-14) the 34-name `Error` component stood at
@@ -239,9 +253,27 @@ def rejection_streak_is_stale(
     violations. Spending the third and last attempt under a prompt that now
     states it up front would retire the crashed family's only structural escape
     on evidence about a different prompt. An absent stamp reads as epoch 0 —
-    legacy, earned in an unknown context — and is therefore also stale."""
+    legacy, earned in an unknown context — and is therefore also stale.
+
+    The BUILD half is the same argument the epoch makes, applied to the half of
+    the constraint set that is not in the prompt text: the accept path's own
+    checks, which live in the pipeline and change with it. Its absence was a
+    permanent lock of exactly the shape `mechanical_streak_is_stale` was
+    written for, and the two sat one `if` apart. Measured on `anyhow`
+    2026-08-16, run `1408670-3c074ece`: the 34-name component's store held
+    `mech: 2` and `rejected: 3`, and the log printed both readings on the same
+    sweep — `2 mechanical failure(s) … earned by a different build … NOT
+    refusing this aim` immediately above `3 consecutive re-author(s) REJECTED
+    … Not retriggering`. Nothing but an ACCEPTED re-author clears the rejection
+    counter, and the refusal sits upstream of the only path that can accept
+    one, so every future run refuses on a streak no future run can spend.
+
+    A caller that passes `code_stamp=0` (build unknown) opts out of the build
+    half exactly as the mechanical rule does: 0 == 0 keeps the streak."""
     return (attempts.get(contract_key(component_key), 0)
-            != REJECTION_CONTRACT_EPOCH)
+            != REJECTION_CONTRACT_EPOCH
+            or attempts.get(rejection_build_key(component_key), 0)
+            != code_stamp)
 
 
 def rejected_key(component_key: str) -> str:
@@ -254,7 +286,7 @@ def rejected_key(component_key: str) -> str:
 
 def rejection_budget_spent(
     attempts: Mapping[str, int], component_key: str,
-    cap: int = DEFAULT_MAX_REJECTIONS,
+    cap: int = DEFAULT_MAX_REJECTIONS, *, code_stamp: int = 0,
 ) -> bool:
     """Whether this component's last `cap` re-authors were all REJECTED.
 
@@ -271,13 +303,43 @@ def rejection_budget_spent(
     get their own cap, cleared only by an ACCEPTED re-author. Reaching it is
     attempt-invariant — RED at the moment it prints, not a countdown.
 
-    A streak earned under an older constraint set does not count
-    (`rejection_streak_is_stale`): this cap answers "does the model keep
-    violating the contract after being told it", and a prompt that never told
-    it cannot answer that."""
-    if rejection_streak_is_stale(attempts, component_key):
+    A streak earned under an older constraint set, or by a different build of
+    the pipeline, does not count (`rejection_streak_is_stale`): this cap
+    answers "does the model keep violating the contract after being told it",
+    and neither a prompt that never told it nor an accept path that no longer
+    runs can answer that."""
+    if rejection_streak_is_stale(attempts, component_key, code_stamp):
         return False
     return attempts.get(rejected_key(component_key), 0) >= cap
+
+
+def charge_rejection(
+    attempts: dict[str, int], component_key: str, code_stamp: int = 0,
+) -> int:
+    """Book one REJECTED re-author against `component_key`, stamped with the
+    build and the constraint epoch that earned it, and return how many earlier
+    rejections were retired as stale.
+
+    A stale streak is REPLACED, not extended — the earlier rejections were a
+    claim about a prompt or an accept path that no longer runs, and continuing
+    the count would read the first rejection under the current rules as the
+    third. The sibling of `charge_mechanical_failure`, and the write it pairs
+    with `rejection_budget_spent`'s read: stamping only on the read side is how
+    a streak becomes unspendable."""
+    retired = 0
+    if rejection_streak_is_stale(attempts, component_key, code_stamp):
+        retired = attempts.pop(rejected_key(component_key), 0)
+    attempts[contract_key(component_key)] = REJECTION_CONTRACT_EPOCH
+    # Build 0 is "unknown", which is what an absent row already reads as, so an
+    # unstamped caller leaves the store as it found it rather than writing a
+    # row that asserts nothing — `charge_mechanical_failure`'s rule.
+    if code_stamp:
+        attempts[rejection_build_key(component_key)] = code_stamp
+    else:
+        attempts.pop(rejection_build_key(component_key), None)
+    attempts[rejected_key(component_key)] = (
+        attempts.get(rejected_key(component_key), 0) + 1)
+    return retired
 
 
 def settle_retrigger_payoff(

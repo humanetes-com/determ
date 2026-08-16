@@ -978,6 +978,67 @@ def test_a_rejection_streak_from_an_older_prompt_does_not_convict() -> None:
     assert rejection_budget_spent(current, "Error|ptr")
 
 
+def test_a_rejection_streak_from_another_build_does_not_refuse() -> None:
+    """The same permanent-lock shape `mechanical_streak_is_stale` was written
+    for, one `if` away from it and left behind. Run `1408670-3c074ece`
+    (2026-08-16) printed both readings on the same sweep: `2 mechanical
+    failure(s) … earned by a different build … NOT refusing this aim`
+    immediately above `3 consecutive re-author(s) REJECTED … Not retriggering`.
+    Only an ACCEPTED re-author clears `rejected:`, and this refusal sits
+    upstream of the only path that can accept one, so the streak was
+    unspendable for every future run."""
+    from pipeline_core.domain.layout_retrigger import (
+        REJECTION_CONTRACT_EPOCH,
+        contract_key,
+        rejected_key,
+        rejection_budget_spent,
+        rejection_build_key,
+    )
+    # The live store's shape: at the cap, current epoch, earned by build A.
+    live = {rejected_key(_MEGA): 3,
+            contract_key(_MEGA): REJECTION_CONTRACT_EPOCH,
+            rejection_build_key(_MEGA): _BUILD_A}
+    assert rejection_budget_spent(live, _MEGA, code_stamp=_BUILD_A)
+    assert not rejection_budget_spent(live, _MEGA, code_stamp=_BUILD_B)
+    # Negative control, matching the mechanical rule: an unstamped reader over
+    # an unstamped store still refuses, so every pre-existing caller is
+    # unchanged.
+    legacy = {rejected_key(_MEGA): 3, contract_key(_MEGA): REJECTION_CONTRACT_EPOCH}
+    assert rejection_budget_spent(legacy, _MEGA)
+
+
+def test_charging_a_rejection_under_a_new_build_restarts_the_streak() -> None:
+    """The write half. Stamping only on the read side is how a streak becomes
+    unspendable: the release fires once, the next rejection extends a count
+    earned under code that no longer runs, and the cap is reached again on
+    evidence about two different builds."""
+    from pipeline_core.domain.layout_retrigger import (
+        REJECTION_CONTRACT_EPOCH,
+        charge_rejection,
+        contract_key,
+        rejected_key,
+        rejection_budget_spent,
+        rejection_build_key,
+    )
+    attempts = {rejected_key(_MEGA): 3,
+                contract_key(_MEGA): REJECTION_CONTRACT_EPOCH,
+                rejection_build_key(_MEGA): _BUILD_A}
+    retired = charge_rejection(attempts, _MEGA, _BUILD_B)
+    assert retired == 3
+    assert attempts[rejected_key(_MEGA)] == 1
+    assert attempts[rejection_build_key(_MEGA)] == _BUILD_B
+    assert not rejection_budget_spent(attempts, _MEGA, code_stamp=_BUILD_B)
+    # Same build again extends rather than restarts, and reaches the cap.
+    assert charge_rejection(attempts, _MEGA, _BUILD_B) == 0
+    assert charge_rejection(attempts, _MEGA, _BUILD_B) == 0
+    assert rejection_budget_spent(attempts, _MEGA, code_stamp=_BUILD_B)
+    # An unstamped charge writes no build row — build 0 is what an absent row
+    # already reads as (`charge_mechanical_failure`'s rule).
+    fresh: dict[str, int] = {}
+    charge_rejection(fresh, _MEGA)
+    assert rejection_build_key(_MEGA) not in fresh
+
+
 # --- the aim: a frame that implicates NOBODY must not silence the chain --------
 # Run `263217-d41a5bb5` (2026-08-15), cluster `stable`, both iterations
 # identical: `unittests src/lib.rs` died of `AddressSanitizer: SEGV`, the

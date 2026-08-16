@@ -73,6 +73,15 @@ def test_requirements_text_states_the_consequence_and_groups_per_type() -> None:
     # The cost of omission is the whole build, not one test — the prompt has to
     # say so or the requirement reads as a nicety.
     assert "EVERY test scores as failing" in text
+    # …and so is the cost of INVENTION, which this text used to invite in as
+    # many words ("Add any others the type can support"). Two of the three
+    # rejections on file for `anyhow`'s 34-name `Error` component were derives
+    # the model added beyond the list: `#[derive(Debug, PartialEq)]` on `Error`
+    # against the crate's own `impl Debug for Error` (E0119), and
+    # `#[derive(Copy, Clone)]` on `Own`/`Ref` against their hand-written impls.
+    assert "add NOTHING BEYOND" in text
+    assert "E0119" in text
+    assert "KEEP every derive" in text
 
 
 def test_requirements_text_is_empty_without_requirements() -> None:

@@ -13,6 +13,7 @@ test list.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 
@@ -122,6 +123,23 @@ _OWNERSHIP_PRIMITIVES = (
     "ptr::read", "from_raw", "mem::forget", "ManuallyDrop", "transmute",
     "into_raw", "as_ptr", "cast::<",
 )
+# Ways a body fabricates a pointer that names no object: `NonNull::dangling()`
+# yields `align_of::<T>()` as the address, `null()`/`null_mut()` yield 0, and
+# `NonNull::new_unchecked(<literal>)` yields whatever was written. All three are
+# legitimate as a PLACEHOLDER — a value written into a slot whose real contents
+# have just been moved out — and none of them is legitimate as a value handed to
+# a caller who will dereference it. `placeholder_pointer_subjects` separates the
+# two by what the occurrence is used FOR, not by which mark it is.
+_POINTER_SENTINELS = ("dangling()", "::null()", "::null_mut()")
+# The in-place-exchange idiom, and the whole of the legitimate use above: the
+# sentinel is an ARGUMENT here, written into a slot in exchange for the real
+# value being taken out. Measured on the live anyhow tree 2026-08-16 — of the
+# seven `NonNull::dangling()` occurrences in `.skeleton-filled/stable/src`, four
+# are `core::mem::replace(&mut self.inner, Own { ptr: …dangling() })` in
+# `downcast`, `into_boxed_dyn_error`,
+# `reallocate_into_boxed_dyn_error_without_backtrace` and `Drop::drop`, and all
+# four are correct.
+_SENTINEL_EXCHANGE_CALLS = ("replace(", "swap(", "ptr::write")
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +189,55 @@ class DestructionFault:
             "`Box::from_raw` on memory something else still owns). Look for "
             "the fn that transfers ownership of this value and does not "
             "suppress the original owner's drop.")
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceholderPointerFault:
+    """A dereference of an address too small to be one: a pointer some fn
+    fabricated as a placeholder and returned instead of computing.
+
+    The sibling reading to `DestructionFault`, for the class where the frame
+    filter succeeds and is therefore MORE misleading than when it fails. Run
+    `1408670-3c074ece` (2026-08-16), `tests/test_downcast.rs`:
+
+        thread 'test_drop' panicked at src/error.rs:440:34:
+        misaligned pointer dereference: address must be a multiple of 0x8 but
+        is 0x1
+
+    `src/error.rs:440` is inside `Error::downcast_ref`, and the localizer
+    blamed it — correctly, as a frame. But `0x1` is `NonNull::<()>::dangling()`,
+    and `downcast_ref` does not make it: `object_downcast` two dozen lines away
+    returns `Some(Ref::from_raw(NonNull::dangling()))` where upstream returns
+    the address of the payload field. The blamed fn dereferences; the fn that
+    must change fabricates. That crash aborted the whole 7-test binary on every
+    sweep of a 6h run in which `object_downcast` was never dispatched once.
+
+    The discriminator is arithmetic, not a guess: an address BELOW the
+    alignment its own type requires cannot be a real allocation of that type,
+    so it was written as a constant. A genuinely misaligned heap pointer is
+    large and fails this test, which is the point — this text enters a prompt
+    as a statement of fact."""
+
+    required_align: int
+    address: int
+    deref_site: str
+
+    def render(self) -> str:
+        return (
+            f"PLACEHOLDER POINTER: the dereference at {self.deref_site} read "
+            f"address {hex(self.address)}, and the type it was read as "
+            f"requires an address that is a multiple of "
+            f"{hex(self.required_align)}. No allocation of that type can live "
+            f"below its own alignment, so {hex(self.address)} was never a real "
+            "address: it is a sentinel some fn WROTE — `NonNull::dangling()`, "
+            "a null, a fixed constant — and then handed out. The fn to change "
+            "is the one that FABRICATED this pointer, not the one that "
+            "dereferenced it: look for a body that returns a dangling or null "
+            "pointer where it is supposed to compute the address of the value "
+            "it points at (the address of a field, a cast of a live "
+            "allocation). A sentinel written INTO a slot in exchange for a "
+            "value moved out of it is a different, correct idiom — leave "
+            "those alone.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +755,141 @@ def read_destruction_fault(report: str) -> DestructionFault | None:
         freed_type=freed_type,
         free_site=_authored_site(freed) or "unknown",
         access_site=_authored_site(access) or "unknown")
+
+
+_MISALIGNED_RE = re.compile(
+    r"misaligned pointer dereference: address must be a multiple of "
+    r"(0x[0-9a-fA-F]+) but is (0x[0-9a-fA-F]+)")
+
+
+def read_placeholder_pointer_fault(
+    output: str,
+) -> PlaceholderPointerFault | None:
+    """The fabricated-pointer reading of a sweep's own output, or None.
+
+    Read from the SWEEP TEXT rather than from a `CrashSite.raw_report`, because
+    this class does not need a sanitizer: rustc's own debug alignment check
+    prints it, so the gdb fast path produces it and the site carries an empty
+    `raw_report` (run `1408670-3c074ece`, all five `phase_c.crash.localized`
+    events). Reading it off the site would therefore find nothing exactly when
+    the fault is present.
+
+    Both conditions are required and neither is a heuristic: the message must
+    be the alignment check's, and the address must be strictly below the
+    alignment it violates — an allocation cannot sit below its own alignment,
+    so such an address was written as a constant rather than computed."""
+    site = ""
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        if "panicked at " in line:
+            site = line.split("panicked at ", 1)[1].strip().rstrip(":")
+            # `src/error.rs:440:34` -> `src/error.rs:440`: the column is noise
+            # in a prompt and the file:line is what a reader opens.
+            head, _, col = site.rpartition(":")
+            if col.isdigit() and head.rpartition(":")[2].isdigit():
+                site = head
+            continue
+        m = _MISALIGNED_RE.search(line)
+        if m is None:
+            continue
+        align, addr = int(m.group(1), 16), int(m.group(2), 16)
+        if align <= 1 or addr >= align:
+            return None
+        return PlaceholderPointerFault(
+            required_align=align, address=addr, deref_site=site or "unknown")
+    return None
+
+
+def placeholder_pointer_subjects(
+    fn_records: Iterable[Mapping[str, object]],
+    *, max_subjects: int = 12,
+) -> frozenset[FnLocator]:
+    """The crate's own fns that HAND OUT a fabricated pointer.
+
+    One rule, and it is structural rather than a name guess: a body that
+    constructs a no-argument pointer sentinel (`dangling()`, `null()`,
+    `null_mut()` — each of which names no object by construction) in any
+    position other than as an argument to an in-place exchange. The exchange
+    case is the legitimate idiom and is excluded by what the occurrence is used
+    for, not by which fn it is in.
+
+    Measured on `tmp/anyhow/.skeleton-filled/stable` (2026-08-16) before being
+    believed: seven occurrences, four of them `mem::replace` arguments, and the
+    three survivors are `object_downcast`, `context_downcast` and
+    `context_chain_downcast` — every one of them `Some(Ref::from_raw(NonNull::
+    dangling()))` where upstream returns the address of a payload field, and
+    every one of them absent from the crash evidence of the run that spent six
+    hours on the binary they abort.
+
+    Capped on `destruction_path_subjects`' rule and for its reason: a subject
+    set wider than `max_subjects` contributes nothing at all, because a subject
+    that names half the crate names none of it."""
+    picked: set[FnLocator] = set()
+    for rec in fn_records:
+        file_ = str(rec.get("file") or "")
+        fn_name = str(rec.get("fn_name") or "")
+        if not file_ or not fn_name or not _is_authorable_file(file_):
+            continue
+        for line in str(rec.get("body_text") or "").splitlines():
+            if not any(s in line for s in _POINTER_SENTINELS):
+                continue
+            if any(c in line for c in _SENTINEL_EXCHANGE_CALLS):
+                continue
+            picked.add(FnLocator(file_, fn_name))
+            break
+    return frozenset(picked) if 0 < len(picked) <= max_subjects else frozenset()
+
+
+def callee_subjects(
+    blamed: FnLocator,
+    fn_records: Iterable[Mapping[str, object]],
+    *, max_subjects: int = 12,
+) -> frozenset[FnLocator]:
+    """The in-crate fns `blamed`'s own body names — one hop, as EVIDENCE.
+
+    A frame-derived blame is an observation about where execution faulted, and
+    for every fault whose bad value is PRODUCED elsewhere (a returned raw
+    pointer, a vtable fn pointer, a fabricated sentinel) the producer is one
+    call away and appears in no stack: the caller faults, the callee is the
+    defect. 177.3 shipped a producer aim for the case where the localizer
+    blames NOBODY; this is the same gap on the route where it blames somebody,
+    which is why `object_downcast` — reached from the blamed `downcast_ref` by
+    the single call on the line above the fault — was never once dispatched in
+    run `1408670-3c074ece`.
+
+    An occurrence counts when the name is followed by `(`, `::<` or `)`. The
+    third alternative is not slack: the live call is through a vtable field,
+    `(vtbl.object_downcast)(ref_impl, target)`, so the name is followed by the
+    closing paren of the parenthesized callee and a `(`-only rule misses
+    exactly the fn that matters. A name followed by `::` is a module qualifier
+    (`crate::error::vtable`) and is excluded on that ground — measured on the
+    live tree, that one exclusion is the difference between four subjects and
+    five, the fifth being the `error` module.
+
+    Never blame: these locators carry evidence into a fill prompt and void
+    exhaustion, and nothing here may convict, crash-block or revert. Capped for
+    `destruction_path_subjects`' reason."""
+    records = list(fn_records)
+    body = "\n".join(
+        str(r.get("body_text") or "") for r in records
+        if str(r.get("file") or "") == blamed.file
+        and str(r.get("fn_name") or "") == blamed.fn_name)
+    if not body:
+        return frozenset()
+    by_name: dict[str, set[FnLocator]] = {}
+    for rec in records:
+        file_ = str(rec.get("file") or "")
+        fn_name = str(rec.get("fn_name") or "")
+        if not file_ or not fn_name or not _is_authorable_file(file_):
+            continue
+        if fn_name == blamed.fn_name:
+            continue
+        by_name.setdefault(fn_name, set()).add(FnLocator(file_, fn_name))
+    picked: set[FnLocator] = set()
+    for name, locs in by_name.items():
+        if re.search(r"\b" + re.escape(name) + r"\s*(\(|::<|\))", body):
+            picked |= locs
+    return frozenset(picked) if 0 < len(picked) <= max_subjects else frozenset()
 
 
 def _is_authorable_file(file_rel: str) -> bool:

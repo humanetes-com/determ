@@ -894,3 +894,190 @@ def test_no_chain_blame_without_the_unattributed_site(
     sigs = {crash_signature(e) for e in evidences if e is not None}
     assert len(sigs) == 1
     assert not any(kw.get("crash_evidence") for kw in fills)
+
+
+# --- the producer aim on the FRAME-derived route -----------------------------
+# Run `1408670-3c074ece` (2026-08-16), cluster `stable`, all five sweeps
+# identical: `tests/test_downcast.rs` died SIGABRT in `test_drop` and the
+# localizer blamed `src/error.rs::downcast_ref` — frame-derived, and correct as
+# a frame. The fault was `object_downcast` returning
+# `Some(Ref::from_raw(NonNull::dangling()))`, which `downcast_ref` calls on the
+# line above the one that faulted. 6h02m, 101 fills, 20 dispatches of the impl
+# block holding the blamed fn, zero test-verdict changes, and `object_downcast`
+# never dispatched once. The destruction narrowing shipped for the
+# blame-NOBODY route cannot reach here: this route HAS a blame.
+_MISALIGNED_OUT = (
+    "test t1 ... ok\ntest t2 ... FAILED\n"
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+    "thread 'test_drop' panicked at src/error.rs:440:34:\n"
+    "misaligned pointer dereference: address must be a multiple of 0x8 "
+    "but is 0x1\n"
+    "thread caused non-unwinding panic. aborting.\n")
+
+_LIVE_FNS = [
+    {"file": "src/error.rs", "fn_name": "downcast_ref",
+     "body_text": "let vtbl = unsafe { crate::error::vtable(self.inner.ptr) };\n"
+                  "if let Some(down) = unsafe { (vtbl.object_downcast)(r, target) } {\n"
+                  "    return Some(unsafe { &*(down.as_ptr() as *const E) });\n}"},
+    {"file": "src/error.rs", "fn_name": "object_downcast",
+     "body_text": "Some(unsafe { Ref::from_raw(core::ptr::NonNull::dangling()) })"},
+    {"file": "src/error.rs", "fn_name": "context_downcast",
+     "body_text": "Some(unsafe { Ref::from_raw(core::ptr::NonNull::dangling()) })"},
+    {"file": "src/error.rs", "fn_name": "vtable", "body_text": "unsafe { &*e.vtable }"},
+    {"file": "src/chain.rs", "fn_name": "next", "body_text": "self.state.next()"},
+]
+
+
+def _frame_blamed_site(line: int = 440):
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    return CrashSite(
+        binary_label="tests/test_downcast.rs", test_name="test_drop",
+        signal="SIGABRT",
+        frames=(CrashFrame("src/error.rs", line, "downcast_ref",
+                           "<anyhow::Error>::downcast_ref::<E>"),),
+        origin_frames=(), origin_capable=False)
+
+
+def test_a_frame_blame_aims_at_the_producer_it_cannot_name(
+        tmp_path: Path, monkeypatch) -> None:
+    """The frame READS the bad pointer; the fn that WROTE it is one call away
+    and in no stack. Both halves must arrive: `object_downcast` as a subject,
+    and the placeholder reading as the statement of fact that says why."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict[str, Any]] = []
+    logs: list[str] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, _MISALIGNED_OUT),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (_frame_blamed_site(),),
+                enumerate_fns=lambda src: list(_LIVE_FNS),
+                fill=_fill, logs=logs)
+
+    aimed = [d for ev, d in events if ev == "phase_c.crash.producer_aimed"]
+    assert aimed, "the frame-derived route aimed at no producer at all"
+    assert aimed[0]["blamed"] == ["src/error.rs::downcast_ref"]
+    subs = set(aimed[0]["subjects"])
+    assert "src/error.rs::object_downcast" in subs, \
+        "the fn that fabricated the pointer never entered the pack"
+    # The sentinel family enters on the placeholder reading, whether or not the
+    # blamed fn calls it: the pointer may be handed through any number of hops.
+    assert "src/error.rs::context_downcast" in subs
+    assert "src/chain.rs::next" not in subs, "an unmentioned fn is not a subject"
+    assert aimed[0]["placeholder_pointer"] == {
+        "address": 1, "required_align": 8, "deref_site": "src/error.rs:440"}
+
+    armed = [kw for kw in fills if kw.get("crash_evidence")]
+    assert armed
+    key = FnLocator("src/error.rs", "object_downcast")
+    assert key in armed[0]["crash_evidence"]
+    text = armed[0]["crash_evidence"][key]
+    assert "PRODUCER CANDIDATE" in text and "PLACEHOLDER POINTER" in text
+    # EVIDENCE, never blame: the inference may prompt, enter the frontier and
+    # void exhaustion, and it may not convict, crash-block or revert.
+    assert FnLocator("src/error.rs", "object_downcast") not in (
+        armed[0].get("crash_blamed") or frozenset())
+    assert any("producer candidate" in ln for ln in logs)
+
+
+def test_the_blamed_fns_own_evidence_outranks_the_producer_guess(
+        tmp_path: Path, monkeypatch) -> None:
+    """`setdefault` semantics, asserted where it matters: the blamed fn is its
+    own callee-set's neighbour in the records, and its real frame evidence must
+    not be overwritten by the weaker producer text."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict[str, Any]] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, _MISALIGNED_OUT),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (_frame_blamed_site(),),
+                enumerate_fns=lambda src: list(_LIVE_FNS),
+                fill=_fill)
+
+    armed = [kw for kw in fills if kw.get("crash_evidence")][0]
+    blamed_text = armed["crash_evidence"][FnLocator("src/error.rs", "downcast_ref")]
+    assert "PRODUCER CANDIDATE" not in blamed_text
+    assert "SIGABRT" in blamed_text
+
+
+def test_without_the_fn_enumerator_no_producer_is_aimed(
+        tmp_path: Path, monkeypatch) -> None:
+    """The negative control: the wiring exactly as it stood for the 6h02m run.
+    A frame blame, the same panic text, and the pack is the blamed fn's own
+    frames — which is how `object_downcast` went undispatched."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict[str, Any]] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, _MISALIGNED_OUT),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (_frame_blamed_site(),),
+                enumerate_fns=None, fill=_fill)
+
+    assert not [d for ev, d in events if ev == "phase_c.crash.producer_aimed"]
+    armed = [kw for kw in fills if kw.get("crash_evidence")]
+    assert armed, "the frame evidence itself must be unaffected"
+    assert FnLocator("src/error.rs", "object_downcast") not in armed[0]["crash_evidence"]
+
+
+def test_an_ordinary_crash_aims_at_callees_without_a_placeholder_claim(
+        tmp_path: Path, monkeypatch) -> None:
+    """The callee aim is the general fix and stands alone; the placeholder
+    reading is an extra statement of fact that must NOT be made when the
+    alignment check did not print. Without it the sentinel family is not
+    pulled in either — only what the blamed body actually names."""
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "9")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict[str, Any]] = []
+
+    def _fill(**kw):
+        fills.append(kw)
+        return ClusterFillResult(attempts=1)
+
+    plain = ("test t1 ... ok\ntest t2 ... FAILED\n"
+             "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+             "thread 'test_drop' panicked at src/error.rs:440:34:\n"
+             "explicit panic\n")
+    _run_driver(monkeypatch, tmp_path,
+                run_cargo=lambda *a, **k: (101, plain),
+                inventory=lambda pd, cl, stems, lib=False: (
+                    3, frozenset({"t1", "t2", "t3"})),
+                attribution_kwargs=[], checkpoints=[], events=events,
+                reverse_map={},
+                localize=lambda *a, **k: (_frame_blamed_site(),),
+                enumerate_fns=lambda src: list(_LIVE_FNS),
+                fill=_fill)
+
+    aimed = [d for ev, d in events if ev == "phase_c.crash.producer_aimed"]
+    assert aimed and aimed[0]["placeholder_pointer"] is None
+    subs = set(aimed[0]["subjects"])
+    assert "src/error.rs::object_downcast" in subs
+    assert "src/error.rs::context_downcast" not in subs
+    armed = [kw for kw in fills if kw.get("crash_evidence")][0]
+    text = armed["crash_evidence"][FnLocator("src/error.rs", "object_downcast")]
+    assert "PRODUCER CANDIDATE" in text and "PLACEHOLDER POINTER" not in text
