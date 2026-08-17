@@ -242,7 +242,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  frontier=None, fills_per_iter=0, graceful_stop=None, fill=None,
                  best_mark=None, checkpoints=None, resets=None, stubs=None,
                  retires=None, logs=None, reset_returns=None,
-                 localize=None, escalate=None, reverse_map=None):
+                 localize=None, escalate=None, reverse_map=None,
+                 floor=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -299,6 +300,13 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         retrigger_layout=retrigger,
         localize_crashes=localize,
         escalate_to_producers=escalate,
+        # `floor` is a mutable dict standing in for the on-disk per-cluster
+        # floor file — pass the SAME dict to two runs to model two processes
+        # sharing `.phase_c_logs`, which is what Stage A persistence is for.
+        **({} if floor is None else {
+            "load_tdd_floor": lambda *a, **k: floor.get("row"),
+            "save_tdd_floor": lambda p, c, row: floor.__setitem__("row", row),
+        }),
     )
 
 

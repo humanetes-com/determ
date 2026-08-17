@@ -380,6 +380,39 @@ def impossibility_claim_is_unfounded(
 # fixed — which is precisely when the false premise is provable, not forgivable.
 GUIDANCE_FROM_HOLLOW_TREE = "guidance_from_hollow_tree"
 
+# Set (a dict `{"cluster": ..., "tests": [...]}`) when the futility escalation
+# declared the unit's rewrites futile for the named tests: the attributed
+# unit-set was UNCHANGED across judged sweeps while the tests kept failing, so
+# "what should the next rewrite of this body do" — the question the guidance
+# answers — has been answered "nothing" by measurement. The live instance:
+# `src/chain.rs::*impl*::DoubleEndedIteratorforChain` carried a
+# WRONG_TYPE_CHOICE record (rounds=14) steering "keep the buffered storage as
+# the in-place Vec held by ChainState::Buff…" against a tree whose
+# `ChainState::Buffered` holds `vec::IntoIter` — the model wrote `.pop()` on
+# an `IntoIter` (E0599) and dereferenced `ChainState` (E0614) in run
+# `2773540-e47c3754` (2026-08-17) while, in the same sweep, the escalation
+# declared the accessor futile. Two mechanisms steering one unit in opposite
+# directions; the suspension makes the measured one win. Cluster-scoped
+# because the store is shared and the futility was measured under one
+# cluster's tree; the verdict half of the record (`fully_exhausted`) is
+# deliberately untouched — skipping a futile accessor is what futility wants.
+FUTILITY_SUSPENDED = "futility_suspended"
+
+
+def futility_suspension_applies(
+    record: Mapping[str, Any] | None, cluster: str,
+) -> bool:
+    """Whether ``record``'s guidance is suspended for ``cluster``.
+
+    An empty ``cluster`` (a caller that does not know its cluster) never
+    matches: the futility was measured under one cluster's tree, and
+    suppressing another cluster's prompt on it would be the cross-cluster
+    reuse `conviction_standing` exists to forbid."""
+    if not record or not cluster:
+        return False
+    susp = record.get(FUTILITY_SUSPENDED)
+    return isinstance(susp, Mapping) and susp.get("cluster") == cluster
+
 
 class ConvictionStanding(Enum):
     """Why a stored ``fully_exhausted`` verdict does or does not apply here."""
@@ -411,6 +444,7 @@ def admissible_guidance(
     record: Mapping[str, Any] | None, file_text: str, *,
     evidence: ConvictionEvidence,
     anchor_types: frozenset[str] = frozenset(),
+    cluster: str = "",
 ) -> str:
     """The stored lesson a prompt may carry, or ``""``.
 
@@ -442,6 +476,12 @@ def admissible_guidance(
     if not guidance:
         return ""
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
+        return ""
+    # The fifth way: the futility escalation measured that rewrites of this
+    # unit change nothing for the tests it answers for — the exact question
+    # the guidance advises on. Scoped to the cluster the futility was
+    # measured under; see `FUTILITY_SUSPENDED`.
+    if futility_suspension_applies(rec, cluster):
         return ""
     # The fourth way, and the one the three above cannot see: a claim that the
     # crate CANNOT do this, made against a tree that has since moved (or against

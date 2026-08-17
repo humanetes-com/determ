@@ -1427,7 +1427,8 @@ def fill_impl_blocks(
         _prior_rec = retros_cache.get(_prior_key, {})
         prior_retro = admissible_guidance(
             _prior_rec, snapshot, evidence=_block_evidence,
-            anchor_types=anchor_types_for_container(block.container))
+            anchor_types=anchor_types_for_container(block.container),
+            cluster=cluster_name)
         # The line carries the STORE key so the grep lands on the record.
         if (_hline := honoured_guidance_line(
                 _prior_key, _prior_rec, prior_retro)):
@@ -2162,7 +2163,8 @@ def fill_impl_blocks(
                     fix_attempts=fix_attempt,
                     prior_retrospective=admissible_guidance(
                         prior, snapshot, evidence=_block_evidence,
-                        anchor_types=anchor_types_for_container(block.container)),
+                        anchor_types=anchor_types_for_container(block.container),
+                        cluster=cluster_name),
                 )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
@@ -2263,7 +2265,8 @@ def fill_impl_blocks(
             _prior_rec = retros_cache.get(_prior_key, {})
             prior_retro = admissible_guidance(
                 _prior_rec, snapshot, evidence=_block_evidence,
-                anchor_types=anchor_types_for_container(block.container))
+                anchor_types=anchor_types_for_container(block.container),
+                cluster=cluster_name)
             if (_hline := honoured_guidance_line(
                     _prior_key, _prior_rec, prior_retro)):
                 _log(f"  {_hline}")

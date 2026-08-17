@@ -7,21 +7,24 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.identity import RetroKey
-from pipeline_core.domain.retro_gate import cleared_blockers
+from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.retro_gate import FUTILITY_SUSPENDED, cleared_blockers
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
 from pipeline_core.log import emit, log
 
 __all__ = [
-    "canon_container", "is_fn_fully_exhausted", "load_retrospectives",
-    "migrate_absolute_gate_retros", "migrate_confounded_retros",
-    "reset_exhaustion_flags", "retire_unblocked_convictions", "retro_key",
-    "retrospectives_path", "save_retrospectives",
+    "canon_container", "futile_suspension_keys", "is_fn_fully_exhausted",
+    "load_retrospectives", "migrate_absolute_gate_retros",
+    "migrate_confounded_retros", "reset_exhaustion_flags",
+    "retire_unblocked_convictions", "retro_key", "retrospectives_path",
+    "save_retrospectives", "suspend_futile_guidance",
 ]
 
 
@@ -196,6 +199,91 @@ def retire_unblocked_convictions(
         emit("phase_c.exhaustion.unblocked",
              data={"cleared": cleared, "units": freed[:20]})
     return cleared
+
+
+def futile_suspension_keys(
+    occurrences: Mapping[FnLocator, tuple[tuple[str, str], ...]],
+    futile: Iterable[FnLocator],
+) -> set[str]:
+    """The store keys whose GUIDANCE a futility verdict has answered.
+
+    ``occurrences`` is `fn_occurrence_index`'s view of the tree: (file, fn) →
+    every occurrence's (container, sig). Two record shapes are implicated:
+
+    * the per-fn record of every occurrence of a futile unit — the guidance
+      there advises the exact rewrite futility measured as changing nothing;
+    * a per-impl record (`fn == "*impl*"`), but ONLY when every member of its
+      container is futile. The block record's guidance covers the whole
+      block, and the escalation's verdict is per accessor — suspending
+      `impl Error`'s record because one of its five members went futile for
+      one test would silence lessons about the other four. The live case this
+      exists for is the single-member block: `DoubleEndedIterator for Chain`
+      holds only `next_back`, so its record IS the accessor's record.
+    """
+    futile_set = set(futile)
+    keys: set[str] = set()
+    for loc in futile_set:
+        for container, _sig in occurrences.get(loc, ()):
+            keys.add(str(retro_key(loc.file, loc.fn_name, container)))
+    members: dict[tuple[str, str], set[str]] = {}
+    for loc, occs in occurrences.items():
+        for container, _sig in occs:
+            if container:
+                members.setdefault((loc.file, container), set()).add(
+                    loc.fn_name)
+    futile_names = {(loc.file, loc.fn_name) for loc in futile_set}
+    for (file_rel, container), fns in members.items():
+        if fns and all((file_rel, fn) in futile_names for fn in fns):
+            keys.add(str(retro_key(file_rel, "*impl*", container)))
+    return keys
+
+
+def suspend_futile_guidance(
+    project_dir: Path, keys: Iterable[str], *,
+    cluster: str, tests: Iterable[str],
+) -> list[str]:
+    """Stamp ``keys``' records `futility_suspended` for ``cluster``.
+
+    The read side is `domain/retro_gate.admissible_guidance`, which withholds
+    a suspended record's guidance for the stamping cluster only — the store
+    is shared, and the futility was measured under one cluster's tree. The
+    verdict half (`fully_exhausted`) is deliberately untouched: skipping a
+    futile accessor's re-dispatch is aligned with what futility measured.
+
+    Only records that exist AND carry guidance are stamped (a stamp on a
+    record nobody reads is state with no reader), and re-stamping the same
+    cluster only widens the test list. Returns the keys newly stamped or
+    widened, so the caller's log can name them.
+    """
+    retros = load_retrospectives(project_dir)
+    stamped: list[str] = []
+    new_tests = {str(t) for t in tests}
+    for key in sorted({str(k) for k in keys}):
+        rec = retros.get(key)
+        if not isinstance(rec, dict) or not rec.get("guidance"):
+            continue
+        susp = rec.get(FUTILITY_SUSPENDED)
+        if isinstance(susp, dict) and susp.get("cluster") == cluster:
+            already = {str(t) for t in susp.get("tests", ())}
+            merged = already | new_tests
+            if merged == already:
+                continue
+            susp["tests"] = sorted(merged)
+        else:
+            rec[FUTILITY_SUSPENDED] = {
+                "cluster": cluster, "tests": sorted(new_tests)}
+        stamped.append(key)
+    if stamped:
+        save_retrospectives(project_dir, retros)
+        log(f"  [phase-c] suspended stored guidance on {len(stamped)} "
+            f"record(s) — the futility escalation measured their rewrites as "
+            f"changing nothing for {sorted(new_tests)}: "
+            + "; ".join(stamped[:6])
+            + (f" (+{len(stamped) - 6} more)" if len(stamped) > 6 else ""))
+        emit("phase_c.retros.futility_suspended", data={
+            "cluster": cluster, "tests": sorted(new_tests),
+            "keys": stamped[:20], "count": len(stamped)})
+    return stamped
 
 
 def is_fn_fully_exhausted(

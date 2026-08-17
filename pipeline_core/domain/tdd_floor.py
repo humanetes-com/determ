@@ -93,12 +93,30 @@ class TddFloor:
     # Defaulted so a floor written by an older build parses (`from_dict` is
     # total by design and an absent cursor simply means "start the pass").
     attempted: tuple[str, ...] = ()
+    # The futility evidence: per failing test, the frontier unit-set
+    # (`"<file>::<fn>"`) the LAST sweep attributed to it. The escalation's
+    # trigger is "this test's attributed units are UNCHANGED across two judged
+    # sweeps while it kept failing" — held process-locally, that takes two
+    # sweeps of THIS process, and the flat-score guard stops a resumed flat
+    # run at exactly its second sweep, before the widened frontier's first
+    # dispatch. Run `2773540-e47c3754` (2026-08-17): the escalation added
+    # `construct`/`erase`/`chain::new`/`context.rs::source` at iter 2, the
+    # guard stopped the run at the same sweep, and the additions died with
+    # the process — so no relaunch could ever dispatch them, while the tree
+    # held the severed `ContextError<C, Error>::source -> None` the
+    # escalation existed to reach. Persisting the evidence lets a resume
+    # detect the unchanged set at its FIRST sweep, so the escalated slice is
+    # dispatched inside the one batch the guard's design grants each
+    # relaunch.
+    futile_units: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {"cluster": self.cluster, "best_pass": self.best_pass,
                 "stall": self.stall, "tree_sha": self.tree_sha,
                 "oracle_size": self.oracle_size, "code_id": self.code_id,
-                "attempted": list(self.attempted)}
+                "attempted": list(self.attempted),
+                "futile_units": {t: list(units)
+                                 for t, units in self.futile_units}}
 
     @staticmethod
     def from_dict(raw: Any) -> TddFloor | None:
@@ -109,6 +127,7 @@ class TddFloor:
         if not isinstance(raw, dict):
             return None
         try:
+            _fut = raw.get("futile_units")
             return TddFloor(
                 cluster=str(raw["cluster"]),
                 best_pass=int(raw["best_pass"]),
@@ -117,7 +136,12 @@ class TddFloor:
                 oracle_size=int(raw["oracle_size"]),
                 code_id=str(raw["code_id"]),
                 attempted=tuple(
-                    str(k) for k in (raw.get("attempted") or ())))
+                    str(k) for k in (raw.get("attempted") or ())),
+                futile_units=tuple(sorted(
+                    (str(t), tuple(str(u) for u in units))
+                    for t, units in _fut.items()
+                    if isinstance(units, list))
+                    if isinstance(_fut, dict) else ()))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -136,6 +160,14 @@ class FloorResume:
     # The open pass's cursor. ``None`` means "open a fresh pass"; an empty
     # tuple is a resumed pass that happened to have dispatched nothing.
     attempted: tuple[str, ...] | None = None
+    # The futility evidence, resumed on the CURSOR's identity rule (cluster +
+    # code_id, never the oracle or the tree): like the cursor it is a record
+    # of what this cluster's dispatches already established, not a claim
+    # about a score, and it self-validates at the live sweep — the escalation
+    # trigger re-compares it against the CURRENT attribution, so evidence a
+    # retrigger or restore has invalidated simply fails the equality and
+    # escalates nothing. ``None`` means "no evidence to carry".
+    futility: tuple[tuple[str, tuple[str, ...]], ...] | None = None
 
 
 def resume_mismatch(
@@ -255,14 +287,23 @@ def resume_floor(
         # for: a stop, a restore or a crash flip moves the oracle, and the
         # relaunch then re-dispatched the deterministic prefix it had just been
         # stopped on.
-        _cursor = (saved.attempted if cursor_mismatch(
-            saved, cluster=cluster, code_id=code_id) is None else None)
+        _carry = cursor_mismatch(saved, cluster=cluster, code_id=code_id) is None
+        _cursor = saved.attempted if _carry else None
+        # The futility evidence rides the cursor's identity rule for the
+        # cursor's own reason: both record what this cluster's dispatches
+        # already established, and both self-validate against the live state
+        # (the cursor by frontier intersection, the evidence by the
+        # escalation's own equality re-check).
+        _futility = saved.futile_units if _carry else None
         return FloorResume(
             stall=None, best_pass=None, attempted=_cursor,
+            futility=_futility,
             note=why + " changed"
             + (f"; pass cursor resumed at {len(_cursor)} unit(s) anyway — a "
                "cursor answers to cluster+code_id, not to the oracle"
-               if _cursor else ""))
+               if _cursor else "")
+            + (f"; futility evidence resumed for {len(_futility)} test(s)"
+               if _futility else ""))
     # The CURSOR resumes on the identity check alone, deliberately not on
     # `tree_sha`. It is not a claim about a score — it is the list of units
     # this pass already spent a model call on, and its safety condition is
@@ -276,14 +317,21 @@ def resume_floor(
     if saved.tree_sha != tree_sha:
         return FloorResume(
             stall=saved.stall, best_pass=None, attempted=saved.attempted,
+            futility=saved.futile_units or None,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
                   "changed, so nothing here can restore that peak"
                   + (f"; pass cursor resumed at {len(saved.attempted)} "
-                     "unit(s)" if saved.attempted else "")))
+                     "unit(s)" if saved.attempted else "")
+                  + (f"; futility evidence resumed for "
+                     f"{len(saved.futile_units)} test(s)"
+                     if saved.futile_units else "")))
     return FloorResume(
         stall=saved.stall, best_pass=saved.best_pass,
         attempted=saved.attempted,
+        futility=saved.futile_units or None,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
               + (f" pass cursor={len(saved.attempted)} unit(s)"
-                 if saved.attempted else "")))
+                 if saved.attempted else "")
+              + (f" futility evidence={len(saved.futile_units)} test(s)"
+                 if saved.futile_units else "")))

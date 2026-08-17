@@ -186,6 +186,9 @@ from pipeline_core.adapters.repo_spec_docs import (
     make_repo_spec_section as _make_repo_spec_section,
 )
 from pipeline_core.adapters.retros import (
+    futile_suspension_keys as _futile_suspension_keys,
+)
+from pipeline_core.adapters.retros import (
     is_fn_fully_exhausted as _retros_is_exhausted,
 )
 from pipeline_core.adapters.retros import (
@@ -208,6 +211,9 @@ from pipeline_core.adapters.retros import (
 )
 from pipeline_core.adapters.retros import (
     save_retrospectives as _retros_save,
+)
+from pipeline_core.adapters.retros import (
+    suspend_futile_guidance as _suspend_futile_guidance,
 )
 from pipeline_core.adapters.state import (
     log_state_summary as _state_log_state_summary,
@@ -2328,6 +2334,12 @@ def build_app(
             task2_fill_fns_one_by_one=helpers.task2_fill_fns_one_by_one,
             escalate_to_producers=functools.partial(
                 escalate_frontier_to_producers, _attr_deps),
+            suspend_futile_guidance=lambda pd, sd, units, cl, tests:
+                _suspend_futile_guidance(
+                    pd, _futile_suspension_keys(
+                        _fn_occurrence_index_impl(
+                            sd, enumerate_fns=enumerate_fns), units),
+                    cluster=cl, tests=tests),
             checkpoint_fill_tree=_checkpoint_fill_tree,
             load_best_tree_mark=load_cluster_best_tree_mark,
             restore_best_tree_pair=_restore_best_tree_pair,

@@ -396,3 +396,38 @@ def test_honoured_guidance_line_marks_a_missing_tree_premise() -> None:
 def test_no_line_when_nothing_was_honoured() -> None:
     from pipeline_core.domain.retro_gate import honoured_guidance_line
     assert honoured_guidance_line("u", {"category": "X"}, "") == ""
+
+
+def test_futility_suspension_withholds_guidance_for_the_stamping_cluster_only() -> None:
+    """The futility escalation measured that rewrites of the unit change
+    nothing for its tests — the exact question the guidance advises on. The
+    live instance (run `2773540-e47c3754`, 2026-08-17): a WRONG_TYPE_CHOICE
+    record steered 14 rounds of `ChainState`-as-`Vec` bodies against a tree
+    whose `ChainState::Buffered` holds `vec::IntoIter`, while the escalation
+    declared the accessor futile in the same sweep. The suspension is
+    cluster-scoped (the store is shared; the futility was measured under one
+    cluster's tree) and a caller that does not know its cluster is never
+    suppressed — cross-cluster reuse is what `conviction_standing` forbids."""
+    from pipeline_core.domain.retro_gate import (
+        FUTILITY_SUSPENDED,
+        futility_suspension_applies,
+    )
+    # `error_count` 1 so the evidence rule (compiler-taught lessons survive a
+    # moved blame map) admits it everywhere — the ONLY discriminator under
+    # test is the suspension stamp.
+    rec = {"guidance": "In the Buffered arm keep the storage as a Vec.",
+           "error_count": 1,
+           FUTILITY_SUSPENDED: {"cluster": "stable", "tests": ["test_rev"]}}
+    assert futility_suspension_applies(rec, "stable")
+    assert not futility_suspension_applies(rec, "nightly")
+    assert not futility_suspension_applies(rec, "")
+    assert admissible_guidance(rec, "", evidence=NO_TESTS,
+                               cluster="stable") == ""
+    assert admissible_guidance(rec, "", evidence=NO_TESTS,
+                               cluster="nightly") != ""
+    # NEGATIVE CONTROL — pre-fix shape: the same record with no stamp (or a
+    # caller passing no cluster) flows exactly as before.
+    assert admissible_guidance(rec, "", evidence=NO_TESTS) != ""
+    unstamped = {"guidance": rec["guidance"], "error_count": 1}
+    assert admissible_guidance(unstamped, "", evidence=NO_TESTS,
+                               cluster="stable") != ""

@@ -498,7 +498,7 @@ class FillOneFn:
                 _retro_rec = ctx.retros_cache.get(_retro_key, {})
                 _retro_guidance = admissible_guidance(
                     _retro_rec, cur_text, evidence=_evidence,
-                    anchor_types=_anchor_types)
+                    anchor_types=_anchor_types, cluster=ctx.cluster_name)
                 # The line carries the STORE key (file::fn::container), not a
                 # display name: `fn new` exists under three containers, and
                 # the whole point is that the grep lands on the one record
@@ -1056,7 +1056,7 @@ class FillOneFn:
                 # this layout disproves would just be restated in the new one.
                 _prior_guidance = admissible_guidance(
                     _prior, snapshot, evidence=_evidence,
-                    anchor_types=_anchor_types)
+                    anchor_types=_anchor_types, cluster=ctx.cluster_name)
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,

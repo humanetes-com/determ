@@ -139,6 +139,13 @@ class PhaseCTddDeps:
     # Futility escalation: (src_dir, test, futile_units,
     # futile_containers) -> Frontier additions. None disables escalation.
     escalate_to_producers: Callable[..., Frontier] | None = None
+    # Suspend the stored retro guidance of units the escalation just declared
+    # futile: (project_dir, src_dir, futile_units, cluster_name, tests) ->
+    # stamped keys. The record's guidance advises the exact rewrite futility
+    # measured as changing nothing — left admissible it steers the fix loop
+    # against the escalation (the ChainState `Vec` guidance vs the tree's
+    # `vec::IntoIter`, run `2773540-e47c3754`). None disables.
+    suspend_futile_guidance: Callable[..., list[str]] | None = None
     # Persist a new pass high-water fill tree to heal's restore tiers:
     # (project_dir, cluster_name, filled_dir, BestTreeMark) -> None.
     # None disables checkpointing (heal then has only excision + skeleton).
@@ -1428,6 +1435,19 @@ def run_phase_c_tdd(
                 _pass_attempted = {
                     FnLocator(_f, _fn) for _f, _, _fn
                     in (k.partition("::") for k in _resume.attempted) if _fn}
+            # The FOURTH half: the futility evidence. Without it the
+            # escalation needs two judged sweeps of THIS process to detect an
+            # unchanged unit-set, and the flat-score guard stops a resumed
+            # flat run at exactly its second sweep — so the escalated
+            # producer slice was computed on the sweep the stop pre-empted,
+            # in every process, forever (run `2773540-e47c3754`). Seeded, the
+            # first sweep's own attribution is the second observation, and
+            # the escalation can fire before the one batch this process gets.
+            if _resume.futility:
+                for _fut_test, _fut_units in _resume.futility:
+                    prev_test_units.setdefault(_fut_test, frozenset(
+                        FnLocator(_f, _fn) for _f, _, _fn
+                        in (u.partition("::") for u in _fut_units) if _fn))
             deps.log(f"  {tag} [phase-c/tdd] persisted floor for "
                      f"{cluster.name}: {_resume.note} "
                      f"(stall now {stall}/{max_stalls}, "
@@ -1782,6 +1802,16 @@ def run_phase_c_tdd(
                 code_id=_code_id,
                 attempted=tuple(sorted(
                     f"{_l.file}::{_l.fn_name}" for _l in _pass_attempted)),
+                # The futility evidence as of the PREVIOUS sweep's end (this
+                # save runs before this sweep's attribution). That is the
+                # ordering that makes the persisted evidence usable: the
+                # stopped run's last save carries the unit-sets its final
+                # sweep compared equal, and the resume's first sweep is the
+                # second observation.
+                futile_units=tuple(sorted(
+                    (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}"
+                                      for _l in _us)))
+                    for _t, _us in prev_test_units.items())),
             ).to_dict())
 
         # Attribute failures via the full chain (panics → compile → behavior →
@@ -2012,6 +2042,10 @@ def run_phase_c_tdd(
             for key, tests in frontier.items():
                 for tname in tests:
                     units_by_test.setdefault(tname, set()).add(key)
+            # Accessors a FIRED escalation declared futile this sweep, and the
+            # tests it fired for — fed to the guidance suspension below.
+            _futile_fired: set[FnLocator] = set()
+            _futile_fired_tests: set[str] = set()
             for tname, units in units_by_test.items():
                 prev = prev_test_units.get(tname)
                 if (tname not in escalated_tests and prev is not None
@@ -2045,6 +2079,8 @@ def run_phase_c_tdd(
                         src_dir, tname, set(units))
                     if extra:
                         escalated_tests.add(tname)
+                        _futile_fired.update(units)
+                        _futile_fired_tests.add(tname)
                         # The escalation IS new evidence about its targets: a
                         # producer convicted before anyone knew this test
                         # needed it was judged on a different question. An
@@ -2073,6 +2109,26 @@ def run_phase_c_tdd(
                                 str(k) for k in _re_admitted),
                         })
                 prev_test_units[tname] = frozenset(units)
+            # A fired escalation is a MEASUREMENT about its accessors: their
+            # rewrites change nothing for these tests. The retro store's
+            # guidance for those units advises exactly such rewrites, and
+            # left admissible it steers the fix loop against the escalation
+            # — a stored `WRONG_TYPE_CHOICE` record pushed 14 rounds of
+            # `ChainState`-as-`Vec` bodies while the escalation was declaring
+            # the accessor futile in the same sweep (run `2773540-e47c3754`).
+            # The verdict half of those records is untouched; only guidance
+            # injection is suspended, cluster-scoped, on the read side.
+            if _futile_fired and deps.suspend_futile_guidance is not None:
+                _suspended = deps.suspend_futile_guidance(
+                    project_dir, src_dir, frozenset(_futile_fired),
+                    cluster.name, frozenset(_futile_fired_tests))
+                if _suspended:
+                    deps.log(
+                        f"  {tag} [attribution/escalate] suspended stored "
+                        f"guidance on {len(_suspended)} retro record(s) whose "
+                        "accessors this sweep's escalation declared futile — "
+                        "a record advising the rewrite futility just measured "
+                        "as changing nothing may not steer the next one.")
 
         # Union remaining cluster-active stubs into the frontier so a helper
         # that no failing test attributes directly (called only transitively)

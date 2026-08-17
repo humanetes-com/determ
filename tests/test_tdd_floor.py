@@ -158,3 +158,50 @@ def test_the_sentinel_is_beaten_by_every_real_count() -> None:
     """What the sentinel is FOR: the first sweep improves without a special
     case, including a genuine zero."""
     assert UNSET_PASS < 0
+
+
+# Sorted by test name: `from_dict` normalizes to sorted order, so a
+# round-tripped floor compares equal only in the canonical spelling.
+_EVIDENCE = (("test_boxed_str", ("src/error.rs::from",)),
+             ("test_rev", ("src/chain.rs::next", "src/chain.rs::next_back")))
+
+
+def test_futility_evidence_round_trips_and_an_old_floor_parses_empty() -> None:
+    """The escalation's evidence must survive the process boundary — run
+    `2773540-e47c3754` (2026-08-17) computed the escalated frontier on the
+    exact sweep the flat-score guard stopped, and the process-local evidence
+    died with it, so no relaunch could ever dispatch the escalated slice."""
+    f = replace(_FLOOR, futile_units=_EVIDENCE)
+    r = TddFloor.from_dict(f.to_dict())
+    assert r is not None and r.futile_units == _EVIDENCE
+    # A floor persisted by a pre-fix build has no key; `from_dict` stays total.
+    old = dict(_FLOOR.to_dict())
+    old.pop("futile_units")
+    parsed = TddFloor.from_dict(old)
+    assert parsed is not None and parsed.futile_units == ()
+    # ...and so does a malformed one.
+    bad = dict(_FLOOR.to_dict())
+    bad["futile_units"] = ["not", "a", "dict"]
+    parsed = TddFloor.from_dict(bad)
+    assert parsed is not None and parsed.futile_units == ()
+
+
+def test_futility_evidence_follows_the_cursor_identity_rule() -> None:
+    """Like the cursor, the evidence records what this cluster's dispatches
+    already established: it answers to cluster+code_id and self-validates at
+    the live sweep (the escalation re-compares it against the CURRENT
+    attribution), so an oracle move or a tree change must NOT void it — the
+    flat-score stop, its whole reason to exist, moves both."""
+    f = replace(_FLOOR, futile_units=_EVIDENCE)
+    # Identical measurement: everything resumes.
+    assert resume_floor(f, **_KEY).futility == _EVIDENCE
+    # A changed tree: the peak dies, the evidence rides.
+    r = resume_floor(f, **{**_KEY, "tree_sha": "ffffffff"})
+    assert r.best_pass is None and r.futility == _EVIDENCE
+    # A changed oracle: the score halves die, cursor AND evidence ride.
+    r = resume_floor(f, **{**_KEY, "oracle_size": 103})
+    assert r.stall is None and r.futility == _EVIDENCE
+    assert "futility evidence resumed" in r.note
+    # A changed code build: a different attribution/routes — evidence dies.
+    r = resume_floor(f, **{**_KEY, "code_id": "other"})
+    assert r.futility is None
