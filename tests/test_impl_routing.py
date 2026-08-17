@@ -518,6 +518,38 @@ def test_member_tier_never_fires_on_a_header_that_names_an_impl() -> None:
         assert r.dropped_names == ("not",), attr
 
 
+def test_inherent_impl_header_reaches_a_uniquely_declared_free_fn() -> None:
+    # Run 2370111-1800b8b9 (2026-08-17), src/error.rs group 2/2 attempt 3: the
+    # model grouped five free fns under `impl ErrorImpl<ContextError<C, E>>`, a
+    # header the crate declares nowhere, and all five were dropped. They are
+    # top-level `unsafe fn`s declared exactly once (src/error.rs:508, 519, 529
+    # in the authored layout), and attempt 2 of the same run routed the same
+    # fns fine when the model tagged them with their own signature lines.
+    blocks = [_member_block("", (
+        ("context_downcast",
+         "unsafe fn context_downcast<C, E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>"),
+    ))]
+    mems = members_in_file(blocks, "src/error.rs")
+    r = route_fn_bodies([_fn("context_downcast", "impl ErrorImpl<ContextError<C, E>>")],
+                        target="impl Error", related=[], members=mems)
+    assert r.dropped == ()
+    assert r.routed[0].container == ""
+    assert r.routed[0].via_member_name is True
+    assert "context_downcast" in r.routed[0].sig_text
+
+
+def test_inherent_relaxation_does_not_reach_an_impl_member() -> None:
+    # Only a FREE fn is unreachable by any header. A name whose sole
+    # declaration lives in an impl still needs a header that resolves, or the
+    # model's wrong container claim would silently retarget the body.
+    blocks = [_member_block("impl Error", (
+        ("construct", "unsafe fn construct<E>(error: E) -> Self"),))]
+    mems = members_in_file(blocks, "src/error.rs")
+    r = route_fn_bodies([_fn("construct", "impl ErrorImpl<ContextError<C, E>>")],
+                        target="impl Other", related=[], members=mems)
+    assert r.routed == () and r.dropped_names == ("construct",)
+
+
 def test_member_tier_is_off_by_default() -> None:
     # Callers that pass no members keep the pre-existing drop behaviour.
     r = route_fn_bodies([_fn("construct", "// free function")],

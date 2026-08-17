@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
-from pipeline_core.application.reconstruct.cargo_errors import ecodes_in_text, focus_diagnostics
+from pipeline_core.application.reconstruct.cargo_errors import (
+    ecodes_in_text,
+    excerpt_for_code,
+    focus_diagnostics,
+)
 from pipeline_core.application.reconstruct.cluster_membership import (
     collect_impl_refill_targets,
 )
@@ -28,6 +32,10 @@ from pipeline_core.application.reconstruct.context import (
 )
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
+)
+from pipeline_core.application.reconstruct.peel_revert import (
+    LandedBody,
+    peel_file_first,
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
@@ -804,7 +812,7 @@ def fill_impl_blocks(
                          f"block header does not match any impl in this file. "
                          f"raw_block={_db.block_attr!r} raw_canon={_db.attr_canon!r}")
                 spliced_now = 0
-                _landed: list[tuple[str, str]] = []
+                _landed: list[LandedBody] = []
                 # Refill targets are already-filled-but-WRONG bodies; the splice
                 # must be told to overwrite a non-stub for exactly those names,
                 # or the model's correction is refused `target_not_stub` and
@@ -832,7 +840,9 @@ def fill_impl_blocks(
                         sig_text=rb.sig_text)
                     if ok:
                         spliced_now += 1
-                        _landed.append((_fn, rb.container))
+                        _landed.append(LandedBody(
+                            _fn, rb.container, rb.sig_text,
+                            rb.fn_data["body"], wc))
                         if rb.via_member_name:
                             _log(f"  [phase-c/file] {file_rel}: `{_fn}` was "
                                  f"tagged {rb.fn_data['block']!r}, which names "
@@ -860,7 +870,8 @@ def fill_impl_blocks(
                         # this same reply already filled the fn, which is the
                         # difference between a duplicate answer and a stale
                         # stub record.
-                        _dup = [c for n, c in _landed if n == _fn]
+                        _dup = [b.container for b in _landed
+                                if b.fn_name == _fn]
                         _log(f"  [phase-c/file] {file_rel}: splice "
                              f"`{_fn}` failed: {reason} "
                              f"[routed to `{rb.container}`, "
@@ -934,8 +945,11 @@ def fill_impl_blocks(
                             sig_text=str(_rec.get("sig_text", "")))
                         if _ok:
                             spliced_now += 1
-                            _landed.append((_p["fn_name"],
-                                            str(_rec.get("container", ""))))
+                            _landed.append(LandedBody(
+                                _p["fn_name"],
+                                str(_rec.get("container", "")),
+                                str(_rec.get("sig_text", "")),
+                                _p["body"], _p["where_clause"]))
                             _log(f"  [phase-c/file] {file_rel}: routed free fn "
                                  f"`{_p['fn_name']}` to its module-level stub.")
                         else:
@@ -954,6 +968,35 @@ def fill_impl_blocks(
                         "[phase-c/file]")
                     if _rep is not None:
                         rc, cargo_out, _diags = _rep
+                if rc != 0 and len(_landed) > 1:
+                    # All-or-nothing at this width never lands anything: see
+                    # `peel_revert`. Revert only the bodies the compiler
+                    # actually blames and re-check, so the reply's correct
+                    # bodies survive its wrong ones. On None nothing was kept
+                    # back and the whole-file revert below runs unchanged.
+                    _peel, rc, _p_out, _p_diags = peel_file_first(
+                        file_path=file_path, snapshot=snapshot,
+                        file_rel=file_rel, landed=list(_landed), diags=_diags,
+                        target_src_dir=target_src_dir, check_cmd=check_cmd,
+                        cluster_env=cluster_env,
+                        frontier_from_diags=_frontier_from_diags,
+                        run_cargo_check_diag=_run_cargo_check_diag,
+                        splice_fn_with_where=_splice_fn_with_where,
+                        norm_src_rel=_norm_src_rel)
+                    if _peel is not None:
+                        cargo_out, _diags = _p_out, list(_p_diags)
+                        _landed = list(_peel.kept)
+                        spliced_now = len(_landed)
+                        _log(f"  [phase-c/file] {glabel}: PEELED "
+                             f"{len(_peel.reverted)} body(ies) the compiler "
+                             f"blamed ({', '.join(sorted(_peel.reverted))}) — "
+                             f"the remaining {spliced_now} compile "
+                             f"(round {_peel.rounds}); judged below as usual.")
+                        _emit("phase_c.file.fill.peeled", data={
+                            "cluster": cluster_name, "file": file_rel,
+                            "group": glabel,
+                            "reverted": sorted(_peel.reverted),
+                            "kept": spliced_now, "rounds": _peel.rounds})
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
                     # Stubs AND re-fills. A behavioral re-fill block has no stub
@@ -974,7 +1017,8 @@ def fill_impl_blocks(
                         FnLocator(file_rel, m.fn_name)
                         for b in fblocks
                         for m in (*b.stub_members, *b.refill_members)
-                    ) | frozenset(FnLocator(file_rel, n) for n, _c in _landed)
+                    ) | frozenset(FnLocator(file_rel, b.fn_name)
+                                  for b in _landed)
                     # Conviction-scoped, NOT the dispatch set: a test with no
                     # observed link to this file can never be fixed here, so
                     # letting it reject would revert every attempt forever.
@@ -987,7 +1031,8 @@ def fill_impl_blocks(
                         FnSite(file_rel, m.fn_name, b.container)
                         for b in fblocks
                         for m in (*b.stub_members, *b.refill_members)
-                    ) | frozenset(FnSite(file_rel, n, c) for n, c in _landed)
+                    ) | frozenset(FnSite(file_rel, b.fn_name, b.container)
+                                  for b in _landed)
                     _u2_file = _u2_test_gate(_file_tests, _unit_sites, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's
@@ -1920,6 +1965,20 @@ def fill_impl_blocks(
                  f"(attempt {attempt_n}); errs={outcome.metric} "
                  f"codes={_codes or '—'} "
                  f"floor={gauge.best} stall={gauge.stalls}.")
+            # The codes alone are not diagnosable. src/error.rs::Error logged
+            # `codes=['E0277','E0308','E0425','E0603']` on every attempt of
+            # runs 2370111-1800b8b9 and 2452699-e19bc335 (2026-08-17) while the
+            # block failed to compile for over an hour in each, and neither run
+            # reached a second TDD sweep — with no message in the log, nothing
+            # said WHICH name was unresolved or WHICH item was private, so the
+            # cause could not be read back afterwards. The excerpt is already in
+            # hand here; one headline per distinct code is what makes the next
+            # occurrence a lookup instead of a re-run. Headline only (the code's
+            # `error[...]:` line), so a wide error set cannot flood the log.
+            for _c in _codes:
+                _exc = excerpt_for_code(last_error_excerpt, _c)
+                if _exc:
+                    _log(f"  [phase-c/impl] {block_id}:   {_exc.splitlines()[0]}")
 
         def _on_impl_stall(attempt_n: int, gauge: FloorStall) -> None:
             _codes = sorted(ecodes_in_text(last_error_excerpt))
@@ -1939,6 +1998,21 @@ def fill_impl_blocks(
         # later iteration. Strictly decreasing error counts terminate on
         # their own; the round cap is a runaway backstop.
         _retro_rounds_max = int(os.getenv("PER_FN_RETRO_ROUNDS_MAX", "25"))
+        # A block that has never once compiled has nothing the loop can keep:
+        # this route splices its members as a SET and reverts the whole file on
+        # any error, so a strictly-improving error floor (4 -> 3 -> 2) buys
+        # zero landed bodies while reading to every gate as progress. Runs
+        # 2370111-1800b8b9, 2452699-e19bc335 and 2509252-f1f8c11b (2026-08-17)
+        # each spent their whole lives inside iteration 1 on
+        # src/error.rs::Error, and the third left the file with the same 39
+        # `unimplemented!()` it started with after 89 minutes — the floor moved
+        # 4 -> 3 and not one body landed. The stubs this loop gives up on fall
+        # through to the per-fn route in the same iteration (see
+        # `_impl_stats.remaining` in `phase_c_engine`), which gates each body
+        # on its own `cargo check` and so lands the majority that compile
+        # instead of reverting them with the few that do not.
+        _noncompiling_rounds_max = int(
+            os.getenv("PHASE_C_IMPL_NONCOMPILING_ROUNDS_MAX", "2"))
         _retro_round = 0
         fix_attempt = 0
         while True:
@@ -2167,6 +2241,20 @@ def fill_impl_blocks(
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
             if not (_retry_informed and _retro_round < _retro_rounds_max):
+                break
+            if (salvage.best is None
+                    and _retro_round >= _noncompiling_rounds_max):
+                _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
+                     "improved the error floor but the block has never once "
+                     "compiled, so nothing can be kept from it — handing its "
+                     "stub(s) to the per-fn route, which gates each body "
+                     "separately.")
+                _emit("phase_c.impl.noncompiling_handoff", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "retro_round": _retro_round,
+                    "attempts": fix_attempt,
+                })
                 break
             # Fresh guidance for the next round's prompt (the closure reads
             # this enclosing binding).  Logged like the pass-start read: this

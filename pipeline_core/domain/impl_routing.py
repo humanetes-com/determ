@@ -182,13 +182,34 @@ def route_fn_bodies(
     header can name; it carries the declaration's `sig_text` because "" cannot
     narrow a same-named impl method at splice time.
 
-    Both conditions are load-bearing. Uniqueness alone would let an `impl Bool
-    for bool`-tagged `not` land on the free `fn not(cond)` whenever the impl
-    is cfg-gated out of this cluster and so absent from `blocks`; the container
-    claim alone would let a comment-tagged `fmt` pick one of four `fmt`
-    declarations at random. Last because every header that DOES resolve must
-    win: the model's own claim about its body outranks an inference from the
-    file."""
+    The container claim is load-bearing for an IMPL-MEMBER declaration: without
+    it a comment-tagged `fmt` would pick one of four `fmt` declarations at
+    random. It is not load-bearing when the file's single declaration of the
+    name is a FREE fn, and requiring it there cost five correct bodies a reply.
+    Run 2370111-1800b8b9 (2026-08-17, src/error.rs group 2/2, attempt 3)
+    returned `context_downcast`, `context_drop_rest`, `context_chain_downcast`,
+    `context_chain_drop_rest` and `context_backtrace` all tagged
+    `impl ErrorImpl<ContextError<C, E>>` — a header no impl in the crate
+    declares, invented to group five free fns that do operate on that
+    specialisation. All five are top-level `unsafe fn`s declared exactly once
+    (src/error.rs:508, 519, 529 in the authored layout); all five were dropped
+    as "matches no impl in this file", and the same model in the same run's
+    attempt 2 tagged the same fns with their own signature lines and every one
+    of them routed. So the tier also fires on an INHERENT impl header — `impl
+    Ty`, no `for`, not a `trait` — when the sole declaration is a free fn.
+
+    Trait claims keep the old strictness, and that is what preserves the
+    corruption the gate was written against: `!self`, written for `impl Bool
+    for bool`, must never land on lib.rs' self-less free `fn not(cond: impl
+    Bool)` merely because the impl is cfg-gated out of this cluster and so
+    absent from `blocks`. A trait impl's member is declared BY the trait, so a
+    free fn can never be what it meant; an inherent header that matches no
+    container in the file carries no such claim. `impl Bool for bool`,
+    `impl<T> Bool for &T` and `trait Bool` are all excluded by that test, and
+    `impl ErrorImpl<ContextError<C, E>>` is admitted by it.
+
+    Last because every header that DOES resolve must win: the model's own claim
+    about its body outranks an inference from the file."""
     routed: list[RoutedBody] = []
     dropped: list[DroppedBody] = []
     target_canon = canon_container(target)
@@ -221,13 +242,20 @@ def route_fn_bodies(
         if host is not None:
             routed.append(RoutedBody(fn_data, host.container, via_trait_default=True))
             continue
-        if not names_impl_or_trait(block_attr):
-            decls = [m for m in members if m.fn_name == fn_name]
-            if len(decls) == 1:
-                routed.append(RoutedBody(
-                    fn_data, decls[0].container,
-                    via_member_name=True, sig_text=decls[0].sig_text))
-                continue
+        # An INHERENT impl header (`impl Ty`, no `for`, not a `trait`) that
+        # resolved to nothing is not a claim a free fn can contradict; a TRAIT
+        # claim is, because the trait declares the member and a free fn never
+        # implements one.
+        inherent_impl = (names_impl_or_trait(block_attr)
+                         and not trait_def_name(block_attr)
+                         and not impl_trait_name(block_attr))
+        decls = [m for m in members if m.fn_name == fn_name]
+        if len(decls) == 1 and (not names_impl_or_trait(block_attr)
+                                or (inherent_impl and not decls[0].container)):
+            routed.append(RoutedBody(
+                fn_data, decls[0].container,
+                via_member_name=True, sig_text=decls[0].sig_text))
+            continue
         dropped.append(DroppedBody(
             fn_name=fn_name,
             block_attr=block_attr,

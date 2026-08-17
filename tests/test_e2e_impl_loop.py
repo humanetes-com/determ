@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.attribution import FailureFrontier
-from pipeline_core.domain.models import FnRecord, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.retro_gate import (
     ConvictionEvidence,
     RetroProvenance,
@@ -414,6 +414,57 @@ def test_impl_retro_retry_recovers_on_second_round(monkeypatch, tmp_path):
     assert res.attempts == 3            # 2 failed + 1 green post-retro
 
 
+def test_noncompiling_block_hands_its_stubs_to_the_per_fn_route(
+        monkeypatch, tmp_path):
+    # src/error.rs::Error ground the whole of iteration 1 in runs
+    # 2370111-1800b8b9, 2452699-e19bc335 and 2509252-f1f8c11b (2026-08-17):
+    # the floor moved 4 -> 3 with stall=0, every gate read that as progress,
+    # and after 89 minutes the file still held the same 39 `unimplemented!()`
+    # it started with. This route splices a block's members as a SET and
+    # reverts the file on any error, so a block that never compiles has
+    # nothing to keep however far its floor falls.
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    monkeypatch.setenv("PHASE_C_IMPL_NONCOMPILING_ROUNDS_MAX", "1")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
+    res = _run(ws)
+    assert res.impls_filled == 0 and res.impls_failed == 1
+    assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
+    # The stubs survive for the per-fn route, which gates each body on its own
+    # `cargo check` — that is the whole point of handing off.
+    assert res.remaining == 2
+    assert res.attempts == 2          # round 1 only, then handed off
+
+    # Negative control: with the cap lifted the pre-fix behaviour reproduces —
+    # a block that has compiled NOTHING still buys another round.
+    ws2 = _setup(monkeypatch, tmp_path / "b")
+    monkeypatch.setenv("PHASE_C_IMPL_NONCOMPILING_ROUNDS_MAX", "99")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
+    res2 = _run(ws2)
+    assert res2.impls_filled == 0
+    assert res2.attempts == 4, res2.attempts
+
+
+def test_noncompiling_cap_does_not_fire_once_something_compiled(
+        monkeypatch, tmp_path):
+    # The cap keys on "never once compiled", not on "failed". A block that has
+    # a compiling image in hand still has something salvage can keep, so the
+    # retro rounds stay available to improve on it.
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    _install_model(monkeypatch, [RESPONSE_BOTH, RESPONSE_BOTH, RESPONSE_BOTH])
+    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
+    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    res = _run(ws)
+    assert res.impls_filled == 1 and res.impls_failed == 0
+
+
 # --- P2: pull protocol through the impl fill path -----------------------------
 
 
@@ -519,6 +570,52 @@ def test_file_first_reverts_on_compile_failure_then_blocks_take_over(
     # consequence of the fix, not the thing being tested here.
     assert res.impls_filled == 1 and res.impls_failed == 0
     assert "self.tag" in text and "unimplemented!()" not in text
+
+
+def test_file_first_peels_the_blamed_body_and_keeps_the_rest(
+        monkeypatch, tmp_path):
+    # The pathology: `src/error.rs` is split into groups of 16 and 13 fns and
+    # no whole-group attempt compiled across five runs (1920662-40f711b2 ..
+    # 2571732-149bc3cf, 2026-08-16/17); six file-first attempts in the last of
+    # them spent an hour and landed nothing, on ordinary errors in a few of
+    # sixteen bodies. Here `kind` is blamed and `name` is not, so `name` must
+    # survive instead of being reverted with it.
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    install_scripted_cargo(
+        monkeypatch,
+        # red once (blaming `kind`), then green after the peel re-stubs it.
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (0, "", [])],
+        frontier={FnLocator("lib.rs", "kind"): {"<compile>"}})
+    _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert "self.tag + 1" in text          # `name` kept
+    assert "unimplemented!()" in text      # `kind` put back
+
+
+def test_file_first_without_the_peel_loses_the_good_body_too(
+        monkeypatch, tmp_path):
+    # Negative control. Same reply, same single blamed fn — but with the blame
+    # naming EVERY landed body there is no proper subset to keep, which is the
+    # pre-peel behaviour: the whole attempt reverts and `name` is lost with
+    # `kind`. If this ever keeps `name`, the test above proves nothing.
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    _install_model(monkeypatch, [RESPONSE_TWO])
+    monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "1")
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (101, "error: x", [diag("src/lib.rs", code="E0308")])],
+        frontier={FnLocator("lib.rs", "kind"): {"<compile>"},
+                  FnLocator("lib.rs", "name"): {"<compile>"}})
+    _run(ws)
+    assert "self.tag + 1" not in (ws / "src" / "lib.rs").read_text()
 
 
 def test_file_first_retries_with_the_compiler_errors_from_the_failed_attempt(
