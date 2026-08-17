@@ -317,9 +317,16 @@ def run_phase_c_tdd(
     # operator's SIGTERM rather than on any decision of the loop's. This guard
     # is the other terminator: it stops the RUN before spending model calls on a
     # score the last `window` judged sweeps have already seen `repeats` times.
+    # `require_traversal` defaults OFF: the precondition waited on a completed
+    # frontier traversal, and runs `1064759-0f23fb68` (7h48m),
+    # `1692702-94e6163a` (3h36m) and `1920662-40f711b2` (9h48m) each ended on
+    # an operator's stop with the repeat clause satisfied and the traversal
+    # index parked. The rule is now a repeat in the window, full stop.
     _flat_guard = FlatScoreGuard(
         window=int(os.getenv("TDD_FLAT_SCORE_WINDOW", "5")),
-        repeats=int(os.getenv("TDD_FLAT_SCORE_REPEATS", "2")))
+        repeats=int(os.getenv("TDD_FLAT_SCORE_REPEATS", "2")),
+        require_traversal=os.getenv(
+            "TDD_FLAT_SCORE_REQUIRE_TRAVERSAL", "0") == "1")
     # The protector's SECOND clock, and the reason there is one: the guard
     # above and the plateau budget are both denominated in completed traversals,
     # and on run `1692702-94e6163a` (2026-08-16) that unit stopped ticking —
@@ -636,6 +643,17 @@ def run_phase_c_tdd(
                                     str(DEFAULT_REFILL_PER_ITER)))
     _grace_max_iters = int(os.getenv("PHASE_C_REFILL_GRACE_MAX_ITERS",
                                      str(DEFAULT_REFILL_GRACE_MAX_ITERS)))
+    # The window's WALL-CLOCK ceiling, sized off the measured cost of an
+    # iteration rather than guessed: run `1920662-40f711b2` (2026-08-16/17) ran
+    # 588 minutes for 6 iterations, so 360 minutes is ~3.5 iterations there and
+    # a 54-body re-stub's 18-iteration budget stops being ~29 hours of a run
+    # with the batch ratchet, the stall budget and the crash streak all
+    # disarmed. Set to 0 to restore the iterations-only rule.
+    _grace_max_minutes = float(os.getenv("TDD_REFILL_WINDOW_MAX_MINUTES", "360"))
+    _run_started_at = time.monotonic()
+
+    def _now_minutes() -> float:
+        return (time.monotonic() - _run_started_at) / 60.0
 
     def _grant_grace(reverted: int,
                      vanished_at_grant: frozenset[str] = frozenset(),
@@ -653,7 +671,13 @@ def run_phase_c_tdd(
         _g = RefillGrace.for_restub(
             reverted, total_filled, per_iter=_grace_per_iter,
             max_iters=_grace_max_iters, granted_at=iter_n,
-            vanished_at_grant=vanished_at_grant)
+            vanished_at_grant=vanished_at_grant,
+            granted_at_minute=_now_minutes(),
+            max_minutes=_grace_max_minutes,
+            # The mark the re-climb has to reach for the window to have been
+            # repaid. Read BEFORE `lineage_replaced` below, because that is the
+            # call that retires it.
+            highwater_at_grant=_highwater.best)
         if _g.restubbed:
             _highwater = _highwater.lineage_replaced(iter_n)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window open for "
@@ -662,11 +686,21 @@ def run_phase_c_tdd(
                  + (f"; CLIPPED by the {_grace_max_iters}-iter cap, so it will "
                     "expire before the bodies land" if _g.clipped else "")
                  + ". The batch ratchet, the stall budget and the crash streak "
-                 "stand down while re-fills keep landing.")
+                 "stand down while re-fills keep landing"
+                 + (f", and no longer than {_grace_max_minutes:.0f} min or "
+                    f"until the re-climb reaches {_g.highwater_at_grant} — an "
+                    "exemption counted in iterations cannot bound what an "
+                    "iteration costs"
+                    if _grace_max_minutes > 0 or _g.highwater_at_grant >= 0
+                    else "")
+                 + ". The flat-score guard is NOT stood down and remains the "
+                 "live terminator inside this window.")
         deps.emit("phase_c.tdd.refill_window_open", data={
             "cluster": cluster.name, "iter": iter_n,
             "restubbed": _g.restubbed, "iters_granted": _g.iters_left,
             "per_iter": _grace_per_iter, "clipped": _g.clipped,
+            "max_minutes": _grace_max_minutes,
+            "highwater_at_grant": _g.highwater_at_grant,
             # The pre-revert vanished reading the window can never explain —
             # a graced sweep vanishing ONLY these names keeps crash evidence
             # armed (see `RefillGrace.explains_vanish`).
@@ -674,7 +708,7 @@ def run_phase_c_tdd(
         })
         return _g
 
-    def _score_grace(iter_n: int) -> None:
+    def _score_grace(iter_n: int, pass_count: int = -1) -> None:
         """Spend one iter of the re-fill window and score it on what landed.
 
         Called at EVERY point an iter ends having had (or been denied) its fill
@@ -693,19 +727,32 @@ def run_phase_c_tdd(
         nonlocal _grace
         if not _grace.active or _grace.granted_at == iter_n:
             return
-        _next = _grace.consume(total_filled)
+        # One clock reading for both calls: two `_now_minutes()` reads can
+        # straddle the wall-clock ceiling, making the log's reason and
+        # `consume`'s decision disagree about the same iter. And `consume`
+        # checks the no-fills rule FIRST, so an early reason may be true of a
+        # window that actually closed for landing nothing — attribute the
+        # close to "early" only when fills kept it alive past that rule.
+        _now = _now_minutes()
+        _early = _grace.early_close_reason(_now, pass_count)
+        if total_filled <= _grace.fills_at_grant:
+            _early = ""
+        _next = _grace.consume(total_filled, _now, pass_count)
         if not _next.active and _grace.restubbed:
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill window closed "
                 f"({_grace.restubbed} body(ies) re-stubbed, "
                 f"{total_filled - _grace.fills_at_grant} re-fill(s) landed this "
-                f"iter, {_grace.iters_left - 1} iter(s) of the budget unspent) — "
-                "the batch ratchet judges the re-author from the next sweep on.")
+                f"iter, {_grace.iters_left - 1} iter(s) of the budget unspent)"
+                + (f" — CLOSED EARLY: {_early}." if _early else " —")
+                + " The batch ratchet judges the re-author from the next "
+                "sweep on.")
             deps.emit("phase_c.tdd.refill_window_closed", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "restubbed": _grace.restubbed,
                 "fills_this_iter": total_filled - _grace.fills_at_grant,
                 "iters_unspent": _grace.iters_left - 1,
+                "early_close": _early,
             })
         _grace = _next
 
@@ -1330,6 +1377,18 @@ def run_phase_c_tdd(
             if _resume.best_pass is not None:
                 best_pass = _resume.best_pass
                 state.best_metric = float(best_pass)
+            # The third half: the open pass's cursor. Without it the
+            # flat-score guard's stop is a LOCK — it can stop the run having
+            # attempted 12 units of 59, and a relaunch with an empty cursor
+            # re-sends the same deterministic first 12 and stops again. With
+            # it, each relaunch takes the next slice. Malformed entries are
+            # dropped rather than failing the resume: this runs at the top of
+            # a 10-hour loop and a bad state file must cost a fresh pass, not
+            # the run (the same rule `TddFloor.from_dict` is total for).
+            if _resume.attempted:
+                _pass_attempted = {
+                    FnLocator(_f, _fn) for _f, _, _fn
+                    in (k.partition("::") for k in _resume.attempted) if _fn}
             deps.log(f"  {tag} [phase-c/tdd] persisted floor for "
                      f"{cluster.name}: {_resume.note} "
                      f"(stall now {stall}/{max_stalls}, "
@@ -1368,7 +1427,21 @@ def run_phase_c_tdd(
         # An improvement reopens the frontier: the traversal in progress was
         # planned against a worse tree, and the units it had already spent are
         # worth re-offering now that the evidence moved.
-        if improved:
+        #
+        # Unless the "improvement" is a sweep beating the UNSET sentinel: that
+        # is the ABSENCE of a baseline, not evidence the tree moved. The resume
+        # path hands the cursor across an `oracle_size` or `tree_sha` change
+        # with `best_pass=None` precisely so a relaunch takes the next slice
+        # (`resume_floor`: a cursor answers to cluster+code_id, not to the
+        # oracle) — and the first sweep then compared its reading against -1,
+        # read "improved", and cleared the cursor it had adopted forty lines
+        # up, before any dispatch could take a slice from it. The relaunch
+        # re-sent the same deterministic first batch and the eager stop became
+        # the lock the cursor exists to remove; the floor save below then
+        # persisted the EMPTY set, destroying the coverage on disk too. The
+        # oracle moves in 26 of 401 consecutive sweep pairs, so this was the
+        # common resume, not the odd one.
+        if improved and best_pass > UNSET_PASS:
             _pass_attempted.clear()
             _pass_cohort = None
         # `best_metric` is -inf until some iter improves, and a compile-broken
@@ -1489,16 +1562,45 @@ def run_phase_c_tdd(
         # taken its turn yet. On the recorded run that ordering is worth 6.4 GPU
         # hours: iters 1 and 3 both read 79/101 and both left through a crash
         # retrigger, so the window is already at two by iter 4's dispatch.
-        _flat_excuse = (
-            "a re-fill grace window is open — the reading measures the "
-            "retrigger's re-stub" if _grace.bodies_in_flight
-            else "the sweep did not compile — a 0 nothing ran for is not a "
-            "measurement" if _sweep_compile_broke
-            else f"the tree is still filling ({_stubs_prev} -> "
-            f"{len(_stub_keys)} stub(s))"
-            if _stubs_prev >= 0 and len(_stub_keys) < _stubs_prev
-            else "")
         _flat_reading = ScoreReading(pass_count, _measure.oracle_size)
+        # THE EXEMPTIONS STARVED THE WINDOW, WHICH IS HOW A GUARD WITH A
+        # SATISFIED RULE SPENDS A NIGHT. Two of the three reasons a sweep used
+        # to be excused — a re-fill grace window, a shrinking stub set — are
+        # true of essentially every iteration of a loop that is doing its job:
+        # a fill loop lands bodies, landing bodies shrinks the stub set, so the
+        # reading was never RECORDED and `repeated()` could never reach 2. On
+        # run `1920662-40f711b2` that is the whole mechanism of the burn:
+        # `83/106` at iterations 2, 3 and 4, then a grace window opened at
+        # iteration 4 for 18 more iterations, and `33/105` at 6 and 7. Nine
+        # hours 48 minutes, 191 model calls, and the window held almost
+        # nothing.
+        #
+        # So the rule is now the operator's rule: the same reading twice stops
+        # the run, and no argument about WHY the score is standing still buys
+        # another sweep. A grace window explains a score FALLING — it does not
+        # explain the same number arriving twice, because a re-climb that reads
+        # 33/105 at two sweeps is a re-climb that has stopped climbing. A
+        # shrinking stub set explains a score standing still while the tree
+        # pays in stubs — it does not explain it twice.
+        #
+        # WHAT THIS COSTS, STATED RATHER THAN HIDDEN. Cluster `stable` of run
+        # `7445-00ee8a3c` (2026-08-07) read 11 -> 13 -> 13 while its stub set
+        # fell 132 -> 118 -> 82 -> 75, and iteration 3's file-first batch then
+        # took the score 13 -> 83 in ONE sweep. Under this rule that run stops
+        # on the second 13, one sweep before its payoff. The reason that is now
+        # an acceptable price and was not before is `TddFloor.attempted`: the
+        # stop leaves a pass cursor on disk, so `bash continue.sh` resumes on
+        # the units the stopped run never reached rather than re-sending the
+        # ones it did. A false stop costs one relaunch, not a run — which is
+        # exactly what this file's own header used to deny.
+        #
+        # A tree that did not compile stays excused, and is the only thing that
+        # is. Its 0 is the ABSENCE of a measurement rather than a measurement
+        # of nothing, two of them are not "the same reading twice", and the
+        # red-build budget and the compile-blocked exit own that case already.
+        _flat_excuse = (
+            "the sweep did not compile — a 0 nothing ran for is not a "
+            "measurement" if _sweep_compile_broke else "")
         _flat_guard = (_flat_guard.excused() if _flat_excuse
                        else _flat_guard.observed(_flat_reading, _traversals))
         _stubs_prev = len(_stub_keys)
@@ -1618,7 +1720,10 @@ def run_phase_c_tdd(
             deps.save_tdd_floor(project_dir, cluster.name, TddFloor(
                 cluster=cluster.name, best_pass=best_pass, stall=stall,
                 tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
-                code_id=_code_id).to_dict())
+                code_id=_code_id,
+                attempted=tuple(sorted(
+                    f"{_l.file}::{_l.fn_name}" for _l in _pass_attempted)),
+            ).to_dict())
 
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
@@ -2506,7 +2611,7 @@ def run_phase_c_tdd(
             # (Mostly a no-op, but keeps the loop honest: if a flaky
             # failure or test ordering surfaced a fn next iter, we'll
             # pick it up.)
-            _score_grace(iter_n)
+            _score_grace(iter_n, pass_count)
             continue
 
         # The batch is decided BEFORE the guard, and committed after it. Two
@@ -2678,7 +2783,8 @@ def run_phase_c_tdd(
                     # every consumer already reads.
                     _highwater = _highwater.lineage_replaced(iter_n)
                     _flat_guard = FlatScoreGuard(
-                        window=_flat_guard.window, repeats=_flat_guard.repeats)
+                        window=_flat_guard.window, repeats=_flat_guard.repeats,
+                        require_traversal=_flat_guard.require_traversal)
                     permanently_exhausted.clear()
                     _stubs_prev = -1
                     _pass_attempted = set()
@@ -2686,6 +2792,30 @@ def run_phase_c_tdd(
                     _unmoved = _unmoved.moved()
                     _prev_pass_completed = True
                     _zp_history, _zp_planned, _zp_fired_on = (), None, None
+                    # AND THE RE-FILL WINDOW. Its grant describes the tree the
+                    # restore just replaced — `restubbed`, `fills_at_grant` and
+                    # `vanished_at_grant` are all readings of a lineage that no
+                    # longer exists, and left open it keeps the ratchet, the
+                    # stall budget and the crash streak standing down over a
+                    # tree that holds no re-stub, until a regained-mark close
+                    # that needs `mark >= highwater_at_grant` or the wall
+                    # clock. This combination became reachable when the flat
+                    # guard stopped excusing graced sweeps: a trip — and so a
+                    # restore — can now happen inside an open window.
+                    if _grace.active and _grace.restubbed:
+                        deps.log(
+                            f"  {tag} [phase-c/tdd] iter {iter_n}: re-fill "
+                            f"window closed ({_grace.restubbed} body(ies) "
+                            "re-stubbed) — the tree it was granted against was "
+                            "replaced by the best-tree restore.")
+                        deps.emit("phase_c.tdd.refill_window_closed", data={
+                            "cluster": cluster.name, "iter": iter_n,
+                            "restubbed": _grace.restubbed,
+                            "fills_this_iter": 0,
+                            "iters_unspent": _grace.iters_left,
+                            "early_close": "tree replaced by best-tree restore",
+                        })
+                    _grace = RefillGrace.none()
                     continue
             if _stop_clock == "flat_score":
                 deps.log(
@@ -2897,7 +3027,7 @@ def run_phase_c_tdd(
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
         errors.extend(sub.errors)
-        _score_grace(iter_n)
+        _score_grace(iter_n, pass_count)
 
         # Update recently_filled ring buffer with this iter's actual fills.
         # We don't have the exact list from the sub-result, so use the
@@ -2963,17 +3093,54 @@ def run_phase_c_tdd(
                         "reason": "re-fill cap reached on measurable "
                                   "sweeps — exhausted until re-admission",
                         "cluster": cluster.name})
-        if _spared_undispatched:
+        # THE LINE BELOW CONFLATED TWO POPULATIONS WITH OPPOSITE MEANINGS, and
+        # the benign one is 8 of the 10 instances on the retained record.
+        # `cur_stubs` comes from `scan_unimplemented_functions`, which takes no
+        # cluster and evaluates no cfg, so a stub this cluster's cfg-set
+        # excludes is in it — and being cfg-dead is exactly why no route
+        # dispatched it (the engine refuses those at dispatch, by design). On
+        # the retained logs the line named `src/nightly.rs::fmt` in cluster
+        # `stable` eight times and the genuine case — four impl-member producers
+        # no route claimed, iteration 6 of run `1920662-40f711b2` — once, with
+        # `src/ensure.rs::__dispatch_ensure` (a synthesized dispatch-family
+        # name) making up the tenth. The cfg-inactive names were already printed
+        # one line above by the per-fn route's own membership report, so the two
+        # readings sat adjacent and disagreed.
+        #
+        # Subtracting them is what makes this line evidence: an undispatched
+        # cfg-dead stub is the cfg filter working, and an undispatched LIVE stub
+        # is a routing gap. `_stub_keys` is this iteration's CLUSTER-SCOPED stub
+        # scan, already taken at the top of the loop — reused rather than
+        # re-scanned, so the classification costs nothing and cannot disagree
+        # with the frontier that was built from it. It is a pre-fill reading and
+        # `cur_stubs` is post-fill, which is sound for exactly this question: a
+        # key in `_spared_undispatched` was dispatched by nobody, so nothing
+        # could have filled it in between and it is a stub in both readings.
+        #
+        # FAIL OPEN. An empty cluster-scoped scan against a non-empty stub set
+        # would make EVERY stub read as cfg-inactive and silence the line
+        # completely — turning a diagnostic into a guarantee of silence, which
+        # is the failure mode `ClusterMembershipReport.emptied` names ("a filter
+        # with input and no output is a contradiction to locate"). An empty
+        # answer is therefore treated as no answer.
+        _cfg_inactive = (cur_stubs - set(_stub_keys)) if _stub_keys else set()
+        _spared_live = [k for k in _spared_undispatched
+                        if k not in _cfg_inactive]
+        _spared_dead = len(_spared_undispatched) - len(_spared_live)
+        if _spared_live:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
-                     f"{len(_spared_undispatched)} frontier stub(s) were "
+                     f"{len(_spared_live)} frontier stub(s) were "
                      "dispatched by NO route this iter — left admitted, no "
                      "exhaustion charge: " + ", ".join(
                          sorted(f"{k.file}::{k.fn_name}"
-                                for k in _spared_undispatched)))
+                                for k in _spared_live))
+                     + (f" ({_spared_dead} further stub(s) are cfg-inactive in "
+                        "this cluster and are correctly undispatched — not "
+                        "counted here)" if _spared_dead else ""))
             deps.emit("phase_c.charge.undispatched_spared", data={
                 "cluster": cluster.name, "iter": iter_n,
-                "fns": sorted(f"{k.file}::{k.fn_name}"
-                              for k in _spared_undispatched)})
+                "fns": sorted(f"{k.file}::{k.fn_name}" for k in _spared_live),
+                "cfg_inactive_excluded": _spared_dead})
         last_total_filled = total_filled
 
     # Every `break` above lands here — backstop, timeout, stall exit, and the

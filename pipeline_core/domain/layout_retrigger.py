@@ -79,9 +79,22 @@ PAYOFF_KEY_PREFIX = "payoff:"
 REJECTED_KEY_PREFIX = "rejected:"
 REJ_BUILD_KEY_PREFIX = "rejbuild:"
 CRASH_SIG_KEY_PREFIX = "sig:"
+# The vanished-test SCOPE a refutation was recorded against: one row per test
+# name, so the whole thing fits an int-valued store. See
+# `crash_component_refutation` for why a refutation has to carry a scope at all.
+CRASH_SCOPE_KEY_PREFIX = "sigv:"
+# Authoring ROUNDS spent on one crash signature by one component, landed or
+# not. Distinct from the destruction cap, which counts only what landed.
+CRASH_ROUND_KEY_PREFIX = "sigr:"
 CONTRACT_KEY_PREFIX = "contract:"
 DEFAULT_MAX_MECHANICAL = 2
 DEFAULT_MAX_REJECTIONS = 3
+# Authoring rounds one crash signature may buy from one component. Matches the
+# destruction cap deliberately: a round that lands and a round that is rejected
+# cost the same GPU (~55 min and ~14 model calls, measured on run
+# `1920662-40f711b2`'s iteration-2 fire), and the budget here is about the
+# spend, not about the damage.
+DEFAULT_MAX_CRASH_ROUNDS = 2
 # The authoring prompt's CONSTRAINT SET, as an epoch. Bumped whenever a
 # constraint the accept path enforces gains (or loses) an up-front statement in
 # the prompt — a rejection streak earned before the model was ever told a rule
@@ -220,7 +233,8 @@ def charge_mechanical_failure(
 BOOKKEEPING_KEY_PREFIXES = (
     MECHANICAL_KEY_PREFIX, INFLIGHT_KEY_PREFIX, INFLIGHT_PID_KEY_PREFIX,
     MECH_BUILD_KEY_PREFIX, PAYOFF_KEY_PREFIX, REJECTED_KEY_PREFIX,
-    REJ_BUILD_KEY_PREFIX, CRASH_SIG_KEY_PREFIX, CONTRACT_KEY_PREFIX)
+    REJ_BUILD_KEY_PREFIX, CRASH_SIG_KEY_PREFIX, CRASH_SCOPE_KEY_PREFIX,
+    CRASH_ROUND_KEY_PREFIX, CONTRACT_KEY_PREFIX)
 
 
 def _is_bookkeeping_key(key: str) -> bool:
@@ -498,15 +512,91 @@ def crash_signature(evidence: CrashEvidence) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
+def crash_blame_signature(evidence: CrashEvidence) -> str:
+    """`crash_signature` with the VANISHED SET LEFT OUT — the half of the
+    fingerprint that says *what the localizer knows*, not *how much damage is
+    currently visible*.
+
+    Same construction, same marker, one field short, so the two move together
+    if the hashing rule ever changes. This is the key a refutation's scope is
+    filed under: two sweeps share it exactly when the blame and the marker are
+    the same, which is precisely the condition under which the vanished sets
+    are comparable at all."""
+    blamed = ",".join(sorted(
+        f"{b.file}::{b.fn_name}" for b in evidence.blamed_fns))
+    raw = f"b={blamed}"
+    if evidence.chain_blamed:
+        raw += ";c=chain"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def crash_sig_key(sig: str, component_key: str) -> str:
     """Attempts-store key counting LANDED cause-C re-authors of one component
     against one crash signature. Same prefixing rule as `mechanical_key`."""
     return f"{CRASH_SIG_KEY_PREFIX}{sig}:{component_key}"
 
 
-def crash_component_refuted(
-    attempts: Mapping[str, int], sig: str, component_key: str,
-) -> bool:
+def crash_scope_key(blame_sig: str, component_key: str, test: str) -> str:
+    """One row per vanished TEST NAME in a refutation's scope.
+
+    A row per name rather than a serialized set because the attempts store is
+    `Mapping[str, int]` and has to stay one: it is read by
+    `tools/reset_retrigger_attempts.py`, by the budget predicates here, and by
+    `reconcile_interrupted_attempts`, none of which should learn a second value
+    shape to carry one field. Membership is the only query the subset rule
+    makes, and a row per name answers it directly."""
+    return f"{CRASH_SCOPE_KEY_PREFIX}{blame_sig}:{component_key}:{test}"
+
+
+def crash_round_key(sig: str, component_key: str) -> str:
+    """Attempts-store key counting AUTHORING ROUNDS one component has spent on
+    one crash, landed or rejected. Same prefixing rule as `mechanical_key`.
+
+    Callers pass the BLAME signature (`crash_blame_signature`), never the
+    vanished-inclusive `crash_signature`: the loop shrinks the vanished set by
+    working, and a budget whose key its debtor moves by making progress is
+    re-bought once per distinct subset. The blame moves only when the localizer
+    learns something new, which is the one event that honestly deserves a fresh
+    budget."""
+    return f"{CRASH_ROUND_KEY_PREFIX}{sig}:{component_key}"
+
+
+@dataclass(frozen=True, slots=True)
+class CrashRefutation:
+    """Why (or whether) a component is refused for the crash in front of it.
+
+    A bool would do for the decision and would not do for the LOG, which is the
+    half that was missing: the silent version of the subset case is what cost
+    run `1920662-40f711b2` its night, and a reader has to be able to see "this
+    is the same crash minus two tests we fixed" without re-deriving it."""
+
+    refuted: bool
+    #: The vanished set the refusal was recorded against (V).
+    scope: frozenset[str] = frozenset()
+    #: V minus the crash in front of us — what the loop has repaired since.
+    fixed: frozenset[str] = frozenset()
+    #: True when the hash-exact row matched, i.e. an identical crash.
+    exact: bool = False
+    #: A refutation with no scope on file. The caller should write the current
+    #: vanished set as the scope so the NEXT shrink is covered.
+    needs_scope: bool = False
+
+
+def crash_refutation_scope(
+    attempts: Mapping[str, int], blame_sig: str, component_key: str,
+) -> frozenset[str]:
+    """The vanished test names a refutation for this (blame, component) was
+    recorded against."""
+    prefix = f"{CRASH_SCOPE_KEY_PREFIX}{blame_sig}:{component_key}:"
+    return frozenset(k[len(prefix):] for k, v in attempts.items()
+                     if v and k.startswith(prefix) and len(k) > len(prefix))
+
+
+def crash_component_refutation(
+    attempts: Mapping[str, int], sig: str, component_key: str, *,
+    blame_sig: str | None = None,
+    vanished: Collection[str] = (),
+) -> CrashRefutation:
     """Whether this component's re-author was already spent on THIS crash and
     the crash survived it.
 
@@ -521,20 +611,157 @@ def crash_component_refuted(
     landed attempt 1 at iter 3, the same 3 bodies re-filled, and the identical
     crash reproduced at iter 5 — at which point the walk re-picked `Quoted` on
     registry order, because nothing remembered that the crash had already
-    survived its re-author. Iterations 3-6 oscillated 79/74/79/74 for it."""
-    return attempts.get(crash_sig_key(sig, component_key), 0) > 0
+    survived its re-author. Iterations 3-6 oscillated 79/74/79/74 for it.
+
+    THE MATCH IS SUBSET-AWARE, AND A HASH-EXACT MATCH ALONE COST A NIGHT.
+    `crash_signature` hashes the vanished set, so a refutation was keyed to the
+    exact damage visible when it was recorded — and the loop's whole job is to
+    reduce that damage. Run `1920662-40f711b2` (2026-08-16/17): at iteration 1
+    the retrigger refused this component in as many words, `vanished` being
+    `{test_large_alignment, test_no_backtrace_fallback}`. The promoted dispatch
+    then filled `object_drop_front`, `tests/test_downcast.rs` went 0/7 to 4/3,
+    pass 79 to 83, and `vanished` became `{test_no_backtrace_fallback}` — a
+    STRICT SUBSET. Different set, different sha, no row, aim re-opened. It
+    fired twice more; the second landed, reverted 54 bodies and took the
+    cluster 83 to 25. Net for 9h48m and 191 model calls: −46 tests.
+
+    This is the function's own docstring argument applied to the field it was
+    not applied to. `crash_signature` already refuses to hash a chain-derived
+    blame's fn list, on the grounds that "every landed fill could change the
+    set and re-open the walk on a crash that never changed — an unbounded
+    destruction license". `vanished` does that by a shorter route, and it is
+    the worse field to key on, because the excluded ones flap in both
+    directions while a shrinking vanished set is unambiguously the loop working.
+
+    So: refuted for a crash whose vanished set is a SUBSET of the recorded
+    scope and whose blame marker is unchanged — that is the same crash minus
+    what got fixed. The aim re-opens on exactly the two things a repeat fire is
+    supposed to require:
+
+    * a vanished test OUTSIDE the scope — a binary going down that was not down
+      before, which is new damage and new evidence;
+    * a change of blame marker — `blame_sig` moves on the empty → chain →
+      frames transitions `crash_signature`'s docstring already sanctions.
+
+    Backward compatible in both directions. A store written before the scope
+    existed has no rows, so `scope` is empty, the subset branch is inert and
+    the behaviour is the old hash-exact one; `needs_scope` then tells the caller
+    to backfill from the crash it is refusing right now, which is a valid scope
+    by construction — the refusal being made is a refusal against that set."""
+    if attempts.get(crash_sig_key(sig, component_key), 0) > 0:
+        scope = (crash_refutation_scope(attempts, blame_sig, component_key)
+                 if blame_sig else frozenset())
+        return CrashRefutation(refuted=True, scope=scope or frozenset(vanished),
+                               exact=True, needs_scope=not scope)
+    if not blame_sig or not vanished:
+        return CrashRefutation(refuted=False)
+    scope = crash_refutation_scope(attempts, blame_sig, component_key)
+    now = frozenset(vanished)
+    if scope and now <= scope:
+        return CrashRefutation(refuted=True, scope=scope, fixed=scope - now)
+    return CrashRefutation(refuted=False, scope=scope)
+
+
+def crash_component_refuted(
+    attempts: Mapping[str, int], sig: str, component_key: str, *,
+    blame_sig: str | None = None,
+    vanished: Collection[str] = (),
+) -> bool:
+    """`crash_component_refutation`'s decision alone, for callers that only
+    need the bool."""
+    return crash_component_refutation(
+        attempts, sig, component_key,
+        blame_sig=blame_sig, vanished=vanished).refuted
+
+
+def record_crash_scope(
+    attempts: Mapping[str, int], blame_sig: str, component_key: str,
+    vanished: Collection[str],
+) -> dict[str, int]:
+    """File the vanished set a refutation is answerable to. Idempotent, and
+    additive on purpose: re-recording a LARGER set widens the scope, which is
+    the honest direction — a crash that took more binaries down and was then
+    re-authored against was refuted against all of them."""
+    out = dict(attempts)
+    for test in vanished:
+        out[crash_scope_key(blame_sig, component_key, test)] = 1
+    return out
+
+
+def crash_rounds_spent(
+    attempts: Mapping[str, int], sig: str, component_key: str,
+) -> int:
+    """How many authoring rounds this component has already spent on this exact
+    crash signature — landed, rejected, it makes no difference to the GPU."""
+    return attempts.get(crash_round_key(sig, component_key), 0)
+
+
+def crash_round_budget_spent(
+    attempts: Mapping[str, int], sig: str, component_key: str,
+    cap: int = DEFAULT_MAX_CRASH_ROUNDS,
+) -> bool:
+    """Whether one crash signature has bought all the authoring rounds it may
+    from one component.
+
+    THE HOLE THIS CLOSES. A rejected re-author refutes nothing and destroys
+    nothing, and both of those are correct — `crash_component_refutation`
+    counts landed fires only, and the destruction cap counts what landed. The
+    consequence nobody had priced is that a rejected round is therefore FREE:
+    nothing anywhere recorded that a signature had already been taken to the
+    model and come back with nothing. Run `1920662-40f711b2`, iteration 2: three
+    authoring attempts against the 31-name `Error` component, all three rejected
+    at the compile gate (`E0255 Backtrace defined multiple times`, `E0119
+    conflicting Clone for Own<_>`, `E0255` again), 55 minutes and ~14 model
+    calls, destruction cap correctly not charged — and then iteration 4 re-fired
+    on the identical vanished set and that one landed, for −58 tests.
+
+    Deliberately NOT a widening of the destruction cap. A rejected fire must
+    still not count as a destruction for the ratchet's purposes; it must only
+    stop being free."""
+    return crash_rounds_spent(attempts, sig, component_key) >= max(cap, 1)
+
+
+def charge_crash_round(
+    attempts: Mapping[str, int], sig: str, component_key: str,
+) -> dict[str, int]:
+    """Book an authoring round against a crash signature.
+
+    Charged on the OUTCOME, not at the open, and the asymmetry with the
+    destruction cap beside it is deliberate. That cap is charged before the
+    authoring call and refunded after, so a process killed mid-authoring cannot
+    retry for free; this budget cannot use that shape, because the refund would
+    have to survive the kill and `reconcile_interrupted_attempts` — which is
+    what does the surviving — has no way to know WHICH crash signature the dead
+    attempt was aimed at. Charging on the outcome gives the same rule with
+    nothing to reconcile: a REJECTED round is charged (the model was asked and
+    answered, and its answer failing the compile gate is exactly the spend this
+    bounds), a REFUNDED one is not (no model evidence was bought), and a kill
+    charges nothing — which `mechanical_budget_spent` already bounds at
+    `DEFAULT_MAX_MECHANICAL` per component."""
+    out = dict(attempts)
+    key = crash_round_key(sig, component_key)
+    out[key] = out.get(key, 0) + 1
+    return out
 
 
 def record_crash_fire(
-    attempts: Mapping[str, int], sig: str, component_key: str,
+    attempts: Mapping[str, int], sig: str, component_key: str, *,
+    blame_sig: str | None = None,
+    vanished: Collection[str] = (),
 ) -> dict[str, int]:
     """Book a LANDED cause-C fire: the component is refuted for this signature
     the moment the crash is seen again, and the fire's payoff claim is opened
-    against signature reproduction (see `settle_crash_payoff`)."""
+    against signature reproduction (see `settle_crash_payoff`).
+
+    The refutation's SCOPE is written in the same call, because a refutation
+    without one degrades to the hash-exact match that the subset rule exists to
+    replace — see `crash_component_refutation`."""
     out = dict(attempts)
     key = crash_sig_key(sig, component_key)
     out[key] = out.get(key, 0) + 1
     out[f"{PAYOFF_CRASH_PENDING_PREFIX}{sig}"] = 1
+    if blame_sig and vanished:
+        out = record_crash_scope(out, blame_sig, component_key, vanished)
     return out
 
 
@@ -1085,6 +1312,30 @@ class RefillGrace:
     fills_at_grant: int
     granted_at: int = 0
     clipped: bool = False
+    # THE WINDOW'S SECOND AND THIRD DENOMINATORS. It is sized in ITERATIONS and
+    # nothing bounds what an iteration costs: run `1920662-40f711b2` measured
+    # 588 minutes for 6 iterations (98 min/iteration), so the 18 iterations its
+    # 54-body re-stub bought are ~29 hours with the batch ratchet, the stall
+    # budget and the crash streak all standing down. An exemption with one
+    # denominator can only be as right as that denominator is.
+    #
+    # `max_minutes` is the wall-clock ceiling (0 disables it, which is what
+    # every caller that does not measure time gets). `highwater_at_grant` is the
+    # score the window was re-based FROM: once the re-climb reaches it the
+    # re-fills have demonstrably finished paying, the ordinary gates describe
+    # the tree again, and holding them down further protects nothing. -1 means
+    # the granting site had no high-water to record.
+    granted_at_minute: float = 0.0
+    max_minutes: float = 0.0
+    highwater_at_grant: int = -1
+    # Whether any sweep inside this window has read BELOW `highwater_at_grant`.
+    # A re-climb presupposes a drop, and without this the "reached the mark"
+    # close fires on the window's very first sweep whenever the re-stub cost no
+    # tests — which is the common case when the reverted bodies' tests were
+    # already failing. Walk `3368-753757e6` is exactly that: 25 bodies reverted,
+    # pass 39 before and 39 after, so an unqualified rule closed the window at
+    # once and protected nothing.
+    dipped: bool = False
     # The vanished-test reading of the sweep the fire acted on — a reading
     # taken on the PRE-revert tree, where every body the fire re-stubbed was
     # still filled. It bounds the window's explanatory power (see
@@ -1103,6 +1354,9 @@ class RefillGrace:
         max_iters: int = DEFAULT_REFILL_GRACE_MAX_ITERS,
         granted_at: int = 0,
         vanished_at_grant: frozenset[str] = frozenset(),
+        granted_at_minute: float = 0.0,
+        max_minutes: float = 0.0,
+        highwater_at_grant: int = -1,
     ) -> RefillGrace:
         """A window for `restubbed` bodies: one iter per `per_iter` bodies,
         never fewer than one (the smallest re-stub keeps the original
@@ -1117,6 +1371,9 @@ class RefillGrace:
                    fills_at_grant=fills_so_far,
                    granted_at=granted_at,
                    clipped=sized > bound,
+                   granted_at_minute=granted_at_minute,
+                   max_minutes=max_minutes,
+                   highwater_at_grant=highwater_at_grant,
                    vanished_at_grant=vanished_at_grant)
 
     @classmethod
@@ -1168,7 +1425,60 @@ class RefillGrace:
         return bool(set(vanished) - set(self.vanished_at_grant)) \
             or not self.vanished_at_grant
 
-    def consume(self, fills_so_far: int) -> RefillGrace:
+    def dipped_by(self, pass_count: int) -> bool:
+        """Whether the window has seen the score below the mark it was re-based
+        from, this sweep included. `pass_count` of -1 means "not measured" and
+        can neither set nor clear it."""
+        return self.dipped or (
+            0 <= pass_count < self.highwater_at_grant)
+
+    def early_close_reason(
+        self, now_minutes: float = 0.0, pass_count: int = -1,
+    ) -> str:
+        """Why this window should close before its iteration budget runs out,
+        or "" — the SECOND and THIRD denominators, stated as one rule so the
+        driver's log line and `consume` cannot drift apart.
+
+        The stand-down itself is right and stays: the drop was deliberate, so
+        no gate may charge it. What was missing is that "deliberate" has an
+        expiry, and an exemption denominated in iterations alone cannot express
+        it. Two things end it earlier than the count:
+
+        * THE RE-CLIMB REACHED THE MARK IT WAS RE-BASED FROM. At that point the
+          re-fills have finished paying by the window's own definition of
+          paying, and every gate it is holding down now describes the tree
+          accurately again. This is the cheap one and it needs no configuration
+          — but it requires a DIP first, because a re-climb presupposes a drop.
+          Without that qualifier the clause fires on the window's first sweep
+          whenever the re-stub cost no tests, which is what happens when the
+          reverted bodies' tests were already failing: walk `3368-753757e6`
+          reverted 25 bodies with pass 39 on both sides of the fire, and an
+          unqualified rule closed a 9-iteration window immediately.
+        * THE WALL CLOCK. The window is granted in iterations and nothing bounds
+          what an iteration costs. Run `1920662-40f711b2` (2026-08-16/17):
+          588 minutes for 6 iterations, so the 18 iterations its 54-body
+          re-stub bought were ~29 hours of a run with the batch ratchet, the
+          stall budget and the crash streak all disarmed. `max_minutes=0`
+          disables this, which is what a caller with no clock gets."""
+        if not self.active:
+            return ""
+        if (self.highwater_at_grant >= 0 and self.dipped_by(pass_count)
+                and pass_count >= self.highwater_at_grant):
+            return (f"the re-climb reached {pass_count}, the high-water this "
+                    f"window was re-based from ({self.highwater_at_grant}) — "
+                    "the re-fills have finished paying and the ordinary gates "
+                    "describe this tree again")
+        elapsed = now_minutes - self.granted_at_minute
+        if self.max_minutes > 0 and elapsed >= self.max_minutes:
+            return (f"the wall-clock ceiling — {elapsed:.0f} min since the "
+                    f"window opened against a {self.max_minutes:.0f}-min cap, "
+                    f"with {self.iters_left} iter(s) of the budget unspent. An "
+                    "exemption counted in iterations cannot bound what an "
+                    "iteration costs")
+        return ""
+
+    def consume(self, fills_so_far: int, now_minutes: float = 0.0,
+                pass_count: int = -1) -> RefillGrace:
         """The window after one graced iter has run its fills. Survives only
         while fills keep LANDING: an iter that filled nothing has no re-author
         in flight to protect, whatever budget is left. Progress is measured in
@@ -1180,14 +1490,23 @@ class RefillGrace:
         learns which fns filled only after this point, and the same "did
         anything fill" condition is what re-admits the exhausted re-stubs into
         the next iter's frontier — a window that outlived their re-admission
-        would protect work that can no longer run."""
+        would protect work that can no longer run.
+
+        …and it closes on whichever of its three denominators comes first — see
+        `early_close_reason` for the other two."""
         if not self.active or fills_so_far <= self.fills_at_grant:
+            return RefillGrace.none()
+        if self.early_close_reason(now_minutes, pass_count):
             return RefillGrace.none()
         return RefillGrace(iters_left=self.iters_left - 1,
                            restubbed=self.restubbed,
                            fills_at_grant=fills_so_far,
                            granted_at=self.granted_at,
                            clipped=self.clipped,
+                           granted_at_minute=self.granted_at_minute,
+                           max_minutes=self.max_minutes,
+                           highwater_at_grant=self.highwater_at_grant,
+                           dipped=self.dipped_by(pass_count),
                            vanished_at_grant=self.vanished_at_grant)
 
 

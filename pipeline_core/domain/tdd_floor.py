@@ -75,11 +75,30 @@ class TddFloor:
     tree_sha: str
     oracle_size: int
     code_id: str
+    # The OPEN pass's cursor: `"<file>::<fn>"` for every frontier unit this
+    # pass has already dispatched. Empty when no pass is open.
+    #
+    # WHY IT IS PERSISTED, and it is the flat-score guard's safety net. That
+    # guard stops the run on the second identical reading, which under a
+    # dispatch cap of 12 can mean stopping having attempted 12 units of 59.
+    # With a process-local cursor that stop is a LOCK rather than a pause:
+    # `order_frontier` is deterministic, so the relaunch starts with an empty
+    # attempted-set, sends the SAME first 12, reads the same score and stops
+    # again — units 13-59 unreachable without a human editing the env, which
+    # is the deadlock shape `domain/pass_highwater.py` documents. Carrying the
+    # cursor across the boundary is what makes the guard's eagerness safe: each
+    # relaunch takes the NEXT slice, and the frontier is covered across as many
+    # short runs as it takes instead of burning one long one.
+    #
+    # Defaulted so a floor written by an older build parses (`from_dict` is
+    # total by design and an absent cursor simply means "start the pass").
+    attempted: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {"cluster": self.cluster, "best_pass": self.best_pass,
                 "stall": self.stall, "tree_sha": self.tree_sha,
-                "oracle_size": self.oracle_size, "code_id": self.code_id}
+                "oracle_size": self.oracle_size, "code_id": self.code_id,
+                "attempted": list(self.attempted)}
 
     @staticmethod
     def from_dict(raw: Any) -> TddFloor | None:
@@ -96,7 +115,9 @@ class TddFloor:
                 stall=int(raw["stall"]),
                 tree_sha=str(raw["tree_sha"]),
                 oracle_size=int(raw["oracle_size"]),
-                code_id=str(raw["code_id"]))
+                code_id=str(raw["code_id"]),
+                attempted=tuple(
+                    str(k) for k in (raw.get("attempted") or ())))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -105,13 +126,16 @@ class TddFloor:
 class FloorResume:
     """How much of a persisted floor this process may adopt.
 
-    The two halves of a floor are NOT one decision, and gating them together
+    The halves of a floor are NOT one decision, and gating them together
     is what made Stage A inert on its first live day. See :func:`resume_floor`.
-    ``None`` in either field means "start that half fresh"."""
+    ``None`` in a field means "start that half fresh"."""
 
     stall: int | None
     best_pass: int | None
     note: str
+    # The open pass's cursor. ``None`` means "open a fresh pass"; an empty
+    # tuple is a resumed pass that happened to have dispatched nothing.
+    attempted: tuple[str, ...] | None = None
 
 
 def resume_mismatch(
@@ -133,6 +157,49 @@ def resume_mismatch(
         return f"cluster ({saved.cluster} != {cluster})"
     if saved.oracle_size != oracle_size:
         return f"oracle_size ({saved.oracle_size} != {oracle_size})"
+    if saved.code_id != code_id:
+        return f"code_id ({saved.code_id} != {code_id})"
+    return None
+
+
+def cursor_mismatch(saved: TddFloor, *, cluster: str, code_id: str) -> str | None:
+    """The first field that forbids resuming the pass CURSOR, or None.
+
+    This is `resume_mismatch` minus ``oracle_size``, and the omission is the
+    whole reason the function exists rather than being one call.
+
+    A cursor is not a claim about a score. It is the list of frontier units this
+    pass already spent a model call on, and the only thing that can invalidate
+    it is the frontier being drawn from a different population: a different
+    CLUSTER (different fns entirely) or a different CODE build (a different
+    `order_frontier`, a different route set). ``oracle_size`` is neither. It is
+    ``pass_count + fail_count`` — a reading of the sweep, which moves whenever a
+    test binary's crash state flips, and one landed body is enough to move it:
+    on run `1920662-40f711b2` filling `object_drop_front` took
+    `tests/test_downcast.rs` from 0/7 to 4/3 and the oracle from 101 to 106 in
+    one iteration, then a re-stub took it to 105.
+
+    WHAT GATING THE CURSOR ON IT COST, stated because the cursor was added to
+    prevent exactly this. The flat-score guard stops the run on the second
+    identical reading, which under a dispatch cap of 12 can mean stopping having
+    attempted 12 units of 59; the cursor is what makes that a pause rather than
+    a lock, because the relaunch opens on units the stopped run never reached.
+    Routed through `resume_mismatch`, the cursor was dropped on any oracle move
+    — so the relaunch started empty, `order_frontier` is deterministic, and it
+    re-sent the same first 12, read the same score and stopped again. Measured
+    over the whole event store (`phase_c.tdd.iter`, 2026-08-17): **26 of 401
+    consecutive sweep pairs change `oracle_size`**, so roughly one stop in
+    fifteen landed in the lock the cursor exists to remove.
+
+    A stale key cannot survive being carried: `take_batch` intersects the cursor
+    with the LIVE frontier, so a unit that no longer exists is dropped and a
+    unit that still does is one the previous process demonstrably already tried.
+    That intersection is the same argument that lets the cursor ignore
+    ``tree_sha``, applied to the one other field that describes the tree rather
+    than the experiment.
+    """
+    if saved.cluster != cluster:
+        return f"cluster ({saved.cluster} != {cluster})"
     if saved.code_id != code_id:
         return f"code_id ({saved.code_id} != {code_id})"
     return None
@@ -181,13 +248,42 @@ def resume_floor(
     why = resume_mismatch(saved, cluster=cluster, oracle_size=oracle_size,
                           code_id=code_id)
     if why is not None:
-        return FloorResume(stall=None, best_pass=None, note=why + " changed")
+        # THE SCORE HALVES DIE HERE AND THE CURSOR DOES NOT, because they are
+        # answerable to different identities — see `cursor_mismatch`, which is
+        # this check minus `oracle_size`. Both halves used to leave through this
+        # return, which voided the cursor on the one transition it was written
+        # for: a stop, a restore or a crash flip moves the oracle, and the
+        # relaunch then re-dispatched the deterministic prefix it had just been
+        # stopped on.
+        _cursor = (saved.attempted if cursor_mismatch(
+            saved, cluster=cluster, code_id=code_id) is None else None)
+        return FloorResume(
+            stall=None, best_pass=None, attempted=_cursor,
+            note=why + " changed"
+            + (f"; pass cursor resumed at {len(_cursor)} unit(s) anyway — a "
+               "cursor answers to cluster+code_id, not to the oracle"
+               if _cursor else ""))
+    # The CURSOR resumes on the identity check alone, deliberately not on
+    # `tree_sha`. It is not a claim about a score — it is the list of units
+    # this pass already spent a model call on, and its safety condition is
+    # only that the frontier is drawn from the same cluster by the same code.
+    # A changed tree cannot invalidate it: `take_batch` intersects the cursor
+    # with the LIVE frontier, so a unit that no longer exists is dropped and a
+    # unit that still does is one the previous process already tried. Gating
+    # it on `tree_sha` would void it in exactly the case it is for — the
+    # flat-score stop, whose whole premise is that the tree changed and the
+    # score did not.
     if saved.tree_sha != tree_sha:
         return FloorResume(
-            stall=saved.stall, best_pass=None,
+            stall=saved.stall, best_pass=None, attempted=saved.attempted,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
-                  "changed, so nothing here can restore that peak"))
+                  "changed, so nothing here can restore that peak"
+                  + (f"; pass cursor resumed at {len(saved.attempted)} "
+                     "unit(s)" if saved.attempted else "")))
     return FloorResume(
         stall=saved.stall, best_pass=saved.best_pass,
-        note=f"best_pass={saved.best_pass} stall={saved.stall}")
+        attempted=saved.attempted,
+        note=(f"best_pass={saved.best_pass} stall={saved.stall}"
+              + (f" pass cursor={len(saved.attempted)} unit(s)"
+                 if saved.attempted else "")))

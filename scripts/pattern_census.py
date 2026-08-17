@@ -169,6 +169,27 @@ RE_INTERRUPTED = re.compile(
     r"an attempt was charged and never reached an outcome")
 RE_MECHANICAL_DEATH = re.compile(
     r"re-author died in splice/locate infrastructure")
+# P9 — the refusal and the later fire that contradicts it. The refusal names
+# the component; the fire names the same component and its cause.
+RE_SIG_REFUSED = re.compile(
+    r"\[layout-retrigger\] \w+/(?P<comp>\[[^]]*\]): this component's re-author "
+    r"was already spent on this exact crash")
+RE_SIG_SUBSET_REFUSED = re.compile(
+    r"refuted for a SUPERSET signature")
+RE_VANISHED_SET = re.compile(
+    r"vanished set \((?P<n>\d+) test\(s\)\)")
+# P10 — a frontier stub no route dispatched. The driver subtracts the
+# cfg-inactive population before printing, so a match is a routing gap and not
+# the cfg filter working; pre-2026-08-17 logs did not, hence the count of
+# cfg-dead names carried alongside.
+RE_NO_ROUTE = re.compile(
+    r"(?:\[(?P<cluster>\w+)\] )?\[phase-c/tdd\] iter \d+: "
+    r"(?P<n>\d+) frontier stub\(s\) were dispatched by NO route this iter"
+    r"[^:]*: (?P<fns>.+?)(?: \(\d+ further stub| *$)")
+RE_CFG_INACTIVE = re.compile(
+    r"(?:cluster (?P<cluster>\w+): )?"
+    r"skipped \d+ of \d+ stub\(s\) not active in this cluster's cfg-set: "
+    r"(?P<fns>.+)")
 RE_LOCATE_MISS = re.compile(
     r"could not locate a frozen definition to replace: (?P<item>[^\s(]+)")
 
@@ -233,6 +254,23 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         ("DROPPING", "scope-narrowed"),
         # The streak, said out loud: a refund is not a report.
         ("NEVER LANDED", "never-landed-reported"),
+    ],
+    "P9": [
+        # The subset-aware refutation holding the line: the crash in front of
+        # it is the refused one minus what the loop repaired, so the aim stays
+        # shut and the log says which tests were fixed (2026-08-17).
+        ("refuted for a SUPERSET signature", "subset-refuted"),
+        # …and the authoring-round budget, which stops a signature buying a
+        # second ~55-minute round whether or not the first one landed.
+        ("authoring round(s) of a cap of", "round-budget"),
+    ],
+    "P10": [
+        # The deferral no longer throws away the frontier's other stubs: the
+        # producers the blockers are blocked on stay in the same batch.
+        ("the deferral keeps", "deferral-keeps-stubs"),
+        # …and the line itself now separates the cfg-dead population, so a hit
+        # is a routing gap rather than the cfg filter working.
+        ("are cfg-inactive in this cluster", "cfg-dead-excluded"),
     ],
 }
 
@@ -693,14 +731,141 @@ def detect_p8(run: Run, iters: list[dict]) -> list[dict]:
     return hits
 
 
+def detect_p9(run: Run, iters: list[dict]) -> list[dict]:
+    """Destruction authorised by progress: the retrigger REFUSES a component
+    for a crash signature, the loop then repairs part of that crash, and the
+    smaller crash re-opens the aim it had just been refused.
+
+    WHY IT IS ITS OWN CLASS. Every other class here is a mechanism failing to
+    act or acting on nothing. This one is a mechanism acting BECAUSE the loop
+    succeeded: `crash_signature` hashes the vanished-test set, so any fix that
+    un-crashes a binary changes the key, the refutation row is not found, and a
+    component that was correctly immune becomes a target again. The predicate
+    "has the situation changed since we last refused" is satisfied by progress,
+    which is the general shape — and it is the opposite sign of P1, where a
+    baseline destroyed by a deliberate re-stub made a retry gate unsatisfiable
+    exactly when it was needed.
+
+    MEASURED. Run `1920662-40f711b2` (2026-08-16/17). Iteration 1 refused the
+    31-name `Error` component in as many words, `vanished` being
+    `{test_large_alignment, test_no_backtrace_fallback}`. The promoted dispatch
+    filled `object_drop_front`, `tests/test_downcast.rs` went 0/7 to 4/3 and
+    pass 79 to 83 at 92 minutes — the first verdict movement on that binary in
+    the recorded run history — and `vanished` shrank to
+    `{test_no_backtrace_fallback}`. The aim re-opened, fired at iterations 2
+    (three attempts, all rejected, 55 min) and 4 (landed: 54 bodies reverted,
+    83 to 25). Net for 9h48m and 191 model calls: −46 tests.
+
+    THE SIGNATURE IN THE LOG is a refusal naming a component, followed later in
+    the same run by a fire on that same component with a strictly SMALLER
+    vanished-set reading. LATER is load-bearing and is enforced on line order:
+    the refutation WORKING produces the opposite sequence — a fire lands at
+    iter 1, the crash reproduces, the hash-exact refusal prints at iter 3 —
+    and a pooled comparison would flag that healthy run as the pathology,
+    polluting the census the recurrence check reads. The subset-aware
+    refutation shipped 2026-08-17 prints `refuted for a SUPERSET signature`
+    when it holds the line, so a run carrying that marker is REACTED rather
+    than a hit."""
+    refusal_at: dict[str, int] = {}
+    repeats: list[tuple[str, re.Match]] = []
+    for i, (ref, text) in enumerate(run.lines):
+        if (m := RE_SIG_REFUSED.search(text)):
+            refusal_at.setdefault(m["comp"], i)
+        elif (m := RE_FIRED.search(text)):
+            if m["comp"] in refusal_at and i > refusal_at[m["comp"]]:
+                repeats.append((ref, m))
+    if not repeats:
+        return []
+    refused_comps = {m["comp"] for _r, m in repeats}
+    # The shrink itself, when the log carries the per-sweep vanished readings.
+    counts = [int(m["n"]) for _r, m in run.find(RE_VANISHED_SET)]
+    shrank = bool(counts) and min(counts) < max(counts)
+    return [{
+        "evidence": f"{len(repeats)} fire(s) on {len(refused_comps)} component(s) "
+                    "this run had already REFUSED for the same crash"
+                    + (f"; the vanished set shrank {max(counts)} -> "
+                       f"{min(counts)} test(s) in between, which is the loop "
+                       "working and is what re-opened the aim" if shrank else "")
+                    + f" — {', '.join(sorted(refused_comps))[:120]}",
+        "refs": [ref for ref, _m in repeats[:4]]}]
+
+
+def detect_p10(run: Run, iters: list[dict]) -> list[dict]:
+    """Undispatchable frontier unit: a stub sits in the frontier, no route
+    claims it, and nothing charges or escalates — so the loop can spend
+    iterations on its CONSUMERS indefinitely while the pass count says nothing.
+
+    WHY IT IS ITS OWN CLASS. P7 is sampling starvation — a unit the cap keeps
+    reaching last. This is a unit no route will take at all, which no counter
+    can see: the driver deliberately does not charge an exhaustion strike to
+    something nobody attempted (that charge is what locked every A/B/C cluster
+    out of its impl members on 2026-08-11/12), so the correct fix for one defect
+    created a state with no terminator.
+
+    MEASURED. Run `1920662-40f711b2` iteration 6 (2026-08-17 05:14Z): the impl
+    route deferred itself behind 8 free-fn/oversized blockers, all 8 landed, and
+    all 8 logged `kept ... (compiles; N attributed test(s) blocked by
+    still-stubbed sibling(s))` — zero verdicts could move by construction and
+    the sweep read 33/105 twice. The four they were waiting on —
+    `src/context.rs::ext_context`, `src/error.rs::drop`, `src/error.rs::from`,
+    `src/kind.rs::new` — were dispatched by no route in any of the run's 7
+    iterations, 10 hours and 191 model calls. `src/kind.rs::new` alone is the
+    named stub target of eight distinct tests.
+
+    THE CFG-INACTIVE POPULATION IS SUBTRACTED, and that is the difference
+    between a row and a false positive. Before 2026-08-17 the driver's line did
+    not exclude stubs this cluster's cfg-set gates out, and on the retained logs
+    8 of its 10 instances were `src/nightly.rs::fmt` in cluster `stable` —
+    correctly undispatched, since the engine refuses a cfg-dead dispatch by
+    design. This detector re-applies the subtraction from the membership report
+    the per-fn route prints, so old logs read the same as new ones."""
+    hits = run.find(RE_NO_ROUTE)
+    if not hits:
+        return []
+    # The cfg-dead population is PER CLUSTER: `src/nightly.rs::fmt` is
+    # cfg-inactive in `stable` and a live routing gap in `nightly`, and a
+    # run-wide union would suppress the second with the first — a false
+    # negative in the one detector whose point is separating those
+    # populations. Lines missing the cluster capture (older formats) fall
+    # into the "" bucket, which every hit also consults, preserving the old
+    # pooled behaviour exactly where the cluster is unknowable.
+    dead: dict[str, set[str]] = {}
+    for _ref, m in run.find(RE_CFG_INACTIVE):
+        bucket = dead.setdefault(m["cluster"] or "", set())
+        bucket.update(n.strip() for n in m["fns"].split(",") if n.strip())
+    live: dict[str, int] = {}
+    refs: list[str] = []
+    for ref, m in hits:
+        names = [n.strip() for n in m["fns"].split(",") if n.strip()]
+        _dead_here = dead.get(m["cluster"] or "", set()) | dead.get("", set())
+        alive = [n for n in names if n not in _dead_here]
+        if not alive:
+            continue
+        refs.append(ref)
+        for n in alive:
+            live[n] = live.get(n, 0) + 1
+    if not live:
+        return []
+    worst = sorted(live.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{
+        "evidence": f"{len(refs)} iteration(s) left {len(live)} live frontier "
+                    "stub(s) undispatched by every route (cfg-inactive stubs "
+                    "excluded) — "
+                    + ", ".join(f"{n} x{c}" for n, c in worst[:4]),
+        "refs": refs[:4]}]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
-             "P7": detect_p7, "P8": detect_p8}
+             "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
+             "P10": detect_p10}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
     "P6": "budget lockout", "P7": "sampling starvation",
-    "P8": "fire that never lands"}
+    "P8": "fire that never lands",
+    "P9": "destruction authorised by progress",
+    "P10": "undispatchable frontier unit"}
 
 
 # -------------------------------------------------------------------- report

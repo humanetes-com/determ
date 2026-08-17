@@ -19,6 +19,7 @@ from typing import Any
 from ...domain.bound_mismatch import detect_frozen_bound_mismatch
 from ...domain.llm_output import parse_retrospective
 from ...domain.text import (
+    PromptDigest,
     label_value_offset,
     starts_with_label,
     strip_surrounding_asterisks,
@@ -49,6 +50,14 @@ class PhaseCRetroDeps:
     log: Callable[[str], None]
     failed_body_cap: int
     fix_err_cap: int
+    # Telemetry sibling for the model call below. In `llm.stream_meta` a retro
+    # call is indistinguishable from a fill call, which is what made the retro
+    # round's price unmeasurable: ~50 retro outcomes bought ~6 honoured
+    # guidances on run `58819-ee78a1d1` at ordinary big-think call prices
+    # (fix-loop median 22,822 prompt tokens), and nothing could split that
+    # spend out of the stream. The event joins `llm.stream_meta` on
+    # `prompt_sha` — same digest, same function — so the split is one join.
+    emit: Callable[..., None] | None = None
 
 
 def diagnose_phase_c(
@@ -116,6 +125,11 @@ def diagnose_phase_c(
     # Retro runs think=True with a bounded output budget (think=False
     # returns empty content on the vLLM reasoning-parser endpoint). One retry on
     # empty is handled inside the injected ask_retrospective.
+    if deps.emit is not None:
+        deps.emit("phase_c.retro.call", data={
+            "unit": f"{file_rel}::{fn_name}", "cluster": cluster_name,
+            "prompt_sha": PromptDigest.of(prompt).sha256,
+            "purpose": "retro", "kind": "per_fn"})
     try:
         result = deps.ask_retrospective(prompt)
     except Exception as e:
@@ -135,6 +149,7 @@ def whole_tree_retrospective(
     ask_retrospective: Callable[[str], str],
     log: Callable[[str], None],
     fix_err_cap: int,
+    emit: Callable[..., None] | None = None,
 ) -> str:
     """Strategy retrospective for whole-tree fix loops — the tree-wide partner of
     `diagnose_phase_c`. Asks the model what categorically different approach to
@@ -144,6 +159,11 @@ def whole_tree_retrospective(
         return ""
     prompt = build_whole_tree_retro_prompt(
         error_excerpt, history, name=name, fix_err_cap=fix_err_cap)
+    if emit is not None:
+        emit("phase_c.retro.call", data={
+            "unit": name, "cluster": "",
+            "prompt_sha": PromptDigest.of(prompt).sha256,
+            "purpose": "retro", "kind": "whole_tree"})
     try:
         result = ask_retrospective(prompt)
     except Exception as e:

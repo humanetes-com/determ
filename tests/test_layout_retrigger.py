@@ -756,6 +756,150 @@ def test_a_landed_fire_refutes_its_component_for_that_signature_only() -> None:
     assert not crash_component_refuted(attempts, other, "Quoted")
 
 
+def test_a_shrinking_vanished_set_does_not_re_open_the_refuted_aim() -> None:
+    """THE FIX. Run `1920662-40f711b2` (2026-08-16/17): the retrigger refused
+    this component at iteration 1 against
+    `{test_large_alignment, test_no_backtrace_fallback}`, the promoted dispatch
+    then filled `object_drop_front`, `tests/test_downcast.rs` went 0/7 to 4/3
+    and `vanished` became `{test_no_backtrace_fallback}` — a strict subset.
+    Hash-exact, that is a different key with no row, so the aim re-opened, fired
+    twice, and the second fire reverted 54 bodies for pass 83 -> 25."""
+    from pipeline_core.domain.layout_retrigger import (
+        crash_blame_signature,
+        crash_component_refutation,
+        crash_signature,
+        record_crash_fire,
+    )
+    before = _uaf_evidence()
+    after = CrashEvidence(
+        vanished=frozenset({"test_no_backtrace_fallback"}),
+        suspect_fns=before.suspect_fns)
+    attempts = record_crash_fire(
+        {}, crash_signature(before), "Error",
+        blame_sig=crash_blame_signature(before), vanished=before.vanished)
+
+    r = crash_component_refutation(
+        attempts, crash_signature(after), "Error",
+        blame_sig=crash_blame_signature(after), vanished=after.vanished)
+    assert r.refuted, "the fix that shrank the crash re-authorised the fire"
+    assert not r.exact, "this is the subset branch, not the hash-exact one"
+    assert r.fixed == frozenset({"test_large_alignment"}), (
+        "the refusal must be able to NAME what was repaired — the silent "
+        "version of this line is what cost the night")
+
+
+def test_a_new_vanished_test_outside_the_scope_still_re_opens_the_aim() -> None:
+    """The subset rule must not become a blanket immunity: a binary going down
+    that was not down before is new damage and new evidence."""
+    from pipeline_core.domain.layout_retrigger import (
+        crash_blame_signature,
+        crash_component_refutation,
+        crash_signature,
+        record_crash_fire,
+    )
+    before = _uaf_evidence()
+    attempts = record_crash_fire(
+        {}, crash_signature(before), "Error",
+        blame_sig=crash_blame_signature(before), vanished=before.vanished)
+    # Same two names, plus one the scope has never seen.
+    wider = CrashEvidence(
+        vanished=before.vanished | {"test_ffi_alignment"},
+        suspect_fns=before.suspect_fns)
+    assert not crash_component_refutation(
+        attempts, crash_signature(wider), "Error",
+        blame_sig=crash_blame_signature(wider),
+        vanished=wider.vanished).refuted
+    # …and so does the blame-marker transition the signature already sanctions.
+    blamed = _uaf_evidence(frozenset({FnLocator("src/error.rs", "object_drop")}))
+    narrower = CrashEvidence(
+        vanished=frozenset({"test_no_backtrace_fallback"}),
+        suspect_fns=blamed.suspect_fns, blamed_fns=blamed.blamed_fns)
+    assert not crash_component_refutation(
+        attempts, crash_signature(narrower), "Error",
+        blame_sig=crash_blame_signature(narrower),
+        vanished=narrower.vanished).refuted
+
+
+def test_negative_control_the_hash_exact_lookup_re_opens_on_the_repair() -> None:
+    """Without this the case above proves nothing: it asserts a refusal that a
+    lookup broken some other way would also produce. Drive the SAME transition
+    with no scope recorded — which is exactly the hash-exact behaviour, since
+    the subset branch has nothing to match against — and the aim re-opens."""
+    from pipeline_core.domain.layout_retrigger import (
+        crash_blame_signature,
+        crash_component_refutation,
+        crash_signature,
+        record_crash_fire,
+    )
+    before = _uaf_evidence()
+    after = CrashEvidence(vanished=frozenset({"test_no_backtrace_fallback"}),
+                          suspect_fns=before.suspect_fns)
+    # Pre-fix store: the landed fire booked the row and no scope.
+    attempts = record_crash_fire({}, crash_signature(before), "Error")
+    assert not crash_component_refutation(
+        attempts, crash_signature(after), "Error",
+        blame_sig=crash_blame_signature(after),
+        vanished=after.vanished).refuted, (
+        "the control no longer reproduces the burn")
+    # …and the hash-exact refusal it DOES still make reports that it has no
+    # scope, which is what makes the caller backfill one.
+    same = crash_component_refutation(
+        attempts, crash_signature(before), "Error",
+        blame_sig=crash_blame_signature(before), vanished=before.vanished)
+    assert same.refuted and same.exact and same.needs_scope
+
+
+def test_the_backfilled_scope_covers_the_next_shrink() -> None:
+    """The backfill is what arms the fix on a store written before it existed —
+    the live `_layout_retrigger_attempts_stable.json` on 2026-08-17. The refusal
+    being made right now is a refusal against the crash in front of it, so that
+    crash is a valid scope."""
+    from pipeline_core.domain.layout_retrigger import (
+        crash_blame_signature,
+        crash_component_refutation,
+        crash_signature,
+        record_crash_fire,
+        record_crash_scope,
+    )
+    before = _uaf_evidence()
+    attempts = record_crash_fire({}, crash_signature(before), "Error")
+    attempts = record_crash_scope(
+        attempts, crash_blame_signature(before), "Error", before.vanished)
+    after = CrashEvidence(vanished=frozenset({"test_no_backtrace_fallback"}),
+                          suspect_fns=before.suspect_fns)
+    assert crash_component_refutation(
+        attempts, crash_signature(after), "Error",
+        blame_sig=crash_blame_signature(after), vanished=after.vanished).refuted
+
+
+def test_one_signature_may_buy_only_so_many_authoring_rounds() -> None:
+    """The hole a rejected round fell through: the refutation counts LANDED
+    fires, so a rejected round —
+    ~55 min and ~14 model calls on run `1920662-40f711b2`'s iteration 2, three
+    attempts all rejected at the compile gate — was recorded nowhere and the
+    identical signature re-fired at iteration 4."""
+    from pipeline_core.domain.layout_retrigger import (
+        DEFAULT_MAX_CRASH_ROUNDS,
+        charge_crash_round,
+        crash_round_budget_spent,
+        crash_rounds_spent,
+        crash_signature,
+    )
+    sig = crash_signature(_uaf_evidence())
+    attempts: dict[str, int] = {}
+    for n in range(DEFAULT_MAX_CRASH_ROUNDS):
+        assert not crash_round_budget_spent(attempts, sig, "Error"), n
+        attempts = charge_crash_round(attempts, sig, "Error")
+    assert crash_round_budget_spent(attempts, sig, "Error")
+    assert crash_rounds_spent(attempts, sig, "Error") == DEFAULT_MAX_CRASH_ROUNDS
+    # Per component and per signature, not per cluster: another component is
+    # untouched, and so is a changed crash.
+    assert not crash_round_budget_spent(attempts, sig, "Quoted")
+    other = crash_signature(_uaf_evidence(
+        frozenset({FnLocator("src/error.rs", "object_drop")})))
+    assert not crash_round_budget_spent(attempts, other, "Error")
+
+
 def test_the_identical_crash_back_settles_the_fire_as_zero_payoff() -> None:
     from pipeline_core.domain.layout_retrigger import (
         crash_payoff_budget_spent,

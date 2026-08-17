@@ -19,35 +19,70 @@ two of them are not comparable at all; pairing is what makes "the same number"
 mean the same tree-level fact.
 
 THE RULE. Over the last `window` JUDGED readings, if the reading a dispatch is
-about to be launched against has already been seen `repeats` times AND at least
-one COMPLETED frontier traversal separates two of those readings, the loop has
+about to be launched against has already been seen `repeats` times, the loop has
 returned to a score it already had and the model calls about to be spent are the
-ones that did not move it last time. That is a window rather than a consecutive
-streak on purpose: the recorded pathology is not a flat line but a fixed point —
-79 → re-stub → 32 → 39 → … → 79 — and a consecutive-only rule reads the re-climb
-as movement every time.
+ones that did not move it last time. STOP. That is a window rather than a
+consecutive streak on purpose: the recorded pathology is not a flat line but a
+fixed point — 79 → re-stub → 32 → 39 → … → 79 — so `83 → 79 → 83` has to trip
+exactly as `83 → 83` does, and a consecutive-only rule reads the re-climb as
+movement every time.
 
-THE TRAVERSAL CLAUSE IS NOT DECORATION, AND IT COST A REVIEW TO FIND. The
+Two readings of the same number are the whole rule. Nothing else has to be true
+— not a completed traversal, not a stalled stub count, not a closed pass. Every
+additional conjunct this guard has carried has been a way for it to stay silent
+through a burn (see the traversal clause below and the exemption list further
+down), and each was withdrawn only after a run paid for it in GPU-hours.
+
+THE TRAVERSAL CLAUSE WAS THE RULE'S SECOND HALF AND IS NOW OFF BY DEFAULT. The
 dispatch cap (`domain/dispatch_batch.py`) makes a sweep measure a SLICE of the
 frontier — 12 units of 59 on the live anyhow tree — so "two sweeps in a row read
-79/101" says twelve units bought nothing, not that the frontier did. Without
-this clause the guard stops the run after two slices, i.e. having attempted 24
-of 59 units, and it stops there again on every relaunch: `order_frontier` is
-deterministic and a new process starts with an empty window and an empty
-attempted-set, so it re-dispatches the SAME first 12 and reads the same score.
-Units 25-59 then become unreachable without a human editing
-`TDD_FLAT_SCORE_REPEATS` — a gate whose unlock condition is the progress the
-gate itself prevents, which is the deadlock shape `domain/pass_highwater.py`
-documents at length. Requiring a completed traversal bounds the loss to ONE
-traversal per process (five iterations at the measured cap and frontier) while
-keeping every later repeat immediate, because the window still holds the
-mid-traversal readings and only the DECISION waits.
+79/101" says twelve units bought nothing, not that the frontier did. The clause
+therefore required a COMPLETED traversal to separate two matching readings
+before the stop could charge, so the rest of the frontier got its turn.
 
-This is the same correction the plateau budget already carries: `TDD_MAX_STALLS`
-charges only on a sweep that followed a completed traversal, so the two
-terminators are now denominated in the same unit of time. A guard measured in
-sweeps beside a budget measured in traversals is two clocks, and the faster one
-decides everything.
+It was withdrawn as a precondition on 2026-08-17 because it waits on a quantity
+the loop is not obliged to produce, and three runs measured what that costs —
+every one of them ended on an operator's stop rather than the loop's own
+decision:
+
+    1064759-0f23fb68  7h48m  79/101 at six of seven sweeps; stall 1 of 3
+    1692702-94e6163a  3h36m  frontier 35 -> 57 -> 63 outgrew the cursor; no
+                             pass closed; `first < traversal` read `0 < 0`
+    1920662-40f711b2  9h48m  repeat clause satisfied at iter 3 (00:25:43Z,
+                             `83/106` twice); withheld on `traversal 0`, which
+                             the run never left; 191 model calls, net -46
+
+The cohort fix in `domain/dispatch_batch.py` was supposed to make traversals
+tick again, and on the third run it did not: the cohort opened at iter 2 over a
+frontier of 43, iter 3 attempted 15 of them against a frontier that had shrunk
+to 16, and iter 4 left through a crash retrigger's `continue`, which commits no
+batch by design. From iter 5 a grace window excused every sweep.
+
+WHAT REPLACES IT. The concern was real — a stop on the second repeat has
+attempted 12 units of 59 — but the remedy did not have to be a precondition.
+`repeats` is 2 and every process starts with an EMPTY window, so a relaunch
+records one reading, dispatches ONE batch, and can only trip on the sweep that
+follows it. That batch is a slice the previous process never reached, because
+`TddFloor.attempted` carried the cursor across the boundary. Progress through
+the frontier is bounded below by one fresh slice per relaunch rather than by a
+traversal that may never complete, and the stopped run's fills are all still on
+disk, which moves the frontier on its own. The loss is bounded and
+self-unlocking; the clause's failure mode was neither.
+`TDD_FLAT_SCORE_REQUIRE_TRAVERSAL=1` restores it.
+
+ONE batch per process, not two, and the arithmetic matters to whoever is
+relaunching. The reading is recorded at the sweep and the decision is taken
+BEFORE the dispatch, so the second sweep's recording is already the second
+occurrence and the second batch never goes out — pinned by
+`test_the_gpu_guard_stops_the_capped_loop_on_the_second_repeat`, which asserts
+exactly one. Covering a frontier of F at cap C therefore costs ceil(F/C)
+relaunches, not half that: at the live cap of 12 and the 33-unit frontier of
+run `1920662-40f711b2`'s last iteration, three.
+
+The plateau budget still charges on a completed traversal (`TDD_MAX_STALLS`),
+so the two terminators are no longer denominated in the same unit. That is
+deliberate and is the point: a guard that can only charge when another
+mechanism advances is not a second clock, it is the first one wearing a hat.
 
 WHAT IS NOT JUDGED. Three readings cannot judge a dispatch, and each is the same
 exemption the plateau budget already applies (`phase_c_tdd.py`):
@@ -180,6 +215,11 @@ class FlatScoreGuard:
 
     window: int = 5
     repeats: int = 2
+    # The traversal precondition on `trips_on`, OFF by default — see that
+    # method for the three runs that measured it. Kept as a field rather than
+    # deleted so the old behaviour is an env var and not a code edit, and so
+    # the walks can drive both.
+    require_traversal: bool = False
     readings: tuple[ScoreObservation, ...] = ()
     # Excused sweeps since the newest recorded reading (`pending`), and the
     # number that sat immediately before it (`gap`). Two counters because the
@@ -231,21 +271,69 @@ class FlatScoreGuard:
 
     def trips_on(self, reading: ScoreReading, traversal: int) -> bool:
         """Would a dispatch launched against `reading` be spending on a score
-        the window has already seen `repeats` times, across a completed pass
-        over the frontier?
+        the window has already seen `repeats` times?
 
         The NEWEST reading has to be the repeated one. A window holding
         `79, 66, 79, 80` contains a repeat, but the sweep about to dispatch read
         80 — the loop moved, and stopping it there would be reading a stale
         entry as the present.
 
-        And `traversal` has to have MOVED since the earliest matching reading.
-        Two readings inside one traversal are two slices of a single plan; only
-        a repeat that survives the loop finishing that plan is evidence about
-        the frontier rather than about twelve of its units. With no cap (or a
-        frontier under it) every batch closes a pass, the index advances every
-        iteration, and this clause costs nothing — which is why it is invisible
-        in every walk, all of which drive a one-fn frontier.
+        THE TRAVERSAL CLAUSE IS OFF BY DEFAULT, AND THE THIRD RUN IS WHY. It
+        required `traversal` to have moved since the earliest matching reading,
+        on the argument that two readings inside one traversal are two slices
+        of one plan. The argument is sound and the clause is still unsound as a
+        PRECONDITION, because the quantity it waits on is one the loop is not
+        obliged to ever produce. Three runs, each ending on an operator's stop
+        rather than the loop's own:
+
+          `1064759-0f23fb68`  7h48m   79/101 read at six of seven sweeps
+          `1692702-94e6163a`  3h36m   frontier 35 -> 57 -> 63 outgrew the
+                                      cursor, no pass closed, `0 < 0`
+          `1920662-40f711b2`  9h48m   the repeat clause was satisfied at iter 3
+                                      (00:25:43Z, `83/106` twice) and the stop
+                                      was withheld on `traversal 0`, which the
+                                      run never left
+
+        The cohort fix in `domain/dispatch_batch.py` was supposed to make
+        traversals tick again and on that third run it did not: the cohort
+        opened at iter 2 over a frontier of 43, iter 3 attempted 15 of them
+        against a frontier that had shrunk to 16, and iter 4 left through a
+        crash retrigger's `continue` — which by design commits no batch, so
+        `_traversals` stayed 0. From iter 5 a re-fill grace window excused
+        every sweep. Nine hours, 191 model calls, net -46 passing tests, and
+        the guard's own ARMED-and-WITHHELD line printed once and then went
+        quiet because the excuses stopped it being evaluated.
+
+        So the rule is now the plain one: a reading the window has already seen
+        `repeats` times stops the run. That is a WINDOW and not a consecutive
+        streak, so `83 -> 79 -> 83` trips exactly as `83 -> 83` does — the
+        recorded pathology is a fixed point, not a flat line.
+
+        WHAT THE CLAUSE WAS PROTECTING, AND WHAT REPLACES IT. With a dispatch
+        cap of 12 and a frontier of 59, stopping on the second repeat means the
+        run stops having attempted 12 units, not 59. The clause held the stop
+        back so the rest got their turn. What actually gives them their turn is
+        cheaper and does not depend on a pass closing: `repeats` is 2 and every
+        process starts with an EMPTY window, so a relaunch records one reading,
+        dispatches ONE batch, and trips on the sweep after it — and that batch
+        is a slice the previous process never reached, because
+        `TddFloor.attempted` persists the pass cursor across the boundary.
+        Progress through the frontier is therefore bounded below by one fresh
+        slice per relaunch instead of by a traversal that may never complete,
+        and the fills of the stopped run are all still on disk, which moves the
+        frontier anyway. The loss is bounded and self-unlocking; the clause's
+        failure mode was not.
+
+        It is ONE batch and not two, which is the number an operator divides a
+        frontier by. The reading is recorded at the sweep and this decision is
+        taken before the dispatch, so the second sweep's recording is already
+        the second occurrence — `test_the_gpu_guard_stops_the_capped_loop_on_
+        the_second_repeat` asserts a batch count of exactly 1. Covering F units
+        at cap C costs ceil(F/C) relaunches.
+
+        `require_traversal=True` restores the old precondition for a caller
+        that wants it (`TDD_FLAT_SCORE_REQUIRE_TRAVERSAL=1`). It is off by
+        default because the three runs above are what "on" measured.
 
         `enabled` is checked HERE and not left to the arithmetic: with the guard
         turned off by `repeats=0`, an empty window's count of 0 satisfies
@@ -253,6 +341,8 @@ class FlatScoreGuard:
         dispatch."""
         if not self.enabled or self.repeated(reading) < self.repeats:
             return False
+        if not self.require_traversal:
+            return True
         first = self.first_traversal_of(reading)
         return first is not None and first < traversal
 
@@ -266,7 +356,14 @@ class FlatScoreGuard:
         it does not trip, so "the terminator is armed but cannot charge" and
         "the loop is making progress" looked identical in the log. The driver
         reports it per sweep; the arithmetic lives here beside the rule it is
-        the negative of."""
+        the negative of.
+
+        With `require_traversal` off — the default — nothing is ever withheld
+        and this is vacuously False, because `trips_on` returns True on the
+        same condition that gets us past the guard above. It stays as a method
+        rather than being deleted so that turning the precondition back on
+        restores its reporting with it: an operator who re-arms the clause gets
+        the line that says the clause is what is holding the stop."""
         if not self.enabled or self.repeated(reading) < self.repeats:
             return False
         return not self.trips_on(reading, traversal)

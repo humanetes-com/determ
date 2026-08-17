@@ -1093,6 +1093,55 @@ def test_a_new_localizer_blame_reopens_a_refuted_component():
     assert res2.fired and res2.succeeded
 
 
+def test_a_shrunken_vanished_set_does_not_reopen_the_rounds_budget():
+    """The rounds budget is keyed on the BLAME signature, not the
+    vanished-inclusive one. Two rejected rounds against vanished {a, b}; the
+    loop then fixes one test and the crash comes back as {b} with the same
+    blame. Keyed on the full signature the `sigr:` row is not found and the
+    same blame buys a fresh cap of ~55-minute rounds — once per distinct
+    subset, which for an N-test crash is up to 2^N−1 budgets. The refusal
+    must hold: nothing the localizer knows has changed."""
+    from dataclasses import replace as dc_replace
+    ev_wide = dc_replace(_uaf_ev(),
+                         vanished=frozenset({"test_boxed_str", "test_rev"}))
+    f = _Fakes(compiles=False)
+    res1 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f.deps(), crash_evidence=ev_wide)
+    assert res1.fired and res1.rejected
+    f2 = _Fakes(attempts=f.saved_attempts, compiles=False)
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f2.deps(), crash_evidence=ev_wide)
+    assert res2.fired and res2.rejected
+    ev_shrunk = dc_replace(_uaf_ev(), vanished=frozenset({"test_boxed_str"}))
+    f3 = _Fakes(attempts=f2.saved_attempts, compiles=False)
+    res3 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f3.deps(), crash_evidence=ev_shrunk)
+    assert not res3.fired, (
+        "a vanished set the loop shrank by working re-opened the rounds "
+        "budget — the sigr: key moved with the progress it is supposed to "
+        "be indifferent to")
+    assert any("authoring round(s) of a cap of" in ln for ln in f3.logs)
+
+
+def test_a_new_blame_opens_a_fresh_rounds_budget():
+    """…and the one event the refusal line promises DOES re-open it: the
+    localizer learning something new. Same two spent rounds; the third call
+    arrives with an origin blame the first two never had."""
+    from dataclasses import replace as dc_replace
+    f = _Fakes(compiles=False)
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                     "", f.deps(), crash_evidence=_uaf_ev())
+    f2 = _Fakes(attempts=f.saved_attempts, compiles=False)
+    retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                     "", f2.deps(), crash_evidence=_uaf_ev())
+    ev_blamed = dc_replace(_uaf_ev(), blamed_fns=frozenset(
+        {FnLocator("src/error.rs", "fmt")}))
+    f3 = _Fakes(attempts=f2.saved_attempts)
+    res3 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
+                            "", f3.deps(), crash_evidence=ev_blamed)
+    assert res3.fired and res3.succeeded
+
+
 def test_two_landed_fires_on_one_signature_close_the_whole_walk():
     """The signature payoff budget bounds the WALK: with two landed cause-C
     re-authors each survived by the identical crash, a third fire is refused

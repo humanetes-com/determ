@@ -1426,7 +1426,7 @@ def build_app(
         return _whole_tree_retro_impl(
             error_excerpt, history, name=name,
             ask_retrospective=helpers.ask_retrospective, log=ports.log,
-            fix_err_cap=cfg.fix_err_cap)
+            fix_err_cap=cfg.fix_err_cap, emit=ports.emit)
 
     def task2_group_tests(skeleton_dir: Path, test_files: list[tuple[str, str]],
                           cluster_name: str, module_name: str) -> list[dict[str, Any]]:
@@ -2040,6 +2040,7 @@ def build_app(
     _retro_deps = PhaseCRetroDeps(
         ask_retrospective=helpers.ask_retrospective, log=ports.log,
         failed_body_cap=cfg.failed_body_cap, fix_err_cap=cfg.fix_err_cap,
+        emit=ports.emit,
     )
 
     def _checkpoint_fill_tree(

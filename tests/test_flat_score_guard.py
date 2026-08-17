@@ -107,28 +107,57 @@ def test_a_higher_limit_needs_more_repeats() -> None:
     assert g.trips_on(r, 2)
 
 
-def test_two_readings_inside_one_traversal_are_two_slices_of_one_plan() -> None:
-    """THE CLAUSE THE DISPATCH CAP MADE NECESSARY, and the reason this file
-    carries a traversal index at all.
+def test_a_repeat_inside_one_traversal_stops_the_run() -> None:
+    """THE NEGATIVE CONTROL for the 2026-08-17 change, on the sequence that
+    cost run `1920662-40f711b2` its night.
 
-    Under `PHASE_C_TDD_MAX_DISPATCH=12` a sweep measures 12 units of a 59-unit
-    frontier, so "79/101 twice running" says twelve units bought nothing — not
-    that the frontier did. Stopping there stops the run having attempted 24 of
-    59, and it stops there again on every relaunch, because `order_frontier` is
-    deterministic and a new process starts with an empty window and an empty
-    attempted-set: the same first 12 go out and read the same score. The
-    remaining 35 units are then unreachable without a human editing the env.
-    """
+    That run read `83/106` at iterations 2, 3 and 4 without ever completing a
+    frontier traversal: the cohort opened at iter 2 over a frontier of 43, iter
+    3 attempted 15 of them against a frontier that had shrunk to 16, and iter 4
+    left through a crash retrigger's `continue`, which commits no batch. The
+    guard's own line printed at 00:25:43Z — `83/106 has been read 2 time(s)
+    (limit 2) but all of them inside traversal 0` — and the run went on for
+    another five hours.
+
+    Injecting the pre-fix behaviour (`require_traversal=True`) reproduces that
+    exactly, which is what makes this a control rather than a restatement."""
     g = _guard()
-    r = ScoreReading(79, 101)
-    for _ in range(4):                      # four capped sweeps, one traversal
-        g = g.observed(r, 0)
-    assert g.repeated(r) == 4 >= g.repeats
-    assert not g.trips_on(r, 0), \
-        "four slices of ONE plan is not evidence about the plan"
-    g = g.observed(r, 1)                    # the traversal closed; same reading
-    assert g.trips_on(r, 1), \
-        "a repeat that survives the loop finishing its plan is the evidence"
+    r = ScoreReading(83, 106)
+    g = g.observed(r, 0)
+    assert not g.trips_on(r, 0), "one reading is a measurement, not a repeat"
+    g = g.observed(r, 0)
+    assert g.trips_on(r, 0), \
+        "the same number twice IS the rule — no traversal precondition"
+
+    old = _guard(require_traversal=True)  # type: ignore[arg-type]
+    for _ in range(4):                    # four capped sweeps, one traversal
+        old = old.observed(r, 0)
+    assert old.repeated(r) == 4 >= old.repeats
+    assert not old.trips_on(r, 0), \
+        "pre-fix: four repeats inside traversal 0 did not stop the run"
+    assert old.withheld_by_traversal(r, 0), \
+        "pre-fix: armed and withheld — the state the run spent 9h48m in"
+
+
+def test_the_withheld_report_is_vacuous_once_the_clause_is_off() -> None:
+    """`withheld_by_traversal` is the negative of `trips_on`, so with the
+    precondition off nothing is ever withheld. It survives as a method so that
+    re-arming the clause restores its reporting in the same switch."""
+    g = _guard()
+    r = ScoreReading(83, 106)
+    g = g.observed(r, 0).observed(r, 0)
+    assert g.trips_on(r, 0)
+    assert not g.withheld_by_traversal(r, 0)
+
+
+def test_a_non_consecutive_repeat_trips_without_a_traversal() -> None:
+    """The operator's rule, stated as a sequence: `83 -> 79 -> 83` is a fixed
+    point and must stop just as `83 -> 83` does, and neither may wait on a
+    completed pass. The window is what carries this; the middle reading is a
+    re-climb, not progress."""
+    g, r83, r79 = _guard(), ScoreReading(83, 106), ScoreReading(79, 106)
+    g = g.observed(r83, 0).observed(r79, 0).observed(r83, 0)
+    assert g.trips_on(r83, 0)
 
 
 def test_the_clause_is_free_when_every_batch_closes_a_pass() -> None:

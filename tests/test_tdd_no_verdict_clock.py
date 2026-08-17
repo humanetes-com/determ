@@ -191,15 +191,23 @@ def test_a_sweep_that_landed_nothing_is_not_counted(
 
 def test_the_withheld_flat_guard_reports_itself_every_sweep(
         tmp_path: Path, monkeypatch) -> None:
-    """180.4's third part. The guard is silent when it does not trip, so
-    "armed but unable to charge" and "making progress" looked identical in the
-    log for 3h36m. With the repeat clause satisfied and the traversal clause
-    not, every sweep now says so — and names the cohort progress that is the
-    only thing that can release it."""
+    """The guard is silent when it does not trip, so "armed but unable to
+    charge" and "making progress" looked identical in the log for 3h36m. With
+    the repeat clause satisfied and the traversal clause not, every sweep says
+    so — and names the cohort progress that is the only thing that can release
+    it.
+
+    The traversal clause is OFF by default since 2026-08-17, so nothing is
+    withheld on a default run and this report is vacuous there. It is driven
+    here through `TDD_FLAT_SCORE_REQUIRE_TRAVERSAL=1`, which is the whole
+    reason `withheld_by_traversal` survived the change rather than being
+    deleted: an operator who re-arms the precondition gets back the line that
+    says the precondition is what is holding the stop."""
     events: list[tuple[str, dict]] = []
     logs: list[str] = []
     # The guard ARMED (repeats=2) and the second clock OFF, so the run survives
     # long enough to print the line and nothing else ends it first.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REQUIRE_TRAVERSAL", "1")
     _run(tmp_path, monkeypatch, [_sweep(79, 22)], events, limit="0",
          flat_repeats="2", logs=logs)
 

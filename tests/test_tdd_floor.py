@@ -3,12 +3,14 @@ measurement it describes is still the same measurement."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from pipeline_core.domain.measurement import code_identity, combine_source_hashes
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
+    cursor_mismatch,
     render_pass_floor,
     resume_floor,
     resume_mismatch,
@@ -69,6 +71,36 @@ def test_a_changed_oracle_code_or_cluster_resumes_nothing() -> None:
     for bad in ({"oracle_size": 121}, {"code_id": "new"}, {"cluster": "stable"}):
         r = resume_floor(_FLOOR, **{**_KEY, **bad})
         assert (r.stall, r.best_pass) == (None, None)
+
+
+def test_a_changed_oracle_drops_the_score_halves_and_KEEPS_the_pass_cursor() -> None:
+    """THE CURSOR IS NOT A SCORE, and routing it through `resume_mismatch`
+    treated it as one.
+
+    The cursor is what makes the flat-score guard's eager stop a PAUSE: the
+    guard can stop a run having attempted 12 units of 59, and the relaunch has
+    to open on units the stopped run never reached or `order_frontier`'s
+    determinism turns the stop into a lock. `oracle_size` is `pass_count +
+    fail_count`, so it moves whenever a test binary's crash state flips — one
+    landed body did it on run `1920662-40f711b2` (filling `object_drop_front`
+    took `tests/test_downcast.rs` from 0/7 to 4/3 and the oracle 101 -> 106),
+    and 26 of 401 consecutive sweep pairs in the whole event store change it.
+    Gated on that, the cursor was voided in roughly one stop in fifteen — in the
+    exact transition it exists for."""
+    saved = replace(_FLOOR, attempted=("src/error.rs::new", "src/kind.rs::new"))
+    r = resume_floor(saved, **{**_KEY, "oracle_size": 121})
+    assert (r.stall, r.best_pass) == (None, None), (
+        "the SCORE halves must still die on a changed oracle")
+    assert r.attempted == ("src/error.rs::new", "src/kind.rs::new")
+    assert "pass cursor resumed" in r.note
+    # …and the two identities that DO describe the frontier's population still
+    # void it, because a different cluster or a different build is a different
+    # set of units and a different `order_frontier`.
+    for bad in ({"code_id": "new"}, {"cluster": "stable"}):
+        assert resume_floor(saved, **{**_KEY, **bad}).attempted is None
+    assert cursor_mismatch(saved, cluster="nightly", code_id="abc123def456") is None
+    assert "code_id" in str(
+        cursor_mismatch(saved, cluster="nightly", code_id="other"))
 
 
 def test_no_saved_floor_is_a_fresh_start_not_a_crash() -> None:

@@ -33,7 +33,8 @@ _FAILING = ("test t1 ... ok\ntest t2 ... FAILED\n"
 
 def _run(monkeypatch, tmp_path: Path, events, logs, *,
          dispatched: tuple[tuple[str, str], ...] | None,
-         max_stalls: str = "2") -> None:
+         max_stalls: str = "2",
+         cluster_stubs: list[FnLocator] | None = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     from pipeline_core.domain.models import BuildCluster
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
@@ -60,7 +61,8 @@ def _run(monkeypatch, tmp_path: Path, events, logs, *,
 
     deps = _driver_deps(
         _cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
-        events, None, frontier={_KEY: {"t2"}}, fill=_fill, logs=logs)
+        events, None, frontier={_KEY: {"t2"}}, fill=_fill, logs=logs,
+        stubs=cluster_stubs if cluster_stubs is not None else [_KEY])
     # The frontier key stays a stub the whole run — the charge site's
     # `key in cur_stubs` arm is the one under test.
     deps = deps.__class__(**{
@@ -105,6 +107,60 @@ def test_undispatched_stub_is_spared_and_stays_admitted(
     # Stall exit names the spare rather than convicting it.
     assert any("0 of 1 frontier fn(s) were dispatched" in ln and
                "1 never dispatched, left admitted" in ln for ln in logs)
+
+
+def test_a_cfg_inactive_stub_is_not_reported_as_a_routing_gap(
+        tmp_path: Path, monkeypatch) -> None:
+    """The line conflated two populations with opposite meanings, and the
+    benign one is 8 of its 10 instances on the retained record.
+
+    `scan_unimplemented_functions` takes no cluster and evaluates no cfg, so a
+    stub this cluster's cfg-set excludes is in `cur_stubs` — and being cfg-dead
+    is exactly WHY no route dispatched it. Across the retained logs the line
+    named `src/nightly.rs::fmt` in cluster `stable` eight times (with the per-fn
+    route's own membership report naming it cfg-inactive on the line directly
+    above), `src/ensure.rs::__dispatch_ensure` once, and the genuine case — four
+    impl-member producers no route claimed — once. A census class keyed on the
+    raw line would be ~90% benign, and an escalation keyed on it would spend
+    model calls re-prompting a fn this cluster cannot build.
+
+    Here the frontier stub is absent from the CLUSTER-scoped scan, i.e. cfg-dead:
+    it must be spared exactly as before (no exhaustion charge) and must NOT be
+    reported as undispatched."""
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, events, logs, dispatched=(),
+         cluster_stubs=[FnLocator("src/other.rs", "live")])
+    assert not _exhaustion_verdicts(events), "sparing must be unchanged"
+    assert not any("dispatched by NO route this iter" in ln for ln in logs), (
+        "a cfg-dead stub is the cfg filter working, not a routing gap")
+    assert not any(ev == "phase_c.charge.undispatched_spared" and d.get("fns")
+                   for ev, d in events)
+
+
+def test_negative_control_a_live_stub_is_still_reported(
+        tmp_path: Path, monkeypatch) -> None:
+    """Without this the case above proves nothing: a subtraction that silenced
+    the line unconditionally would pass it too. Same run, the stub present in
+    the cluster-scoped scan — the line must still fire and still name it."""
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, events, logs, dispatched=(),
+         cluster_stubs=[_KEY])
+    assert any(ev == "phase_c.charge.undispatched_spared" and
+               d.get("fns") == ["src/a.rs::f"] for ev, d in events)
+
+
+def test_an_empty_cluster_scan_fails_open_rather_than_silencing_the_line(
+        tmp_path: Path, monkeypatch) -> None:
+    """A filter with input and no output is a contradiction to locate, not a
+    verdict that everything is dead — the failure mode
+    `ClusterMembershipReport.emptied` names. An extractor-absent build must not
+    convert a diagnostic into a guarantee of silence."""
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, events, logs, dispatched=(), cluster_stubs=[])
+    assert any("dispatched by NO route this iter" in ln for ln in logs)
 
 
 def test_dispatched_stub_is_still_charged(tmp_path: Path, monkeypatch) -> None:

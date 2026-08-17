@@ -45,7 +45,11 @@ def _cluster() -> BuildCluster:
 
 
 def _deps(*, logs: list[str], batches: list[tuple[FnLocator, ...]],
-          cargo_calls: list[int], fill=None) -> PhaseCTddDeps:
+          cargo_calls: list[int], fill=None, floor: dict | None = None) -> PhaseCTddDeps:
+    """`floor`, when given, is a mutable dict standing in for the on-disk
+    per-cluster floor file — pass the SAME dict to two `_run` calls to model
+    two processes sharing `.phase_c_logs`, which is what the pass cursor is
+    persisted for."""
     def _cargo(*a: Any, **k: Any) -> tuple[int, str]:
         cargo_calls.append(1)
         return 101, _FLAT
@@ -74,6 +78,10 @@ def _deps(*, logs: list[str], batches: list[tuple[FnLocator, ...]],
         scan_unimplemented_for_cluster=lambda *a, **k: [],
         scan_unimplemented_functions=lambda *a, **k: [],
         task2_fill_fns_one_by_one=fill or _fill,
+        **({} if floor is None else {
+            "load_tdd_floor": lambda *a, **k: floor.get("row"),
+            "save_tdd_floor": lambda p, c, row: floor.__setitem__("row", row),
+        }),
     )
 
 
@@ -143,62 +151,135 @@ def test_capped_run_spends_the_same_traversals_not_the_same_iterations(
     assert any("plateau" in ln for ln in logs)
 
 
-def test_the_gpu_guard_lets_the_capped_loop_finish_one_traversal(
+def test_the_gpu_guard_stops_the_capped_loop_on_the_second_repeat(
         tmp_path, monkeypatch) -> None:
-    """THE TWO MECHANISMS TOGETHER, which is what a launch runs and what nothing
-    covered until this case existed.
+    """THE TWO MECHANISMS TOGETHER, which is what a launch runs.
 
-    A cap of 10 over 30 units is three batches per traversal. The guard's rule
-    is two identical readings, and every reading here is identical — so a guard
-    denominated in SWEEPS stops after the FIRST batch, having attempted 10 of
-    30, and stops there again on every relaunch (`order_frontier` is
-    deterministic and a new process starts with an empty window and an empty
-    attempted-set, so the same batch goes out and reads the same score). The
-    remaining 20 units are then unreachable without a human editing the env.
-
-    Denominated in TRAVERSALS it lets the loop cover the frontier once and stops
-    on the first reading of the second traversal — the fourth batch's sweep. The
-    assertion is the batch count: 3 means the whole frontier was dispatched
-    exactly once before the run ended."""
-    batches: list[tuple[FnLocator, ...]] = []
-    _run(_deps(logs=[], batches=batches, cargo_calls=[]), tmp_path, monkeypatch,
-         cap="10", guard="2", max_stalls="99")
-
-    assert len(batches) == 3, (
-        f"the guard must not stop the run mid-traversal; got {len(batches)} "
-        "batch(es), so it stopped with part of the frontier never dispatched")
-    dispatched = [k for b in batches for k in b]
-    assert sorted(dispatched) == sorted(_FRONTIER), \
-        "every frontier unit got its turn before the run stopped"
-
-
-def test_negative_control_a_sweep_denominated_guard_stops_mid_traversal(
-        tmp_path, monkeypatch) -> None:
-    """The case above with the PRE-FIX rule injected — two identical readings
-    stop the run whatever fraction of the frontier they measured.
-
-    It stops after ONE batch of ten, not two: the reading is recorded at the
+    A cap of 10 over 30 units is three batches per traversal, and every reading
+    here is identical. The rule is two identical readings, full stop — so the
+    run ends after ONE batch, having attempted 10 of 30. It stops before the
+    second batch rather than after it because the reading is recorded at the
     sweep and the decision taken before the dispatch, so the second sweep's
-    recording is the second occurrence and the run ends before the second batch
-    goes out. A THIRD of the frontier attempted, and the same third on every
-    relaunch. Without this control the case above asserts a batch count that a
-    guard broken some other way could also produce."""
-    from pipeline_core.domain.flat_score import FlatScoreGuard
+    recording is already the second occurrence.
 
-    monkeypatch.setattr(
-        FlatScoreGuard, "trips_on",
-        lambda self, reading, traversal: (
-            self.enabled and self.repeated(reading) >= self.repeats))
-
+    Stopping there is the point, not a defect: what makes it safe is that the
+    pass cursor is persisted, so the relaunch takes units 11-20 instead of
+    re-sending 1-10 (the case below). Before that existed, this eagerness was
+    a lock, which is why the traversal precondition was in the rule at all."""
     batches: list[tuple[FnLocator, ...]] = []
     _run(_deps(logs=[], batches=batches, cargo_calls=[]), tmp_path, monkeypatch,
          cap="10", guard="2", max_stalls="99")
 
     assert len(batches) == 1, (
-        f"the pre-fix rule stops after one slice; got {len(batches)} — the "
-        "control no longer reproduces the defect and the case above proves "
-        "nothing")
+        f"two identical readings must end the run; got {len(batches)} "
+        "batch(es), so something let it keep spending")
     assert len({k for b in batches for k in b}) == 10 < len(_FRONTIER)
+
+
+def test_the_persisted_pass_cursor_makes_the_eager_stop_resumable(
+        tmp_path, monkeypatch) -> None:
+    """THE REPLACEMENT for the traversal precondition, and the reason removing
+    it is not simply a more trigger-happy guard.
+
+    Two processes, one floor file. `order_frontier` is deterministic and both
+    runs see the same 30-unit frontier and the same flat readings, so without a
+    persisted cursor the second run re-sends the first run's ten units and the
+    remaining twenty are unreachable for as many relaunches as anyone cares to
+    perform. With it, the second run opens on the units the first never
+    reached.
+
+    The assertion is DISJOINTNESS, not a batch count: what matters is that no
+    model call is spent twice on the same unit across the stop."""
+    floor: dict = {}
+    first: list[tuple[FnLocator, ...]] = []
+    _run(_deps(logs=[], batches=first, cargo_calls=[], floor=floor),
+         tmp_path, monkeypatch, cap="10", guard="2", max_stalls="99")
+
+    second: list[tuple[FnLocator, ...]] = []
+    _run(_deps(logs=[], batches=second, cargo_calls=[], floor=floor),
+         tmp_path, monkeypatch, cap="10", guard="2", max_stalls="99")
+
+    a = {k for b in first for k in b}
+    b = {k for b in second for k in b}
+    assert len(a) == 10 and len(b) == 10
+    assert not (a & b), (
+        "the relaunch re-dispatched units the stopped run had already spent a "
+        "call on — the pass cursor did not survive the process boundary, and "
+        "the guard's stop is a lock rather than a pause")
+    assert (a | b) <= set(_FRONTIER)
+
+
+def test_the_pass_cursor_survives_an_oracle_size_change_across_the_stop(
+        tmp_path, monkeypatch) -> None:
+    """The case above with the one transition it avoided: the relaunch's first
+    sweep reads a DIFFERENT oracle (a crashed binary flipped — 26 of 401
+    consecutive sweep pairs move `oracle_size`, roughly one stop in fifteen).
+
+    `resume_floor` hands the cursor through that branch with `best_pass=None`
+    on purpose — a cursor answers to cluster+code_id, not to the oracle. The
+    driver then computed `improved` against the UNSET sentinel, read any
+    buildable sweep as an improvement, and cleared the cursor it had just
+    adopted — so the relaunch re-sent the same deterministic first ten and the
+    eager stop was a lock again, with the empty cursor persisted over the
+    accumulated one. Same disjointness claim as the same-oracle case; the only
+    difference is the second process's cargo output carries five tests where
+    the first carried four."""
+    wider = ("    Running tests/t.rs (t/t-1)\n"
+             "running 5 tests\n"
+             "test t1 ... ok\n"
+             "test t2 ... FAILED\ntest t3 ... FAILED\n"
+             "test t4 ... FAILED\ntest t5 ... FAILED\n"
+             "test result: FAILED. 1 passed; 4 failed")
+    floor: dict = {}
+    first: list[tuple[FnLocator, ...]] = []
+    _run(_deps(logs=[], batches=first, cargo_calls=[], floor=floor),
+         tmp_path, monkeypatch, cap="10", guard="2", max_stalls="99")
+
+    second: list[tuple[FnLocator, ...]] = []
+    deps2 = _deps(logs=[], batches=second, cargo_calls=[], floor=floor)
+
+    def _cargo_wider(*a: Any, **k: Any) -> tuple[int, str]:
+        return 101, wider
+
+    _run(replace(deps2, run_cargo=_cargo_wider), tmp_path, monkeypatch,
+         cap="10", guard="2", max_stalls="99")
+
+    a = {k for b in first for k in b}
+    b = {k for b in second for k in b}
+    assert len(a) == 10 and len(b) == 10
+    assert not (a & b), (
+        "the relaunch re-dispatched units the stopped run had already spent a "
+        "call on — the oracle moved, `best_pass` resumed as None, and the "
+        "first sweep's vacuous 'improvement' against the UNSET sentinel "
+        "cleared the cursor the resume had just handed over")
+
+
+def test_negative_control_the_traversal_precondition_reproduces_the_burn(
+        tmp_path, monkeypatch) -> None:
+    """The case above with the PRE-FIX rule injected — the stop withheld until
+    a frontier traversal completes.
+
+    This is the state runs `1064759-0f23fb68` (7h48m), `1692702-94e6163a`
+    (3h36m) and `1920662-40f711b2` (9h48m) each burned in, the last of them
+    printing `83/106 has been read 2 time(s) (limit 2) but all of them inside
+    traversal 0` at 00:25:43Z and running five more hours. Here the loop keeps
+    dispatching through the whole frontier instead of stopping at the repeat.
+    Without this control the case above asserts a batch count that a guard
+    broken some other way could also produce."""
+    from pipeline_core.domain.flat_score import FlatScoreGuard
+
+    monkeypatch.setenv("TDD_FLAT_SCORE_REQUIRE_TRAVERSAL", "1")
+    assert FlatScoreGuard(require_traversal=True).repeats == 2
+
+    batches: list[tuple[FnLocator, ...]] = []
+    _run(_deps(logs=[], batches=batches, cargo_calls=[]), tmp_path, monkeypatch,
+         cap="10", guard="2", max_stalls="99")
+
+    assert len(batches) >= 3, (
+        f"the pre-fix rule spends the whole traversal; got {len(batches)} — "
+        "the control no longer reproduces the burn and the case above proves "
+        "nothing")
+    assert {k for b in batches[:3] for k in b} == set(_FRONTIER)
 
 
 def test_the_gpu_guard_still_stops_the_capped_loop(tmp_path, monkeypatch) -> None:

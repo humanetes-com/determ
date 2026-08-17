@@ -55,6 +55,7 @@ from pipeline_core.domain.authored_layout import (
 )
 from pipeline_core.domain.behaviour import BehaviourSuite
 from pipeline_core.domain.layout_retrigger import (
+    DEFAULT_MAX_CRASH_ROUNDS,
     DEFAULT_MAX_MECHANICAL,
     DEFAULT_MAX_REJECTIONS,
     DEFAULT_MAX_ZERO_PAYOFF,
@@ -64,15 +65,19 @@ from pipeline_core.domain.layout_retrigger import (
     CompileEvidence,
     CrashEvidence,
     LayoutRetriggerCause,
+    charge_crash_round,
     charge_mechanical_failure,
     charge_rejection,
     classify_compile_retrigger,
     classify_layout_retrigger,
     code_build_stamp,
+    crash_blame_signature,
     crash_candidate_grade,
-    crash_component_refuted,
+    crash_component_refutation,
     crash_evidence_confounded,
     crash_payoff_budget_spent,
+    crash_round_budget_spent,
+    crash_rounds_spent,
     crash_signature,
     filled_body_text,
     find_fns_referencing,
@@ -87,6 +92,7 @@ from pipeline_core.domain.layout_retrigger import (
     payoff_budget_spent,
     reconcile_interrupted_attempts,
     record_crash_fire,
+    record_crash_scope,
     rejected_key,
     rejection_budget_spent,
     rejection_build_key,
@@ -533,8 +539,16 @@ def retrigger_layout(
     # re-picked `Quoted` on registry order two iterations after its landed
     # re-author changed nothing, and oscillated 79/74/79/74 for ~2.1h a cycle.
     _crash_sig: str | None = None
+    # The blame/marker half of the signature, without the vanished set. It is
+    # what a refutation's SCOPE is filed under, so that a crash the loop has
+    # partially REPAIRED still matches the refusal it earned — see
+    # `crash_component_refutation`.
+    _crash_blame_sig: str | None = None
+    _crash_vanished: frozenset[str] = frozenset()
     if crash_evidence is not None:
         _crash_sig = crash_signature(crash_evidence)
+        _crash_blame_sig = crash_blame_signature(crash_evidence)
+        _crash_vanished = frozenset(crash_evidence.vanished)
         _settled = settle_crash_payoff(attempts, _crash_sig)
         if _settled != attempts:
             attempts = _settled
@@ -605,15 +619,90 @@ def retrigger_layout(
             continue
 
         key = _component_key(names)
-        if _crash_sig is not None and crash_component_refuted(
-                attempts, _crash_sig, key):
-            deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
-                     "this component's re-author was already spent on this "
-                     "exact crash and the crash survived it — refuted for "
-                     "this signature, skipping. A changed crash or a new "
-                     "localizer blame re-opens the aim.")
-            _refused += 1
-            continue
+        if _crash_sig is not None:
+            _refutation = crash_component_refutation(
+                attempts, _crash_sig, key, blame_sig=_crash_blame_sig,
+                vanished=_crash_vanished)
+            if _refutation.refuted and _refutation.needs_scope \
+                    and _crash_blame_sig and _crash_vanished:
+                # BACKFILL. This refusal is being made against the crash in
+                # front of us, so that crash IS a valid scope for it — and
+                # writing it now is what makes the NEXT shrink match instead of
+                # re-opening the aim. Stores written before the scope existed
+                # hold only the hash-exact row; without this they would stay on
+                # the old behaviour until the next landed fire, which is the one
+                # event this is trying to prevent.
+                attempts = record_crash_scope(
+                    attempts, _crash_blame_sig, key, _crash_vanished)
+                deps.save_attempts(project_dir, cfg_cluster, attempts)
+            if _refutation.refuted:
+                if _refutation.fixed:
+                    # THE SILENT VERSION OF THIS LINE COST A NIGHT. Run
+                    # `1920662-40f711b2` refused this component at iteration 1
+                    # and fired at iterations 2 and 4 on a vanished set that had
+                    # only SHRUNK, because a shrunken set hashes differently and
+                    # the lookup was hash-exact. The refusal has to be able to
+                    # say "same crash, minus what we fixed" out loud, or the
+                    # next reader reconstructs it from a log diff again.
+                    deps.log(
+                        f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                        "refuted for a SUPERSET signature — this component's "
+                        "re-author was already spent on a crash whose vanished "
+                        f"set was {sorted(_refutation.scope)}, and "
+                        f"{len(_refutation.fixed)} of those "
+                        f"{len(_refutation.scope)} test(s) have since been "
+                        f"fixed ({sorted(_refutation.fixed)}). That is the same "
+                        "crash minus the repair, not a new one, so the aim does "
+                        "NOT re-open. A vanished test outside that set, or a "
+                        "new localizer blame, still does.")
+                else:
+                    deps.log(
+                        f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                        "this component's re-author was already spent on this "
+                        "exact crash and the crash survived it — refuted for "
+                        "this signature, skipping. A changed crash or a new "
+                        "localizer blame re-opens the aim.")
+                _refused += 1
+                continue
+            if _crash_blame_sig is not None and crash_round_budget_spent(
+                    attempts, _crash_blame_sig, key):
+                # A REJECTED ROUND IS NOT FREE. The refutation above counts
+                # landed fires only, correctly — a rejected scaffold destroyed
+                # nothing and proves nothing about the crash. But nothing
+                # recorded that the signature had already been taken to the
+                # model and come back empty, so on run `1920662-40f711b2` one
+                # signature bought a 55-minute, ~14-call authoring round at
+                # iteration 2 (three attempts, all rejected at the compile gate)
+                # and then re-fired at iteration 4 on the identical vanished set
+                # — that one landed, reverted 54 bodies and cost 58 tests.
+                #
+                # KEYED ON THE BLAME SIGNATURE, not the vanished-inclusive one.
+                # The refutation two blocks up spends this file arguing that a
+                # landed fill SHRINKS the vanished set, which changes
+                # `crash_signature`, which must not re-open a settled question —
+                # and a budget keyed on the full signature has exactly that
+                # hole: fix one of N vanished tests and the `sigr:` row is not
+                # found, so the same blame buys a fresh cap of rounds, up to
+                # once per distinct subset. The run above happened to repeat an
+                # identical vanished set, so the hash-exact key covered the
+                # instance and not the class. What honestly re-opens the budget
+                # is what the log promises: a new localizer blame (`blame_sig`
+                # moves) — not the loop repairing part of the crash. Rows
+                # written under the old key are unreachable after this change;
+                # that is one fresh budget per component at upgrade, bounded by
+                # the destruction cap as ever.
+                deps.log(
+                    f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: "
+                    f"{crash_rounds_spent(attempts, _crash_blame_sig, key)} "
+                    f"authoring round(s) of a cap of {DEFAULT_MAX_CRASH_ROUNDS} "
+                    "have already been spent on this crash BLAME by this "
+                    "component, landed or rejected. A rejected round destroys "
+                    "nothing and is therefore not charged to the destruction "
+                    "cap — but it is not free either, and this blame has "
+                    "had its GPU. A new localizer blame opens a fresh budget; "
+                    "a vanished set the loop shrank by working does not.")
+                _refused += 1
+                continue
         if attempts.get(key, 0) >= deps.max_attempts:
             deps.log(f"  [layout-retrigger] {cfg_cluster}/{sorted(names)}: cap "
                      f"({deps.max_attempts}) reached — not retriggering again.")
@@ -807,6 +896,23 @@ def retrigger_layout(
         # opens can only ever settle against the cluster's zero-payoff cap.
         if plateau_walk and not outcome.refunded and not outcome.rejected:
             attempts = mark_retrigger_pending(attempts, best_pass)
+        # THE AUTHORING ROUND, charged here rather than at the open. The
+        # destruction cap is charged before the call and refunded after,
+        # because a process killed mid-authoring must not be able to retry for
+        # free; this budget cannot use that shape, because the refund would
+        # have to survive a kill and `reconcile_interrupted_attempts` has no way
+        # to know WHICH crash signature the dead attempt was aimed at. Charging
+        # on the outcome gives the same rule with no reconciliation: a REJECTED
+        # round is charged (the model was asked, answered, and its answer failed
+        # the compile gate — that is exactly the spend this bounds), a REFUNDED
+        # one is not (no model evidence was bought), and a kill charges nothing,
+        # which the per-component mechanical cap already bounds at 2.
+        # Booked against the BLAME signature, matching the refusal's key: the
+        # vanished-inclusive signature moves whenever the loop repairs part of
+        # the crash, and a budget whose key the debtor can change by working is
+        # re-bought once per distinct vanished subset.
+        if _crash_blame_sig is not None and not outcome.refunded:
+            attempts = charge_crash_round(attempts, _crash_blame_sig, key)
         # A LANDED cause-C fire is booked against its crash signature: the
         # component is refuted for this exact crash the moment it is seen
         # again, and the fire's payoff claim settles on signature
@@ -814,7 +920,9 @@ def retrigger_layout(
         # refund changed nothing in the tree and proves nothing about the
         # crash.
         if _crash_sig is not None and outcome.succeeded:
-            attempts = record_crash_fire(attempts, _crash_sig, key)
+            attempts = record_crash_fire(
+                attempts, _crash_sig, key,
+                blame_sig=_crash_blame_sig, vanished=_crash_vanished)
         deps.save_attempts(project_dir, cfg_cluster, attempts)
         return outcome
 

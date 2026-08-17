@@ -631,6 +631,83 @@ def test_engine_defers_impl_route_for_a_free_fn_stub(tmp_path: Path) -> None:
     assert "phase_c.dispatch.impl_route_deferred" in fake.events
 
 
+def test_the_deferral_keeps_other_frontier_stubs_in_the_batch(
+        tmp_path: Path) -> None:
+    """THE FIX. The deferral's premise is about RE-fills — a body landed while a
+    sibling is `unimplemented!()` is reverted as a sibling crash — and it was
+    implemented as `tdd_frontier_keys = set(_impl_deferred_stubs)`, which throws
+    away every other frontier key including the ones that are themselves stubs.
+    A first fill of a stub cannot be undone by a sibling panic (there is no body
+    to lose) and it is how a blocker stops being one.
+
+    Run `1920662-40f711b2` iteration 6 (2026-08-17 05:14Z): the frontier held 41,
+    the deferral rewrote it to 8 blockers, all 8 landed and all 8 logged
+    `kept ... (compiles; N attributed test(s) blocked by still-stubbed
+    sibling(s))` — zero verdicts could move by construction and the sweep read
+    33/105 twice. The driver's own line at the end of that iteration named what
+    they were waiting on: `src/context.rs::ext_context, src/error.rs::drop,
+    src/error.rs::from, src/kind.rs::new`, all stubs, all impl members the impl
+    route would have claimed, none dispatched once in the run's 7 iterations,
+    10 hours and 191 model calls."""
+    from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
+    ws = _mk_ws(tmp_path)
+    free = FnRecord(file="src/e.rs", fn_name="drop_rest")
+    blocked = FnRecord(file="src/e.rs", fn_name="new")
+    blocks = [ImplBlock(file="src/e.rs", container="", members=(free,),
+                        stub_members=(free,)),
+              ImplBlock(file="src/e.rs", container="impl E",
+                        members=(blocked,), stub_members=(blocked,))]
+    key = FnLocator("src/e.rs", "drop_rest")
+    producer = FnLocator("src/e.rs", "new")          # a STUB the impl route owns
+    refill = FnLocator("src/e.rs", "wrongfn")        # filled, wrong body
+    fake = FakeFill(cluster_blocks=blocks, stub_records=[], stub_tuples=[],
+                    impl_stats=ClusterFillResult(remaining=0, fns_filled=99))
+    # The engine asks the workspace which fns are live stubs; both the blocker
+    # and the producer are, `wrongfn` is not.
+    fake.scan_stub_records = (  # type: ignore[method-assign]
+        lambda d, c: [{"file": k.file, "fn_name": k.fn_name}
+                      for k in (key, producer)])
+    _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key, producer, refill},
+        tdd_frontier_tests=FailureFrontier.of_direct({refill: {"t1"}}),
+        skip_end_pass_test=True)
+    assert "phase_c.dispatch.impl_route_deferred" in fake.events
+    _kept = next(d.get("kept_stubs") for ev, d in fake.event_data
+                 if ev == "phase_c.dispatch.impl_route_deferred")
+    assert _kept == ["src/e.rs::new"], (
+        f"the producer the blocker is waiting on was dropped: {_kept}")
+
+
+def test_negative_control_the_deferral_still_withholds_the_refills(
+        tmp_path: Path) -> None:
+    """Without this the case above proves nothing: an engine that simply stopped
+    deferring would also keep the producer. The RE-fill target — a filled body
+    with a failing test, which is exactly what a sibling panic reverts — must
+    still be withheld, so the deferral's own premise is intact."""
+    from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
+    ws = _mk_ws(tmp_path)
+    free = FnRecord(file="src/e.rs", fn_name="drop_rest")
+    blocks = [ImplBlock(file="src/e.rs", container="", members=(free,),
+                        stub_members=(free,))]
+    key = FnLocator("src/e.rs", "drop_rest")
+    refill = FnLocator("src/e.rs", "wrongfn")
+    fake = FakeFill(cluster_blocks=blocks, stub_records=[], stub_tuples=[],
+                    impl_stats=ClusterFillResult(remaining=0, fns_filled=99))
+    fake.scan_stub_records = (  # type: ignore[method-assign]
+        lambda d, c: [{"file": key.file, "fn_name": key.fn_name}])
+    out = _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key, refill},
+        tdd_frontier_tests=FailureFrontier.of_direct({refill: {"t1"}}),
+        skip_end_pass_test=True)
+    assert out.fns_filled != 99, "the impl route must still stand down"
+    _kept = next(d.get("kept_stubs") for ev, d in fake.event_data
+                 if ev == "phase_c.dispatch.impl_route_deferred")
+    assert _kept == [], (
+        "a re-fill target is not a stub and must stay withheld")
+
+
 def test_engine_runs_impl_route_when_every_stub_is_covered(tmp_path: Path) -> None:
     from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
     ws = _mk_ws(tmp_path)

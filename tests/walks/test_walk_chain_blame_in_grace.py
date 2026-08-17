@@ -146,13 +146,37 @@ def test_negative_control_prefix_semantics_reproduce_the_starvation(
                         lambda self, vanished: True)
     logs, events, fills = _run(monkeypatch, tmp_path)
 
-    # The recorded outcome, reproduced: nothing synthesizes while the
-    # 9-iteration window holds (the recording's iters 3-4 both starved; at
-    # the run's ~3h/iter the window is ~20h of GPU) — pre-fix semantics only
-    # arm once the window expires. (Frame-derived evidence from the pre-fire
-    # sweeps is not the claim; only the chain tier is under test.)
+    # The recorded outcome, reproduced: nothing synthesizes while the window
+    # HOLDS (the recording's iters 3-4 both starved; at the run's ~3h/iter
+    # that was ~20h of GPU) — pre-fix semantics only arm once it expires.
+    # (Frame-derived evidence from the pre-fire sweeps is not the claim; only
+    # the chain tier is under test.)
+    #
+    # THE WINDOW'S EXTENT IS READ FROM THE RUN, not asserted as 9 iterations.
+    # It was `range(3, 3 + 9)` — the size the grant computes from ceil(25/3) —
+    # and that stopped being the window's length on 2026-08-17, when the
+    # re-fill window gained a second and third denominator: a wall-clock
+    # ceiling and an early close once the re-climb regains the high-water it
+    # was re-based from. This recording hits the second one. Its score dips
+    # below 39 and recovers to exactly 39, which IS the mark the fire re-based
+    # from, so the window closes at loop iter 5 with 8 of its 9 iterations
+    # unspent and iters 5+ are simply not graced. Hard-coding the size made
+    # this control assert a fact about the grant arithmetic; what it is FOR is
+    # the fact that a graced sweep starves under pre-fix semantics, and that
+    # claim has to be scoped to the sweeps that are actually graced or it
+    # convicts the wrong mechanism the next time the window's length moves.
     armed_at = {d["iter"]
                 for ev, d in events if ev == "phase_c.crash.chain_blame"}
-    window_iters = set(range(3, 3 + 9))
+    _closed = [d["iter"] for ev, d in events
+               if ev == "phase_c.tdd.refill_window_closed"]
+    _opened = [d["iter"] for ev, d in events
+               if ev == "phase_c.tdd.refill_window_open"]
+    assert len(_opened) == 1, "the walk's premise is one window"
+    # Open from the grant's iteration up to and including the one that closed
+    # it; unclosed means it ran to the end of the replay.
+    window_iters = set(range(
+        _opened[0] + 1, (_closed[0] if _closed else max(armed_at or {0})) + 1))
+    assert window_iters, "no graced sweep — the control cannot convict"
     assert not (armed_at & window_iters), (
-        f"pre-fix semantics armed inside the window: {sorted(armed_at)}")
+        f"pre-fix semantics armed inside the window: {sorted(armed_at)} "
+        f"against graced sweeps {sorted(window_iters)}")

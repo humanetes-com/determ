@@ -168,6 +168,55 @@ def test_the_defaults_cover_the_case_they_were_measured_on() -> None:
     assert not RefillGrace.for_restub(3, 0).clipped
 
 
+def test_the_window_closes_on_the_wall_clock_it_was_never_bounded_by() -> None:
+    """THE SECOND DENOMINATOR. The window is sized in ITERATIONS and nothing
+    bounded what an iteration costs. Run `1920662-40f711b2` (2026-08-16/17) ran
+    588 minutes for 6 iterations — 98 min/iteration — so the 18 iterations its
+    54-body re-stub bought were ~29 hours with the batch ratchet, the stall
+    budget and the crash streak all standing down."""
+    g = RefillGrace.for_restub(54, fills_so_far=0, granted_at_minute=10.0,
+                               max_minutes=360.0)
+    assert g.iters_left == 18
+    # Inside the ceiling the window behaves exactly as before.
+    assert g.consume(5, 100.0).active
+    assert not g.early_close_reason(100.0)
+    # …and at it, the window ends with its iteration budget unspent, saying so.
+    reason = g.early_close_reason(370.0)
+    assert "wall-clock ceiling" in reason and "18 iter(s) of the budget" in reason
+    assert not g.consume(5, 370.0).active
+    # NEGATIVE CONTROL — the pre-fix rule is `max_minutes=0`, and under it the
+    # same 6-hour-old window is still open. Without this the case above asserts
+    # a close that an unconditionally-closing window would also produce.
+    old = RefillGrace.for_restub(54, fills_so_far=0, granted_at_minute=10.0)
+    assert old.consume(5, 370.0).active, (
+        "the control no longer reproduces the unbounded window")
+
+
+def test_the_window_closes_once_the_re_climb_regains_its_own_high_water() -> None:
+    """THE THIRD DENOMINATOR. Once the score is back at the mark the window was
+    re-based from, the re-fills have finished paying by the window's own
+    definition of paying and every gate it holds down describes the tree again.
+
+    It needs a DIP first, and that qualifier is not decoration: walk
+    `3368-753757e6` reverted 25 bodies with pass 39 on both sides of the fire,
+    so an unqualified rule would close a 9-iteration window on its first sweep
+    and protect nothing."""
+    g = RefillGrace.for_restub(54, fills_so_far=0, highwater_at_grant=83)
+    # Never dipped — the re-stub cost no tests — so the clause stays silent.
+    assert not g.early_close_reason(pass_count=83)
+    assert g.consume(5, pass_count=83).active
+    # The recorded shape: 83 -> re-stub -> 25 -> 33 -> ... -> 83.
+    g = g.consume(5, pass_count=25)
+    assert g.active and g.dipped
+    assert not g.early_close_reason(pass_count=33)
+    assert "re-climb reached 83" in g.early_close_reason(pass_count=83)
+    assert not g.consume(9, pass_count=83).active
+    # NEGATIVE CONTROL — a grant with no high-water recorded (-1) can never
+    # close this way, which is what every caller that does not measure one gets.
+    blind = RefillGrace.for_restub(54, fills_so_far=0)
+    assert blind.consume(5, pass_count=999).active
+
+
 def test_refill_window_survives_only_while_re_fills_land() -> None:
     """What keeps a sized window safe. Progress is counted in FILLS, not pass
     count: the re-stubbed bodies are mostly consumers blocked on still-stubbed

@@ -91,15 +91,19 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
                 enumerate_fns=None, test_files=None,
                 target_src_dir: Path | None = None,
                 frontier: dict[FnLocator, set[str]] | None = None,
+                guard: str = "0", best_mark: Any = None, restore: Any = None,
                 ) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "2")
-    # The flat-score GPU guard off: these sweeps repeat a reading on purpose
-    # (the oracle shrink has to reproduce before the crash counts as
+    # The flat-score GPU guard off BY DEFAULT: these sweeps repeat a reading on
+    # purpose (the oracle shrink has to reproduce before the crash counts as
     # deterministic), so the guard would stop the run at the second reading —
     # correctly, and one iteration before the evidence this module is about
-    # reaches a dispatch. `tests/test_tdd_gpu_guard.py` owns the guard.
-    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
+    # reaches a dispatch. `tests/test_tdd_gpu_guard.py` owns the guard; the one
+    # case here that arms it (`guard="2"`) does so because the state under test
+    # — a restore inside an open re-fill window — needs a retrigger fire AND a
+    # trip in one run, and only this harness can produce the fire.
+    monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", guard)
 
     def _attr(*a: Any, **k: Any):
         attribution_kwargs.append(k)
@@ -135,6 +139,8 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         enumerate_fns=enumerate_fns,
         test_file_index=((lambda *a, **k: dict(test_files))
                          if test_files is not None else None),
+        load_best_tree_mark=(lambda *a, **k: best_mark) if best_mark else None,
+        restore_best_tree_pair=restore,
     )
     return run_phase_c_tdd(
         deps, project_dir=tmp_path,
@@ -1137,3 +1143,60 @@ def test_crash_subjects_are_dispatched_in_the_sweep_that_named_them(
                   FnLocator("src/error.rs", "object_downcast")]
     assert FnLocator("src/error.rs", "object_downcast") not in \
         take_batch(unpromoted, set(), 12).keys
+
+
+def test_a_best_tree_restore_inside_a_refill_window_closes_the_window(
+        tmp_path: Path, monkeypatch) -> None:
+    """The restore block's own rule is "every consumer of the score, told in
+    the same breath" — and the re-fill window was the consumer nobody told.
+    A window granted for a 50-body re-stub describes the lineage the restore
+    just replaced; left open it keeps the ratchet, the stall budget and the
+    crash streak standing down over a tree that holds no re-stub, until a
+    regained-mark close that needs `mark >= highwater_at_grant` (and a prior
+    dip) or the wall clock. The combination became reachable when the flat
+    guard stopped excusing graced sweeps: a trip — and so a restore — can now
+    happen inside an open window. Sequence here: deterministic first-sweep
+    shrink fires the retrigger (window granted), flat readings repeat, the
+    guard trips, the better tree on disk is restored — and the window must go
+    down with the tree it was granted against."""
+    from pipeline_core.application.retrigger_layout import RetriggerResult
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    monkeypatch.setenv("PHASE_C_CRASH_RETRIGGER_AFTER", "2")
+    monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "99")
+    out = ("test t1 ... FAILED\n"
+           "test result: FAILED. 0 passed; 1 failed; 0 ignored")
+    fired: list[int] = []
+
+    def _retrig(pd, mod, cl, sd, output, crash_evidence=None, **_kw):
+        if fired:
+            return RetriggerResult(fired=False, succeeded=False,
+                                   reverted_count=0, cause="")
+        fired.append(1)
+        return RetriggerResult(fired=True, succeeded=True,
+                               reverted_count=50, cause="RUNTIME_CRASH")
+
+    events: list[tuple[str, dict]] = []
+    _run_driver(
+        monkeypatch, tmp_path,
+        run_cargo=lambda *a, **k: (101, out),
+        inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
+        attribution_kwargs=[], checkpoints=[], events=events,
+        retrigger=_retrig,
+        reverse_map={"t2": {("src/error.rs", "downcast_ref")}},
+        frontier={FnLocator("src/a.rs", f"p{i}"): {"t1"} for i in range(3)},
+        fill=lambda **kw: ClusterFillResult(attempts=1, fns_filled=1,
+                                            bytes_filled=10),
+        guard="2",
+        best_mark=BestTreeMark(pass_count=2, iteration=1, tree_sha="a" * 16,
+                               oracle_size=2),
+        restore=lambda pd, cl, f: (50, 12, []),
+    )
+    rows = [d for ev, d in events if ev == "phase_c.tdd.best_tree_restored"]
+    assert rows, "the scenario must reach the restore to test anything"
+    closes = [d for ev, d in events
+              if ev == "phase_c.tdd.refill_window_closed"]
+    assert any(d.get("early_close") == "tree replaced by best-tree restore"
+               for d in closes), (
+        "the restore replaced the tree the window was granted against and "
+        "left the window open — the ratchet, the stall budget and the crash "
+        "streak keep standing down over a tree with no re-stub in it")

@@ -236,3 +236,43 @@ def test_vtable_fn_with_where_bound_not_fast_exited() -> None:
     )
     assert called
     assert result["signal"] != "vtable_fast_exit"
+
+
+def test_a_retro_call_is_tagged_in_telemetry_and_joins_on_prompt_sha() -> None:
+    """In `llm.stream_meta` a retro call is indistinguishable from a fill
+    call, which is what made the retro round's price unmeasurable (~6 honoured
+    guidances from ~50 outcomes at big-think prices, run `58819-ee78a1d1`, and
+    no way to split the spend out of the stream). The sibling event carries
+    purpose=retro and the SAME PromptDigest sha the stream event is keyed on,
+    so the split is one join."""
+    from pipeline_core.domain.text import PromptDigest
+    seen_prompts: list[str] = []
+    events: list[tuple[str, dict]] = []
+
+    def ask(p: str) -> str:
+        seen_prompts.append(p)
+        return "CATEGORY: X\nGUIDANCE: y"
+
+    deps = PhaseCRetroDeps(
+        ask_retrospective=ask, log=lambda *_: None,
+        failed_body_cap=2000, fix_err_cap=2000,
+        emit=lambda ev, **k: events.append((ev, k.get("data") or {})))
+    diagnose_phase_c(
+        "construct", "fn construct()", "impl Error", "src/error.rs",
+        "stable", "let x = 1;", "error[E0308]: mismatched", 1, deps)
+    rows = [d for ev, d in events if ev == "phase_c.retro.call"]
+    assert rows and rows[0]["purpose"] == "retro"
+    assert rows[0]["unit"] == "src/error.rs::construct"
+    assert seen_prompts and rows[0]["prompt_sha"] == \
+        PromptDigest.of(seen_prompts[0]).sha256
+
+
+def test_a_whole_tree_retro_call_is_tagged_too() -> None:
+    events: list[tuple[str, dict]] = []
+    whole_tree_retrospective(
+        "error[E0277]: bad", [], name="gfl",
+        ask_retrospective=lambda _p: "CATEGORY: X\nGUIDANCE: y",
+        log=lambda _m: None, fix_err_cap=2000,
+        emit=lambda ev, **k: events.append((ev, k.get("data") or {})))
+    rows = [d for ev, d in events if ev == "phase_c.retro.call"]
+    assert rows and rows[0]["kind"] == "whole_tree"

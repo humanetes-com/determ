@@ -297,6 +297,44 @@ keying on the loudness and ship its replacement **in the same change**. The
 question to ask of any such fix is not "is the new state valid" but "what used to
 fire here, and what fires now".
 
+## A repo operation has a tool that owns it — find it before doing the operation by hand
+
+`tools/` holds ~55 helpers, `scripts/` 8, the repo root ~30 user-owned
+launchers. Nobody remembers that inventory, which is exactly why the rule is
+mechanical rather than a matter of recall: **before performing any repo
+operation by hand — saving a handover, rotating a log, archiving debt,
+restoring a tree, distilling a walk, resetting a counter — run one `ls`+`grep`
+for a tool that already owns it.** It costs one command:
+
+    ls tools/ scripts/ *.sh | grep -i <operation>
+
+**The instance, 2026-08-17.** Asked to save the handover, the assistant read
+`handover.md`, saw sessions 348, 347, 346, 343 and 325 stacked newest-first,
+inferred "prepend a new block", mapped the file's section structure to do it by
+hand, and took a manual backup. All of that was wrong. `tools/rotate_handover.sh`
+owns the operation and the convention is **archive-then-OVERWRITE**, not
+prepend: it moves the current `handover.md` into `previous_handovers.md`, is
+idempotent (it refuses to double-archive a session), strips `<!-- PINNED:BEGIN
+… -->` blocks out of the archived copy because standing reference has a
+different lifecycle from the session it sits in, and mirrors them to
+`handover_pinned.md` so the next session can paste them back verbatim. Doing it
+by hand would have buried the pinned block in an archive nobody loads. The five
+stacked sessions that made prepend *look* like the convention were not the
+convention — they were evidence the rotation had not been run in a while.
+
+**Why this is the same rule as the path-scoped negative above, not a new one.**
+Both are "establish the mechanism from the code that owns the artefact, never
+from the artefact's current shape". A tree's layout does not tell you what
+writes it; a file's accumulated state does not tell you how it is meant to be
+written. In both cases the artefact is the *output* of a convention and reading
+it backwards recovers a plausible convention that is not the real one.
+
+**The tell** is the sentence "the file looks like it wants X" — or any plan
+whose first step is to hand-edit a file the pipeline or the workflow also
+writes. On that sentence, stop and grep. If no tool owns it, that absence is
+worth a line in the summary, and a durable operation with no owner is a
+candidate for `scripts/` under the section below.
+
 ## A script the assistant writes goes in `scripts/`, with a usage-and-interpretation header
 
 Every durable script the assistant creates lives in `scripts/` — never the
@@ -323,6 +361,33 @@ user commits from the summary, not from a diff crawl — so **every final
 summary of a finished batch of changes concludes with a ready-to-use
 suggested commit message as its last line.** One message per coherent batch;
 if the batch is the session's work, one message for the session.
+
+## Saving a handover is `rotate_handover.sh`, then OVERWRITE — never a hand-prepend
+
+    bash tools/rotate_handover.sh   # archive current handover.md -> previous_handovers.md
+                                    # strips PINNED blocks, mirrors them to handover_pinned.md
+    # then WRITE handover.md fresh: the new session block + the pinned block(s) back
+
+`handover.md` holds ONE session plus its pinned blocks — not a stack. The
+rotation is what keeps it that way, so a `load handover` reads a few hundred
+lines instead of paging through superseded sessions (it had reached 274 KB and
+five stacked sessions before the 2026-08-17 rotation; it is 795 lines after).
+The script refuses to archive a session already in `previous_handovers.md`, so
+running it twice is safe and running it when unsure is the cheap move.
+
+**The pinned blocks are the part a hand-edit loses.** Content between
+`<!-- PINNED:BEGIN name -->` and `<!-- PINNED:END name -->` is standing
+reference with its own lifecycle — the score history, the standing cautions —
+and archiving it with the session would bury it in a file nobody loads. The
+script strips it from the archived copy and mirrors it to `handover_pinned.md`;
+**carrying it into the new `handover.md` is the writer's job and the script
+prints a CARRY FORWARD reminder.** Verify with
+`grep -c 'PINNED:BEGIN' handover.md` before calling the save done.
+
+A session block opens `# Handover — session N (date) — **<what the session
+established, in bold>**` — the script hard-fails on any other first line — and
+closes with `## ON RETURN`, `## State at handover`, `## Key facts` and the
+suggested commit message(s).
 
 ## The commands this repo's gate is made of
 

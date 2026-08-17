@@ -254,10 +254,56 @@ class PhaseCFillEngine:
                 "it never attempts (free fn / oversized block) must fill first, "
                 "or every re-fill is reverted as a sibling crash: "
                 + ", ".join(sorted(f"{f}::{fn}" for f, fn in _impl_deferred_stubs)))
+            # THE DEFERRAL WITHHOLDS RE-FILLS. IT MUST NOT ALSO WITHHOLD
+            # FIRST-FILLS, and replacing the frontier wholesale did.
+            #
+            # The premise above is about re-fills: a behavioural re-fill landed
+            # while a sibling is still `unimplemented!()` is reverted as a
+            # sibling crash, so the blockers go first. That argument says
+            # nothing about a frontier fn that is ITSELF a stub — filling one
+            # cannot be undone by a sibling panic, because there is no body to
+            # lose, and it is how a blocker stops being one.
+            #
+            # Measured on run `1920662-40f711b2` iteration 6 (2026-08-17
+            # 05:14Z): the frontier held 41, the deferral rewrote it to the 8
+            # free-fn/oversized blockers, all 8 landed and all 8 logged
+            # `kept ... (compiles; N attributed test(s) blocked by
+            # still-stubbed sibling(s))` — zero verdicts could move by
+            # construction, and the sweep read 33/105 twice. The line the
+            # driver printed at the end of that iteration names what the 8 were
+            # waiting on: `4 frontier stub(s) were dispatched by NO route this
+            # iter — src/context.rs::ext_context, src/error.rs::drop,
+            # src/error.rs::from, src/kind.rs::new`. All four are stubs, all
+            # four are impl members the impl route would have claimed, and none
+            # was dispatched once in the run's 7 iterations, 10 hours and 191
+            # model calls. `src/kind.rs::new` alone is the named stub target of
+            # eight distinct tests.
+            #
+            # So the rewrite keeps every frontier key that is a live stub and
+            # drops only the re-fills, which is what the premise actually
+            # licenses. The per-fn route below re-scans and re-filters anyway,
+            # so a key that is no longer a stub costs nothing.
+            _live_stub_keys = frozenset(
+                Stub.from_dict(r).key
+                for r in (self.ws.scan_stub_records(target_src_dir, cluster)
+                          or ()))
+            _also_stubs = frozenset(
+                k for k in ((tdd_frontier_keys or set()) & _live_stub_keys)
+                if not _is_cfg_dead(k)) - _impl_deferred_stubs
+            if _also_stubs:
+                self.tel.log(
+                    f"  [phase-c/impl] cluster {cluster_name}: the deferral "
+                    f"keeps {len(_also_stubs)} further frontier stub(s) in the "
+                    "batch — withholding a RE-fill while a sibling is stubbed "
+                    "is the rule, withholding a FIRST fill of a stub is not, "
+                    "and these are what the blockers are blocked on: "
+                    + ", ".join(sorted(f"{f}::{fn}"
+                                       for f, fn in _also_stubs)[:8]))
             self.tel.emit("phase_c.dispatch.impl_route_deferred", data={
                 "cluster": cluster_name,
-                "stubs": sorted(f"{f}::{fn}" for f, fn in _impl_deferred_stubs)})
-            tdd_frontier_keys = set(_impl_deferred_stubs)
+                "stubs": sorted(f"{f}::{fn}" for f, fn in _impl_deferred_stubs),
+                "kept_stubs": sorted(f"{f}::{fn}" for f, fn in _also_stubs)})
+            tdd_frontier_keys = set(_impl_deferred_stubs) | set(_also_stubs)
             _carryover: dict[str, Any] = {}
         elif self.config.fill_unit is FillUnit.IMPL:
             _impl_stats = self.impl_path.fill_impl_blocks(

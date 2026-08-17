@@ -225,74 +225,89 @@ def test_a_reading_returned_to_after_a_detour_still_stops(
     stops = [d for ev, d in events if ev == "phase_c.tdd.flat_score_stop"]
     assert len(stops) == 1
     assert stops[0]["pass_count"] == 79
-    # Each reading carries the traversal it was taken in. 41 units at a cap of
-    # 12 is four iterations, so the first four sit in traversal 0 and the stop
-    # is taken on the first reading of traversal 1 — the detour is inside the
-    # window, and the repeat that ends the run is the one that survived the
-    # loop finishing its plan.
-    assert stops[0]["readings"] == [[79, 101, 0], [66, 101, 0], [79, 101, 0],
-                                    [79, 101, 0], [79, 101, 1]]
-    assert stops[0]["traversals"] == 1 and stops[0]["iter"] == 5
+    # The detour sits INSIDE the window and does not clear it, which is the
+    # whole point of a window rather than a consecutive streak. The stop is
+    # taken on the third sweep — the second 79 — with no traversal having
+    # closed, because a completed traversal is no longer a precondition.
+    assert stops[0]["readings"] == [[79, 101, 0], [66, 101, 0], [79, 101, 0]]
+    assert stops[0]["traversals"] == 0 and stops[0]["iter"] == 3
 
 
-def test_a_shrinking_stub_set_is_not_judged(tmp_path: Path, monkeypatch) -> None:
-    """The negative control that costs a run if it fails. Cluster `stable` of
-    run `7445-00ee8a3c` (2026-08-07) went 11 → 13 → 13 on the pass count while
-    the stub set fell 132 → 118 → 82 → 75; iteration 3's file-first batch then
-    took the score 13 → 83 in one sweep. A guard that stops a cluster paying in
-    stubs stops it one iteration before it is paid back."""
+def test_a_shrinking_stub_set_no_longer_buys_another_sweep(
+        tmp_path: Path, monkeypatch) -> None:
+    """THE PRICE OF THE OPERATOR'S RULE, pinned so it cannot be paid by
+    accident.
+
+    Cluster `stable` of run `7445-00ee8a3c` (2026-08-07) went 11 → 13 → 13 on
+    the pass count while its stub set fell 132 → 118 → 82 → 75, and iteration
+    3's file-first batch then took the score 13 → 83 in ONE sweep. The stub
+    exemption existed for exactly this shape, and this case used to assert that
+    the run reached 83.
+
+    It no longer does, and that is deliberate: the exemption was true of nearly
+    every iteration of a working fill loop, so the window it starved could
+    never reach a repeat — run `1920662-40f711b2` read `83/106` three times and
+    `33/105` twice across 9h48m without the guard ever recording enough to
+    trip. The rule is now the blunt one and this run stops on the second 13.
+
+    What makes that affordable is that the stop is RESUMABLE:
+    `TddFloor.attempted` persists the pass cursor, so the relaunch opens on the
+    units this run never reached and the file-first batch that scores 83 is
+    still ahead of it. The cost is one relaunch, not the payoff. See
+    `tests/test_tdd_dispatch_cadence.py::
+    test_the_persisted_pass_cursor_makes_the_eager_stop_resumable`."""
     events: list[tuple[str, dict]] = []
     _run(tmp_path, monkeypatch,
          [_sweep(11, 90), _sweep(13, 88), _sweep(13, 88), _sweep(83, 18)],
          events, stubs=[132, 118, 82, 75, 70])
 
-    reached = [d["pass_count"] for d in _iters(events)]
-    assert 83 in reached, \
-        f"the flat 13 -> 13 must not stop a cluster one sweep before its "\
-        f"stub-paid fills land; readings were {reached}"
     stops = [d for ev, d in events if ev == "phase_c.tdd.flat_score_stop"]
-    assert all(d["pass_count"] == 83 for d in stops), \
-        "any stop must be about the fixed point AFTER the climb, not during it"
+    assert len(stops) == 1 and stops[0]["pass_count"] == 13, \
+        "the second identical reading stops the run, stubs or no stubs"
+    reached = [d["pass_count"] for d in _iters(events)]
+    assert 83 not in reached, \
+        f"this run ends before its payoff by design; readings were {reached}"
 
 
-def test_a_flat_score_over_a_flat_stub_set_still_stops(
+def test_a_flat_score_over_a_shrinking_stub_set_stops_on_the_second_sweep(
         tmp_path: Path, monkeypatch) -> None:
-    """The exemption is bought with stubs, not with activity: once the stub set
-    stops falling, the same reading stops the run.
+    """The stub set falls 132 → 118 and then stands still, and the run ends on
+    the second identical reading regardless — iteration 2, not iteration 11.
 
-    A 119-unit frontier at a cap of 12 is a ten-iteration traversal, and the
-    stop is taken on the sweep after it closes. That is the price of the
-    traversal clause, stated as a number rather than left implicit: the guard
-    cannot end a run before the loop has been round its own plan once, because
-    until then "the calls about to be spent are the ones that did not move it"
-    is not true of the units about to go out."""
+    The number in the old version of this case was the price of the traversal
+    clause: a 119-unit frontier at a cap of 12 is a ten-iteration traversal, so
+    the guard could not end the run before iteration 11 however flat the score
+    was. Ten iterations at run `1920662-40f711b2`'s measured 98 min/iteration is
+    sixteen hours. That is the cost this change removes."""
     events: list[tuple[str, dict]] = []
     _run(tmp_path, monkeypatch, [_sweep(13, 88)], events,
          stubs=[132, 118, 118, 118])
 
     stops = [d for ev, d in events if ev == "phase_c.tdd.flat_score_stop"]
     assert len(stops) == 1 and stops[0]["pass_count"] == 13
-    assert stops[0]["traversals"] == 1
-    assert stops[0]["iter"] == 11, \
-        "119 units at a cap of 12 is ten dispatching iterations, then the stop"
-    assert all(r[:2] == [13, 101] for r in stops[0]["readings"]), \
-        "the sweep that shrank the stub set is excused, so it is not a reading"
+    assert stops[0]["traversals"] == 0
+    assert stops[0]["iter"] == 2, \
+        "the second reading is the stop; no traversal has to close first"
+    assert all(r[:2] == [13, 101] for r in stops[0]["readings"])
 
 
-def test_the_excused_sweep_is_reported_as_the_gap_it_was(
+def test_no_sweep_is_skipped_now_that_only_a_red_build_is_excused(
         tmp_path: Path, monkeypatch) -> None:
-    """A stub-shrinking sweep leaves the window untouched and is COUNTED, so the
-    stop line can say how far apart the two identical readings really were —
-    the one thing an operator needs to judge the stop by hand. Frontier under
-    the cap here, so a traversal is one iteration and the gap is still adjacent
-    to the trip when it is reported. The behavioural targets are what keep a
-    frontier alive at all once the stubs have been dispatched and exhausted."""
+    """The gap counter survives, and reads 0 on a green run.
+
+    It exists so the stop line can say how far apart two identical readings
+    really were — the one thing an operator needs to judge a stop by hand — and
+    with the grace-window and stub-shrink exemptions withdrawn the only thing
+    that can still open a gap is a sweep whose tree did not compile. This case
+    is that counter's green-path control: a stub-shrinking sweep is now a
+    reading like any other, so `skipped` is 0 and the two readings the stop
+    names are adjacent."""
     events: list[tuple[str, dict]] = []
     _run(tmp_path, monkeypatch, [_sweep(13, 88)], events, stubs=[6, 3, 3, 3],
          targets=3, refill_max="99")
 
     stops = [d for ev, d in events if ev == "phase_c.tdd.flat_score_stop"]
-    assert len(stops) == 1 and stops[0]["skipped"] == 1
+    assert len(stops) == 1 and stops[0]["skipped"] == 0
 
 
 def test_the_same_pass_count_at_a_different_oracle_is_not_a_repeat(
