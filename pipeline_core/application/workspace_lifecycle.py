@@ -301,6 +301,7 @@ def restore_cluster_best_tree(
     removed. Deleting is how a restore turns into a second destruction, and the
     leftover case (t1.5 added a file after the snapshot) is rare enough to be
     worth a line in the log instead."""
+    import os as _os
     import shutil
     best = project_dir / BEST_TREE_DIR / cluster
     if not best.is_dir():
@@ -316,6 +317,15 @@ def restore_cluster_best_tree(
         dst = Path(filled_dir) / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+        # `copy2` hands the restored file the SNAPSHOT's mtime, which is older
+        # than the cargo fingerprints this run's own fill compiles recorded —
+        # and cargo rebuilds only on newer-than-fingerprint, so without the
+        # bump the next `cargo test` re-runs the DISCARDED tree's binaries
+        # against the restored sources. Run `2620196-de4a7ca2` (2026-08-17):
+        # the sweep 0.4s after a 57-file restore read a per-binary vector
+        # byte-identical to the pre-restore sweep's, stamped with the restored
+        # tree's sha, and spent the once-per-process restore guard on it.
+        _os.utime(dst)
         stored.add(rel)
         bodies += 1
     layout = 0
@@ -327,6 +337,7 @@ def restore_cluster_best_tree(
             dst = Path(layout_dir) / src.relative_to(layout_root)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+            _os.utime(dst)  # same freshness bump as the bodies half above
             layout += 1
     leftovers = sorted(
         str(p.relative_to(filled_dir))

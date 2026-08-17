@@ -117,6 +117,39 @@ build the tree. State the cost of the in-process route honestly (a re-merge
 discards task2c's merged-tree fills, which live only in the workspace `src/`)
 rather than reaching for an editor because the honest route is expensive.
 
+## Archiving a closed technical_debt.md entry is `rotate_technical_debt.py`, never a hand cut-and-paste
+
+    python tools/rotate_technical_debt.py <entry-number> [<entry-number> ...] \
+        [--date YYYY-MM-DD] [--force]
+
+`<entry-number>` is the integer in a top-level `# <N> — ...` heading. The
+script moves the whole span from that heading to the next top-level `# `
+heading — which carries every `## <N>.<M>` subsection and trailing
+validation/amendment along with it, since they already live inside that
+span — appends it verbatim under a dated `## Archived <date> from
+technical_debt.md (entry ...)` header in `completed_tech_debt.md`, and
+deletes it from `technical_debt.md`. It is idempotent (a re-run on an
+already-archived id prints `skip <N>: already archived` and touches
+neither file) and it refuses rather than guesses: an id that resolves to
+more than one top-level heading, or to none, is left untouched in both
+files, and so is one whose span still contains the word `OPEN` — that
+word inside a span the caller believes is closed is worth a second read
+before `--force` waves it through.
+
+**What it deliberately will not do.** Range headings (`# 151–158 — ...`,
+`# 132–140 — ...`) and the individually-numbered `##` children living
+under them are not resolved by number — the entry `# 132–140` alone
+contains `## 140` down through `## 89`, arbitrarily interleaved, sharing
+one intro paragraph. A bare id there is ambiguous (which sibling under
+the shared intro?), and per the rule above, pulling one child out from
+under an open group means copying the group's intro into the archive
+alongside it — a per-entry judgment call, not a mechanical span cut. Move
+those by hand with Edit. The script's whole job is the mechanical half of
+the operation; deciding an entry is fully closed happens before it is
+invoked, by reading the entry, exactly as `tools/split_tech_debt.py` (the
+one-shot, hardcoded-line-range predecessor this replaces for every case
+but the range-heading one) had no way to do either.
+
 ## A deliberate destruction invalidates a measurement for EVERY consumer of it
 
 Several mechanisms here destroy progress **on purpose**: the crash/layout

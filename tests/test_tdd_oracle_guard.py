@@ -1200,3 +1200,101 @@ def test_a_best_tree_restore_inside_a_refill_window_closes_the_window(
         "the restore replaced the tree the window was granted against and "
         "left the window open — the ratchet, the stall budget and the crash "
         "streak keep standing down over a tree with no re-stub in it")
+
+
+_BINS_OUT = ("     Running unittests src/lib.rs (target/debug/deps/x)\n"
+             "running 2 tests\n"
+             "test t1 ... ok\n"
+             "test t2 ... FAILED\n"
+             "test result: FAILED. 1 passed; 1 failed; 0 ignored\n")
+# Same counts, different verdict set — what a sweep that actually rebuilt the
+# restored tree looks like (t2 flipped, t1 regressed: any movement at all).
+_BINS_OUT_MOVED = ("     Running unittests src/lib.rs (target/debug/deps/x)\n"
+                   "running 2 tests\n"
+                   "test t1 ... FAILED\n"
+                   "test t2 ... ok\n"
+                   "test result: FAILED. 1 passed; 1 failed; 0 ignored\n")
+
+
+def test_a_restore_the_next_sweep_cannot_see_is_called_unmeasured(
+        tmp_path: Path, monkeypatch) -> None:
+    """Run `2620196-de4a7ca2` (2026-08-17): the restore replaced 57 body files,
+    the next sweep arrived 0.436s later with a per-binary vector byte-identical
+    to the pre-restore sweep's (`copy2` kept the snapshot's day-old mtimes, so
+    cargo rebuilt nothing), and the once-per-process guard was spent judging
+    the DISCARDED tree. The mtime bump removes the cause; this tripwire is what
+    makes any recurrence loud: the sweep is announced as an unmeasured restore,
+    excused from the flat window, and the high-water re-base is deferred to the
+    first sweep that could actually see the restore."""
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    events: list[tuple[str, dict]] = []
+    _run_driver(
+        monkeypatch, tmp_path,
+        run_cargo=lambda *a, **k: (101, _BINS_OUT),
+        inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
+        attribution_kwargs=[], checkpoints=[], events=events,
+        reverse_map={"t2": {("src/error.rs", "downcast_ref")}},
+        frontier={FnLocator("src/a.rs", f"p{i}"): {"t2"} for i in range(3)},
+        fill=lambda **kw: ClusterFillResult(attempts=1, fns_filled=1,
+                                            bytes_filled=10),
+        guard="2",
+        best_mark=BestTreeMark(pass_count=2, iteration=1, tree_sha="a" * 16,
+                               oracle_size=2),
+        restore=lambda pd, cl, f: (57, 12, []),
+    )
+    restored = [d for ev, d in events if ev == "phase_c.tdd.best_tree_restored"]
+    assert restored, "the scenario must reach the restore to test anything"
+    restore_iter = restored[0]["iter"]
+    unmeasured = [d for ev, d in events
+                  if ev == "phase_c.tdd.restore_unmeasured"]
+    assert unmeasured and unmeasured[0]["iter"] == restore_iter + 1, (
+        "a 57-file restore followed by a byte-identical per-binary vector was "
+        "scored as a real reading — the guard spends itself on a measurement "
+        "of the discarded tree")
+    assert unmeasured[0]["restored_bodies"] == 57
+    # The high-water must NOT be re-based to the stale count on that sweep;
+    # the re-base stays due and lands on the first measured sweep after it.
+    rebases = [d for ev, d in events if ev == "phase_c.tdd.highwater_rebased"]
+    assert all(d["iter"] != restore_iter + 1 for d in rebases), (
+        "the high-water was re-based to a count measured on the discarded "
+        "tree — the whole re-climb is now judged from the wrong lineage")
+
+
+def test_a_restore_the_next_sweep_DOES_see_is_not_called_unmeasured(
+        tmp_path: Path, monkeypatch) -> None:
+    """Negative control: when the post-restore sweep's vector moved (the
+    binaries rebuilt — what the mtime bump guarantees), the tripwire stays
+    silent and the ordinary re-base happens on that sweep."""
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+    events: list[tuple[str, dict]] = []
+    box = {"restored": False}
+
+    def _restore(pd, cl, f):
+        box["restored"] = True
+        return (57, 12, [])
+
+    _run_driver(
+        monkeypatch, tmp_path,
+        run_cargo=lambda *a, **k: (
+            101, _BINS_OUT_MOVED if box["restored"] else _BINS_OUT),
+        inventory=lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
+        attribution_kwargs=[], checkpoints=[], events=events,
+        reverse_map={"t2": {("src/error.rs", "downcast_ref")}},
+        frontier={FnLocator("src/a.rs", f"p{i}"): {"t2"} for i in range(3)},
+        fill=lambda **kw: ClusterFillResult(attempts=1, fns_filled=1,
+                                            bytes_filled=10),
+        guard="2",
+        best_mark=BestTreeMark(pass_count=2, iteration=1, tree_sha="a" * 16,
+                               oracle_size=2),
+        restore=_restore,
+    )
+    restored = [d for ev, d in events if ev == "phase_c.tdd.best_tree_restored"]
+    assert restored, "the scenario must reach the restore to test anything"
+    restore_iter = restored[0]["iter"]
+    assert not [d for ev, d in events
+                if ev == "phase_c.tdd.restore_unmeasured"], (
+        "a sweep whose vector moved measured the restore — announcing it as "
+        "unmeasured would excuse readings the flat guard must count")
+    rebases = [d for ev, d in events if ev == "phase_c.tdd.highwater_rebased"]
+    assert any(d["iter"] == restore_iter + 1 for d in rebases), (
+        "the measured post-restore sweep must perform the deferred re-base")

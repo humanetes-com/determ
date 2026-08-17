@@ -209,6 +209,59 @@ def test_the_best_tree_slot_stores_and_restores_the_PAIR(tmp_path) -> None:
     assert (filled / "src" / "later.rs").exists()
 
 
+def test_a_restore_bumps_mtimes_so_cargo_can_see_it(tmp_path) -> None:
+    """`copy2` hands the restored file the SNAPSHOT's mtime. Cargo rebuilds
+    only on newer-than-fingerprint, so a restored file that moves BACKWARDS in
+    time is "fresh" and the next `cargo test` re-runs the DISCARDED tree's
+    binaries against the restored sources. Run `2620196-de4a7ca2` (2026-08-17):
+    the sweep 0.436s after a 57-file restore read a per-binary vector
+    byte-identical to the pre-restore sweep's, stamped with the restored tree's
+    sha (`4053189fa5d499d1`), and spent the once-per-process restore guard on a
+    reading of the tree the restore had just discarded. Every restored file —
+    bodies AND layout — must therefore come back newer than the moment the
+    restore was called."""
+    import os
+    import time
+
+    from pipeline_core.application.workspace_lifecycle import (
+        restore_cluster_best_tree,
+        save_cluster_best_tree,
+    )
+    from pipeline_core.domain.best_tree_mark import BestTreeMark
+
+    filled = tmp_path / ".skeleton-filled" / "stable"
+    layout = tmp_path / ".skeleton" / "stable"
+    (filled / "src").mkdir(parents=True)
+    (layout / "src").mkdir(parents=True)
+    (filled / "src" / "error.rs").write_text("fn good() { 83 }")
+    (layout / "src" / "error.rs").write_text("fn good() { unimplemented!() }")
+    # The snapshot ages: the live slot's files carried 2026-08-16 21:23:34
+    # while the restore ran on 2026-08-17 — a day older than every cargo
+    # fingerprint of the running process.
+    day_ago = time.time() - 86_400
+    os.utime(filled / "src" / "error.rs", (day_ago, day_ago))
+    os.utime(layout / "src" / "error.rs", (day_ago, day_ago))
+    save_cluster_best_tree(
+        tmp_path, "stable", filled,
+        BestTreeMark(pass_count=83, iteration=2, tree_sha="a" * 16,
+                     oracle_size=106),
+        layout_dir=layout)
+
+    (filled / "src" / "error.rs").write_text("fn bad() { 34 }")
+    (layout / "src" / "error.rs").write_text("fn bad() { unimplemented!() }")
+
+    t0 = time.time()
+    bodies, layout_n, _ = restore_cluster_best_tree(
+        tmp_path, "stable", filled, layout_dir=layout)
+    assert (bodies, layout_n) == (1, 1)
+    assert (filled / "src" / "error.rs").read_text() == "fn good() { 83 }"
+    # 1s slack for filesystem timestamp granularity.
+    assert (filled / "src" / "error.rs").stat().st_mtime >= t0 - 1, \
+        "restored body kept the snapshot's mtime — cargo will not rebuild it"
+    assert (layout / "src" / "error.rs").stat().st_mtime >= t0 - 1, \
+        "restored layout kept the snapshot's mtime — cargo will not rebuild it"
+
+
 def test_a_slot_saved_without_a_layout_declines_to_call_itself_a_pair(
         tmp_path) -> None:
     """The pre-fix slot shape. A caller must be able to ask before restoring,

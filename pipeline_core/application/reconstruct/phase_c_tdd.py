@@ -343,6 +343,16 @@ def run_phase_c_tdd(
     _filled_at_prev_sweep = 0
     # One durable-tree restore per process (see the guard's trip site).
     _restore_spent = False
+    # Armed by the restore block: the pre-restore sweep's binary-qualified
+    # verdict pairs and the restored body count, consumed by the NEXT sweep. A
+    # restore that replaced >0 files and is followed by identical pairs was
+    # never measured — the binaries did not rebuild — and that sweep must not
+    # be allowed to judge it. Pairs rather than the per-binary count vector:
+    # counts cannot see a swapped verdict, pairs are the repo's own definition
+    # of "the same reading" (`tools/pass_delta.py`).
+    _restore_probe: (
+        tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]], int]
+        | None) = None
 
     deps.log(f"  {tag} [phase-c/tdd] driver=tdd, "
          f"max_stalls={max_stalls}, timeout={test_timeout}s, "
@@ -1231,6 +1241,35 @@ def run_phase_c_tdd(
         if _bins:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n} binaries: "
                      + ", ".join(f"{lbl} {p}/{f}" for lbl, p, f in _bins))
+        # THE TRIPWIRE FOR AN UNMEASURED RESTORE. The restore replaces dozens
+        # of source files; a sweep whose per-binary vector is byte-identical
+        # to the PRE-restore sweep's cannot have rebuilt them, whatever the
+        # cause — it measured the discarded tree. The mtime bump in
+        # `restore_cluster_best_tree` removes the known cause (copy2 kept the
+        # snapshot's day-old mtimes, cargo saw nothing newer-than-fingerprint
+        # and re-ran the old binaries; run `2620196-de4a7ca2`, 2026-08-17,
+        # sweep 0.4s after a 57-file restore). This check is what makes any
+        # recurrence loud instead of a silent guard-spend: the reading is
+        # excused from the flat window and the high-water re-base is deferred
+        # to the first sweep that could actually see the restore.
+        _restore_unmeasured = ""
+        if _restore_probe is not None:
+            _probe_pass, _probe_fail, _probe_bodies = _restore_probe
+            _restore_probe = None
+            if (_probe_bodies > 0 and (_p_pairs or _f_pairs)
+                    and _p_pairs == _probe_pass and _f_pairs == _probe_fail):
+                _restore_unmeasured = (
+                    f"the best-tree restore replaced {_probe_bodies} body "
+                    "file(s) and this sweep's binary-qualified verdict pairs "
+                    "are identical to the pre-restore sweep's — the binaries "
+                    "never rebuilt, so this is a reading of the DISCARDED "
+                    "tree, not of the restore")
+                deps.log(f"  {tag} [phase-c/tdd] GUARD iter {iter_n}: "
+                         f"{_restore_unmeasured}.")
+                deps.emit("phase_c.tdd.restore_unmeasured", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count,
+                    "restored_bodies": _probe_bodies})
         # THE CONTRADICTION, printed. A fill pass that landed bodies against a
         # per-binary vector that did not move by one test is the loop's own
         # measurement disagreeing with its own activity, and until now nothing
@@ -1456,8 +1495,15 @@ def run_phase_c_tdd(
         # the first measurement of the one it made. Re-base every scalar derived
         # from it, in one place, so no consumer is left reading the old lineage
         # — the defect this replaces was exactly one un-updated consumer.
-        # A compile-broken sweep measured nothing and cannot be a baseline.
-        if _highwater.rebase_due(iter_n) and not _sweep_compile_broke:
+        # A compile-broken sweep measured nothing and cannot be a baseline —
+        # and neither is an unmeasured-restore sweep: its count describes the
+        # tree the restore discarded, so re-basing to it would seed the whole
+        # re-climb from a number about the wrong lineage (the live instance
+        # printed `high-water re-based 34 -> 34` for a tree whose mark was
+        # 83/106). `rebase_due` stays pending, so the first sweep that really
+        # measures the new tree performs the re-base.
+        if (_highwater.rebase_due(iter_n) and not _sweep_compile_broke
+                and not _restore_unmeasured):
             _stale = _highwater.best
             _highwater = _highwater.rebased(pass_count)
             best_pass = _highwater.best
@@ -1472,11 +1518,20 @@ def run_phase_c_tdd(
             # yet and re-basing it would spend it here for nothing.
             if _pass_at_last_reset >= 0:
                 _pass_at_last_reset = best_pass
+            # Two producers replace the lineage (`lineage_replaced`'s own
+            # docstring): the retrigger's re-stub and the best-tree restore.
+            # The message used to name the retrigger unconditionally, so a
+            # restore printed `the retrigger re-stubbed 0 body(ies)` (run
+            # `2620196-de4a7ca2`, 2026-08-17) — name the producer the state
+            # can actually distinguish.
+            _cause = (f"the retrigger re-stubbed {_grace.restubbed} body(ies)"
+                      if _grace.restubbed
+                      else "the tree was replaced (best-tree restore, or a "
+                           "re-author that re-stubbed nothing)")
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: high-water re-based "
-                     f"{render_pass_floor(_stale)} -> {best_pass} — the "
-                     f"retrigger re-stubbed {_grace.restubbed} body(ies), so "
-                     f"{render_pass_floor(_stale)} describes a tree this run no "
-                     "longer has. The re-climb is judged from here.")
+                     f"{render_pass_floor(_stale)} -> {best_pass} — {_cause}, "
+                     f"so {render_pass_floor(_stale)} describes a tree this run "
+                     "no longer has. The re-climb is judged from here.")
             deps.emit("phase_c.tdd.highwater_rebased", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "stale_best": _stale, "new_best": best_pass,
@@ -1594,13 +1649,17 @@ def run_phase_c_tdd(
         # ones it did. A false stop costs one relaunch, not a run — which is
         # exactly what this file's own header used to deny.
         #
-        # A tree that did not compile stays excused, and is the only thing that
-        # is. Its 0 is the ABSENCE of a measurement rather than a measurement
-        # of nothing, two of them are not "the same reading twice", and the
-        # red-build budget and the compile-blocked exit own that case already.
+        # A tree that did not compile stays excused, and the unmeasured-restore
+        # tripwire joins it — both are the ABSENCE of a measurement rather than
+        # a measurement of nothing: the first ran no tests at all, the second
+        # ran the DISCARDED tree's binaries against the restored sources (the
+        # red-build budget owns the first case; the mtime bump in
+        # `restore_cluster_best_tree` owns the second, this excusal is what
+        # keeps any recurrence from spending the flat window on it). Nothing
+        # else is excused.
         _flat_excuse = (
             "the sweep did not compile — a 0 nothing ran for is not a "
-            "measurement" if _sweep_compile_broke else "")
+            "measurement" if _sweep_compile_broke else _restore_unmeasured)
         _flat_guard = (_flat_guard.excused() if _flat_excuse
                        else _flat_guard.observed(_flat_reading, _traversals))
         _stubs_prev = len(_stub_keys)
@@ -2757,6 +2816,11 @@ def run_phase_c_tdd(
                         "mark_oracle": _mark_now.oracle_size,
                         "bodies": _bodies, "layout_files": _layout_n,
                         "leftovers": _leftover[:20]})
+                    # Arm the unmeasured-restore tripwire: the next sweep must
+                    # be able to SEE a >0-file replacement, and this sweep's
+                    # verdict pairs are what "did not see it" looks like.
+                    _restore_probe = (_measure.passed_pairs,
+                                      _measure.failed_pairs, _bodies)
                     # Every consumer of the score, told in the same breath —
                     # the tree under all of them was just replaced. The guard's
                     # window holds readings of a tree that no longer exists;

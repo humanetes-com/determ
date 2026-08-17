@@ -140,7 +140,13 @@ echo "SNAPSHOT $(cd "$SNAP" && pwd)"
 # `git archive | tar -x` rather than `git checkout <sha> -- <path>`: this
 # working tree is permanently dirty and holds artefacts newer than any commit,
 # and a checkout would write into it wholesale.
-git archive "$SHA" "$LAYOUT" "$FILLED" | tar -x || exit 6
+# `-m` because git archive stamps entries with the COMMIT date and tar restores
+# it: extracted files would be older than cargo's fingerprints from the last
+# build, cargo rebuilds only on newer-than-fingerprint, and the next `cargo
+# test` would run the PRE-restore binaries against the restored sources — the
+# same staleness measured in-pipeline on run `2620196-de4a7ca2` (2026-08-17),
+# where a 57-file restore swept 0.4s later with a byte-identical vector.
+git archive "$SHA" "$LAYOUT" "$FILLED" | tar -xm || exit 6
 echo "RESTORED $LAYOUT + $FILLED from $SHA"
 echo "  reverse it with:  rm -rf $LAYOUT $FILLED"
 echo "                    mv $SNAP/skeleton/src $LAYOUT"
