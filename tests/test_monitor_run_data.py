@@ -96,3 +96,48 @@ def test_configure_sets_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "PIPELINE_LOG", "x")
     rd.configure(script_dir="/s", pipeline_log="/p")
     assert (rd.SCRIPT_DIR, rd.PIPELINE_LOG) == ("/s", "/p")
+
+
+def test_pipeline_running_reads_registry(tmp_path, monkeypatch):
+    import os
+    reg = tmp_path / "reg.json"
+    monkeypatch.setenv("PIPELINE_RUN_REGISTRY", str(reg))
+    # No registry file: no run ever registered.
+    assert rd.pipeline_running() is False
+    # Malformed / non-list contents parse to "not running", never raise.
+    reg.write_text("{not json")
+    assert rd.pipeline_running() is False
+    reg.write_text(json.dumps({"pid": 1}))
+    assert rd.pipeline_running() is False
+    # A registered pid that is dead (a run killed before atexit unregistered
+    # it): /proc is the arbiter, the stale entry is not "running". pid 0 is
+    # never a /proc entry, so it models the reaped run deterministically.
+    reg.write_text(json.dumps([{"pid": 0}]))
+    assert rd.pipeline_running() is False
+    # A registered pid that is alive — even alongside a stale sibling.
+    reg.write_text(json.dumps([{"pid": 0}, {"pid": os.getpid()}]))
+    assert rd.pipeline_running() is True
+
+
+def test_pipeline_running_ignores_cmdline_lookalikes(tmp_path, monkeypatch):
+    """Negative control for the 2026-08-18 false positive: a live process
+    whose ARGV contains 'pipeline.py' (the watcher shell quoting the name in
+    its own pgrep loop) must not read as a running pipeline. The old
+    `pgrep -f pipeline.py` substring check returned True on exactly this."""
+    import os
+    import subprocess
+    import sys
+    reg = tmp_path / "reg.json"
+    reg.write_text("[]")
+    monkeypatch.setenv("PIPELINE_RUN_REGISTRY", str(reg))
+    decoy = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)",
+         "pipeline.py --project anyhow"])
+    try:
+        # The decoy is alive and its command line contains the magic string —
+        # prove the precondition the old code tripped on, then the assertion.
+        assert os.path.exists(f"/proc/{decoy.pid}")
+        assert rd.pipeline_running() is False
+    finally:
+        decoy.kill()
+        decoy.wait()

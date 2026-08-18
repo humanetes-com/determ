@@ -592,3 +592,29 @@ predicted. On-theory: say nothing. Off-theory — the gate the fix targeted did 
 fire by the iteration the walk said it would — stop, fix, validate; not
 "watching, N iterations left". A pathology no walk covers: distill it from the
 live log into a fixture, so the expensive path funds the cheap one.
+
+## An armed watcher's wait loop carries a hard deadline — always
+
+Any background wait the assistant arms — a death-watch on a pipeline process,
+a poll for a log line, a sleep-until-condition loop — loops on BOTH clauses:
+
+    while <condition not met> AND <elapsed < deadline>   # default: 1 hour
+
+and on expiry it WAKES AND REPORTS the timeout loudly, never exits silently.
+The deadline is not politeness; it is the bound on a predicate bug, and the
+predicates keep having bugs — this is a repeating class (it has cost idle
+hours on multiple days), not a one-off.
+
+The instance, 2026-08-18: a watcher armed to relaunch `continue.sh` when the
+pipeline exited waited on `pgrep -f "pipeline.py --project anyhow"` — a
+pattern its own shell's command line contains, so the loop matched itself and
+could never exit. The pipeline had stopped cleanly at 02:44 (the flat-score
+guard, by design, one relaunch away from dispatching the escalated producer
+slice) and the machine sat idle for over an hour; the watcher was 4h53m old
+when found. A one-hour deadline converts every instance of this class into a
+bounded, self-reporting failure regardless of which predicate is wrong.
+
+Defense in depth, not a substitute for the deadline: write self-non-matching
+predicates (`pgrep -f "[p]ipeline.py --project anyhow"` — the bracket keeps
+the pattern from matching its own command line) and run the predicate once
+from the arming shell to see what it returns before trusting it.

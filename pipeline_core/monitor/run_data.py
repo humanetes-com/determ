@@ -5,7 +5,7 @@ reads `pipeline_state.md`, the coverage JSON dumps, the raw pipeline-log tail, a
 `.env`/`/proc`/git for backend + run facts. Everything here returns plain data (no
 ANSI); `monitor.py` formats it.
 
-NOTE (debt #7): the task0c progress facts + vLLM-runtime facts that used to be
+NOTE: the task0c progress facts + vLLM-runtime facts that used to be
 regex-scraped here now come from structured events (see events_data.pipeline_log_facts
 / vllm_runtime). What remains reads pipeline_state.md (the pipeline's own structured
 state file) or the raw log tail for presentation only (log_tail_meta).
@@ -298,12 +298,31 @@ def read_backend() -> str:
 
 
 def pipeline_running() -> bool:
-    """True if a pipeline.py process is alive."""
+    """True if a REGISTERED pipeline.py process is alive.
+
+    Judged by the live-run registry (every run appends its pid on start and
+    unregisters atexit — ``adapters/run_registry.py``), each recorded pid
+    verified against ``/proc`` — the same rule ``monitor.py``'s own run
+    discovery applies to the same file. Deliberately NOT ``pgrep -f
+    pipeline.py``: that is a substring match over full command lines, and any
+    shell whose command line merely QUOTES the script's name satisfies it. On
+    2026-08-18 it held the monitor's "running" badge up for over an hour
+    after run ``2953362-63d4b47e`` exited 0 — the match was a session watcher
+    shell whose own ``pgrep`` loop contained ``pipeline.py --project anyhow``
+    as text. A registry entry whose pid is dead (a run killed before atexit)
+    is not "running" either; ``/proc`` is the arbiter.
+    """
     try:
-        subprocess.check_output(["pgrep", "-f", "pipeline.py"], stderr=subprocess.DEVNULL)
-        return True
-    except subprocess.CalledProcessError:
+        with open(os.getenv("PIPELINE_RUN_REGISTRY",
+                            "/tmp/determ_pipelines.json")) as fh:
+            reg = _json.load(fh)
+    except Exception:
         return False
+    if not isinstance(reg, list):
+        return False
+    return any(isinstance(r, dict) and r.get("pid")
+               and os.path.exists(f"/proc/{r['pid']}")
+               for r in reg)
 
 
 def detect_cached_repo_url() -> str:
