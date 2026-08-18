@@ -21,8 +21,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.domain.models import FnLocator
 from tests.walks.harness import load_walk, replay
+
+pytestmark = pytest.mark.walk
 
 _WALK = "2773540-e47c3754"
 # The harness frontier unit (the consumer) and the escalation's addition.
@@ -30,12 +34,13 @@ _ACC = FnLocator("src/a.rs", "f")
 _PROD = FnLocator("src/b.rs", "producer")
 
 
-def _process(monkeypatch, tmp_path: Path, floor: dict) -> tuple[
+def _process(monkeypatch, tmp_path: Path, floor: dict,
+             events: list[tuple[str, dict]] | None = None) -> tuple[
         list[str], list[tuple[FnLocator, ...]], list[str]]:
     """One process over the recorded readings: guard ON at the live repeat
     rule, the escalation returning one producer, batches captured."""
     from pipeline_core.domain.models import ClusterFillResult
-    events: list[tuple[str, dict]] = []
+    events = [] if events is None else events
     batches: list[tuple[FnLocator, ...]] = []
     escalations: list[str] = []
 
@@ -80,6 +85,51 @@ def test_a_relaunch_dispatches_the_escalated_slice_in_its_one_batch(
     assert batches and _PROD in batches[0], (
         f"the resumed process's first batch must carry the escalated unit, "
         f"got {batches[0]}")
+
+
+def test_the_product_survives_to_the_sweep_the_guard_stops(
+        monkeypatch, tmp_path: Path) -> None:
+    """The product's lifetime is the evidence's lifetime. The resumed process
+    fires at sweep 1 and the guard stops sweep 2 — and at THAT sweep the
+    escalated unit must still be in the frontier the stop line counts, so the
+    pass denominator never shrinks and `take_batch` cannot close the pass
+    over units that only 'left' because a fire-once guard withheld them
+    (run `2953362-63d4b47e`: 43 at iter 1, 16 at iter 2, one dispatch from a
+    wiped cursor and a false traversal credit)."""
+    floor: dict = {}
+    _process(monkeypatch, tmp_path, floor)
+    events: list[tuple[str, dict]] = []
+    logs, _, _ = _process(monkeypatch, tmp_path, floor, events)
+    stop = [ln for ln in logs if "GPU_GUARD_STOP" in ln]
+    assert stop and " of 2 " in stop[0], (
+        f"the stopped sweep's frontier must still carry the escalated unit "
+        f"(2 units, not the accessor alone): {stop}")
+    sustained = [d for e, d in events
+                 if e == "phase_c.attribution.escalation_sustained"]
+    assert sustained and "src/b.rs::producer" in sustained[0]["added"], (
+        "the sweep after the fire re-merges the cached product")
+
+
+def test_negative_control_blinding_the_sustain_restores_the_shrink(
+        monkeypatch, tmp_path: Path) -> None:
+    """The same replay with the sustain blinded (fire-once semantics) re-runs
+    the recorded shape: the stopped sweep's frontier is the accessor alone —
+    the denominator shrink that had the cursor one dispatch from a wipe."""
+    import pipeline_core.application.reconstruct.phase_c_tdd as _mod
+    from pipeline_core.domain.escalation_lifetime import SustainResult
+    floor: dict = {}
+    _process(monkeypatch, tmp_path, floor)
+    monkeypatch.setattr(
+        _mod, "sustain_escalation_products",
+        lambda products, units_by_test, stub_keys: SustainResult(
+            merges={}, sustained=(), dropped=()))
+    events: list[tuple[str, dict]] = []
+    logs, _, _ = _process(monkeypatch, tmp_path, floor, events)
+    stop = [ln for ln in logs if "GPU_GUARD_STOP" in ln]
+    assert stop and " of 1 " in stop[0], (
+        f"fire-once shape: the stopped sweep sees the accessor alone: {stop}")
+    assert not any(e == "phase_c.attribution.escalation_sustained"
+                   for e, _ in events)
 
 
 def test_negative_control_the_pre_fix_floor_reproduces_the_lock(

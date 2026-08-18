@@ -265,3 +265,58 @@ def test_origin_unattributed_site_survives_with_zero_crate_frames() -> None:
     assert site.test_name == "test_drop"
     assert "heap-use-after-free" in site.raw_report
     assert any("blaming NOBODY" in m for m in logged)
+
+
+_ASAN_TEST_ONLY_ORIGIN = """\
+    Running tests/test_source.rs (target-asan/debug/deps/test_source-999)
+running 3 tests
+test test_io_source ... ==7==ERROR: AddressSanitizer: heap-use-after-free on address 0x7f
+READ of size 8 at 0x7f thread T2
+    #0 0x55a in <anyhow::Error as core::ops::deref::Deref>::deref /w/src/error.rs:560:27
+freed by thread T2 here:
+    #0 0x55b in free /rustc/llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #1 0x55c in <alloc::sync::Arc<T> as core::ops::drop::Drop>::drop /rustc/xyz/library/alloc/src/sync.rs:2874:18
+    #2 0x55d in test_source::test_io_source /w/tests/test_source.rs:83:5
+"""
+
+_ASAN_RAW_ADDRESS_ORIGIN = """\
+    Running tests/test_source.rs (target-asan/debug/deps/test_source-999)
+running 3 tests
+test test_io_source ... ==7==ERROR: AddressSanitizer: heap-use-after-free on address 0x7f
+READ of size 8 at 0x7f thread T2
+    #0 0x55a in <anyhow::Error as core::ops::deref::Deref>::deref /w/src/error.rs:560:27
+freed by thread T2 here:
+    #0 0x55b (/w/target-asan/debug/deps/test_source-999+0x1234)
+    #1 0x55c (/w/target-asan/debug/deps/test_source-999+0x2222)
+"""
+
+
+def test_nobody_verdict_names_the_starvation_symbolized_but_test_only() -> None:
+    """A NOBODY verdict must say WHICH starvation it is. Here every origin
+    frame symbolizes and the only workspace frames are the test's own — the
+    shape measured on `asan-20260816T194054947258.txt` (the test's free is
+    the legitimate one; the crate's defect is on the access/retention side).
+    The verdict line answers that without an archive dig."""
+    logged: list[str] = []
+    deps, _ = _deps(gdb_result=None, asan_result=(101, _ASAN_TEST_ONLY_ORIGIN),
+                    log=logged.append)
+    (site,) = _run(deps)
+    assert site.origin_unattributed
+    nobody = [m for m in logged if "blaming NOBODY" in m]
+    assert nobody and "3 of 3 frame(s) symbolized" in nobody[0]
+    assert "test-file frame(s) (oracle" in nobody[0]
+    assert "access/retention" in nobody[0]
+
+
+def test_nobody_verdict_names_the_starvation_raw_addresses() -> None:
+    """Negative control for the line above: an origin stack of bare addresses
+    (no `in SYMBOL FILE:LINE`) parses to zero frames — the verdict must say
+    NO frame symbolized and point at the symbolizer, not at the crate."""
+    logged: list[str] = []
+    deps, _ = _deps(gdb_result=None, asan_result=(101, _ASAN_RAW_ADDRESS_ORIGIN),
+                    log=logged.append)
+    (site,) = _run(deps)
+    assert site.origin_unattributed
+    nobody = [m for m in logged if "blaming NOBODY" in m]
+    assert nobody and "NO frame symbolized" in nobody[0]
+    assert "llvm-symbolizer" in nobody[0]

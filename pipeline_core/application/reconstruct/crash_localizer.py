@@ -31,6 +31,7 @@ from pipeline_core.domain.crash_site import (
     relativize_frame_files,
     site_from_frames,
 )
+from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.test_results import parse_binary_results
 
 # adapter signatures (composition injects the concrete fns)
@@ -78,14 +79,38 @@ def _asan_site(
                             origin_capable=True)
     if site.origin_unattributed:
         # The report HAD a free/alloc stack (that is what stacks[1] is); every
-        # frame in it was filtered out as non-crate. Say so, and keep the raw
-        # stacks on the site so the next reader can see who freed the memory
-        # without paying for another instrumented build.
+        # frame in it was filtered out as non-crate. Say so, and say WHICH
+        # starvation this is — the verdict alone left "unsymbolized raw
+        # addresses" and "symbolized but genuinely foreign" indistinguishable,
+        # and telling them apart cost an archive dig per instance. Measured
+        # 2026-08-18 on `logs/asan/asan-20260816T194054947258.txt` (the
+        # deterministic `test_downcast::test_drop` heap-use-after-free): all
+        # 27 origin frames symbolize, and the only workspace frames are the
+        # TEST's own (`tests/test_downcast.rs:83` frees the Arc legitimately)
+        # — so no build flag can put a crate frame on that stack, and the
+        # culprit for this class lives on the ACCESS/retention side. The raw
+        # stacks stay on the site so the next reader sees who freed the
+        # memory without paying for another instrumented build.
+        _sym = [f for f in origin if str(f.get("file") or "")]
+        _ws = [str(f.get("file") or "") for f in _sym
+               if not str(f.get("file") or "").startswith("/")]
+        _oracle = [f for f in _ws if is_oracle_path(f)]
         deps.log("  [phase-c/crash-localizer] "
                  f"{kind} in {label}: no in-crate frame in the origin stack "
-                 f"({len(origin)} raw frame(s)) — blaming NOBODY. The access "
-                 "path is recorded; the fn that invalidated the memory is not "
-                 "identified.")
+                 f"({len(origin)} raw frame(s)) — blaming NOBODY. "
+                 + ((f"{len(_sym)} of {len(origin)} frame(s) symbolized"
+                     + (f"; the only workspace frame(s) are {len(_oracle)} "
+                        "test-file frame(s) (oracle — not authorable, and a "
+                        "test's own free is usually the legitimate one: "
+                        "suspect the crate's access/retention path)"
+                        if _ws and len(_oracle) == len(_ws)
+                        else f"; {len(_ws)} workspace frame(s)"))
+                    if _sym else
+                    "NO frame symbolized — raw addresses; check "
+                    "llvm-symbolizer on the sweep's PATH")
+                 + ". The access path is recorded; the fn that invalidated "
+                 "the memory is not identified. Raw report archived under "
+                 "logs/asan/.")
     # An origin-unattributed site survives even with ZERO in-crate frames:
     # it still names the binary, the in-flight test and the raw report, and
     # "an origin-capable detector looked and placed nothing in-crate" is the

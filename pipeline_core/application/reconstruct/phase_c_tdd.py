@@ -58,6 +58,10 @@ from pipeline_core.domain.dispatch_batch import (
     promote_crash_evidence,
     take_batch,
 )
+from pipeline_core.domain.escalation_lifetime import (
+    FiredProduct,
+    sustain_escalation_products,
+)
 from pipeline_core.domain.flat_score import (
     FlatScoreGuard,
     ScoreReading,
@@ -388,9 +392,27 @@ def run_phase_c_tdd(
     permanently_exhausted: set[FnLocator] = set()
     # Futility escalation state: per failing test, the frontier
     # unit-set of the previous iteration; a test whose set is UNCHANGED while
-    # it kept failing has exhausted its attributed fns — escalate once.
+    # it kept failing has exhausted its attributed fns — escalate.
     prev_test_units: dict[str, frozenset[FnLocator]] = {}
-    escalated_tests: set[str] = set()
+    # Escalated test -> (the futile unit-set that EARNED its fire, the
+    # additions the fire computed). The escalation's product lives exactly as
+    # long as this evidence: while a test's attribution still equals the
+    # recorded set, the cached additions are re-merged into the frontier
+    # every sweep; the moment the set changes, the product dies with the
+    # evidence (and the test may re-earn a fire from the new set under the
+    # ordinary two-sweep rule). The additions are cached rather than
+    # recomputed because `escalate_to_producers` logs its whole verdict —
+    # recomputing would print ~2 lines per fired test per sweep — and a
+    # resume recomputes fresh at its own fire anyway. Fire-once
+    # (`escalated_tests: set`, merged only on the firing sweep) shrank the
+    # pass denominator on every later sweep of the same process: run
+    # `2953362-63d4b47e` (2026-08-18) escalated 43 units at iter 1 and read
+    # a 16-unit frontier at iter 2, so `take_batch` counted the 19 vanished
+    # producers as "left the frontier", was one dispatch from closing the
+    # pass over a third of it, and would have wiped the cursor and credited
+    # a traversal that never touched the escalated slice. Only the
+    # flat-score guard's stop scheduling pre-empted it.
+    escalation_products: dict[str, FiredProduct] = {}
     last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
     # Self-contained snapshot for the exhaustion-reset gate below — deliberately
@@ -2036,7 +2058,9 @@ def run_phase_c_tdd(
         # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by
         # rewrites that changed nothing — its accessors are the wrong target.
-        # Escalate ONCE per test to the producers of the exercised types.
+        # Escalate to the producers of the exercised types; a fired
+        # escalation's additions are then re-merged every sweep for as long
+        # as the evidence that earned the fire still holds.
         if deps.escalate_to_producers is not None:
             units_by_test: dict[str, set[FnLocator]] = {}
             for key, tests in frontier.items():
@@ -2046,9 +2070,58 @@ def run_phase_c_tdd(
             # tests it fired for — fed to the guidance suspension below.
             _futile_fired: set[FnLocator] = set()
             _futile_fired_tests: set[str] = set()
+            # Already-fired products first: re-merge each one whose evidence
+            # still stands (the product's lifetime IS the evidence's — see
+            # `domain/escalation_lifetime`), drop the rest. A sustain is not
+            # new evidence: no guidance suspension, no exhaustion
+            # re-admission, one summary line for all of them; an escalated
+            # unit that exhausts its refill budget leaves through the D3
+            # filter exactly as any frontier unit does.
+            _sustain = sustain_escalation_products(
+                escalation_products, units_by_test, _stub_keys)
+            for k, ts in _sustain.merges.items():
+                frontier.setdefault(k, set()).update(ts)
+            for tname, _why in _sustain.dropped:
+                del escalation_products[tname]
+                deps.log(
+                    f"  {tag} [attribution/escalate] {tname}: escalation "
+                    "product dropped — "
+                    + {"evidence_changed":
+                        "its attributed unit-set changed, so the evidence "
+                        "that earned the fire is gone",
+                       "stub_accessor":
+                        "an attributed unit is a stub again (never served "
+                        "by any rewrite, so 'futile' no longer describes "
+                        "it)",
+                       "not_failing":
+                        "the test no longer fails, so there is no "
+                        "attribution to hold evidence against"}[_why]
+                    + "; a product outliving its evidence would be frontier "
+                    "nobody measured.")
+                deps.emit("phase_c.attribution.escalation_dropped",
+                          data={"test": tname, "reason": _why})
+            if _sustain.sustained:
+                deps.log(
+                    f"  {tag} [attribution/escalate] "
+                    f"{len(_sustain.merges)} escalated addition(s) for "
+                    f"{len(_sustain.sustained)} fired test(s) re-merged — "
+                    "evidence unchanged since the fire, so the product "
+                    "stays in the frontier (and in the pass denominator) "
+                    "as long as the evidence stands.")
+                deps.emit("phase_c.attribution.escalation_sustained", data={
+                    "tests": list(_sustain.sustained),
+                    "added": sorted(f"{k.file}::{k.fn_name}"
+                                    for k in _sustain.merges)})
             for tname, units in units_by_test.items():
                 prev = prev_test_units.get(tname)
-                if (tname not in escalated_tests and prev is not None
+                if tname in escalation_products or any(
+                        tname == _t for _t, _ in _sustain.dropped):
+                    # Fired: handled above. A dropped product's test does not
+                    # re-fire THIS sweep — the two-sweep rule re-arms it from
+                    # the new set, exactly as a never-fired test earns one.
+                    prev_test_units[tname] = frozenset(units)
+                    continue
+                if (prev is not None
                         and prev == frozenset(units)):
                     # An accessor that is STILL A STUB was never served by any
                     # rewrite — it is the target, not futile. On 2026-08-11/12
@@ -2078,7 +2151,9 @@ def run_phase_c_tdd(
                     extra = deps.escalate_to_producers(
                         src_dir, tname, set(units))
                     if extra:
-                        escalated_tests.add(tname)
+                        escalation_products[tname] = (
+                            frozenset(units),
+                            {k: set(ts) for k, ts in extra.items()})
                         _futile_fired.update(units)
                         _futile_fired_tests.add(tname)
                         # The escalation IS new evidence about its targets: a

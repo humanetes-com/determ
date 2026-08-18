@@ -92,6 +92,27 @@ markers = [
 root_package = "pipeline_core"
 
 [[tool.importlinter.contracts]]
+# `pipeline_core/monitor/` is the standalone observer's library (monitor.py is
+# its only importer). `code_identity` (domain/measurement.py) EXCLUDES it from
+# the resume-invalidation identity on exactly that premise — an observer-only
+# edit must not discard the TDD floor's cursor and futility evidence (run
+# `3097970-03bcf403`, 2026-08-18, cost one ~68-minute relaunch cycle). This
+# contract is what keeps the premise true: composing the observer into the
+# pipeline would silently turn that exclusion into a lie. `pipeline.py`
+# itself cannot be a root here (grimp rejects single-file modules), so its
+# half of the premise is pinned by AST in `tests/test_measurement_identity.py`.
+name = "The observer library is not composed into the pipeline"
+type = "forbidden"
+source_modules = [
+    "pipeline_core.adapters",
+    "pipeline_core.application",
+    "pipeline_core.prompts",
+    "pipeline_core.ports",
+    "pipeline_core.domain",
+]
+forbidden_modules = ["pipeline_core.monitor"]
+
+[[tool.importlinter.contracts]]
 name = "Layers: adapters > application > prompts > ports > domain"
 type = "layers"
 layers = [

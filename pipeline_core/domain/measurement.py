@@ -296,6 +296,21 @@ def code_identity(root: Path, *, entry: str = "pipeline.py",
         for p in sorted(pkg.rglob("*.py")):
             if "__pycache__" in p.parts:
                 continue
+            # `pipeline_core/monitor/` is the standalone observer's library —
+            # `monitor.py` is its only importer, and the import-linter
+            # contract "The observer library is not composed into the
+            # pipeline" (pyproject.toml) is what keeps this exclusion true
+            # rather than merely written. Nothing the pipeline process
+            # composes lives there, so an edit to it cannot change a loop
+            # decision — but folded into this identity it invalidates every
+            # resume keyed on `code_id`. Run `3097970-03bcf403` (2026-08-18):
+            # an observer-only fix to `monitor/run_data.py` moved the id, the
+            # TDD floor resumed `best_pass unset` with its pass cursor and
+            # futility evidence discarded, and the crawl re-spent a
+            # ~68-minute relaunch cycle re-earning state no pipeline
+            # behaviour had invalidated.
+            if p.relative_to(pkg).parts[0] == "monitor":
+                continue
             try:
                 entries.append((str(p.relative_to(root)), p.read_bytes()))
             except OSError:

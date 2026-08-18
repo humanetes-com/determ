@@ -18,9 +18,17 @@ it, and deletion is not retrieval.
 local mermaid render to SVG, a file path in the chat. If a preview genuinely
 cannot be produced locally, say so and stop — do not fall back to an upload.
 
-**Never reference a tracker ID in source, tests, prompts, log lines or event
-payloads.** That means no `debt 91.2`, no `debt #46 point 2`, no `FR-018`, no
-`plan #77 T1`, no `#82`, and no bare `91.5)` shorthand.
+**Never reference a tracker ID in source, tests, prompts, log lines, event
+payloads, code comments or COMMIT MESSAGES — suggested ones included.** That
+means no `debt 91.2`, no `debt #46 point 2`, no `FR-018`, no `plan #77 T1`,
+no `#82`, and no bare `91.5)` shorthand. Commit messages are in the list for
+the same reason the rest are: `git log` travels with the repository and the
+trackers do not, so a message opening `debt 187.3:` promises context the
+reader cannot redeem — and suggested commit messages in a summary or a
+handover become real ones by copy-paste, which is exactly how the pattern
+propagated (a 2026-08-18 session copied the `debt N:` prefix from the
+previous session's handover). State the fact the entry stood for; run ids,
+dates, symbols and measured numbers are all fine.
 
 **Why.** The person reading the file has the repository and nothing else. The
 `.md` trackers are not distributed with it — `technical_debt.md`,
