@@ -8,11 +8,24 @@
 #   Monitor) armed on it delivers exactly one notification per stop.
 #
 # USAGE: bash scripts/interactive_run_watch.sh [--poll SECONDS]
+#   Arm it with the Bash tool's run_in_background from the session that wants
+#   the wake — the script itself is a plain blocking watcher; it has no
+#   daemonizing mode. Any flag it does not know is a hard error (exit 64),
+#   never silently ignored: on 2026-08-18 a session invoked it with `--arm`
+#   (a flag a skill doc described but nothing implemented) and the old
+#   silent-ignore parsing would have blocked the calling turn in the
+#   foreground for the pipeline's whole lifetime instead of failing fast.
 #   Preconditions: a pipeline launched via continue.sh (it finds the newest
 #   `pipeline.py --project` process; if none is up yet it waits up to
 #   $STARTUP_GRACE (default 120 s) for one to appear, so it can be armed
 #   immediately after `continue.sh --y --no-tail` returns).
-#   Env: POLL (default 5) seconds between checks; STARTUP_GRACE (default 120).
+#   Env: POLL (default 5) seconds between checks; STARTUP_GRACE (default 120);
+#   DEADLINE (default 3600) seconds the death-watch may run before it wakes
+#   and reports a timeout — the bound on a predicate bug, per the standing
+#   watcher rule (unbounded watchers have sat stuck for hours, e.g. the
+#   self-matching pgrep of 2026-08-18, found 4h53m old). A healthy pipeline
+#   outliving the deadline is NOT an error: the wake says so and the loop is
+#   continued by re-arming.
 #   Cost: zero GPU, one pgrep per poll. Safe to kill (TaskStop) at any time;
 #   it never signals the pipeline or anything else.
 #
@@ -29,11 +42,26 @@
 #   Exit 0 = pipeline observed then gone (the normal wake). Exit 2 = no
 #   pipeline appeared within STARTUP_GRACE — the launch failed; check
 #   continue.sh output and the gate (a stale stamp exits 3) before re-arming.
+#   Exit 4 = deadline expired with the pipeline still alive — re-arm to keep
+#   watching. Exit 64 = unknown argument.
 
 set -u
 POLL="${POLL:-5}"
 STARTUP_GRACE="${STARTUP_GRACE:-120}"
-if [ "${1:-}" = "--poll" ] && [ -n "${2:-}" ]; then POLL="$2"; fi
+DEADLINE="${DEADLINE:-3600}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --poll)
+      if [ -z "${2:-}" ]; then
+        echo "usage: $0 [--poll SECONDS]  (--poll needs a value)" >&2; exit 64
+      fi
+      POLL="$2"; shift 2 ;;
+    *)
+      echo "usage: $0 [--poll SECONDS]  (unknown argument: $1 — this script has no daemon/--arm mode; arm it via a background task)" >&2
+      exit 64 ;;
+  esac
+done
 
 find_pid() {
   pgrep -f 'python.*pipeline\.py --project' | head -1
@@ -51,6 +79,10 @@ fi
 
 start=$(date +%s)
 while kill -0 "$pid" 2>/dev/null; do
+  if [ $(( $(date +%s) - start )) -ge "$DEADLINE" ]; then
+    echo "THIS IS PART OF INTERACTIVE RUN: watcher deadline expired after ${DEADLINE}s — pipeline pid=${pid} is STILL ALIVE. Not an error; re-arm the watcher to keep the loop."
+    exit 4
+  fi
   sleep "$POLL"
 done
 # Give the supervisor's death-watch a moment to append its record.

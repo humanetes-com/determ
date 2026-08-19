@@ -90,6 +90,10 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.oracle_ledger import SweepOracle, reconcile_sweep
 from pipeline_core.domain.pass_highwater import PassHighWater
+from pipeline_core.domain.plateau import (
+    plateau_exit_disabled,
+    plateau_exit_due,
+)
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
@@ -366,7 +370,10 @@ def run_phase_c_tdd(
         | None) = None
 
     deps.log(f"  {tag} [phase-c/tdd] driver=tdd, "
-         f"max_stalls={max_stalls}, timeout={test_timeout}s, "
+         f"max_stalls={max_stalls}"
+         + (" (plateau exit DISABLED)" if plateau_exit_disabled(max_stalls)
+            else "")
+         + f", timeout={test_timeout}s, "
          f"stems={len(test_stems)}, "
          + (f"gpu-guard={_flat_guard.repeats} repeat(s) of a reading in "
             f"{_flat_guard.window}" if _flat_guard.enabled
@@ -2714,8 +2721,11 @@ def run_phase_c_tdd(
         # looks. Pre-fix, an unfixable fn that stayed in the frontier
         # forever would override the stall check and burn compute
         # indefinitely. The frontier is now a hint about WHERE to look,
-        # not a license to keep iterating.
-        if stall >= max_stalls:
+        # not a license to keep iterating. A non-positive budget disables
+        # this exit (`domain/plateau.py` owns the semantics — the raw
+        # comparison fired on the FIRST sweep at 0); the flat-score guard
+        # and the iteration backstop still bound the loop.
+        if plateau_exit_due(stall, max_stalls):
             # Before giving up, check whether the plateau is a private
             # LAYOUT problem (t1.5 left a component frozen on the original
             # scaffold, and this cluster's fills are fighting it) rather than

@@ -63,6 +63,7 @@ from ...domain.models import (
     ClusterFillResult,
     FnLocator,
 )
+from ...domain.plateau import plateau_exit_disabled, plateau_exit_due
 from ...domain.rust_fn_headers import locate_all_fns
 from ...domain.rust_scan import item_names
 from ...domain.test_results import find_unreported_tests, parse_test_counts
@@ -2606,6 +2607,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if hard_cap <= 0:
             return False
         tag = "[skeleton-merge]"
+        if plateau_exit_disabled(max_stalls):
+            self.tel.log(f"  {tag} post-merge plateau exit DISABLED "
+                         f"(POST_MERGE_MAX_STALLS={max_stalls}); the hard cap "
+                         f"({hard_cap}) is the only terminator.")
         tests_dir_files: list[Path] = list((project_dir / "tests").rglob("*.rs"))
         fr_path = project_dir / f"functional_requirements_{module}.md"
         leaf_counts: dict[str, int] = {}
@@ -2794,7 +2799,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # frontier with a stuck fn must not override it — same fix as
             # _run_phase_c_tdd: pass_count plateau is the only "no real
             # improvement" signal that captures cluster-level progress.
-            if stall >= max_stalls:
+            # A non-positive POST_MERGE_MAX_STALLS disables this exit
+            # (`domain/plateau.py` — the raw comparison fired on the FIRST
+            # sweep at 0); the hard-cap backstop still bounds the loop.
+            if plateau_exit_due(stall, max_stalls):
                 self.tel.log(f"  {tag} post-merge iter {iter_n}: pass_count plateau "
                              f"{stall} iter(s) at best={best_pass}; stopping "
                              f"({len(eligible)} fn(s) still on frontier — marking "
