@@ -68,6 +68,11 @@ from pipeline_core.domain.flat_score import (
     UnmovedVerdicts,
 )
 from pipeline_core.domain.graceful_stop import request_graceful_stop
+from pipeline_core.domain.landed_change import (
+    changed_units,
+    render_pass_audit,
+    unit_bodies,
+)
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_REFILL_GRACE_MAX_ITERS,
     DEFAULT_REFILL_PER_ITER,
@@ -496,6 +501,16 @@ def run_phase_c_tdd(
     # closes and whenever the score improves — a better tree reopens the whole
     # frontier rather than resuming a traversal taken against the old one.
     _pass_attempted: set[FnLocator] = set()
+    # The subset of the cursor on which a SEMANTIC change landed — the unit's
+    # body tuple differed after the batch that dispatched it (measured per
+    # batch from extractor records, `domain/landed_change.py`). The cursor
+    # marks ATTEMPTED at dispatch; a completed pass read off the cursor alone
+    # claims every unit was TRIED, and the pass that closed the 2026-08-19
+    # crawl dispatched byte-identical re-authors, peeled fills and
+    # immutable-by-rule units for roughly half its denominator. Cleared with
+    # the cursor, persisted with it (same identity rule), reported when a
+    # pass closes so the post-pass flat verdict names its effective coverage.
+    _pass_landed: set[FnLocator] = set()
     # The frontier the current pass OPENED over. A traversal is over this set,
     # not over the frontier as it stands now: escalation and crash evidence add
     # units mid-pass, and a closure condition that waits for them cannot be met
@@ -1503,6 +1518,16 @@ def run_phase_c_tdd(
                 #     the record it exists to report.
                 _prev_pass_completed = False
                 _resumed_cursor_window = frozenset(_pass_attempted)
+                # The cursor's landed-change record rides with it: which of
+                # the resumed units actually took a semantic body change.
+                # Without it, a pass spread across the one-batch-per-relaunch
+                # crawl closes with only its LAST batch's landed set, and the
+                # pass audit under-reports the very coverage it exists to
+                # state.
+                if _resume.landed:
+                    _pass_landed = {
+                        FnLocator(_f, _fn) for _f, _, _fn
+                        in (k.partition("::") for k in _resume.landed) if _fn}
             # The FOURTH half: the futility evidence. Without it the
             # escalation needs two judged sweeps of THIS process to detect an
             # unchanged unit-set, and the flat-score guard stops a resumed
@@ -1570,6 +1595,7 @@ def run_phase_c_tdd(
         # common resume, not the odd one.
         if improved and best_pass > UNSET_PASS:
             _pass_attempted.clear()
+            _pass_landed.clear()
             _pass_cohort = None
             _resumed_cursor_window = frozenset()
         # `best_metric` is -inf until some iter improves, and a compile-broken
@@ -1871,6 +1897,8 @@ def run_phase_c_tdd(
                 code_id=_code_id,
                 attempted=tuple(sorted(
                     f"{_l.file}::{_l.fn_name}" for _l in _pass_attempted)),
+                landed=tuple(sorted(
+                    f"{_l.file}::{_l.fn_name}" for _l in _pass_landed)),
                 # The futility evidence as of the PREVIOUS sweep's end (this
                 # save runs before this sweep's attribution). That is the
                 # ordering that makes the persisted evidence usable: the
@@ -3033,6 +3061,7 @@ def run_phase_c_tdd(
                     permanently_exhausted.clear()
                     _stubs_prev = -1
                     _pass_attempted = set()
+                    _pass_landed = set()
                     _pass_cohort = None
                     _resumed_cursor_window = frozenset()
                     _unmoved = _unmoved.moved()
@@ -3132,6 +3161,12 @@ def run_phase_c_tdd(
         # stops to measure moves. The cursor advances here and not at the
         # decision, so an iteration that stopped or restored above leaves the
         # traversal exactly where it found it.
+        # Captured BEFORE the cursor reset below: when this batch closes the
+        # pass, the audit after the fill phase reports the WHOLE traversal —
+        # everything the pass dispatched (across relaunches, via the resumed
+        # cursor), not just this batch.
+        _pass_units_at_close = _pass_attempted | set(_batch.keys)
+        _cohort_at_close = len(_pass_cohort or ())
         _pass_attempted = (set() if _batch.completes_pass
                            else _pass_attempted | set(_batch.keys))
         # A closed pass releases its cohort; the next iteration opens one over
@@ -3231,6 +3266,15 @@ def run_phase_c_tdd(
         # (not stubs) → the engine will behaviorally re-fill them.
         _stubs_before = set(deps.scan_unimplemented_functions(src_dir))
         _refill_targets = frontier_keys - _stubs_before
+        # Body snapshot of the dispatched units, taken now so the post-fill
+        # reading below can say which of them actually TOOK a semantic change
+        # — the cursor's "attempted" is a dispatch fact, and the pass audit
+        # needs the landed fact (`domain/landed_change.py`). None ⇒ the
+        # extractor port is absent (legacy/stub engines): the audit is
+        # skipped, never guessed.
+        _bodies_before = (
+            unit_bodies(deps.enumerate_fns(target_src_dir) or [], frontier_keys)
+            if deps.enumerate_fns is not None else None)
         # Drive the per-fn fill machinery with this frontier. The engine runs its
         # own graceful-stop checks (worker pools included), so this is where a
         # stop lands in practice — it owns the hours of the iter — and it exits by
@@ -3281,6 +3325,60 @@ def run_phase_c_tdd(
         # the pass — that's the set of fns that materially changed.
         cur_stubs = set(deps.scan_unimplemented_functions(src_dir))
         newly_filled = [k for k in frontier_keys if k not in cur_stubs]
+        # The landed-change reading: which dispatched units' bodies MOVED.
+        # This is the fact the refutation criterion needs and the cursor
+        # cannot supply — a byte-identical re-author, a peeled/reverted fill
+        # and an immutable-by-rule skip all advanced the cursor while landing
+        # nothing, and a completed pass over such units proves nothing about
+        # them (the 2026-08-19 crawl's third batch: 4 byte-identical
+        # re-authors incl. traversal step `src/error.rs::source`, 2 peeled
+        # incl. the severed `src/context.rs::source`).
+        if _bodies_before is not None and deps.enumerate_fns is not None:
+            _batch_landed = changed_units(
+                _bodies_before,
+                unit_bodies(deps.enumerate_fns(target_src_dir) or [],
+                            frontier_keys))
+            _pass_landed |= _batch_landed
+            _batch_unchanged = frontier_keys - _batch_landed
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: landed-change audit — "
+                f"{len(_batch_landed)} of {len(frontier_keys)} dispatched "
+                "unit(s) landed a semantic change"
+                + ("; unchanged: " + ", ".join(sorted(
+                    f"{k.file}::{k.fn_name}" for k in _batch_unchanged)[:12])
+                   if _batch_unchanged else "") + ".")
+            deps.emit("phase_c.tdd.landed_change", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "dispatched": len(frontier_keys),
+                "landed": sorted(f"{k.file}::{k.fn_name}"
+                                 for k in _batch_landed),
+                "unchanged": sorted(f"{k.file}::{k.fn_name}"
+                                    for k in _batch_unchanged)})
+            if _batch.completes_pass:
+                _unchanged_pass = _pass_units_at_close - _pass_landed
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: PASS AUDIT — "
+                    f"traversal {_traversals} complete: "
+                    + render_pass_audit(
+                        cohort_size=_cohort_at_close,
+                        attempted=len(_pass_units_at_close),
+                        landed=frozenset(_pass_landed),
+                        unchanged=frozenset(_unchanged_pass)))
+                deps.emit("phase_c.tdd.pass_audit", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "traversal": _traversals,
+                    "cohort_size": _cohort_at_close,
+                    "attempted": sorted(f"{k.file}::{k.fn_name}"
+                                        for k in _pass_units_at_close),
+                    "landed": sorted(f"{k.file}::{k.fn_name}"
+                                     for k in _pass_landed),
+                    "unchanged": sorted(f"{k.file}::{k.fn_name}"
+                                        for k in _unchanged_pass)})
+        # The landed record's lifetime is the pass's, exactly like the
+        # cursor: a closed pass releases both (the audit above has already
+        # reported this one), and the next pass accumulates fresh.
+        if _batch.completes_pass:
+            _pass_landed = set()
         last_newly_filled = newly_filled   # hook 3: next iter attributes regressions to these
         for k in newly_filled:
             recently_filled.append(k)

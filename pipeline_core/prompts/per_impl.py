@@ -95,10 +95,21 @@ def build_per_impl_prompt(
                "structural pattern:\n```rust\n",
         suffix="\n```")
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
-    # Corrected R2/R3 (debt #28): methods the impl's frozen where-bounds make
-    # callable — prefer a bound-provided trait method over a mis-bound free
-    # constructor (the E0277 thrash root).
+    # Methods the impl's frozen where-bounds make callable — prefer a
+    # bound-provided trait method over a mis-bound free constructor (the
+    # E0277 thrash root).
     bound_methods_block = tag_block("BOUND_METHODS", sections.bound_methods)
+    # The previous attempt's own compiler/test verdict, verbatim. Without it
+    # a retry is blind: the error text reached only the TYPES_IN_SCOPE
+    # re-selection, so an error naming no new types rebuilt attempt 1's
+    # prompt byte-for-byte and attempt 2 was a temperature resample (both
+    # E0277 units of run `275772-425da59c`, 2026-08-19, same prompt sha on
+    # both attempts while other units' attempt-2 prompts differed).
+    last_error_block = tag_block(
+        "LAST_ERROR", sections.last_error,
+        prefix="Your previous attempt at this block produced these errors — "
+               "the bodies below must resolve them; do not resubmit the "
+               "same approach:\n")
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
@@ -133,10 +144,10 @@ def build_per_impl_prompt(
                "these idioms whenever your fn's situation matches one of "
                "them. Do NOT invent a new approach when one of these "
                "patterns clearly applies.\n")
-    # debt #46 point 2: members flagged [REFILL] above compile but their
-    # attributed test still fails — usually because they disagree with a
-    # sibling stub/refill member on a shared private scheme. Rewrite them
-    # TOGETHER with the stubs so the whole block agrees.
+    # Members flagged [REFILL] above compile but their attributed test still
+    # fails — usually because they disagree with a sibling stub/refill member
+    # on a shared private scheme. Rewrite them TOGETHER with the stubs so the
+    # whole block agrees.
     refill_block = tag_block(
         "REFILL_TARGETS",
         ", ".join(m.fn_name for m in refill_members),
@@ -174,7 +185,7 @@ Stubs to fill in this response: {stub_names}
 <RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}

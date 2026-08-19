@@ -36,3 +36,8 @@ tools/skeleton_extractor/target/
 # The pre-run gate stamp: the content hash of the tree check.sh + the walks last
 # passed against. A claim about THIS checkout, never shared between machines.
 .pre_run_stamp
+
+# The current batch's commit message, written by the assistant and consumed by
+# ./commit.sh. It is overwritten every batch and describes changes that are
+# about to be committed, not repository content.
+last_commit_message.txt

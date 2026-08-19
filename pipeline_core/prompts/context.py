@@ -62,8 +62,10 @@ class PerImplSections:
     macros: str
     siblings: str
     retrospective_guidance: str
-    # Methods the impl's FROZEN where-bounds make callable (corrected R2/R3,
-    # debt #28). "" when no generic param is bounded by an in-scope trait.
+    # Methods the impl's FROZEN where-bounds make callable — prefer a
+    # bound-provided trait method over a mis-bound free constructor, the
+    # E0277-thrash root. "" when no generic param is bounded by an in-scope
+    # trait.
     bound_methods: str
     # The crate blueprint slice (P3) — the model's OWN design sections
     # relevant to this block. "" when no blueprint exists.
@@ -71,3 +73,11 @@ class PerImplSections:
     # Localized crash backtrace implicating this block's fns (faulting +
     # origin frames). "" when no binary crash points here.
     crash_evidence: str = ""
+    # The PREVIOUS attempt's focused compile/test errors. "" on attempt 1.
+    # Until this section existed, the fix loop's only error feedback into the
+    # per-impl prompt was TYPES_IN_SCOPE re-selection from the error text — an
+    # error naming only already-selected types changed nothing, so attempt 2
+    # re-sent attempt 1's prompt byte-identically (same sha at 18:48:29 and
+    # 18:58:59, both E0277 units of run `275772-425da59c`, 2026-08-19) and
+    # bought one temperature resample of an unchanged question.
+    last_error: str = ""

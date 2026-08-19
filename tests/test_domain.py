@@ -141,6 +141,17 @@ def test_find_fn_blocks_matches_old_regex(text: str) -> None:
     # `context_chain_downcast`, all tagged `block=""`, and logged
     # `empty/no FN blocks (4 FN tag(s) in reply)`.
     ('<FN name="f" block="">free fn</FN>', [("f", "", "free fn")]),
+    # A SELF-CLOSED tag is a complete record with an empty body slot — the
+    # answer, when there is one, is in the `block` attribute and the recovery
+    # pass reads it from there. Refusing the `/` left the scan on it, the `>`
+    # was never found, and the whole tag dropped: the per-impl maximal
+    # last-resort reply for `src/context.rs::Context<T,E> for Result<T,E>`
+    # (run `275772-425da59c`, 2026-08-19) answered BOTH members this way and
+    # was logged `maximal attempt returned no FN blocks (2 FN tag(s) in
+    # reply)`.
+    ('<FN name="f" block="x + 1"/></FN>', [("f", "x + 1", "")]),
+    # The self-close terminator may arrive XML-escaped, like every other `>`.
+    ('<FN name="c" block="z"/&gt;', [("c", "z", "")]),
 ])
 def test_find_fn_blocks_departs_from_the_old_regex(
         text: str, expected: list[tuple[str, str, str]]) -> None:
@@ -153,6 +164,16 @@ def test_find_fn_blocks_departs_from_the_old_regex(
     from pipeline import _find_fn_blocks
     assert _OLD_FN_RE.findall(text) == []
     assert _find_fn_blocks(text) == expected
+
+
+def test_find_fn_blocks_self_closed_tag_does_not_swallow_its_sibling() -> None:
+    """A self-closed record ends AT the `/>`. Scanning on for a `</FN>` would
+    swallow the next `<FN>` block whole into this record's body and lose it —
+    so the sibling after a self-closed tag must come through intact."""
+    from pipeline import _find_fn_blocks
+    assert _find_fn_blocks(
+        '<FN name="a" block="x + 1"/><FN name="b" block="impl Foo">y</FN>'
+    ) == [("a", "x + 1", ""), ("b", "impl Foo", "y")]
 
 
 _OLD_WHERE_RE = re.compile(r'^\s*(where\s[^\n]+)\n', re.MULTILINE)
@@ -738,6 +759,24 @@ def test_extract_fn_bodies_recovers_a_shuffled_reply() -> None:
     # 7b. The CLOSE tag escaped too — the body still ends where `</FN` starts.
     (i,) = llm_output.extract_fn_bodies('<FN name="f" block="b"&gt;y</FN&gt;')
     assert i["fn_name"] == "f" and i["body"] == "y"
+
+    # 8. Body in the `block` attribute AND the tag self-closed — the shape of
+    #    the per-impl maximal last-resort reply for
+    #    `src/context.rs::Context<T,E> for Result<T,E>` (run `275772-425da59c`
+    #    2026-08-19, reply after an answered file pull; recurring across the
+    #    16 maximal fires of 08-18/19). Both members answered, correct names,
+    #    and the reader produced 0 records from 2 tags: `_tag_terminator`
+    #    refused the `/`, so the recovery pass that already handles
+    #    body-in-attribute (shape 2) was never reached.
+    j, k = llm_output.extract_fn_bodies(
+        '<FN name="context" block="match self { Ok(v) => Ok(v), '
+        'Err(e) => Err(crate::Error::from(e).ext_context(context)) }"/></FN>\n'
+        '<FN name="with_context" block="match self { Ok(v) => Ok(v), '
+        'Err(e) => Err(crate::Error::from(e).ext_context(context())) }"/></FN>')
+    assert j["fn_name"] == "context" and j["block"] == ""
+    assert j["body"].startswith("match self { Ok(v)")
+    assert k["fn_name"] == "with_context"
+    assert k["body"].endswith("ext_context(context())) }")
 
 
 def test_extract_fn_bodies_leaves_a_well_formed_reply_alone() -> None:

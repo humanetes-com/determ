@@ -1,5 +1,61 @@
 # CLAUDE.md — conventions for code written in this repo
 
+## What this file is FOR: breaking the plateau — an analysis is judged by whether the next iteration progresses
+
+Everything in this file serves one outcome: an iteration of the loop that
+moves the score. A whole iteration that lands fills and changes no verdict
+is the failure this project exists to fix; the ideal iteration is ONE loop
+in which every fill is dispatched and every fill cashes into verdicts. So
+when the user asks for an analysis of a stall, a flat run, or a plateau,
+the deliverable is NOT a narrative of what happened — it is the change (or
+the named existing mechanism plus why it did not fire) that makes the next
+iteration progress where the last one did not. A report the user could
+produce themselves with a grep and low effort is not the deliverable; the
+per-fill causality below, cross-checked against the record, is why the
+analysis is worth asking for at all.
+
+**Fill by fill, never aggregate.** A `pass=N → N` sweep is not explained
+at the sweep level — "the design accepts flat sweeps" is a description,
+not a finding. For EACH fill that landed and bought nothing, name which of
+these it was, with the log line that establishes it:
+
+- **mis-targeted** — the unit's attributed tests are blocked upstream, so
+  no body written here could have moved them. The question that matters:
+  what evidence already in the record said so before the GPU was spent,
+  and why didn't dispatch read it?
+- **wrong body** — the right unit, an answer that compiles and is wrong.
+  The question: what was missing from the prompt (context section, crash
+  evidence, sibling source), and which mechanism owns supplying it?
+- **right body, unreachable verdict** — the attributed test cannot run:
+  still-stubbed sibling, crashing binary, cfg-world mismatch, oracle
+  miscount. A measurement defect; fixing the body was never the move.
+- **answer dropped** — the model answered and a route/parser/splicer lost
+  it (the `HEALTH ‼` / routing_drop class). Always a pipeline defect.
+
+The four have different owners and different fixes, and one sweep's fills
+usually mix them. The per-unit evidence is already printed — fix-loop exit
+lines, the escalation's futility verdicts, `kept … blocked by
+still-stubbed sibling(s)`, splice refusals — so the cost is reading, not
+new instrumentation.
+
+**The instance that motivated the rule, 2026-08-19, run pid 4169156.** 163
+minutes and 26 LLM calls landed 16 compiling bodies; the sweep's verdict
+vector came back byte-identical, and the first analysis offered was "flat
+is expected mid-pass." The per-fill answer was one screen away: all 16
+were accessor rewrites, and the escalation's own measurement one sweep
+later declared every one of them futile — the convicted units sit
+upstream, in a slice never yet dispatched. The finding was not "no
+progress, by design"; it was "the iteration spent its entire budget on
+units the record could already convict as unable to pay."
+
+**What counts as progress, so the bar is checkable.** One of: test
+verdicts moved; or the iteration dispatched units never tried before,
+under evidence that says they can pay; or a defect was named and fixed
+such that a walk shows the next iteration doing one of the first two. An
+iteration that does none of these is the pathology, whatever the log calls
+it — and an analysis that ends without a change aimed at making the next
+iteration clear this bar is unfinished.
+
 ## Nothing leaves this machine
 
 **Never transmit repository or workspace content to any external service.**
@@ -394,14 +450,43 @@ healthy cell's max; would-hit-cap(X)=k/N is how many healthy calls the
 current cap would have broken"). A script whose output needs its author to
 read is not finished. `scripts/measure_muse_reasoning.sh` is the template.
 
-## A final summary of changes ends with a suggested commit message
+## A finished batch writes `last_commit_message.txt`; `./commit.sh` commits it
 
 Commits are user-owned and the tree is permanently dirty: the assistant never
 runs `git commit` and never checks commit state. The flip side is that the
-user commits from the summary, not from a diff crawl — so **every final
-summary of a finished batch of changes concludes with a ready-to-use
-suggested commit message as its last line.** One message per coherent batch;
-if the batch is the session's work, one message for the session.
+user commits from the summary, not from a diff crawl — so **every finished
+batch of changes ends by WRITING the commit message to
+`last_commit_message.txt` in the repo root, overwriting whatever was there**,
+and the final summary's last line says so. One message per coherent batch; if
+the batch is the session's work, one message for the session. The user then
+runs:
+
+    ./commit.sh          # git commit -F last_commit_message.txt (staged only)
+    ./commit.sh -a       # ... also staging tracked modifications
+    ./commit.sh --amend  # ... reworking the previous commit
+
+The file is untracked (`.gitignore`) and holds the CURRENT batch only — it is
+overwritten, never appended, so it can never offer a stale message to the next
+`./commit.sh`.
+
+**Why a file and not the chat.** A message pasted out of a chat summary carries
+the terminal's hard wraps into the object. `git log` then shows the subject
+running into the body, ragged leading indentation and 100-column lines — the
+four-point message on `abc2179` is what that looks like from the other side.
+`git commit -F` takes the file verbatim, so the wrapping is the writer's
+decision instead of the pane width's.
+
+**Which makes the formatting the writer's job.** Write the file as git wants
+it, not as prose: a subject line of at most 72 columns, no trailing period,
+then a BLANK line, then a body hard-wrapped at 72 columns with no leading
+indentation. Blank lines between points; `-` or `1.` for a list, at the left
+margin. The tracker-id ban above applies here as it does everywhere else, and
+`commit.sh` refuses a subject that opens with one (`debt 91.2`, `FR-018`,
+`#82`) rather than letting it reach `git log`.
+
+A batch that touched only the untracked trackers (`technical_debt.md`,
+`handover.md`, the plan files — `.gitignore` is `*.md`) has nothing to commit:
+say that plainly and leave `last_commit_message.txt` alone.
 
 ## Saving a handover is `rotate_handover.sh`, then OVERWRITE — never a hand-prepend
 
@@ -428,7 +513,8 @@ prints a CARRY FORWARD reminder.** Verify with
 A session block opens `# Handover — session N (date) — **<what the session
 established, in bold>**` — the script hard-fails on any other first line — and
 closes with `## ON RETURN`, `## State at handover`, `## Key facts` and the
-suggested commit message(s).
+suggested commit message(s) — the handover keeps its own copy of the message
+for the record; the copy `./commit.sh` reads is `last_commit_message.txt`.
 
 ## The commands this repo's gate is made of
 

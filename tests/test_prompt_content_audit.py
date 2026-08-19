@@ -103,3 +103,35 @@ def test_per_impl_prompt_carries_repo_spec_bundle(tmp_path: Path) -> None:
     bare = build_per_impl_prompt(block, [], [], "mycrate", "stable",
                                  PerImplSections(**empty), fr_path=None)
     assert "<REPOSITORY_SPECIFICATIONS>" not in bare
+
+
+def test_per_impl_prompt_carries_the_previous_attempts_errors() -> None:
+    """The fix loop's retry must SEE what the last attempt broke. Until this
+    section existed the error text reached only TYPES_IN_SCOPE re-selection,
+    so an error naming no new types rebuilt attempt 1's prompt byte-for-byte
+    and attempt 2 was a temperature resample — both E0277 units of run
+    `275772-425da59c` (2026-08-19) sent the same prompt sha on both attempts
+    and burned their whole fix loop on one unchanged question."""
+    import pipeline  # noqa: F401 — binds the real prompts runtime facade
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+    from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
+
+    stub = FnRecord(file="src/lib.rs", fn_name="fmt", container="impl Display for X",
+                    sig_text="fn fmt(&self)", has_unimplemented_body=True)
+    block = ImplBlock(file="src/lib.rs", container="impl Display for X",
+                      members=(stub,), stub_members=(stub,))
+    empty = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
+             "dispatch_family": "", "macros": "", "siblings": "",
+             "retrospective_guidance": "", "bound_methods": ""}
+    _err = "SENTINEL_LAST_ERROR_E0277_xyz"
+    with_err = build_per_impl_prompt(
+        block, [], [], "mycrate", "stable",
+        PerImplSections(**empty, last_error=_err), fr_path=None)
+    assert "<LAST_ERROR>" in with_err and _err in with_err
+    # attempt 1 has no previous error: the section must not appear, so the
+    # attempt-2 prompt (which carries it) can never equal attempt 1's.
+    without = build_per_impl_prompt(block, [], [], "mycrate", "stable",
+                                    PerImplSections(**empty), fr_path=None)
+    assert "<LAST_ERROR>" not in without
+    assert with_err != without

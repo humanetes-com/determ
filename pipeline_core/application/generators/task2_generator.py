@@ -39,6 +39,7 @@ from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...application.reconstruct.import_repair import repair_missing_imports
 from ...application.workspace_lifecycle import (
+    MERGED_BEST,
     merged_best_pass_count,
     restore_merged_best_tree,
     save_merged_best_tree,
@@ -58,6 +59,7 @@ from ...domain.generation import (
     topo_sort_files,
 )
 from ...domain.heal import RestorePoint
+from ...domain.layout_sync_staleness import DEFAULT_STALE_AFTER, ReinstallStreak
 from ...domain.llm_output import extract_files
 from ...domain.models import (
     BuildCluster,
@@ -1128,7 +1130,40 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # alongside work done hides every one of them.
         for n in notes:
             self.tel.log(f"  {tag} [layout-sync] {n}")
+        _streak = self._load_reinstall_streak(project_dir, cluster)
         if not plan:
+            # Nothing superseded: the registry and this cluster's tree agree.
+            # A standing staleness streak is over — the divergence it measured
+            # has re-converged (a re-author refreshed the registry, or the
+            # tree adopted it), so the next divergence starts from zero.
+            if _streak.green_reverts:
+                self._save_reinstall_streak(project_dir, cluster,
+                                            _streak.cleared())
+            return
+        _stale_after = int(os.getenv("LAYOUT_SYNC_STALE_AFTER",
+                                     str(DEFAULT_STALE_AFTER)))
+        if _streak.stale(_stale_after):
+            # The registry is the stale side, measured: its reinstall has been
+            # rolled back on a COMPILING tree this many consecutive entries,
+            # so the registry holds a layout the live tree cannot build (the
+            # 2026-08-19 entry: `ErrorImpl { vtable, backtrace, value }`
+            # field-set mismatch, E0308 at src/error.rs:220, plus an E0277 —
+            # repeating every entry). Not re-adopting protects the RED path:
+            # kept-by-rule on a red-at-entry tree, the reinstall would hand
+            # `_restub_after_reinstall` the live fills to re-stub toward that
+            # unbuildable layout — a whole-run cost for a crash mid-splice.
+            self.tel.log(
+                f"  {tag} [layout-sync] NOT re-adopting the registry: its "
+                f"reinstall was rolled back on a compiling tree "
+                f"{_streak.green_reverts} consecutive entr(y/ies) — the "
+                "registry is stale against this cluster's live tree. The "
+                "streak clears when a reinstall lands or the plans converge.")
+            self.tel.emit("phase_c.layout_sync.registry_stale", data={
+                "cluster": getattr(cluster, "name", ""),
+                "green_reverts": _streak.green_reverts,
+                "threshold": _stale_after,
+                "definitions_withheld": sum(len(v) for v in plan.values()),
+            })
             return
         # The registry is CRATE-WIDE and permanent, and this step reinstalls it
         # over the live tree on every later start. A retrigger that fired on a
@@ -1162,6 +1197,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _rc_after, _out_after, _diags_after = self.cargo.run_check_diag(
             _check, filled_dir, _env, 180)
         if _rc_after == 0:
+            # The reinstall LANDED — whatever divergence the streak was
+            # counting is resolved.
+            if _streak.green_reverts:
+                self._save_reinstall_streak(project_dir, cluster,
+                                            _streak.cleared())
             return
         if _rc_before != 0:
             # The rollback rule below cannot judge a reinstall on a tree that
@@ -1190,17 +1230,52 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _fp.write_text(_text, encoding="utf-8")
             except Exception:
                 continue
+        # A green-tree rollback is a measurement of the REGISTRY, and it
+        # accumulates: enough consecutive ones and the sync stops re-adopting
+        # (the staleness branch above), so a later red-at-entry tree is not
+        # re-stubbed toward a layout these rollbacks proved unbuildable.
+        _streak = _streak.reverted_on_green()
+        self._save_reinstall_streak(project_dir, cluster, _streak)
         self.tel.log(
             f"  {tag} [layout-sync] REVERTED: the reinstalled definition(s) "
             "stopped a compiling tree from compiling. The registry holds a "
-            "layout this cluster's tree cannot build — first errors: "
+            "layout this cluster's tree cannot build "
+            f"({_streak.green_reverts} consecutive green-tree rollback(s)) "
+            "— first errors: "
             + "; ".join(line for line in _out_after.splitlines()
                         if "error" in line)[:300])
         self.tel.emit("phase_c.layout_sync.reverted", data={
             "cluster": getattr(cluster, "name", ""),
             "files": sorted(str(p.name) for p in _before),
             "definitions": sum(len(v) for v in plan.values()),
+            "green_reverts": _streak.green_reverts,
         })
+
+    @staticmethod
+    def _reinstall_streak_path(project_dir: Path, cluster: Any) -> Path:
+        return (project_dir / ".skeleton"
+                / f"_layout_sync_streak_{getattr(cluster, 'name', '')}.json")
+
+    def _load_reinstall_streak(self, project_dir: Path,
+                               cluster: Any) -> ReinstallStreak:
+        """Total: a missing or corrupt state file costs a fresh streak, which
+        fails SAFE (the sync re-adopts — the pre-guard behaviour)."""
+        try:
+            return ReinstallStreak.from_dict(json.loads(
+                self._reinstall_streak_path(project_dir, cluster)
+                .read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            return ReinstallStreak()
+
+    def _save_reinstall_streak(self, project_dir: Path, cluster: Any,
+                               streak: ReinstallStreak) -> None:
+        p = self._reinstall_streak_path(project_dir, cluster)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(streak.to_dict()), encoding="utf-8")
+        except OSError as e:
+            self.tel.log(f"  [layout-sync] could not persist the reinstall "
+                         f"streak: {e}")
 
     def _restub_after_reinstall(self, tag: str, filled_dir: Path,
                                 skeleton_dir: Path | None, project_dir: Path,
@@ -2826,6 +2901,21 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _prev_pass_completed = True
         _dispatched_ever: set[FnLocator] = set()
         _just_restored = False
+        # The second cfg-world seam. Every gate this loop's fills pass —
+        # the engine's per-splice `cargo check`, the sweep at the top of the
+        # iteration — builds the DEFAULT world, so a body that reads an item
+        # another world's cfg removes ships clean and surfaces at task3 (the
+        # merge-time world check catches merge-composed breaks; a fill
+        # written HERE enters after it). Baseline the divergent worlds once,
+        # then re-check after each batch: a world that was green and went
+        # red was broken by bodies this batch wrote, and those are the fns
+        # its own compiler implicates. cargo check is incremental, so the
+        # per-batch cost is seconds once the first build exists. A world red
+        # at entry is inherited (the merge check already named it) and is
+        # not re-litigated per batch.
+        _spec_map = {c.name: c for c in clusters}
+        _worlds_red: set[str] = {
+            n for n, _ in self._merged_tree_world_check(project_dir, _spec_map)}
 
         def _snapshot_merged(pass_count: int, fail_count: int) -> None:
             """Replace `.best_tree/_merged/` only by beating what is stored.
@@ -3174,6 +3264,47 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log(f"  {tag} post-merge iter {iter_n}: "
                          f"{sub.fns_filled} fn(s) filled, "
                          f"{sub.attempts} attempt(s).")
+            # Per-batch world gate (see the baseline comment above the loop).
+            _red_now = self._merged_tree_world_check(project_dir, _spec_map)
+            _reverted_worlds = False
+            for _wname, _werr in _red_now:
+                if _wname in _worlds_red:
+                    continue
+                _wc = _spec_map[_wname]
+                _rc_w, _out_w, _diags_w = self.cargo.run_check_diag(
+                    self._cluster_check_cmd(_wc), project_dir,
+                    self._cluster_env(_wc), 180)
+                _impl_w = self.cargo.implicated_fns_from_check(
+                    _diags_w, _out_w or "", project_dir)
+                _targets = [t for t in _impl_w if t in _batch_keys]
+                self.tel.log(
+                    f"  {tag} post-merge iter {iter_n}: this batch broke the "
+                    f"'{_wname}' cfg world ({_werr}) — the default-world "
+                    "splice gate cannot see that world, so the gate is here: "
+                    + (f"reverting {len(_targets)} implicated batch fn(s) to "
+                       "stubs." if _targets else
+                       "no batch fn is implicated by its compiler; leaving "
+                       "the break named for task3."))
+                self.tel.emit("post_merge.world_broken_by_batch", data={
+                    "iter": iter_n, "world": _wname, "error": _werr,
+                    "implicated": [f"{f}::{fn}" for f, fn in _targets[:12]],
+                })
+                if _targets:
+                    _n_w = self._revert_implicated(
+                        tag, _targets, project_dir,
+                        project_dir / ".best_tree" / MERGED_BEST,
+                        project_dir, "merged")
+                    _reverted_worlds = _reverted_worlds or _n_w > 0
+                    if _n_w:
+                        self.tel.log(
+                            f"  {tag} post-merge iter {iter_n}: reverted "
+                            f"{_n_w} body(ies); the fns return as stubs for "
+                            "a re-fill that must hold in every world.")
+            # A world we failed to repair joins the inherited set so one
+            # break is named once, not every remaining iteration.
+            _worlds_red = ({n for n, _ in self._merged_tree_world_check(
+                                project_dir, _spec_map)}
+                           if _reverted_worlds else {n for n, _ in _red_now})
         self.tel.log(f"  {tag} post-merge hard cap {hard_cap} reached (safety net).")
         if best_pass > 0:
             restore_merged_best_tree(project_dir)

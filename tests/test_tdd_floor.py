@@ -103,6 +103,38 @@ def test_a_changed_oracle_drops_the_score_halves_and_KEEPS_the_pass_cursor() -> 
         cursor_mismatch(saved, cluster="nightly", code_id="other"))
 
 
+def test_landed_record_rides_the_cursor_and_an_old_floor_parses_empty() -> None:
+    """The cursor marks ATTEMPTED at dispatch; the landed record is the
+    subset that actually TOOK a semantic body change, and the pass audit
+    reads it when the traversal closes. The 2026-08-19 crawl's completed pass
+    is why the two must not be conflated: byte-identical re-authors, peeled
+    fills and immutable-by-rule units advanced the cursor for roughly half
+    the denominator while landing nothing, so a flat sweep after "43/43"
+    refuted the dispatch for barely half the units it claimed. Spread over
+    the one-batch-per-relaunch crawl, the record is only whole if it
+    persists WITH the cursor, under the cursor's identity rule."""
+    saved = replace(_FLOOR,
+                    attempted=("src/error.rs::new", "src/kind.rs::new"),
+                    landed=("src/error.rs::new",))
+    # Round-trips…
+    parsed = TddFloor.from_dict(saved.to_dict())
+    assert parsed is not None and parsed.landed == ("src/error.rs::new",)
+    # …an old floor (no key) parses empty, totally…
+    old = dict(_FLOOR.to_dict())
+    old.pop("landed")
+    parsed = TddFloor.from_dict(old)
+    assert parsed is not None and parsed.landed == ()
+    # …and it follows the CURSOR's identity rule exactly: rides an oracle or
+    # tree change, dies with cluster or code_id.
+    assert resume_floor(saved, **_KEY).landed == ("src/error.rs::new",)
+    assert resume_floor(
+        saved, **{**_KEY, "oracle_size": 121}).landed == ("src/error.rs::new",)
+    assert resume_floor(
+        saved, **{**_KEY, "tree_sha": "ffffffff"}).landed == ("src/error.rs::new",)
+    for bad in ({"code_id": "new"}, {"cluster": "stable"}):
+        assert resume_floor(saved, **{**_KEY, **bad}).landed is None
+
+
 def test_no_saved_floor_is_a_fresh_start_not_a_crash() -> None:
     r = resume_floor(None, **_KEY)
     assert (r.stall, r.best_pass) == (None, None)

@@ -99,7 +99,7 @@ def _run(monkeypatch, rcs: list[int], tmp_path: Path,
     import pipeline_core.application.generators.task2_generator as mod
 
     src = tmp_path / "filled" / "src"
-    src.mkdir(parents=True)
+    src.mkdir(parents=True, exist_ok=True)
     target = src / "error.rs"
     target.write_text("ORIGINAL\n", encoding="utf-8")
     monkeypatch.setattr(
@@ -175,3 +175,107 @@ def test_red_path_errors_outside_src_are_left_to_the_oracle(monkeypatch, tmp_pat
     tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
     assert target.read_text() == "REINSTALLED\n"
     assert any("no error lands on repairable src/" in m for m in tel.lines)
+
+
+# ---------------------------------------------------------------------------
+# The registry can be the stale side, and repeated green-tree rollbacks are
+# the measurement that says so. 2026-08-19, run entry 19:38:42: 7 authored
+# definitions reinstalled into 4 live files and rolled back on `E0308
+# src/error.rs:220` (ErrorImpl field-set mismatch) plus an E0277 — repeating
+# at EVERY entry until registry and tree re-converge. The green path's cost
+# is two cargo checks; the RED path's is not: kept-by-rule on a
+# red-at-entry tree, the divergent registry's reinstall hands
+# `_restub_after_reinstall` the live fills to re-stub toward a layout the
+# green entries already proved unbuildable.
+# ---------------------------------------------------------------------------
+
+
+def _streak_file(tmp_path: Path) -> Path:
+    return tmp_path / ".skeleton" / "_layout_sync_streak_stable.json"
+
+
+def test_repeated_green_rollbacks_stop_the_readoption(monkeypatch, tmp_path):
+    # Two consecutive green-tree rollbacks: the registry is measured stale.
+    for _ in range(2):
+        tel, target = _run(monkeypatch, [0, 101], tmp_path)
+        assert target.read_text() == "ORIGINAL\n"
+    assert _streak_file(tmp_path).exists()
+    # Third entry: the sync must not even TRY — no cargo check, no apply.
+    cargo = _Cargo([0, 101])
+    tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
+    assert cargo.calls == 0, "a stale registry must not buy two more checks"
+    assert target.read_text() == "ORIGINAL\n"
+    assert any("NOT re-adopting the registry" in m for m in tel.lines)
+
+
+def test_a_landed_reinstall_clears_the_streak(monkeypatch, tmp_path):
+    tel, _ = _run(monkeypatch, [0, 101], tmp_path)     # one rollback
+    tel, target = _run(monkeypatch, [0, 0], tmp_path)  # then it LANDS
+    assert target.read_text() == "REINSTALLED\n"
+    # The streak restarted from zero: one more rollback is below the
+    # threshold, so the entry after it still re-adopts.
+    tel, _ = _run(monkeypatch, [0, 101], tmp_path)
+    cargo = _Cargo([0, 0])
+    tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
+    assert cargo.calls > 0 and target.read_text() == "REINSTALLED\n"
+    assert not any("NOT re-adopting" in m for m in tel.lines)
+
+
+def test_a_stale_registry_never_reaches_the_red_path_restub(monkeypatch, tmp_path):
+    """THE HAZARD THE GUARD EXISTS FOR. On a red-at-entry tree the reinstall
+    is kept by rule and its re-stub wave follows — correct when the tree's
+    bodies answer to the registry, a whole-run cost when the green entries
+    already measured the registry unbuildable. With the streak standing, a
+    red entry must skip the reinstall entirely: no adoption, no re-stub."""
+    for _ in range(2):
+        _run(monkeypatch, [0, 101], tmp_path)
+
+    def _boom(self, *a, **k):  # pragma: no cover - guard
+        raise AssertionError("stale registry: the re-stub wave must not fire")
+
+    monkeypatch.setattr(_Gen, "_restub_after_reinstall", _boom)
+    cargo = _Cargo([101, 101, 0])
+    tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
+    assert target.read_text() == "ORIGINAL\n", \
+        "a stale registry was re-adopted on a red tree"
+    assert any("NOT re-adopting the registry" in m for m in tel.lines)
+
+
+def test_convergence_clears_the_streak(monkeypatch, tmp_path):
+    import json as _json
+
+    import pipeline_core.application.generators.task2_generator as mod
+    for _ in range(2):
+        _run(monkeypatch, [0, 101], tmp_path)
+    assert _json.loads(_streak_file(tmp_path).read_text())["green_reverts"] == 2
+    # An entry whose plan is EMPTY means registry and tree agree again — the
+    # divergence the streak measured is over.
+    tel = _Tel([])
+    gen = _gen(_Cargo([0, 0]), tel, "error.rs")
+    monkeypatch.setattr(mod, "plan_layout_reconciliation",
+                        lambda *_a, **_k: ({}, []))
+    gen._sync_layout_into_tree("[tag]", tmp_path, _Cluster(), tmp_path / "filled")
+    assert _json.loads(_streak_file(tmp_path).read_text())["green_reverts"] == 0
+
+
+def test_staleness_threshold_zero_disables_the_guard(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAYOUT_SYNC_STALE_AFTER", "0")
+    for _ in range(3):
+        _run(monkeypatch, [0, 101], tmp_path)
+    cargo = _Cargo([0, 0])
+    tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
+    assert target.read_text() == "REINSTALLED\n"
+    assert not any("NOT re-adopting" in m for m in tel.lines)
+
+
+def test_reinstall_streak_state_is_total():
+    from pipeline_core.domain.layout_sync_staleness import ReinstallStreak
+
+    assert ReinstallStreak.from_dict(None) == ReinstallStreak()
+    assert ReinstallStreak.from_dict({"green_reverts": "x"}) == ReinstallStreak()
+    assert ReinstallStreak.from_dict({"green_reverts": -3}) == ReinstallStreak()
+    s = ReinstallStreak.from_dict(
+        ReinstallStreak().reverted_on_green().reverted_on_green().to_dict())
+    assert s.green_reverts == 2 and s.stale() and not s.stale(threshold=0)
+    assert not ReinstallStreak(1).stale()
+    assert s.cleared().green_reverts == 0

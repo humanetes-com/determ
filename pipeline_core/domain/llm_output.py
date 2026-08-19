@@ -544,6 +544,28 @@ def _tag_terminator(text: str, pos: int) -> int:
     return -1
 
 
+def _self_closing_terminator(text: str, pos: int) -> int:
+    """Index just past a SELF-CLOSING tag terminator (`/>` — or `/&gt;`, the
+    XML-safe rendering) at `pos`, or -1.
+
+    A self-closed `<FN …/>` is a COMPLETE record whose body slot is empty by
+    construction — the model that emits it has put the answer somewhere else,
+    and the observed somewhere-else is the `block` attribute:
+    `<FN name="context" block="match self {…}"/></FN>` (per-impl maximal
+    last-resort reply, `src/context.rs::Context<T,E> for Result<T,E>`, run
+    `275772-425da59c` 2026-08-19, recurring across the 16 maximal fires of
+    2026-08-18/19). Refusing the `/` cost the whole reply: the scan sat on it,
+    never found the `>`, dropped both records, and the call was logged
+    `maximal attempt returned no FN blocks (2 FN tag(s) in reply)` — the
+    standing rule being that N tags in with 0 records out is always the
+    reader. Accepted here, the record reaches `_recover_slots`, whose
+    body↔block swap already recovers the answer.
+    """
+    if pos < len(text) and text[pos] == "/":
+        return _tag_terminator(text, pos + 1)
+    return -1
+
+
 def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
     """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`).
 
@@ -584,6 +606,11 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
       the body in one of them :func:`extract_fn_bodies` still recovers it.
       Deliberately not "take the rest of the reply": that would splice
       whatever prose followed a truncated body.
+    * A SELF-CLOSED tag (`<FN …/>`) is the same case arriving closed: a
+      complete record with an empty body slot, accepted for
+      :func:`_self_closing_terminator`'s reason. It ends AT the `/>` — the
+      scan must not go looking for a `</FN>`, which would swallow any
+      following `<FN>` block into this record's body.
     * Either tag's terminator may arrive as `&gt;` (:func:`_tag_terminator`).
     """
     out: list[tuple[str, str, str]] = []
@@ -606,6 +633,11 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
         if block is not None:
             bl_val, q = block
             q = _skip_ws(text, q)            # `\s*` before `>`
+        sc = _self_closing_terminator(text, q)
+        if sc != -1:
+            out.append((nm_val, bl_val, ""))
+            i = sc
+            continue
         body_start = _tag_terminator(text, q)
         if body_start == -1:
             i = s + 1; continue

@@ -155,6 +155,44 @@ def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
 
 
+def test_impl_retry_prompt_carries_the_previous_attempts_errors(
+        monkeypatch, tmp_path):
+    """Attempt 2 of the per-impl fix loop must SEE what attempt 1 broke.
+
+    Its only error feedback used to be TYPES_IN_SCOPE re-selection from the
+    error text, so an error naming no new types rebuilt attempt 1's prompt
+    byte-identically and the retry was a temperature resample of an unchanged
+    question — both E0277 units of run `275772-425da59c` (2026-08-19) sent
+    the SAME prompt sha on attempts 1 and 2 (18:48:29 and 18:58:59) while
+    other units' attempt-2 prompts differed, and each burned its whole fix
+    loop on it. The negative control is the first attempt: no previous error,
+    no LAST_ERROR section — which is also what guarantees attempt 2's prompt
+    can never equal attempt 1's."""
+    ws = _setup(monkeypatch, tmp_path)
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return RESPONSE_BOTH
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error[E0308]: mismatched types --> src/lib.rs:4",
+                    [diag("src/lib.rs", code="E0308")]))
+    _run(ws)
+    impl_prompts = [p for p in prompts if "TARGET_IMPL_BLOCK" in p]
+    assert len(impl_prompts) >= 2, "the fix loop must have retried"
+    first, second = impl_prompts[0], impl_prompts[1]
+    assert "<LAST_ERROR>" not in first, \
+        "attempt 1 has no previous attempt to report"
+    assert "<LAST_ERROR>" in second, \
+        "attempt 2 dropped the errors attempt 1 produced"
+    section = second.split("<LAST_ERROR>", 1)[1].split("</LAST_ERROR>", 1)[0]
+    assert "error" in section.lower()
+    assert first != second
+
+
 def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
     # B3: crate still has a PRE-EXISTING error elsewhere, but this
     # block's fill adds no NEW error and none lands on the filled fns →
@@ -679,6 +717,41 @@ def test_file_first_attempt_budget_is_bounded(monkeypatch, tmp_path):
     # loop. The exact fallback count is not the contract; the cap is.
     assert len(calls) >= 2
     assert (ws / "src" / "lib.rs").read_text().count("unimplemented!()") == 2
+
+
+def test_file_first_skips_the_byte_identical_resample(monkeypatch, tmp_path):
+    """An attempt whose rebuilt prompt equals the previous attempt's is a
+    temperature resample, not a retry — no new information reaches the model.
+    The route retries on `prior_error` and has no repeated-signature exit, so
+    an identical revert reason looped it verbatim: `src/ensure.rs::render`
+    sent the SAME prompt sha on attempts 2 and 3 (2026-08-19, 19:45:30 and
+    19:53:41 UTC; attempt 1 differed), reverted all three times on the
+    identical 11-test newly-red list, then fell back to per-block anyway.
+    With the error identical every attempt, exactly ONE feedback-carrying
+    prompt goes out (attempt 2); attempt 3 is skipped. Pre-fix this counted 2."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    calls: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        calls.append(prompt)
+        return RESPONSE_TWO
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "3")
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error[E0432]: unresolved import `crate::Nope`",
+                    [diag("src/lib.rs", code="E0432")]))
+    _run(ws)
+    feedback = "Your last attempt at this file failed:"
+    with_feedback = [p for p in calls if feedback in p]
+    assert len(with_feedback) == 1, (
+        "an unchanged error must buy ONE feedback-carrying retry, not a "
+        f"byte-identical resample per remaining attempt (got "
+        f"{len(with_feedback)})")
 
 
 IMPL_LIB_FREE = """\

@@ -93,6 +93,22 @@ class TddFloor:
     # Defaulted so a floor written by an older build parses (`from_dict` is
     # total by design and an absent cursor simply means "start the pass").
     attempted: tuple[str, ...] = ()
+    # The subset of `attempted` on which a SEMANTIC change actually landed —
+    # the unit's on-disk body differed after the batch that dispatched it.
+    # The cursor alone marks ATTEMPTED at dispatch, and a completed pass read
+    # off it silently claims every unit was TRIED; the pass that closed the
+    # 2026-08-19 crawl says otherwise, batch by batch: byte-identical
+    # re-authors (`src/error.rs::source` — a traversal step — plus three
+    # `construct_from_*` producers), compile-failed peels that left the old
+    # body in place (`src/context.rs::source`, the severed `None`, peeled
+    # with its whole file), and the immutable test-oracle producers skipped
+    # by rule every pass. A flat sweep after such a pass refutes the
+    # escalation theory ONLY for the landed subset; without this record the
+    # "genuine plateau" verdict is pronounced over a denominator roughly
+    # half of which was never re-tried. Persisted with the cursor, under the
+    # cursor's identity rule, so the one-batch-per-relaunch crawl accumulates
+    # it across processes.
+    landed: tuple[str, ...] = ()
     # The futility evidence: per failing test, the frontier unit-set
     # (`"<file>::<fn>"`) the LAST sweep attributed to it. The escalation's
     # trigger is "this test's attributed units are UNCHANGED across two judged
@@ -115,6 +131,7 @@ class TddFloor:
                 "stall": self.stall, "tree_sha": self.tree_sha,
                 "oracle_size": self.oracle_size, "code_id": self.code_id,
                 "attempted": list(self.attempted),
+                "landed": list(self.landed),
                 "futile_units": {t: list(units)
                                  for t, units in self.futile_units}}
 
@@ -137,6 +154,8 @@ class TddFloor:
                 code_id=str(raw["code_id"]),
                 attempted=tuple(
                     str(k) for k in (raw.get("attempted") or ())),
+                landed=tuple(
+                    str(k) for k in (raw.get("landed") or ())),
                 futile_units=tuple(sorted(
                     (str(t), tuple(str(u) for u in units))
                     for t, units in _fut.items()
@@ -160,6 +179,11 @@ class FloorResume:
     # The open pass's cursor. ``None`` means "open a fresh pass"; an empty
     # tuple is a resumed pass that happened to have dispatched nothing.
     attempted: tuple[str, ...] | None = None
+    # The cursor's landed-change record: which of `attempted` actually took a
+    # semantic body change. Rides the cursor — same identity rule, same
+    # lifetime — so a pass spread across relaunches can state its effective
+    # coverage when it closes. ``None`` exactly when `attempted` is None.
+    landed: tuple[str, ...] | None = None
     # The futility evidence, resumed on the CURSOR's identity rule (cluster +
     # code_id, never the oracle or the tree): like the cursor it is a record
     # of what this cluster's dispatches already established, not a claim
@@ -297,6 +321,7 @@ def resume_floor(
         _futility = saved.futile_units if _carry else None
         return FloorResume(
             stall=None, best_pass=None, attempted=_cursor,
+            landed=saved.landed if _carry else None,
             futility=_futility,
             note=why + " changed"
             + (f"; pass cursor resumed at {len(_cursor)} unit(s) anyway — a "
@@ -317,6 +342,7 @@ def resume_floor(
     if saved.tree_sha != tree_sha:
         return FloorResume(
             stall=saved.stall, best_pass=None, attempted=saved.attempted,
+            landed=saved.landed,
             futility=saved.futile_units or None,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
@@ -329,6 +355,7 @@ def resume_floor(
     return FloorResume(
         stall=saved.stall, best_pass=saved.best_pass,
         attempted=saved.attempted,
+        landed=saved.landed,
         futility=saved.futile_units or None,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
               + (f" pass cursor={len(saved.attempted)} unit(s)"

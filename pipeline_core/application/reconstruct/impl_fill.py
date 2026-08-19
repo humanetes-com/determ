@@ -731,6 +731,7 @@ def fill_impl_blocks(
             txt for loc, txt in (crash_evidence or {}).items()
             if loc.file == file_rel))
         prior_error = ""
+        _prev_prompt: str | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
             # TYPES_IN_SCOPE selected over the WHOLE file, which is this
             # route's unit — the per-impl path searches one block's member
@@ -750,6 +751,26 @@ def fill_impl_blocks(
                 module_name=module_name, cluster_name=cluster_name,
                 gotchas=_gotchas_summary(), types_section=_file_types,
                 invariants_section=invariants_section)
+            # A rebuilt prompt byte-identical to the previous attempt's is a
+            # temperature resample, not a retry: every input — the snapshot,
+            # the plan, and above all `prior_error` — came out the same, so no
+            # new information reaches the model. This route retries on the
+            # feedback in `prior_error` and has no repeated-signature exit, so
+            # an identical revert reason looped it verbatim:
+            # `src/ensure.rs::render` sent the SAME prompt sha on attempts 2
+            # and 3 (2026-08-19 19:45:30 and 19:53:41 UTC; attempt 1
+            # differed), reverted all three times on the identical 11-test
+            # newly-red list, then fell back to per-block anyway.
+            if prompt == _prev_prompt:
+                _log(f"  [phase-c/file] {glabel}: attempt {_attempt} rebuilt "
+                     "a byte-identical prompt — the revert feedback did not "
+                     "change, so another call buys a temperature resample of "
+                     "the same question; falling back to per-block fills.")
+                _emit("phase_c.file.fill.resample_skipped", data={
+                    "cluster": cluster_name, "file": file_rel, "group": glabel,
+                    "attempt": _attempt})
+                return
+            _prev_prompt = prompt
             _log(f"  [phase-c/file] {glabel}: file-first fill "
                  f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
                  f"{len(refill_names)} re-fill(s), "
@@ -1519,6 +1540,14 @@ def fill_impl_blocks(
                     dispatch_family=dispatch_family_section, siblings=siblings_section,
                     blueprint=_blueprint_slice,
                     crash_evidence=_block_crash_evidence,
+                    # The previous attempt's own errors, as a section the model
+                    # reads — not just as TYPES_IN_SCOPE re-selection input.
+                    # Without it, an error naming no new types rebuilt attempt
+                    # 1's prompt byte-identically and attempt 2 was a
+                    # temperature resample (both E0277 units of run
+                    # `275772-425da59c`, 2026-08-19: same prompt sha on both
+                    # attempts, identical error, whole fix loop spent).
+                    last_error=last_error_excerpt or "",
                     bound_methods=_bound_methods_section_for(
                         _block_where, _crate_type_records)),
                 fr_path=fr_path,

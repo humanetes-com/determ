@@ -760,6 +760,71 @@ def test_post_merge_reproduced_breach_restores_then_resweeps(
     assert any("re-based" in ln for ln in fake.logs)
 
 
+def test_post_merge_batch_that_breaks_a_cfg_world_is_reverted(
+        tmp_path: Path, monkeypatch) -> None:
+    """The second cfg-world seam: a fill written INTO the merged tree passes
+    only default-world gates (the engine's splice check, the sweep), so a
+    body reading an item another world's cfg removes ships clean and
+    surfaces at task3 — one boundary after the merge-time world check. The
+    gate is per batch: a divergent world that was green and went red after
+    the batch convicts the batch fns its own compiler implicates."""
+    c1, c2 = _cluster(), _cluster("nightly")
+    c2.env_extra = {"RUSTFLAGS": "--cfg error_generic_member_access"}
+    key = ("src/lib.rs", "foo")
+    flat = (101, "test result: FAILED. 3 passed; 2 failed")
+    fake = FakeAdapter(
+        clusters_list=[c1, c2],
+        # baseline world check green; iter1 sweep flat; post-batch world
+        # check RED; post-revert recheck green; iter2 sweep flat + world
+        # green; iter3 sweep flat → plateau exit.
+        run_results=[(0, "ok"), flat, (101, "error[E0609]: no field"),
+                     (0, "ok"), flat, (0, "ok"), flat],
+        attribute_seq=[({key: {"t"}}, FailureKind.RUNTIME)] * 3,
+        diag_results=[(101, "error[E0609]: no field",
+                       [_Diag("src/lib.rs", "E0609", "no field")])],
+        implicated=[key],
+    )
+    reverts: list[list] = []
+    monkeypatch.setattr(
+        StaticSkeletonTask2Generator, "_revert_implicated",
+        lambda self, tag, implicated, *a, **k: (
+            reverts.append(list(implicated)), len(implicated))[1])
+    pd = _make_project(tmp_path, [c1, c2])
+    _post(fake, pd, _cfg(per_fn=True, tdd=True))
+    assert "post_merge.world_broken_by_batch" in fake.events
+    data = dict(fake.event_data)["post_merge.world_broken_by_batch"]
+    assert data["world"] == "nightly"
+    assert reverts == [[key]], (
+        "the batch fn the red world's compiler implicates must be reverted "
+        "— the default-world splice gate accepted a body one world cannot "
+        "build")
+
+
+def test_post_merge_world_red_at_entry_is_inherited_not_relitigated(
+        tmp_path: Path, monkeypatch) -> None:
+    """A world already red when the loop starts was broken upstream (the
+    merge-time check names it); charging every later batch with it would
+    revert innocent fills each iteration."""
+    c1, c2 = _cluster(), _cluster("nightly")
+    c2.env_extra = {"RUSTFLAGS": "--cfg error_generic_member_access"}
+    key = ("src/lib.rs", "foo")
+    flat = (101, "test result: FAILED. 3 passed; 2 failed")
+    red = (101, "error[E0609]: no field")
+    fake = FakeAdapter(
+        clusters_list=[c1, c2],
+        # baseline RED; every post-batch check stays red.
+        run_results=[red, flat, red, flat, red, flat],
+        attribute_seq=[({key: {"t"}}, FailureKind.RUNTIME)] * 3,
+    )
+    monkeypatch.setattr(
+        StaticSkeletonTask2Generator, "_revert_implicated",
+        lambda self, *a, **k: (_ for _ in ()).throw(
+            AssertionError("an inherited world break convicted a batch")))
+    pd = _make_project(tmp_path, [c1, c2])
+    _post(fake, pd, _cfg(per_fn=True, tdd=True))
+    assert "post_merge.world_broken_by_batch" not in fake.events
+
+
 def test_validate_reverts_every_same_name_fn(tmp_path: Path) -> None:
     """`fmt` lives in several impls; the bare-name implication must revert
     every occurrence, not just the first."""
