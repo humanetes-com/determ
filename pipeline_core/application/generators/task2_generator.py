@@ -47,6 +47,7 @@ from ...domain.attribution import FailureFrontier, FailureKind
 from ...domain.cfg import CfgSet
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
+from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH, take_batch
 from ...domain.generation import (
     GenerationRequest,
     SkeletonConfig,
@@ -1054,7 +1055,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
     def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
                                filled_dir: Path,
-                               donor_clusters: Sequence[str] = ()) -> None:
+                               donor_clusters: Sequence[str] = (),
+                               skeleton_dir: Path | None = None) -> None:
         """Reinstall every AUTHORED layout definition the live tree is missing.
         Silent no-op on a healthy tree (nothing is superseded), so this reads a
         handful of files per cluster start and never rewrites a filled body.
@@ -1157,11 +1159,31 @@ class StaticSkeletonTask2Generator(Task2Generator):
             f"{sum(len(v) for v in plan.values())} authored definition(s) into "
             f"{written} live file(s)" + (f"; ERROR: {err}" if err else "")
             + " — the tree was building a layout the store had superseded.")
-        if _rc_before != 0:
-            return
-        _rc_after, _out_after, _ = self.cargo.run_check_diag(
+        _rc_after, _out_after, _diags_after = self.cargo.run_check_diag(
             _check, filled_dir, _env, 180)
         if _rc_after == 0:
+            return
+        if _rc_before != 0:
+            # The rollback rule below cannot judge a reinstall on a tree that
+            # was already red — and stopping here left the destruction
+            # unpaired: the adopted definitions stood while every body
+            # written against the superseded ones was left in place for the
+            # compiler to find. The wreckage then presents as file-level
+            # errors that resolve to no fn (a cast in a macro definition, a
+            # top-level item), pre-pass-heal's fn-scoped reader reverts
+            # nothing, and the cluster pays with its whole run: `nightly` in
+            # run `3579062-476abc3b` (2026-08-19) took `E0605` at
+            # src/backtrace.rs:21 plus unresolved-import cascades in every
+            # test file, three heal rounds reverted 0 fns, and the TDD loop
+            # closed the cluster with ZERO scored sweeps. Destroy-then-restub
+            # is a pair (the crash/layout retrigger's own rule): re-stub what
+            # the compiler implicates, and give file-level damage file-level
+            # reversion. Scoped to src/ — errors in tests/ and in generated
+            # test files are the oracle (never rewritten) and, for a lib that
+            # does not build, cascades that repairing the lib removes.
+            self._restub_after_reinstall(
+                tag, filled_dir, skeleton_dir, project_dir, cluster,
+                _check, _env, _rc_after, _out_after, _diags_after)
             return
         for _fp, _text in _before.items():
             try:
@@ -1179,6 +1201,69 @@ class StaticSkeletonTask2Generator(Task2Generator):
             "files": sorted(str(p.name) for p in _before),
             "definitions": sum(len(v) for v in plan.values()),
         })
+
+    def _restub_after_reinstall(self, tag: str, filled_dir: Path,
+                                skeleton_dir: Path | None, project_dir: Path,
+                                cluster: Any, check_cmd: str,
+                                env: dict[str, str], rc: int, out: str,
+                                diags: list[Any]) -> None:
+        """The second half of a red-path reinstall: re-stub the bodies the
+        compiler implicates against the adopted definitions, giving file-level
+        damage (errors that resolve to no fn) file-level reversion. Bounded
+        rounds; stops when the tree compiles, when a round reverts nothing, or
+        when every remaining error is outside src/ (oracle content, or test
+        cascades a lib repair removes)."""
+        _skel = skeleton_dir or (project_dir / ".skeleton"
+                                 / getattr(cluster, "name", ""))
+        for _round in range(1, 4):
+            _impl = self.cargo.implicated_fns_from_check(
+                diags, out or "", filled_dir)
+            _fn_targets = [
+                t for t in _impl
+                if t.file.startswith("src/")
+                and not self.gentests.is_gen_tests_file(Path(t.file).name)]
+            _covered = {t.file for t in _fn_targets}
+            _nofn = sorted(
+                {d.file for d in diags
+                 if getattr(d, "file", "")
+                 and d.file.startswith("src/")
+                 and not self.gentests.is_gen_tests_file(Path(d.file).name)}
+                - _covered)
+            _targets = _fn_targets or [FnLocator(f, "") for f in _nofn]
+            if not _targets:
+                self.tel.log(
+                    f"  {tag} [layout-sync] tree still red after the "
+                    "reinstall, but no error lands on repairable src/ "
+                    "content — leaving it to pre-pass-heal (test-file "
+                    "errors are the oracle, or cascades of the lib).")
+                break
+            _n = self._revert_implicated(tag, _targets, filled_dir, _skel,
+                                         project_dir,
+                                         getattr(cluster, "name", ""))
+            self.tel.log(
+                f"  {tag} [layout-sync] round {_round}: re-stubbed/healed "
+                f"{_n} target(s) written against the superseded "
+                "definition(s) — a reinstall is a deliberate destruction "
+                "and travels with its re-stub, like a re-author.")
+            self.tel.emit("phase_c.layout_sync.restubbed", data={
+                "cluster": getattr(cluster, "name", ""), "round": _round,
+                "reverted": _n,
+                "targets": [f"{f}::{fn}" for f, fn in _targets[:12]],
+            })
+            if _n == 0:
+                break
+            rc, out, diags = self.cargo.run_check_diag(
+                check_cmd, filled_dir, env, 180)
+            if rc == 0:
+                self.tel.log(f"  {tag} [layout-sync] tree compiles after "
+                             f"{_round} re-stub round(s).")
+                return
+        if rc != 0:
+            self.tel.log(
+                f"  {tag} [layout-sync] tree STILL red after the reinstall's "
+                "re-stub rounds — first errors: "
+                + "; ".join(line for line in (out or "").splitlines()
+                            if "error" in line)[:300])
 
     def _ensure_blueprint(self, project_dir: Path, module: str,
                           default_cluster: Any, all_test_pairs: list[tuple[str, str]],
@@ -1666,7 +1751,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # the seed invariant is established.
         self._sync_layout_into_tree(
             tag, project_dir, cluster, filled_dir,
-            [d.name for d in (donor_dirs or [])])
+            [d.name for d in (donor_dirs or [])], skeleton_dir=skeleton_dir)
 
         # Debt #36: adopt the shared-fn bodies earlier clusters already accepted
         # (fill ONCE, propagate). Only `unimplemented!()` stubs are replaced, so
@@ -2224,10 +2309,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # merge, leaving a cluster that had scored 93/103 an iteration earlier.
         _baseline_broken = bool(getattr(c_result, "baseline_broken", False))
         if _baseline_broken:
-            self.tel.log(f"  {tag} [skeleton-C] cluster NOT checkpointed — the "
-                         "fill loop stopped on a tree that does not build, so "
-                         "this is an unfinished cluster, not a done one; the "
-                         "next run re-enters it against the same tree.")
+            # The stop reason is a claim about a MOMENT: the validate loop
+            # above runs AFTER the fill loop stopped, and it reverts, heals
+            # and refills. On 2026-08-18 (`nightly`, run `3579062-476abc3b`)
+            # validate had just PASSED when this line asserted the tree "does
+            # not build" — the refusal itself was right (zero scored sweeps
+            # is not a finished cluster), but its premise must be re-read
+            # from the tree, not from the fill loop's exit reason.
+            if validate_ok:
+                self.tel.log(
+                    f"  {tag} [skeleton-C] cluster NOT checkpointed — the "
+                    "fill loop stopped RED with zero scored sweeps; the "
+                    "validate loop has since repaired the tree, but an "
+                    "unscored cluster is unfinished, and the next run "
+                    "re-enters it to score what validate rebuilt.")
+            else:
+                self.tel.log(
+                    f"  {tag} [skeleton-C] cluster NOT checkpointed — the "
+                    "fill loop stopped on a tree that does not build, so "
+                    "this is an unfinished cluster, not a done one; the "
+                    "next run re-enters it against the same tree.")
         return {"ok": not _baseline_broken, "phase_c": c_result,
                 "phase_d": d_result,
                 "validates": validate_ok and not _baseline_broken}
@@ -2504,10 +2605,80 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     project_dir=project_dir, cluster_specs=cluster_specs,
                     successes=successes, prefer_cluster=None,
                 )
+        # The check above (and every build between here and task3 — the
+        # post-merge loop's sweeps, the fix loop's probes) runs the DEFAULT
+        # cfg world only. A body that reads an item the other world's cfg
+        # removes compiles clean through all of them, and the first build
+        # that can even see the error is task3's per-cluster run: measured
+        # 2026-08-19 (run `3579062-476abc3b`), `ErrorImpl::backtrace` read
+        # `vtable.object_backtrace` — a field declared
+        # `#[cfg(all(not(error_generic_member_access), feature = "std"))]` —
+        # so the nightly world failed `E0609` at task3 after a 6-hour
+        # post-merge wave, and task3-retry burned 3 identical rounds on a
+        # structural break. One `cargo check` per divergent cfg world here
+        # converts that class into a merge-time verdict: a red world first
+        # retries with the preference off (same rule as the default-world
+        # check), and what remains red is named NOW, with its world.
+        _red_worlds = self._merged_tree_world_check(project_dir, cluster_specs)
+        if _red_worlds and prefer_cluster and stats.get("preferred"):
+            _wname, _werr = _red_worlds[0]
+            self.tel.log("  [skeleton-merge] preferred merge is red under the "
+                         f"'{_wname}' cfg world — redoing with provenance "
+                         f"gating. First error: {_werr}")
+            self.tel.emit("task2b.merge.preference_reverted", data={
+                "prefer_cluster": prefer_cluster,
+                "preferred_count": len(stats.get("preferred", [])),
+                "error": _werr, "world": _wname,
+            })
+            stats = self.fill.merge_cluster_outputs(
+                project_dir=project_dir, cluster_specs=cluster_specs,
+                successes=successes, prefer_cluster=None,
+            )
+            _red_worlds = self._merged_tree_world_check(
+                project_dir, cluster_specs)
+        for _wname, _werr in _red_worlds:
+            self.tel.log("  [skeleton-merge] MERGED TREE RED under the "
+                         f"'{_wname}' cfg world: {_werr} — the default-world "
+                         "gates cannot see this; task3 will fail it. A body "
+                         "let into a cfg-divergent region compiles in one "
+                         "world only.")
+            self.tel.emit("task2b.merge.world_red", data={
+                "world": _wname, "error": _werr,
+                "prefer_cluster": stats.get("prefer_cluster", ""),
+            })
         if stats.get("items_dropped"):
             self.tel.log("  [skeleton-merge] WARN: merge emitted "
                          f"{stats['items_dropped']} fewer item(s) than its richest "
                          "input held — something was dropped.")
+        self._emit_merge_stats(module, cluster_specs, stats)
+        return stats
+
+    def _merged_tree_world_check(
+            self, project_dir: Path,
+            cluster_specs: dict[str, BuildCluster]) -> list[tuple[str, str]]:
+        """`cargo check` the merged tree under each cluster's OWN cfg world
+        (toolchain + RUSTFLAGS), returning `(cluster, first_error)` for every
+        world that is red. Worlds indistinguishable from the default build
+        (no extra env, no toolchain) are skipped — the default check already
+        ran. A timeout is reported as red: an unverified world is not a
+        verified one."""
+        red: list[tuple[str, str]] = []
+        for _name in sorted(cluster_specs):
+            _c = cluster_specs[_name]
+            if not (_c.env_extra or getattr(_c, "toolchain", None)):
+                continue
+            rc, out = self.cargo.run(
+                self._cluster_check_cmd(_c), project_dir,
+                self._cluster_env(_c),
+                timeout=self.cfg.post_merge_test_timeout)
+            if rc != 0:
+                red.append((_name, _first_error_line(out)
+                            if rc != -1 else "check timed out (UNVERIFIED)"))
+        return red
+
+    def _emit_merge_stats(self, module: str,
+                          cluster_specs: dict[str, BuildCluster],
+                          stats: dict[str, Any]) -> None:
         self.tel.emit("task2b.merge", data={
             "module": module,
             "clusters": sorted(cluster_specs),
@@ -2521,7 +2692,6 @@ class StaticSkeletonTask2Generator(Task2Generator):
             "prefer_cluster": stats.get("prefer_cluster", ""),
             "preferred": list(stats.get("preferred", []))[:200],
         })
-        return stats
 
     def _reopen_stale_cluster(self, project_dir: Path, module: str, cluster: str,
                               clusters: Sequence[BuildCluster]) -> bool:
@@ -2636,6 +2806,26 @@ class StaticSkeletonTask2Generator(Task2Generator):
         best_fail = None
         iter_n = 0
         measured_any = False
+        # Bound the bet. This loop handed the engine the WHOLE eligible
+        # frontier with no mid-wave sweep (`skip_end_pass_test=True`,
+        # `max_passes=1`), so one iteration was one unbounded wager judged by
+        # a single reading: run `3579062-476abc3b` (2026-08-18/19) dispatched
+        # a 38-fn frontier at 21:08, the engine's routes widened it to 120
+        # landed fills by 03:08, the next sweep read a crash (34 of >=130
+        # reporting), and the ratchet discarded all ~6 GPU-hours as a unit
+        # with nothing in the record saying which fill did it. The cap slices
+        # the frontier exactly as task2a's does (`domain/dispatch_batch.py`),
+        # and the stall budget then charges per completed traversal, not per
+        # iteration — the re-denomination task2a shipped with its cap, and
+        # the rule the 2026-08-18 plateau close re-taught cross-process.
+        # 0 disables (pre-cap behaviour).
+        _dispatch_cap = int(os.getenv("POST_MERGE_MAX_DISPATCH",
+                                      str(DEFAULT_MAX_DISPATCH)))
+        _pass_attempted: set[FnLocator] = set()
+        _pass_cohort: tuple[FnLocator, ...] | None = None
+        _prev_pass_completed = True
+        _dispatched_ever: set[FnLocator] = set()
+        _just_restored = False
 
         def _snapshot_merged(pass_count: int, fail_count: int) -> None:
             """Replace `.best_tree/_merged/` only by beating what is stored.
@@ -2750,20 +2940,98 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 best_pass = pass_count
                 best_fail = fail_count
                 stall = 0
+                _just_restored = False
+                # A better tree reopens the frontier — the traversal in
+                # progress was planned against a worse one.
+                _pass_attempted.clear()
+                _pass_cohort = None
                 _snapshot_merged(pass_count, fail_count)
+            elif _just_restored and best_pass > 0 and pass_count < best_pass:
+                # The RESTORED tree re-measured below the floor: the
+                # high-water describes a tree this loop cannot get back by
+                # restoring (the slot already gave its answer). Re-base and
+                # judge the re-climb from reality — restoring again would
+                # loop restore -> sweep -> restore past every exit (the
+                # `continue` above skips the plateau check). task2a's
+                # high-water re-base, one stage later.
+                self.tel.log(f"  {tag} post-merge iter {iter_n}: high-water "
+                             f"re-based {best_pass} -> {pass_count} — the "
+                             "restored tree measures this; the re-climb is "
+                             "judged from here (snapshot slot keeps the "
+                             "better tree for the exit).")
+                self.tel.emit("post_merge.highwater_rebased", data={
+                    "iter": iter_n, "stale_best": best_pass,
+                    "new_best": pass_count})
+                best_pass = pass_count
+                best_fail = fail_count
+                _just_restored = False
+                if _prev_pass_completed:
+                    stall += 1
             else:
-                stall += 1
+                # A flat (not below-floor) sweep after a restore means the
+                # restore took; the re-base branch above is armed only for
+                # the sweep immediately judging a restored tree.
+                _just_restored = False
+                # Charge the stall only after a completed traversal: a
+                # non-improving sweep that followed a MID-PASS batch has not
+                # run the fills the question is about (task2a's rule, and the
+                # rule the 2026-08-18 plateau close re-taught).
+                if _prev_pass_completed:
+                    stall += 1
                 if best_pass > 0 and pass_count < best_pass:
-                    # Below the floor: the fills this iteration made things
-                    # worse. task2a restores here and always has; task2c kept
-                    # `best_pass` only to compute `improved`, so it ended on
-                    # whatever its last iteration happened to produce.
-                    restored = restore_merged_best_tree(project_dir)
-                    if restored:
-                        self.tel.emit("post_merge.tree_restored", data={
-                            "iter": iter_n, "pass_count": pass_count,
-                            "best_pass": best_pass, "files": len(restored),
-                        })
+                    # Below the floor. A crashed binary removes numerator and
+                    # denominator together, so a single below-floor reading
+                    # can be pure noise — and it convicted this loop's whole
+                    # 120-fill wave THREE times on the same crash (run
+                    # `3579062-476abc3b`: 106 -> "32/2" with 96 tests
+                    # announced-but-silent). task2a's rule: re-sweep the
+                    # UNCHANGED tree and only a reproduced breach earns the
+                    # destructive restore.
+                    _rc2, _out2 = self.cargo.run(
+                        test_cmd, project_dir, self.cargo.env(),
+                        timeout=test_timeout)
+                    _p2, _f2, _ = parse_test_counts(_out2)
+                    if _rc2 != -1 and _p2 >= best_pass:
+                        self.tel.log(
+                            f"  {tag} post-merge iter {iter_n}: breach "
+                            f"(pass_count {pass_count}<{best_pass}) NOT "
+                            f"reproduced on re-sweep ({_p2} passing) — "
+                            "keeping the tree (crash-noise reading).")
+                        self.tel.emit("post_merge.breach_not_reproduced",
+                                      data={"iter": iter_n,
+                                            "first": pass_count,
+                                            "resweep": _p2})
+                        # The re-sweep is the honest reading; the stall
+                        # charge above described the noise.
+                        rc, output = _rc2, _out2
+                        pass_count, fail_count = _p2, _f2
+                        gap = find_unreported_tests(output)
+                        if _p2 > best_pass:
+                            best_pass, best_fail, stall = _p2, _f2, 0
+                            _pass_attempted.clear()
+                            _pass_cohort = None
+                            _snapshot_merged(_p2, _f2)
+                        elif _prev_pass_completed and stall > 0:
+                            stall -= 1
+                    else:
+                        restored = restore_merged_best_tree(project_dir)
+                        if restored:
+                            self.tel.emit("post_merge.tree_restored", data={
+                                "iter": iter_n, "pass_count": pass_count,
+                                "best_pass": best_pass,
+                                "files": len(restored),
+                            })
+                            # The sweep in hand measured the DISCARDED tree;
+                            # attributing fills from it aims at ghosts and
+                            # exhausts units on a mismatch (recorded: the
+                            # loop filled the restored tree from the crashed
+                            # wave's attribution). Re-enter for a fresh sweep
+                            # of the tree that is actually on disk.
+                            _pass_attempted.clear()
+                            _pass_cohort = None
+                            _prev_pass_completed = True
+                            _just_restored = True
+                            continue
 
             _attr = self.cargo.attribute_failures(
                 output, project_dir, recently_filled, test_reverse_map, "merged",
@@ -2803,12 +3071,19 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # (`domain/plateau.py` — the raw comparison fired on the FIRST
             # sweep at 0); the hard-cap backstop still bounds the loop.
             if plateau_exit_due(stall, max_stalls):
+                # Convict only what was actually dispatched — a unit a capped
+                # batch never attempted was refused, not judged (the same
+                # narrowing the TDD loop's stall exit carries).
+                _convictable = set(eligible) & _dispatched_ever
+                _spared_n = len(eligible) - len(_convictable)
                 self.tel.log(f"  {tag} post-merge iter {iter_n}: pass_count plateau "
                              f"{stall} iter(s) at best={best_pass}; stopping "
-                             f"({len(eligible)} fn(s) still on frontier — marking "
-                             "exhausted). best pass="
-                             f"{best_pass} fail={best_fail}.")
-                for _stuck_key in eligible:
+                             f"({len(_convictable)} of {len(eligible)} frontier "
+                             "fn(s) were dispatched — those are marked exhausted"
+                             + (f"; {_spared_n} never dispatched, left admitted"
+                                if _spared_n else "")
+                             + f"). best pass={best_pass} fail={best_fail}.")
+                for _stuck_key in _convictable:
                     permanently_exhausted.add(_stuck_key)
                 self.tel.emit("post_merge.fill.iter", data={
                     "iter": iter_n, "rc": rc, "frontier_size": len(eligible),
@@ -2831,15 +3106,25 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 })
                 continue
 
+            _ordered = list(eligible.keys())
+            if _pass_cohort is None:
+                _pass_cohort = tuple(_ordered)
+            _batch = take_batch(_ordered, _pass_attempted, _dispatch_cap,
+                                cohort=_pass_cohort)
+            _batch_keys = set(_batch.keys)
+            _batch_eligible = {k: eligible[k] for k in _batch.keys}
             self.tel.log(f"  {tag} post-merge iter {iter_n}: cargo test rc={rc} "
                          f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
                          f"(improved={improved}, stall={stall}/{max_stalls}); "
-                         f"frontier={len(eligible)} fn(s) ({kind}).")
+                         f"frontier={len(eligible)} fn(s) ({kind}); "
+                         f"dispatching {_batch.rendered}.")
             self.tel.emit("post_merge.fill.iter", data={
                 "iter": iter_n, "rc": rc,
                 "frontier_size": len(eligible), "kind": kind,
                 "pass_count": pass_count, "fail_count": fail_count,
                 "improved": improved, "stall": stall,
+                "dispatched": len(_batch.keys),
+                "pass_completed": _batch.completes_pass,
             })
             sub = self.fill.fill_fns_one_by_one(
                 project_dir=project_dir,
@@ -2859,15 +3144,23 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 max_passes=1,
                 leaf_name_counts=leaf_counts,
                 fr_path=fr_path,
-                tdd_frontier_keys=set(eligible.keys()),
+                tdd_frontier_keys=_batch_keys,
                 tdd_frontier_tests=FailureFrontier.build(
-                    eligible, _attr.convicting),
+                    _batch_eligible, _attr.convicting),
                 tdd_test_cmd=test_cmd,         # Plan 10 U2
                 skip_end_pass_test=True,
             )
+            _pass_attempted = (set() if _batch.completes_pass
+                               else _pass_attempted | _batch_keys)
+            if _batch.completes_pass:
+                _pass_cohort = None
+            _prev_pass_completed = _batch.completes_pass
+            _dispatched_ever |= _batch_keys
             cur_stubs = set(self.fill.scan_unimplemented_functions(project_dir / "src"))
+            # Both loops below are scoped to the BATCH: a unit the cap
+            # withheld this iteration was neither filled nor refused.
             newly_filled: list[FnLocator] = [
-                k for k in eligible
+                k for k in _batch_keys
                 if k not in cur_stubs
                 and (k[0].split("/")[-1], k[1]) not in cur_stubs
             ]
@@ -2875,7 +3168,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 recently_filled.append(k)
             if len(recently_filled) > recently_filled_max:
                 recently_filled = recently_filled[-recently_filled_max:]
-            for key in eligible:
+            for key in _batch_keys:
                 if key in cur_stubs or (key[0].split("/")[-1], key[1]) in cur_stubs:
                     permanently_exhausted.add(key)
             self.tel.log(f"  {tag} post-merge iter {iter_n}: "

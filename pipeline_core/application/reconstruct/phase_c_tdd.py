@@ -451,6 +451,13 @@ def run_phase_c_tdd(
     # stall exit may convict only units that were dispatched AND judged
     # inside the stalled window, not everything left standing.
     _dispatched_window: list[frozenset[FnLocator]] = []
+    # The resumed floor cursor's units, for the same stall-exit accounting.
+    # Under the one-batch-per-relaunch crawl a traversal spans processes, so
+    # the units the RECORD says this traversal already dispatched (all judged
+    # flat — an improvement clears cursor and streak together) live here, not
+    # in the ring above, whose trim to the last `max_stalls` fill passes
+    # would drop them. Cleared wherever the cursor is.
+    _resumed_cursor_window: frozenset[FnLocator] = frozenset()
     # Consecutive red-build sweeps with an IDENTICAL compile digest. Three in
     # a row means two full fill passes changed nothing about why the cluster
     # cannot compile — spending the stall budget on it buys 0/oracle sweeps
@@ -1464,6 +1471,38 @@ def run_phase_c_tdd(
                 _pass_attempted = {
                     FnLocator(_f, _fn) for _f, _, _fn
                     in (k.partition("::") for k in _resume.attempted) if _fn}
+                # A non-empty cursor IS a mid-pass statement: the previous
+                # process stopped between batches of one traversal. Two
+                # process-local defaults contradicted that record and together
+                # closed a cluster one batch short of its first complete
+                # escalated pass (runs `3455951-a98b2182`/`3516315-d13ac998`/
+                # `3579062-476abc3b`, 2026-08-18: cursor walked 12 -> 24 -> 36
+                # of 43, then the plateau exit fired at the NEXT relaunch's
+                # iter 1 printing "0 of 43 ... dispatched in the stalled
+                # window" while the floor read 36/43):
+                #   - `_prev_pass_completed` initialises True, so the resumed
+                #     flat sweep charged the stall budget even though the
+                #     fills the question is about (the rest of the cohort)
+                #     had not been dispatched yet. Seed it False; the
+                #     mid-pass exemption below then restores the streak, and
+                #     the budget counts completed traversals across processes
+                #     exactly as it does within one. The exemption dies with
+                #     the cursor: a completed or abandoned pass persists an
+                #     empty `attempted`, which does not reach this branch.
+                #   - `_dispatched_window` starts empty, so a stop firing
+                #     before this process's first fill pass asserted that
+                #     nothing was dispatched in the stalled window — an
+                #     untruth about the record. The cursor's units were
+                #     dispatched inside this same traversal, by the processes
+                #     the one-batch-per-relaunch crawl spreads it over, and
+                #     every sweep since judged them flat (an improvement
+                #     clears cursor and streak together) — so the stall
+                #     exit's accounting unions them in. A separate term
+                #     rather than a ring entry: the ring is trimmed to the
+                #     last `max_stalls` FILL PASSES and would silently drop
+                #     the record it exists to report.
+                _prev_pass_completed = False
+                _resumed_cursor_window = frozenset(_pass_attempted)
             # The FOURTH half: the futility evidence. Without it the
             # escalation needs two judged sweeps of THIS process to detect an
             # unchanged unit-set, and the flat-score guard stops a resumed
@@ -1532,6 +1571,7 @@ def run_phase_c_tdd(
         if improved and best_pass > UNSET_PASS:
             _pass_attempted.clear()
             _pass_cohort = None
+            _resumed_cursor_window = frozenset()
         # `best_metric` is -inf until some iter improves, and a compile-broken
         # sweep no longer does — so a cluster whose FIRST sweep cannot build
         # keeps the loop's own initial floor instead of overflowing on
@@ -2760,7 +2800,7 @@ def run_phase_c_tdd(
             # blanket conviction here was the code-surface hole the audit of
             # 2026-08-10 named: 15 fns convicted at run `2219473`'s stable
             # exit, of which iters 3-4 had dispatched zero.
-            _window_keys: set[FnLocator] = set()
+            _window_keys: set[FnLocator] = set(_resumed_cursor_window)
             for _dset in _dispatched_window[-max_stalls:]:
                 _window_keys |= _dset
             _convictable = set(eligible) & _window_keys
@@ -2994,6 +3034,7 @@ def run_phase_c_tdd(
                     _stubs_prev = -1
                     _pass_attempted = set()
                     _pass_cohort = None
+                    _resumed_cursor_window = frozenset()
                     _unmoved = _unmoved.moved()
                     _prev_pass_completed = True
                     _zp_history, _zp_planned, _zp_fired_on = (), None, None

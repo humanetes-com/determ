@@ -386,6 +386,7 @@ def restore_merged_best_tree(project_dir: Path) -> list[str]:
     best = project_dir / BEST_TREE_DIR / MERGED_BEST
     if not best.is_dir():
         return []
+    import os as _os
     import shutil
     restored: list[str] = []
     for src in sorted(best.rglob("*.rs")):
@@ -397,6 +398,13 @@ def restore_merged_best_tree(project_dir: Path) -> list[str]:
         dst = project_dir / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+        # Same freshness bump as `restore_cluster_best_tree`: `copy2` hands
+        # the file the snapshot's mtime, older than cargo's fingerprints, so
+        # without it the next `cargo test` re-runs the DISCARDED tree's
+        # binaries. Measured on THIS slot 2026-08-19 (run `3579062-476abc3b`):
+        # after the 106-tree restore at post-merge iter 2, iters 3 and 4 both
+        # re-read the crashed wave's 32/2 in 1.9s.
+        _os.utime(dst)
         restored.append(str(rel))
     if restored:
         log(f"  [ratchet] restored merged best tree ({len(restored)} file(s), "

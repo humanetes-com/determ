@@ -31,12 +31,21 @@ class _Tel:
         pass
 
 
+@dataclass
+class _Diag:
+    file: str
+
+
 class _Cargo:
     """Scripted `cargo check`: returns each queued rc in turn."""
 
-    def __init__(self, rcs: list[int]) -> None:
+    def __init__(self, rcs: list[int],
+                 diags: list[Any] | None = None,
+                 implicated: list[Any] | None = None) -> None:
         self.rcs = rcs
         self.calls = 0
+        self.diags = diags or []
+        self.implicated = implicated or []
 
     def env(self) -> dict[str, str]:
         return {}
@@ -45,7 +54,15 @@ class _Cargo:
         rc = self.rcs[min(self.calls, len(self.rcs) - 1)]
         self.calls += 1
         return rc, ("error[E0560]: struct has no field named `x`"
-                    if rc else ""), []
+                    if rc else ""), (self.diags if rc else [])
+
+    def implicated_fns_from_check(self, *_a: Any, **_k: Any) -> list[Any]:
+        return list(self.implicated)
+
+
+class _GenTests:
+    def is_gen_tests_file(self, name: str) -> bool:
+        return ".gen_tests_" in name
 
 
 class _Cluster:
@@ -71,12 +88,14 @@ def _gen(cargo: _Cargo, tel: _Tel, plan_file: str) -> _Gen:
     object.__setattr__(gen, "cargo", cargo)
     object.__setattr__(gen, "layout_sync", (_load_surface, _load_records, _apply))
     object.__setattr__(gen, "layout_registry", None)
+    object.__setattr__(gen, "gentests", _GenTests())
     # `plan_layout_reconciliation` is imported into the module under test; the
     # scripted plan is injected by patching it there in the test body.
     return gen
 
 
-def _run(monkeypatch, rcs: list[int], tmp_path: Path) -> tuple[_Tel, Path]:
+def _run(monkeypatch, rcs: list[int], tmp_path: Path,
+         cargo: _Cargo | None = None) -> tuple[_Tel, Path]:
     import pipeline_core.application.generators.task2_generator as mod
 
     src = tmp_path / "filled" / "src"
@@ -87,7 +106,7 @@ def _run(monkeypatch, rcs: list[int], tmp_path: Path) -> tuple[_Tel, Path]:
         mod, "plan_layout_reconciliation",
         lambda *_a, **_k: ({"error.rs": ["def"]}, []))
     tel = _Tel([])
-    gen = _gen(_Cargo(rcs), tel, "error.rs")
+    gen = _gen(cargo or _Cargo(rcs), tel, "error.rs")
     gen._sync_layout_into_tree("[tag]", tmp_path, _Cluster(), tmp_path / "filled")
     return tel, target
 
@@ -110,3 +129,49 @@ def test_an_already_broken_tree_is_not_held_against_the_reinstall(monkeypatch, t
     tel, target = _run(monkeypatch, [101, 101], tmp_path)
     assert target.read_text() == "REINSTALLED\n"
     assert not any("REVERTED" in m for m in tel.lines)
+
+
+def test_a_red_path_reinstall_travels_with_its_restub(monkeypatch, tmp_path):
+    """The 2026-08-19 wreck: on an already-red tree the reinstall stood ALONE
+    — the adopted definitions replaced what bodies elsewhere were written
+    against, the wreckage surfaced as errors resolving to no fn, pre-pass-heal
+    reverted 0 in 3 rounds, and `nightly` closed with zero scored sweeps (run
+    `3579062-476abc3b`). Destroy-then-restub is a pair: the sync itself must
+    re-stub what the compiler implicates against its reinstall."""
+    from pipeline_core.domain.models import FnLocator
+
+    calls: list[list[Any]] = []
+
+    def _fake_revert(self, tag, implicated, filled_dir, skeleton_dir,
+                     project_dir=None, cluster_name=""):
+        calls.append(list(implicated))
+        return len(implicated)
+
+    monkeypatch.setattr(_Gen, "_revert_implicated", _fake_revert)
+    cargo = _Cargo([101, 101, 0],
+                   implicated=[FnLocator("src/backtrace.rs", "capture")])
+    tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
+    assert target.read_text() == "REINSTALLED\n", \
+        "the registry's definition must stand — the bodies answer to it"
+    assert calls and calls[0] == [FnLocator("src/backtrace.rs", "capture")], \
+        "the reinstall was not paired with a re-stub of what it broke"
+    assert any("re-stubbed" in m for m in tel.lines)
+    assert any("compiles after" in m for m in tel.lines)
+
+
+def test_red_path_errors_outside_src_are_left_to_the_oracle(monkeypatch, tmp_path):
+    """Unresolved-import cascades in tests/*.rs are the oracle plus fallout of
+    a lib that does not build — healing them repairs nothing (measured: the
+    overnight rounds targeted only test files and reverted 0). The sync must
+    not touch them, and must say what it left behind."""
+    def _boom(self, *a, **k):  # pragma: no cover - guard
+        raise AssertionError("no src/ target — nothing may be reverted")
+
+    monkeypatch.setattr(_Gen, "_revert_implicated", _boom)
+    cargo = _Cargo([101, 101],
+                   diags=[_Diag("tests/test_source.rs"),
+                          _Diag("tests/test_chain.rs"),
+                          _Diag("src/error.gen_tests_1.rs")])
+    tel, target = _run(monkeypatch, [], tmp_path, cargo=cargo)
+    assert target.read_text() == "REINSTALLED\n"
+    assert any("no error lands on repairable src/" in m for m in tel.lines)

@@ -153,3 +153,44 @@ def test_fill_order_default_cluster_first() -> None:
     # "zdefault" sorts LAST by name but owns the base position.
     out = fill_order([_c("nightly", False), _c("zdefault", True), _c("alpha", False)])
     assert [c.name for c in out] == ["zdefault", "alpha", "nightly"]
+
+
+def test_cfg_world_rules_name_the_atoms_and_the_guard_rule() -> None:
+    """The task3-retry prompt told the model a cluster NAME and left the cfg
+    atoms to inference; the recorded burn (run `3579062-476abc3b`, 2026-08-19)
+    is an unguarded read of a field whose declaration the nightly world's cfg
+    removes — E0609 at task3, re-spliced identically for three rounds. The
+    rules render, per world, what exists and what does not, and the guard
+    rule that a shared body must gate on the SAME predicate."""
+    from pipeline_core.domain.cluster_plan import cfg_world_rules
+    from pipeline_core.domain.models import BuildCluster
+
+    def _c(name: str, active: list[str], excluded: list[str]) -> BuildCluster:
+        return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],
+                            excluded_cfg=excluded, active_cfg=active,
+                            prompt_nightly_rule="")
+
+    out = cfg_world_rules([
+        _c("stable", [], ["error_generic_member_access"]),
+        _c("nightly", ["error_generic_member_access"], []),
+    ])
+    assert "`error_generic_member_access` IS active" in out
+    assert "DO NOT EXIST in this world" in out
+    assert "cfg world `stable`" in out and "cfg world `nightly`" in out
+    assert "SAME predicate" in out, "the guard rule is the actionable half"
+
+
+def test_cfg_world_rules_are_silent_without_divergence() -> None:
+    from pipeline_core.domain.cluster_plan import cfg_world_rules
+    from pipeline_core.domain.models import BuildCluster
+
+    plain = BuildCluster(name="stable", env_extra={},
+                         tarpaulin_exclude_files=[], excluded_cfg=[],
+                         active_cfg=[], prompt_nightly_rule="")
+    assert cfg_world_rules([plain]) == ""
+    one = BuildCluster(name="nightly", env_extra={},
+                       tarpaulin_exclude_files=[], excluded_cfg=[],
+                       active_cfg=["error_generic_member_access"],
+                       prompt_nightly_rule="")
+    assert "SAME predicate" not in cfg_world_rules([one]), \
+        "one listed world has no cross-world guard rule to state"

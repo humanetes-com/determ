@@ -155,8 +155,21 @@ def test_merged_best_tree_is_scoped_and_does_not_wipe_cluster_snapshots(tmp_path
     assert (tmp_path / ".best_tree/nightly/src/lib.rs").read_text() == "cluster body"
 
     (tmp_path / "src/error.rs").write_text("REGRESSED")
+    # Make the snapshot's mtime OLD, like a snapshot taken hours before the
+    # wave: `copy2` preserves it, and cargo's freshness check then re-runs
+    # the DISCARDED tree's binaries against the restored sources. Measured
+    # on THIS slot 2026-08-19 (run `3579062-476abc3b`): post-merge iters 3-4
+    # re-read the crashed wave's 32/2 in 1.9s after the 106-tree restore.
+    import os as _os
+    import time as _time
+    snap = tmp_path / ".best_tree/_merged/error.rs"
+    _os.utime(snap, (_time.time() - 3600, _time.time() - 3600))
+    before = _time.time()
     assert restore_merged_best_tree(tmp_path) == ["src/error.rs"]
     assert (tmp_path / "src/error.rs").read_text() == "good merged body"
+    assert (tmp_path / "src/error.rs").stat().st_mtime >= before - 1, (
+        "the restored file kept the snapshot's mtime — invisible to cargo's "
+        "fingerprint check, so the next sweep measures the discarded tree")
     assert (tmp_path / ".best_tree/nightly/src/lib.rs").exists()
 
 

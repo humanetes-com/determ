@@ -254,6 +254,84 @@ def test_the_pass_cursor_survives_an_oracle_size_change_across_the_stop(
         "cleared the cursor the resume had just handed over")
 
 
+def test_a_relaunch_crawl_cannot_plateau_close_mid_pass(
+        tmp_path, monkeypatch) -> None:
+    """THE FIX for the 2026-08-18 close: under the guard's one-batch-per-
+    relaunch regime every process stops after its single dispatch, so the
+    stall streak was charged at each relaunch's flat first sweep — a sweep
+    that measures a MID-PASS batch, exactly what the in-process exemption
+    refuses to charge. Three relaunches walked the persisted cursor
+    12 -> 24 -> 36 of 43 and the fourth fired `pass_count plateau 3 iter(s)`
+    at iter 1, printing `0 of 43 ... dispatched in the stalled window` while
+    the floor read 36/43 (runs `3455951-a98b2182`/`3516315-d13ac998`/
+    `3579062-476abc3b`) — the first complete escalated pass closed one batch
+    short.
+
+    Here: cap 10 over 30 units, guard at 2 identical readings, budget 3.
+    Pre-fix the plateau line appears once the cursor has walked ONE
+    traversal (three false mid-pass charges); post-fix a resumed non-empty
+    cursor seeds `_prev_pass_completed=False`, the exemption restores the
+    streak across the process boundary, and the exit needs flat COMPLETED
+    traversals — so every unit is dispatched at least twice before the stop
+    can fire. The in-process twin of this claim is
+    `test_capped_run_spends_the_same_traversals_not_the_same_iterations`."""
+    floor: dict = {}
+    all_batches: list[tuple[FnLocator, ...]] = []
+    plateau_at: int | None = None
+    for relaunch in range(1, 13):
+        logs: list[str] = []
+        batches: list[tuple[FnLocator, ...]] = []
+        _run(_deps(logs=logs, batches=batches, cargo_calls=[], floor=floor),
+             tmp_path, monkeypatch, cap="10", guard="2", max_stalls="3")
+        all_batches.extend(batches)
+        if any("plateau" in ln for ln in logs):
+            plateau_at = relaunch
+            break
+    assert plateau_at is not None, (
+        "the crawl must still terminate — the exemption may defer the "
+        "plateau exit, never delete it")
+    counts: dict[FnLocator, int] = {}
+    for b in all_batches:
+        for k in b:
+            counts[k] = counts.get(k, 0) + 1
+    assert set(counts) == set(_FRONTIER), (
+        "the plateau exit closed the cluster before the first complete pass "
+        "— the recorded 2026-08-18 close, one batch short of the cohort")
+    assert min(counts.values()) >= 2, (
+        f"pre-fix shape: mid-pass relaunch sweeps charged the stall, so the "
+        f"exit fired after {min(counts.values())} traversal(s) instead of "
+        "flat COMPLETED traversals (unit counts: "
+        f"{sorted(counts.values())})")
+
+
+def test_a_stop_with_a_resumed_cursor_reports_the_record_not_the_process(
+        tmp_path, monkeypatch) -> None:
+    """The stop line's window accounting. A relaunch that resumes a mid-pass
+    cursor, completes the pass with its own batch, and then legitimately
+    fires the exit must count the cursor's units as dispatched-in-window
+    rather than asserting `0 of N` about a traversal the record shows at
+    20/30. The recorded lie: `0 of 43 frontier fn(s) were dispatched in the
+    stalled window` printed while the persisted cursor read 36/43."""
+    floor: dict = {}
+    # Two relaunches walk the cursor to 20 of 30.
+    for _ in range(2):
+        _run(_deps(logs=[], batches=[], cargo_calls=[], floor=floor),
+             tmp_path, monkeypatch, cap="10", guard="2", max_stalls="99")
+    # Third relaunch: resumes attempted=20, dispatches the last 10 (pass
+    # completes), and its second flat sweep charges the streak. With the
+    # budget at 1 the exit fires in THIS process — the one holding both the
+    # resumed cursor and its own batch in the window.
+    logs: list[str] = []
+    _run(_deps(logs=logs, batches=[], cargo_calls=[], floor=floor),
+         tmp_path, monkeypatch, cap="10", guard="0", max_stalls="1")
+    stop = [ln for ln in logs if "plateau" in ln and "stopping" in ln]
+    assert stop, "the exit must fire once the completed pass stays flat"
+    assert "30 of 30" in stop[0], (
+        f"the stop counted only process-local dispatch: {stop[0]!r} — the "
+        "resumed cursor's 20 units were dispatched in this same traversal "
+        "and the line must read the record")
+
+
 def test_negative_control_the_traversal_precondition_reproduces_the_burn(
         tmp_path, monkeypatch) -> None:
     """The case above with the PRE-FIX rule injected — the stop withheld until

@@ -296,6 +296,42 @@ def fill_order(clusters: Iterable[BuildCluster]) -> list[BuildCluster]:
     return sorted(clusters, key=lambda c: (not c.is_default, c.name))
 
 
+def cfg_world_rules(clusters: Iterable[BuildCluster]) -> str:
+    """The cfg-atom facts a repair prompt needs when the artifact is ONE tree
+    that every cluster compiles: per cluster, which predicates are active and
+    which are absent, plus the guard rule that follows.
+
+    The task3-retry prompt previously carried the cluster NAMES and a macro
+    table only, so the model was told a word and left to infer its cfg atoms
+    — and the recorded burn is a body reading a field declared
+    `#[cfg(all(not(error_generic_member_access), feature = "std"))]` from an
+    unguarded context: it compiled in the default world, failed `E0609` under
+    `--cfg error_generic_member_access`, and task3-retry re-spliced the same
+    two fns for three identical rounds with the mismatch never named in the
+    prompt (run `3579062-476abc3b`, 2026-08-19)."""
+    parts: list[str] = []
+    listed = [c for c in sorted(clusters, key=lambda c: c.name)
+              if (getattr(c, "active_cfg", None)
+                  or getattr(c, "excluded_cfg", None))]
+    for c in listed:
+        lines = [f"- cfg world `{c.name}`:"]
+        for p in sorted(c.active_cfg or []):
+            lines.append(f"    `{p}` IS active — `#[cfg({p})]` items exist; "
+                         f"`#[cfg(not({p}))]` items DO NOT.")
+        for p in sorted(c.excluded_cfg or []):
+            lines.append(f"    `{p}` is NOT active — `#[cfg({p})]` items DO "
+                         f"NOT EXIST in this world.")
+        parts.append("\n".join(lines))
+    if len(listed) > 1:
+        parts.append(
+            "- A cfg-gated declaration exists in SOME of those worlds only. "
+            "A body compiled by every cluster may reference it only from a "
+            "context gated by the SAME predicate (or its negation) — an "
+            "unguarded reference compiles in one world and fails "
+            "E0609/E0599/E0433 in the other.")
+    return "\n".join(parts)
+
+
 def nightly_rules_for(cluster: object | None) -> str:
     """The nightly boundary rules to inject into generation prompts for the
     ACTIVE cluster: a non-default cluster carries its own prompt override; the

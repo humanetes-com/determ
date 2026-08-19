@@ -664,6 +664,102 @@ def test_post_merge_fill_then_stall_exit(tmp_path: Path) -> None:
     assert fake.events.count("post_merge.fill.iter") >= 1
 
 
+def test_post_merge_wave_is_capped_and_the_cursor_walks(
+        tmp_path: Path, monkeypatch) -> None:
+    """One post-merge iteration was one unbounded wager: the whole eligible
+    frontier went to the engine with no mid-wave sweep, so run
+    `3579062-476abc3b` landed 120 fills over 6 h and one crashing binary
+    voided all of them on a single reading. The cap slices the frontier and
+    the stall budget charges per completed traversal, so the plateau exit
+    still buys `max_stalls` traversals, not `max_stalls` slices."""
+    monkeypatch.setenv("POST_MERGE_MAX_DISPATCH", "2")
+    c = _cluster()
+    frontier = {(f"src/f{i}.rs", f"fn{i}"): {"t"} for i in range(5)}
+    flat = (101, "test result: FAILED. 3 passed; 2 failed")
+    fake = FakeAdapter(
+        clusters_list=[c], run_results=[flat] * 12,
+        attribute_seq=[(dict(frontier), FailureKind.RUNTIME)] * 12)
+    batches: list[set] = []
+    fake.fill_fns_one_by_one = lambda **kw: (
+        batches.append(set(kw["tdd_frontier_keys"])), _PER_FN_RESULT)[1]
+    pd = _make_project(tmp_path, [c])
+    _post(fake, pd, _cfg(per_fn=True, tdd=True))
+    assert batches and all(len(b) <= 2 for b in batches), \
+        "the cap must hold every iteration"
+    # Two full traversals before the plateau exit (max_stalls=2): 3 batches
+    # each (2+2+1), every unit dispatched exactly twice.
+    assert len(batches) == 6, f"got {len(batches)} batch(es)"
+    counts: dict = {}
+    for b in batches:
+        for k in b:
+            counts[k] = counts.get(k, 0) + 1
+    assert set(counts) == set(frontier) and set(counts.values()) == {2}, (
+        "a capped flat run must spend whole traversals — a partial cohort "
+        "at the exit is the premature close the 2026-08-18 night recorded")
+    stop = [ln for ln in fake.logs if "plateau" in ln and "stopping" in ln]
+    assert stop and "5 of 5 frontier fn(s) were dispatched" in stop[0]
+
+
+def test_post_merge_below_floor_needs_a_reproduced_breach(
+        tmp_path: Path) -> None:
+    """A crashed binary removes numerator and denominator together, so one
+    below-floor reading can be noise: the overnight run's `32/2` (96 tests
+    announced-but-silent) convicted and destroyed the 120-fill wave three
+    times. Only a reproduced breach earns the destructive restore."""
+    c = _cluster()
+    frontier = {("src/lib.rs", "foo"): {"t"}}
+    good = (101, "test result: FAILED. 5 passed; 1 failed")
+    crashy = (101, "test result: FAILED. 1 passed; 1 failed")
+    fake = FakeAdapter(
+        clusters_list=[c],
+        # iter1 sets the floor at 5; iter2 reads a 1 (noise); the confirm
+        # re-sweep reads 5 again → keep the tree.
+        run_results=[good, crashy, good, good],
+        attribute_seq=[(dict(frontier), FailureKind.RUNTIME)] * 4)
+    pd = _make_project(tmp_path, [c])
+    (pd / "src" / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
+    _post(fake, pd, _cfg(per_fn=True, tdd=True))
+    assert "post_merge.breach_not_reproduced" in fake.events
+    assert "post_merge.tree_restored" not in fake.events, (
+        "a single unreproduced below-floor reading destroyed the wave — "
+        "the recorded crash-noise conviction")
+
+
+def test_post_merge_reproduced_breach_restores_then_resweeps(
+        tmp_path: Path) -> None:
+    """A reproduced breach restores — and the iteration then re-enters for a
+    fresh sweep instead of filling from the discarded tree's attribution
+    (the recorded run filled the restored tree from the crashed wave's
+    output, then exhausted units on the mismatch). A restored tree that
+    re-measures below the floor re-bases the high-water rather than looping
+    restore -> sweep -> restore."""
+    c = _cluster()
+    frontier = {("src/lib.rs", "foo"): {"t"}}
+    good = (101, "test result: FAILED. 5 passed; 1 failed")
+    crashy = (101, "test result: FAILED. 1 passed; 1 failed")
+    fake = FakeAdapter(
+        clusters_list=[c],
+        # iter1 floor=5; iter2 reads 1, confirm reads 1 (reproduced) →
+        # restore + continue; iter3 fresh sweep still 1 → re-base, no second
+        # restore.
+        run_results=[good, crashy, crashy, crashy, crashy, crashy],
+        attribute_seq=[(dict(frontier), FailureKind.RUNTIME)] * 6)
+    fills_by_iter: list[int] = []
+    fake.fill_fns_one_by_one = lambda **kw: (
+        fills_by_iter.append(1), _PER_FN_RESULT)[1]
+    pd = _make_project(tmp_path, [c])
+    (pd / "src" / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
+    _post(fake, pd, _cfg(per_fn=True, tdd=True))
+    assert "post_merge.tree_restored" in fake.events
+    restore_count = fake.events.count("post_merge.tree_restored")
+    assert restore_count == 1, (
+        f"{restore_count} restores — the restore/re-sweep pair must not loop")
+    assert "post_merge.highwater_rebased" in fake.events
+    # The iteration that restored did not fill from the stale attribution:
+    # iter1 filled, iter2 restored+continued (no fill), iter3+ resumed.
+    assert any("re-based" in ln for ln in fake.logs)
+
+
 def test_validate_reverts_every_same_name_fn(tmp_path: Path) -> None:
     """`fmt` lives in several impls; the bare-name implication must revert
     every occurrence, not just the first."""

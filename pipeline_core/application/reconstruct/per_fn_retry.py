@@ -34,6 +34,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.attribution import AttributionResult
+from pipeline_core.domain.cluster_plan import cfg_world_rules
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.retry_outcome import (
@@ -366,6 +367,15 @@ def run_task3_inline_retry(
             "This file is compiled by EVERY cluster below. A body must hold "
             "under all of them: "
             + ", ".join(sorted(c.name for c in _ctx_clusters)) + ".")
+    # ...and what those names MEAN, as cfg atoms. The names alone left the
+    # model inferring which predicates are active; the recorded burn is an
+    # unguarded read of a `#[cfg(all(not(error_generic_member_access),
+    # feature = "std"))]` field — green in the default world, E0609 under the
+    # nightly cluster's RUSTFLAGS, re-spliced identically for three rounds
+    # with the mismatch never named (run `3579062-476abc3b`, 2026-08-19).
+    _world_rules = cfg_world_rules(_ctx_clusters)
+    if _world_rules:
+        _inv_parts.append(_world_rules)
     for c in sorted(_ctx_clusters, key=lambda c: c.name):
         _macro_inv = deps.enumerator.compute_cluster_macro_invariants(
             src_root, c)

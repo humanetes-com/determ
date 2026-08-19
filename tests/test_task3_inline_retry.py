@@ -197,3 +197,67 @@ def test_the_prompt_says_what_the_cluster_name_means(tmp_path: Path) -> None:
         "a shared artifact's prompt must name every cfg world it must satisfy"
     assert "crate is no_std" in inv
     assert "[cluster: nightly]" in inv and "[cluster: stable]" in inv
+
+
+def test_the_prompt_names_the_cfg_atoms_not_just_the_cluster_names(
+        tmp_path: Path) -> None:
+    """The names alone left the model inferring the atoms, and the recorded
+    burn is an unguarded read of a `#[cfg(all(not(error_generic_member_access),
+    feature = "std"))]` field: green in the default world, E0609 under the
+    nightly cluster's RUSTFLAGS, re-spliced identically for three rounds with
+    the mismatch never named in the prompt (run `3579062-476abc3b`,
+    2026-08-19). The invariants block must carry each world's active/absent
+    predicates and the same-predicate guard rule."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text("fn f() { unimplemented!() }\n")
+    (tmp_path / "tests").mkdir()
+    seen: dict[str, object] = {}
+
+    class _C:
+        def __init__(self, name: str, active: list[str],
+                     excluded: list[str]) -> None:
+            self.name, self.toolchain, self.env_extra = name, "", {}
+            self.active_cfg, self.excluded_cfg = active, excluded
+
+    deps = _deps(run=lambda *a, **k: (101, _failed(1)))
+    from dataclasses import replace
+    enum = replace(
+        deps.enumerator,
+        compute_cluster_macro_invariants=lambda root, cl: "",
+        detect_crate_no_std_invariant=lambda root: "",
+        fn_container_index=lambda root: {},
+        fn_occurrence_index=lambda root: {},
+    )
+    fix = replace(
+        deps.retry_fix,
+        locate_fn=lambda text, fn: ("fn f()", 0, 9, 26),
+        locate_all_fns=lambda text, fn: [],
+        gather_fix_context=lambda **kw: type(
+            "C", (), {"container": "", "types_section": "",
+                      "notes_section": "", "bound_methods_section": "",
+                      "blueprint_section": ""})(),
+        find_tests_for_fn=lambda *a, **kw: [],
+        focus_cargo_errors=lambda out, rel: "",
+        build_per_fn_fix_prompt=lambda **kw: seen.update(
+            sections=kw["sections"]) or "prompt",
+        ask_per_fn_body=lambda *a, **kw: (None, ""),
+    )
+    attr = replace(
+        deps.attribution,
+        build_test_reverse_map=lambda files, root: {},
+        attribute_failures=lambda *a, **kw: type(
+            "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}}})(),
+        filter_test_targets=lambda fr, root: fr,
+        expand_frontier_by_calls=lambda fr, root, **kw: (fr, dict.fromkeys(fr, 0)),
+    )
+    deps = replace(deps, enumerator=enum, retry_fix=fix, attribution=attr)
+    run_task3_inline_retry(
+        tmp_path, "cargo test", 1, _failed(1),
+        _C("nightly", ["error_generic_member_access"], []),
+        all_clusters=[_C("nightly", ["error_generic_member_access"], []),
+                      _C("stable", [], ["error_generic_member_access"])],
+        max_stalls=1, hard_cap=1, deps=deps)
+    inv = seen["sections"].invariants  # type: ignore[union-attr]
+    assert "`error_generic_member_access` IS active" in inv
+    assert "DO NOT EXIST in this world" in inv
+    assert "SAME predicate" in inv
