@@ -1,0 +1,91 @@
+Qwen vs Muse — is the block the pipeline or the model? (2026-08-19)
+
+Question: since the switch to Muse we perceive being blocked. Is the
+problem the pipeline or the LLM?
+
+VERDICT (as of 2026-08-19): the block is mostly pipeline-owned; Muse is
+not the blocker on any measurement taken so far. The per-unit answer
+arrives with the first complete audited 43/43 escalated pass, now in
+flight (~4-5 relaunches out).
+
+1. The only equal-footing head-to-head says Muse > Qwen.
+   Perf ledger, 2026-08-12 A/B/C matrix (identical crates and seeds):
+   - output-contract compliance: Muse 96-100%, Qwen 41-58% — Qwen
+     ignored the FN/FILE contract about half the time, which is what
+     genuine model failure looks like in this pipeline;
+   - Muse completed microcrate and hardcrate at equal or better scores;
+   - file_primary halved Muse's calls on hardcrate (30 vs 59) while the
+     same flag REGRESSED Qwen (negative-control run 182955-0c302bf2,
+     both clusters EXHAUSTED, task3 104/106).
+
+2. "Blocked since Muse" has a confound: the 08-06 --clean.
+   The switch landed within days of the --clean that wiped the only
+   complete reconstruction and reset the oracle's identity, so every
+   anyhow number since is a cold-tree climb on a new oracle — not
+   comparable to the 112/121-era scores. The one Qwen-era cold climb
+   (08-07, run 7445-00ee8a3c) topped out at 81-83 and then deadlocked
+   in the readmission lock (run 259637-36db9aad). Cold Muse sits at
+   83/106 now. On the same cold problem, both models landed on the
+   same number — the 83 plateau is not a Muse ceiling.
+
+3. Why Qwen "filled all the bodies" (the 08-06 completion): three
+   ingredients, none of them Qwen's per-call quality.
+   a. The tree was WARM — ten days of accumulated fills (07-26 →
+      08-05) never wiped, across dozens of relaunches. Every jump in
+      the score timeline lines up with a pipeline fix, not a model
+      change: 36→93 in twelve minutes on 07-25 when the per-impl
+      route shipped (on `construct`, which the per-fn route had
+      failed 12 times in 5 days with the same model); 93→100 on
+      08-04 hours after the block="" parser fix and the free-fn
+      routing fix armed (the four vtable/context free fns had been
+      writable by NO route since 08-02). The completion run itself
+      (938442, 08-06) made ZERO model calls — same tree as the
+      failed run before it; only the done-criterion changed.
+   b. The layout predated the cold-start path. The --clean forced
+      t1.5 to author layouts cold for the first time since 07-27;
+      the cold path's own defect class (accept gate compiling only
+      stubs, hollow ErrorVTable, dropped #[repr(transparent)]) is
+      what the post-clean climbs have been paying for, under both
+      models.
+   c. No Muse run ever inherited the warm tree. Ledger 08-13 row
+      58819-ee78a1d1: from-scratch resume, "NOT the pre-muse seed
+      arm (seed tar never restored)". Every Muse anyhow run since
+      has been cold, killed mid-climb for a fix, or the deliberate
+      flat evidence crawl.
+
+4. Per-fill, the record since the switch convicts the pipeline: the
+   model's answers were not reliably reaching verdicts. Escalation
+   dead 08-01→08-04; free fns writable by no route; the plateau exit
+   closed the first full escalated pass one batch short (36/43);
+   self-closed <FN .../> replies dropped whole (2 tags in, 0 records
+   out); fix-loop attempt 2 a byte-identical resample of attempt 1;
+   nightly closed with zero scored sweeps after layout-sync broke its
+   tree; 120 post-merge fills voided by one crash reading. All fixed
+   in the entries-187-191 batches (2026-08-19).
+
+5. What IS on Muse's side of the ledger so far:
+   - one confirmed wrong body: the central severed unit
+     ContextError::source got its first-ever dispatch and returned
+     the naive E0277 body with the correct idiom in the prompt x3
+     (run 275772-425da59c). Provisional — pre-fix the model never
+     saw its own error on retry; the error-fed retry now exists.
+   - finish=length on 23-30% of fill calls (60-75k reasoning chars
+     vs request_max 16384; twice content=0). Currently costs latency
+     and a doubled call (the followup recovers), not answers. The
+     think-cap / sampling knob measurement is open and user-owned.
+
+6. The decisive experiment, in flight: the first complete 43/43 pass
+   under the new code closes with a PASS AUDIT naming which units
+   landed a semantic change. Flat sweep after that:
+   - landed + still flat  => model-owned (wrong body with full
+     context and error-fed retries);
+   - dispatched-but-unchanged => still the pipeline's question.
+   Cross-check against workspace git over the pass window before
+   pronouncing either way. Do not switch MODEL= mid-crawl: it would
+   discard the very evidence the crawl exists to earn (every landed
+   body and futility verdict so far describes Muse's answers).
+
+   Direct test if wanted afterwards: the 08-06 winning tree is in
+   /home/user/anyhow-reconstruction-20260806.bundle; compare_models.sh
+   snapshot/arm gives both models the same seed, judged on progress
+   per sweep.
