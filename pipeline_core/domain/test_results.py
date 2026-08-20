@@ -551,6 +551,32 @@ def extract_test_output_from_file(file_content: str) -> str:
     return file_content[idx + len(marker):]
 
 
+# libtest qualifies a `#[should_panic]` test's result line with ` - should
+# panic` BEFORE the ` ... ` separator (`test a::b::test_x - should panic ...
+# ok`), while the oracle, attribution and every generated-test index know the
+# test as `test_x`. Kept in the name, the qualifier makes the verdict
+# unmatchable: `bare_test_name` yields `test_x - should panic`, the expected
+# name `test_x` reports no verdict, and the sweep records a vanished test in
+# a binary that completed — read as a deterministic crash. Measured on
+# `anyhow`/`stable`: `error::gen_tests_4::test_no_backtrace_fallback`
+# (generated 2026-08-12) passed as `- should panic ... ok` under plain
+# `cargo test --lib` on 2026-08-20 while every sweep since had logged `ORACLE
+# SHRUNK — counting 1 as failing ... (binary crashed)`, run the gdb/ASAN
+# localizer to a NOBODY verdict, deliberated a layout retrigger, refused the
+# durable-tree replacement (`sweep 83 with 1 test(s) unmeasured does not beat
+# the stored 83`) and escalated 25 producers for a test that was passing.
+_SHOULD_PANIC_QUALIFIER = " - should panic"
+
+
+def strip_libtest_qualifier(name: str) -> str:
+    """The test name as the oracle knows it: libtest's ` - should panic`
+    qualifier removed. Only that exact suffix — doc-test names legitimately
+    contain ` - ` (`src/lib.rs - Error (line 12)`) and are left alone."""
+    if name.endswith(_SHOULD_PANIC_QUALIFIER):
+        return name[: -len(_SHOULD_PANIC_QUALIFIER)].rstrip()
+    return name
+
+
 def _resolve_test_file(module_path: list[str], known_files: set[str]) -> str:
     """Resolve a unit-test module path (e.g. ['context', 'gen_tests_1']) to a
     source file in `known_files` (forward-slash relative paths). Tries, deepest
@@ -598,7 +624,7 @@ def per_file_test_stats(
         if line.startswith("test result:"):
             continue
         name, _, status = line[len("test "):].partition(" ... ")
-        name = name.strip()
+        name = strip_libtest_qualifier(name.strip())
         status = status.split(",")[0].split(" ")[0]  # "ignored, reason" → "ignored"
         if status not in ("ok", "FAILED", "ignored"):
             continue
@@ -628,7 +654,7 @@ def failing_test_names(test_output: str) -> list[str]:
         if line.startswith("test result:"):
             continue
         name, _, status = line[len("test "):].partition(" ... ")
-        name = name.strip()
+        name = strip_libtest_qualifier(name.strip())
         if status.split(",")[0].split(" ")[0] == "FAILED" and name not in seen:
             seen.add(name)
             names.append(name)
@@ -1352,9 +1378,9 @@ def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
         # marking a cfg-gated test as the in-flight one that crashed.
         head = tail.split()[0].rstrip(",") if tail.split() else ""
         verdict = head if head in _LIBTEST_VERDICTS else ""
-        return (name.strip(), verdict)
+        return (strip_libtest_qualifier(name.strip()), verdict)
     if line.endswith(" ..."):
-        name = line[len("test "):-len(" ...")].strip()
+        name = strip_libtest_qualifier(line[len("test "):-len(" ...")].strip())
         return (name, "") if name else None
     return None
 

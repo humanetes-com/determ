@@ -446,3 +446,41 @@ def test_an_unnamed_target_falls_back_to_its_executable() -> None:
     (b,) = parse_binary_results(out)
     assert b.label == "target/debug/deps/mystery-9f2"
     assert b.exe_path == "target/debug/deps/mystery-9f2"
+
+
+_SHOULD_PANIC_BINARY = """\
+     Running unittests src/lib.rs (target/debug/deps/anyhow-f8e3aaf01e9ae568)
+running 3 tests
+test error::gen_tests_4::test_no_backtrace_fallback - should panic ... ok
+test error::gen_tests_4::test_wrong_message - should panic ... FAILED
+test src/lib.rs - Error (line 12) ... ok
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+
+def test_parse_binary_results_strips_should_panic_qualifier() -> None:
+    """libtest prints a `#[should_panic]` verdict as `test NAME - should panic
+    ... ok`. The qualifier is not part of the name the oracle expects, so kept
+    in the parsed name it turns a passing test into a vanished one — the
+    `test_no_backtrace_fallback` "crash" logged on every `stable` sweep from
+    2026-08-12 to 2026-08-20 was this line, passing. Doc-test names keep
+    their ` - `."""
+    (b,) = parse_binary_results(_SHOULD_PANIC_BINARY)
+    assert b.completed
+    assert b.passed == frozenset({
+        "error::gen_tests_4::test_no_backtrace_fallback",
+        "src/lib.rs - Error (line 12)",
+    })
+    assert b.failed == frozenset({"error::gen_tests_4::test_wrong_message"})
+    assert b.dangling is None
+
+
+def test_should_panic_in_flight_line_is_the_bare_name() -> None:
+    """A binary that dies while a should_panic test is running leaves
+    `test NAME - should panic ...` with no verdict; the crash site must be
+    named the way attribution names it."""
+    from pipeline_core.domain.test_results import strip_libtest_qualifier
+    assert strip_libtest_qualifier("a::b - should panic") == "a::b"
+    assert strip_libtest_qualifier("src/lib.rs - Error (line 12)") == (
+        "src/lib.rs - Error (line 12)")
+    assert strip_libtest_qualifier("plain") == "plain"
