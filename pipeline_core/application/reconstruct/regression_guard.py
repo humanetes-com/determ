@@ -48,7 +48,10 @@ def gate(
     cwd: Path,
     env: dict[str, str] | None,
     base: TestStateReading | None,
+    *,
+    stub_free: bool = False,
 ) -> tuple[RegressionComparison, str] | None:
     return cargo_runner.test_regression_gate(
         run_cargo, test_cmd, cwd, env, base,
-        enabled=unified_on and _guard_on(), timeout=timeout, guard=guard)
+        enabled=unified_on and _guard_on(), timeout=timeout, guard=guard,
+        stub_free=stub_free)

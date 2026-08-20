@@ -431,3 +431,135 @@ def test_futility_suspension_withholds_guidance_for_the_stamping_cluster_only() 
     unstamped = {"guidance": rec["guidance"], "error_count": 1}
     assert admissible_guidance(unstamped, "", evidence=NO_TESTS,
                                cluster="stable") != ""
+
+
+# ---------------------------------------------------------------------------
+# A do-nothing body prescribed for a unit that answers for failing tests is
+# not a lesson. The live record (`StdErrorforContextError<C,Error>`, 9
+# rounds) told the model "replace the body with `None`" and was honoured at
+# every dispatch of the crawl's central unit (run `626784-4b7c38ba`,
+# 2026-08-20); it carried `best_failing_tests: 1` the whole time.
+
+_SEVERED_SOURCE_RECORD = {
+    "category": "TRAIT_BOUND_VIOLATION",
+    "guidance": (
+        "The frozen where clause is only `C: Display`, so `self.error` "
+        "cannot be used as a `&(dyn StdError + 'static)` and "
+        "`self.error.provide` cannot be proved to exist. Avoid the unfrozen "
+        "`Error: StdError` requirement by not touching `self.error`. For "
+        "`source` replace the body with `None` instead of `Some(&self.error)`, "
+        "and for `provide` replace the body with a no-op such as "
+        "`let _ = request;`. This makes both methods type-check under the "
+        "frozen `C: Display` bound alone."),
+    "retrospective_count": 9, "error_count": 3, "failing_test_count": 0,
+    "best_compile_errors": 0, "best_failing_tests": 1,
+    "convicted_by": [], "blocked_on": ["provide"],
+}
+
+_CONTEXT_RS = """\
+impl<C> StdError for ContextError<C, Error>
+where
+    C: Display,
+{
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        None
+    }
+    #[cfg(error_generic_member_access)]
+    fn provide<'a>(&'a self, request: &mut Request<'a>) {
+        ::core::unimplemented!()
+    }
+}
+"""
+
+
+def test_degenerate_prescription_for_a_unit_with_failing_tests_is_retired() -> None:
+    from pipeline_core.domain.retro_gate import (
+        TEST_SACRIFICING_PRESCRIPTION,
+        ConvictionEvidence,
+        asserts_impossibility,
+        prescribes_degenerate_body,
+        prescription_sacrifices_tests,
+        retired_guidance_line,
+        screen_guidance,
+    )
+    rec = dict(_SEVERED_SOURCE_RECORD)
+    # The class the impossibility rule cannot see: no marker, phrased as a fix.
+    assert not asserts_impossibility(rec["guidance"])
+    assert prescribes_degenerate_body(rec["guidance"])
+    assert prescription_sacrifices_tests(rec)
+    verdict = screen_guidance(rec, _CONTEXT_RS,
+                             evidence=ConvictionEvidence(frozenset()))
+    assert verdict.text == ""
+    assert verdict.retired_by == TEST_SACRIFICING_PRESCRIPTION
+    line = retired_guidance_line(
+        "src/context.rs::*impl*::StdErrorforContextError<C,Error>", rec, verdict)
+    assert line.startswith("[phase-c/retro-retired] src/context.rs::*impl*::")
+    assert "rounds=9" in line and "best_failing_tests=1" in line
+    assert "replace the body with `None`" in line
+
+
+def test_degenerate_prescription_without_test_evidence_is_left_alone() -> None:
+    """No failing test on the record, none stamped, none live: "make it
+    type-check" may be all there is to ask, and the rule must not guess."""
+    from pipeline_core.domain.retro_gate import (
+        ConvictionEvidence,
+        prescription_sacrifices_tests,
+        retired_guidance_line,
+        screen_guidance,
+    )
+    rec = dict(_SEVERED_SOURCE_RECORD, best_failing_tests=0,
+               failing_test_count=0, convicted_by=[])
+    assert not prescription_sacrifices_tests(rec)
+    verdict = screen_guidance(rec, _CONTEXT_RS,
+                             evidence=ConvictionEvidence(frozenset()))
+    assert verdict.text and verdict.retired_by == ""
+    assert retired_guidance_line("k", rec, verdict) == ""
+    # Live evidence alone is enough: the unit answers for a red test NOW.
+    assert prescription_sacrifices_tests(
+        rec, ConvictionEvidence(frozenset({"test_iter"})))
+    assert screen_guidance(
+        rec, _CONTEXT_RS, evidence=ConvictionEvidence(frozenset({"test_iter"})),
+    ).text == ""
+
+
+def test_corrective_guidance_without_a_degenerate_body_is_untouched() -> None:
+    """The `ErrorImpl` GENUINELY_HARD record (21 rounds, convicted by the seven
+    chain/boxed tests) prescribes nothing degenerate — it argues about `Ref`
+    deref — and must reach the prompt on this rule's account (its own defect
+    is a premise the tree refutes, a different gate)."""
+    from pipeline_core.domain.retro_gate import (
+        ConvictionEvidence,
+        prescribes_degenerate_body,
+        prescription_sacrifices_tests,
+    )
+    rec = {
+        "guidance": "The `ptr::Ref<'_, ErrorImpl>` parameter cannot be "
+                    "dereferenced with `*`; the prior `let r = &*this` deref "
+                    "pattern was already tried and still yields E0614.",
+        "best_failing_tests": 0, "failing_test_count": 0,
+        "convicted_by": ["test_clone", "test_iter", "test_len", "test_rev"],
+    }
+    assert not prescribes_degenerate_body(rec["guidance"])
+    assert not prescription_sacrifices_tests(
+        rec, ConvictionEvidence(frozenset({"test_iter"})))
+
+
+def test_a_blocker_the_cluster_never_compiles_does_not_keep_a_claim_alive() -> None:
+    """`provide` is textually `unimplemented!()` in `context.rs` and cfg-gated
+    out of the `stable` build, so it can never fill there. An impossibility
+    claim blocked only on it would stand for the life of the store; handed
+    the cluster's cfg-dead names, the premise check treats the blocker as
+    cleared. Negative control: the same record without `cfg_dead` stands."""
+    from pipeline_core.domain.retro_gate import ConvictionEvidence, screen_guidance
+    rec = {
+        "guidance": "The frozen `C: Display` bound provides no `Error` value, "
+                    "so the only body-only source is `None`. Do not retry.",
+        "error_count": 1, "blocked_on": ["provide"],
+        "best_failing_tests": 0, "failing_test_count": 0, "convicted_by": [],
+    }
+    ev = ConvictionEvidence(frozenset())
+    standing = screen_guidance(rec, _CONTEXT_RS, evidence=ev)
+    assert standing.text  # pre-fix shape: `provide` is still hollow, claim stands
+    released = screen_guidance(rec, _CONTEXT_RS, evidence=ev,
+                              cfg_dead=frozenset({"provide"}))
+    assert released.text == "" and released.retired_by == "impossibility_unfounded"

@@ -637,3 +637,50 @@ def test_a_passing_accept_carries_the_names_it_saw_pass() -> None:
     assert _gate(boom, {"a"}, enabled=False).self_passed == frozenset()
     assert _gate(boom, set()).self_passed == frozenset()
     assert _gate(_const_run_cargo(-1, "timeout"), {"a"}).self_passed == frozenset()
+
+
+def test_regression_gate_reverts_a_crash_in_a_stub_free_tree() -> None:
+    """The crash-only keep exists for a still-hollow sibling's panic. With no
+    stub in the tree there is no such sibling, and the fill is the only change
+    between a baseline whose binaries completed and a reading where they did
+    not. Run `626784-4b7c38ba` (2026-08-20): one kept crash in a 0-stub tree
+    blinded the rest of its batch — every later unit judged with 7 binaries
+    excluded, both owners of 19 failing tests accepted `unmeasurable`. With
+    `stub_free=True` the gate reverts now; the default keeps the recorded
+    behaviour (negative control)."""
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    fired: list[tuple[str, str]] = []
+    res = test_regression_gate(
+        _const_run_cargo(101, _crashed_after("Segmentation fault\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired.append((loc, m)), stub_free=True)
+    assert res is not None
+    cmp, detail = res
+    assert cmp.newly_crashed and not cmp.newly_red
+    assert any(loc == "phase-c/crash_stub_free_reverted" for loc, _m in fired)
+    assert not any(loc == "phase-c/crash_only_unmeasurable_kept"
+                   for loc, _m in fired)
+    assert "crash" in detail.lower()
+    # Negative control: the same capture without the stub-free statement is
+    # kept as unmeasurable, exactly as before.
+    fired2: list[tuple[str, str]] = []
+    assert test_regression_gate(
+        _const_run_cargo(101, _crashed_after("Segmentation fault\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired2.append((loc, m))) is None
+    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
+               for loc, _m in fired2)
+    # A stub panic in the capture still outranks the stub-free statement: the
+    # caller's pass-start scan can lag a sibling's revert-to-stub.
+    fired3: list[tuple[str, str]] = []
+    assert test_regression_gate(
+        _const_run_cargo(101, _crashed_after(
+            "thread 'x' panicked at src/error.rs:64:17:\nnot implemented\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired3.append((loc, m)), stub_free=True) is None
+    assert any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired3)

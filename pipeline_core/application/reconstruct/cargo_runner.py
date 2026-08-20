@@ -172,6 +172,7 @@ def test_regression_gate(
     enabled: bool,
     timeout: int,
     guard: Callable[[str, str], None],
+    stub_free: bool = False,
 ) -> tuple[RegressionComparison, str] | None:
     """Global non-regression gate (the monotone ratchet). A fill is a REGRESSION
     if it turns a previously-passing test red, crashes a previously-completing
@@ -193,6 +194,11 @@ def test_regression_gate(
         key the stall on it, rather than inferring a cause from an empty
         `newly_red`); `detail` is the prompt-ready explanation, which names the
         measured scope and lists pre-existing crashed binaries as excluded.
+
+    ``stub_free`` — the caller's statement that the cluster-active tree held
+    no hollow body when the pass began. It decides the crash-only branch
+    below: the keep there rests on a still-hollow sibling being able to
+    speak, and in a stub-free tree none can.
     """
     if not (enabled and test_cmd and baseline is not None):
         return None
@@ -270,6 +276,32 @@ def test_regression_gate(
         # the crash drops the next sweep's pass count, which the batch
         # ratchet confirms and claws back from its pre-fill snapshot. The
         # stub-restore NOTE above applies here identically.
+        #
+        # Unless the tree holds no stub at all. Then the "hollow sibling"
+        # the keep is written for does not exist, the crash appeared between
+        # a baseline where these binaries completed and a reading where they
+        # did not, and the fill is the only change in between. Keeping it
+        # costs more than the pass count the ratchet claws back a sweep
+        # later: every later unit in the SAME batch is judged with the
+        # crashed binaries excluded (`u2_missing_verdict`), accepted
+        # `unmeasurable`, and credited to the traversal cursor as dispatched.
+        # Run `626784-4b7c38ba` (2026-08-20): `src/error.rs::
+        # StdErrorforErrorImpl<E>` attempt 3 crashed 7 binaries in a 0-stub
+        # tree and was kept (`cost withheld: 50 baseline pass(es)`); the
+        # batch's remaining units — among them the two bodies that own 19 of
+        # the cluster's 21 failing tests — were then accepted blind, the
+        # sweep read 33, the ratchet reverted 3 files, and the pass closed
+        # with both owners recorded as dispatched and unchanged.
+        if stub_free:
+            guard("phase-c/crash_stub_free_reverted",
+                  f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
+                  f"{list(cmp.newly_crashed)} crashed after the fill and the "
+                  "tree holds no stub — no hollow sibling can be the one "
+                  "speaking, so the crash is this fill's; REVERTED now "
+                  "rather than kept for the next sweep's ratchet, so the "
+                  "rest of the batch is judged against a live baseline "
+                  f"(cost: {cmp.crash_lost_pass} baseline pass(es))")
+            return cmp, render_regression_detail(cmp)
         guard("phase-c/crash_only_unmeasurable_kept",
               f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
               f"{list(cmp.newly_crashed)} crashed with no newly-red verdict "

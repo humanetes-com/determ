@@ -229,11 +229,13 @@ class CargoFillAdapter:
 
     def test_regression_gate(self, test_cmd: str | None, cwd: Path,
                              env: dict[str, str] | None,
-                             baseline: TestStateReading | None
+                             baseline: TestStateReading | None,
+                             *, stub_free: bool = False,
                              ) -> tuple[RegressionComparison, str] | None:
         if self.test_regression_gate_fn is None:
             return None
-        return self.test_regression_gate_fn(test_cmd, cwd, env, baseline)
+        return self.test_regression_gate_fn(test_cmd, cwd, env, baseline,
+                                            stub_free=stub_free)
 
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = None) -> str:

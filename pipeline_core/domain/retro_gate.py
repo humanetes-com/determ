@@ -19,11 +19,12 @@ same record can be true for the other cluster's layout.
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, NamedTuple
 
 from .model_notes import (
     LayoutJudgement,
@@ -373,6 +374,77 @@ def impossibility_claim_is_unfounded(
     return bool(cleared_blockers(record, still_stubbed))
 
 
+# Phrases by which stored guidance prescribes a body that does NO WORK — a
+# constant return, a discarded argument, a hollow marker — as the way to make
+# a unit type-check. Such a prescription is a compile-time answer; whether it
+# is the right body is a run-time question the record itself has usually
+# already answered: the live instance carried `best_failing_tests: 1`.
+#
+# `src/context.rs::*impl*::StdErrorforContextError<C,Error>`, 9 rounds,
+# `TRAIT_BOUND_VIOLATION`, `blocked_on: ["provide"]`, guidance verbatim: "For
+# `source` replace the body with `None` instead of `Some(&self.error)`, and
+# for `provide` replace the body with a no-op such as `let _ = request;`. This
+# makes both methods type-check under the frozen `C: Display` bound alone."
+# The premise is true — anyhow's `Error` implements no `StdError` — and the
+# prescription is the severed chain link diagnosed on 2026-08-14: every
+# `.context()` over an `anyhow::Error` stops at the first hop, ten tests
+# (`test_iter/rev/len/clone`, `test_altdisplay/debug`, `test_boxed_anyhow`,
+# `test_anyhow_from_anyhow`, `test_root_cause`) fail on it. Honoured into the
+# prompt at every dispatch of the unit (`retro-honoured … rounds=9`, run
+# `626784-4b7c38ba`, 2026-08-20), the model wrote `None` again, byte-identical
+# to disk. It escaped `impossibility_claim_is_unfounded` because it is phrased
+# as a correction, not a claim about the crate, and `cleared_blockers` because
+# `provide` is cfg-gated out of the cluster and can never fill.
+DEGENERATE_BODY_MARKERS: tuple[str, ...] = (
+    "replace the body with `none`",
+    "body with `none`",
+    "body to `none`",
+    "return `none`",
+    "returning `none`",
+    "with a no-op",
+    "as a no-op",
+    "replace the body with `ok(())`",
+    "`let _ = ",
+    "unimplemented!()",
+    "todo!()",
+    "leave the body empty",
+    "empty body",
+)
+
+
+def prescribes_degenerate_body(guidance: str) -> bool:
+    """Whether stored guidance tells the next attempt to write a body that
+    does no work (a constant, a discarded argument, a hollow marker)."""
+    low = guidance.lower()
+    return any(m in low for m in DEGENERATE_BODY_MARKERS)
+
+
+def prescription_sacrifices_tests(
+    record: Mapping[str, Any] | None,
+    evidence: ConvictionEvidence | None = None,
+) -> bool:
+    """Whether ``record`` prescribes a do-nothing body for a unit that answers
+    for failing tests — on the record's own counts (`best_failing_tests`,
+    `failing_test_count`), its conviction stamp (`convicted_by`), or the
+    tests the unit currently answers for (``evidence``).
+
+    A degenerate body for a unit with NO test evidence is left alone: the
+    tree may hold no test for it, and then "make it type-check" is all there
+    is to ask. With failing tests on the unit, the prescription is refuted by
+    the measurement that produced them — the tests ARE the run-time answer —
+    and injecting it steers every re-fill into the body that keeps them red."""
+    if not record:
+        return False
+    if not prescribes_degenerate_body(str(record.get("guidance") or "")):
+        return False
+    recorded = (int(record.get("best_failing_tests") or 0) >= 1
+                or int(record.get("failing_test_count") or 0) >= 1)
+    convicted = record.get("convicted_by")
+    stamped = isinstance(convicted, list) and bool(convicted)
+    live = evidence is not None and bool(evidence.tests)
+    return recorded or stamped or live
+
+
 # Set on a record whose lesson was written from a test outcome that hollow
 # siblings, not the attempted body, decided. `blocked_on` alone cannot carry
 # this: the caller narrows that set as blockers fill, so it empties out and the
@@ -440,13 +512,46 @@ def conviction_standing(
     return ConvictionStanding.CURRENT
 
 
+class GuidanceScreening(NamedTuple):
+    """What `screen_guidance` decided: the text a prompt may carry (``""`` when
+    nothing may), and the rule that retired it (``""`` when honoured or when
+    there was nothing to judge)."""
+    text: str
+    retired_by: str
+
+
+TEST_SACRIFICING_PRESCRIPTION = "test_sacrificing_prescription"
+
+
 def admissible_guidance(
     record: Mapping[str, Any] | None, file_text: str, *,
     evidence: ConvictionEvidence,
     anchor_types: frozenset[str] = frozenset(),
     cluster: str = "",
+    cfg_dead: frozenset[str] = frozenset(),
 ) -> str:
-    """The stored lesson a prompt may carry, or ``""``.
+    """The stored lesson a prompt may carry, or ``""`` — `screen_guidance`'s
+    text half, for the callers that do not log the verdict."""
+    return screen_guidance(record, file_text, evidence=evidence,
+                          anchor_types=anchor_types, cluster=cluster,
+                          cfg_dead=cfg_dead).text
+
+
+def screen_guidance(
+    record: Mapping[str, Any] | None, file_text: str, *,
+    evidence: ConvictionEvidence,
+    anchor_types: frozenset[str] = frozenset(),
+    cluster: str = "",
+    cfg_dead: frozenset[str] = frozenset(),
+) -> GuidanceScreening:
+    """The stored lesson a prompt may carry, or ``""``, with the retiring rule.
+
+    ``cfg_dead`` names the fns of ``file_text`` whose every stub occurrence
+    is gated out of the cluster's build. They are textually `unimplemented!()`
+    and can never fill here, so a conviction that recorded one as a blocker
+    would otherwise never expire on its evidence: the live ContextError record
+    carried `blocked_on: ["provide"]` under a cluster that never compiles
+    `provide`. A blocker outside the build is not a tree premise.
 
     Two independent ways a stored lesson goes bad, judged in ONE place so the
     injection sites cannot drift apart on the rule:
@@ -474,15 +579,21 @@ def admissible_guidance(
     rec = record or {}
     guidance = str(rec.get("guidance") or "")
     if not guidance:
-        return ""
+        return GuidanceScreening("", "")
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
-        return ""
+        return GuidanceScreening("", "hollow_tree")
     # The fifth way: the futility escalation measured that rewrites of this
     # unit change nothing for the tests it answers for — the exact question
     # the guidance advises on. Scoped to the cluster the futility was
     # measured under; see `FUTILITY_SUSPENDED`.
     if futility_suspension_applies(rec, cluster):
-        return ""
+        return GuidanceScreening("", "futility_suspended")
+    # The sixth way: a do-nothing body prescribed for a unit that answers for
+    # failing tests. Judged before the impossibility rule because it is the
+    # class that rule cannot see — phrased as a correction, earned from a
+    # real compile error, and exactly what the failing tests measure against.
+    if prescription_sacrifices_tests(rec, evidence):
+        return GuidanceScreening("", TEST_SACRIFICING_PRESCRIPTION)
     # The fourth way, and the one the three above cannot see: a claim that the
     # crate CANNOT do this, made against a tree that has since moved (or against
     # no recorded tree at all). Judged before the evidence rule because it
@@ -493,11 +604,43 @@ def admissible_guidance(
     # blockers out of, so its current stub set is the right vocabulary to
     # compare them against — deriving it here rather than taking it as a
     # parameter is what keeps the two sides from drifting.
-    if impossibility_claim_is_unfounded(rec, stubbed_fn_names(file_text)):
-        return ""
+    if impossibility_claim_is_unfounded(
+            rec, stubbed_fn_names(file_text) - cfg_dead):
+        return GuidanceScreening("", "impossibility_unfounded")
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
+        return GuidanceScreening("", "stale_evidence")
+    text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
+    return GuidanceScreening(text, "" if text else "layout_contradicted")
+
+
+def retired_guidance_line(
+    unit_key: str, record: Mapping[str, Any] | None, verdict: GuidanceScreening,
+) -> str:
+    """One log line when a stored record was retired as a test-sacrificing
+    prescription, or "" — the retirement the next reader must be able to see,
+    because the record stays in the store and its text is what was dropped.
+    The other retirements keep their existing silence (the per-batch tally
+    counts them); this class gets a line because its instance steered the
+    crawl's central unit for a week with no signature but the honoured line."""
+    if verdict.retired_by != TEST_SACRIFICING_PRESCRIPTION:
         return ""
-    return layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
+    rec = record or {}
+    convicted = rec.get("convicted_by")
+    tests = (f"convicted_by={sorted(str(t) for t in convicted)}"
+             if isinstance(convicted, list) and convicted else
+             f"best_failing_tests={rec.get('best_failing_tests') or 0}, "
+             f"failing_test_count={rec.get('failing_test_count') or 0}")
+    text = " ".join(str(rec.get("guidance") or "").split())
+    # Quote the sentence that prescribes, not the record's opening premise —
+    # the premise is usually true and the prescription is what was dropped.
+    sentences = [x.strip() for x in re.split(r"(?<=[.;])\s+", text) if x.strip()]
+    hit = next((x for x in sentences if prescribes_degenerate_body(x)), text)
+    head = hit[:140]
+    return (f"[phase-c/retro-retired] {unit_key}: "
+            f"category={rec.get('category') or '?'} "
+            f"rounds={rec.get('retrospective_count') or 0} prescribes a body "
+            f"that does no work while the unit answers for failing test(s) "
+            f"({tests}) — NOT injected: {head}")
 
 
 def honoured_guidance_line(

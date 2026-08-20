@@ -113,6 +113,8 @@ from pipeline_core.domain.retro_gate import (
     honoured_guidance_line,
     impossibility_claim_is_unfounded,
     judge_guidance,
+    retired_guidance_line,
+    screen_guidance,
     stamp_conviction,
 )
 from pipeline_core.domain.rust_idents import canon_container, signature_fixed_by_trait
@@ -216,17 +218,31 @@ def cluster_inactive_stub_names(
     refusing on the first inactive occurrence would block the ACTIVE one — the
     same conservative direction `fn_belongs_to_cluster` takes when a predicate
     is undecidable: better a wasted call than a fn nothing can fill."""
+    return cluster_stub_census(target_src_dir, cluster, scan_records)[0]
+
+
+def cluster_stub_census(
+    target_src_dir: Path, cluster: BuildCluster | None,
+    scan_records: Callable[..., list[dict[str, Any]] | None],
+) -> tuple[frozenset[tuple[str, str]], int | None]:
+    """`cluster_inactive_stub_names`' verdict AND the number of stubs the
+    cluster DOES compile, from the same two scans — the second figure is what
+    the regression gate's crash-only branch needs (`stub_free`), and taking it
+    here costs no further scan. ``None`` when no scan is available: unknown is
+    not zero, and the gate keeps its crash-only keep on unknown."""
     if cluster is None:
-        return frozenset()
+        return frozenset(), None
     every = scan_records(target_src_dir, None)
     if every is None:      # extractor unavailable — no verdict to enforce
-        return frozenset()
+        return frozenset(), None
+    active_recs = scan_records(target_src_dir, cluster) or []
     active = {(_norm_src_rel(r.get("file", "")), r.get("fn_name", ""))
-              for r in (scan_records(target_src_dir, cluster) or [])}
-    return frozenset(
+              for r in active_recs}
+    inactive = frozenset(
         key for key in ((_norm_src_rel(r.get("file", "")), r.get("fn_name", ""))
                         for r in every)
         if key not in active)
+    return inactive, len(active_recs)
 
 
 def cluster_scoped_splice(
@@ -395,11 +411,23 @@ def fill_impl_blocks(
     # Rebound BEFORE any nested route defines itself, so every splice this
     # module performs — block, file-first, free-fn reroute, last-resort — goes
     # through the cluster's own membership verdict exactly once.
+    _cfg_dead_pairs, _active_stub_count = cluster_stub_census(
+        target_src_dir, cluster, _scan_unimplemented_records_for_cluster)
+    # The cluster-active tree holds no hollow body as this call begins: the
+    # regression gate's crash-only keep has no hollow sibling to defer to,
+    # so a fill that newly crashes binaries is reverted at once (see
+    # `cargo_runner.test_regression_gate`, `stub_free`). Unknown ⇒ False.
+    stub_free = _active_stub_count == 0
     _splice_fn_with_where = cluster_scoped_splice(
         _splice_fn_with_where,
-        inactive=cluster_inactive_stub_names(
-            target_src_dir, cluster, _scan_unimplemented_records_for_cluster),
+        inactive=_cfg_dead_pairs,
         target_src_dir=target_src_dir, log=_log)
+
+    def _cfg_dead_fns(file_rel: str) -> frozenset[str]:
+        """The fns of `file_rel` this cluster never compiles — handed to the
+        retro gate so a conviction blocked on one of them can expire."""
+        rel = _norm_src_rel(file_rel)
+        return frozenset(fn for f, fn in _cfg_dead_pairs if f == rel)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
     # Guards the plain-Python aggregate counters (`attempts_total`,
@@ -1109,7 +1137,8 @@ def fill_impl_blocks(
                          "(all were failing at baseline); judged at the "
                          "next sweep in the joint tree.")
                 _regr_file = (_test_regression_gate(
-                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
+                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
+                    stub_free=stub_free)
                     if rc == 0 else None)
                 if rc == 0 and (not _u2_reject or _bank is not None
                                 or _crash_keep_file or _nonregr_keep_file
@@ -1446,14 +1475,18 @@ def fill_impl_blocks(
         # poisoned record's only other trace is its downstream test failures.
         _prior_key = _retro_key(block.file, "*impl*", block.container)
         _prior_rec = retros_cache.get(_prior_key, {})
-        prior_retro = admissible_guidance(
+        _prior_verdict = screen_guidance(
             _prior_rec, snapshot, evidence=_block_evidence,
             anchor_types=anchor_types_for_container(block.container),
-            cluster=cluster_name)
+            cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file))
+        prior_retro = _prior_verdict.text
         # The line carries the STORE key so the grep lands on the record.
         if (_hline := honoured_guidance_line(
                 _prior_key, _prior_rec, prior_retro)):
             _log(f"  {_hline}")
+        if (_rline := retired_guidance_line(
+                _prior_key, _prior_rec, _prior_verdict)):
+            _log(f"  {_rline}")
         notes_section = ""
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
@@ -1763,7 +1796,8 @@ def fill_impl_blocks(
                 # runs exactly once per green attempt (never wasted). Red
                 # attempts skip it (tests can't run; deferred to the TDD loop).
                 _regr = (_test_regression_gate(
-                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test)
+                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
+                    stub_free=stub_free)
                     if rc == 0 else None)
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
@@ -2193,7 +2227,8 @@ def fill_impl_blocks(
                     prior_retrospective=admissible_guidance(
                         prior, snapshot, evidence=_block_evidence,
                         anchor_types=anchor_types_for_container(block.container),
-                        cluster=cluster_name),
+                        cluster=cluster_name,
+                        cfg_dead=_cfg_dead_fns(block.file)),
                 )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
@@ -2292,13 +2327,17 @@ def fill_impl_blocks(
             # is the record that steers the retry the line below announces.
             _prior_key = _retro_key(block.file, "*impl*", block.container)
             _prior_rec = retros_cache.get(_prior_key, {})
-            prior_retro = admissible_guidance(
+            _prior_verdict = screen_guidance(
                 _prior_rec, snapshot, evidence=_block_evidence,
                 anchor_types=anchor_types_for_container(block.container),
-                cluster=cluster_name)
+                cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file))
+            prior_retro = _prior_verdict.text
             if (_hline := honoured_guidance_line(
                     _prior_key, _prior_rec, prior_retro)):
                 _log(f"  {_hline}")
+            if (_rline := retired_guidance_line(
+                    _prior_key, _prior_rec, _prior_verdict)):
+                _log(f"  {_rline}")
             _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
                  "kept the error floor improving — re-entering the fix loop "
                  "with the new guidance.")
@@ -2347,7 +2386,8 @@ def fill_impl_blocks(
                     _sv_rc, _, _ = _run_cargo_check_diag(
                         check_cmd, target_src_dir, cluster_env)
                     _sv_regr = (_test_regression_gate(
-                        tdd_test_cmd, target_src_dir, cluster_env, _sv_base)
+                        tdd_test_cmd, target_src_dir, cluster_env, _sv_base,
+                        stub_free=stub_free)
                         if _sv_rc == 0 else None)
                     if _sv_rc != 0 or _sv_regr is not None:
                         file_path.write_text(_stubbed, encoding="utf-8")

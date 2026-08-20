@@ -563,6 +563,11 @@ class PhaseCFillEngine:
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
                 still_stubbed=_pass_stub_keys,
+                cfg_dead=_cfg_dead,
+                # Pass-start, cfg-aware: a stub the cluster never compiles
+                # cannot panic in its binaries and does not make the tree
+                # hollow for the gate's purpose.
+                stub_free=not any(not _is_cfg_dead(k) for k in _pass_stub_keys),
             )
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,

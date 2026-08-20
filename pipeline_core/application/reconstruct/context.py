@@ -79,6 +79,17 @@ class PerFnPassCtx:
     # failing attributed test needs one of these is kept-and-deferred instead
     # of re-prompted (`domain/dispatch.sibling_blocked_u2_failures`).
     still_stubbed: frozenset[FnLocator] = frozenset()
+    # (file, fn) pairs whose every stub occurrence is cfg-gated out of this
+    # cluster's build — the dispatch-side cfg verdict. Read by the retro
+    # gate: a conviction that recorded one of these as a blocker can never
+    # see it fill, so it is not a tree premise (`screen_guidance(cfg_dead=)`).
+    cfg_dead: frozenset[tuple[str, str]] = frozenset()
+    # True when the cluster-active tree held NO hollow body at pass start.
+    # Read by the regression gate: a fill that newly crashes binaries in a
+    # stub-free tree has no hollow sibling to blame and is reverted at once,
+    # instead of being kept until the next sweep's ratchet while every later
+    # unit in the batch is judged with those binaries excluded.
+    stub_free: bool = False
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

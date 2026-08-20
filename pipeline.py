@@ -856,8 +856,9 @@ _HELPERS = _Helpers(
     # late-bind _run_cargo/_UNIFIED_FILL_LOOP by name: both are patched seams.
     test_regression_baseline=lambda tc, cwd, env: _regression_guard.baseline(
         _run_cargo, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env),
-    test_regression_gate=lambda tc, cwd, env, base: _regression_guard.gate(
-        _run_cargo, _guard, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env, base),
+    test_regression_gate=lambda tc, cwd, env, base, **kw: _regression_guard.gate(
+        _run_cargo, _guard, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env, base,
+        **kw),
     per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
     converge_in_cluster=lambda *a, **k: _converge_in_cluster(*a, **k),
     count_relevant_notes=lambda *a, **k: _count_relevant_notes(*a, **k),

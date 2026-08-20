@@ -49,6 +49,7 @@ from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
+from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
@@ -69,6 +70,8 @@ from pipeline_core.domain.retro_gate import (
     conviction_standing,
     honoured_guidance_line,
     judge_guidance,
+    retired_guidance_line,
+    screen_guidance,
     stamp_conviction,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -97,6 +100,13 @@ from pipeline_core.prompts.per_fn import (
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import format_type_for_prompt
 
+
+def _cfg_dead_fns_of(ctx: PerFnPassCtx, rel_file: str) -> frozenset[str]:
+    """The fns of `rel_file` this cluster never compiles (`ctx.cfg_dead`),
+    in the retro gate's vocabulary: a conviction blocked on one of them can
+    never see it fill, so it must not keep the record alive."""
+    rel = norm_src_rel(rel_file)
+    return frozenset(fn for f, fn in ctx.cfg_dead if f == rel)
 
 @dataclass(frozen=True, slots=True)
 class FillCaps:
@@ -146,7 +156,8 @@ class FillOneFn:
             return False
         _rc, _ = self.cargo.run(ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
         _regr = (self.cargo.test_regression_gate(
-            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base)
+            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base,
+            stub_free=ctx.stub_free)
             if _rc == 0 else None)
         if _rc != 0 or _regr is not None:
             _why = ("no longer compiles here" if _regr is None
@@ -496,9 +507,11 @@ class FillOneFn:
                 # 2026-08-13/14, was visible in no log for two days).
                 _retro_key = self.retros.retro_key(rel_file, fn_name, container)
                 _retro_rec = ctx.retros_cache.get(_retro_key, {})
-                _retro_guidance = admissible_guidance(
+                _retro_verdict = screen_guidance(
                     _retro_rec, cur_text, evidence=_evidence,
-                    anchor_types=_anchor_types, cluster=ctx.cluster_name)
+                    anchor_types=_anchor_types, cluster=ctx.cluster_name,
+                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file))
+                _retro_guidance = _retro_verdict.text
                 # The line carries the STORE key (file::fn::container), not a
                 # display name: `fn new` exists under three containers, and
                 # the whole point is that the grep lands on the one record
@@ -506,6 +519,9 @@ class FillOneFn:
                 if (_hline := honoured_guidance_line(
                         _retro_key, _retro_rec, _retro_guidance)):
                     self.tel.log(f"  {_hline}")
+                if (_rline := retired_guidance_line(
+                        _retro_key, _retro_rec, _retro_verdict)):
+                    self.tel.log(f"  {_rline}")
                 prompt = build_per_fn_fix_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                     test_blocks=test_blocks, module_name=ctx.module_name,
@@ -804,7 +820,7 @@ class FillOneFn:
             if rc == 0 and _u2_fail_sig is None:
                 _regr = self.cargo.test_regression_gate(
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
-                    _attempt_baseline_test)
+                    _attempt_baseline_test, stub_free=ctx.stub_free)
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
                     _u2_fail_sig = _cmp.signature
@@ -1056,7 +1072,8 @@ class FillOneFn:
                 # this layout disproves would just be restated in the new one.
                 _prior_guidance = admissible_guidance(
                     _prior, snapshot, evidence=_evidence,
-                    anchor_types=_anchor_types, cluster=ctx.cluster_name)
+                    anchor_types=_anchor_types, cluster=ctx.cluster_name,
+                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file))
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,

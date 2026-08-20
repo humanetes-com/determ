@@ -87,7 +87,7 @@ class FakeFill:
         from pipeline_core.domain.test_report import U2Verdict
         return self.s.get("u2") or U2Verdict.accept()
     def test_regression_baseline(self, *a: Any) -> Any: return self.s.get("regr_base")
-    def test_regression_gate(self, *a: Any) -> Any: return self.s.get("regr")
+    def test_regression_gate(self, *a: Any, **kw: Any) -> Any: return self.s.get("regr")
     def focus_errors(self, *a: Any, **k: Any) -> str: return self.s.get("err", "E")
     def env(self) -> dict[str, str]: return {}
 
