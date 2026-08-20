@@ -1379,3 +1379,74 @@ def test_impl_poisoned_guidance_is_withheld_from_the_prompt(
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
     _run(ws)
     assert seen and not any("_object" in p for p in seen)
+
+
+SIBLING_LIB = """pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+impl Bar {
+    pub fn kind(&self) -> u32 {
+        self.tag.wrapping_add(1)
+    }
+}
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        unimplemented!()
+    }
+    pub fn name(&self) -> u32 {
+        unimplemented!()
+    }
+}
+"""
+
+RESPONSE_LIKE_SIBLING = (
+    '<FN name="kind" block="impl Foo">self.tag.wrapping_add(1)</FN>\n'
+    '<FN name="name" block="impl Foo">self.tag + 1</FN>'
+)
+
+_REJECTED_RENDERED = (
+    "error[E0599]: no method named `wrapping_add` found for struct `Foo`\n"
+    "  --> src/lib.rs:12:18\n"
+    "   |\n"
+    "12 |         self.tag.wrapping_add(1)\n"
+    "   |                  ^^^^^^^^^^^^ method not found\n")
+
+
+def test_impl_retry_flips_a_sibling_that_carries_the_rejected_expression(
+        monkeypatch, tmp_path):
+    """Attempt 2 must not be told to "follow the same structural pattern" as a
+    sibling whose body carries the expression attempt 1 was rejected on. On
+    run `902902-daee577d` (2026-08-20, prompt `11899c17478d`) LAST_ERROR's
+    E0277 quoted `Some(&self.error)` and the SIBLING_REFERENCE endorsed a
+    sibling containing it; the model wrote it again. Negative control: attempt
+    1 has no previous error, so its sibling section carries the endorsement."""
+    from pipeline_core.domain.models import Diagnostic
+
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(SIBLING_LIB)
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return RESPONSE_LIKE_SIBLING
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, _REJECTED_RENDERED,
+                    [Diagnostic(code="E0599", file="src/lib.rs", line=12,
+                                message="no method named `wrapping_add`",
+                                rendered=_REJECTED_RENDERED)]))
+    _run(ws)
+    impl_prompts = [p for p in prompts if "TARGET_IMPL_BLOCK" in p]
+    assert len(impl_prompts) >= 2, "the fix loop must have retried"
+    first, second = impl_prompts[0], impl_prompts[1]
+    assert "<SIBLING_REFERENCE>" in first and "<SIBLING_REFERENCE>" in second, \
+        "Bar::kind is a same-named filled sibling and must be shown on both attempts"
+    assert "follow the same structural pattern" in first
+    assert "CAUTION" not in first
+    assert "<LAST_ERROR>" in second
+    sib2 = second.split("<SIBLING_REFERENCE>", 1)[1].split("</SIBLING_REFERENCE>", 1)[0]
+    assert "CAUTION" in sib2 and "`self.tag.wrapping_add(1)`" in sib2
+    assert "follow the same structural pattern" not in sib2

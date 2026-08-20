@@ -135,3 +135,91 @@ def test_per_impl_prompt_carries_the_previous_attempts_errors() -> None:
                                     PerImplSections(**empty), fr_path=None)
     assert "<LAST_ERROR>" not in without
     assert with_err != without
+
+
+def test_per_impl_prompt_states_refill_evidence_and_does_not_ask_for_cfg_dead_stubs() -> None:
+    """Two claims the per-impl prompt used to make without support, both from
+    run `902902-daee577d` (2026-08-20): that a re-fill member "FAILS" (when
+    the frontier named it by inference and the tests were not in the prompt),
+    and that a cfg-dead `provide` was to be filled "in this response" (the
+    splice then refused the body)."""
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+    from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
+
+    container = "impl<C, E> StdError for ContextError<C, E>"
+    source = FnRecord(file="src/context.rs", fn_name="source", container=container,
+                      sig_text="fn source(&self) -> Option<&(dyn StdError + 'static)>",
+                      body_text="Some(&self.error)", has_unimplemented_body=False)
+    provide = FnRecord(file="src/context.rs", fn_name="provide", container=container,
+                       sig_text="fn provide<'a>(&'a self, request: &mut Request<'a>)",
+                       has_unimplemented_body=True)
+    block = ImplBlock(file="src/context.rs", container=container,
+                      members=(source, provide), stub_members=(), refill_members=(source,))
+    sibling_container = "impl<C> StdError for ContextError<C, Error>"
+    sib = FnRecord(file="src/context.rs", fn_name="source", container=sibling_container,
+                   sig_text="fn source(&self) -> Option<&(dyn StdError + 'static)>",
+                   body_text="None", has_unimplemented_body=False)
+    sibling = ImplBlock(file="src/context.rs", container=sibling_container,
+                        members=(sib,), refill_members=(sib,))
+    empty = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
+             "dispatch_family": "", "macros": "", "siblings": "", "retrospective_guidance": "",
+             "bound_methods": ""}
+    prompt = build_per_impl_prompt(
+        block, [sibling], [], "anyhow", "stable",
+        PerImplSections(**empty,
+                        refill_evidence="`source` — INFERRED: nothing singles out THIS body.\n"
+                                        "  test_len said:\n    left: 4\n    right: 1",
+                        inferred_refill_names=frozenset({"source"})),
+        fr_path=None)
+    assert "[REFILL?]" in prompt and "return it unchanged" in prompt
+    assert "its test below FAILS" not in prompt
+    assert "<REFILL_TARGETS>" in prompt and "test_len said:" in prompt and "left: 4" in prompt
+    prov = next(ln for ln in prompt.splitlines() if "fn provide" in ln and "[STUB]" in ln)
+    assert "NOT in this response" in prov and "fill in this response" not in prov
+    # The same-named candidate in the related block is shown as such.
+    assert "same-named re-fill candidate" in prompt
+    # Legacy: a DIRECT re-fill keeps the certainty tag.
+    legacy = build_per_impl_prompt(block, [], [], "anyhow", "stable",
+                                   PerImplSections(**empty), fr_path=None)
+    assert "[REFILL] compiles but its test below FAILS" in legacy
+
+
+def test_per_impl_sibling_reference_names_the_contradiction_with_last_error() -> None:
+    """When the sibling body carries the expression LAST_ERROR rejected, the
+    SIBLING_REFERENCE lead-in must say so instead of "follow the same
+    structural pattern" — on attempt 2 of `ContextError<C, Error>::source`
+    (run `902902-daee577d`, 2026-08-20, prompt `11899c17478d`) the two
+    sections contradicted each other and the sibling won, E0277 twice."""
+    import pipeline  # noqa: F401 — binds the real prompts runtime facade
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+    from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
+
+    stub = FnRecord(file="src/context.rs", fn_name="source",
+                    container="impl<C> StdError for ContextError<C, Error>",
+                    sig_text="fn source(&self)", has_unimplemented_body=True)
+    block = ImplBlock(file="src/context.rs",
+                      container="impl<C> StdError for ContextError<C, Error>",
+                      members=(stub,), stub_members=(stub,))
+    sib = ("fn source(&self) -> Option<&(dyn StdError + 'static)> {\n"
+           "Some(&self.error)\n}")
+    base = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
+            "dispatch_family": "", "macros": "", "siblings": sib,
+            "retrospective_guidance": "", "bound_methods": "",
+            "last_error": "error[E0277]: ...\n148 |         Some(&self.error)\n"}
+    flipped = build_per_impl_prompt(
+        block, [], [], "mycrate", "stable",
+        PerImplSections(**base, sibling_rejected=("Some(&self.error)",)),
+        fr_path=None)
+    section = flipped.split("<SIBLING_REFERENCE>", 1)[1].split(
+        "</SIBLING_REFERENCE>", 1)[0]
+    assert "CAUTION" in section and "`Some(&self.error)`" in section
+    assert "Do NOT follow" in section
+    assert "follow the same structural pattern" not in section
+    assert "Some(&self.error)\n}" in section, "the sibling body is still shown"
+    # Negative control: no rejected expression → the original endorsement.
+    plain = build_per_impl_prompt(block, [], [], "mycrate", "stable",
+                                  PerImplSections(**base), fr_path=None)
+    assert "follow the same structural pattern" in plain
+    assert "CAUTION" not in plain

@@ -66,3 +66,25 @@ def test_of_direct_and_of_dispatch_are_the_two_extremes() -> None:
     assert FailureFrontier.of_dispatch(d).convicting_for(A) == set()
     assert FailureFrontier.of_dispatch(d).tests_for(A) == {"t"}
     assert not FailureFrontier.of_dispatch({})
+
+
+def test_evidence_travels_on_the_frontier_and_matches_bare_names() -> None:
+    """The failing tests' own words ride the frontier (the one value every
+    fill seam already receives). The escalation names tests bare (`test_rev`)
+    while libtest prints `chain::test_rev`; the lookup matches on the last
+    `::` segment, exact name first."""
+    dispatch = {A: {"test_rev", "t_direct"}}
+    convicting = {A: {"t_direct"}}
+    fr = FailureFrontier.build(dispatch, convicting, evidence={
+        "chain::test_rev": "panicked at tests/test_chain.rs:31\nleft: \"0\"\nright: \"3\"",
+        "t_direct": "panicked at src/a.rs:1",
+    })
+    assert fr.evidence_for("test_rev").startswith("panicked at tests/test_chain.rs:31")
+    assert fr.evidence_for("chain::test_rev") == fr.evidence_for("test_rev")
+    assert fr.evidence_for("t_direct") == "panicked at src/a.rs:1"
+    assert fr.evidence_for("never_ran") == ""
+    # Default: no evidence, the projections untouched.
+    bare = FailureFrontier.build(dispatch, convicting)
+    assert bare.evidence == {} and bare.evidence_for("test_rev") == ""
+    assert bare.tests_for(A) == {"test_rev", "t_direct"}
+    assert FailureFrontier.of_dispatch(dispatch).evidence == {}

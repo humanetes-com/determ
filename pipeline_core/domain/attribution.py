@@ -1,4 +1,4 @@
-"""Domain types + pure helper for failure→fn attribution (P2).
+"""Domain types + pure helper for failure→fn attribution.
 
 `FailureKind` is a StrEnum (its members ARE their wire strings, so existing callers that
 treat the kind as a plain string keep working) and it also answers whether the path it
@@ -7,7 +7,8 @@ mapping, moved out of pipeline.py.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
 
@@ -72,15 +73,29 @@ class FailureFrontier:
 
     dispatch: Frontier
     convicting: Frontier
+    # What the failing tests SAID — panic site + assertion text per test, keyed
+    # as libtest printed the name (`test_report.failure_evidence_by_test`). The
+    # prompt that asks for a re-fill owes the model this: on 2026-08-20 (run
+    # `902902-daee577d`) the per-impl REFILL section read "its attributed test
+    # (see Tests below) still FAILS" while the tests it meant (`test_iter`,
+    # `test_len`, `test_rev`, `test_clone`) were absent from the prompt and
+    # their `left: 4 / right: 1` never reached the model. Carried on the
+    # frontier rather than threaded as one more engine parameter because the
+    # frontier already travels every seam the evidence must reach.
+    evidence: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, dispatch: Frontier, convicting: Frontier) -> FailureFrontier:
+    def build(
+        cls, dispatch: Frontier, convicting: Frontier,
+        evidence: Mapping[str, str] | None = None,
+    ) -> FailureFrontier:
         narrowed = {
             key: (convicting.get(key, set()) & tests)
             for key, tests in dispatch.items()
             if convicting.get(key)
         }
-        return cls(dict(dispatch), {k: v for k, v in narrowed.items() if v})
+        return cls(dict(dispatch), {k: v for k, v in narrowed.items() if v},
+                   dict(evidence or {}))
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:
@@ -100,6 +115,19 @@ class FailureFrontier:
 
     def convicting_for(self, key: FnLocator) -> set[str]:
         return self.convicting.get(key, set())
+
+    def evidence_for(self, test: str) -> str:
+        """The failing test's own words, or "". Exact name first; a bare name
+        (the escalation's `test_rev`) matches a printed `chain::test_rev` on
+        the last `::` segment, the same rule `oracle_ledger.bare_test_name`
+        applies when reconciling the two name forms."""
+        if test in self.evidence:
+            return self.evidence[test]
+        leaf = test.rsplit("::", 1)[-1]
+        for name, text in self.evidence.items():
+            if name.rsplit("::", 1)[-1] == leaf:
+                return text
+        return ""
 
     def __bool__(self) -> bool:
         return bool(self.dispatch)

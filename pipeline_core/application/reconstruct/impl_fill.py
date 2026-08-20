@@ -1,4 +1,4 @@
-"""Per-impl-block Phase-C fill engine (P4) — relocated from pipeline.py.
+"""Per-impl-block Phase-C fill engine — relocated from pipeline.py.
 
 Concrete behind `_PhaseCFillAdapter.fill_impl_blocks`. ~39 collaborators injected via
 `ImplFillDeps` (composition root late-binds the pipeline.py helpers for seams); body
@@ -93,6 +93,13 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
 from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.refill_evidence import (
+    attributed_test_leaves,
+    collect_refill_evidence,
+    container_header,
+    inferred_refill_names,
+    render_refill_evidence,
+)
 from pipeline_core.domain.refine import (
     CompilingSalvage,
     FixProgress,
@@ -119,6 +126,7 @@ from pipeline_core.domain.retro_gate import (
 )
 from pipeline_core.domain.rust_idents import canon_container, signature_fixed_by_trait
 from pipeline_core.domain.rust_scan import stubbed_fn_names
+from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
     JointImprovement,
@@ -300,8 +308,8 @@ def fill_impl_blocks(
     cluster_env: dict[str, str] | None,
     fr_path: Path | None,
     tdd_frontier_keys: set[FnLocator] | None,
-    tdd_frontier_tests: FailureFrontier | None = None,  # Plan 10 U2
-    tdd_test_cmd: str | None = None,                                       # Plan 10 U2
+    tdd_frontier_tests: FailureFrontier | None = None,
+    tdd_test_cmd: str | None = None,
     parallelism: int = 1,
     crash_evidence: dict[FnLocator, str] | None = None,
     # The ORIGIN blame only — see PerFnPassCtx.crash_blamed: evidence KEYS
@@ -342,7 +350,7 @@ def fill_impl_blocks(
     plain-Python aggregate counters and the
     on-disk retrospective cache save that fall outside that lock.
     """
-    # P4 rebind-prelude — collaborators localised so the 8 nested closures stay byte-identical.
+    # Rebind prelude — collaborators localised so the 8 nested closures stay byte-identical.
     _build_dispatch_family_section = deps.build_dispatch_family_section
     _build_per_impl_prompt = deps.build_per_impl_prompt
     _cargo_env = deps.cargo_env
@@ -535,7 +543,7 @@ def fill_impl_blocks(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
     macros_section = _collect_crate_macros(_src_for_macros)
 
-    # P3: the crate blueprint — the model's own design doc, sliced per block
+    # The crate blueprint — the model's own design doc, sliced per block
     # so every local fill sees the global scheme it committed to.
     _blueprint = Blueprint()
     if fr_path is not None:
@@ -547,7 +555,7 @@ def fill_impl_blocks(
                 _log(f"  [phase-c/impl] blueprint loaded: "
                      f"{len(_blueprint.sections)} section(s).")
 
-    # P2 pull protocol: the model may request ONE typed artifact instead of
+    # Pull protocol: the model may request ONE typed artifact instead of
     # guessing (bounded round-trips; menu appended to every fill prompt).
     # All sources are post-strip-legal: the reconstruction tree, the tests,
     # the enumerated type records, the last cargo output.
@@ -631,7 +639,7 @@ def fill_impl_blocks(
     _FILE_FIRST_MAX_ATTEMPTS = int(os.getenv("PHASE_C_FILE_MAX_ATTEMPTS", "3"))
 
     def _fill_file_first(file_rel: str, fblocks: list[ImplBlock]) -> None:
-        """P5 file-first pass: ONE prompt fills every stub of a multi-block
+        """File-first pass: ONE prompt fills every stub of a multi-block
         file so the impls are designed together (run-187469 evidence: the
         Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
         Strict gate — kept only on rc==0 (+U2 with comparative banking), else
@@ -737,6 +745,28 @@ def fill_impl_blocks(
             dispatched_keys.update(FnLocator(file_rel, n) for n in wanted)
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
         test_blocks: list[tuple[str, str]] = []
+        # The evidence behind each re-fill in this file: attributed tests,
+        # DIRECT vs INFERRED, same-named candidates, and what the tests said.
+        # The attributed tests' SOURCE goes in first — they are the tests the
+        # "rewrite" instruction is about; the name-match heuristic below
+        # found `tests/test_source.rs` for `source` and nothing for
+        # `ext_context` while the frontier named `test_iter`/`test_len`
+        # (run `902902-daee577d`, 2026-08-20).
+        _file_refill_evs = {
+            _impl_block_id(b.file, b.container):
+                collect_refill_evidence(b, fblocks, _frontier_tests)
+            for b in fblocks}
+        for _leaf in attributed_test_leaves(
+                (e for evs in _file_refill_evs.values() for e in evs), cap=4):
+            for path_str, txt in _find_tests_referencing_fn(
+                    tests_dir_files, _leaf, max_blocks=1):
+                if not any(p == path_str for p, _ in test_blocks):
+                    test_blocks.append((path_str, txt))
+        _file_refill_evidence = "\n".join(
+            f"in `{container_header(b.container) or 'free fns'}`:\n"
+            + render_refill_evidence(_file_refill_evs[_impl_block_id(b.file, b.container)])
+            for b in fblocks
+            if _file_refill_evs[_impl_block_id(b.file, b.container)])
         for fn_name in wanted[:6]:
             for path_str, txt in _find_tests_referencing_fn(
                     tests_dir_files, fn_name, max_blocks=2):
@@ -771,9 +801,12 @@ def fill_impl_blocks(
                 fill_plan=[BlockFillPlan(
                     b.container,
                     tuple(m.fn_name for m in b.stub_members),
-                    tuple(m.fn_name for m in b.refill_members))
+                    tuple(m.fn_name for m in b.refill_members),
+                    inferred=tuple(sorted(inferred_refill_names(
+                        _file_refill_evs[_impl_block_id(b.file, b.container)]))))
                     for b in fblocks],
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
+                refill_evidence=_file_refill_evidence,
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
                 crash_evidence=_file_crash,
                 module_name=module_name, cluster_name=cluster_name,
@@ -1420,6 +1453,21 @@ def fill_impl_blocks(
         refill_fn_names = [m.fn_name for m in block.refill_members]
         _fill_target_names = stub_fn_names + refill_fn_names
         test_blocks: list[tuple[str, str]] = []
+        # What the record supports for each re-fill member — DIRECT vs
+        # INFERRED, the attributed tests, same-named candidates in the file,
+        # and the tests' own failure text (`domain.refill_evidence`). The
+        # attributed tests' SOURCE is looked up first: the name-match below
+        # found `tests/test_source.rs` for a `source` member and nothing for
+        # `ext_context`, while the frontier that stamped the re-fill named
+        # `test_iter`/`test_len`/`test_rev` (run `902902-daee577d`).
+        _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests)
+        _refill_evidence_text = render_refill_evidence(_refill_evs)
+        _inferred_refill = inferred_refill_names(_refill_evs)
+        for _leaf in attributed_test_leaves(_refill_evs, cap=4):
+            for path_str, txt in _find_tests_referencing_fn(
+                    tests_dir_files, _leaf, max_blocks=1):
+                if not any(p == path_str for p, _ in test_blocks):
+                    test_blocks.append((path_str, txt))
         # Reuse the per-fn test finder by unioning tests touching any
         # stub/refill target.
         for fn_name in _fill_target_names[:4]:
@@ -1461,7 +1509,7 @@ def fill_impl_blocks(
             if _s:
                 _sib_parts.append(_s)
         siblings_section = "\n\n".join(_sib_parts)
-        # P3: this block's blueprint slice — ranked by overlap with the
+        # This block's blueprint slice — ranked by overlap with the
         # stub/refill names, the container tokens, and the file stem.
         _blueprint_slice = "" if _blueprint.empty else _blueprint.slice_for(
             frozenset([*_fill_target_names, *_container_names(block.container),
@@ -1555,11 +1603,31 @@ def fill_impl_blocks(
             _last_loss[:] = [AttemptLoss.MODEL_FAILURE]
             # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
-            # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a trait
+            # (E0277/E0599/E0046/E0053 routinely name a trait
             # the impl block's signatures don't mention).
             _types_section_eff = _types_section_for_fix(
                 _member_sigs_text, "", last_error_excerpt or "",
                 _block_container, _block_where, _crate_type_records)
+            # Attempt 2+: does the sibling reference carry the expression the
+            # previous attempt was rejected on? Then the two sections
+            # contradict each other and the prefix must say so — run
+            # `902902-daee577d` (2026-08-20), prompt `11899c17478d`:
+            # `Some(&self.error)` quoted in LAST_ERROR's E0277 AND in the
+            # sibling introduced with "follow the same structural pattern";
+            # the model followed the sibling and hit the identical error.
+            _steer = sibling_steer(siblings_section, last_error_excerpt or "")
+            if _steer.contradicts:
+                _shared_txt = ", ".join(f"`{e}`" for e in _steer.shared)
+                _log(f"  [phase-c/impl] {block_id}: SIBLING_REFERENCE contradicts "
+                     f"LAST_ERROR — the sibling body carries {_shared_txt}, the "
+                     "expression the previous attempt was rejected on; its "
+                     "prefix now reads 'do NOT follow' instead of 'follow'.")
+                _emit("phase_c.impl.sibling_contradicts_last_error", data={
+                    "block_id": block_id, "file": block.file,
+                    "container": block.container,
+                    "shared": list(_steer.shared),
+                    "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
+                })
             prompt = _build_per_impl_prompt(
                 block=block,
                 related_blocks=related_blocks,
@@ -1582,7 +1650,10 @@ def fill_impl_blocks(
                     # attempts, identical error, whole fix loop spent).
                     last_error=last_error_excerpt or "",
                     bound_methods=_bound_methods_section_for(
-                        _block_where, _crate_type_records)),
+                        _block_where, _crate_type_records),
+                    refill_evidence=_refill_evidence_text,
+                    inferred_refill_names=_inferred_refill,
+                    sibling_rejected=_steer.shared),
                 fr_path=fr_path,
             )
             try:
@@ -1603,7 +1674,7 @@ def fill_impl_blocks(
         def _splice_and_verify(parsed: list[dict[str, Any]],
                                fix_attempt: int) -> FixOutcome:
             """Route → splice → cargo-verify one parsed reply. Shared by the
-            budgeted attempts and the P6 maximal last-resort attempt."""
+            budgeted attempts and the maximal last-resort attempt."""
             nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
                 members_filled_this_block, block_already_complete, last_metric
             # Hold the global splice+cargo lock while we mutate and check.
@@ -1629,7 +1700,7 @@ def fill_impl_blocks(
                 # (exact first) — a multi-line where-clause container must
                 # match the model's single-line `block` attribute.
                 # `members` for the same reason the file-first route passes it:
-                # the P6 last-resort prompt this same splice serves shows the
+                # the last-resort prompt this same splice serves shows the
                 # model the ENTIRE file, so a reply can carry a body for a free
                 # fn or for a sibling impl's member tagged with something that
                 # is not an impl header at all.
@@ -1750,7 +1821,7 @@ def fill_impl_blocks(
                 _last_full_out[0] = cargo_out  # `full_error` pull source
                 _u2_impl: U2Verdict | None = None
                 if rc == 0:
-                    # Plan 10 U2 (shared gate): accept the block only if its
+                    # Shared gate: accept the block only if its
                     # members' own tests pass too — not just compile.
                     # Conviction-scoped (see the file-first gate above): only
                     # tests with direct evidence at a member may revert the block.
@@ -1988,7 +2059,7 @@ def fill_impl_blocks(
                     FixProgress(0, max(1, len(cur_err_sig))) if _u2_impl_reject
                     else FixProgress(max(1, len(cur_err_sig)), 0))
                 last_metric = cur_metric
-                # P7: whole rustc diagnostics (count-capped) when the JSON
+                # Whole rustc diagnostics (count-capped) when the JSON
                 # path yielded them; the char-budgeted text focus is fallback.
                 last_error_excerpt = (
                     focus_diagnostics(diagnostics, block.file)
@@ -2131,7 +2202,7 @@ def fill_impl_blocks(
                         evidence=tuple(sorted(_cur_sig)),
                         model_calls=fix_attempt)
                     break
-            # P6: maximal last-resort — ONE attempt with budgets OFF (round 1
+            # Maximal last-resort — ONE attempt with budgets OFF (round 1
             # only; later rounds change guidance, not budgets): the WHOLE
             # current file, every referencing test verbatim, and the full
             # focused error. A defect outside the budgeted window (sibling
@@ -2437,7 +2508,7 @@ def fill_impl_blocks(
                     "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
                 })
 
-    # P5: file-first pass — one prompt designs a file's frontier together;
+    # File-first pass — one prompt designs a file's frontier together;
     # the per-block loop below handles the remainder (the freshness gate
     # skips blocks the file pass completed). Unit selection is
     # `file_route_units` (domain): the historical multi-block-only selection

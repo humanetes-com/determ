@@ -268,3 +268,60 @@ def test_gotcha_test_process_aborted_fires_on_the_u2_abort_feedback():
     assert out.count("WRONG") >= 2 and "RIGHT" in out
     # Names the two real causes, not an API substitution.
     assert "unwinding" in out and "forget" in out
+
+
+# --- what the TARGET render may claim about a member ----------------------- #
+
+def test_format_impl_block_cfg_dead_stub_is_not_asked_for():
+    """`provide` under the stable cluster has no body and is never compiled
+    there; rendering it "[STUB] — fill in this response" while the header
+    listed only `source` had the model answer it and the splice refuse the
+    body (`not_in_cluster_cfg`, four blocks on 2026-08-20)."""
+    block = ImplBlock(container="impl<C, E> StdError for ContextError<C, E> {",
+                      members=(_fn("source", stub=True), _fn("provide", stub=True)))
+    out = format_impl_block_for_prompt(
+        block, mark_target=True, fill_fn_names=frozenset({"source"}))
+    src = next(ln for ln in out.splitlines() if "fn source" in ln)
+    prov = next(ln for ln in out.splitlines() if "fn provide" in ln)
+    assert "fill in this response" in src
+    assert "NOT in this response" in prov and "do NOT emit an <FN>" in prov
+    assert "fill in this response" not in prov
+    # Legacy reading (no fill_fn_names): every stub is a target.
+    legacy = format_impl_block_for_prompt(block, mark_target=True)
+    assert legacy.count("fill in this response") == 2
+    # A related render never asks for anything.
+    related = format_impl_block_for_prompt(block, mark_target=False,
+                                           fill_fn_names=frozenset({"source"}))
+    assert "this response" not in related
+
+
+def test_format_impl_block_inferred_refill_is_hedged_not_convicted():
+    """A re-fill stamped by inference only (escalation / traversal step) is
+    `[REFILL?]` with an instruction to return a right body unchanged — the
+    certainty tag had the correct `ContextError<C, E>::source` rewritten."""
+    block = ImplBlock(container="impl<C, E> StdError for ContextError<C, E> {",
+                      members=(_fn("source", body="Some(&self.error)"),))
+    out = format_impl_block_for_prompt(
+        block, refill_fn_names=frozenset({"source"}),
+        inferred_fn_names=frozenset({"source"}))
+    assert "[REFILL?]" in out and "return it unchanged" in out
+    assert "Some(&self.error)" in out
+    assert "its test below FAILS" not in out
+    direct = format_impl_block_for_prompt(block, refill_fn_names=frozenset({"source"}))
+    assert "[REFILL] compiles but its test below FAILS" in direct
+    assert "[REFILL?]" not in direct
+
+
+def test_format_impl_block_related_candidate_is_shown_in_full():
+    """In a RELATED block, the same-named re-fill candidate is the competing
+    hypothesis — full body, named as a candidate, not a truncated
+    `/* FILLED */` preview that reads as settled."""
+    long_body = "\n".join(f"line{i};" for i in range(60))
+    block = ImplBlock(container="impl<C> StdError for ContextError<C, Error> {",
+                      members=(_fn("source", body=long_body),))
+    out = format_impl_block_for_prompt(
+        block, mark_target=False, candidate_fn_names=frozenset({"source"}))
+    assert "same-named re-fill candidate" in out
+    assert "line59;" in out and "/* ... */" not in out
+    plain = format_impl_block_for_prompt(block, mark_target=False)
+    assert "/* FILLED */" in plain and "/* ... */" in plain

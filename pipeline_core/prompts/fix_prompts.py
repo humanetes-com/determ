@@ -1,4 +1,4 @@
-"""Pure prompt assembly for the shared compile/test fix loop (P3.A).
+"""Pure prompt assembly for the shared compile/test fix loop.
 
 These are the four inner-loop fix prompts `generate_fix_loop` used to build as
 inline f-strings: re-fill ONE fn body (`build_fn_fix_prompt`), re-fill a whole
@@ -116,6 +116,13 @@ class BlockFillPlan:
     header: str
     stubs: tuple[str, ...] = ()
     refills: tuple[str, ...] = ()
+    # The subset of `refills` whose attribution is inference only (a producer
+    # escalation or a traversal step named the fn, no test convicts it — see
+    # `domain.refill_evidence`). Listed as "re-check", never as "rewrite":
+    # told with certainty that `construct_from_context` failed, the file route
+    # replaced its per-type vtable with a `construct_from_std` delegation that
+    # made the downcast tests unreachable (run `902902-daee577d`, 2026-08-20).
+    inferred: tuple[str, ...] = ()
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -123,9 +130,15 @@ def _plan_line(p: BlockFillPlan) -> str:
     parts = []
     if p.stubs:
         parts.append("write: " + ", ".join(p.stubs))
-    if p.refills:
+    direct = tuple(r for r in p.refills if r not in p.inferred)
+    inferred = tuple(r for r in p.refills if r in p.inferred)
+    if direct:
         parts.append("rewrite (a body exists, but its test still fails): "
-                     + ", ".join(p.refills))
+                     + ", ".join(direct))
+    if inferred:
+        parts.append("re-check (a body exists; implicated by NAME only — "
+                     "rewrite ONLY if it is wrong for its bounds, else leave it "
+                     "unchanged): " + ", ".join(inferred))
     return f"  {where} -> " + "; ".join(parts)
 
 
@@ -144,8 +157,9 @@ def build_file_fill_prompt(
     gotchas: str = "",
     types_section: str = "",
     invariants_section: str = "",
+    refill_evidence: str = "",
 ) -> str:
-    """P5 file-first fill: everything one file needs in ONE prompt, so the
+    """File-first fill: everything one file needs in ONE prompt, so the
     model designs the file's impls together (the coherence a fresh reply
     naturally has) instead of inventing each block locally. `prior_error`, when
     given, is the previous file-first attempt's compile/test failure — feeding
@@ -183,6 +197,13 @@ def build_file_fill_prompt(
                   if notes.strip() else "")
     tests_part = (f"\nTests that exercise this file (make them pass):\n"
                   f"{tests_block}\n" if tests_block.strip() else "")
+    # What the record supports for each "rewrite"/"re-check" above — DIRECT
+    # conviction or inference only, the attributed tests, and what they said
+    # (`domain.refill_evidence`); "" when the plan has no re-fills.
+    evidence_part = (f"\n<REFILL_EVIDENCE>\nFor the bodies listed as rewrite / "
+                     f"re-check above — what the failing tests actually "
+                     f"establish:\n{refill_evidence}\n</REFILL_EVIDENCE>\n"
+                     if refill_evidence.strip() else "")
     error_part = (f"\nYour last attempt at this file failed:\n{prior_error}\n"
                   "Fix the WHOLE file again, keeping every impl mutually "
                   "consistent.\n" if prior_error.strip() else "")
@@ -216,7 +237,7 @@ Functions to write (by impl block):
 ```rust
 {file_text}
 ```
-{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{tests_part}{error_part}
+{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{evidence_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
 in `block` and NOWHERE else:
@@ -241,7 +262,7 @@ def build_maximal_impl_prompt(
     errs: str,
     notes: str,
 ) -> str:
-    """P6 last resort — budgets OFF. After the budgeted per-impl loop
+    """Last resort — budgets OFF. After the budgeted per-impl loop
     exhausts, the model gets ONE attempt with the WHOLE current file, every
     referencing test verbatim, and the full focused error (a defect outside
     the block's window is invisible to the budgeted prompt)."""

@@ -19,6 +19,32 @@ from pipeline_core.prompts.sections import (
     trait_contract_for,
 )
 
+SIBLING_FOLLOW_PREFIX = (
+    "Already-filled fns in OTHER impl blocks of this file with the same name "
+    "as a TARGET stub — follow the same structural pattern:\n```rust\n")
+
+
+def sibling_reference_prefix(rejected: tuple[str, ...]) -> str:
+    """The SIBLING_REFERENCE lead-in. With no rejected expression in the
+    sibling (attempt 1, or a sibling that does not carry what LAST_ERROR
+    names) it endorses the pattern; otherwise it names the contradiction —
+    the sibling is shown so the model can see what THIS block must do
+    differently, not as a template. The sibling stays in the prompt either
+    way: the same body is visible as a RELATED block, so dropping the section
+    would remove the place the contradiction is named, not the pattern."""
+    if not rejected:
+        return SIBLING_FOLLOW_PREFIX
+    exprs = ", ".join(f"`{e}`" for e in rejected)
+    return (
+        "Already-filled fns in OTHER impl blocks of this file with the same "
+        f"name as a TARGET stub. CAUTION — this sibling's body carries {exprs}: "
+        "the expression your previous attempt wrote and LAST_ERROR above "
+        "rejected under THIS block's bounds. The sibling compiles only because "
+        "its impl header bounds its types differently. Do NOT follow its "
+        "structural pattern here — reach the same result by a path THIS "
+        "block's bounds allow (TYPES_IN_SCOPE and BOUND_METHODS name the "
+        "fields and methods available):\n```rust\n")
+
 
 def build_per_impl_prompt(
     block: ImplBlock,
@@ -39,7 +65,7 @@ def build_per_impl_prompt(
     surface the `impl AsRef<T1>` + `impl AsRef<T2>` case that per-fn
     prompts cannot show together).
 
-    `sections` (P7): every injected section as a frozen no-default record.
+    `sections`: every injected section as a frozen no-default record.
     """
     types_section = sections.types
     invariants_section = sections.invariants
@@ -53,13 +79,25 @@ def build_per_impl_prompt(
     container = block.container
     stub_members = block.stub_members
     refill_members = block.refill_members
+    _refill_names = frozenset(m.fn_name for m in refill_members)
     target_render = format_impl_block_for_prompt(
         block, mark_target=True,
-        refill_fn_names=frozenset(m.fn_name for m in refill_members))
+        refill_fn_names=_refill_names,
+        # Only the cluster-active stubs are asked for; a stub the cluster's
+        # cfg never compiles is rendered as one the model must NOT answer
+        # (see `format_impl_block_for_prompt`).
+        fill_fn_names=frozenset(m.fn_name for m in stub_members),
+        inferred_fn_names=sections.inferred_refill_names)
     related_renders = []
     for rb in related_blocks:
         related_renders.append(
-            format_impl_block_for_prompt(rb, mark_target=False))
+            format_impl_block_for_prompt(
+                rb, mark_target=False,
+                # A same-named member that is ALSO a re-fill target for the
+                # same failing tests is the competing candidate: shown in
+                # full, not as a settled `/* FILLED */` preview.
+                candidate_fn_names=_refill_names & frozenset(
+                    m.fn_name for m in rb.refill_members)))
     related_section = ""
     if related_renders:
         related_section = (
@@ -86,13 +124,16 @@ def build_per_impl_prompt(
 
     notes_block = tag_block("MODEL_NOTES", notes_section)
     macros_block = tag_block("MACROS", macros_section)
-    # FR-024 sibling reference (per-impl variant): already-filled fns
-    # elsewhere in this file sharing a stub member's name.
+    # Sibling reference (per-impl variant): already-filled fns elsewhere in
+    # this file sharing a stub member's name. When the sibling body carries an
+    # expression LAST_ERROR just rejected, the two sections contradict each
+    # other and the worked example wins over the diagnostic (run
+    # `902902-daee577d`, 2026-08-20: attempt 2 of `ContextError<C, Error>::
+    # source` re-wrote the sibling's `Some(&self.error)` into the same E0277)
+    # — so the prefix names the contradiction instead of endorsing the pattern.
     siblings_block = tag_block(
         "SIBLING_REFERENCE", siblings_section,
-        prefix="Already-filled fns in OTHER impl blocks of this file with "
-               "the same name as a TARGET stub — follow the same "
-               "structural pattern:\n```rust\n",
+        prefix=sibling_reference_prefix(sections.sibling_rejected),
         suffix="\n```")
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
     # Methods the impl's frozen where-bounds make callable — prefer a
@@ -148,15 +189,30 @@ def build_per_impl_prompt(
     # fails — usually because they disagree with a sibling stub/refill member
     # on a shared private scheme. Rewrite them TOGETHER with the stubs so the
     # whole block agrees.
-    refill_block = tag_block(
-        "REFILL_TARGETS",
-        ", ".join(m.fn_name for m in refill_members),
-        prefix="These members are marked [REFILL] in TARGET_IMPL_BLOCK above: "
-               "they already COMPILE but their attributed test (see Tests "
-               "below) still FAILS. Rewrite their BEHAVIOR — keep the "
-               "signature, do not just resubmit the same body. If they share "
-               "a private field/scheme with a [STUB] member, design BOTH "
-               "consistently in this same response.\n")
+    # With evidence (`domain.refill_evidence`) the section states, per
+    # member, what the record supports — DIRECT conviction or inference only,
+    # the attributed tests, and what they said — instead of asserting that a
+    # test the prompt did not carry "still FAILS".
+    if sections.refill_evidence:
+        refill_block = tag_block(
+            "REFILL_TARGETS",
+            sections.refill_evidence,
+            prefix="Members marked [REFILL] / [REFILL?] in TARGET_IMPL_BLOCK "
+                   "above already COMPILE. What the record supports for each, "
+                   "and the failing tests' own words (their source is under "
+                   "Tests below). If a member shares a private field/scheme "
+                   "with a [STUB] member, design BOTH consistently in this "
+                   "same response.\n")
+    else:
+        refill_block = tag_block(
+            "REFILL_TARGETS",
+            ", ".join(m.fn_name for m in refill_members),
+            prefix="These members are marked [REFILL] in TARGET_IMPL_BLOCK "
+                   "above: they already COMPILE but their attributed test "
+                   "(see Tests below) still FAILS. Rewrite their BEHAVIOR — "
+                   "keep the signature, do not just resubmit the same body. "
+                   "If they share a private field/scheme with a [STUB] member, "
+                   "design BOTH consistently in this same response.\n")
 
     # Output protocol example.
     output_example: list[str] = []

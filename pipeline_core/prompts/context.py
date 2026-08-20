@@ -1,9 +1,9 @@
-"""Frozen per-family prompt-section records (P7).
+"""Frozen per-family prompt-section records.
 
 Each builder family takes ONE of these instead of a bag of keyword args that
 default to "". The fields have NO defaults: a section a call site forgets to
 inject is a `TypeError` at construction — a VISIBLE hole — instead of a silent
-empty string. This is the bug class P7 targets (e.g. the BoxedError fn that
+empty string. This is the bug class these records target (e.g. the BoxedError fn that
 silently got no TYPES_IN_SCOPE because a call site omitted `types_section`).
 
 The records hold only the injected SECTIONS (the silent-hole risk set); the
@@ -27,10 +27,11 @@ class PerFnSections:
     invariants: str
     siblings: str
     crate_idioms: str
-    # Methods the fn's FROZEN where-bounds make callable (corrected R2/R3,
-    # debt #28). "" when no generic param is bounded by an in-scope trait.
+    # Methods the fn's FROZEN where-bounds make callable — the bound-provided
+    # trait method the model should prefer over a mis-bound free constructor.
+    # "" when no generic param is bounded by an in-scope trait.
     bound_methods: str
-    # The crate blueprint slice (P3) — the model's OWN design sections
+    # The crate blueprint slice — the model's OWN design sections
     # relevant to this fn. "" when no blueprint exists.
     blueprint: str = ""
     # Harvested behaviours that demonstrate this fn's public usage (F10 Use-B /
@@ -67,7 +68,7 @@ class PerImplSections:
     # E0277-thrash root. "" when no generic param is bounded by an in-scope
     # trait.
     bound_methods: str
-    # The crate blueprint slice (P3) — the model's OWN design sections
+    # The crate blueprint slice — the model's OWN design sections
     # relevant to this block. "" when no blueprint exists.
     blueprint: str = ""
     # Localized crash backtrace implicating this block's fns (faulting +
@@ -81,3 +82,19 @@ class PerImplSections:
     # 18:58:59, both E0277 units of run `275772-425da59c`, 2026-08-19) and
     # bought one temperature resample of an unchanged question.
     last_error: str = ""
+    # Per re-fill member, what the record supports (`domain.refill_evidence`):
+    # DIRECT vs INFERRED, the attributed tests, and their failure text. "" when
+    # the block has no re-fill members. Replaces a section that asserted "its
+    # attributed test (see Tests below) still FAILS" over tests the prompt did
+    # not carry (run `902902-daee577d`, 2026-08-20).
+    refill_evidence: str = ""
+    # Re-fill members whose attribution is inference only — rendered with the
+    # `[REFILL?]` tag so a possibly-correct body is not declared failing.
+    inferred_refill_names: frozenset[str] = frozenset()
+    # The previous attempt's rejected expressions that the SIBLING_REFERENCE
+    # body carries (`domain.sibling_steer`). Non-empty flips that section's
+    # prefix from "follow the same structural pattern" to "this is the pattern
+    # LAST_ERROR rejected under THIS block's bounds". () on attempt 1 and
+    # whenever the two sections agree. Run `902902-daee577d` (2026-08-20),
+    # prompt `11899c17478d`: both sections present, the sibling won, E0277 x2.
+    sibling_rejected: tuple[str, ...] = ()

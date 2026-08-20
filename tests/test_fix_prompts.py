@@ -191,3 +191,29 @@ def test_file_fill_plan_line_avoids_the_name_colon_shape() -> None:
     assert "impl Error: root_cause" not in out
     assert "in `impl Error` -> write: root_cause" in out
     assert 'RIGHT: <FN name="root_cause" block="impl Error">' in out
+
+
+def test_file_fill_states_inference_as_re_check_and_carries_the_evidence() -> None:
+    """A re-fill the frontier named by inference only is listed as
+    "re-check … else leave it unchanged", never as "rewrite (… its test still
+    fails)"; the evidence section carries what the record supports. Told
+    with certainty, the file route replaced `construct_from_context`'s
+    per-type vtable with a `construct_from_std` delegation that made the
+    downcast tests unreachable (run `902902-daee577d`, 2026-08-20)."""
+    p = build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}",
+        fill_plan=[BlockFillPlan(
+            "impl Error", (), ("construct_from_adhoc", "construct_from_context"),
+            inferred=("construct_from_context",))],
+        tests_block="", blueprint="", notes="",
+        refill_evidence="`construct_from_context` — INFERRED: …")
+    plan = next(ln for ln in p.splitlines() if ln.strip().startswith("in `impl Error`"))
+    assert "rewrite (a body exists, but its test still fails): construct_from_adhoc" in plan
+    assert "re-check (a body exists; implicated by NAME only" in plan
+    assert "construct_from_context" in plan.split("re-check", 1)[1]
+    assert "construct_from_context" not in plan.split("re-check", 1)[0]
+    assert "<REFILL_EVIDENCE>" in p and "INFERRED" in p
+    # Without evidence: no empty tag, and the legacy wording stands.
+    bare = _file_fill([BlockFillPlan("impl Error", (), ("chain",))])
+    assert "<REFILL_EVIDENCE>" not in bare
+    assert "rewrite (a body exists, but its test still fails): chain" in bare

@@ -13,7 +13,7 @@ from typing import Any
 
 from pipeline_core.domain.models import DispatchFamily, ImplBlock, TypeRecord
 
-# P5.3: standard library trait contracts. When a fn is being implemented
+# Standard library trait contracts. When a fn is being implemented
 # inside `impl Trait for X`, inject the trait's documented behavior so the
 # model knows what's expected (return type semantics, format conventions,
 # etc.). Hardcoded for the most common stdlib traits — covers ~90% of impl
@@ -169,7 +169,7 @@ def extract_trait_from_container(container: str) -> str | None:
 
 def trait_contract_for(container: str) -> str:
     """Return the standard contract text for the trait this fn implements,
-    or empty string if no matching contract is known. P5.3.
+    or empty string if no matching contract is known.
     """
     name = extract_trait_from_container(container)
     if not name:
@@ -177,7 +177,7 @@ def trait_contract_for(container: str) -> str:
     return TRAIT_CONTRACTS.get(name, "")
 
 
-# Six Rust confusion classes seen recurrently in overnight runs (P3.2).
+# Six Rust confusion classes seen recurrently in overnight runs.
 # Each has a one-line summary (always shown in the prompt) and a fuller
 # detail block (injected only when the current cargo error trips the
 # gotcha's trigger keyword/code, via gotchas_for_error).
@@ -251,7 +251,7 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         ),
     },
     {
-        # FR-040: the vtable / shared-machinery class. You fill fn BODIES only —
+        # The vtable / shared-machinery class. You fill fn BODIES only —
         # you cannot introduce a new top-level item — so a referenced-but-
         # undefined module-level symbol can never resolve. Build it inline.
         "id": "undefined_symbol_build_inline",
@@ -966,15 +966,39 @@ def format_impl_block_for_prompt(
     block: ImplBlock,
     mark_target: bool = True,
     refill_fn_names: frozenset[str] = frozenset(),
+    *,
+    fill_fn_names: frozenset[str] | None = None,
+    inferred_fn_names: frozenset[str] = frozenset(),
+    candidate_fn_names: frozenset[str] = frozenset(),
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every
     member's signature + a one-line body status. Stub members are tagged
     [STUB] so the model knows which to fill; already-filled members carry a
     shortened body preview so the model can mirror their structural shape
-    when designing the new ones. Members named in `refill_fn_names` (debt #46
-    point 2 — behavioral re-fill targets: compiling but test-failing) get the
-    FULL body (no truncation) tagged [REFILL] instead of the FILLED preview,
-    so the model can actually rewrite them, not just pattern-match them.
+    when designing the new ones. Members named in `refill_fn_names`
+    (behavioral re-fill targets: compiling but test-failing) get the FULL body
+    (no truncation) tagged [REFILL] instead of the FILLED preview, so the model
+    can actually rewrite them, not just pattern-match them.
+
+    `fill_fn_names` — the stubs THIS response is asked for. None keeps the old
+    reading (every stub is a target). When given, a stub outside it is a
+    member the cluster's cfg never compiles (or one already handled): it is
+    rendered as a stub the model must NOT answer. Until this distinction
+    existed, `provide` under the stable cluster read "[STUB] — fill in this
+    response" while the header listed only the active members, the model
+    answered it, and the splice refused the body (`not_in_cluster_cfg`) —
+    four blocks on 2026-08-20 (run `902902-daee577d`), two of which lost
+    their whole reply that way.
+
+    `inferred_fn_names` — re-fill members whose attribution is inference only
+    (`domain.refill_evidence`): tagged `[REFILL?]` with an instruction to
+    return the body unchanged when it is right, instead of the certainty
+    "its test below FAILS — rewrite" that had a correct `source` body rewritten
+    and `construct_from_context` degraded on the same day.
+
+    `candidate_fn_names` — for a RELATED block: members that are the
+    same-named re-fill candidates for the same failing tests, shown in full
+    as the other candidate rather than as a settled `/* FILLED */` preview.
 
     `block` is an `ImplBlock` produced by `_collect_impl_blocks`.
     """
@@ -997,12 +1021,31 @@ def format_impl_block_for_prompt(
         sig = m.sig_text.strip()
         is_stub = m.has_unimplemented_body
         if is_stub:
-            tag = " // [STUB] — fill in this response" if mark_target else " // [STUB]"
+            if not mark_target:
+                tag = " // [STUB]"
+            elif fill_fn_names is None or m.fn_name in fill_fn_names:
+                tag = " // [STUB] — fill in this response"
+            else:
+                tag = (" // [STUB] — NOT in this response (cfg-gated out of "
+                       "this cluster or handled elsewhere): do NOT emit an "
+                       "<FN> for it")
             lines.append(f"    {sig} {tag}")
         elif m.fn_name in refill_fn_names:
             body = m.body_text.strip().replace("\n", "\n    ")
-            lines.append(f"    {sig} {{ /* [REFILL] compiles but its test "
-                          f"below FAILS — rewrite the BEHAVIOR */ {body} }}")
+            if m.fn_name in inferred_fn_names:
+                lines.append(
+                    f"    {sig} {{ /* [REFILL?] compiles; implicated by NAME "
+                    f"only — see REFILL_TARGETS. Rewrite ONLY if wrong for "
+                    f"these bounds, else return it unchanged */ {body} }}")
+            else:
+                lines.append(f"    {sig} {{ /* [REFILL] compiles but its test "
+                              f"below FAILS — rewrite the BEHAVIOR */ {body} }}")
+        elif m.fn_name in candidate_fn_names:
+            body = m.body_text.strip().replace("\n", "\n    ")
+            lines.append(
+                f"    {sig} {{ /* FILLED — same-named re-fill candidate for "
+                f"the SAME failing tests (tried separately); shown in full */ "
+                f"{body} }}")
         else:
             body = m.body_text.strip()
             preview = body
@@ -1050,10 +1093,10 @@ def _construct_hint(rec: TypeRecord) -> str | None:
 def format_type_for_prompt(rec: TypeRecord) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
-    P5.2 includes a field-vs-method annotation: each name is shown with `.x`
+    The rendering includes a field-vs-method annotation: each name is shown with `.x`
     for fields and `.x()` for methods so the model doesn't confuse them.
 
-    P6.1: methods are shown with their FULL SIGNATURE so the model knows
+    Methods are shown with their FULL SIGNATURE so the model knows
     exactly what each takes/returns. Without this it kept calling e.g.
     `Ref::new(NonNull<T>)` when `Ref::new` actually takes `&T` — visible
     method NAME but invisible argument types.
@@ -1081,7 +1124,7 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
         lines.append(_ctor)
     if methods:
         # Dedup by method name (same fn can appear in multiple impl blocks);
-        # keep the first sig we saw. Then render WITH SIGNATURE (P6.1).
+        # keep the first sig we saw. Then render WITH SIGNATURE.
         seen: set[str] = set()
         sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_exactly_pub)
         for m in methods:

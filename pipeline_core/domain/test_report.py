@@ -26,6 +26,7 @@ from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.test_results import (
     parse_failed_tests,
     split_test_stdout_sections,
+    strip_libtest_qualifier,
 )
 
 
@@ -132,15 +133,76 @@ def _classify(msg: str, body: str) -> FailureKind:
 
 
 def _passed_names(output: str) -> set[str]:
-    """Names of tests libtest reported as ``... ok`` (regex-free; mirrors the
-    ``test NAME ... FAILED`` scan in :func:`parse_failed_tests`)."""
+    """Names of tests libtest reported as ``... ok`` (regex-free; the mirror of
+    :func:`failing_test_names` for the passing verdict).
+
+    Split on the ``" ... "`` separator, never on whitespace tokens. A
+    ``#[should_panic]`` test passes as ``test a::b::test_x - should panic ...
+    ok``; a token walk expecting ``toks[2] == "..."`` dropped it from `passed`
+    while the binary's trailer still counted it, and `reconcile_sweep` reads
+    THIS set against the expected names. That is how a PASSING test was
+    reported crash-vanished on every sweep of runs `626784-4b7c38ba` and
+    `902902-daee577d` (2026-08-20) — `test_no_backtrace_fallback`, 37/0 in its
+    binary — after the qualifier strip had been applied to the three parsers in
+    `test_results` but not to this one: each sweep ran the gdb/ASAN localizer,
+    deliberated the layout retrigger, escalated 25 producers for a test that
+    was green, and refused to replace the durable tree ("1 test unmeasured").
+    """
     passed: set[str] = set()
-    for ln in output.splitlines():
-        toks = ln.split()
-        if (ln[:4] == "test" and len(toks) >= 4
-                and toks[0] == "test" and toks[2] == "..." and toks[3] == "ok"):
-            passed.add(toks[1])
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not (line.startswith("test ") and " ... " in line):
+            continue
+        if line.startswith("test result:"):
+            continue
+        name, _, status = line[len("test "):].partition(" ... ")
+        if status.split(",")[0].split(" ")[0] == "ok":
+            passed.add(strip_libtest_qualifier(name.strip()))
     return passed
+
+
+def failure_evidence_by_test(output: str, *, per_test_cap: int = 480) -> dict[str, str]:
+    """Per failing test, the lines a body author needs: the ``panicked at``
+    location and message, then the assertion's ``left``/``right`` (or the first
+    lines of the panic body), capped at `per_test_cap` characters. Keyed by the
+    test name exactly as libtest printed it; a consumer holding a bare name
+    matches on the last ``::`` segment (`FailureFrontier.evidence_for`).
+
+    The per-impl prompt's [REFILL] section told the model "its attributed test
+    (see Tests below) still FAILS" and carried neither the test nor what it
+    said — `test_len`'s ``left: 4 / right: 1`` and `test_rev`'s ``"0" vs "3"``
+    (run `902902-daee577d`, 2026-08-20) never reached a prompt, so the model
+    reasoned about WHICH test could fail instead of about why. A test that
+    failed with no captured section (an aborted binary) yields no entry: a
+    verdict-less crash is not evidence about a body.
+    """
+    out: dict[str, str] = {}
+    for f in parse_test_output(output).failures:
+        if not f.body.strip():
+            continue
+        keep: list[str] = []
+        started = False
+        for ln in f.body.splitlines():
+            s = ln.strip()
+            if not started:
+                if "panicked at " in s:
+                    started = True
+                    keep.append(s)
+                continue
+            if not s:
+                continue
+            if s.startswith("note: run with `RUST_BACKTRACE"):
+                break
+            keep.append(s)
+            if len(keep) >= 8:
+                break
+        if not keep:
+            keep = [s for s in (ln.strip() for ln in f.body.splitlines()) if s][:6]
+        text = "\n".join(keep)
+        if len(text) > per_test_cap:
+            text = text[:per_test_cap].rstrip() + " …"
+        out[f.test_name] = text
+    return out
 
 
 def parse_test_output(text: str) -> TestRunReport:

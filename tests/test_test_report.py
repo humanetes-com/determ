@@ -438,3 +438,60 @@ def test_stub_only_crash_unparseable_panic_line_vetoes() -> None:
            "thread 'a' panicked at src/error.rs:64:17:\n"
            "not implemented\n")
     assert stub_only_crash(out) == frozenset()
+
+
+# --- the passing verdict of a `#[should_panic]` test, and the failure words --- #
+
+SHOULD_PANIC_PASS = """\
+running 2 tests
+test error::gen_tests_4::test_no_backtrace_fallback - should panic ... ok
+test error::gen_tests_4::test_plain ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+
+def test_should_panic_pass_line_is_a_passed_name() -> None:
+    """libtest qualifies a `#[should_panic]` result BEFORE the ` ... `
+    separator. The oracle reconciles the expected names against THIS parser's
+    `passed`; a whitespace-token walk dropped the qualified line, so a passing
+    test was reported crash-vanished on every sweep of runs `626784-4b7c38ba`
+    and `902902-daee577d` (2026-08-20) after the qualifier strip had reached
+    the three parsers in `test_results` but not this one."""
+    from pipeline_core.domain.oracle_ledger import reconcile_sweep
+    r = parse_test_output(SHOULD_PANIC_PASS)
+    assert r.passed == frozenset({
+        "error::gen_tests_4::test_no_backtrace_fallback",
+        "error::gen_tests_4::test_plain"})
+    oracle = reconcile_sweep(
+        2, frozenset({"test_no_backtrace_fallback", "test_plain"}),
+        r.passed, r.failed_names, executed_count=2)
+    assert oracle.vanished == frozenset() and oracle.intact
+
+
+def test_passed_names_negative_control_the_token_walk_drops_the_line() -> None:
+    """The pre-fix predicate (`toks[2] == "..."`) does not hold on the
+    qualified line — that is the defect, reproduced — while the separator
+    split reads it."""
+    line = "test a::test_x - should panic ... ok"
+    assert line.split()[2] != "..."
+    assert "a::test_x" in parse_test_output(line + "\n").passed
+    # An ignored or failed line is still not a pass.
+    assert parse_test_output("test a::t ... ignored\n").passed == frozenset()
+    assert parse_test_output("test a::t - should panic ... FAILED\n").passed == frozenset()
+
+
+def test_failure_evidence_by_test_carries_panic_site_and_assertion() -> None:
+    from pipeline_core.domain.test_report import failure_evidence_by_test
+    ev = failure_evidence_by_test(STABLE_MULTI)
+    assert set(ev) == {"tests::test_stub", "tests::test_assert"}
+    a = ev["tests::test_assert"]
+    assert "panicked at src/chain.rs:8:5" in a
+    assert "assertion `left == right` failed" in a
+    assert "left: 1" in a and "right: 2" in a
+    # the backtrace hint is noise, not evidence
+    assert "RUST_BACKTRACE" not in ev["tests::test_stub"]
+    # capped, never empty for a test that left a body
+    small = failure_evidence_by_test(STABLE_MULTI, per_test_cap=40)
+    assert all(len(v) <= 42 for v in small.values())
+    assert failure_evidence_by_test("") == {}

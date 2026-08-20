@@ -1,4 +1,4 @@
-"""Phase-C TDD fill driver (P4) — relocated from pipeline.py.
+"""Phase-C TDD fill driver — relocated from pipeline.py.
 
 The per-cluster test-driven fill loop: scan stubs → leaf-first frontier → fill via the
 PhaseC fn engine → re-run cluster tests → attribute failures → repeat under a FloorStall
@@ -110,7 +110,11 @@ from pipeline_core.domain.tdd_floor import (
     resume_floor,
 )
 from pipeline_core.domain.test_command import ensure_serial_harness
-from pipeline_core.domain.test_report import parse_test_output, stub_only_crash
+from pipeline_core.domain.test_report import (
+    failure_evidence_by_test,
+    parse_test_output,
+    stub_only_crash,
+)
 from pipeline_core.domain.test_results import (
     TestStateReading,
     compile_error_digest,
@@ -3302,8 +3306,12 @@ def run_phase_c_tdd(
                 # docstring names.
                 tdd_frontier_tests=FailureFrontier.build(
                     {k: t for k, t in eligible.items() if k in frontier_keys},
-                    convicting),
-                tdd_test_cmd=test_cmd,     # Plan 10 U2: scoped cluster test cmd
+                    convicting,
+                    # The sweep's own words per failing test (panic site +
+                    # assertion), so a re-fill prompt can show WHY the test
+                    # failed instead of asserting that it did.
+                    evidence=failure_evidence_by_test(output)),
+                tdd_test_cmd=test_cmd,     # scoped cluster test cmd
                 skip_end_pass_test=True,
                 crash_evidence=crash_texts or None,
                 crash_blamed=crash_blamed or None,
@@ -3339,23 +3347,47 @@ def run_phase_c_tdd(
                 unit_bodies(deps.enumerate_fns(target_src_dir) or [],
                             frontier_keys))
             _pass_landed |= _batch_landed
+            # An unchanged unit that NO failing test convicts (reached by
+            # inference: escalation producer, traversal step) was told to
+            # return a right body unchanged — `[REFILL?]` — so its
+            # "unchanged" is the instructed outcome, not a failed try, and
+            # the refutation reading must not count it as one. The split is
+            # by conviction because that is the distinction the record
+            # holds; the body comparison cannot see WHY nothing landed.
             _batch_unchanged = frontier_keys - _batch_landed
+            _batch_declined = frozenset(
+                k for k in _batch_unchanged if not convicting.get(k))
+            _batch_unchanged -= _batch_declined
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: landed-change audit — "
                 f"{len(_batch_landed)} of {len(frontier_keys)} dispatched "
                 "unit(s) landed a semantic change"
                 + ("; unchanged: " + ", ".join(sorted(
                     f"{k.file}::{k.fn_name}" for k in _batch_unchanged)[:12])
-                   if _batch_unchanged else "") + ".")
+                   if _batch_unchanged else "")
+                + ("; INFERRED, unchanged (not a failed try): " + ", ".join(
+                    sorted(f"{k.file}::{k.fn_name}" for k in _batch_declined)[:12])
+                   if _batch_declined else "") + ".")
             deps.emit("phase_c.tdd.landed_change", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "dispatched": len(frontier_keys),
                 "landed": sorted(f"{k.file}::{k.fn_name}"
                                  for k in _batch_landed),
                 "unchanged": sorted(f"{k.file}::{k.fn_name}"
-                                    for k in _batch_unchanged)})
+                                    for k in _batch_unchanged),
+                "declined": sorted(f"{k.file}::{k.fn_name}"
+                                   for k in _batch_declined)})
             if _batch.completes_pass:
                 _unchanged_pass = _pass_units_at_close - _pass_landed
+                # Read against the CURRENT conviction map: the pass's
+                # earlier batches may have run in an earlier process (the
+                # cursor resumes across relaunches) and only `landed`
+                # travels with it. A unit convicted now was convicted at
+                # its dispatch too, barring a verdict move — which would
+                # have ended the flat reading this audit qualifies.
+                _declined_pass = frozenset(
+                    k for k in _unchanged_pass if not convicting.get(k))
+                _unchanged_pass -= _declined_pass
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: PASS AUDIT — "
                     f"traversal {_traversals} complete: "
@@ -3363,7 +3395,8 @@ def run_phase_c_tdd(
                         cohort_size=_cohort_at_close,
                         attempted=len(_pass_units_at_close),
                         landed=frozenset(_pass_landed),
-                        unchanged=frozenset(_unchanged_pass)))
+                        unchanged=frozenset(_unchanged_pass),
+                        declined=_declined_pass))
                 deps.emit("phase_c.tdd.pass_audit", data={
                     "cluster": cluster.name, "iter": iter_n,
                     "traversal": _traversals,
@@ -3373,7 +3406,9 @@ def run_phase_c_tdd(
                     "landed": sorted(f"{k.file}::{k.fn_name}"
                                      for k in _pass_landed),
                     "unchanged": sorted(f"{k.file}::{k.fn_name}"
-                                        for k in _unchanged_pass)})
+                                        for k in _unchanged_pass),
+                    "declined": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _declined_pass)})
         # The landed record's lifetime is the pass's, exactly like the
         # cursor: a closed pass releases both (the audit above has already
         # reported this one), and the next pass accumulates fresh.
