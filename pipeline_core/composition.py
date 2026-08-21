@@ -63,6 +63,18 @@ from pipeline_core.adapters.auto_operator import (
     seed_auto_operator_default as _auto_op_seed_default,
 )
 from pipeline_core.adapters.behaviour_store import save_behaviour_suite
+from pipeline_core.adapters.body_ledger_store import (
+    append_entries as _body_ledger_append,
+)
+from pipeline_core.adapters.body_ledger_store import (
+    default_root as _body_ledger_root,
+)
+from pipeline_core.adapters.body_ledger_store import (
+    load_entries as _body_ledger_load,
+)
+from pipeline_core.adapters.body_ledger_store import (
+    store_size as _body_ledger_size,
+)
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.cluster_pruning import (
@@ -113,6 +125,12 @@ from pipeline_core.adapters.fill_engine_roles import (
     WorkspaceModelAdapter,
 )
 from pipeline_core.adapters.flow_audit import FlowAuditor
+from pipeline_core.adapters.fn_reseed import (
+    current_bodies,
+    current_signatures,
+    splice_bodies,
+)
+from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.adapters.gdb_backtrace import (
     localize_crashed_binary as _gdb_localize_crashed_binary,
 )
@@ -221,6 +239,7 @@ from pipeline_core.adapters.retros import (
 from pipeline_core.adapters.retros import (
     suspend_futile_guidance as _suspend_futile_guidance,
 )
+from pipeline_core.adapters.skeleton_compile import compile_filled_check
 from pipeline_core.adapters.state import (
     log_state_summary as _state_log_state_summary,
 )
@@ -354,6 +373,7 @@ from pipeline_core.application.reconstruct.attribution import (
     escalate_frontier_to_producers,
     not_body_repairable_tests,
 )
+from pipeline_core.application.reconstruct.body_reseed import TreeWriter
 from pipeline_core.application.reconstruct.cargo_errors import (
     categorize_compile_error as _categorize_compile_error,
 )
@@ -2371,6 +2391,25 @@ def build_app(
             implicated_fns=lambda out, tsd: _implicated_fns_from_cargo_impl(
                 out, tsd, enumerate_fns=enumerate_fns),
             enumerate_fns=enumerate_fns,
+            # --- the proven-body ledger. The store lives OUTSIDE the
+            # workspace (`logs/body_ledger/<project>/`) because every
+            # workspace-level destruction can reach inside it: the augmented
+            # restart's `git reset --hard` deleted 5,137 tracked files on
+            # 2026-08-08, and `.phase_c_logs` — where the retro store lives —
+            # is tracked.
+            ledger_load=lambda pd, cl: _body_ledger_load(
+                _body_ledger_root(), pd.name, cluster=cl),
+            ledger_append=lambda pd, rows: _body_ledger_append(
+                _body_ledger_root(), pd.name, rows),
+            ledger_size=lambda pd: _body_ledger_size(
+                _body_ledger_root(), pd.name),
+            layout_items=lambda pd: {
+                name: (item.kind, item.definition)
+                for name, item in load_layout_registry(pd).items()},
+            tree_writer=TreeWriter(
+                splice=splice_bodies, revert=revert_fns_to_stub,
+                signatures=current_signatures, bodies=current_bodies),
+            check_tree_builds=lambda pd, cl: compile_filled_check(pd, cl),
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

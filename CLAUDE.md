@@ -582,13 +582,23 @@ four-point message on `abc2179` is what that looks like from the other side.
 `git commit -F` takes the file verbatim, so the wrapping is the writer's
 decision instead of the pane width's.
 
-**Which makes the formatting the writer's job.** Write the file as git wants
-it, not as prose: a subject line of at most 72 columns, no trailing period,
-then a BLANK line, then a body hard-wrapped at 72 columns with no leading
-indentation. Blank lines between points; `-` or `1.` for a list, at the left
-margin. The tracker-id ban above applies here as it does everywhere else, and
-`commit.sh` refuses a subject that opens with one (`debt 91.2`, `FR-018`,
-`#82`) rather than letting it reach `git log`.
+**Which makes the formatting the writer's job — and "no stray EOLs" cuts both
+ways.** Write the file as git wants it structurally: a subject line, no
+trailing period, then a BLANK line, then the body. Within that structure, an
+EOL is only ever a STRUCTURAL boundary — the subject/body separator, or a
+blank line between points — never a wrap inserted mid-paragraph to hit a
+column target. A hard-wrap-at-72 rule was tried here and produced exactly the
+symptom this section was written to prevent: a sentence broken by a newline
+that has nothing to do with its meaning, indistinguishable from the
+pane-width wrapping the file format was introduced to escape (2026-08-21). So
+each point/paragraph is ONE line, however long, with no manual break inside
+it; `-` or `1.` for a list, one list item per line, at the left margin, blank
+lines between points. `commit.sh` normalizes the file before committing —
+joining any line that isn't blank into its paragraph's single line — as a
+backstop against a wrap slipping in anyway, so a stray mid-paragraph EOL costs
+nothing even if one is written. The tracker-id ban above applies here as it
+does everywhere else, and `commit.sh` refuses a subject that opens with one
+(`debt 91.2`, `FR-018`, `#82`) rather than letting it reach `git log`.
 
 A batch that touched only the untracked trackers (`technical_debt.md`,
 `handover.md`, the plan files — `.gitignore` is `*.md`) has nothing to commit:

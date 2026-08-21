@@ -174,7 +174,8 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            retrigger=None, localize=None, escalate=None, reverse_map=None,
            fill=None, inventory: int | None = None,
            chronic_vanished: int = 0, gpu_guard: str = "0",
-           dispatch_cap: str = "0", floor: dict | None = None) -> list[str]:
+           dispatch_cap: str = "0", floor: dict | None = None,
+           frontier: dict | None = None, enumerate_fns=None) -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
     The cargo stub reads the loop's own `iter N: running cargo test` line to
@@ -238,7 +239,9 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
                      events,
                      retrigger if retrigger is not None
                      else scripted_retrigger(src, walk, logs), logs=logs,
-                     frontier={FnLocator("src/a.rs", "f"): {"t2"}},
+                     frontier=(frontier if frontier is not None
+                               else {FnLocator("src/a.rs", "f"): {"t2"}}),
+                     enumerate_fns=enumerate_fns,
                      fills_per_iter=2, reset_returns=reset_returns,
                      localize=localize, escalate=escalate,
                      reverse_map=reverse_map, fill=fill,

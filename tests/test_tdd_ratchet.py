@@ -238,12 +238,29 @@ def test_refill_window_survives_only_while_re_fills_land() -> None:
     assert not RefillGrace.none().consume(500).active
 
 
+def _ledger_writer():
+    """The real tree adapters, wired as the re-seed's `TreeWriter`.
+
+    Real ones rather than fakes: what these tests are about is a body going
+    back onto a tree and surviving a build check, and a fake splice would test
+    the test."""
+    from pipeline_core.adapters.fn_reseed import (
+        current_bodies,
+        current_signatures,
+        splice_bodies,
+    )
+    from pipeline_core.adapters.fn_revert import revert_fns_to_stub
+    from pipeline_core.application.reconstruct.body_reseed import TreeWriter
+    return TreeWriter(splice=splice_bodies, revert=revert_fns_to_stub,
+                      signatures=current_signatures, bodies=current_bodies)
+
+
 def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  frontier=None, fills_per_iter=0, graceful_stop=None, fill=None,
                  best_mark=None, checkpoints=None, resets=None, stubs=None,
                  retires=None, logs=None, reset_returns=None,
                  localize=None, escalate=None, reverse_map=None,
-                 floor=None):
+                 floor=None, enumerate_fns=None, ledger=None, tree_stubs=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -290,7 +307,11 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         reset_exhaustion_flags=_reset,
         run_cargo=run_cargo,
         scan_unimplemented_for_cluster=lambda *a, **k: list(stubs or []),
-        scan_unimplemented_functions=lambda *a, **k: [],
+        # The whole-tree stub scan. `[]` is the pre-ledger default every other
+        # test wants (it feeds `newly_filled`); `tree_stubs` is for the tests
+        # that need the loop to SEE stubs — the re-seed asks this dep which
+        # units it may put a body back into.
+        scan_unimplemented_functions=lambda *a, **k: list(tree_stubs or []),
         task2_fill_fns_one_by_one=fill or (lambda **kw: ClusterFillResult(
             attempts=1, fns_filled=fills_per_iter)),
         checkpoint_fill_tree=_checkpoint,
@@ -303,9 +324,31 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         retrigger_layout=retrigger,
         localize_crashes=localize,
         escalate_to_producers=escalate,
+        # The extractor's per-fn records, so a replay can model the
+        # landed-change reading. None (the default) is the pre-existing walk
+        # behaviour: no body comparison, so `landed`/`declined` stay empty and
+        # every carried cursor entry reads as "produced nothing".
+        enumerate_fns=enumerate_fns,
         # `floor` is a mutable dict standing in for the on-disk per-cluster
         # floor file — pass the SAME dict to two runs to model two processes
         # sharing `.phase_c_logs`, which is what Stage A persistence is for.
+        # `ledger` is a mutable dict standing in for the on-disk proven-body
+        # ledger (`logs/body_ledger/<project>/`), the same shape `floor` uses
+        # for the floor file: pass the SAME dict to two runs to model two
+        # processes sharing it. Absent means the ledger is not wired at all,
+        # which is the pre-ledger behaviour every other test wants.
+        **({} if ledger is None else {
+            "ledger_load": lambda pd, cl: [
+                e for e in ledger.get("rows", []) if e.key.cluster == cl],
+            "ledger_append": lambda pd, rows: (
+                ledger.setdefault("rows", []).extend(rows) or len(rows)),
+            "ledger_size": lambda pd: (len(ledger.get("rows", [])), 0),
+            "layout_items": lambda pd: dict(ledger.get("items", {})),
+            "tree_writer": _ledger_writer(),
+            "check_tree_builds": (
+                None if ledger.get("check") is None
+                else (lambda pd, cl: ledger["check"]())),
+        }),
         **({} if floor is None else {
             "load_tdd_floor": lambda *a, **k: floor.get("row"),
             "save_tdd_floor": lambda p, c, row: floor.__setitem__("row", row),

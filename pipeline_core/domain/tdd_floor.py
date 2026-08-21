@@ -125,6 +125,16 @@ class TddFloor:
     # dispatched inside the one batch the guard's design grants each
     # relaunch.
     futile_units: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # The subset of `attempted` that was told NOT to change its body — the
+    # INFERRED units (escalation producers, traversal steps) a `[REFILL?]`
+    # prompt asks to return unchanged when they are already right. They land
+    # nothing BY INSTRUCTION, so unlike the rest of the unchanged set they are
+    # not failed tries, and a code change to the fill or route path gives no
+    # reason to re-offer them. Persisted for the same reason `landed` is: the
+    # carry rule below distinguishes "tried" from "produced nothing", and the
+    # record of which is which is per-batch and would otherwise die with the
+    # process that made it.
+    declined: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {"cluster": self.cluster, "best_pass": self.best_pass,
@@ -132,6 +142,7 @@ class TddFloor:
                 "oracle_size": self.oracle_size, "code_id": self.code_id,
                 "attempted": list(self.attempted),
                 "landed": list(self.landed),
+                "declined": list(self.declined),
                 "futile_units": {t: list(units)
                                  for t, units in self.futile_units}}
 
@@ -156,6 +167,8 @@ class TddFloor:
                     str(k) for k in (raw.get("attempted") or ())),
                 landed=tuple(
                     str(k) for k in (raw.get("landed") or ())),
+                declined=tuple(
+                    str(k) for k in (raw.get("declined") or ())),
                 futile_units=tuple(sorted(
                     (str(t), tuple(str(u) for u in units))
                     for t, units in _fut.items()
@@ -184,8 +197,18 @@ class FloorResume:
     # lifetime — so a pass spread across relaunches can state its effective
     # coverage when it closes. ``None`` exactly when `attempted` is None.
     landed: tuple[str, ...] | None = None
-    # The futility evidence, resumed on the CURSOR's identity rule (cluster +
-    # code_id, never the oracle or the tree): like the cursor it is a record
+    # The cursor's declined record — INFERRED units instructed to change
+    # nothing. Rides the cursor exactly as `landed` does, and for the same
+    # reason: `cursor_carry` needs both to tell "tried" from "produced
+    # nothing" at the NEXT relaunch, not just at this one.
+    declined: tuple[str, ...] | None = None
+    # Units dropped from the carried cursor because the code identity moved
+    # and their last attempt landed nothing — released for an immediate retry
+    # rather than deferred to the next pass. Reported, never acted on: they
+    # are simply absent from `attempted`, so the frontier offers them again.
+    released: tuple[str, ...] = ()
+    # The futility evidence, resumed on the CURSOR's identity rule (cluster,
+    # never the code, the oracle or the tree): like the cursor it is a record
     # of what this cluster's dispatches already established, not a claim
     # about a score, and it self-validates at the live sweep — the escalation
     # trigger re-compares it against the CURRENT attribution, so evidence a
@@ -218,17 +241,17 @@ def resume_mismatch(
     return None
 
 
-def cursor_mismatch(saved: TddFloor, *, cluster: str, code_id: str) -> str | None:
-    """The first field that forbids resuming the pass CURSOR, or None.
+def cursor_mismatch(saved: TddFloor, *, cluster: str) -> str | None:
+    """The one field that forbids resuming the pass CURSOR at all, or None.
 
-    This is `resume_mismatch` minus ``oracle_size``, and the omission is the
-    whole reason the function exists rather than being one call.
+    This is `resume_mismatch` minus ``oracle_size`` AND minus ``code_id``, and
+    both omissions are the whole reason the function exists rather than being
+    one call.
 
     A cursor is not a claim about a score. It is the list of frontier units this
-    pass already spent a model call on, and the only thing that can invalidate
-    it is the frontier being drawn from a different population: a different
-    CLUSTER (different fns entirely) or a different CODE build (a different
-    `order_frontier`, a different route set). ``oracle_size`` is neither. It is
+    pass already spent a model call on, and the only population that can make
+    those units mean nothing is a different CLUSTER — different fns entirely.
+    ``oracle_size`` is not that. It is
     ``pass_count + fail_count`` — a reading of the sweep, which moves whenever a
     test binary's crash state flips, and one landed body is enough to move it:
     on run `1920662-40f711b2` filling `object_drop_front` took
@@ -253,12 +276,103 @@ def cursor_mismatch(saved: TddFloor, *, cluster: str, code_id: str) -> str | Non
     That intersection is the same argument that lets the cursor ignore
     ``tree_sha``, applied to the one other field that describes the tree rather
     than the experiment.
+
+    WHY ``code_id`` LEFT TOO, and why it is not replaced by a narrower hash.
+    `code_identity` covers pipeline.py plus every `.py` under `pipeline_core`,
+    so a docstring edit voided the cursor as surely as rewriting
+    `order_frontier` did: sixteen code identities over 2026-08-17 -> 08-20, each
+    restarting a 43-unit crawl at 0, in a week whose whole purpose was the one
+    reading a completed pass produces. The obvious repair — hash only the
+    modules that determine the frontier's population and order — was MEASURED
+    before it was written (`scripts/cursor_identity_replay.py`, 41 code_id
+    transitions on `stable`): it would have preserved the cursor on 4 of 41
+    (10 %), carrying **zero** units, because the modules any honest such hash
+    must contain (`phase_c_tdd.py` 12 drops, `retro_gate.py` 4, `retros.py`,
+    `dispatch_batch.py`, `impl_routing.py`, `scheduling.py`, `dispatch.py`) are
+    precisely the modules a fix session edits. Dropping `code_id` outright
+    preserves all 41 and carries 300 units.
+
+    What `code_id` was really protecting is not the cursor's VALIDITY but a
+    retry: a change to the fill or route path can make a previously failed
+    attempt worth repeating, and a carried cursor defers that repeat to the
+    next pass. That is a lifetime question, not an identity one, and
+    :func:`cursor_carry` answers it per unit instead of throwing the traversal
+    away.
     """
     if saved.cluster != cluster:
         return f"cluster ({saved.cluster} != {cluster})"
-    if saved.code_id != code_id:
-        return f"code_id ({saved.code_id} != {code_id})"
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class CursorCarry:
+    """How much of a persisted cursor this process adopts, and what it released.
+
+    Empty tuples with ``released == ()`` and ``carried_all`` False is the
+    cluster mismatch: nothing to adopt. Callers distinguish "no cursor" from
+    "an empty cursor" through :class:`FloorResume`, which is where ``None``
+    still means "open a fresh pass"."""
+
+    attempted: tuple[str, ...] = ()
+    landed: tuple[str, ...] = ()
+    declined: tuple[str, ...] = ()
+    released: tuple[str, ...] = ()
+    carried_all: bool = True
+
+    @property
+    def note(self) -> str:
+        if not self.released:
+            return f"pass cursor={len(self.attempted)} unit(s)"
+        return (f"pass cursor={len(self.attempted)} unit(s) "
+                f"({len(self.released)} released for retry — the code moved "
+                "and their last attempt landed nothing)")
+
+
+def cursor_carry(saved: TddFloor, *, cluster: str, code_id: str) -> CursorCarry:
+    """The cursor this process adopts from ``saved``: all of it under the same
+    code, and under a MOVED code identity only the units whose last attempt
+    actually produced something.
+
+    The three populations a pass's `attempted` set is made of, and what each
+    one deserves when the code has changed under it:
+
+    * ``landed`` — the unit's on-disk body took a semantic change. It was
+      genuinely tried; re-dispatching it inside the same pass buys another
+      lottery ticket on a unit that already answered. CARRIED.
+    * ``declined`` — an INFERRED unit told to return its body unchanged
+      (`[REFILL?]`). Landing nothing was the instructed outcome, not a failure,
+      so a fill-path fix gives no reason to re-offer it. CARRIED.
+    * everything else — dispatched, and nothing came back: a routing drop
+      (`impl<T, E> Context<T, E> for Result<T, E)` lost twice in one run), a
+      splice refusal, a compile-failed peel that left the old body standing, a
+      byte-identical re-author. These are exactly the attempts a change to the
+      fill, route or prompt path can turn into an answer. RELEASED, so the
+      resumed pass offers them again instead of deferring them by up to a
+      traversal.
+
+    So the identity question ("is this cursor about the same experiment") and
+    the lifetime question ("is this attempt still predictive") stop being one
+    decision. Measured over the record: carrying everything saves 300 unit
+    dispatches across 41 transitions but can defer a retry by up to one pass
+    (p50 2 iterations, p90 5); carrying nothing — today's rule — defers no
+    retry and re-spends all 300. The split carries about two thirds of them
+    (58 of 240 dispatched units landed and 97 more were declined, over the 22
+    batches the landed-change audit has recorded) while releasing every unit a
+    code fix could plausibly help.
+    """
+    if cursor_mismatch(saved, cluster=cluster) is not None:
+        return CursorCarry(carried_all=False)
+    if saved.code_id == code_id:
+        return CursorCarry(attempted=saved.attempted, landed=saved.landed,
+                           declined=saved.declined)
+    keep = set(saved.landed) | set(saved.declined)
+    carried = tuple(k for k in saved.attempted if k in keep)
+    released = tuple(k for k in saved.attempted if k not in keep)
+    return CursorCarry(
+        attempted=carried,
+        landed=tuple(k for k in saved.landed if k in carried),
+        declined=tuple(k for k in saved.declined if k in carried),
+        released=released, carried_all=False)
 
 
 def resume_floor(
@@ -311,21 +425,36 @@ def resume_floor(
         # for: a stop, a restore or a crash flip moves the oracle, and the
         # relaunch then re-dispatched the deterministic prefix it had just been
         # stopped on.
-        _carry = cursor_mismatch(saved, cluster=cluster, code_id=code_id) is None
-        _cursor = saved.attempted if _carry else None
+        _ok = cursor_mismatch(saved, cluster=cluster) is None
+        _carry = cursor_carry(saved, cluster=cluster, code_id=code_id)
+        _cursor = _carry.attempted if _ok else None
         # The futility evidence rides the cursor's identity rule for the
         # cursor's own reason: both record what this cluster's dispatches
         # already established, and both self-validate against the live state
         # (the cursor by frontier intersection, the evidence by the
         # escalation's own equality re-check).
-        _futility = saved.futile_units if _carry else None
+        #
+        # It keeps the OLD rule on the code identity, deliberately, while the
+        # cursor drops it. The two are not the same question: a cursor entry
+        # records that a model call was spent, which stays true however the
+        # code changed, whereas the evidence records WHICH UNITS a failing test
+        # attributed — and attribution is one of the things a code change
+        # rewrites. Carrying a stale attribution across such a change would let
+        # the escalation's "unchanged across two judged sweeps" equality be
+        # satisfied by two different attributors. Narrowing the cursor's
+        # identity is this entry's whole scope; the evidence's identity is a
+        # separate question and is left where it was.
+        _futility = (saved.futile_units
+                     if _ok and saved.code_id == code_id else None)
         return FloorResume(
             stall=None, best_pass=None, attempted=_cursor,
-            landed=saved.landed if _carry else None,
+            landed=_carry.landed if _ok else None,
+            declined=_carry.declined if _ok else None,
+            released=_carry.released if _ok else (),
             futility=_futility,
             note=why + " changed"
-            + (f"; pass cursor resumed at {len(_cursor)} unit(s) anyway — a "
-               "cursor answers to cluster+code_id, not to the oracle"
+            + (f"; {_carry.note} resumed anyway — a cursor answers to the "
+               "cluster, not to the oracle or the code"
                if _cursor else "")
             + (f"; futility evidence resumed for {len(_futility)} test(s)"
                if _futility else ""))
@@ -339,26 +468,27 @@ def resume_floor(
     # it on `tree_sha` would void it in exactly the case it is for — the
     # flat-score stop, whose whole premise is that the tree changed and the
     # score did not.
+    carry = cursor_carry(saved, cluster=cluster, code_id=code_id)
     if saved.tree_sha != tree_sha:
         return FloorResume(
-            stall=saved.stall, best_pass=None, attempted=saved.attempted,
-            landed=saved.landed,
+            stall=saved.stall, best_pass=None, attempted=carry.attempted,
+            landed=carry.landed, declined=carry.declined,
+            released=carry.released,
             futility=saved.futile_units or None,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
                   "changed, so nothing here can restore that peak"
-                  + (f"; pass cursor resumed at {len(saved.attempted)} "
-                     "unit(s)" if saved.attempted else "")
+                  + (f"; {carry.note} resumed" if carry.attempted else "")
                   + (f"; futility evidence resumed for "
                      f"{len(saved.futile_units)} test(s)"
                      if saved.futile_units else "")))
     return FloorResume(
         stall=saved.stall, best_pass=saved.best_pass,
-        attempted=saved.attempted,
-        landed=saved.landed,
+        attempted=carry.attempted,
+        landed=carry.landed, declined=carry.declined,
+        released=carry.released,
         futility=saved.futile_units or None,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
-              + (f" pass cursor={len(saved.attempted)} unit(s)"
-                 if saved.attempted else "")
+              + (f" {carry.note}" if carry.attempted else "")
               + (f" futility evidence={len(saved.futile_units)} test(s)"
                  if saved.futile_units else "")))

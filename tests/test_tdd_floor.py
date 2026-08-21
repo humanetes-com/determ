@@ -92,15 +92,19 @@ def test_a_changed_oracle_drops_the_score_halves_and_KEEPS_the_pass_cursor() -> 
     assert (r.stall, r.best_pass) == (None, None), (
         "the SCORE halves must still die on a changed oracle")
     assert r.attempted == ("src/error.rs::new", "src/kind.rs::new")
-    assert "pass cursor resumed" in r.note
-    # …and the two identities that DO describe the frontier's population still
-    # void it, because a different cluster or a different build is a different
-    # set of units and a different `order_frontier`.
-    for bad in ({"code_id": "new"}, {"cluster": "stable"}):
-        assert resume_floor(saved, **{**_KEY, **bad}).attempted is None
-    assert cursor_mismatch(saved, cluster="nightly", code_id="abc123def456") is None
-    assert "code_id" in str(
-        cursor_mismatch(saved, cluster="nightly", code_id="other"))
+    assert "pass cursor=2 unit(s)" in r.note
+    # …and the ONE identity that describes the frontier's population still
+    # voids it, because a different cluster is a different set of units.
+    assert resume_floor(saved, **{**_KEY, "cluster": "stable"}).attempted is None
+    assert cursor_mismatch(saved, cluster="nightly") is None
+    assert "cluster" in str(cursor_mismatch(saved, cluster="stable"))
+    # A moved code identity no longer voids the cursor — it TRIMS it, and the
+    # trim is per unit (`test_cursor_lifetime.py` carries that argument and the
+    # measurement behind it). Here only the shape: nothing landed and nothing
+    # was declined on this floor, so every attempted unit is released.
+    moved = resume_floor(saved, **{**_KEY, "code_id": "new"})
+    assert moved.attempted == ()
+    assert moved.released == ("src/error.rs::new", "src/kind.rs::new")
 
 
 def test_landed_record_rides_the_cursor_and_an_old_floor_parses_empty() -> None:
@@ -125,14 +129,19 @@ def test_landed_record_rides_the_cursor_and_an_old_floor_parses_empty() -> None:
     parsed = TddFloor.from_dict(old)
     assert parsed is not None and parsed.landed == ()
     # …and it follows the CURSOR's identity rule exactly: rides an oracle or
-    # tree change, dies with cluster or code_id.
+    # tree change, dies with the cluster.
     assert resume_floor(saved, **_KEY).landed == ("src/error.rs::new",)
     assert resume_floor(
         saved, **{**_KEY, "oracle_size": 121}).landed == ("src/error.rs::new",)
     assert resume_floor(
         saved, **{**_KEY, "tree_sha": "ffffffff"}).landed == ("src/error.rs::new",)
-    for bad in ({"code_id": "new"}, {"cluster": "stable"}):
-        assert resume_floor(saved, **{**_KEY, **bad}).landed is None
+    assert resume_floor(saved, **{**_KEY, "cluster": "stable"}).landed is None
+    # A moved code identity keeps the landed record and drops the rest: the
+    # landed unit IS the carried cursor, and the record has to survive with it
+    # or the NEXT relaunch cannot tell a tried unit from an untried one.
+    moved = resume_floor(saved, **{**_KEY, "code_id": "new"})
+    assert moved.landed == ("src/error.rs::new",)
+    assert moved.attempted == ("src/error.rs::new",)
 
 
 def test_no_saved_floor_is_a_fresh_start_not_a_crash() -> None:

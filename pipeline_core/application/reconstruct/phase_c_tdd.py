@@ -8,17 +8,24 @@ concrete pipeline.py helpers, late-bound for the monkeypatch seams); pure domain
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import time
+from collections import Counter
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
 
+from pipeline_core.application.reconstruct.body_reseed import (
+    ReseedOutcome,
+    TreeWriter,
+    reseed,
+)
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
     closure_withheld,
@@ -33,6 +40,18 @@ from pipeline_core.domain.attribution import (
     union_unattributed_stubs,
 )
 from pipeline_core.domain.best_tree_mark import BestTreeMark
+from pipeline_core.domain.body_ledger import (
+    BodyState,
+    LedgerEntry,
+    LedgerKey,
+    SweepView,
+    authored_layout_fp,
+    body_layout_deps,
+    body_sha,
+    classify,
+    latest_by_unit,
+    sig_sha_of,
+)
 from pipeline_core.domain.crash_site import (
     blamed_locators,
     callee_subjects,
@@ -64,9 +83,10 @@ from pipeline_core.domain.escalation_lifetime import (
     sustain_escalation_products,
 )
 from pipeline_core.domain.flat_score import (
-    FlatScoreGuard,
+    FlatScoreDecision,
     ScoreReading,
     UnmovedVerdicts,
+    flat_score,
 )
 from pipeline_core.domain.graceful_stop import request_graceful_stop
 from pipeline_core.domain.landed_change import (
@@ -81,6 +101,11 @@ from pipeline_core.domain.layout_retrigger import (
     CrashEvidence,
     RefillGrace,
 )
+from pipeline_core.domain.loop_facts import (
+    Fact,
+    PassClosed,
+    SweepMeasured,
+)
 from pipeline_core.domain.measurement import (
     Measurement,
     VerdictReconciliation,
@@ -94,7 +119,11 @@ from pipeline_core.domain.models import (
     FnLocator,
     Frontier,
 )
-from pipeline_core.domain.oracle_ledger import SweepOracle, reconcile_sweep
+from pipeline_core.domain.oracle_ledger import (
+    SweepOracle,
+    bare_test_name,
+    reconcile_sweep,
+)
 from pipeline_core.domain.pass_highwater import PassHighWater
 from pipeline_core.domain.plateau import (
     plateau_exit_disabled,
@@ -104,6 +133,7 @@ from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
 )
+from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
@@ -246,6 +276,32 @@ class PhaseCTddDeps:
     # that narrowing; the chain-derived pack is then the full producer closure
     # it always was.
     enumerate_fns: Callable[..., list[dict[str, Any]] | None] | None = None
+    # --- the proven-body ledger (`domain/body_ledger.py`). Every one of these
+    # is None-disabled: with none of them wired the loop behaves exactly as it
+    # did before the ledger existed, which is what makes the write path
+    # shippable on its own.
+    # Rows the ledger already holds for this project/cluster.
+    ledger_load: Callable[..., list[LedgerEntry]] | None = None
+    # Append rows (a landing, or a sweep's verdict on one). Append-only: a body
+    # that was proven and later refuted must keep both rows.
+    ledger_append: Callable[..., int] | None = None
+    # The crate's authored item set, `name -> (kind, definition)`. Used ONLY to
+    # know which names are layout items when computing a body's dependencies —
+    # never as the layout gate itself, which reads the cluster skeleton (see
+    # `body_ledger.authored_layout_fp`).
+    layout_items: Callable[..., dict[str, tuple[str, str]]] | None = None
+    # Splice/revert/read-signature over a live tree, injected because they are
+    # adapters and this is the application layer.
+    tree_writer: TreeWriter | None = None
+    # `cargo check` over the tree a re-seed just wrote: (project_dir, cluster)
+    # -> (ok, error excerpt). Takes the whole cluster, never a loose env
+    # mapping, for the reason `compile_skeleton_check` documents: a dict of env
+    # vars cannot express "this cluster needs the nightly toolchain". None
+    # means the re-seed runs UNCHECKED and says so in its line — never
+    # silently.
+    check_tree_builds: Callable[..., tuple[bool, str]] | None = None
+    # `(rows, bytes)` for the cluster-entry size line.
+    ledger_size: Callable[..., tuple[int, int]] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -374,11 +430,32 @@ def run_phase_c_tdd(
     # `1692702-94e6163a` (3h36m) and `1920662-40f711b2` (9h48m) each ended on
     # an operator's stop with the repeat clause satisfied and the traversal
     # index parked. The rule is now a repeat in the window, full stop.
-    _flat_guard = FlatScoreGuard(
-        window=int(os.getenv("TDD_FLAT_SCORE_WINDOW", "5")),
-        repeats=int(os.getenv("TDD_FLAT_SCORE_REPEATS", "2")),
-        require_traversal=os.getenv(
-            "TDD_FLAT_SCORE_REQUIRE_TRAVERSAL", "0") == "1")
+    #
+    # A FOLD, NOT A STATEFUL GUARD. `FlatScoreGuard.observed`/`excused` had to
+    # be called on exactly the right path in a 3,700-line module, and the
+    # recorded cost of that shape is three runs that ended on an operator's
+    # SIGTERM with the repeat clause satisfied. The window is now DERIVED from
+    # the sweep facts this loop records, so there is no path on which a
+    # reading can be missed: `flat_score(_flat_facts, …)` answers from the
+    # stream. The fact vocabulary is `domain/loop_facts.py`; the completeness
+    # of the recorded stream for THIS gate was measured before the conversion
+    # (`scripts/fold_completeness.py`, 2026-08-21: pass_count, oracle_size and
+    # the pass closures are rebuildable for every recorded run).
+    _flat_window = int(os.getenv("TDD_FLAT_SCORE_WINDOW", "5"))
+    _flat_limit = int(os.getenv("TDD_FLAT_SCORE_REPEATS", "2"))
+    _flat_require_traversal = os.getenv(
+        "TDD_FLAT_SCORE_REQUIRE_TRAVERSAL", "0") == "1"
+    _flat_enabled = _flat_limit >= 2 and _flat_window >= _flat_limit
+    _flat_facts: list[Fact] = []
+
+    def _flat_decision() -> FlatScoreDecision | None:
+        """The guard's answer for the sweep just recorded, or None before the
+        first judged one. Recomputed rather than carried: a decision that is a
+        function of the facts cannot go stale on a path that forgot it."""
+        if not _flat_enabled:
+            return None
+        return flat_score(_flat_facts, window=_flat_window, limit=_flat_limit,
+                          require_traversal=_flat_require_traversal)
     # The protector's SECOND clock, and the reason there is one: the guard
     # above and the plateau budget are both denominated in completed traversals,
     # and on run `1692702-94e6163a` (2026-08-16) that unit stopped ticking —
@@ -412,9 +489,8 @@ def run_phase_c_tdd(
             else "")
          + f", timeout={test_timeout}s, "
          f"stems={len(test_stems)}, "
-         + (f"gpu-guard={_flat_guard.repeats} repeat(s) of a reading in "
-            f"{_flat_guard.window}" if _flat_guard.enabled
-            else "gpu-guard=off")
+         + (f"gpu-guard={_flat_limit} repeat(s) of a reading in "
+            f"{_flat_window}" if _flat_enabled else "gpu-guard=off")
          + (f", no-frontier-stop after {_no_frontier_stop_after} "
             "undispatchable iteration(s)" if _no_frontier_stop_after > 0
             else ", no-frontier-stop=off"))
@@ -493,6 +569,129 @@ def run_phase_c_tdd(
     # re-admission watermark carries the epoch it was set in.
     _destruction_epoch = 0
     _reset_epoch = 0
+    # THE PROVEN-BODY LEDGER's process state. `_ledger_rows` are entries this
+    # process wrote at a landing and has not yet had a sweep judge; the sweep
+    # after them classifies each one and appends the verdict. `_ledger_before`
+    # is the reading those bodies landed ON — the "prior" half of a comparison
+    # that must refuse to answer across a destruction epoch.
+    _ledger_rows: list[LedgerEntry] = []
+    _ledger_before: SweepView | None = None
+    _ledger_cache: list[LedgerEntry] | None = None
+
+    def _ledger_entries() -> list[LedgerEntry]:
+        """Every row this project/cluster has, read once per process."""
+        nonlocal _ledger_cache
+        if _ledger_cache is None:
+            _ledger_cache = (list(deps.ledger_load(project_dir, cluster.name))
+                             if deps.ledger_load is not None else [])
+        return _ledger_cache
+
+    def _skeleton_root() -> Path:
+        """The cluster's AUTHORED layout crate — what the bodies answer to.
+
+        The crate root rather than its `src/`, because the ledger keys files
+        the way the extractor does (`src/error.rs`). Not the filled tree
+        either: a fingerprint taken over that would move every time a body
+        landed, which is the one event that must NOT refuse a re-seed."""
+        return project_dir / ".skeleton" / cluster.name
+
+    _layout_ctx_cache: dict[int, tuple[dict[str, tuple[str, str]],
+                                       dict[str, str], dict[str, str]]] = {}
+
+    def _layout_ctx(epoch: int) -> tuple[dict[str, tuple[str, str]],
+                                         dict[str, str], dict[str, str]]:
+        """`(items, file_of_item, fingerprint_by_file)` for the layout as it
+        stands, cached per destruction epoch.
+
+        Keyed on the epoch because that counter is bumped by exactly the event
+        that rewrites the skeleton — a retrigger's re-author — so a cache that
+        outlived one would stamp new bodies with the old layout's fingerprint
+        and re-seed them, later, against a layout they never compiled under."""
+        hit = _layout_ctx_cache.get(epoch)
+        if hit is not None:
+            return hit
+        items = (deps.layout_items(project_dir)
+                 if deps.layout_items is not None else {})
+        texts: dict[str, str] = {}
+        skel = _skeleton_root()
+        with suppress(OSError):
+            for _p in sorted((skel / "src").rglob("*.rs")):
+                with suppress(OSError):
+                    texts[str(_p.relative_to(skel))] = _p.read_text(
+                        encoding="utf-8", errors="replace")
+        fps = {rel: authored_layout_fp(txt) for rel, txt in texts.items()}
+        file_of: dict[str, str] = {}
+        for name, (_kind, definition) in items.items():
+            for rel, txt in texts.items():
+                if find_definition_span(txt, definition) is not None:
+                    file_of[name] = rel
+                    break
+        _layout_ctx_cache.clear()
+        _layout_ctx_cache[epoch] = (items, file_of, fps)
+        return _layout_ctx_cache[epoch]
+
+    def _ledger_adopt() -> int:
+        """Queue every backfilled row whose body IS the body on the tree, so
+        this process's first sweep judges it.
+
+        WITHOUT THIS THE BACKFILL IS INERT, and silently so. Rows indexed from
+        an archive or from the live tree enter as `landed` — correctly,
+        because promotion needs a verdict vector measured on THIS code — and
+        the promotion pass only judges rows this process WROTE. So the 465
+        backfilled rows would sit unjudged forever, never reaching `proven` or
+        `unmeasured`, and therefore never re-seedable: the ledger would pay
+        only for bodies the loop happened to re-land itself, which is the case
+        it is least needed for.
+
+        Adoption is one-shot per process and bounded by the tree's own unit
+        count, and it claims nothing on its own — a queued row is judged by the
+        same rule as a fresh landing, against the same verdict vector. The
+        body-identity check is what keeps that honest: a stored body that is
+        not the body on the tree cannot be what the sweep is measuring."""
+        if (deps.ledger_append is None or deps.tree_writer is None
+                or not _ledger_entries()):
+            return 0
+        for _key, _entry in latest_by_unit(_ledger_entries()).items():
+            if _entry.state is not BodyState.LANDED:
+                continue
+            _unit = FnLocator(_key.file, _key.fn_name)
+            if body_sha(deps.tree_writer.bodies(
+                    _unit, target_src_dir)) == _entry.body_sha:
+                _ledger_rows.append(_entry)
+        return len(_ledger_rows)
+
+    def _reseed_site(site: str, iter_no: int) -> ReseedOutcome | None:
+        """Put back every body the ledger can vouch for, at one destruction
+        seam. Returns None when the ledger is not wired.
+
+        `wanted` is the CURRENT stub set rather than a list handed down by the
+        destroyer: a retrigger reports how many bodies it reverted, not which,
+        and the stub set answers the question the re-seed actually asks. Units
+        whose file was re-authored are refused by the gate, and units the
+        ledger never saw are simply absent — so this is correct at every site
+        without the site having to describe its own damage."""
+        if deps.ledger_append is None or deps.tree_writer is None:
+            return None
+        stubs = [FnLocator(*k)
+                 for k in deps.scan_unimplemented_functions(target_src_dir)]
+        if not stubs:
+            return None
+        _checker = deps.check_tree_builds
+        _check = (None if _checker is None
+                  else (lambda: _checker(project_dir, cluster)))
+        out = reseed(
+            site=site, entries=_ledger_entries(), wanted=stubs,
+            project=project_dir.name, cluster=cluster.name,
+            src_dir=target_src_dir, skeleton_root=_skeleton_root(),
+            writer=deps.tree_writer, check_builds=_check,
+            log=deps.log)
+        if not (out.seeded or out.rejected or out.skipped):
+            return out
+        deps.log(f"  {tag} [phase-c/ledger] iter {iter_no}: {site} — "
+                 + out.render() + ".")
+        deps.emit("phase_c.ledger.reseed",
+                  data={"cluster": cluster.name, "iter": iter_no, **out.data})
+        return out
     # The fns each fill pass actually dispatched, most recent last — the
     # stall exit may convict only units that were dispatched AND judged
     # inside the stalled window, not everything left standing.
@@ -552,6 +751,12 @@ def run_phase_c_tdd(
     # the cursor, persisted with it (same identity rule), reported when a
     # pass closes so the post-pass flat verdict names its effective coverage.
     _pass_landed: set[FnLocator] = set()
+    # The pass's DECLINED units: dispatched, INFERRED, and told to return the
+    # body unchanged. They land nothing by instruction, so the cursor's carry
+    # rule counts them as tried rather than as failed tries (`domain/
+    # tdd_floor.py::cursor_carry`). Same lifetime as `_pass_landed` — cleared
+    # with the cursor, persisted with it, reset when the pass closes.
+    _pass_declined: set[FnLocator] = set()
     # The frontier the current pass OPENED over. A traversal is over this set,
     # not over the frontier as it stands now: escalation and crash evidence add
     # units mid-pass, and a closure condition that waits for them cannot be met
@@ -1095,6 +1300,28 @@ def run_phase_c_tdd(
             incomplete=_inc, has_qualified=bool(_pp or _fp))
 
     iter_n = 0
+    # READ PATH: cluster entry. A fresh cluster gets the stub skeleton today;
+    # with the ledger it gets the stub skeleton plus every body the ledger can
+    # vouch for under the current layout — which is what makes a from-scratch
+    # restart cost minutes instead of the fortnight the record measures (the
+    # 2026-08-08 relaunch spent 7h45m to move 11 -> 13 on a tree whose 95
+    # passing bodies were sitting in an archive nothing could address).
+    #
+    # This is also where the augmented reset's value is delivered. Re-seeding
+    # inside `_archive_reconstruction` would write bodies into a tree the
+    # `git reset --hard` then deletes; the ledger lives OUTSIDE the workspace
+    # precisely so the next cluster entry — this line — can use it.
+    if deps.ledger_size is not None:
+        _rows, _bytes = deps.ledger_size(project_dir)
+        deps.log(f"  {tag} [phase-c/ledger] {_rows} row(s), "
+                 f"{_bytes / 1024:.0f} KiB on disk (append-only, untracked, "
+                 "machine-local — a cache of provenance, never the only copy)")
+    _reseed_site("cluster entry", 0)
+    if _ledger_adopt():
+        deps.log(f"  {tag} [phase-c/ledger] {len(_ledger_rows)} backfilled "
+                 "body(ies) are the bodies on this tree — this process's "
+                 "first sweep judges them, because a `landed` row no sweep "
+                 "has judged on THIS code is never re-seeded.")
     # Hard cap removed — the sole non-success terminator is `stall >=
     # max_stalls` on the pass_count floor. The 10k backstop here mirrors
     # `_improvement_loop`'s safety net and should never fire in practice.
@@ -1223,6 +1450,14 @@ def run_phase_c_tdd(
                     "pass_count": pass_count, "best_pass": _bratchet_best,
                     "breach": _confirm, "files_reverted": _rev,
                 })
+                # READ PATH: the restore is whole-tree and older by
+                # construction, so it re-stubs units the ledger can vouch for
+                # under the SAME layout — the restore only rolled the tree
+                # back, it did not re-author anything. Deliberately NOT an
+                # epoch bump (see the comment above), which is also why the
+                # ledger's own refutation rule carries a body-identity clause
+                # instead of trusting the epoch alone.
+                _reseed_site("after batch-ratchet restore", iter_n)
                 rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
                                             timeout=test_timeout)
                 pass_count, fail_count, _ignored = parse_test_counts(output)
@@ -1334,6 +1569,56 @@ def run_phase_c_tdd(
                  # The outer-loop budget travels with every iter event so a
                  # dashboard can render stall x/N without hardcoding the cap.
                  "max_stalls": max_stalls}
+        # THE LEDGER'S PROMOTION PASS. Every body this process landed since
+        # the last sweep is judged HERE, against the verdict vector and
+        # nothing else — never a pass count and never a high-water, so the
+        # standing rule about baselines taken across a deliberate destruction
+        # cannot reach the ledger through a score.
+        #
+        # Bare test names on both sides: the reverse map is keyed by the bare
+        # name (`_bare = _vt.split("::")[-1]` is how every other consumer in
+        # this module reads it) while a sweep reports `binary::module::test`.
+        # The collapse loses the distinction between two binaries running a
+        # same-named test; for "did this unit's tests regress" that is the
+        # question anyway, and the pair-level vector stays available to every
+        # consumer that needs it.
+        _sweep_view = SweepView(
+            passed=frozenset(bare_test_name(t_) for t_ in _measure.passed),
+            failed=frozenset(bare_test_name(t_) for t_ in _measure.failed),
+            intact=_rec.reconciled, epoch=_destruction_epoch)
+        if _ledger_rows and deps.ledger_append is not None:
+            _judged: list[LedgerEntry] = []
+            for _row in _ledger_rows:
+                _unit = FnLocator(_row.key.file, _row.key.fn_name)
+                _attributed = {
+                    bare_test_name(_t) for _t, _units in test_reverse_map.items()
+                    if _unit in _units}
+                _now = (body_sha(deps.tree_writer.bodies(_unit, target_src_dir))
+                        if deps.tree_writer is not None else "")
+                _state, _delta = classify(
+                    _row, attributed=_attributed,
+                    before=_ledger_before or _sweep_view, after=_sweep_view,
+                    body_now_sha=_now)
+                _judged.append(replace(_row, state=_state,
+                                       verdict_delta=_delta, iteration=iter_n,
+                                       epoch=_destruction_epoch))
+            deps.ledger_append(project_dir, _judged)
+            if _ledger_cache is not None:
+                _ledger_cache.extend(_judged)
+            _counts = Counter(str(r.state) for r in _judged)
+            deps.log(
+                f"  {tag} [phase-c/ledger] iter {iter_n}: judged "
+                f"{len(_judged)} landed body(ies) — "
+                + ", ".join(f"{n} {s}" for s, n in sorted(_counts.items()))
+                + ". `unmeasured` means the attributed tests did not run, "
+                  "which is re-seedable and is NOT evidence about the unit.")
+            deps.emit("phase_c.ledger.judged", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "states": dict(_counts),
+                "units": sorted(f"{r.key.file}::{r.key.fn_name}: {r.state}"
+                                for r in _judged)})
+            _ledger_rows = []
+        _ledger_before = _sweep_view
         # Per-binary breakdown so triage can see WHICH test set
         # changed between iters (vanished tests, not just pass→fail flips).
         _bins = summarize_test_binaries(output)
@@ -1578,6 +1863,35 @@ def run_phase_c_tdd(
                     _pass_landed = {
                         FnLocator(_f, _fn) for _f, _, _fn
                         in (k.partition("::") for k in _resume.landed) if _fn}
+                # The decline record rides with it for the same reason, and
+                # for one more: it is half of what `cursor_carry` reads at
+                # the NEXT relaunch to decide which units a code move
+                # releases for retry. Dropping it here would make every
+                # declined unit look like a failed try one relaunch later.
+                if _resume.declined:
+                    _pass_declined = {
+                        FnLocator(_f, _fn) for _f, _, _fn
+                        in (k.partition("::") for k in _resume.declined) if _fn}
+            # Units the code move released from the cursor: dispatched by the
+            # previous process, landed nothing, and therefore worth offering
+            # again now that the fill/route/prompt path has changed under
+            # them. Nothing to do — they are simply absent from the resumed
+            # cursor — but the count is the whole visible effect of the carry
+            # rule and a silent release reads as a cursor that shrank.
+            if _resume.released:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] pass cursor: released "
+                    f"{len(_resume.released)} attempted unit(s) for retry — "
+                    "the code identity moved and their last attempt landed "
+                    "nothing: "
+                    + ", ".join(sorted(_resume.released)[:8])
+                    + (f" (+{len(_resume.released) - 8} more)"
+                       if len(_resume.released) > 8 else ""))
+                deps.emit("phase_c.tdd.cursor_released", data={
+                    "cluster": cluster.name,
+                    "released": sorted(_resume.released),
+                    "carried": sorted(_resume.attempted or ()),
+                })
             # The FOURTH half: the futility evidence. Without it the
             # escalation needs two judged sweeps of THIS process to detect an
             # unchanged unit-set, and the flat-score guard stops a resumed
@@ -1646,6 +1960,7 @@ def run_phase_c_tdd(
         if improved and best_pass > UNSET_PASS:
             _pass_attempted.clear()
             _pass_landed.clear()
+            _pass_declined.clear()
             _pass_cohort = None
             _resumed_cursor_window = frozenset()
         # `best_metric` is -inf until some iter improves, and a compile-broken
@@ -1825,8 +2140,17 @@ def run_phase_c_tdd(
         _flat_excuse = (
             "the sweep did not compile — a 0 nothing ran for is not a "
             "measurement" if _sweep_compile_broke else _restore_unmeasured)
-        _flat_guard = (_flat_guard.excused() if _flat_excuse
-                       else _flat_guard.observed(_flat_reading, _traversals))
+        # The sweep, as a FACT. `judged=False` is the old `excused()`: a
+        # sweep that cannot judge the dispatch before it is not evidence in
+        # either direction, and the fold counts it as a gap rather than as a
+        # reading.
+        _flat_facts.append(SweepMeasured(
+            iter=iter_n, cluster=cluster.name, pass_count=pass_count,
+            fail_count=fail_count, oracle_size=_measure.oracle_size,
+            # `kind` is not settled this early in the iteration (the frontier
+            # has not been drawn yet) and the fold does not read it — the
+            # judged/excused split is what the flat-score rule is made of.
+            intact=_rec.reconciled, judged=not _flat_excuse))
         _stubs_prev = len(_stub_keys)
 
         # The re-admission baseline starts at a sentinel any score beats, so
@@ -1949,6 +2273,8 @@ def run_phase_c_tdd(
                     f"{_l.file}::{_l.fn_name}" for _l in _pass_attempted)),
                 landed=tuple(sorted(
                     f"{_l.file}::{_l.fn_name}" for _l in _pass_landed)),
+                declined=tuple(sorted(
+                    f"{_l.file}::{_l.fn_name}" for _l in _pass_declined)),
                 # The futility evidence as of the PREVIOUS sweep's end (this
                 # save runs before this sweep's attribution). That is the
                 # ordering that makes the persisted evidence usable: the
@@ -2510,6 +2836,14 @@ def run_phase_c_tdd(
                 })
                 _compile_broke_streak = 0
                 _destruction_epoch += 1
+                # READ PATH: the re-stub is the destruction the ledger exists
+                # for. It runs BEFORE the `continue`, so the next sweep
+                # measures the re-seeded tree — a sweep of the un-re-seeded
+                # one would re-base the high-water onto a tree that existed
+                # for milliseconds. Only bodies whose file was NOT re-authored
+                # come back; the gate refuses the rest, which is exactly the
+                # retrigger's intent.
+                _reseed_site("after retrigger re-stub (build cause)", iter_n)
                 _grace = _grant_grace(_retrig_k.reverted_count,
                                       frozenset(_oracle.vanished))
                 _emit_retrigger_iter("retrigger_build",
@@ -2845,6 +3179,7 @@ def run_phase_c_tdd(
                     "reverted_count": _retrig_c.reverted_count,
                 })
                 _destruction_epoch += 1
+                _reseed_site("after retrigger re-stub (crash cause)", iter_n)
                 _grace = _grant_grace(_retrig_c.reverted_count,
                                       frozenset(_oracle.vanished))
                 _emit_retrigger_iter("retrigger_crash",
@@ -2888,6 +3223,8 @@ def run_phase_c_tdd(
                         "reverted_count": _retrig.reverted_count,
                     })
                     _destruction_epoch += 1
+                    _reseed_site("after retrigger re-stub (stall cause)",
+                                 iter_n)
                     _grace = _grant_grace(_retrig.reverted_count,
                                           frozenset(_oracle.vanished))
                     _emit_retrigger_iter("retrigger_stall",
@@ -3106,13 +3443,14 @@ def run_phase_c_tdd(
         # that is how run `1692702-94e6163a` spent 3h36m with its repeat clause
         # satisfied since iteration 2 and its traversal clause unsatisfiable.
         # One line per sweep, only while the guard is actually withheld.
-        if not _flat_excuse and _flat_guard.withheld_by_traversal(
-                _flat_reading, _traversals):
+        _flat_verdict = _flat_decision()
+        if (not _flat_excuse and _flat_verdict is not None
+                and _flat_verdict.withheld_by_traversal):
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: the flat-score guard is "
                 f"ARMED and WITHHELD — {_flat_reading} has been read "
-                f"{_flat_guard.repeated(_flat_reading)} time(s) (limit "
-                f"{_flat_guard.repeats}) but all of them inside traversal "
+                f"{_flat_verdict.repeats} time(s) (limit "
+                f"{_flat_verdict.limit}) but all of them inside traversal "
                 f"{_traversals}, and a stop needs one completed traversal "
                 "behind the repeat. This pass has attempted "
                 f"{_batch.attempted_before + len(_batch.keys)} of "
@@ -3122,7 +3460,7 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "pass_count": pass_count,
                 "oracle_size": _measure.oracle_size,
-                "repeats": _flat_guard.repeated(_flat_reading),
+                "repeats": _flat_verdict.repeats,
                 "traversals": _traversals,
                 "cohort_size": len(_pass_cohort or ()),
                 "attempted_this_pass": (_batch.attempted_before
@@ -3138,9 +3476,8 @@ def run_phase_c_tdd(
         # that skipped it would be a second way to end a run on a tree worse
         # than one already on disk.
         _stop_clock = (
-            "flat_score" if (not _flat_excuse
-                             and _flat_guard.trips_on(_flat_reading,
-                                                      _traversals))
+            "flat_score" if (not _flat_excuse and _flat_verdict is not None
+                             and _flat_verdict.stop)
             else "no_verdict" if _unmoved.trips else "")
         if _stop_clock:
             # BEFORE stopping: is there a better tree on disk that this run has
@@ -3171,7 +3508,8 @@ def run_phase_c_tdd(
                     deps.log(
                         f"  {tag} [phase-c/tdd] iter {iter_n}: the re-climb "
                         f"failed — this sweep reads {_flat_reading} for the "
-                        f"{_flat_guard.repeated(_flat_reading)}(nd/rd) time "
+                        f"{_flat_verdict.repeats if _flat_verdict else 0}"
+                        "(nd/rd) time "
                         f"and the durable mark is {_mark_now.pass_count}/"
                         f"{_mark_now.oracle_size}. RESTORING that tree "
                         f"({_bodies} body file(s) + {_layout_n} layout "
@@ -3220,13 +3558,16 @@ def run_phase_c_tdd(
                     # same way and the next sweep re-bases through the one path
                     # every consumer already reads.
                     _highwater = _highwater.lineage_replaced(iter_n)
-                    _flat_guard = FlatScoreGuard(
-                        window=_flat_guard.window, repeats=_flat_guard.repeats,
-                        require_traversal=_flat_guard.require_traversal)
+                    # The restore replaced the lineage, so the readings before
+                    # it describe a tree the loop no longer has. Clearing the
+                    # FACTS is the same statement the guard's re-construction
+                    # used to make, with one fewer way to get it wrong.
+                    _flat_facts.clear()
                     permanently_exhausted.clear()
                     _stubs_prev = -1
                     _pass_attempted = set()
                     _pass_landed = set()
+                    _pass_declined = set()
                     _pass_cohort = None
                     _resumed_cursor_window = frozenset()
                     _unmoved = _unmoved.moved()
@@ -3257,16 +3598,16 @@ def run_phase_c_tdd(
                         })
                     _grace = RefillGrace.none()
                     continue
-            if _stop_clock == "flat_score":
+            if _stop_clock == "flat_score" and _flat_verdict is not None:
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: GPU_GUARD_STOP — "
                     f"this sweep reads {_flat_reading}, which the last "
-                    f"{len(_flat_guard.readings)} judged sweep(s) have already "
-                    f"produced {_flat_guard.repeated(_flat_reading)} time(s): "
-                    f"{_flat_guard.render(_flat_reading)}"
-                    + (f"; {_flat_guard.gap} sweep(s) in between were not "
+                    f"{len(_flat_verdict.observations)} judged sweep(s) have "
+                    f"already produced {_flat_verdict.repeats} time(s): "
+                    f"{_flat_verdict.render()}"
+                    + (f"; {_flat_verdict.gap} sweep(s) in between were not "
                        "judged (grace window / still filling / red build)"
-                       if _flat_guard.gap else "")
+                       if _flat_verdict.gap else "")
                     + f". {_traversals} completed traversal(s) of this "
                     "frontier stand behind that reading. Stopping the RUN "
                     f"before dispatching {_batch.rendered} — the batch it was "
@@ -3277,12 +3618,13 @@ def run_phase_c_tdd(
                     "cluster": cluster.name, "iter": iter_n,
                     "pass_count": pass_count,
                     "oracle_size": _measure.oracle_size,
-                    "repeats": _flat_guard.repeated(_flat_reading),
-                    "limit": _flat_guard.repeats,
-                    "window": _flat_guard.window,
-                    "skipped": _flat_guard.gap,
+                    "repeats": _flat_verdict.repeats,
+                    "limit": _flat_verdict.limit,
+                    "window": _flat_verdict.window,
+                    "skipped": _flat_verdict.gap,
                     "readings": [[o.reading.pass_count, o.reading.oracle_size,
-                                  o.traversal] for o in _flat_guard.readings],
+                                  o.traversal]
+                                 for o in _flat_verdict.observations],
                     "traversals": _traversals,
                     "frontier_size": len(eligible),
                     "withheld_dispatch": len(_batch.keys),
@@ -3342,6 +3684,13 @@ def run_phase_c_tdd(
         _prev_pass_completed = _batch.completes_pass
         if _batch.completes_pass:
             _traversals += 1
+            # The traversal, as a fact — `flat_score` counts pass closures out
+            # of the stream rather than being handed a number by a local, so a
+            # gate that both counts and decides stops existing.
+            _flat_facts.append(PassClosed(
+                iter=iter_n, cluster=cluster.name,
+                cohort_size=_cohort_at_close,
+                attempted=_batch.attempted_before + len(_batch.keys)))
         frontier_keys = set(_batch.keys)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
@@ -3350,10 +3699,39 @@ def run_phase_c_tdd(
              f"frontier={len(eligible)} fn(s) ({kind}), "
              f"{skipped_perm} skipped as exhausted; "
              f"dispatching {_batch.rendered}.")
+        # The ordered frontier this iteration walked, as one digest. It is a
+        # DIAGNOSTIC and never a gate: a hash of the population cannot decide
+        # whether a carried cursor is valid, because the population moves for
+        # the very reason the cursor exists (bodies land, units leave, the
+        # escalation widens the frontier 12 -> 39 mid-pass) and a resumed
+        # process re-opens its cohort on whatever the frontier is then. What
+        # it is for is reading a stop-and-relaunch pair afterwards —
+        # `scripts/cursor_identity_replay.py` can then say what the population
+        # actually did across a transition instead of inferring it from which
+        # module changed.
+        _frontier_fp = hashlib.sha256(
+            "\n".join(f"{k.file}::{k.fn_name}" for k, _ in ordered)
+            .encode("utf-8")).hexdigest()[:12]
         deps.emit("phase_c.tdd.iter", data={
                 **_prov,
             "cluster": cluster.name, "iter": iter_n, "rc": rc,
             "frontier_size": len(eligible), "kind": kind,
+            # The four fields the printed line carries and the event did not.
+            # Measured 2026-08-21 by `scripts/fold_completeness.py`: a fold
+            # over the recorded stream could rebuild every field of the iter
+            # vector EXCEPT the sweep's elapsed seconds and the exhausted-skip
+            # count, so the log and the fact stream disagreed about what the
+            # loop knew. A fold that reads a default where the variable would
+            # have read the truth is worse than the variable.
+            "elapsed_s": round(dt, 1),
+            "skipped_exhausted": skipped_perm,
+            "attempted_before": _batch.attempted_before,
+            "cohort_size": len(_pass_cohort or ()),
+            "frontier_fp": _frontier_fp,
+            "cohort_fp": hashlib.sha256(
+                "\n".join(f"{k.file}::{k.fn_name}"
+                          for k in (_pass_cohort or ())).encode("utf-8")
+            ).hexdigest()[:12],
             "pass_count": pass_count, "fail_count": fail_count,
             "improved": improved, "stall": stall,
             "dispatched": len(_batch.keys),
@@ -3503,10 +3881,57 @@ def run_phase_c_tdd(
         # re-authors incl. traversal step `src/error.rs::source`, 2 peeled
         # incl. the severed `src/context.rs::source`).
         if _bodies_before is not None and deps.enumerate_fns is not None:
+            _recs_after = deps.enumerate_fns(target_src_dir) or []
             _batch_landed = changed_units(
                 _bodies_before,
-                unit_bodies(deps.enumerate_fns(target_src_dir) or [],
-                            frontier_keys))
+                unit_bodies(_recs_after, frontier_keys))
+            # THE LEDGER'S WRITE PATH. The bodies are in hand at this exact
+            # line and were thrown away here for the whole life of the
+            # pipeline: `landed_change` emits the unit NAMES, and every
+            # destruction afterwards had to re-derive the bodies through the
+            # model. One row per landed unit, state `landed` — no sweep has
+            # judged it yet, and the sweep below is what turns it into
+            # evidence or into nothing.
+            #
+            # RAW `body_text`, never the folded form `unit_bodies` returns:
+            # `" ".join(text.split())` collapses a body onto one line, and a
+            # body holding a `//` comment then comments out its own remainder
+            # the moment it is spliced back.
+            if deps.ledger_append is not None and _batch_landed:
+                _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
+                _new_rows: list[LedgerEntry] = []
+                for _key in sorted(_batch_landed):
+                    _recs = [r for r in _recs_after
+                             if str(r.get("file") or "") == _key.file
+                             and str(r.get("fn_name") or "") == _key.fn_name]
+                    # `_led_*` rather than `_bodies`/`_sigs`: the durable
+                    # restore below unpacks `_bodies, _layout_n, _leftover`
+                    # as COUNTS in this same function scope, and two meanings
+                    # of one name inside a 3,900-line body is how a value
+                    # crosses between mechanisms that never meant to meet.
+                    _led_bodies = tuple(str(r.get("body_text") or "")
+                                        for r in _recs)
+                    _led_sigs = tuple(str(r.get("sig_text") or "")
+                                      for r in _recs)
+                    if not _led_bodies:
+                        continue
+                    _new_rows.append(LedgerEntry(
+                        key=LedgerKey(project=project_dir.name,
+                                      cluster=cluster.name, file=_key.file,
+                                      fn_name=_key.fn_name),
+                        body_sha=body_sha(_led_bodies), bodies=_led_bodies,
+                        sig_sha=sig_sha_of(_led_sigs),
+                        layout_fp=_fps.get(_key.file, ""),
+                        layout_deps=body_layout_deps(
+                            "\n".join(_led_bodies), "\n".join(_led_sigs),
+                            _items,
+                            file_of=_file_of),
+                        iteration=iter_n, epoch=_destruction_epoch))
+                if _new_rows:
+                    deps.ledger_append(project_dir, _new_rows)
+                    _ledger_rows.extend(_new_rows)
+                    if _ledger_cache is not None:
+                        _ledger_cache.extend(_new_rows)
             _pass_landed |= _batch_landed
             # An unchanged unit that NO failing test convicts (reached by
             # inference: escalation producer, traversal step) was told to
@@ -3519,6 +3944,7 @@ def run_phase_c_tdd(
             _batch_declined = frozenset(
                 k for k in _batch_unchanged if not convicting.get(k))
             _batch_unchanged -= _batch_declined
+            _pass_declined |= _batch_declined
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: landed-change audit — "
                 f"{len(_batch_landed)} of {len(frontier_keys)} dispatched "
@@ -3540,14 +3966,19 @@ def run_phase_c_tdd(
                                    for k in _batch_declined)})
             if _batch.completes_pass:
                 _unchanged_pass = _pass_units_at_close - _pass_landed
-                # Read against the CURRENT conviction map: the pass's
-                # earlier batches may have run in an earlier process (the
-                # cursor resumes across relaunches) and only `landed`
-                # travels with it. A unit convicted now was convicted at
-                # its dispatch too, barring a verdict move — which would
-                # have ended the flat reading this audit qualifies.
+                # The pass's own record FIRST, the current conviction map
+                # as the fallback. `_pass_declined` travels with the cursor
+                # across a relaunch exactly as `_pass_landed` does, so a
+                # pass spread over the one-batch-per-relaunch crawl states
+                # the decline its earlier process actually observed; the
+                # map is still read for units this process dispatched
+                # before the record existed. A unit convicted now was
+                # convicted at its dispatch too, barring a verdict move —
+                # which would have ended the flat reading this audit
+                # qualifies.
                 _declined_pass = frozenset(
-                    k for k in _unchanged_pass if not convicting.get(k))
+                    k for k in _unchanged_pass
+                    if k in _pass_declined or not convicting.get(k))
                 _unchanged_pass -= _declined_pass
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: PASS AUDIT — "
@@ -3575,6 +4006,7 @@ def run_phase_c_tdd(
         # reported this one), and the next pass accumulates fresh.
         if _batch.completes_pass:
             _pass_landed = set()
+            _pass_declined = set()
         last_newly_filled = newly_filled   # hook 3: next iter attributes regressions to these
         for k in newly_filled:
             recently_filled.append(k)

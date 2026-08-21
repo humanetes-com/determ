@@ -6,9 +6,17 @@
 # width the pane happens to be. Copy-pasting it put those wraps into the
 # object: `git log` then shows a subject running into the body, ragged
 # indentation and 100+ column lines (see the four-point message on abc2179).
-# The message is now written to a FILE instead, wrapped by the writer at 72
-# columns, and `git commit -F` takes it verbatim — nothing passes through a
-# terminal on the way in.
+# The message is now written to a FILE instead, and `git commit -F` takes it
+# verbatim — nothing passes through a terminal on the way in.
+#
+# A later rule (hard-wrap the body at 72 columns) produced the same symptom
+# from the other direction: an EOL landing mid-sentence, not at a paragraph
+# boundary (2026-08-21). So an EOL in the file is only ever structural now —
+# the subject/body separator or a blank line between points — and this script
+# normalizes before committing: every run of non-blank lines (one paragraph)
+# is rejoined into a single line, blank lines are left as the separators they
+# are. That runs unconditionally, so a stray mid-paragraph wrap in the file
+# costs nothing even if one slips in.
 #
 # USAGE
 #   ./commit.sh                # commit what is staged, message from the file
@@ -44,7 +52,18 @@ if [[ ! -s "$MSG_FILE" ]]; then
     exit 2
 fi
 
-SUBJECT="$(head -n 1 "$MSG_FILE")"
+# Rejoin any mid-paragraph wrap: consecutive non-blank lines become one line,
+# blank lines (the subject/body separator, the gaps between points) pass
+# through untouched. A no-op on an already-correct file.
+NORMALIZED="$(mktemp)"
+trap 'rm -f "$NORMALIZED"' EXIT
+awk '
+    /^[[:space:]]*$/ { if (para != "") { print para; para = "" }; print ""; next }
+    { para = (para == "") ? $0 : para " " $0 }
+    END { if (para != "") print para }
+' "$MSG_FILE" > "$NORMALIZED"
+
+SUBJECT="$(head -n 1 "$NORMALIZED")"
 
 if [[ -z "${SUBJECT// /}" ]]; then
     echo "refusing: $MSG_FILE starts with a blank line — line 1 is the subject" >&2
@@ -74,6 +93,6 @@ if [[ ${#SUBJECT} -gt 72 ]]; then
     echo "warning: subject is ${#SUBJECT} chars; git log --oneline truncates past 72" >&2
 fi
 
-git commit -F "$MSG_FILE" "$@"
+git commit -F "$NORMALIZED" "$@"
 
 echo "committed $(git rev-parse --short HEAD) $SUBJECT"

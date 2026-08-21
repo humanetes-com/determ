@@ -125,3 +125,55 @@ def compile_skeleton_check(
     if proc.returncode == 0:
         return True, ""
     return False, (proc.stderr or "")[:_ERROR_EXCERPT_CHARS]
+
+
+_FILLED_DIR = ".skeleton-filled"
+
+
+def filled_dir_for(project_dir: Path, cfg_cluster: str) -> Path:
+    return Path(project_dir) / _FILLED_DIR / cfg_cluster
+
+
+def compile_filled_check(
+    project_dir: Path,
+    cluster: BuildCluster,
+    *,
+    timeout: int = 240,
+) -> tuple[bool, str]:
+    """Does the cluster's FILLED tree pass ``cargo check`` (lib only)?
+
+    The same gate as :func:`compile_skeleton_check`, pointed at the tree the
+    loop actually builds and scores (`.skeleton-filled/<cluster>`), and it
+    exists for the proven-body ledger: a re-seed is the one write in this
+    pipeline made of code nobody just wrote, so it is the one that has to prove
+    the tree still builds before the sweep reads a 0 it cannot attribute to any
+    unit (`nightly 0/124 for 8.7 h`, from a seed defect).
+
+    ``--lib`` deliberately: the re-seed puts bodies back into the crate, and
+    building the test targets as well would cost minutes per check inside a
+    bisect. A body that compiles in the lib and breaks a test binary is caught
+    by the very next sweep, which is a normal verdict move rather than a tree
+    with no signal.
+
+    Conservative in the same direction as its sibling: any error, timeout or
+    non-zero exit returns False, which costs a re-seeded body and never a
+    broken tree."""
+    crate_dir = filled_dir_for(project_dir, cluster.name)
+    if not (crate_dir / "src").is_dir():
+        return False, "filled src/ missing"
+    if not (crate_dir / "Cargo.toml").exists() and not _ensure_crate_manifest(
+            Path(project_dir), crate_dir):
+        return False, "crate manifest missing"
+    env = base_cargo_env()
+    apply_cluster_env(env, cluster)
+    try:
+        proc = subprocess.run(
+            ["cargo", "check", "--lib", "--quiet"],
+            cwd=crate_dir, env=env, capture_output=True, text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"cargo check did not run: {exc}"
+    if proc.returncode == 0:
+        return True, ""
+    return False, (proc.stderr or "")[:_ERROR_EXCERPT_CHARS]

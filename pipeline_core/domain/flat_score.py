@@ -116,7 +116,14 @@ the conservative part of this design rather than the lax part.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+
+from pipeline_core.domain.loop_facts import (
+    Fact,
+    PassClosed,
+    SweepMeasured,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,3 +381,99 @@ class FlatScoreGuard:
         return (f"{' '.join(f'{o.reading}@t{o.traversal}' for o in self.readings)} "
                 f"(reading {reading} {self.repeated(reading)}x in the last "
                 f"{len(self.readings)} judged sweep(s))")
+
+
+# --- stage 2 of the fold: the same rule, as a function of the fact stream ----
+
+@dataclass(frozen=True, slots=True)
+class FlatScoreDecision:
+    """What the guard decides, and everything its log line needs to say why.
+
+    A value rather than a mutation, which is the whole point of the conversion:
+    `FlatScoreGuard.observed`/`excused` had to be called on exactly the right
+    paths, in the right order, from a 3,708-line module — and the recorded cost
+    of getting that wrong is three runs that ended on an operator's SIGTERM
+    instead of the loop's own decision. A fold over the facts cannot be called
+    on the wrong path, because there is no path: the readings ARE the judged
+    sweeps in the stream."""
+
+    stop: bool
+    reading: ScoreReading
+    repeats: int
+    limit: int
+    window: int
+    gap: int
+    traversals: int
+    first_traversal: int | None
+    withheld_by_traversal: bool
+    observations: tuple[ScoreObservation, ...] = ()
+
+    @property
+    def enabled(self) -> bool:
+        return self.limit >= 2 and self.window >= self.limit
+
+    def render(self) -> str:
+        return (f"{' '.join(f'{o.reading}@t{o.traversal}' for o in self.observations)} "
+                f"(reading {self.reading} {self.repeats}x in the last "
+                f"{len(self.observations)} judged sweep(s))")
+
+
+def flat_score(
+    facts: Sequence[Fact], *, window: int = 5, limit: int = 2,
+    require_traversal: bool = False,
+) -> FlatScoreDecision | None:
+    """STOP or continue, decided from the fact stream and nothing else.
+
+    Returns None when no judged sweep has been recorded yet — there is no
+    reading to be about, which is a different state from "the reading does not
+    repeat" and must not be collapsed into it.
+
+    `require_traversal` survives as a PARAMETER rather than as guard state, and
+    only because `CLAUDE.md` documents `TDD_FLAT_SCORE_REQUIRE_TRAVERSAL=1` as
+    a supported setting. The difference matters: as a field it was part of the
+    guard's identity and a caller could observe a reading under one value and
+    decide under another; as an argument it is a question the caller asks, and
+    the answer is a pure function of the stream.
+
+    THE NEGATIVE CONTROL THIS FUNCTION EXISTS FOR is run `1920662-40f711b2`
+    (2026-08-16 → 08-17, 9h48m, 191 model calls, net -46 tests). Its iterations
+    1-3 read 79/101, 83/106, 83/106 and no pass closed, so the live guard's
+    repeat clause was satisfied at 00:25:43Z and the traversal clause withheld
+    the stop: `83/106 has been read 2 time(s) (limit 2) but all of them inside
+    traversal 0`. The fold over that same recorded stream, with
+    `require_traversal` off, decides STOP at iteration 3."""
+    obs: list[ScoreObservation] = []
+    traversals = 0
+    gap = 0
+    pending = 0
+    for f in facts:
+        if isinstance(f, PassClosed):
+            traversals += 1
+        elif isinstance(f, SweepMeasured):
+            if f.judged:
+                obs.append(ScoreObservation(
+                    ScoreReading(f.pass_count, f.oracle_size), traversals))
+                gap, pending = pending, 0
+            else:
+                # A sweep that cannot judge the dispatch before it is not
+                # evidence in either direction — it is a gap, and the stop line
+                # reports it so an operator can tell "two identical readings in
+                # a row" from "two identical readings with four excused sweeps
+                # between them".
+                pending += 1
+    if not obs:
+        return None
+    kept = tuple(obs[-window:]) if window > 0 else tuple(obs)
+    reading = kept[-1].reading
+    repeats = sum(1 for o in kept if o.reading == reading)
+    seen = [o.traversal for o in kept if o.reading == reading]
+    first = min(seen) if seen else None
+    enabled = limit >= 2 and window >= limit
+    tripped = enabled and repeats >= limit
+    withheld = bool(tripped and require_traversal
+                    and (first is None or first >= traversals))
+    return FlatScoreDecision(
+        stop=tripped and not withheld, reading=reading, repeats=repeats,
+        limit=limit, window=window, gap=gap, traversals=traversals,
+        first_traversal=first, withheld_by_traversal=withheld,
+        observations=kept)
