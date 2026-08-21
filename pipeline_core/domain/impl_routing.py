@@ -28,6 +28,7 @@ from pipeline_core.domain.rust_idents import (
     impl_head_name,
     impl_trait_name,
     names_impl_or_trait,
+    repair_truncated_generics,
     trait_def_name,
 )
 
@@ -234,6 +235,21 @@ def route_fn_bodies(
         if canonical is not None:
             routed.append(RoutedBody(fn_data, canonical))
             continue
+        # A header whose last generic list the model closed with `)` or `]`
+        # (`… for Result<T, E)`, `… ContextError<C, Error]`) names the impl as
+        # plainly as a correct one; read it as such rather than dropping the
+        # body on the one-character slip. Tried after the exact canonical
+        # tiers so a header that matches as written is never re-read.
+        repaired = repair_truncated_generics(attr_canon)
+        if repaired != attr_canon:
+            if repaired == target_canon:
+                routed.append(RoutedBody(fn_data, target))
+                continue
+            canonical = next(
+                (c for c, cc in related_canon if repaired == cc), None)
+            if canonical is not None:
+                routed.append(RoutedBody(fn_data, canonical))
+                continue
         fn_name = str(fn_data.get("fn_name", ""))
         trait = impl_trait_name(block_attr) or impl_head_name(block_attr)
         host = next((h for h in trait_defaults

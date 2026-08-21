@@ -130,15 +130,59 @@ def test_conviction_dies_when_the_tests_it_rests_on_stop_convicting() -> None:
     assert _standing(record, prov, wider) is ConvictionStanding.CURRENT
 
 
-def test_compile_only_conviction_is_never_invalidated_by_the_frontier() -> None:
-    # Exhausting on compile errors names no tests; nothing about the blame map
-    # can make that verdict unfair, so it must survive every frontier change.
+def test_compile_only_conviction_stands_while_no_test_blames_the_unit() -> None:
+    # Exhausting on compile errors names no tests. Read where the blame map
+    # still names none, the verdict is about the same question and stands.
     prov = RetroProvenance.current("stable", LAYOUT)
     record = stamp_conviction({"fully_exhausted": True}, prov, NO_TESTS)
     assert record["convicted_by"] == []
-    assert _standing(record, prov,
-                     ConvictionEvidence(frozenset({"test_x"}))) is (
-        ConvictionStanding.CURRENT)
+    assert _standing(record, prov, NO_TESTS) is ConvictionStanding.CURRENT
+
+
+# The record that held `anyhow`/`stable` at 83 for two complete traversals of
+# its frontier (run `1246060-2339497b`, 2026-08-21), verbatim from
+# `.phase_c_logs/retrospectives.json`: a `fully_exhausted` verdict convicted by
+# NO test, stamped on a nesting diagnostic (the reply's own `fn source(&self)`
+# line spliced inside the body), read under a frontier in which nine failing
+# tests blamed the unit's `None` body.
+_CONTEXT_ERROR_SOURCE = {
+    "category": "WRONG_DEREF_PATTERN",
+    "guidance": "The `error` field is a wrapper/smart-pointer, so `&self.error` "
+                "yields a reference to the wrapper, not to the inner `dyn "
+                "Error`. Build the source value by dereferencing the wrapper, "
+                "e.g. `Some(self.error.as_ref())` / `Some(&*self.error)`",
+    "retrospective_count": 10, "error_count": 3, "failing_test_count": 0,
+    "best_failing_tests": 1, "fully_exhausted": True, "reset_attempts": 0,
+    "convicted_by": [], "blocked_on": ["provide"],
+    "last_error_preview": "# Errors in target file:\nerror: `self` parameter "
+                          "is only allowed in associated functions\n   --> "
+                          "src/context.rs:148:19",
+}
+_NINE = ConvictionEvidence(frozenset({
+    "test_iter", "test_rev", "test_len", "test_clone", "test_root_cause",
+    "test_anyhow_from_anyhow", "test_boxed_anyhow", "test_debug",
+    "test_altdisplay"}))
+
+
+def test_a_conviction_by_no_test_dies_once_a_test_blames_the_unit() -> None:
+    # The blame map moved from "nothing" to "nine tests": `frozenset() <= tests`
+    # was True in every context, and the impl route logged `skipped (prior
+    # retro marked exhausted)` at both dispatches while every release path
+    # waited on the score rise only this unit could deliver.
+    prov = RetroProvenance.current("stable", LAYOUT)
+    record = prov.stamp(dict(_CONTEXT_ERROR_SOURCE))
+    assert _standing(record, prov, _NINE) is ConvictionStanding.STALE_EVIDENCE
+    # Negative control, the same run's `src/error.rs::*impl*::ErrorImpl`: a
+    # verdict convicted ON tests that still convict stands exactly as before.
+    seven = ConvictionEvidence(frozenset({
+        "test_anyhow_from_anyhow", "test_boxed_anyhow", "test_boxed_str",
+        "test_clone", "test_iter", "test_len", "test_rev"}))
+    error_impl = stamp_conviction(
+        {"category": "WRONG_DEREF_PATTERN", "fully_exhausted": True,
+         "error_count": 0, "failing_test_count": 7}, prov, seven)
+    assert _standing(error_impl, prov, seven) is ConvictionStanding.CURRENT
+    assert _standing(error_impl, prov, _NINE) is ConvictionStanding.STALE_EVIDENCE
+
 
 
 def test_legacy_records_convict_nothing() -> None:

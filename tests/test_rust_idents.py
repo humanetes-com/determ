@@ -454,3 +454,18 @@ def test_signature_fixed_by_trait_covers_declaration_and_impl() -> None:
     assert signature_fixed_by_trait("impl Display for Error")
     assert not signature_fixed_by_trait("impl Error")
     assert not signature_fixed_by_trait("")
+
+
+def test_repair_truncated_generics_rewrites_only_an_open_trailing_bracket() -> None:
+    from pipeline_core.domain.rust_idents import repair_truncated_generics
+    assert repair_truncated_generics("Context<T,E>forResult<T,E)") == \
+        "Context<T,E>forResult<T,E>"
+    assert repair_truncated_generics("StdErrorforContextError<C,Error]") == \
+        "StdErrorforContextError<C,Error>"
+    # Two lists left open, two wrong closers: both repaired.
+    assert repair_truncated_generics("Afor<B<C))") == "Afor<B<C>>"
+    # Balanced: untouched, `)` or not.
+    assert repair_truncated_generics("Foofor(A,B)") == "Foofor(A,B)"
+    assert repair_truncated_generics("DebugforError") == "DebugforError"
+    # Open depth but no trailing closer to rewrite: returned as is.
+    assert repair_truncated_generics("Foofor<T") == "Foofor<T"

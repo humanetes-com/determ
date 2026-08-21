@@ -117,6 +117,7 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
     impossibility_claim_is_unfounded,
     judge_guidance,
@@ -2326,7 +2327,21 @@ def fill_impl_blocks(
                                                   "FROZEN_BOUND_MISMATCH")
                         or not improved
                     )
+                # A conviction is a verdict on the model's bodies. A last error
+                # that is a splice/nesting diagnostic — a member's own
+                # `fn source(&self)` line spliced inside a body, a
+                # `parse_broken` — is a verdict on how the pipeline placed the
+                # text and bought no evidence about the block. The record that
+                # held `StdErrorforContextError<C,Error>` out of two dispatches
+                # in run `1246060-2339497b` was stamped on exactly that.
+                if full_exhaust and exhaustion_from_splice_diagnostic(
+                        last_error_excerpt):
+                    full_exhaust = False
+                    _log(f"  [phase-c/impl/retro] {block_id}: NOT exhausting "
+                         "— the last error is a splice/nesting diagnostic, "
+                         "not a verdict on the block's bodies.")
                 # The dict write + on-disk save must be atomic together —
+
                 # two blocks finishing concurrently each write their OWN key
                 # (safe unlocked, per-block-unique), but an unlocked
                 # save-after-write race could have one thread's

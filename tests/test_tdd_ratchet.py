@@ -255,7 +255,10 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         if checkpoints is not None:
             checkpoints.append(mark)
 
-    def _retire(pd, by_file, cluster_name):
+    def _retire(pd, by_file, cluster_name, *, cfg_dead=frozenset()):
+        # `cfg_dead` is the cluster's positive census of cfg-inactive stubs,
+        # threaded so a cfg-dead blocker reads as cleared; the replay records
+        # the map and ignores the census (no test models cfg here).
         if retires is not None:
             retires.append((cluster_name, {f: set(n) for f, n in by_file.items()}))
         return 0

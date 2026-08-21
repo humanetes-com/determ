@@ -65,6 +65,18 @@ _READMITTED = re.compile(
     r"\[(?P<cluster>[^\]]+)\] \[phase-c/tdd\] iter (?P<iter>\d+): re-admitted "
     r"(?P<count>\d+) previously-exhausted")
 
+# An iteration that found nothing dispatchable prints THIS line and no summary
+# — the `continue` in that branch skips the `cargo test rc=` emit — so without
+# it the distiller reads a spin as a run of swallowed-crash iterations: run
+# `1246060-2339497b` (2026-08-21) spent iterations 9 .. 3 797 here at two a
+# second, and a fixture that served those as crashes over a shrunken oracle
+# would arm the crash machinery on a tree that never crashed.
+_NO_FRONTIER = re.compile(
+    r"\[(?P<cluster>[^\]]+)\] \[phase-c/tdd\] iter (?P<iter>\d+): no actionable "
+    r"frontier this iter but stall=(?P<stall>\d+)/(?P<max_stall>\d+) — "
+    r"continuing \(pass=(?P<passed>\d+), fail=(?P<failed>\d+), "
+    r"improved=(?P<improved>\w+)\)")
+
 _REFUSED = re.compile(
     r"\[(?P<cluster>[^\]]+)\] \[phase-c/tdd\] iter (?P<iter>\d+): (?P<fills>\d+) "
     r"fill\(s\) since the last check moved pass no further than (?P<against>\d+) "
@@ -143,6 +155,20 @@ def distill(paths: list[Path], cluster: str, run: str | None,
                         frontier=int(m.group("frontier")),
                         kind=m.group("kind"),
                         exhausted=int(m.group("exhausted")))
+                    continue
+                m = _NO_FRONTIER.search(line)
+                if m is not None and m.group("cluster") == cluster:
+                    s = slot(int(m.group("iter")))
+                    s.update(
+                        passed=int(m.group("passed")),
+                        failed=int(m.group("failed")),
+                        oracle=int(m.group("passed")) + int(m.group("failed")),
+                        improved=m.group("improved") == "True",
+                        stall=int(m.group("stall")),
+                        max_stall=int(m.group("max_stall")),
+                        frontier=0,
+                        kind="no_frontier_continue",
+                        exhausted=0)
                     continue
                 m = _RETRIGGER.search(line)
                 if m is not None and m.group("cluster") == cluster:

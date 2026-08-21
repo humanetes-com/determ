@@ -159,3 +159,63 @@ def test_escalation_re_admits_an_exhausted_target(
     esc = [d for ev, d in events if ev == "phase_c.attribution.escalated"]
     assert esc and any("producer" in x for x in esc[0].get("re_admitted", []))
     assert any("re-admitted on the new evidence" in ln for ln in logs)
+
+
+def test_escalation_releases_the_stored_verdict_on_its_target(
+        tmp_path: Path, monkeypatch) -> None:
+    """The store is the second gate. Run `1246060-2339497b` (2026-08-21)
+    re-merged `StdErrorforContextError<C,Error>` into the frontier on every
+    sweep (`escalation_sustained` ×1599) and the impl route skipped it at
+    every dispatch on its disk `fully_exhausted` flag — the process-local
+    re-admission above never reached that flag. The escalation's evidence
+    must open both, through the capped reset."""
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    released_with: list[tuple[frozenset, str]] = []
+
+    def _escalate(src_dir, tname, units):
+        return {_PROD: {tname}}
+
+    def _release(pd, sd, targets, reason):
+        released_with.append((frozenset(targets), reason))
+        return ["src/a.rs::*impl*::Producer"]
+
+    from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
+    from pipeline_core.domain.models import BuildCluster
+    monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
+    monkeypatch.setenv("TDD_MAX_STALLS", "3")
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / "a.rs").write_text("orig", encoding="utf-8")
+
+    def _cargo(*a: Any, **k: Any):
+        return 101, _FAILING
+
+    deps = _driver_deps(
+        _cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
+        events, None, frontier={_ACC: {"t2"}, _PROD: {"t2"}},
+        fill=lambda **kw: ClusterFillResult(attempts=1), logs=logs)
+    deps = deps.__class__(**{
+        **{f: getattr(deps, f) for f in deps.__dataclass_fields__},
+        "scan_unimplemented_functions": lambda *a, **k: [_PROD],
+        "escalate_to_producers": _escalate,
+        "release_escalated_convictions": _release,
+    })
+    run_phase_c_tdd(
+        deps, project_dir=tmp_path, target_src_dir=tmp_path,
+        tests_dir_files=[],
+        cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
+        cluster=BuildCluster(
+            name="stable", env_extra={}, tarpaulin_exclude_files=[],
+            excluded_cfg=[], active_cfg=[], prompt_nightly_rule=""),
+        check_cmd="cargo check", cluster_env={}, leaf_counts=None,
+        fr_path=None,
+        test_cmd_builder=lambda stems, include_lib=False: "cargo test",
+        tag="[stable]")
+    assert released_with, "the escalation never reached the store"
+    targets, reason = released_with[0]
+    assert targets == frozenset({_PROD})
+    assert "escalation of t2" in reason
+    esc = [d for ev, d in events if ev == "phase_c.attribution.escalated"]
+    assert esc and esc[0].get("disk_released") == ["src/a.rs::*impl*::Producer"]
+    assert any("released 1 stored exhaustion verdict(s)" in ln for ln in logs)

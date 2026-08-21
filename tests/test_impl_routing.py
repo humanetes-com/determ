@@ -637,3 +637,34 @@ def test_joint_overwrite_never_leaves_the_file_or_invents_a_name() -> None:
         _JOINT_BLOCKS, "src/error.rs",
         ["downcast", "boxed", "object_drop_rest_simple"])
     assert got == {"downcast"}
+
+
+def test_a_header_closed_with_the_wrong_bracket_still_routes() -> None:
+    # Verbatim `block` attributes from two runs: run `3124988-ac6886ba`
+    # (2026-08-21) tagged both `with_context` bodies `… for Result<T, E)` /
+    # `… for Option<T)` in batches 2 AND 3, and run `1246060-2339497b`
+    # tagged both `source` bodies `… ContextError<C, Error]`. Every one was a
+    # correct body dropped as "block header does not match any impl".
+    result_impl = "impl<T, E> Context<T, E> for Result<T, E>\nwhere\n    E: StdError,"
+    option_impl = "impl<T> Context<T, Infallible> for Option<T>"
+    ctx_err_impl = "impl<C> StdError for ContextError<C, Error>\nwhere\n    C: Display,"
+    r = route_fn_bodies(
+        [_fn("with_context", "impl<T, E> Context<T, E> for Result<T, E)"),
+         _fn("with_context", "impl<T> Context<T, Infallible> for Option<T)"),
+         _fn("source", "impl<C> StdError for ContextError<C, Error]")],
+        target=result_impl, related=[option_impl, ctx_err_impl])
+    assert r.dropped == ()
+    assert [rb.container for rb in r.routed] == [
+        result_impl, option_impl, ctx_err_impl]
+
+
+def test_a_tuple_self_type_is_not_mistaken_for_a_truncated_header() -> None:
+    # `for (A, B)` ends in `)` legitimately (angle depth 0 there): the repair
+    # must leave it alone, and an unrelated header is still dropped.
+    pair_impl = "impl Foo for (A, B)"
+    r = route_fn_bodies(
+        [_fn("f", "impl Foo for (A, B)"), _fn("g", "impl Bar for (A, B)")],
+        target=pair_impl, related=[])
+    assert [rb.container for rb in r.routed] == [pair_impl]
+    assert r.dropped_names == ("g",)
+    assert canon_container("impl Foo for (A, B)") == "Foofor(A,B)"

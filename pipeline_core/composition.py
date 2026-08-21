@@ -186,6 +186,9 @@ from pipeline_core.adapters.repo_spec_docs import (
     make_repo_spec_section as _make_repo_spec_section,
 )
 from pipeline_core.adapters.retros import (
+    escalation_release_keys as _escalation_release_keys,
+)
+from pipeline_core.adapters.retros import (
     futile_suspension_keys as _futile_suspension_keys,
 )
 from pipeline_core.adapters.retros import (
@@ -199,6 +202,9 @@ from pipeline_core.adapters.retros import (
 )
 from pipeline_core.adapters.retros import (
     migrate_confounded_retros as _migrate_confounded_retros,
+)
+from pipeline_core.adapters.retros import (
+    release_escalated_convictions as _release_escalated_convictions,
 )
 from pipeline_core.adapters.retros import (
     reset_exhaustion_flags as _reset_exhaustion_flags,
@@ -409,7 +415,10 @@ from pipeline_core.application.reconstruct.impl_blocks import (
 from pipeline_core.application.reconstruct.impl_blocks import (
     fn_occurrence_index as _fn_occurrence_index_impl,
 )
-from pipeline_core.application.reconstruct.impl_fill import ImplFillDeps
+from pipeline_core.application.reconstruct.impl_fill import (
+    ImplFillDeps,
+    cluster_inactive_stub_names,
+)
 from pipeline_core.application.reconstruct.impl_fill import (
     fill_impl_blocks as _fill_impl_blocks,
 )
@@ -2340,6 +2349,14 @@ def build_app(
                         _fn_occurrence_index_impl(
                             sd, enumerate_fns=enumerate_fns), units),
                     cluster=cl, tests=tests),
+            release_escalated_convictions=lambda pd, sd, targets, reason:
+                _release_escalated_convictions(
+                    pd, _escalation_release_keys(
+                        _fn_occurrence_index_impl(
+                            sd, enumerate_fns=enumerate_fns), targets),
+                    reason=reason),
+            cfg_dead_stub_names=lambda sd, cl: cluster_inactive_stub_names(
+                sd, cl, structure_cache.scan_unimplemented_records_for_cluster),
             checkpoint_fill_tree=_checkpoint_fill_tree,
             load_best_tree_mark=load_cluster_best_tree_mark,
             restore_best_tree_pair=_restore_best_tree_pair,

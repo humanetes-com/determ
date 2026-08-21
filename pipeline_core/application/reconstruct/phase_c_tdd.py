@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -186,6 +187,21 @@ class PhaseCTddDeps:
     # convicted for calling `unimplemented!()` siblings stays convicted after
     # they fill, and only a cluster-wide score move can free it.
     retire_unblocked_convictions: Callable[..., int] | None = None
+    # Release the disk-persisted exhaustion verdicts of a futility escalation's
+    # TARGETS: (project_dir, src_dir, targets, reason) -> released store keys.
+    # The escalation already re-admits its targets from the process-local set;
+    # the store's `fully_exhausted` flag is a second gate on the same unit
+    # that the local release never reached — run `1246060-2339497b`
+    # (2026-08-21) entered `StdErrorforContextError<C,Error>` into the
+    # frontier on every sweep and the impl route skipped it at every dispatch.
+    # None disables (the pre-fix behaviour).
+    release_escalated_convictions: Callable[..., list[str]] | None = None
+    # The cluster's positive census of cfg-dead stubs: (src_dir, cluster) ->
+    # frozenset of (file, fn) this cluster's cfg-set never compiles. Threaded
+    # to the blocker release so a record `blocked_on` a cfg-dead name is read
+    # as unblocked, and so an empty cluster-scoped stub map can be told apart
+    # from a failed scan. None keeps the release's old guard.
+    cfg_dead_stub_names: Callable[..., frozenset[tuple[str, str]]] | None = None
     # Stage A, the durable loop floor: (project_dir, cluster) -> the persisted
     # mapping or None, and (project_dir, cluster, mapping) -> None. Both None
     # keeps the pre-Stage-A behaviour (a fresh streak every process), which is
@@ -333,6 +349,18 @@ def run_phase_c_tdd(
     # The real terminator is floor-stall on pass_count (max_stalls below).
     max_stalls = deps.effective_stalls(int(os.getenv("TDD_MAX_STALLS", "3")),
                                    deps.converge_in_cluster(cluster) or module)
+    # The empty-frontier terminator. An iteration that finds nothing
+    # dispatchable is not "flat" and `max_stalls` never governed it: with the
+    # plateau exit disabled the loop re-ran a cached `cargo test` at ~2
+    # iterations a second from iteration 9 to the 10 000 backstop (run
+    # `1246060-2339497b`, 2026-08-21: 29 MB of events in 23 minutes, the log
+    # rotating every 3 minutes). Nothing dispatchable means nothing can
+    # change a verdict, so this stop prevents no reading; it spends the
+    # exhausted set's bounded re-admission budget first (the only move left)
+    # and fires after this many CONSECUTIVE undispatchable iterations once
+    # that budget is spent. `0` disables it and restores the spin.
+    _no_frontier_stop_after = int(os.getenv("TDD_NO_FRONTIER_STOP", "2"))
+    _reset_cap = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
 
     # The GPU protector (domain/flat_score.py). The plateau budget above charges
     # only on a COMPLETED frontier traversal, which under the dispatch cap is
@@ -386,7 +414,10 @@ def run_phase_c_tdd(
          f"stems={len(test_stems)}, "
          + (f"gpu-guard={_flat_guard.repeats} repeat(s) of a reading in "
             f"{_flat_guard.window}" if _flat_guard.enabled
-            else "gpu-guard=off"))
+            else "gpu-guard=off")
+         + (f", no-frontier-stop after {_no_frontier_stop_after} "
+            "undispatchable iteration(s)" if _no_frontier_stop_after > 0
+            else ", no-frontier-stop=off"))
 
     if deps.migrate_retro_evidence is not None:
         _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
@@ -406,6 +437,12 @@ def run_phase_c_tdd(
                      "was reverted then) — one fresh verdict each.")
 
     permanently_exhausted: set[FnLocator] = set()
+    # The empty-frontier terminator's two counters: consecutive iterations
+    # that found nothing dispatchable, and how many times the "no other move"
+    # re-admission has been spent (bounded by the reset cap, like the store's
+    # own per-record budget).
+    _no_frontier_streak = 0
+    _no_move_readmissions = 0
     # Futility escalation state: per failing test, the frontier
     # unit-set of the previous iteration; a test whose set is UNCHANGED while
     # it kept failing has exhausted its attributed fns — escalate.
@@ -1456,10 +1493,19 @@ def run_phase_c_tdd(
             _by_file: dict[str, set[str]] = {}
             for _loc in _stub_list:
                 _by_file.setdefault(str(_loc.file), set()).add(_loc.fn_name)
+            # The cfg-dead census rides along: a blocker this cluster never
+            # compiles is an empty blocker (`blocked_on: ["provide"]` under
+            # `stable`), and a non-empty census is the proof-of-scan that lets
+            # an empty map mean "finished tree" rather than "failed scan".
+            _cfg_dead_now: frozenset[tuple[str, str]] = frozenset()
+            if deps.cfg_dead_stub_names is not None:
+                with suppress(Exception):
+                    _cfg_dead_now = frozenset(
+                        deps.cfg_dead_stub_names(target_src_dir, cluster))
             deps.retire_unblocked_convictions(
                 project_dir,
                 {f: frozenset(names) for f, names in _by_file.items()},
-                cluster.name)
+                cluster.name, cfg_dead=_cfg_dead_now)
         # Stage A — adopt the floor a previous PROCESS left behind, once this
         # sweep has produced the two halves of the key it is guarded on. It
         # cannot happen at loop entry: `tree_sha` and `oracle_size` are results
@@ -2253,6 +2299,27 @@ def run_phase_c_tdd(
                                 "evidence: " + ", ".join(
                                     sorted(f"{k.file}::{k.fn_name}"
                                            for k in _re_admitted)))
+                        # The SAME evidence opens the store's gate on the same
+                        # targets. The local release above reaches only the
+                        # D3 filter; a target whose disk record is
+                        # `fully_exhausted` enters the frontier every sweep
+                        # and is skipped at the route every time (the
+                        # `<C,Error>` block, run `1246060-2339497b`). Capped
+                        # per record by the reset budget, so a test that
+                        # escalates to the same target every sweep buys it
+                        # two re-attempts, not one per sweep.
+                        _disk_released: list[str] = []
+                        if deps.release_escalated_convictions is not None:
+                            _disk_released = deps.release_escalated_convictions(
+                                project_dir, src_dir, frozenset(extra),
+                                f"TDD iter {iter_n}: escalation of {tname} "
+                                "named the unit — new evidence about it")
+                            if _disk_released:
+                                deps.log(
+                                    f"  {tag} [attribution/escalate] {tname}: "
+                                    f"released {len(_disk_released)} stored "
+                                    "exhaustion verdict(s) on its target(s): "
+                                    + ", ".join(sorted(_disk_released)[:6]))
                         for k, ts in extra.items():
                             frontier.setdefault(k, set()).update(ts)
                         deps.emit("phase_c.attribution.escalated", data={
@@ -2261,6 +2328,7 @@ def run_phase_c_tdd(
                             "added": sorted(str(k) for k in extra),
                             "re_admitted": sorted(
                                 str(k) for k in _re_admitted),
+                            "disk_released": sorted(_disk_released),
                         })
                 prev_test_units[tname] = frozenset(units)
             # A fired escalation is a MEASUREMENT about its accessors: their
@@ -2866,6 +2934,98 @@ def run_phase_c_tdd(
             })
             break
         if not eligible:
+            _no_frontier_streak += 1
+            # Nothing dispatchable. This is not "flat" and `max_stalls` never
+            # governed it: the plateau exit above charges a COMPLETED
+            # traversal, and an empty frontier completes nothing. First the
+            # only move left — re-admit what the loop itself holds exhausted
+            # (the D3 filter's set and the store's flags), bounded by the
+            # same reset cap the store applies per record; then, with that
+            # budget spent and still nothing to dispatch, stop under a name
+            # instead of re-running a cached `cargo test` to the backstop.
+            # Only where the plateau exit is DISABLED: with a stall budget the
+            # empty frontier is charged like any flat sweep and the stall exit
+            # ends it within `max_stalls` cached iterations — the documented
+            # terminator, and the one the refill cap's attempt bound is pinned
+            # against. With `max_stalls=0` nothing ends it.
+            _held = set(frontier) & permanently_exhausted
+            _spin_regime = plateau_exit_disabled(max_stalls)
+            if _spin_regime and _no_move_readmissions < _reset_cap:
+                _disk = deps.reset_exhaustion_flags(
+                    project_dir,
+                    f"TDD iter {iter_n}: no actionable frontier — no other "
+                    f"move (re-admission {_no_move_readmissions + 1}/"
+                    f"{_reset_cap})")
+                _disk_locs = {
+                    FnLocator(_parts[0], _parts[1])
+                    for _parts in (str(_k).split("::") for _k in _disk)
+                    if len(_parts) >= 2}
+                if _held or _disk:
+                    _no_move_readmissions += 1
+                    _reopen = _held | _disk_locs
+                    permanently_exhausted -= _reopen
+                    for _loc in _reopen:
+                        refill_attempts.pop(_loc, None)
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
+                        f"frontier and no other move — re-admitting "
+                        f"{len(_held)} unit(s) the loop held as exhausted and "
+                        f"{len(_disk)} stored verdict(s) for one more attempt "
+                        f"({_no_move_readmissions}/{_reset_cap}; "
+                        f"pass={pass_count}, fail={fail_count}): "
+                        + ", ".join(sorted(
+                            f"{k.file}::{k.fn_name}" for k in _reopen)[:8]))
+                    deps.emit("phase_c.tdd.no_move_readmission", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "held": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _held),
+                        "disk_released": sorted(_disk),
+                        "attempt": _no_move_readmissions,
+                        "cap": _reset_cap,
+                    })
+                    deps.emit("phase_c.tdd.iter", data={
+                        **_prov,
+                        "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                        "frontier_size": 0, "kind": "no_frontier_readmit",
+                        "pass_count": pass_count, "fail_count": fail_count,
+                        "improved": improved, "stall": stall,
+                    })
+                    _score_grace(iter_n, pass_count)
+                    continue
+            if (_spin_regime and _no_frontier_stop_after > 0
+                    and _no_frontier_streak >= _no_frontier_stop_after):
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: NO_FRONTIER_STOP — "
+                    f"{_no_frontier_streak} consecutive iteration(s) found "
+                    f"nothing dispatchable (frontier={len(frontier)} unit(s), "
+                    f"{len(_held)} held as exhausted, {fail_count} test(s) "
+                    "still failing) and the no-other-move re-admission budget "
+                    f"is spent ({_no_move_readmissions}/{_reset_cap}). "
+                    f"Reading pass={pass_count} fail={fail_count}. Stopping "
+                    f"the RUN instead of spinning to the {_tdd_backstop}-"
+                    "iteration backstop. Nothing is convicted and every fill "
+                    "is on disk — `bash continue.sh` resumes here; "
+                    "TDD_NO_FRONTIER_STOP=0 disables this stop.")
+                _log_attribution_gap(deps, tag, iter_n, fail_count,
+                                     cur_failed, len(frontier), kind)
+                deps.emit("phase_c.tdd.no_frontier_stop", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "frontier_size": len(frontier),
+                    "held_exhausted": len(_held),
+                    "streak": _no_frontier_streak,
+                    "readmissions": _no_move_readmissions,
+                    "cap": _reset_cap,
+                })
+                deps.emit("phase_c.tdd.iter", data={
+                    **_prov,
+                    "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                    "frontier_size": 0, "kind": "no_frontier_stop",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                request_graceful_stop()
+                break
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
                  f"frontier this iter but stall={stall}/{max_stalls} — "
                  f"continuing (pass={pass_count}, fail={fail_count}, "
@@ -2885,6 +3045,7 @@ def run_phase_c_tdd(
             # pick it up.)
             _score_grace(iter_n, pass_count)
             continue
+        _no_frontier_streak = 0
 
         # The batch is decided BEFORE the guard, and committed after it. Two
         # reasons, both about honesty at the stop: the stop line has to name

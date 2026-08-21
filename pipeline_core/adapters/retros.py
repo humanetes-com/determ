@@ -79,7 +79,10 @@ def retro_key(file_rel: str, fn_name: str, container: str) -> RetroKey:
     return RetroKey(f"{file_rel}::{fn_name}::{canon_container(container)}")
 
 
-def reset_exhaustion_flags(project_dir: Path, reason: str) -> list[str]:
+def reset_exhaustion_flags(
+    project_dir: Path, reason: str, only: Iterable[str] | None = None,
+) -> list[str]:
+
     """Clear `fully_exhausted` flags (keep the lessons — category, guidance,
     history all stay) at a phase boundary where the evidence context changed
     (e.g. the merged tree landed dozens of fills). The cross-iteration skip
@@ -104,14 +107,24 @@ def reset_exhaustion_flags(project_dir: Path, reason: str) -> list[str]:
     + `permanently_exhausted`) that this disk write cannot reach — run
     `2219473` (2026-08-10) re-admitted 11 units here and dispatched zero,
     because all of them sat refill-capped in that other store. The caller
-    needs the identities to open its side."""
+    needs the identities to open its side.
+
+    ``only`` narrows the release to the named store keys (the escalation's
+    targets — `release_escalated_convictions`); None keeps the blanket
+    boundary release. The cap applies either way: a keyed release spends the
+    same per-record budget, so a unit the escalation names every sweep is
+    re-admitted twice and then stays convicted."""
     max_attempts = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
     retros = load_retrospectives(project_dir)
     released: list[str] = []
     capped = 0
+    wanted = None if only is None else {str(k) for k in only}
     for key, rec in retros.items():
         if not (isinstance(rec, dict) and rec.get("fully_exhausted")):
             continue
+        if wanted is not None and str(key) not in wanted:
+            continue
+
         attempts = int(rec.get("reset_attempts", 0))
         if attempts >= max_attempts:
             capped += 1
@@ -132,8 +145,10 @@ def reset_exhaustion_flags(project_dir: Path, reason: str) -> list[str]:
 
 def retire_unblocked_convictions(
     project_dir: Path, still_stubbed: dict[str, frozenset[str]],
-    cluster: str = "",
+    cluster: str = "", *,
+    cfg_dead: frozenset[tuple[str, str]] = frozenset(),
 ) -> int:
+
     """Release every `fully_exhausted` verdict whose recorded blocking stubs
     have since been filled. `still_stubbed` maps a file (repo-relative, as the
     retro key spells it) to the fn names still hollow in it, and must be the
@@ -171,8 +186,21 @@ def retire_unblocked_convictions(
     Bounded without a cap: the stored blocker set is narrowed to those still
     hollow on every release, and a stub set only shrinks, so a record can be
     released at most once per fn it recorded and each release answers to a
-    distinct fill. A record with no `blocked_on` stamp is never touched."""
-    if not still_stubbed:
+    distinct fill. A record with no `blocked_on` stamp is never touched.
+
+    ``cfg_dead`` is the cluster's positive census of ``(file, fn)`` stubs its
+    cfg-set never compiles (`cluster_inactive_stub_names`). It does two things.
+    A blocker in it is read as cleared: nothing in this cluster will ever see
+    it fill, so a record `blocked_on: ["provide"]` under `stable` — where
+    `provide` is `#[cfg(error_generic_member_access)]` — holds an empty
+    blocker list (the rule `screen_guidance` already applies to the guidance
+    half). And a non-empty census is proof the scanner RAN, which is what lets
+    an empty ``still_stubbed`` be read as a finished tree instead of a failed
+    scan: on `anyhow`/`stable` (run `1246060-2339497b`, 2026-08-21) the only
+    hollow body left was the cfg-dead `provide`, the cluster-scoped map was
+    therefore `{}`, and the guard below returned before looking at the one
+    record it existed to release."""
+    if not still_stubbed and not cfg_dead:
         return 0
     retros = load_retrospectives(project_dir)
     cleared = 0
@@ -183,7 +211,10 @@ def retire_unblocked_convictions(
         if rec.get("cluster") != cluster:
             continue
         file_rel = str(key).split("::", 1)[0]
-        released = cleared_blockers(rec, still_stubbed.get(file_rel, frozenset()))
+        dead_here = frozenset(fn for f, fn in cfg_dead if f == file_rel)
+        released = cleared_blockers(
+            rec, still_stubbed.get(file_rel, frozenset()) - dead_here)
+
         if not released:
             continue
         rec["fully_exhausted"] = False
@@ -238,10 +269,53 @@ def futile_suspension_keys(
     return keys
 
 
+def escalation_release_keys(
+    occurrences: Mapping[FnLocator, tuple[tuple[str, str], ...]],
+    targets: Iterable[FnLocator],
+) -> set[str]:
+    """The store keys whose EXHAUSTION a futility escalation has re-opened.
+
+    The escalation is new evidence about its targets: a producer convicted
+    before anyone knew this test needed it was judged on a different question.
+    The driver already re-admits such targets from its process-local set; this
+    names the disk records so the same release reaches the store — the second
+    gate on the same unit, which the process-local release never touched, and
+    the one the impl route honoured as `skipped (prior retro marked exhausted)`
+    at both dispatches of `StdErrorforContextError<C,Error>` in run
+    `1246060-2339497b` (2026-08-21).
+
+    Unlike `futile_suspension_keys`, a per-impl record is named when ANY of its
+    members is a target: the block is dispatched as a whole, and the cost of a
+    wrong release here is one bounded re-attempt (the reset cap), while the
+    cost of the opposite error is a unit skipped on every sweep."""
+    target_set = set(targets)
+    keys: set[str] = set()
+    for loc in target_set:
+        for container, _sig in occurrences.get(loc, ()):
+            keys.add(str(retro_key(loc.file, loc.fn_name, container)))
+            if container:
+                keys.add(str(retro_key(loc.file, "*impl*", container)))
+    return keys
+
+
+def release_escalated_convictions(
+    project_dir: Path, keys: Iterable[str], *, reason: str,
+) -> list[str]:
+    """Release the `fully_exhausted` flags of ``keys`` through the capped
+    boundary reset, so the escalation's re-admission opens BOTH gates on its
+    targets while the per-record budget still bounds it. Returns the released
+    keys, as `reset_exhaustion_flags` does."""
+    wanted = {str(k) for k in keys}
+    if not wanted:
+        return []
+    return reset_exhaustion_flags(project_dir, reason, only=wanted)
+
+
 def suspend_futile_guidance(
     project_dir: Path, keys: Iterable[str], *,
     cluster: str, tests: Iterable[str],
 ) -> list[str]:
+
     """Stamp ``keys``' records `futility_suspended` for ``cluster``.
 
     The read side is `domain/retro_gate.admissible_guidance`, which withholds

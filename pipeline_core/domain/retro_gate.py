@@ -196,8 +196,22 @@ class ConvictionEvidence:
     so it may not skip an attempt. Context alone cannot catch this: the cluster,
     layout, gate and route set can all be unchanged while the blame map moves.
 
-    A verdict drawn from compile errors alone names no tests, so an empty set is
-    supported by every later set and such convictions stand undisturbed."""
+    A verdict drawn from compile errors alone names no tests. It stands while
+    the blame map still names none — and dies the moment a failing test blames
+    the unit, because that is a different question from the one it answered.
+    "I could not make this compile" says nothing about a body that now compiles
+    and is wrong; honouring it there skips the unit on every dispatch, forever.
+    Measured on `anyhow`/`stable`, run `1246060-2339497b` (2026-08-21):
+    `src/context.rs::*impl*::StdErrorforContextError<C,Error>` carried
+    `fully_exhausted: true, convicted_by: []` — stamped on a nesting
+    diagnostic, a reply carrying its own `fn source(&self)` line spliced as a
+    body — while nine failing tests blamed its `None` body; `frozenset() <=
+    tests` was True in every context, the impl route logged `skipped (prior
+    retro marked exhausted)` at both dispatches, and none of the four release
+    paths could open on a score only this unit could move. The same run retired
+    the `Error`, `ErrorImpl` and `IteratorforChain` records seven times as
+    `stale_evidence` — the units convicted ON tests were retried; the one
+    convicted on none never was."""
 
     tests: frozenset[str]
 
@@ -207,7 +221,9 @@ class ConvictionEvidence:
         return record
 
     def still_supports(self, record: Mapping[str, Any] | None) -> bool:
-        """True iff every test the verdict was drawn from may still convict."""
+        """True iff the verdict was drawn from the blame map it is read under:
+        every test it names may still convict, and a verdict that named none is
+        read where none does."""
         if not record:
             return False
         stored = record.get("convicted_by")
@@ -216,7 +232,13 @@ class ConvictionEvidence:
             # the same as "the current one" — the same rule as a missing
             # provenance stamp, and it retires the pre-stamp records by itself.
             return False
+        if not stored:
+            # Convicted by no test — a compile-only verdict. It is evidence only
+            # while no test blames the unit; a frontier that names one asks a
+            # question those attempts never answered.
+            return not self.tests
         return frozenset(str(t) for t in stored) <= self.tests
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,3 +720,31 @@ def stamp_conviction(
     stamped[GUIDANCE_FROM_HOLLOW_TREE] = bool(
         blockers.stubs) and int(stamped.get("error_count") or 0) == 0
     return blockers.stamp(stamped)
+
+
+# Cargo's text for a fn signature nested INSIDE a function body — a reply that
+# carried its own `fn source(&self) …` line and was spliced as a body — and the
+# splicer's own refusal reasons. None of them is a verdict on what the model
+# wrote; each is a verdict on how the pipeline placed it.
+SPLICE_DIAGNOSTIC_MARKS: tuple[str, ...] = (
+    "`self` parameter is only allowed in associated functions",
+    "parse_broken",
+    "item_set_changed",
+    "body_redeclares_fn",
+)
+
+
+def exhaustion_from_splice_diagnostic(error_excerpt: str) -> bool:
+    """True when the failure a conviction would be written from is a SPLICE or
+    nesting diagnostic rather than a compiler verdict on the body's semantics.
+
+    Such a failure bought no model evidence — the same rule the per-component
+    mechanical cap already applies ("a splice/locate failure is refunded") —
+    so it may not set `fully_exhausted`. Measured on `anyhow`/`stable`: the
+    `StdErrorforContextError<C,Error>` record's `last_error_preview` was
+    "error: `self` parameter is only allowed in associated functions -->
+    src/context.rs:148:19 | fn source(&self) -> …", stamped `fully_exhausted:
+    true` by run `902902-daee577d`, and honoured by run `1246060-2339497b` as
+    proof the unit was hard (2026-08-20/21)."""
+    text = error_excerpt or ""
+    return any(mark in text for mark in SPLICE_DIAGNOSTIC_MARKS)

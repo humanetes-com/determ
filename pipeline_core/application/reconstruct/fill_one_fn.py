@@ -68,6 +68,7 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
     judge_guidance,
     retired_guidance_line,
@@ -1131,8 +1132,22 @@ class FillOneFn:
                                                        "FROZEN_BOUND_MISMATCH")
                             or not _improved
                         )
+                    # A conviction is a verdict on the model's bodies. A last
+                    # error that is a splice/nesting diagnostic — the reply's
+                    # own `fn …(&self)` line spliced INSIDE the body, a
+                    # `parse_broken` — is a verdict on how the pipeline
+                    # placed the text, and bought no evidence about the unit.
+                    _splice_failure = exhaustion_from_splice_diagnostic(
+                        error_excerpt or first_error_excerpt or "")
+                    if _full_exhaust and _splice_failure:
+                        _full_exhaust = False
+                        self.tel.log(
+                            f"  [phase-c/retro] {rel_file}::{fn_name}: NOT "
+                            "exhausting — the last error is a splice/nesting "
+                            "diagnostic, not a verdict on the body.")
                     _new_count = _prior_count + 1
                     # Stamped with the context it was earned in (same cluster,
+
                     # layout, gate and route set), the convicting tests it was
                     # drawn from, AND the hollow siblings the attempt ran
                     # against: the next reader honours the verdict only where

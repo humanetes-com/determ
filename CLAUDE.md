@@ -286,6 +286,112 @@ vtable functions referenced in the body ... are not implemented in the crate", a
 `context_chain_drop_rest` and `construct` were all filled on disk by the time it
 mattered. Check a conviction's stated premise against the tree before believing it.
 
+## A stop knob set to "spare GPU" is the most expensive setting in `.env` — size every stop to the reading it must not prevent
+
+The loop has four flat-score stops, all in `.env`: the no-verdict clock
+(`TDD_NO_VERDICT_SWEEPS`, `NO_VERDICT_STOP` in the log), the flat-score
+GPU guard (`TDD_FLAT_SCORE_REPEATS` / `_WINDOW`, `GPU_GUARD_STOP`), the
+plateau exit (`TDD_MAX_STALLS`) and its post-merge twin
+(`POST_MERGE_MAX_STALLS`) — plus one empty-frontier stop
+(`TDD_NO_FRONTIER_STOP`, `NO_FRONTIER_STOP`) that is not a flat-score stop
+at all and is listed below because it shares the rule. Each one exists to stop a run that is spending
+
+GPU on fills that change no verdict, and each one is a MEASUREMENT
+BOUNDARY: the reading the run was launched to take arrives at a specific
+iteration, and a stop that fires before that iteration does not save the
+GPU — it converts every batch already spent into nothing, because the
+reading they were building toward is never taken.
+
+**The instance, 2026-08-17 → 2026-08-20.** The question of the week was one
+reading: the sweep after the first COMPLETE 43-unit escalated pass (4
+batches of 12 under the dispatch cap — iters 1–4 dispatch, iter 5 reads).
+With `TDD_FLAT_SCORE_REPEATS=2`, thirteen of 21 runs ended `GPU_GUARD_STOP`
+at iter 2 — one batch each, ~2 h each, every one of them the accessor batch
+the record already convicted as unable to pay; with
+`TDD_NO_VERDICT_SWEEPS=3`, two more ended at iter 4, one of them 7 units
+short of the pass (`902902-daee577d`). By the standing rule that a stopped
+run stays stopped, each stop cost a session; each session shipped a code
+change; each code change moved `code_id` and restarted the crawl at 0/43 —
+16 code identities in four days. The one time the same code ran twice
+(`396995` + `626784`) the pass completed in ~5 GPU-hours. A knob worth
+~2 h per flat run bought one completed pass in four days and roughly 30
+batch-hours that answered nothing. That is the multiplier: the stop's
+saving is one batch; its cost is every batch before it, plus the relaunch
+that re-spends them, plus the calendar.
+
+**The rule.** Before launching a run whose purpose is to validate a
+mechanism, name the iteration its reading arrives at, and check EVERY stop
+against it. A stop that can fire earlier makes the validation structurally
+unreachable — the run will stop, the session will diagnose the stop, and
+the mechanism will be "awaiting live validation" for another day. The
+arithmetic, with `B` = batches the traversal needs (`ceil(cohort /
+dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
+
+- `TDD_NO_VERDICT_SWEEPS` — counts judged sweeps that landed bodies and
+  moved no verdict, from iter 2; the `L`-th fires at iter `L+1`, BEFORE
+  that iteration's dispatch. To take the pass-complete reading: `L >= B`
+  (`L = B` stops exactly on that reading — 4 for the 43-unit pass). `0`
+  disables. Default 3 stops 7 units short of a 4-batch pass.
+- `TDD_FLAT_SCORE_REPEATS` / `TDD_FLAT_SCORE_WINDOW` — counts identical
+  readings INCLUDING the entry sweep (iter 1), so the pass-complete reading
+  is the `B+1`-th. To take it: `REPEATS >= B+1` and `WINDOW >= REPEATS`
+  (5 / ≥5 for 43 units; 6 leaves room for one batch of a second pass).
+  `REPEATS < 2` disables. `TDD_FLAT_SCORE_REQUIRE_TRAVERSAL=1` says the
+  same thing structurally — the guard cannot fire mid-pass — and is the
+  better setting whenever a completed pass IS the goal; it was switched off
+  after three runs parked the traversal clock and burned 3.5–10 h, so
+  re-enabling it re-accepts that risk unless the parked-clock class has
+  been fixed (it was the subject of the 2026-08-18/19 batches).
+- `TDD_MAX_STALLS` — charges only on a COMPLETED flat traversal (the
+  mid-pass exemption), and closes the CLUSTER on the `L`-th charge, after
+  its reading is taken. To observe `P` completed passes: `L >= P`. `0`
+  disables the EXIT, not the loop: the cluster walks passes while anything
+  is dispatchable, and once every frontier unit is exhausted it spins an
+  EMPTY frontier — `no actionable frontier this iter but stall=N/0 —
+  continuing`, ~2 iterations a second, `cargo test` cached, two events per
+  iteration — until `PHASE_C_TDD_BACKSTOP` (10 000) closes the cluster
+  EXHAUSTED and the flow advances to the merge (run `1246060-2339497b`,
+  2026-08-21: iter 9 at 04:18 UTC, iter 3 797 at 04:51, 29 MB of
+  `events.jsonl` in 23 minutes, the log rotating every 3 minutes). That
+  spin was closed the same day: under `0` an undispatchable iteration now
+  spends the exhausted set's bounded re-admission first
+  (`no actionable frontier and no other move — re-admitting …`,
+  `RETRO_RESET_MAX_ATTEMPTS` times) and then stops under
+  `TDD_NO_FRONTIER_STOP` below. A human can still stop it earlier with
+  `touch /tmp/pipeline_graceful_stop`.
+- `TDD_NO_FRONTIER_STOP` (default 2) — the empty-frontier terminator,
+  active ONLY while `TDD_MAX_STALLS=0` (with a stall budget, the stall exit
+  already ends an empty frontier within `max_stalls` cached iterations).
+  It fires at the `N`-th CONSECUTIVE iteration that found nothing
+  dispatchable AFTER the no-other-move re-admission budget is spent, logs
+  `NO_FRONTIER_STOP`, emits `phase_c.tdd.no_frontier_stop` and stops the
+  RUN at the iteration boundary (`bash continue.sh` resumes the cluster;
+  the cluster is NOT marked done). Nothing dispatchable means no verdict
+  can move, so it prevents no reading; `0` disables it and restores the
+  spin to the backstop.
+- `POST_MERGE_MAX_STALLS` — the same clock for the post-merge wave (task2c),
+  whose traversal is `ceil(frontier / POST_MERGE_MAX_DISPATCH)` iterations;
+  same arithmetic, same `0`. Its empty-frontier branch
+  (`task2_generator.py`, `kind=no_frontier_continue`) has NO named stop
+  yet: under `0` it spins exactly as task2a did.
+- `PHASE_C_TDD_BACKSTOP` (10000) is the only bound that should remain when
+  the others are disabled; leave it.
+
+All five are read ONCE, at cluster entry (`phase_c_tdd.py`, the
+
+`os.getenv` block near `UnmovedVerdicts(` / `FlatScoreGuard(`), so a change
+takes effect at the next launch — and the cluster-entry line
+(`driver=tdd, max_stalls=…, gpu-guard=… repeat(s) of a reading in …`) is
+where the new values are confirmed before any GPU is spent. `.env` is
+outside `code_id` and outside the tree stamp: a knob change restarts
+nothing and needs no gate run. The same rule applies to every future stop
+anyone adds: document its off switch, state which iteration it can fire at,
+and put it in this list.
+
+The tell that the rule is being broken is the sentence "the stop saved us
+two hours". Ask what reading those two hours were on the way to, and
+whether the run ever took it.
+
 ## A recurring finding is not a finding — check the record before diagnosing
 
 The costliest loop in this project is not in the pipeline; it is the working

@@ -1137,3 +1137,38 @@ def canon_container(container: str) -> str:
     s = s.split(" where ")[0]
     return _drop_empty_generics(
         _drop_orphan_plus("".join(_strip_lifetimes(s).split())))
+
+
+def repair_truncated_generics(canon: str) -> str:
+    """``canon`` with a model's mis-closed generic list repaired, or ``canon``
+    itself when nothing is wrong with it.
+
+    The file-first reply tags each body with the impl header it answers to,
+    and the model closes the LAST generic list with the wrong bracket often
+    enough to have dropped correct bodies in two consecutive batches of one
+    run: ``block="impl<T, E> Context<T, E> for Result<T, E)"`` and ``impl<T>
+    Context<T, Infallible> for Option<T)`` (run `3124988-ac6886ba`,
+    2026-08-21, both `with_context` bodies, batches 2 and 3), and ``impl<C>
+    StdError for ContextError<C, Error]`` (run `1246060-2339497b`, both
+    `source` bodies). The router compared the canonical form byte-for-byte,
+    matched nothing, and logged `block header does not match any impl in this
+    file` — an answer dropped on a one-character slip.
+
+    Only a TRAILING run of ``)`` / ``]`` is rewritten, and only while an
+    angle bracket is still open at that point: ``Foofor(A,B)`` (a tuple self
+    type, depth 0 at its ``)``) is identity and is returned unchanged."""
+    depth = 0
+    for ch in canon:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+    if depth <= 0:
+        return canon
+    out = list(canon)
+    i = len(out) - 1
+    while i >= 0 and depth > 0 and out[i] in ")]":
+        out[i] = ">"
+        depth -= 1
+        i -= 1
+    return "".join(out)
