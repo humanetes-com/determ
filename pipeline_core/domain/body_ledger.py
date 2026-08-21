@@ -1,0 +1,565 @@
+"""The per-unit proven-body ledger: which body was right, under which layout.
+
+WHAT WAS MISSING. The pipeline's only cross-run store,
+`.phase_c_logs/retrospectives.json`, holds 39 records over 19 fields and every
+one of them is a NEGATIVE claim — `category`, `guidance`, `error_count`,
+`failing_test_count`, `convicted_by`, `fully_exhausted`, `blocked_on`,
+`reset_attempts`. There is no field, and was no file, recording which body was
+proven correct. So every mechanism that destroys progress ON PURPOSE — the
+retrigger's re-stub, the ratchet's restore, the merge, the augmented restart —
+forced the loop to re-derive work it had already done, through the model, which
+is the one part of the system where every known failure class lives (routing
+drops, splice refusals, poisoned convictions, cfg-world mismatch, truncated
+generics). Run `259637-36db9aad` (2026-08-07) is the measured cost: the
+retrigger reverted 56 of 178 filled bodies, the next sweep read 21 against a
+high-water of 81, and nine hours, 148 landed fills and +5 tests later the run
+had no exit. It had not LOST those bodies. It had lost the addressing of them.
+
+This module is the addressing. It is pure domain: identity, the layout gate,
+the promotion rule and the re-seed decision. Storage is
+`adapters/body_ledger_store.py`; the sites that write and read are
+`application/reconstruct/phase_c_tdd.py` and `application/reconstruct/
+body_reseed.py`.
+
+THE KEY IS `FnLocator`, NOT `RetroKey`, and that is forced by the seams rather
+than chosen for simplicity. `landed_change.unit_bodies` keys on
+`(file, fn_name)` and its value is the ordered tuple of EVERY matching
+occurrence — deliberately, because `src/context.rs::source` is two impls and
+the escalation's unit is the pair — and `fn_revert.revert_fns_to_stub` reverts
+by the same key. What the re-seed restores is exactly the tuple the revert
+removed, so the container precision `RetroKey` carries is precision this store
+would have to discard.
+
+THE BODIES ARE STORED RAW. `unit_bodies` hands back `_canon_body(...)`, i.e.
+`" ".join(text.split())`. That form is an IDENTITY and must never be spliced:
+a body holding a `//` comment, folded onto one line, comments out its own
+remainder, and the result is a broken body in a tree whose only symptom is a
+compile error the model gets blamed for. The canonical form is what `body_sha`
+digests; the raw occurrence text is what goes back on the tree.
+"""
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+GATE_VERSION = "bl1"
+"""Bumped when the layout gate's meaning changes.
+
+An entry whose `gate_ver` is not this one is never re-seeded. Bumping costs a
+re-derivation of the affected units and can never cost a bad splice, which is
+the right direction for a gate whose failure mode is a tree that does not
+build."""
+
+
+class BodyState(StrEnum):
+    """What the record says about a body, and what it licenses.
+
+    The four exist because three did not survive contact with the loop. "The
+    attributed tests are at or above the prior reading" promotes the
+    unmeasurable — a body whose tests are blocked by a still-stubbed sibling
+    moves nothing, so `0 >= 0` would promote every such body and the word
+    `proven` would carry no evidence at all (in run `259637-36db9aad`'s last
+    iteration, 17 of 17 frontier units were in exactly that state). And it
+    refutes across destructions: a body whose tests drop because a SIBLING was
+    re-stubbed would be marked refuted, which is the one state that suppresses
+    re-seeding forever."""
+
+    LANDED = "landed"
+    """A semantic body change took. No sweep has spoken about it yet."""
+    UNMEASURED = "unmeasured"
+    """The attributed tests did not RUN, or the reading cannot be compared:
+    a crashed binary, a cfg-excluded test, a test blocked behind a stubbed
+    sibling, a comparison spanning a destruction epoch, or a body that is no
+    longer the one on the tree. Re-seedable — an unmeasured body is worth
+    putting back and is NOT evidence about anything."""
+    PROVEN = "proven"
+    """The attributed tests ran, inside one destruction epoch, with this body
+    on the tree, none of them regressed, and at least one of them PASSES.
+    That last clause is what stops the word drifting back to "did not break
+    anything": a unit whose tests are all still red has not been shown to be
+    right."""
+    REFUTED = "refuted"
+    """The attributed tests ran under those same conditions and regressed.
+    Never re-seeded. This is not a conviction and the retro gate must not read
+    it: it says one BODY was wrong, not that a unit is hard."""
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerKey:
+    """One unit in one cluster of one project. `file` is repo-relative."""
+
+    project: str
+    cluster: str
+    file: str
+    fn_name: str
+
+    def as_str(self) -> str:
+        return f"{self.project}/{self.cluster}/{self.file}::{self.fn_name}"
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutDep:
+    """One authored item a body depends on, as it stood when the body landed.
+
+    The definition TEXT is kept, not merely its digest, for two reasons: the
+    gate's fallback asks "is this exact definition still in the tree", which is
+    a search rather than a comparison, and a mismatch is rendered into the
+    unit's prompt as "a body proven under a different layout of this file",
+    which needs the old text to diff against the new one."""
+
+    name: str
+    kind: str
+    definition: str
+    file: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {"name": self.name, "kind": self.kind,
+                "definition": self.definition, "file": self.file}
+
+    @staticmethod
+    def from_dict(raw: Mapping[str, Any]) -> LayoutDep:
+        return LayoutDep(name=str(raw.get("name") or ""),
+                         kind=str(raw.get("kind") or ""),
+                         definition=str(raw.get("definition") or ""),
+                         file=str(raw.get("file") or ""))
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerEntry:
+    """A claim about one unit's body under one authored layout."""
+
+    key: LedgerKey
+    body_sha: str
+    bodies: tuple[str, ...]           # RAW occurrence texts, in splice order
+    sig_sha: str
+    layout_fp: str
+    layout_deps: tuple[LayoutDep, ...] = ()
+    state: BodyState = BodyState.LANDED
+    verdict_delta: tuple[tuple[str, str], ...] = ()   # (test, "gained"|"lost")
+    run_id: str = ""
+    iteration: int = 0
+    epoch: int = 0
+    gate_ver: str = GATE_VERSION
+    source: str = "live"              # "live" | a backfill source label
+    rejected_builds: int = 0          # times a re-seed of this body did not build
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "project": self.key.project, "cluster": self.key.cluster,
+            "file": self.key.file, "fn": self.key.fn_name,
+            "body_sha": self.body_sha, "bodies": list(self.bodies),
+            "sig_sha": self.sig_sha, "layout_fp": self.layout_fp,
+            "layout_deps": [d.to_dict() for d in self.layout_deps],
+            "state": str(self.state), "verdict_delta":
+                [list(p) for p in self.verdict_delta],
+            "run_id": self.run_id, "iteration": self.iteration,
+            "epoch": self.epoch, "gate_ver": self.gate_ver,
+            "source": self.source, "rejected_builds": self.rejected_builds,
+        }
+
+    @staticmethod
+    def from_dict(raw: Any) -> LedgerEntry | None:
+        """Parse one index row, or None when it is absent or malformed.
+
+        Total by design, exactly as `TddFloor.from_dict` is: this runs at
+        cluster entry over an append-only file that a killed process may have
+        left with a half-written last line, and a corrupt row must cost one
+        entry, never the run."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            state = BodyState(str(raw.get("state") or "landed"))
+        except ValueError:
+            return None
+        try:
+            return LedgerEntry(
+                key=LedgerKey(project=str(raw["project"]),
+                              cluster=str(raw["cluster"]),
+                              file=str(raw["file"]), fn_name=str(raw["fn"])),
+                body_sha=str(raw["body_sha"]),
+                bodies=tuple(str(b) for b in (raw.get("bodies") or ())),
+                sig_sha=str(raw.get("sig_sha") or ""),
+                layout_fp=str(raw.get("layout_fp") or ""),
+                layout_deps=tuple(
+                    LayoutDep.from_dict(d)
+                    for d in (raw.get("layout_deps") or ())
+                    if isinstance(d, dict)),
+                state=state,
+                verdict_delta=tuple(
+                    (str(p[0]), str(p[1]))
+                    for p in (raw.get("verdict_delta") or ())
+                    if isinstance(p, (list, tuple)) and len(p) == 2),
+                run_id=str(raw.get("run_id") or ""),
+                iteration=int(raw.get("iteration") or 0),
+                epoch=int(raw.get("epoch") or 0),
+                gate_ver=str(raw.get("gate_ver") or ""),
+                source=str(raw.get("source") or "live"),
+                rejected_builds=int(raw.get("rejected_builds") or 0),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @property
+    def reseedable(self) -> bool:
+        """States a re-seed may draw from. `LANDED` is excluded on purpose:
+        it means no sweep has judged the body on THIS code, which is exactly
+        what a backfilled entry is, and putting an unjudged body on the tree
+        is how a seed defect becomes a 0-scoring sweep with no per-unit signal
+        (`nightly 0/124 for 8.7 h`)."""
+        return self.state in (BodyState.PROVEN, BodyState.UNMEASURED)
+
+
+# --- identity ----------------------------------------------------------------
+
+def canon_body(text: str) -> str:
+    """A body's semantic identity: whitespace runs folded.
+
+    The same fold `landed_change._canon_body` uses, restated here rather than
+    imported so the two stores cannot drift apart silently — if this ever needs
+    to differ, the difference has to be written down."""
+    return " ".join(text.split())
+
+
+def body_sha(bodies: Sequence[str]) -> str:
+    h = hashlib.sha256()
+    for b in bodies:
+        h.update(canon_body(b).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def sig_sha_of(sigs: Sequence[str]) -> str:
+    """Identity of a unit's SIGNATURE set, folded exactly like its bodies.
+
+    A body answers to its own signature before it answers to any layout item,
+    and the signature is the one thing a re-seed can check without reading the
+    layout at all — so it is a separate condition in the gate rather than a
+    component of the layout fingerprint."""
+    return body_sha(sigs)
+
+
+def text_sha(text: str) -> str:
+    return hashlib.sha256(canon_body(text).encode("utf-8")).hexdigest()[:16]
+
+
+def strip_comments(text: str) -> str:
+    """Rust source with `//` line comments and `/* */` blocks removed.
+
+    Deliberately naive about strings containing comment markers: this feeds a
+    fingerprint, and the only cost of over-stripping is a fingerprint that
+    moves when a string literal changes — a refused re-seed, which is the safe
+    direction. Nesting is honoured because Rust block comments nest."""
+    out: list[str] = []
+    i, n, depth = 0, len(text), 0
+    while i < n:
+        two = text[i:i + 2]
+        if depth:
+            if two == "/*":
+                depth += 1
+                i += 2
+                continue
+            if two == "*/":
+                depth -= 1
+                i += 2
+                continue
+            i += 1
+            continue
+        if two == "/*":
+            depth = 1
+            i += 2
+            continue
+        if two == "//":
+            j = text.find("\n", i)
+            if j == -1:
+                break
+            out.append("\n")
+            i = j + 1
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def authored_layout_fp(file_text: str) -> str:
+    """The fingerprint of ONE cluster skeleton file: comments stripped,
+    whitespace folded, digested.
+
+    WHY NOT `retro_gate.layout_fingerprint`. That one digests
+    `rust_scan.struct_names` — `struct NAME` items and their field sets, and
+    nothing else. t1.5 authors five kinds (`AuthoredItem.kind` is
+    `struct | enum | type | trait | fn`), so an enum variant set, a trait's
+    method set, a type alias and a free fn signature can all move with it
+    unchanged, and a body re-seeded across such a move does not compile. Worse,
+    `backtrace.rs` and `macros.rs` declare no struct at all and therefore digest
+    to `d41d8cd9` — md5 of the empty string — so for those files that gate
+    carries no information and every body would re-seed unconditionally. The
+    two stores also want opposite failure modes: for a conviction a fingerprint
+    that is too strict silently retires evidence, for a body one that is too
+    loose splices code that does not build. They must not share a digest.
+
+    WHY NOT `.skeleton/_layout_registry.json` either, which is the obvious
+    source and looks perfect (name -> {kind, definition} over all five kinds).
+    `adapters/layout_registry_store.py` holds ONE definition per uid
+    crate-wide — "whichever cfg-cluster authored it first" — and `upsert`
+    overwrites it on a re-author while "clusters that already adopted the
+    superseded one keep it: their trees are already spliced, and this store is
+    the only place the discrepancy is visible". A gate keyed on it would report
+    a moved layout for a cluster whose tree did not move.
+
+    WHY THE WHOLE FILE TEXT IS ENOUGH. The argument is that this reads the
+    SKELETON, not the filled tree: `.skeleton/<cluster>/src` is the authored
+    layout with `unimplemented!()` bodies (12 files, 183 fn declarations, 144
+    of them stubs, measured 2026-08-21), and fills land in
+    `.skeleton-filled/<cluster>/src`. So this digest cannot move because a body
+    was filled; it moves when the layout the bodies answer to moves, which is
+    exactly the event that must refuse a re-seed. The 39 non-stub bodies in the
+    skeleton are the frozen public/inline surface the strip keeps, and they too
+    move only when t1.5 re-authors."""
+    return hashlib.sha256(
+        canon_body(strip_comments(file_text)).encode("utf-8")).hexdigest()[:12]
+
+
+# --- the layout gate ---------------------------------------------------------
+
+def body_layout_deps(
+    body_text: str, signature: str,
+    items: Mapping[str, tuple[str, str]],
+    *, file_of: Mapping[str, str] | None = None,
+) -> tuple[LayoutDep, ...]:
+    """The authored items this body depends on: every item name that appears as
+    a word in the body or its signature.
+
+    `items` is `name -> (kind, definition)` — the crate's authored item set,
+    which IS what the registry is good for (a name set does not care that the
+    registry is crate-wide). Word matching is deliberately generous: an item
+    named in a comment costs a dependency that will simply be checked and found
+    unchanged, whereas a missed dependency costs a body spliced against a
+    definition that moved.
+
+    A body with no dependencies is not a hole: it is gated by its file's
+    fingerprint and by its own signature, which is the honest statement of what
+    could break it."""
+    haystack = f"{signature}\n{body_text}"
+    words = set(_words(haystack))
+    out = [LayoutDep(name=name, kind=items[name][0], definition=items[name][1],
+                     file=(file_of or {}).get(name, ""))
+           for name in sorted(words & set(items))]
+    return tuple(out)
+
+
+def _words(text: str) -> Iterable[str]:
+    cur: list[str] = []
+    for ch in text:
+        if ch.isalnum() or ch == "_":
+            cur.append(ch)
+        elif cur:
+            yield "".join(cur)
+            cur = []
+    if cur:
+        yield "".join(cur)
+
+
+@dataclass(frozen=True, slots=True)
+class GateDecision:
+    """Whether a stored body may go back on the tree, and why not."""
+
+    allowed: bool
+    reason: str = ""
+    moved: tuple[str, ...] = ()       # dep names whose definition moved
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+
+def reseed_allowed(
+    entry: LedgerEntry, *, file_fp: str, sig_sha: str,
+    definition_present: Any = None,
+) -> GateDecision:
+    """May `entry`'s body be spliced into the tree as it stands now?
+
+    Three conditions, cheapest first:
+
+    1. the gate version is current — an entry earned under an older meaning of
+       "the layout matched" is not re-seeded, it is re-derived;
+    2. the unit's SIGNATURE is unchanged, because a body answers to its own
+       signature before it answers to anything else;
+    3. the layout matches — either the file fingerprint is identical (the fast
+       path, and the common one: fingerprinting all 12 files of the 08-14
+       archive, the 08-16 archive and the live skeleton gave 12/12 identical,
+       so a week and an augmented restart moved no layout at all), or every
+       authored item this body actually references is still defined exactly as
+       it was.
+
+    `definition_present(dep) -> bool` is how condition 3's fallback reaches the
+    tree; passing None makes the fallback unavailable and a moved fingerprint
+    simply refuses. Refusing is never expensive: it costs a re-derivation of one
+    unit and it is what keeps the 2026-08-08 `ErrorImpl` lesson — the tree that
+    lost `pub(crate) backtrace` under bodies that referenced it — from becoming
+    a splice."""
+    if entry.gate_ver != GATE_VERSION:
+        return GateDecision(False, f"gate {entry.gate_ver} != {GATE_VERSION}")
+    if entry.state is BodyState.REFUTED:
+        return GateDecision(False, "refuted")
+    if not entry.reseedable:
+        return GateDecision(False, f"state {entry.state}")
+    if entry.sig_sha and sig_sha and entry.sig_sha != sig_sha:
+        return GateDecision(False, "signature moved")
+    if entry.layout_fp and file_fp and entry.layout_fp == file_fp:
+        return GateDecision(True)
+    if definition_present is None or not entry.layout_deps:
+        # No dependency list means the fallback has nothing to check, and an
+        # empty check is not a pass: a body that names no authored item is
+        # gated by its file alone (the docstring's own rule), so a moved file
+        # refuses it. This is the direction that costs a re-derivation instead
+        # of a tree that does not build.
+        return GateDecision(False, "layout moved")
+    moved = tuple(d.name for d in entry.layout_deps if not definition_present(d))
+    if moved:
+        return GateDecision(False, "layout moved", moved)
+    return GateDecision(True)
+
+
+# --- promotion ---------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class SweepView:
+    """The half of a sweep the ledger is allowed to read.
+
+    Never a pass count and never a high-water: the ledger's admission test is
+    the per-test verdict vector, so the standing rule about baselines taken
+    across a deliberate destruction cannot reach it through a score."""
+
+    passed: frozenset[str] = frozenset()
+    failed: frozenset[str] = frozenset()
+    intact: bool = True
+    epoch: int = 0
+
+    @property
+    def ran(self) -> frozenset[str]:
+        return self.passed | self.failed
+
+
+def classify(
+    entry: LedgerEntry, *, attributed: Iterable[str],
+    before: SweepView, after: SweepView, body_now_sha: str,
+) -> tuple[BodyState, tuple[tuple[str, str], ...]]:
+    """What the sweep after a landing says about the body that landed.
+
+    The three guards that keep `refuted` honest, and each of them is a defect
+    that would otherwise be written into the store permanently:
+
+    * the attributed tests must have RUN in this sweep. Blocked behind a
+      stubbed sibling, excluded by cfg, or in a binary that crashed, they said
+      nothing — `UNMEASURED`, which is re-seedable and is the majority class.
+    * the comparison must sit inside ONE destruction epoch. The retrigger's
+      re-stub bumps it; a baseline taken before a deliberate destruction is
+      unsatisfiable exactly when the destruction was intentional.
+    * the body being judged must still be the body on the tree. This clause
+      carries the case the epoch cannot: the batch ratchet's restore is
+      deliberately NOT an epoch bump ("the restore returns the tree TO the
+      snapshot that set the high-water"), so a restore that reverted a sibling
+      leaves the epoch unchanged while changing the tree under the comparison.
+
+    A sweep that could not be reconciled (`intact` False) judges nothing
+    either: that is the crash-noise reading the batch ratchet already refuses
+    to convict on."""
+    names = frozenset(attributed)
+    if not names or not (names & after.ran):
+        return BodyState.UNMEASURED, ()
+    if body_now_sha and body_now_sha != entry.body_sha:
+        return BodyState.UNMEASURED, ()
+    if before.epoch != after.epoch or not after.intact or not before.intact:
+        return BodyState.UNMEASURED, ()
+    judged = names & after.ran & before.ran
+    if not judged:
+        return BodyState.UNMEASURED, ()
+    lost = tuple(sorted(t for t in judged
+                        if t in before.passed and t in after.failed))
+    gained = tuple(sorted(t for t in judged
+                          if t in before.failed and t in after.passed))
+    delta = tuple([(t, "lost") for t in lost] + [(t, "gained") for t in gained])
+    if lost:
+        return BodyState.REFUTED, delta
+    if not (names & after.passed):
+        # The tests RAN and every one of them is still red. Nothing regressed,
+        # so this is not a refutation — but nothing passed either, so calling
+        # it `proven` would put the word back where it started: a body whose
+        # attributed tests are all failing has not been shown to be right, it
+        # has been shown not to have broken anything. `unmeasured` is
+        # re-seedable and claims nothing, which is exactly the state that
+        # describes it.
+        return BodyState.UNMEASURED, delta
+    return BodyState.PROVEN, delta
+
+
+# --- selection ---------------------------------------------------------------
+
+@dataclass(slots=True)
+class ReseedPlan:
+    """What a re-seed site intends to do, before anything touches the tree."""
+
+    take: list[LedgerEntry] = field(default_factory=list)
+    skipped: list[tuple[LedgerKey, str]] = field(default_factory=list)
+
+    def render(self) -> str:
+        proven = sum(1 for e in self.take if e.state is BodyState.PROVEN)
+        unmeasured = len(self.take) - proven
+        return (f"{len(self.take)} unit(s) from {len(self.take)} entr(ies) "
+                f"({proven} proven, {unmeasured} unmeasured); "
+                f"{len(self.skipped)} skipped (layout moved)")
+
+
+def latest_by_unit(entries: Iterable[LedgerEntry]) -> dict[LedgerKey, LedgerEntry]:
+    """The claim that stands for each unit: the LAST row wins, except that a
+    `proven` row outranks a later `unmeasured` one.
+
+    The index is append-only precisely so that a body which was proven and then
+    refuted keeps both rows — a reader must be able to tell that apart from a
+    body nobody ever tried. Collapsing happens here, at read time, where the
+    rule is visible."""
+    best: dict[LedgerKey, LedgerEntry] = {}
+    for e in entries:
+        cur = best.get(e.key)
+        if cur is None:
+            best[e.key] = e
+            continue
+        if e.body_sha == cur.body_sha:
+            # Same body, later word about it — including a refutation.
+            best[e.key] = e
+            continue
+        if cur.state is BodyState.PROVEN and e.state is not BodyState.PROVEN:
+            continue
+        best[e.key] = e
+    return best
+
+
+def plan_reseed(
+    entries: Iterable[LedgerEntry], *, wanted: Iterable[LedgerKey],
+    file_fp: Mapping[str, str], sig_sha: Mapping[LedgerKey, str],
+    definition_present: Any = None,
+) -> ReseedPlan:
+    """Which of `wanted` this ledger can put back, and why not the rest.
+
+    `wanted` is the stubbed set at a re-seed site — the ledger never chooses
+    which units matter, it only answers about the ones it is asked about. That
+    is the line between this store and a dispatch decider: it never removes a
+    unit from the frontier, never marks one exhausted and never suppresses a
+    prompt."""
+    stand = latest_by_unit(entries)
+    plan = ReseedPlan()
+    for key in wanted:
+        entry = stand.get(key)
+        if entry is None:
+            continue
+        decision = reseed_allowed(
+            entry, file_fp=file_fp.get(entry.key.file, ""),
+            sig_sha=sig_sha.get(key, ""),
+            definition_present=definition_present)
+        if decision:
+            plan.take.append(entry)
+        else:
+            plan.skipped.append((key, decision.reason))
+    return plan
