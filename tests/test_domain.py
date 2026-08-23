@@ -210,6 +210,48 @@ def test_an_unterminated_open_tag_does_not_swallow_the_rest_of_the_reply() -> No
     ) == [("a", "x", ""), ("b", "y", "z")]
 
 
+def test_impl_gt_then_unescaped_std_quote_is_a_body_not_an_attribute_close() -> None:
+    """`block="impl>#[cfg(..., feature = "std")]` — the `>` closed the tag.
+
+    Reply `eb7b448cd4c1…` (2026-08-22T13:57Z): 20 tags in, 14 records out.
+    The six lost all opened `block="impl>` and then a `#[cfg]` whose
+    `feature = "std"` supplied the first `"`. `_read_quoted_attr` succeeded
+    on that quote, `_unterminated_open_tag_value` then saw a quote not
+    followed by a terminator and returned None. The tags that had no
+    inner `"` survived through the windowed recovery.
+
+    The first two assertions ARE the negative control: they reproduce
+    the pre-fix path (`_read_quoted_attr` + no terminator + recovery
+    None) on a verbatim copy of the live opening. The rest is the
+    post-fix reading — both tags reach `extract_fn_bodies`."""
+    from pipeline_core.domain import llm_output as lo
+    dropped = (
+        '<FN name="context_backtrace" block="impl>'
+        '#[cfg(all(not(error_generic_member_access), feature = "std"))]\n'
+        'unsafe fn context_backtrace<C>(e: Ref<ErrorImpl>) '
+        '-> Option<&Backtrace> { None }</FN>\n'
+    )
+    sibling = (
+        '<FN name="object_drop" block="impl>'
+        'unsafe fn object_drop<E>(e: Own<ErrorImpl>) { drop(e) }</FN>'
+    )
+    # Pre-fix path, run on this fixture: first quote is not a terminator,
+    # and the windowed recovery refuses a quote followed by `std")]`.
+    name = lo._read_quoted_attr(dropped, dropped.find("name="), "name")
+    assert name is not None
+    _, after_name = name
+    block = lo._read_quoted_attr(
+        dropped, lo._skip_ws(dropped, after_name), "block", allow_empty=True)
+    assert block is not None
+    assert not lo._attr_is_terminated(dropped, block[1])
+    assert lo._unterminated_open_tag_value(dropped, after_name) is None
+
+    recs = lo.extract_fn_bodies(dropped + sibling)
+    assert [r["fn_name"] for r in recs] == ["context_backtrace", "object_drop"]
+    assert "None" in recs[0]["body"]
+    assert recs[0]["block"] == "impl"
+
+
 def test_an_unterminated_open_tag_with_no_block_attribute_is_still_dropped() -> None:
     """The recovery reads the `block` attribute and nothing else. A tag that
     never opens one carries no answer to recover, and inventing a body out of

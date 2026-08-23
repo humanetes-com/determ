@@ -205,6 +205,24 @@ def _coercible(decl: tuple[bool, tuple[str, ...], str],
     return (d_params == f_params and d_ret == f_ret
             and (f_unsafe or not d_unsafe))
 
+def offer_producers(
+    measured: frozenset[FnLocator],
+    batch: frozenset[FnLocator],
+) -> frozenset[FnLocator]:
+    """Keys `installable_fns` may see.
+
+    The offer asks whether the escalation MEASURED a producer that builds a
+    fn-pointer table, not whether this batch's slice drew one. A batch-only
+    reading is why a fire that named `construct_from_std` still produced
+    zero offers on every iteration that dispatched accessors (run
+    `508344-41b52769`, 2026-08-22; two of seven iterations on the prior
+    run). An empty measured set falls back to the batch so a caller that
+    has not been wired still offers when the slice happens to contain a
+    literal-builder.
+    """
+    return measured or batch
+
+
 def installable_fns(
     fn_records: Sequence[Mapping[str, object]],
     type_records: Iterable[TypeRecord],

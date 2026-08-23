@@ -3876,6 +3876,12 @@ def run_phase_c_tdd(
         _batch_escalated = frozenset(
             k for ks in escalation_producers.values() for k in ks
             if k in frontier_keys)
+        # The offer asks what the fire MEASURED, not which 12 this batch
+        # drew. Same expression as the producer-guidance suspension above;
+        # no `frontier_keys` intersection. The audit and the prompt grade
+        # keep `_batch_escalated`.
+        _measured_escalated = frozenset(
+            k for ks in escalation_producers.values() for k in ks)
         # Drive the per-fn fill machinery with this frontier. The engine runs its
         # own graceful-stop checks (worker pools included), so this is where a
         # stop lands in practice — it owns the hours of the iter — and it exits by
@@ -3909,6 +3915,7 @@ def run_phase_c_tdd(
                     # failed instead of asserting that it did.
                     evidence=failure_evidence_by_test(output)),
                 escalated_keys=_batch_escalated,
+                escalated_measured=_measured_escalated,
                 tdd_test_cmd=test_cmd,     # scoped cluster test cmd
                 skip_end_pass_test=True,
                 crash_evidence=crash_texts or None,

@@ -14,6 +14,7 @@ from pipeline_core.domain.installable_fns import (
     fn_decl_shape,
     fn_pointer_shape,
     installable_fns,
+    offer_producers,
 )
 from pipeline_core.domain.models import FieldRecord, FnLocator, TypeRecord
 
@@ -118,6 +119,29 @@ def test_an_impl_member_is_never_offered_as_installable() -> None:
                "sig_text": "unsafe fn context_downcast<C, E>(e: Ref<ErrorImpl>,"
                            " target: TypeId) -> Option<Ref<()>>"}]
     assert installable_fns([PRODUCER, *member], [VTABLE], ESCALATED, REL) == ()
+
+
+def test_the_offer_reads_the_measured_set_not_the_batch() -> None:
+    """A 12-of-N slice of accessors is not an empty measurement.
+
+    `installable_fns` gates on whether an escalated producer of the file
+    builds a fn-pointer table. The batch that happens to be in flight is
+    a different quantity: run `508344-41b52769` iteration 2 dispatched
+    `new`/`msg`/`from_boxed`/`context` after a fire that had already
+    named `construct_from_std`, and offered nothing. The pre-fix
+    reading — keys = batch only — is the first assertion."""
+    accessors = frozenset({FnLocator(REL, "downcast"),
+                           FnLocator(REL, "context")})
+    assert installable_fns([PRODUCER, *FREE_RECS], [VTABLE], accessors,
+                           REL) == ()
+    assert offer_producers(frozenset(), accessors) == accessors
+    measured = accessors | ESCALATED
+    assert offer_producers(measured, accessors) == measured
+    got = {i.fn_name for i in installable_fns(
+        [PRODUCER, *FREE_RECS], [VTABLE],
+        offer_producers(measured, accessors), REL)}
+    assert "context_downcast" in got
+    assert "no_backtrace" in got
 
 
 def test_a_producer_that_builds_no_table_yields_nothing() -> None:

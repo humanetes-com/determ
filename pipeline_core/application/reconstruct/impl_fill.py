@@ -78,7 +78,7 @@ from pipeline_core.domain.impl_routing import (
 from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
-from pipeline_core.domain.installable_fns import installable_fns
+from pipeline_core.domain.installable_fns import installable_fns, offer_producers
 from pipeline_core.domain.llm_output import (
     bind_headerless_names,
     extract_fn_bodies,
@@ -386,6 +386,10 @@ def fill_impl_blocks(
     # merged frontier it returns (the merge also carries traversal steps and
     # the accessors' own file, which must keep the weaker grade).
     escalated_keys: frozenset[FnLocator] = frozenset(),
+    # The escalation's full producer set, NOT intersected with this batch.
+    # `installable_fns` asks what the fire MEASURED; `escalated_keys` stays
+    # batch-scoped for the prompt grade and the landed-change audit.
+    escalated_measured: frozenset[FnLocator] = frozenset(),
     tdd_test_cmd: str | None = None,
     parallelism: int = 1,
     crash_evidence: dict[FnLocator, str] | None = None,
@@ -887,7 +891,8 @@ def fill_impl_blocks(
         # and the extractor run is not free.
         _installable = installable_fns(
             _enumerate_fns_via_extractor(target_src_dir) or [],
-            _crate_type_records, escalated_keys, file_rel,
+            _crate_type_records,
+            offer_producers(escalated_measured, escalated_keys), file_rel,
             reference_counts=fn_reference_counts(snapshot))
         _free_plan = ([BlockFillPlan(
             "", (), tuple(i.fn_name for i in _installable),

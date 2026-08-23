@@ -577,6 +577,53 @@ def _self_closing_terminator(text: str, pos: int) -> int:
 _TAG_TAILS = ("", ">", "/>", "&gt;", "/&gt;")
 
 
+def _attr_is_terminated(text: str, pos: int) -> bool:
+    """True when `pos` (after an attribute's closing quote) is a tag end.
+
+    Optional whitespace, then `>` / `/>` (or the XML-safe forms). A first
+    `"` that is not followed by one of these is interior — the live shape
+    is `block="impl>#[cfg(..., feature = "std")]`, where `_read_quoted_attr`
+    succeeds on the `"` before `std` and the tag never terminates.
+    """
+    q = _skip_ws(text, pos)
+    return (_self_closing_terminator(text, q) != -1
+            or _tag_terminator(text, q) != -1)
+
+
+def _block_closed_by_bare_gt(text: str, pos: int) -> tuple[str, int] | None:
+    """`(block-header, body-start)` for `block="impl>BODY`.
+
+    The model dropped the attribute's closing quote and used `>` as the
+    tag terminator — the protocol's own `block="IMPL_HEADER">` minus one
+    `"`. Only fires when a `>` appears before any `"` after `block="`, so
+    an unescaped `"std"` in the BODY cannot steal the attribute close.
+    Reply `eb7b448cd4c1…` (2026-08-22T13:57Z): 6 of 20 tags were this
+    shape (`context_backtrace`, `context_downcast`, `context_drop_rest`,
+    `no_backtrace`, `object_boxed`, `object_reallocate_boxed`) and the
+    first-quote path dropped every one.
+    """
+    q = _skip_ws(text, pos)
+    if not text.startswith('block="', q):
+        return None
+    start = q + len('block="')
+    cands = [x for x in (text.find("</FN", start), text.find("<FN ", start))
+             if x != -1]
+    window = min(cands) if cands else len(text)
+    quote = text.find('"', start, window)
+    limit = quote if quote != -1 else window
+    gt = text.find(">", start, limit)
+    if gt == -1 or (gt > start and text[gt - 1] == "-"):
+        return None
+    raw = text[start:gt].rstrip()
+    # `>` in `new<E>` / `-> Self` is not a tag closer. The live hole is
+    # specifically `block="impl>#[cfg…]` / `block="impl>unsafe fn`.
+    head = raw.split(None, 1)[0] if raw.split() else ""
+    if head.split("<", 1)[0] not in ("impl", "trait", "mod"):
+        return None
+    value = html.unescape(raw.replace('\\"', '"'))
+    return value, gt + 1
+
+
 def _unterminated_open_tag_value(text: str, pos: int) -> tuple[str, int] | None:
     """`(block-attribute value, resume index)` for a `<FN name="…"` whose open
     tag never terminates, or None when there is no `block="` to read.
@@ -720,9 +767,26 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
         q = _skip_ws(text, p)
         block = (_read_quoted_attr(text, q, "block", allow_empty=True)
                  if q > p else None)
+        if block is not None and not _attr_is_terminated(text, block[1]):
+            # First `"` was interior. Fail over: the quote did not close
+            # the attribute, so the terminated-tag path must not run.
+            block = None
         if block is not None:
             bl_val, q = block
             q = _skip_ws(text, q)            # `\s*` before `>`
+        else:
+            closed = _block_closed_by_bare_gt(text, p)
+            if closed is not None:
+                bl_val, body_start = closed
+                close = _find_fn_close(text, body_start)
+                if close is None:
+                    out.append((nm_val, bl_val, ""))
+                    i = body_start
+                    continue
+                body_end, after = close
+                out.append((nm_val, bl_val, text[body_start:body_end]))
+                i = after
+                continue
         sc = _self_closing_terminator(text, q)
         if sc != -1:
             out.append((nm_val, bl_val, ""))

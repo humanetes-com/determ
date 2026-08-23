@@ -193,6 +193,7 @@ class PhaseCFillEngine:
         # logs its whole verdict once and a second scan would be a second
         # opinion about a measurement that already happened.
         escalated_keys: frozenset[FnLocator] = frozenset(),
+        escalated_measured: frozenset[FnLocator] = frozenset(),
         tdd_test_cmd: str | None = None,
         crash_evidence: dict[FnLocator, str] | None = None,
         crash_blamed: frozenset[FnLocator] | None = None,
@@ -324,6 +325,7 @@ class PhaseCFillEngine:
                 tdd_frontier_keys=tdd_frontier_keys,
                 tdd_frontier_tests=tdd_frontier_tests,   # Plan 10 U2
                 escalated_keys=escalated_keys,
+                escalated_measured=escalated_measured,
                 tdd_test_cmd=tdd_test_cmd,               # Plan 10 U2
                 parallelism=self.config.parallelism,
                 crash_evidence=crash_evidence,
