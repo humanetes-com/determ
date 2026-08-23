@@ -136,7 +136,7 @@ def _replay(monkeypatch, tmp_path):
     logs = replay(walk, monkeypatch, tmp_path, events=events,
                   retrigger=retrig, reverse_map=_REVERSE_MAP,
                   localize=lambda *a, **k: (_asan_site(),),
-                  escalate=lambda src, tname, units: {k: {tname}
+                  escalate=lambda src, tname, units, producers_out=None: {k: {tname}
                                                       for k in _CHAIN},
                   inventory=_INVENTORY)
     return logs, events, seen

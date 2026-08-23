@@ -14,6 +14,7 @@ from __future__ import annotations
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.refill_evidence import (
+    Attribution,
     RefillEvidence,
     attributed_test_leaves,
     collect_refill_evidence,
@@ -50,7 +51,8 @@ def test_same_named_refill_in_two_blocks_is_inferred_with_the_sibling_named() ->
         "test_len": "panicked at tests/test_chain.rs:31:5\nassertion `left == right` failed\n  left: 4\n  right: 1"})
     (ev,) = collect_refill_evidence(generic, [generic, anyhow], fr)
     assert ev == RefillEvidence(
-        fn_name="source", tests=("test_iter", "test_len"), direct=False,
+        fn_name="source", tests=("test_iter", "test_len"),
+        attribution=Attribution.NAMED,
         sibling_containers=(ANYHOW,),
         excerpts=(("test_len", fr.evidence_for("test_len")),))
     assert inferred_refill_names([ev]) == frozenset({"source"})
@@ -87,8 +89,10 @@ def test_no_frontier_is_inference_with_no_tests() -> None:
 
 def test_attributed_test_leaves_direct_first_bare_deduped_capped() -> None:
     evs = [
-        RefillEvidence("a", ("chain::test_rev", "test_iter"), False, (), ()),
-        RefillEvidence("b", ("tests::test_len", "test_iter"), True, (), ()),
+        RefillEvidence("a", ("chain::test_rev", "test_iter"),
+                       Attribution.NAMED, (), ()),
+        RefillEvidence("b", ("tests::test_len", "test_iter"),
+                       Attribution.DIRECT, (), ()),
     ]
     assert attributed_test_leaves(evs) == ("test_len", "test_iter", "test_rev")
     assert attributed_test_leaves(evs, cap=2) == ("test_len", "test_iter")

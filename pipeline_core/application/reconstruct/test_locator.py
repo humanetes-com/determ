@@ -8,6 +8,7 @@ for its two call sites.
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pipeline_core.domain.generation import strip_mod_test_prefix
@@ -155,4 +156,42 @@ def find_tests_for_fn(
             out.append((str(path), path.read_text(encoding="utf-8")))
         except Exception:
             continue
+    return out
+
+
+def attributed_test_blocks(
+    leaves: Sequence[str],
+    lookup: Callable[[str], Sequence[tuple[str, str]]],
+    *,
+    file_cap: int,
+    into: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """The attributed tests' SOURCE for a prompt, capped by distinct FILES.
+
+    `leaves` are bare test names in priority order; `lookup` resolves one name
+    to `(path, text)` pairs. Files already in `into` are kept and counted, so a
+    caller can seed it and keep one budget across both lookups.
+
+    The cap is per FILE and not per NAME because the two are not the same
+    number and the difference is exactly what was lost: several attributed
+    tests routinely live in one file, and every call site dedups by path. At
+    iter 3 of run `263257-9e46def4` (2026-08-22) the four leaves
+    `test_boxed_str, test_downcast, test_downcast_high, test_downcast_mid`
+    resolved to `tests/test_boxed.rs` and `tests/test_context.rs`, the name
+    budget was spent, and `tests/test_downcast.rs` — which holds the three
+    failures the escalated `construct_from_adhoc` owns, and the one assertion
+    that states the defect (`downcast::<&str>()` on an adhoc error) — never
+    reached the prompt at all, while a later name-match loop filled five slots
+    with `*.gen_tests_*.rs`."""
+    out = list(into) if into else []
+    seen = {p for p, _ in out}
+    for leaf in leaves:
+        if len(out) >= file_cap:
+            break
+        for path_str, txt in lookup(leaf):
+            if path_str not in seen:
+                seen.add(path_str)
+                out.append((path_str, txt))
+            if len(out) >= file_cap:
+                break
     return out

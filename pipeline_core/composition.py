@@ -2427,6 +2427,7 @@ def build_app(
             dispatch_families_via_extractor=enumerate_dispatch_families,
             effective_stalls=helpers.effective_stalls,
             emit=ports.emit,
+            enumerate_fns_via_extractor=enumerate_fns,
             enumerate_types_via_extractor=enumerate_types,
             extract_crate_idioms=_extract_crate_idioms,
             extract_impl_where_clause=_impl_where_clause,

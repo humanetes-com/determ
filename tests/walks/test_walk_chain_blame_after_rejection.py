@@ -129,7 +129,7 @@ def _run(monkeypatch, tmp_path, *, reverted: int, mutate=None):
     logs = replay(walk, monkeypatch, tmp_path, events=events,
                   retrigger=retrig, reverse_map=_REVERSE_MAP,
                   localize=_localizer_of_the_recording(),
-                  escalate=lambda src, tname, units: {
+                  escalate=lambda src, tname, units, producers_out=None: {
                       _CHAIN_PRODUCER: {tname}},
                   fill=_fill, inventory=_INVENTORY,
                   chronic_vanished=_CHRONIC)

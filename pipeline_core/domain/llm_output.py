@@ -9,8 +9,11 @@ through the :mod:`pipeline_core.log` facade; the genesis-format text helper
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .. import log as _log
@@ -566,6 +569,93 @@ def _self_closing_terminator(text: str, pos: int) -> int:
     return -1
 
 
+
+
+#: What may follow an attribute value's closing quote inside the open tag —
+#: nothing (the quote is the last thing before the window), or a terminator the
+#: model did type. Anything else means the quote was not the value's end.
+_TAG_TAILS = ("", ">", "/>", "&gt;", "/&gt;")
+
+
+def _unterminated_open_tag_value(text: str, pos: int) -> tuple[str, int] | None:
+    """`(block-attribute value, resume index)` for a `<FN name="…"` whose open
+    tag never terminates, or None when there is no `block="` to read.
+
+    `pos` is the index just past the `name` attribute. The reading is the one
+    the strict path would have produced had the model typed the character it
+    dropped, which is why the value is returned in the ATTRIBUTE slot: the
+    caller emits it with an empty body and `_recover_slots`' existing
+    body-in-the-`block`-attribute swap turns it into the body, exactly as it
+    does for a self-closed tag.
+
+    `_find_fn_close` already grants the CLOSING tag this tolerance — a bare
+    `</FN` with no `>` is accepted rather than discarding a body over
+    punctuation — and the opening tag had none. Three model shapes reach here,
+    all of them complete answers:
+
+        <FN name="new" block="…}"</FN>          the `>` is simply absent
+        <FN name="drop" block="unsafe {…}\n</FN>   the closing `"` is absent
+        <FN name="len" block="…feature = "std"…" />  an UNESCAPED `"` inside
+
+    The third closes `_attr_value_close` early, so the tag is unterminated from
+    that point on; taking the LAST candidate quote in the window rather than
+    the first is what reads it as the model meant it.
+
+    The WINDOW is load-bearing, not defensive. This record cannot extend past
+    the next `</FN` or the next `<FN `, whichever comes first. Without the
+    `</FN` bound one fumbled character cascades: the value scans into the
+    following tag's text, the scan resumes mid-tag, and every remaining tag in
+    the reply is lost — `0b38076c` (4 tags), `acbf57e7` (5) and `e7167489` (2)
+    each returned zero records that way. Without the `<FN ` bound a reply whose
+    tags are terminated but never closed loses the rest of itself instead:
+    `b05175b1`, 28 records today, drops to 3 when its third tag's unescaped
+    quote lets it swallow the other 25.
+    """
+    cands = [x for x in (text.find("</FN", pos), text.find("<FN ", pos))
+             if x != -1]
+    window = min(cands) if cands else len(text)
+    q = _skip_ws(text, pos)
+    if not text.startswith('block="', q):
+        return None
+    start = q + len('block="')
+    seg = text[start:window]
+    close = _last_unescaped_quote(seg)
+    if close == -1:
+        # No quote closes the value anywhere in the window: the model opened
+        # `block="` and ran the body straight into `</FN>`. The window IS the
+        # value.
+        value = seg
+    elif seg[close + 1:].strip() in _TAG_TAILS:
+        value = seg[:close]
+    else:
+        # A quote closes the value and then something that is not a terminator
+        # follows it. That is not a dropped character, it is a tag whose shape
+        # this reader cannot decide — `<FN name="f" block="b"x>y</FN>` has a
+        # real `>` one character further on, so the body is `y`, not `b`.
+        # Guessing here would splice the attribute over the answer.
+        return None
+    return html.unescape(value.rstrip().replace('\\"', '"')), window
+
+
+def _last_unescaped_quote(seg: str) -> int:
+    """Index of the last `"` in `seg` that is not backslash-escaped, or -1.
+
+    Escaped quotes are the model rendering a `#[cfg(feature = \\"std\\")]` line
+    inside an attribute the JSON way, and `_attr_value_close` already refuses
+    to end a value on one. The LAST unescaped quote rather than the first is
+    what reads an UNescaped `"std"` correctly: the first one closes the value
+    mid-body, the last one is where the model actually ended it."""
+    out, i, n = -1, 0, len(seg)
+    while i < n:
+        if seg[i] == "\\":
+            i += 2
+            continue
+        if seg[i] == '"':
+            out = i
+        i += 1
+    return out
+
+
 def _find_fn_close(text: str, start: int) -> tuple[int, int] | None:
     """Nearest `</FN\\s*>` at/after `start`. Returns (close_start, pos_after_`>`).
 
@@ -640,7 +730,12 @@ def _find_fn_blocks(text: str) -> list[tuple[str, str, str]]:
             continue
         body_start = _tag_terminator(text, q)
         if body_start == -1:
-            i = s + 1; continue
+            recovered = _unterminated_open_tag_value(text, p)
+            if recovered is None:
+                i = s + 1; continue
+            bl_val, i = recovered
+            out.append((nm_val, bl_val, ""))
+            continue
         close = _find_fn_close(text, body_start)
         if close is None:
             out.append((nm_val, bl_val, ""))
@@ -805,6 +900,54 @@ def fn_tag_occurrences(text: str) -> int:
     call for opposite responses: ask again vs. fix the reader."""
     return (text or "").count("<FN")
 
+
+
+@dataclass(frozen=True, slots=True)
+class ReaderLoss:
+    """A reply that carried more `<FN` tags than the reader turned into
+    records — the standing rule being that N tags in with 0 records out is
+    ALWAYS the reader, never the model.
+
+    `response_sha` is the key of the content-addressed reply store, computed
+    the same way the transport computes it, so a consumer of the event can open
+    the exact artefact instead of re-deriving it from a timestamp. That is the
+    whole point of carrying it: six reader shapes have been found since
+    2026-08-04 (the empty `block`, the `&lt;`-escaped header, the `&gt;`
+    terminator, the self-closed tag, the `)`-closed generic list, the
+    unterminated open tag) and each one cost an investigation because the reply
+    that would have named it was not identified in the log.
+
+    PARTIAL loss counts. Every drop site used to ask only `if not parsed`, so a
+    7-tag reply yielding 1 record was indistinguishable from a clean one — and
+    partial loss is most of the recorded instances.
+    """
+
+    tags: int
+    records: int
+    response_sha: str
+
+    @property
+    def lost(self) -> int:
+        return self.tags - self.records
+
+
+def reader_loss(text: str, records: Sequence[Any]) -> ReaderLoss | None:
+    """`ReaderLoss` when `text` carried more FN tags than `records` holds, else
+    None.
+
+    The count is a tag count, not a body count, so it is an upper bound on two
+    edges: a model that emits the same `<FN name=…>` twice is reported as one
+    lost, and prose that quotes the tag syntax (a retrospective GUIDANCE string
+    naming `<FN ...>`) reads as a tag. Both are rare in a fill reply and both
+    fail LOUD — a false alarm names an artefact that can be opened and
+    dismissed in one command, while the silence it replaces cost 79 bodies."""
+    tags = fn_tag_occurrences(text)
+    if tags <= len(records):
+        return None
+    return ReaderLoss(
+        tags=tags, records=len(records),
+        response_sha=hashlib.sha256(
+            (text or "").encode("utf-8", "replace")).hexdigest())
 
 def bind_headerless_names(records: list[dict[str, Any]],
                           member_names: list[str]) -> list[dict[str, Any]]:

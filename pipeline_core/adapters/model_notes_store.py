@@ -149,11 +149,27 @@ class FileModelNotesStore:
         file_text: str = "",
         current_error: str = "",
         max_chars: int | None = None,
+        escalated_fns: frozenset[str] = frozenset(),
     ) -> str:
-        """Relevance-ranked ``<MODEL_NOTES>`` block for the current (file, fn)."""
+        """Relevance-ranked ``<MODEL_NOTES>`` block for the current (file, fn).
+
+        ``escalated_fns`` are the fns this prompt grades ESCALATED; a
+        `[regression]` note blaming one of them is dropped and logged, for the
+        reason `mn.escalation_superseded_notes` states."""
         notes = [n for n in self.load(fr_path)
                  if not mn.is_bogus_regression_note(n)
                  and not mn.is_stale_regression_note(n, file_text)]
+        superseded = mn.escalation_superseded_notes(notes, escalated_fns)
+        if superseded:
+            dropped_esc = set(superseded)
+            notes = [n for n in notes if n not in dropped_esc]
+            self._log(
+                f"  [notes] {len(superseded)} [regression] note(s) kept out of "
+                "the prompt — this sweep grades their subject ESCALATED (the "
+                "measurement says rewrite; the note says the last rewrite "
+                "cost tests): "
+                + ", ".join(sorted({mn.regression_note_subject(n)
+                                    for n in superseded})))
         contradicted = mn.layout_contradicted_notes(notes, file_text)
         if contradicted:
             dropped = set(contradicted)

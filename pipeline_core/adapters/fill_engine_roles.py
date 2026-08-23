@@ -221,11 +221,12 @@ class CargoFillAdapter:
                                     baseline=baseline)
 
     def test_regression_baseline(self, test_cmd: str | None, cwd: Path,
-                                 env: dict[str, str] | None
+                                 env: dict[str, str] | None,
+                                 raw_sink: list[str] | None = None,
                                  ) -> TestStateReading | None:
         if self.test_regression_baseline_fn is None:
             return None
-        return self.test_regression_baseline_fn(test_cmd, cwd, env)
+        return self.test_regression_baseline_fn(test_cmd, cwd, env, raw_sink)
 
     def test_regression_gate(self, test_cmd: str | None, cwd: Path,
                              env: dict[str, str] | None,

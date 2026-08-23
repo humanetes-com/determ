@@ -32,11 +32,26 @@ def baseline(
     test_cmd: str | None,
     cwd: Path,
     env: dict[str, str] | None,
+    raw_sink: list[str] | None = None,
 ) -> TestStateReading | None:
+    """`raw_sink`, when given, receives the raw combined capture.
+
+    `TestStateReading` carries NAMES — `BinaryResult.failed` is a
+    `frozenset[str]` — and `test_results.py` cannot import `TestFailure`
+    without a cycle, since `test_report.py` imports it. So the pre-fill panic
+    SITES, which the non-regression gate needs to tell two red states apart,
+    are not in the reading and cannot be put there cheaply. They are in the
+    text: `measure_test_state` has taken a sink since it was written, for the
+    neighbouring reason ("the READING deliberately drops panic text, but crash
+    attribution … is decided from exactly that text"), and this function simply
+    never passed one. The caller parses the sites out with
+    `test_report.parse_test_output`, leaving the reading, `BinaryResult` and
+    the regression gate untouched."""
     if not (test_cmd and unified_on and _guard_on()):
         return None
     return cargo_runner.measure_test_state(
-        run_cargo, test_cmd, cwd, env or {}, timeout=timeout)
+        run_cargo, test_cmd, cwd, env or {}, timeout=timeout,
+        raw_sink=raw_sink)
 
 
 def gate(

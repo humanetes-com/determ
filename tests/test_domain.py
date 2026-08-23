@@ -166,6 +166,73 @@ def test_find_fn_blocks_departs_from_the_old_regex(
     assert _find_fn_blocks(text) == expected
 
 
+def test_find_fn_blocks_reads_an_open_tag_the_model_never_terminated() -> None:
+    """`<FN name="x" block="BODY"</FN>` — the `>` the model dropped.
+
+    `_find_fn_close` already tolerates the mirror slip on the CLOSING tag (a
+    bare `</FN` with no `>`), on the reasoning that discarding a body over one
+    character is never right; the opening tag had no such tolerance and the
+    whole record was dropped. Three shapes reach it, all complete answers, and
+    all three are verbatim from the reply store: the `>` absent (`ffff62a5`,
+    run `1246060-2339497b` 2026-08-21T00:08Z, six bodies for `impl Error`), the
+    closing quote absent (`8c153fdc`, the `DropforError` maximal last-resort),
+    and an UNESCAPED `"` inside the body closing the attribute early
+    (`45b3674d`, a complete `Chain::len`). The value lands in the `block` slot
+    so `_recover_slots`' existing swap yields exactly what the strict path
+    would have produced had the character been typed."""
+    from pipeline import _find_fn_blocks
+    assert _find_fn_blocks('<FN name="new" block="Self::from(e)"</FN>') == [
+        ("new", "Self::from(e)", "")]
+    assert _find_fn_blocks('<FN name="drop" block="unsafe { d(self) }\n</FN>') == [
+        ("drop", "unsafe { d(self) }", "")]
+    # The last quote in the window ends the value; the first one is inside a
+    # `#[cfg(feature = "std")]` line the model did not escape.
+    assert _find_fn_blocks(
+        '<FN name="len" block="#[cfg(feature = "std")]\nself.n" />') == [
+        ("len", '#[cfg(feature = "std")]\nself.n', "")]
+
+
+def test_an_unterminated_open_tag_does_not_swallow_the_rest_of_the_reply() -> None:
+    """The window is what stops one dropped character costing every remaining
+    body. Unbounded, the value scans past `</FN>` into the next tag's text and
+    the scan resumes mid-tag: `0b38076c` (4 tags), `acbf57e7` (5) and
+    `e7167489` (2) each returned ZERO records that way. Bounded at `</FN` the
+    siblings survive; bounded also at the next `<FN ` a reply whose tags are
+    terminated but never closed keeps the rest of itself (`b05175b1`, 28
+    records, drops to 3 without it)."""
+    from pipeline import _find_fn_blocks
+    assert _find_fn_blocks(
+        '<FN name="a" block="x"</FN>\n<FN name="b" block="impl Foo">y</FN>'
+    ) == [("a", "x", ""), ("b", "impl Foo", "y")]
+    # No `</FN` anywhere: the next `<FN ` is the only bound there is.
+    assert _find_fn_blocks(
+        '<FN name="a" block="x"\n<FN name="b" block="y">z</FN>'
+    ) == [("a", "x", ""), ("b", "y", "z")]
+
+
+def test_an_unterminated_open_tag_with_no_block_attribute_is_still_dropped() -> None:
+    """The recovery reads the `block` attribute and nothing else. A tag that
+    never opens one carries no answer to recover, and inventing a body out of
+    the surrounding prose is the failure mode the whole reader avoids."""
+    from pipeline import _find_fn_blocks
+    assert _find_fn_blocks('<FN name="a" <FN name="b" block="y">z</FN>') == [
+        ("b", "y", "z")]
+
+
+def test_recovered_open_tag_bodies_reach_extract_fn_bodies() -> None:
+    """End-to-end on the reply that cost the most: six brace-balanced bodies
+    for `impl Error`, answered in a 495-second call and read as zero records
+    (`ffff62a5a9e8899d`, prompt `2172f6776a76…`). `_recover_slots` swaps the
+    attribute into the body and `unwrap_own_fn_definition` strips the `fn`
+    header the model restated around it."""
+    from pipeline import extract_fn_bodies
+    recs = extract_fn_bodies(
+        '<FN name="new" block="pub fn new<E>(e: E) -> Self {\n    Self::c(e)\n}"</FN>\n'
+        '<FN name="msg" block="Self::adhoc(m)"</FN>')
+    assert [(r["fn_name"], r["body"]) for r in recs] == [
+        ("new", "Self::c(e)"), ("msg", "Self::adhoc(m)")]
+
+
 def test_find_fn_blocks_self_closed_tag_does_not_swallow_its_sibling() -> None:
     """A self-closed record ends AT the `/>`. Scanning on for a `</FN>` would
     swallow the next `<FN>` block whole into this record's body and lose it —

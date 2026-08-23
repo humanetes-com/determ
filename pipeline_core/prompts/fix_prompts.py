@@ -116,13 +116,30 @@ class BlockFillPlan:
     header: str
     stubs: tuple[str, ...] = ()
     refills: tuple[str, ...] = ()
-    # The subset of `refills` whose attribution is inference only (a producer
-    # escalation or a traversal step named the fn, no test convicts it — see
-    # `domain.refill_evidence`). Listed as "re-check", never as "rewrite":
-    # told with certainty that `construct_from_context` failed, the file route
-    # replaced its per-type vtable with a `construct_from_std` delegation that
-    # made the downcast tests unreachable (run `902902-daee577d`, 2026-08-20).
+    # The subset of `refills` the record NAMES and never measured (a traversal
+    # step or a name match, no test convicts it — see `domain.refill_evidence`).
+    # Listed as "re-check", never as "rewrite": told with certainty that
+    # `construct_from_context` failed, the file route replaced its per-type
+    # vtable with a `construct_from_std` delegation that made the downcast
+    # tests unreachable (run `902902-daee577d`, 2026-08-20).
     inferred: tuple[str, ...] = ()
+    # The subset a futility escalation added AFTER measuring that rewriting
+    # this fn's consumers moved no verdict. That is the strongest evidence the
+    # loop produces about a producer, and it used to render as `inferred` —
+    # the weakest instruction in the vocabulary — because the source was one
+    # bool. Measured over the 39 file-scope prompts of 2026-08-21: the five
+    # `construct_from_*` were writable slots in 3, all `re-check`, while
+    # `rewrite` went to `from` in 20 and `new` re-check in 17. The escalation
+    # had just declared those accessors futile.
+    escalated: tuple[str, ...] = ()
+    # Free fns of the file an ESCALATED producer could INSTALL into a
+    # fn-pointer table it builds (`domain.installable_fns`). Nothing measured
+    # THEM, so they get neither the escalated line (a measurement about a
+    # producer) nor the re-check line (which tells the model to leave a right
+    # body alone): the instruction is that the table entry is written in the
+    # SAME reply as the producer that names it — the two halves of one defect,
+    # which across three runs were never writable in one prompt.
+    installable: tuple[str, ...] = ()
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -130,11 +147,40 @@ def _plan_line(p: BlockFillPlan) -> str:
     parts = []
     if p.stubs:
         parts.append("write: " + ", ".join(p.stubs))
-    direct = tuple(r for r in p.refills if r not in p.inferred)
-    inferred = tuple(r for r in p.refills if r in p.inferred)
+    direct = tuple(r for r in p.refills
+                   if r not in p.inferred and r not in p.escalated
+                   and r not in p.installable)
+    escalated = tuple(r for r in p.refills
+                      if r in p.escalated and r not in p.installable)
+    installable = tuple(r for r in p.refills if r in p.installable)
+    inferred = tuple(r for r in p.refills
+                     if r in p.inferred and r not in p.escalated
+                     and r not in p.installable)
     if direct:
         parts.append("rewrite (a body exists, but its test still fails): "
                      + ", ".join(direct))
+    if escalated:
+        # States what was MEASURED and nothing more. The grade it replaces told
+        # the model to leave these unchanged, and the model did: six replies
+        # across three runs re-emitted `construct_from_context` as
+        # `Self::construct_from_std(ContextError { context, error }, backtrace)`
+        # byte-for-byte.
+        parts.append("REWRITE (the fns that consume what this one produces "
+                     "were rewritten over repeated sweeps and no test changed "
+                     "its verdict — the defect is not in them, it is in what "
+                     "this fn constructs or returns): " + ", ".join(escalated))
+    if installable:
+        # Nothing was measured about these bodies themselves; what was
+        # measured is that rewriting the producer that names them in its table
+        # moved no verdict. So the line states the relation and the
+        # co-authoring requirement, not a verdict on the body.
+        parts.append("REWRITE WITH THE PRODUCER (a fn-pointer table built by "
+                     "an escalated producer of this file has a field of this "
+                     "fn's signature; the producer was rewritten and no "
+                     "verdict moved, so the body the table dispatches to is "
+                     "written in the same reply — return it unchanged only if "
+                     "it is already right for the type the producer erases): "
+                     + ", ".join(installable))
     if inferred:
         parts.append("re-check (a body exists; implicated by NAME only — "
                      "rewrite ONLY if it is wrong for its bounds, else leave it "

@@ -290,3 +290,66 @@ def test_negative_control_the_producer_scan_alone_never_names_it():
                               exclude={("src/chain.rs", "next")})
     assert ("src/chain.rs", "new") in got
     assert ("src/context.rs", "source") not in got
+
+
+# --- the oracle guard the producer scan was missing --------------------------
+
+# A `#[test]` fn that builds the subject on its way to an assertion. It matches
+# `constructs_type` exactly as a real constructor does, and the reconstruction
+# may never write to it.
+ORACLE_RECS = [
+    *RECS,
+    {"file": "tests/test_chain.rs", "fn_name": "error", "container": "",
+     "sig_text": "fn error() -> Error", "body_text": "Error::msg(\"oh no\")",
+     "cfg": "test", "is_test": True},
+    {"file": "tests/test_context.rs", "fn_name": "make_chain", "container": "",
+     "sig_text": "fn make_chain() -> Chain", "body_text": "Chain { state }",
+     "cfg": "test", "is_test": True},
+]
+
+
+def _oracle_deps():
+    class _S:
+        def enumerate_fns(self, _sd):
+            return ORACLE_RECS
+
+        def enumerate_types(self, _sd):
+            return TYPES
+    return AttributionDeps(
+        structure=_S(), classify=lambda *a, **k: {},
+        locate_fn=lambda *a, **k: None,
+        run_check_diag=lambda *a, **k: (0, "", []),
+        derive_check_only_cmd=lambda c: c, is_gen_tests_file=lambda n: False,
+        log=lambda m: None,
+    )
+
+
+def test_the_escalation_never_names_an_oracle_fn_as_a_producer() -> None:
+    """`_traversal_steps` excludes oracle records by its own rule and the
+    name-match frontier excludes them with the same predicate; the producer
+    scan between them did neither.
+
+    On the live tree that put `tests/test_chain.rs::error`,
+    `tests/test_context.rs::make_chain` and `tests/test_ffi.rs::anyhow3` at the
+    HEAD of all fourteen escalation fires across runs `1246060-2339497b` and
+    `3410521-4ccf6d68` — 3 of every 24-25 escalated units, in the frontier and
+    therefore in the pass denominator, discarded only later by the fill route's
+    immutable-target refusal (95 `skipping test-oracle target` lines)."""
+    extra = escalate_frontier_to_producers(
+        _oracle_deps(), Path("src"), "test_len",
+        futile_units={("src/chain.rs", "len")})
+    assert ("tests/test_chain.rs", "error") not in extra
+    assert ("tests/test_context.rs", "make_chain") not in extra
+    # …and the real producers still escalate, so the guard did not empty it.
+    assert ("src/error.rs", "chain") in extra
+    assert ("src/chain.rs", "new") in extra
+
+
+def test_negative_control_the_unguarded_scan_does_name_them() -> None:
+    """Without the record filter the oracle fns match `constructs_type` and
+    `returns_type` like any other producer — which is why the guard is needed
+    and not merely tidy."""
+    got = producers_for_types(ORACLE_RECS, {"Chain", "Error"},
+                              exclude={("src/chain.rs", "len")})
+    assert ("tests/test_chain.rs", "error") in got
+    assert ("tests/test_context.rs", "make_chain") in got

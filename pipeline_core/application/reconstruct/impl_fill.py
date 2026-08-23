@@ -11,7 +11,7 @@ import os
 import queue as _queue_mod
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -41,6 +41,9 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     ask_with_pulls,
     workspace_file_reader,
+)
+from pipeline_core.application.reconstruct.test_locator import (
+    attributed_test_blocks,
 )
 from pipeline_core.application.reconstruct.unit_pool import run_units_concurrently
 from pipeline_core.domain.attempt_loss import (
@@ -75,10 +78,12 @@ from pipeline_core.domain.impl_routing import (
 from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
+from pipeline_core.domain.installable_fns import installable_fns
 from pipeline_core.domain.llm_output import (
     bind_headerless_names,
     extract_fn_bodies,
     fn_tag_occurrences,
+    reader_loss,
 )
 from pipeline_core.domain.model_defaults import resolve_route_order
 from pipeline_core.domain.models import (
@@ -97,6 +102,7 @@ from pipeline_core.domain.refill_evidence import (
     attributed_test_leaves,
     collect_refill_evidence,
     container_header,
+    escalated_refill_names,
     inferred_refill_names,
     render_refill_evidence,
 )
@@ -125,7 +131,11 @@ from pipeline_core.domain.retro_gate import (
     screen_guidance,
     stamp_conviction,
 )
-from pipeline_core.domain.rust_idents import canon_container, signature_fixed_by_trait
+from pipeline_core.domain.rust_idents import (
+    canon_container,
+    fn_reference_counts,
+    signature_fixed_by_trait,
+)
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -135,6 +145,7 @@ from pipeline_core.domain.test_report import (
     U2TestGate,
     U2Verdict,
     assess_joint_improvement,
+    parse_test_output,
 )
 from pipeline_core.domain.test_results import (
     RegressionComparison,
@@ -157,6 +168,65 @@ from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
 
 
+def _panic_sites_of(raw: Sequence[str]) -> dict[str, tuple[str, int]]:
+    """test name -> (panic file, panic line) from a raw cargo-test capture.
+
+    The reading the regression gate returns carries names; the sites live only
+    in the text, which `measure_test_state`'s `raw_sink` hands back. Failures
+    that printed no location are absent rather than defaulted — the comparison
+    this feeds treats a missing site as unmeasured, and a sentinel would read
+    as movement."""
+    if not raw:
+        return {}
+    report = parse_test_output(raw[0])
+    return {f.test_name: (f.panic_file, f.panic_line)
+            for f in report.failures
+            if f.panic_file and f.panic_line is not None}
+
+def _note_reader_loss(
+    log: Any, emit: Any, *, cluster: str, unit: str, route: str,
+    reply: str, parsed: Sequence[Any],
+) -> None:
+    """Report a reply whose FN tags outnumber the records the reader produced.
+
+    This is the fourth per-fill class — the model answered and the pipeline
+    lost it — and it is always a pipeline defect, never a reason to spend
+    another call on the unit. The signal it replaces existed and was never
+    read: `empty/no FN blocks (N FN tag(s) in reply)` printed 37 times with a
+    nonzero N across the retained logs, on `context.rs::StdErrorforContextError
+    <C,Error>`, `error.rs::Error`, `chain.rs::ExactSizeIteratorforChain` and
+    `kind.rs::Trait` — the units the record keeps re-convicting — while the
+    sweeps that contained it were being read as flat scores.
+
+    Three things it does that the old line did not. It fires on PARTIAL loss,
+    because every drop site asked only `if not parsed` and a 7-tag reply
+    yielding 1 record scored as a success. It carries the response sha, so the
+    next reader shape is a lookup in the content-addressed store rather than an
+    investigation — the cost of the previous six. And it emits an EVENT, which
+    is what lets a run's own record be queried without grepping prose."""
+    loss = reader_loss(reply, parsed)
+    if loss is None:
+        return
+    log(f"  HEALTH ‼ [reader_loss] {route} {unit}: {loss.tags} FN tag(s) in "
+        f"the reply, {loss.records} record(s) out — {loss.lost} answered "
+        f"body(ies) discarded by the READER. Reply sha "
+        f"{loss.response_sha[:12]}… (logs/prompts/{loss.response_sha}.txt); "
+        "this is a parser defect, NOT a model failure.")
+    emit("phase_c.fill.reader_loss", data={
+        "cluster": cluster, "unit": unit, "route": route,
+        "tags": loss.tags, "records": loss.records, "lost": loss.lost,
+        "response_sha": loss.response_sha})
+
+
+#: How many DISTINCT test files the attributed-test lookup may put in a prompt,
+#: and how many leaf names it may walk to find them. The two differ because
+#: several attributed tests routinely share one file: with both at 4, the walk
+#: stopped after four names that resolved to two files and the third file never
+#: reached the prompt.
+_ATTRIBUTED_TEST_FILE_CAP = 4
+_ATTRIBUTED_TEST_LEAF_CAP = 12
+
+
 @dataclass(frozen=True, slots=True)
 class ImplFillDeps:
     """Collaborators for the per-impl fill engine, injected by the composition root."""
@@ -176,6 +246,7 @@ class ImplFillDeps:
     dispatch_families_via_extractor: Callable[..., list[DispatchFamily] | None]
     effective_stalls: Callable[..., int]
     emit: Callable[..., None]
+    enumerate_fns_via_extractor: Callable[..., list[dict[str, Any]] | None]
     enumerate_types_via_extractor: Callable[..., list[TypeRecord] | None]
     extract_crate_idioms: Callable[..., str]
     extract_impl_where_clause: Callable[..., str]
@@ -310,6 +381,11 @@ def fill_impl_blocks(
     fr_path: Path | None,
     tdd_frontier_keys: set[FnLocator] | None,
     tdd_frontier_tests: FailureFrontier | None = None,
+    # Units a futility escalation added after MEASURING their consumers'
+    # rewrites as changing nothing — the producer subset of the fire, never the
+    # merged frontier it returns (the merge also carries traversal steps and
+    # the accessors' own file, which must keep the weaker grade).
+    escalated_keys: frozenset[FnLocator] = frozenset(),
     tdd_test_cmd: str | None = None,
     parallelism: int = 1,
     crash_evidence: dict[FnLocator, str] | None = None,
@@ -367,6 +443,7 @@ def fill_impl_blocks(
     _dispatch_families_via_extractor = deps.dispatch_families_via_extractor
     _effective_stalls = deps.effective_stalls
     _emit = deps.emit
+    _enumerate_fns_via_extractor = deps.enumerate_fns_via_extractor
     _enumerate_types_via_extractor = deps.enumerate_types_via_extractor
     _extract_crate_idioms = deps.extract_crate_idioms
     _extract_impl_where_clause = deps.extract_impl_where_clause
@@ -755,14 +832,19 @@ def fill_impl_blocks(
         # (run `902902-daee577d`, 2026-08-20).
         _file_refill_evs = {
             _impl_block_id(b.file, b.container):
-                collect_refill_evidence(b, fblocks, _frontier_tests)
+                collect_refill_evidence(b, fblocks, _frontier_tests,
+                                        escalated=escalated_keys)
             for b in fblocks}
-        for _leaf in attributed_test_leaves(
-                (e for evs in _file_refill_evs.values() for e in evs), cap=4):
-            for path_str, txt in _find_tests_referencing_fn(
-                    tests_dir_files, _leaf, max_blocks=1):
-                if not any(p == path_str for p, _ in test_blocks):
-                    test_blocks.append((path_str, txt))
+        # …capped by distinct FILES, not by leaf names (`attributed_test_blocks`
+        # carries the measurement).
+        test_blocks = attributed_test_blocks(
+            attributed_test_leaves(
+                (e for evs in _file_refill_evs.values() for e in evs),
+                cap=_ATTRIBUTED_TEST_LEAF_CAP),
+            lambda leaf: _find_tests_referencing_fn(
+                tests_dir_files, leaf, max_blocks=1),
+            file_cap=_ATTRIBUTED_TEST_FILE_CAP,
+            into=test_blocks)
         _file_refill_evidence = "\n".join(
             f"in `{container_header(b.container) or 'free fns'}`:\n"
             + render_refill_evidence(_file_refill_evs[_impl_block_id(b.file, b.container)])
@@ -783,12 +865,57 @@ def fill_impl_blocks(
         if fr_path is not None:
             notes_section = _filter_model_notes_for_prompt(
                 fr_path, file_rel=file_rel, fn_name=wanted[0],
-                file_text=snapshot, current_error="")
+                file_text=snapshot, current_error="",
+                escalated_fns=frozenset(
+                    k.fn_name for k in escalated_keys if k.file == file_rel))
         # Any localized crash inside THIS file applies: the prompt renders the
         # whole file, so a crashing body is visible as an idiom to imitate.
         _file_crash = "\n\n".join(dict.fromkeys(
             txt for loc, txt in (crash_evidence or {}).items()
             if loc.file == file_rel))
+        # The writable COMPLEMENT of this file's escalated producers: fns the
+        # producer could INSTALL into a table it builds. They are not
+        # `refill_members` and never can be — a free fn with a compiling body
+        # and no attributed test is in no frontier, so no batch can contain
+        # it, and across three runs they were writable slots in 0 of 39
+        # file-scope prompts while being pasted into the same prompts as
+        # read-only text. The splicer was never the barrier:
+        # `joint_overwrite_names` already lands any fn of the file the reply
+        # answers once the reply answers a re-fill target, so this is a PLAN
+        # entry, not a dispatch change. Computed ONCE per file: the tree the
+        # attempts below see is the same snapshot (a failed attempt reverts),
+        # and the extractor run is not free.
+        _installable = installable_fns(
+            _enumerate_fns_via_extractor(target_src_dir) or [],
+            _crate_type_records, escalated_keys, file_rel,
+            reference_counts=fn_reference_counts(snapshot))
+        _free_plan = ([BlockFillPlan(
+            "", (), tuple(i.fn_name for i in _installable),
+            installable=tuple(i.fn_name for i in _installable))]
+            if _installable else [])
+        # The evidence section's entry for them: the relation, stated per fn,
+        # so the model can see WHICH table field each one answers to. The
+        # refill-evidence renderer is per impl block and these are free fns.
+        _install_evidence = ""
+        if _installable:
+            _install_evidence = "in `free fns`:\n" + "\n".join(
+                f"`{i.fn_name}` — INSTALLABLE: an escalated producer in this "
+                f"file builds a `{i.type_name}` literal whose field "
+                f"`{i.field}` has this fn's signature"
+                + (" (the name occurs nowhere in the file but its own "
+                   "declaration)" if i.references <= 1 else
+                   f" ({i.references} occurrences in the file)")
+                + ". Rewrite it together with the producer if it is not "
+                "right for the type the producer erases."
+                for i in _installable)
+            _log(f"  [phase-c/file] {file_rel}: {len(_installable)} "
+                 "declared fn(s) an escalated producer could install are "
+                 "writable in this prompt: "
+                 + ", ".join(f"{i.fn_name}->{i.type_name}.{i.field}"
+                             for i in _installable[:5]))
+            _emit("phase_c.file.installable_offered", data={
+                "cluster": cluster_name, "file": file_rel,
+                "fns": [i.fn_name for i in _installable]})
         prior_error = ""
         _prev_prompt: str | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
@@ -799,15 +926,18 @@ def fill_impl_blocks(
                 "", snapshot, prior_error, "", "", _crate_type_records)
             prompt = build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
-                fill_plan=[BlockFillPlan(
+                fill_plan=[*_free_plan, *[BlockFillPlan(
                     b.container,
                     tuple(m.fn_name for m in b.stub_members),
                     tuple(m.fn_name for m in b.refill_members),
                     inferred=tuple(sorted(inferred_refill_names(
+                        _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+                    escalated=tuple(sorted(escalated_refill_names(
                         _file_refill_evs[_impl_block_id(b.file, b.container)]))))
-                    for b in fblocks],
+                    for b in fblocks]],
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
-                refill_evidence=_file_refill_evidence,
+                refill_evidence="\n".join(
+                    s for s in (_file_refill_evidence, _install_evidence) if s),
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
                 crash_evidence=_file_crash,
                 module_name=module_name, cluster_name=cluster_name,
@@ -848,6 +978,9 @@ def fill_impl_blocks(
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
                 return
+            _note_reader_loss(_log, _emit, cluster=cluster_name,
+                              unit=file_rel, route="file",
+                              reply=_file_reply, parsed=parsed)
             if not parsed:
                 _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
                      f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
@@ -864,8 +997,14 @@ def fill_impl_blocks(
                 # happens to check right after. None ⇒ crate not
                 # test-runnable now → gate self-disables, verbatim revert
                 # unchanged.
+                _base_raw: list[str] = []
                 _baseline_test = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env)
+                    tdd_test_cmd, target_src_dir, cluster_env, _base_raw)
+                # The pre-fill panic SITES. The reading carries names only, and
+                # without a site the non-regression keep below cannot tell the
+                # correct body from the one that walks downhill — both are red
+                # on the same tests.
+                _base_sites = _panic_sites_of(_base_raw)
                 containers = [b.container for b in fblocks]
                 # Route-only widening: `fblocks` is only this file's
                 # STILL-NEEDS-FILLING blocks, but the model sees the WHOLE file
@@ -1132,8 +1271,11 @@ def fill_impl_blocks(
                         frozenset(_file_tests),
                         _baseline_test.passed_names,
                         _baseline_test.ignored_names,
-                        _u2_file)
+                        _u2_file, _base_sites)
                     _bank = _joint if _joint.banks else None
+                    if _joint.site_movement:
+                        _log(f"  [phase-c/file] {glabel}: panic sites moved — "
+                             f"{_joint.site_movement}")
                 # An attempt dispatched on crash evidence is judged by a
                 # metric that cannot credit it — a correct fix of a latent
                 # fault moves no test while its activating sibling is
@@ -1161,15 +1303,31 @@ def fill_impl_blocks(
                 # bodies; the next sweep judges the joint tree, and a body
                 # that actually costs tests is clawed back by the batch
                 # ratchet from its pre-fill snapshot.
+                # …with the one gradient a set of names cannot carry. On a
+                # defect where every attributed test is red before AND after,
+                # `new_failures` is empty for the right body and the wrong one
+                # alike, and this keep is what let the 2026-08-20 delegation
+                # land over a working per-type vtable. An EARLIER panic line in
+                # the same test is strictly fewer assertions passed, which is a
+                # regression the name set cannot see.
                 _nonregr_keep_file = (rc == 0 and _u2_reject
                                       and not _crash_keep_file
                                       and _joint is not None
-                                      and not _joint.new_failures)
+                                      and not _joint.new_failures
+                                      and not _joint.regressed_sites)
                 if _nonregr_keep_file:
                     _log(f"  [phase-c/file] GUARD {glabel}: re-fill KEPT on "
                          "non-regression — no self-failure is newly red "
-                         "(all were failing at baseline); judged at the "
+                         "(all were failing at baseline) and no attributed "
+                         "test panics earlier than it did; judged at the "
                          "next sweep in the joint tree.")
+                elif (rc == 0 and _u2_reject and not _crash_keep_file
+                        and _joint is not None and not _joint.new_failures
+                        and _joint.regressed_sites):
+                    _log(f"  [phase-c/file] GUARD {glabel}: re-fill REVERTED "
+                         "— nothing newly red, but "
+                         f"{_joint.site_movement}. Same verdict vector, fewer "
+                         "assertions reached: the old bodies were closer.")
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
                     stub_free=stub_free)
@@ -1461,14 +1619,17 @@ def fill_impl_blocks(
         # found `tests/test_source.rs` for a `source` member and nothing for
         # `ext_context`, while the frontier that stamped the re-fill named
         # `test_iter`/`test_len`/`test_rev` (run `902902-daee577d`).
-        _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests)
+        _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests,
+                                              escalated=escalated_keys)
         _refill_evidence_text = render_refill_evidence(_refill_evs)
         _inferred_refill = inferred_refill_names(_refill_evs)
-        for _leaf in attributed_test_leaves(_refill_evs, cap=4):
-            for path_str, txt in _find_tests_referencing_fn(
-                    tests_dir_files, _leaf, max_blocks=1):
-                if not any(p == path_str for p, _ in test_blocks):
-                    test_blocks.append((path_str, txt))
+        # Capped by distinct FILES, as on the file route.
+        test_blocks = attributed_test_blocks(
+            attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
+            lambda leaf: _find_tests_referencing_fn(
+                tests_dir_files, leaf, max_blocks=1),
+            file_cap=_ATTRIBUTED_TEST_FILE_CAP,
+            into=test_blocks)
         # Reuse the per-fn test finder by unioning tests touching any
         # stub/refill target.
         for fn_name in _fill_target_names[:4]:
@@ -1542,6 +1703,8 @@ def fill_impl_blocks(
                 fr_path, file_rel=block.file,
                 fn_name=_fill_target_names[0] if _fill_target_names else "",
                 file_text=snapshot, current_error="",
+                escalated_fns=frozenset(
+                    k.fn_name for k in escalated_keys if k.file == block.file),
             )
         last_error_excerpt = ""
         # The last failed attempt's REAL two-tier metric. Re-deriving it from
@@ -1665,6 +1828,9 @@ def fill_impl_blocks(
             last_response = response
             parsed = bind_headerless_names(
                 extract_fn_bodies(response), _block_target_names)
+            _note_reader_loss(_log, _emit, cluster=cluster_name,
+                              unit=str(block_id), route="impl",
+                              reply=response, parsed=parsed)
             if not parsed:
                 _log(f"  [phase-c/impl] {block_id}: empty/no FN blocks "
                      f"(attempt {fix_attempt}; "
@@ -1693,8 +1859,10 @@ def fill_impl_blocks(
                 # THIS block is still an `unimplemented!()` stub are already
                 # in the baseline, so filling them green is never mistaken
                 # for a regression.
+                _impl_base_raw: list[str] = []
                 _baseline_test = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env)
+                    tdd_test_cmd, target_src_dir, cluster_env, _impl_base_raw)
+                _impl_base_sites = _panic_sites_of(_impl_base_raw)
                 # Splice each parsed body into the impl indicated by its
                 # `block` attribute. Match against TARGET container OR any
                 # related container. Route by canonical impl-header identity
@@ -1856,8 +2024,11 @@ def fill_impl_blocks(
                         frozenset(_block_tests),
                         _baseline_test.passed_names,
                         _baseline_test.ignored_names,
-                        _u2_impl)
+                        _u2_impl, _impl_base_sites)
                     _bank_impl = _jb if _jb.banks else None
+                    if _jb.site_movement:
+                        _log(f"  [phase-c/impl] {block_id}: panic sites moved "
+                             f"— {_jb.site_movement}")
                 # Global monotone ratchet: a compiled fill is rejected if it
                 # reddened ANY previously-passing cluster test — even when the
                 # block's own U2 tests pass (or it would be B3-kept). This is
@@ -2262,6 +2433,10 @@ def fill_impl_blocks(
                         _max_reply = _ask_fill(_max_prompt)
                         _max_parsed = bind_headerless_names(
                             extract_fn_bodies(_max_reply), _max_target_names)
+                        _note_reader_loss(
+                            _log, _emit, cluster=cluster_name,
+                            unit=str(block_id), route="impl-maximal",
+                            reply=_max_reply, parsed=_max_parsed)
                         if _max_parsed:
                             _splice_and_verify(_max_parsed, fix_attempt + 1)
                         else:

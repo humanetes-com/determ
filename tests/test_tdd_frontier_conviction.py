@@ -37,7 +37,8 @@ def _deps(handoffs: list[Any]) -> PhaseCTddDeps:
         handoffs.append(kw.get("tdd_frontier_tests"))
         return ClusterFillResult(attempts=1)
 
-    def _escalate(_src: Path, test: str, _units: set[FnLocator]) -> dict[Any, Any]:
+    def _escalate(_src: Path, test: str, _units: set[FnLocator],
+                  producers_out=None) -> dict[Any, Any]:
         # A shotgun escalation: a real producer AND a test fn, as the record
         # scan produced on anyhow.
         return {_ESCALATED: {test}, _TEST_FN: {test}}

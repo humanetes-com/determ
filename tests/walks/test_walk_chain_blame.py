@@ -93,7 +93,7 @@ def test_chain_blame_lands_and_the_evidence_pack_arms(
     logs = replay(walk, monkeypatch, tmp_path, events=events,
                   retrigger=retrig, reverse_map=_REVERSE_MAP,
                   localize=lambda *a, **k: (_unattributed_site(),),
-                  escalate=lambda src, tname, units: {
+                  escalate=lambda src, tname, units, producers_out=None: {
                       _CHAIN_PRODUCER: {tname}},
                   fill=_fill, inventory=_INVENTORY,
                   chronic_vanished=_CHRONIC)
@@ -145,7 +145,7 @@ def test_negative_control_old_grading_keeps_the_walk_closed(
     replay(walk, monkeypatch, tmp_path, events=events,
            retrigger=retrig, reverse_map=_REVERSE_MAP,
            localize=lambda *a, **k: (),   # the pre-fix driver input
-           escalate=lambda src, tname, units: {_CHAIN_PRODUCER: {tname}},
+           escalate=lambda src, tname, units, producers_out=None: {_CHAIN_PRODUCER: {tname}},
            fill=_fill, inventory=_INVENTORY, chronic_vanished=_CHRONIC)
 
     # The recorded outcome, reproduced: no synthesis, nothing armed, and one

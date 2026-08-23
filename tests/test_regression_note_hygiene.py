@@ -68,3 +68,57 @@ def test_stale_note_retired_when_body_superseded() -> None:
     assert is_stale_regression_note(note, current_changed)      # superseded
     assert not is_stale_regression_note(note, "")               # no evidence
     assert not is_stale_regression_note("I tried X", current_changed)
+
+
+def test_bodyless_regression_note_is_retired() -> None:
+    """A `[regression]` note with no body is an accusation nothing can check.
+
+    It is also the note the reader could never retire — the retirement test
+    reads the body — so it rode into every prompt naming its file forever. Run
+    `263257-9e46def4` iter 3 (2026-08-22) dispatched
+    `src/error.rs::construct_from_adhoc` under the ESCALATED grade, i.e. told
+    to rewrite it, while this exact shape sat in the same prompt saying a
+    rewrite of it had cost 83→25. This pin fails on the pre-fix predicate,
+    which returned False for every one of them."""
+    from pipeline_core.domain.model_notes import is_stale_regression_note
+
+    bodyless = ("[regression] In error.rs, after `construct_from_adhoc` was "
+                "written, previously-passing test(s) FAILED: t1, t2 (cluster "
+                "pass count dropped 83→25) (12 bodies were filled this pass — "
+                "the culprit is ONE of them). Body applied:")
+    live_tree = "pub(crate) fn construct_from_adhoc<M>() { Self::x() }"
+    assert is_stale_regression_note(bodyless, live_tree)
+    assert is_stale_regression_note(bodyless, "")
+    # …and one whose body survived only as the trailing instruction line.
+    assert is_stale_regression_note(
+        bodyless + "\nRe-implement `construct_from_adhoc` so t1 keep passing.",
+        live_tree)
+    # A non-regression note is untouched by any of this.
+    assert not is_stale_regression_note("I tried X because Y; use Z", "")
+
+
+def test_escalated_grade_supersedes_a_regression_note_on_the_same_fn() -> None:
+    """Two instructions in one prompt is not a steer.
+
+    The ESCALATED grade is this sweep's measurement that the unit must be
+    rewritten; the note is an older, batch-spread claim that rewriting it cost
+    tests. 199's slice A suspended the retrospectives channel for exactly this
+    collision and left this one live."""
+    from pipeline_core.domain.model_notes import (
+        escalation_superseded_notes,
+        regression_note_subject,
+    )
+
+    notes = [
+        "[regression] In error.rs, after `construct_from_adhoc` was written, "
+        "previously-passing test(s) FAILED: t (cluster pass count dropped "
+        "83→25). Body applied:\nSelf::construct_from_std(m)",
+        "[regression] In error.rs, after `object_ref` was written, "
+        "previously-passing test(s) FAILED: t (dropped 83→25). Body applied:\nx",
+        "I tried X because Y; use Z",
+    ]
+    assert regression_note_subject(notes[0]) == "construct_from_adhoc"
+    assert regression_note_subject(notes[2]) == ""
+    out = escalation_superseded_notes(notes, frozenset({"construct_from_adhoc"}))
+    assert out == [notes[0]]
+    assert escalation_superseded_notes(notes, frozenset()) == []

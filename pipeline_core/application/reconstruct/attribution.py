@@ -833,6 +833,7 @@ def escalate_frontier_to_producers(
     src_dir: Path,
     test_name: str,
     futile_units: set[FnLocator],
+    producers_out: set[FnLocator] | None = None,
 ) -> Frontier:
     """Frontier additions for `test_name`: producers of the types whose
     accessors proved futile. Containers come from the fn records (the
@@ -857,6 +858,23 @@ def escalate_frontier_to_producers(
         recs = deps.structure.enumerate_fns(src_dir) or []
     except Exception:
         recs = []
+    # ORACLE RECORDS OUT, before either scan. `_traversal_steps` excludes them
+    # by its own rule ("a test file's own `impl StdError for MyError` is a
+    # fixture the reconstruction may not rewrite") and the name-match frontier
+    # excludes them too, with the same predicate, forty lines up. The producer
+    # scan between them did neither, and a `#[test]` fn that calls
+    # `Error::msg(..)` on its way to an assertion CONSTRUCTS the subject type,
+    # so it matches `constructs_type` exactly as a real constructor does.
+    # Measured on the live tree: `tests/test_chain.rs::error`,
+    # `tests/test_context.rs::make_chain` and `tests/test_ffi.rs::anyhow3` were
+    # the FIRST THREE names of all fourteen escalation fires across runs
+    # `1246060-2339497b` and `3410521-4ccf6d68` — 3 of every 24-25 escalated
+    # units. Nothing was ever written to them (the fill route refuses an
+    # immutable target, 95 `skipping test-oracle target` lines say so), but
+    # they sat in the frontier and therefore in the pass denominator, and an
+    # immutable skip is one of the three classes that inflate a traversal's
+    # tried-set against the flat-sweep refutation.
+    recs = [r for r in recs if not is_test_fn_record(r)]
     types_unreadable = ""
     try:
         producible = ProducibleTypes.from_type_records(
@@ -906,6 +924,16 @@ def escalate_frontier_to_producers(
                  + (f" (+{len(_all_traversed) - len(traversed)} more over the "
                     f"cap of {_MAX_TRAVERSAL_STEPS}, NOT escalated)"
                     if len(_all_traversed) > len(traversed) else ""))
+    # `producers_out`, when given, receives the PRODUCER subset alone.
+    # The return value merges producers with traversal steps because the
+    # frontier is one dict, and a caller that grades the two the same hands the
+    # strongest instruction it has to a traversal step — on the live tree the
+    # merged `added` set carried `src/error.rs::downcast` and `deref`, the very
+    # accessors this fire had just declared futile, beside the five
+    # `construct_from_*` it exists to name. The log has always printed them
+    # apart; only the return value did not.
+    if producers_out is not None:
+        producers_out.update(producers)
     return {key: {test_name} for key in [*producers, *traversed]}
 
 

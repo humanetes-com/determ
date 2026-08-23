@@ -35,10 +35,41 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum, auto
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, ImplBlock
 
+
+class Attribution(Enum):
+    """How strongly the record implicates a re-fill target. Three states,
+    because collapsing the last two into one bool is what locked the pass at
+    92.
+
+    DIRECT — an attributed test's OWN failure points at this unit. Unchanged
+    meaning, unchanged prompt line.
+
+    ESCALATED — a futility escalation added this unit AFTER measuring that
+    rewriting its consumers changed no verdict. That is a MEASUREMENT, and it
+    is the strongest evidence the loop ever produces about a producer: the
+    accessors were tried and they did not pay.
+
+    NAMED — a traversal step or a name match mentioned the fn and nothing was
+    measured. Only this one deserves "leave it unchanged".
+
+    Why the split. `direct` was a bool and `inferred` its complement, so
+    ESCALATED and NAMED rendered identically — as `re-check (… implicated by
+    NAME only — rewrite ONLY if it is wrong for its bounds, else leave it
+    unchanged)`. On the live tree that grade went to the five
+    `construct_from_*` in all three prompts that listed them, while `rewrite`
+    went to `from` twenty times over — the accessors the escalation had just
+    declared futile. The unit is escalated BECAUSE its consumers were measured
+    futile, and was then handed the weakest instruction in the vocabulary.
+    """
+
+    DIRECT = auto()
+    ESCALATED = auto()
+    NAMED = auto()
 
 @dataclass(frozen=True, slots=True)
 class RefillEvidence:
@@ -47,14 +78,21 @@ class RefillEvidence:
     fn_name: str
     # Attributed failing tests (the dispatch projection), sorted, capped.
     tests: tuple[str, ...]
-    # True when at least one attributed test CONVICTS this unit — its own
-    # failure points here. False = inference only (escalation / traversal).
-    direct: bool
+    # How the record implicates this unit (see :class:`Attribution`).
+    attribution: Attribution
     # Headers of the other impl blocks in the same file whose same-named
     # member is also a re-fill target: the competing candidates.
     sibling_containers: tuple[str, ...]
     # (test, what it said) for the attributed tests that left a panic body.
     excerpts: tuple[tuple[str, str], ...]
+
+    @property
+    def direct(self) -> bool:
+        """A test's own failure points here. Kept as the reading it always
+        had — `not direct` is NO LONGER "inference only", because ESCALATED
+        sits between the two; callers that meant that want
+        :func:`inferred_refill_names`."""
+        return self.attribution is Attribution.DIRECT
 
 
 def container_header(container: str) -> str:
@@ -70,6 +108,7 @@ def collect_refill_evidence(
     frontier: FailureFrontier | None,
     *,
     max_tests: int = 6,
+    escalated: frozenset[FnLocator] = frozenset(),
 ) -> tuple[RefillEvidence, ...]:
     """What the frontier supports for each of `block.refill_members`.
 
@@ -83,7 +122,14 @@ def collect_refill_evidence(
         key = FnLocator(block.file, m.fn_name)
         tests = (tuple(sorted(frontier.tests_for(key)))[:max_tests]
                  if frontier is not None else ())
-        direct = bool(frontier.convicting_for(key)) if frontier is not None else False
+        # A convicting test outranks the escalation: the unit's own failure is
+        # better evidence than the measurement that its consumers were futile.
+        if frontier is not None and frontier.convicting_for(key):
+            grade = Attribution.DIRECT
+        elif key in escalated:
+            grade = Attribution.ESCALATED
+        else:
+            grade = Attribution.NAMED
         siblings = tuple(
             b.container for b in blocks
             if b.file == block.file and b.container != block.container
@@ -95,14 +141,25 @@ def collect_refill_evidence(
                 if text:
                     excerpts.append((t, text))
         out.append(RefillEvidence(
-            fn_name=m.fn_name, tests=tests, direct=direct,
+            fn_name=m.fn_name, tests=tests, attribution=grade,
             sibling_containers=siblings, excerpts=tuple(excerpts)))
     return tuple(out)
 
 
 def inferred_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
-    """Members whose re-fill rests on inference only — rendered `[REFILL?]`."""
-    return frozenset(e.fn_name for e in evidence if not e.direct)
+    """Members the record NAMES and never measured — rendered `[REFILL?]` and
+    graded `re-check`. Escalated members are deliberately NOT here: they were
+    measured, and telling the model to leave them unchanged is what this split
+    exists to stop."""
+    return frozenset(e.fn_name for e in evidence
+                     if e.attribution is Attribution.NAMED)
+
+
+def escalated_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
+    """Members a futility escalation added after measuring their consumers'
+    rewrites as changing nothing."""
+    return frozenset(e.fn_name for e in evidence
+                     if e.attribution is Attribution.ESCALATED)
 
 
 def attributed_test_leaves(
@@ -132,6 +189,19 @@ def render_refill_evidence(evidence: Iterable[RefillEvidence]) -> str:
             lines.append(
                 f"`{e.fn_name}` — DIRECT: a failing test's own failure points "
                 f"at this body. Rewrite its BEHAVIOR; keep the signature.")
+        elif e.attribution is Attribution.ESCALATED:
+            # States the MEASUREMENT, never a certainty about this body. The
+            # 2026-08-20 regression came from a prompt that ASSERTED a correct
+            # body had failed, with no evidence attached; the model believed it
+            # and replaced a working per-type vtable with a delegation. What is
+            # true here is narrower and checkable: the fns that CONSUME this
+            # value were rewritten and no verdict moved.
+            lines.append(
+                f"`{e.fn_name}` — ESCALATED: the fns that consume what this one "
+                f"produces were rewritten over repeated sweeps and NO test "
+                f"changed its verdict, so the defect is not in them — it is in "
+                f"what this fn constructs or returns. This is a measurement, "
+                f"not a claim about which line is wrong. Rewrite it.")
         else:
             lines.append(
                 f"`{e.fn_name}` — INFERRED: a failing test's path runs through "

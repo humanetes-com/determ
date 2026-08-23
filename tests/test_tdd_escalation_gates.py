@@ -75,7 +75,7 @@ def test_escalation_withheld_while_the_accessor_is_still_a_stub(
     logs: list[str] = []
     calls: list[str] = []
 
-    def _escalate(src_dir, tname, units):
+    def _escalate(src_dir, tname, units, producers_out=None):
         calls.append(tname)
         return {_PROD: {tname}}
 
@@ -99,7 +99,7 @@ def test_escalation_fires_when_no_accessor_is_a_stub(
     logs: list[str] = []
     calls: list[str] = []
 
-    def _escalate(src_dir, tname, units):
+    def _escalate(src_dir, tname, units, producers_out=None):
         calls.append(tname)
         return {_PROD: {tname}}
 
@@ -119,7 +119,7 @@ def test_escalation_re_admits_an_exhausted_target(
     events: list[tuple[str, dict]] = []
     logs: list[str] = []
 
-    def _escalate(src_dir, tname, units):
+    def _escalate(src_dir, tname, units, producers_out=None):
         return {_PROD: {tname}}
 
     # _PROD enters the frontier from iter 1 via attribution, gets charged
@@ -173,7 +173,7 @@ def test_escalation_releases_the_stored_verdict_on_its_target(
     logs: list[str] = []
     released_with: list[tuple[frozenset, str]] = []
 
-    def _escalate(src_dir, tname, units):
+    def _escalate(src_dir, tname, units, producers_out=None):
         return {_PROD: {tname}}
 
     def _release(pd, sd, targets, reason):

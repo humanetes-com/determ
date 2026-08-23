@@ -84,6 +84,14 @@ HOW TO INTERPRET THE OUTPUT.  One block per qualifying run:
       is the priority order.
   terminal: how the run ended (death-watch exit/signal, plateau abort,
       traceback), plus the perf-ledger note when one exists.
+After the cross-run chronics comes P13, which is standing state rather than a
+run event: per FR file, how many `[regression]` notes are on disk and how many
+carry NO body.  A body-less one asserts "this body broke those tests" with the
+body missing, so the reader that retires such notes has nothing to compare and
+keeps it forever, in every prompt naming that file.  Decision rule: any nonzero
+BODY-LESS count is a backlog item, and a count that GROWS after 2026-08-22
+means the FR round trip is destroying bodies again — the subjects line names
+the fns whose prompts are affected.
 The aggregate at the bottom counts, per class, total hits and how many were
 SILENT.  Decision rule: a class with recurring SILENT hits needs its detector
 and lever BEFORE any new bespoke mechanism is added; a class with only REACTED
@@ -165,6 +173,21 @@ RE_BUDGET_REFUSAL = re.compile(
     r"|cap \(\d+\) reached"
     r"|this component's re-author was already spent on this exact crash)")
 RE_OWNS_GRADE = re.compile(r"the observed fault is inside code \d+ component")
+# A reply the model was paid for that the READER turned into fewer records
+# than it carried tags. Two shapes so old logs read like new ones: the drop
+# sites' own line, which has printed a nonzero tag count 37 times across the
+# retained logs without once being read as a defect, and the HEALTH line that
+# now accompanies it and also fires on PARTIAL loss.
+RE_TAGS_DROPPED = re.compile(
+    r"\[phase-c/(?P<route>impl|file)\][^\n]*?(?P<unit>src/[^\s:]+(?:::[^\s:]+)?)"
+    r"[^\n]*?no FN blocks[^\n]*?\((?:attempt \d+; )?(?P<tags>\d+) FN tag\(s\) in reply")
+RE_READER_LOSS = re.compile(
+    r"HEALTH ‼ \[reader_loss\] (?P<route>\S+) (?P<unit>\S+?): "
+    r"(?P<tags>\d+) FN tag\(s\) in the reply, (?P<records>\d+) record\(s\) out"
+    r"[^\n]*?Reply sha (?P<sha>[0-9a-f]+)")
+RE_INSTALLABLE_OFFERED = re.compile(
+    r"\[phase-c/file\] (?P<file>src/\S+): (?P<n>\d+) declared fn\(s\) an "
+    r"escalated producer could install are writable")
 RE_INTERRUPTED = re.compile(
     r"an attempt was charged and never reached an outcome")
 RE_MECHANICAL_DEATH = re.compile(
@@ -855,17 +878,112 @@ def detect_p10(run: Run, iters: list[dict]) -> list[dict]:
         "refs": refs[:4]}]
 
 
+def detect_p11(run: Run, iters: list[dict]) -> list[dict]:
+    """Discarded answer: the model returned FN tags and the reader produced
+    fewer records than it carried — the fourth per-fill class, and the only one
+    of the four that is ALWAYS a pipeline defect rather than a judgement call.
+
+    WHY IT IS ITS OWN CLASS. Every other detector here reads the loop's
+    decisions. This one reads a call that never became a decision at all: the
+    reply is discarded, the unit is logged as unanswered, and the sweep that
+    contains it is indistinguishable from one where the model said nothing. It
+    cannot be found from the pass count, and the escalation, the retro store
+    and the futility gates will all subsequently reason about the unit as
+    though it had refused to answer.
+
+    WHY A CENSUS ROW AND NOT A LOG LINE. The log line already existed. It
+    printed 97 times across the retained logs, 37 of them with a nonzero tag
+    count, on `src/context.rs::StdErrorforContextError<C,Error>` (the unit the
+    record has convicted since 2026-08-14), `src/error.rs::Error`,
+    `src/chain.rs::ExactSizeIteratorforChain` and `src/kind.rs::Trait` — and it
+    was read as a defect none of those times, because nothing aggregated it.
+    Six distinct reader shapes were found between 2026-08-04 and 2026-08-22 and
+    each cost its own investigation; this row is what makes the seventh a
+    lookup.
+
+    NO REACTION KEY, deliberately. There is nothing the loop can do about a
+    discarded answer at run time — the correct response is always a reader fix
+    — so every hit is backlog until the shape is closed, and marking it
+    REACTED would say the opposite."""
+    hits = [(ref, m) for ref, m in run.find(RE_TAGS_DROPPED)
+            if int(m["tags"]) > 0]
+    losses = list(run.find(RE_READER_LOSS))
+    if not hits and not losses:
+        return []
+    per_unit: dict[str, int] = {}
+    shas: list[str] = []
+    refs: list[str] = []
+    for ref, m in hits:
+        per_unit[m["unit"]] = per_unit.get(m["unit"], 0) + int(m["tags"])
+        refs.append(ref)
+    for ref, m in losses:
+        lost = int(m["tags"]) - int(m["records"])
+        per_unit[m["unit"]] = per_unit.get(m["unit"], 0) + lost
+        shas.append(m["sha"][:12])
+        refs.append(ref)
+    worst = sorted(per_unit.items(), key=lambda kv: (-kv[1], kv[0]))
+    total = sum(per_unit.values())
+    return [{
+        "evidence": f"{total} answered body(ies) discarded by the reader over "
+                    f"{len(refs)} call(s) on {len(per_unit)} unit(s): "
+                    + ", ".join(f"{u} x{c}" for u, c in worst[:4])
+                    + (f"; reply sha(s) {', '.join(shas[:3])}" if shas else
+                       "; no sha recorded (pre-2026-08-22 log format) — find "
+                       "the reply with tools/scan_dropped_fn_responses.sh"),
+        "refs": refs[:4]}]
+
+
+def detect_p12(run: Run, iters: list[dict]) -> list[dict]:
+    """Silent complement: the futility escalation fired and the run never once
+    offered an escalated producer's INSTALLABLE fns alongside it.
+
+    WHY IT IS ITS OWN CLASS. The pass-92 defect spans two units — a producer
+    that builds a fn-pointer table, and the free fns the table names — and
+    every intermediate state scores identically, so the loop can only climb it
+    when both halves are writable in ONE prompt. The mechanism that makes the
+    second half writable (`domain/installable_fns.py`) is gated on the first
+    having fired, so a run in which the fire is logged and the offer never is
+    has spent every escalated batch on half a defect. Run 55484-84c991f1
+    (2026-08-22): six fires at iter 2, the constructors graded ESCALATED in
+    every `src/error.rs` prompt from iter 3, the per-type vtable wiring landed
+    at iter 3 — and `context_downcast` stayed `Ref::from_raw(NonNull::dangling())`
+    because the offer returned () on a type-text spacing mismatch. Five flat
+    sweeps, and the census filed the run as a healthy negative control.
+
+    A run that predates the offer line (before 2026-08-22) hits too, and that
+    reading is correct: the complement was never offered in it either.
+
+    NO REACTION KEY: the loop has nothing to do about it at run time — the
+    offer is a deterministic computation, and a miss is always a defect in
+    it (or a crate with no fn-pointer table, which this crate is not)."""
+    fires = list(run.find(RE_ESCALATE))
+    if not fires:
+        return []
+    if list(run.find(RE_INSTALLABLE_OFFERED)):
+        return []
+    tests = sorted({m["test"] for _, m in fires})
+    return [{
+        "evidence": f"{len(fires)} futility fire(s) for {len(tests)} test(s) "
+                    f"({', '.join(tests[:4])}) and 0 installable-complement "
+                    "offers in the run — every escalated producer was "
+                    "dispatched without the free fns its table names, so the "
+                    "split defect was never writable in one prompt",
+        "refs": [ref for ref, _ in fires[:4]]}]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
-             "P10": detect_p10}
+             "P10": detect_p10, "P11": detect_p11, "P12": detect_p12}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
     "P6": "budget lockout", "P7": "sampling starvation",
     "P8": "fire that never lands",
     "P9": "destruction authorised by progress",
-    "P10": "undispatchable frontier unit"}
+    "P10": "undispatchable frontier unit",
+    "P11": "discarded answer (reader)",
+    "P12": "silent complement (escalation without installable offer)"}
 
 
 # -------------------------------------------------------------------- report
@@ -998,6 +1116,70 @@ def print_report(rows: list[dict]) -> None:
     print(f"  healthy negative controls: {', '.join(healthy) or 'none'}")
 
 
+def immortal_accusations(root: Path) -> list[dict]:
+    """P13 — `[regression]` notes on disk that carry no body, per FR file.
+
+    A `[regression]` note says "THIS body broke those tests" and the reader
+    that retires it (`is_stale_regression_note`) works by comparing the
+    recorded body against the file's current one. A note whose body is missing
+    therefore states a claim that cannot be checked, cannot be acted on, and
+    can never be retired — it is injected into every prompt naming that file
+    for the rest of the crate's life. Measured 2026-08-22 on
+    `tmp/anyhow/functional_requirements_anyhow.md`: 29 `[regression]` notes, 14
+    body-less, and the two that mattered (`construct_from_adhoc`,
+    `construct_from_display`) sat in the same prompt that graded those units
+    ESCALATED and ordered them rewritten.
+
+    This is standing state, not a run event, so it is printed once rather than
+    per run. It is NOT covered by `run_health`'s POISONED_NOTES finding, which
+    counts only the other class (a note whose recorded aggregate did not drop).
+
+    A nonzero count after the round-trip fix means notes written BEFORE it are
+    still on disk (the fix is reader-side, so they are now retired from prompts
+    but remain in the file) — or that the writer has regressed again, which the
+    fn names and their dates distinguish."""
+    sys.path.insert(0, str(root))
+    from pipeline_core.domain.model_notes import (  # noqa: PLC0415
+        parse_note_bullets,
+        regression_note_body_probe,
+        regression_note_subject,
+        slice_model_notes,
+    )
+    out: list[dict] = []
+    for fr in sorted(root.glob("tmp/*/functional_requirements_*.md")):
+        try:
+            _, section = slice_model_notes(fr.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        notes = parse_note_bullets(section)
+        regressions = [n for n in notes if n.lstrip().startswith("[regression]")]
+        bodyless = [n for n in regressions if not regression_note_body_probe(n)]
+        if not regressions:
+            continue
+        out.append({
+            "file": str(fr.relative_to(root)),
+            "notes": len(notes), "regressions": len(regressions),
+            "bodyless": len(bodyless),
+            "fns": sorted({regression_note_subject(n) or "?" for n in bodyless}),
+        })
+    return out
+
+
+def print_immortal_accusations(rows: list[dict]) -> None:
+    print()
+    print("=" * 72)
+    print("P13 immortal accusation — [regression] notes on disk with no body,")
+    print("which no reader can retire and every prompt for that file carries.")
+    if not rows:
+        print("\n  no FR file with [regression] notes found")
+        return
+    for r in rows:
+        print(f"\n  {r['file']}: {r['notes']} note(s), "
+              f"{r['regressions']} [regression], {r['bodyless']} BODY-LESS")
+        if r["fns"]:
+            print(f"    subjects: {', '.join(r['fns'])}")
+
+
 def print_chronics(ch: dict) -> None:
     print()
     print("=" * 72)
@@ -1038,11 +1220,14 @@ def main() -> int:
         print(f"missing: {missing}", file=sys.stderr)
         return 2
     rows, chron = census(paths, args.min_iters)
+    immortal = immortal_accusations(Path(__file__).resolve().parent.parent)
     print_report(rows)
     print_chronics(chron)
+    print_immortal_accusations(immortal)
     if args.json:
         args.json.write_text(json.dumps(
-            {"runs": rows, "chronics": chron}, indent=1))
+            {"runs": rows, "chronics": chron,
+             "immortal_accusations": immortal}, indent=1))
         print(f"json written: {args.json}")
     return 0
 

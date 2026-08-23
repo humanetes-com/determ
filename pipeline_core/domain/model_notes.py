@@ -58,27 +58,55 @@ def slice_model_notes(fr_text: str) -> tuple[str, str]:
     return body, notes.rstrip() + "\n"
 
 
+#: Continuation lines of a multi-line note carry this indent in the FR file, so
+#: a note whose body starts at column 0 (`#[cold]`, `pub(crate) fn …`) is still
+#: one bullet on disk. `render_with_notes` adds it; the parser strips it.
+NOTE_CONTINUATION_INDENT = "  "
+
+
 def parse_note_bullets(notes_section: str) -> list[str]:
-    """The note bullets in a notes section: the text after ``- ``, with
-    continuation lines (indented or following a blank) joined into one entry."""
+    """The note bullets in a notes section: the text after ``- ``, with every
+    following line until the next bullet kept as part of that note, NEWLINE-
+    joined and de-indented.
+
+    Nothing is dropped. The previous reader kept only lines starting with two
+    spaces and silently discarded everything else, which destroyed the body of
+    every `[regression]` note the writer emits — see
+    `regression_note_body_probe`. It also joined with a space, so even a
+    surviving body arrived as one run-on line the model could not read as code.
+    A blank line no longer closes a note either: a body may contain one, and
+    the section boundary is already `slice_model_notes`'s job."""
     if not notes_section.strip():
         return []
     notes: list[str] = []
     cur: list[str] = []
+
+    def close() -> None:
+        if cur:
+            text = "\n".join(cur).strip()
+            if text:
+                notes.append(text)
+
     for ln in notes_section.splitlines():
         if ln.startswith("- "):
-            if cur:
-                notes.append(" ".join(cur).strip())
-                cur = []
-            cur.append(ln[2:].strip())
-        elif cur and ln.startswith("  "):
-            cur.append(ln.strip())
-        elif cur and not ln.strip():
-            notes.append(" ".join(cur).strip())
+            close()
+            cur = [ln[2:].rstrip()]
+        elif _is_markdown_heading(ln):
+            # A heading is structure, never body. The test for it is `#` then a
+            # SPACE, which no Rust attribute matches (`#[cold]`, `#![allow]`).
+            close()
             cur = []
-    if cur:
-        notes.append(" ".join(cur).strip())
-    return [n for n in notes if n]
+        elif cur:
+            cur.append(ln[len(NOTE_CONTINUATION_INDENT):].rstrip()
+                       if ln.startswith(NOTE_CONTINUATION_INDENT)
+                       else ln.rstrip())
+    close()
+    return notes
+
+
+def _is_markdown_heading(line: str) -> bool:
+    stripped = line.lstrip("#")
+    return line.startswith("#") and stripped.startswith(" ")
 
 
 def preserve_model_notes(old_fr_text: str | None, new_fr_text: str) -> str:
@@ -485,13 +513,31 @@ def layout_safe_guidance(
         guidance, file_text, anchor_types=anchor_types) else guidance
 
 
+def render_note_bullet(note: str) -> str:
+    """One note as a markdown bullet, continuation lines indented so the reader
+    can give them back verbatim. A blank line inside a body is rendered as the
+    bare indent, because an empty line would look like a note boundary."""
+    lines = note.splitlines() or [""]
+    out = [f"- {lines[0]}"]
+    out.extend(f"{NOTE_CONTINUATION_INDENT}{ln}" if ln.strip()
+               else NOTE_CONTINUATION_INDENT
+               for ln in lines[1:])
+    return "\n".join(out)
+
+
 def render_with_notes(fr_text: str, notes: list[str]) -> str:
     """Rewrite the notes section of ``fr_text`` with ``notes`` as bullets,
-    creating a minimal FR body when the input has none."""
+    creating a minimal FR body when the input has none.
+
+    Round-trips through `parse_note_bullets` for multi-line notes as well as
+    single-line ones — the property the `[regression]` notes' bodies depend on,
+    since every FR append is a read-modify-write and one lossy read destroys
+    them for good."""
     body, _ = slice_model_notes(fr_text)
     if not body.strip():
         body = "# Functional Requirements\n\n"
-    section = MODEL_NOTES_HEADER + "\n\n" + "\n".join(f"- {n}" for n in notes) + "\n"
+    section = (MODEL_NOTES_HEADER + "\n\n"
+               + "\n".join(render_note_bullet(n) for n in notes) + "\n")
     return body.rstrip() + "\n\n" + section
 
 
@@ -671,7 +717,9 @@ def rank_notes(
     out_lines: list[str] = []
     total = 0
     for _, n in indexed:
-        line = f"- {n}"
+        # Same bullet shape the FR file uses, so a multi-line note reaches the
+        # prompt as the code it is rather than as one run-on line.
+        line = render_note_bullet(n)
         if total + len(line) + 1 > max_chars:
             break
         out_lines.append(line)
@@ -782,30 +830,94 @@ def is_bogus_regression_note(note: str) -> bool:
     return int(now_digits) >= int(prev_s)
 
 
-def is_stale_regression_note(note: str, file_text: str) -> bool:
-    """A `[regression]` note whose recorded body is no longer the file's
-    current body describes a SUPERSEDED attempt — its causal claim ("this
-    body broke those tests") cannot bind the model's next attempt. Retire it
-    from prompts (the note stays on disk). `file_text` empty → keep (no
-    evidence either way)."""
-    if not file_text or not note.lstrip().startswith("[regression]"):
-        return False
+def regression_note_body_probe(note: str) -> str:
+    """The first substantial line of a `[regression]` note's recorded body, or
+    "" when the note carries no body that can be checked against a file.
+
+    "" is the interesting case and it is not rare: the writer emits
+    ``Body applied:\\n<body>\\nRe-implement `fn` so <tests> keep passing.``
+    with the body's own indentation, and until the round trip was fixed
+    `render_with_notes` + `parse_note_bullets` discarded every body line that
+    started at column 0 — a Rust body opens `#[cold]` or `pub(crate) fn`. The
+    next append is a read-modify-write, so the mutilated note overwrote the
+    intact one on disk. Measured on `tmp/anyhow/functional_requirements_anyhow.md`
+    2026-08-22: of 29 `[regression]` notes, 0 kept the `Re-implement` line, 14
+    kept no body line at all, 15 kept only whichever line happened to be
+    indented. Whether a note survived was decided by that accident alone."""
+    if not note.lstrip().startswith("[regression]"):
+        return ""
     body = ""
     for marker in ("Body applied:", "WRONG (this body broke those tests):"):
         i = note.find(marker)
         if i != -1:
             body = note[i + len(marker):]
             break
-    if not body:
-        return False
     for ln in body.splitlines():
         probe = ln.strip()
-        if len(probe) >= 12:
-            # first substantial body line; ignore the trailing instruction line
-            if probe.startswith("Re-implement"):
-                return False
-            return probe[:60] not in file_text
-    return False
+        # The trailing instruction line is not body text.
+        if len(probe) >= 12 and not probe.startswith("Re-implement"):
+            return probe
+    return ""
+
+
+def regression_note_subject(note: str) -> str:
+    """The fn a `[regression]` note blames, from its ``after `fn` was written``
+    clause; "" for any other note."""
+    if not note.lstrip().startswith("[regression]"):
+        return ""
+    i = note.find("after `")
+    if i == -1:
+        return ""
+    j = note.find("`", i + len("after `"))
+    return note[i + len("after `"):j] if j != -1 else ""
+
+
+def escalation_superseded_notes(
+    notes: list[str], escalated_fns: frozenset[str],
+) -> list[str]:
+    """`[regression]` notes blaming a fn this sweep has graded ESCALATED.
+
+    The grade says the loop MEASURED that rewriting this unit's consumers moved
+    no verdict, so the prompt orders it rewritten; the note says a past rewrite
+    of it cost N tests. Two instructions in one prompt is not a steer, and the
+    measurement is both newer and checkable where the note's blame is spread
+    over every fn of a batch. This is the second channel of the same collision
+    the retrospectives store had — that one is suspended at the fire
+    (`suspend_futile_guidance`), and leaving this one live is what run
+    `263257-9e46def4` iter 3 (2026-08-22) measured: five escalated constructors
+    dispatched, five returned byte-identical, the reply's reasoning citing the
+    notes."""
+    if not escalated_fns:
+        return []
+    return [n for n in notes
+            if (s := regression_note_subject(n)) and s in escalated_fns]
+
+
+def is_stale_regression_note(note: str, file_text: str) -> bool:
+    """A `[regression]` note whose recorded body is no longer the file's
+    current body describes a SUPERSEDED attempt — its causal claim ("this
+    body broke those tests") cannot bind the model's next attempt. Retire it
+    from prompts (the note stays on disk).
+
+    A note with NO recoverable body is retired too, and that is a deliberate
+    inversion of the old "no evidence either way → keep". The rule reads
+    differently for a note that ADVISES than for one that ACCUSES: the whole
+    content of a `[regression]` note is "THIS body broke those tests", so with
+    the body gone the claim cannot be checked against the tree, cannot be acted
+    on, and — because the check that retires it is exactly the one that needs
+    the body — can never be retired either. Run `263257-9e46def4` iter 3
+    (2026-08-22) dispatched `src/error.rs::construct_from_adhoc` and
+    `construct_from_display` under the ESCALATED grade, i.e. told to rewrite,
+    with body-less notes in the same prompt saying a rewrite of each had cost
+    83→25; the reply's own reasoning cites them three times and returns both
+    bodies byte-identical. `file_text` empty still keeps a note that HAS a
+    body — there the comparison, not the claim, is what is missing."""
+    probe = regression_note_body_probe(note)
+    if not probe:
+        return note.lstrip().startswith("[regression]")
+    if not file_text:
+        return False
+    return probe[:60] not in file_text
 
 
 def rejected_symbols_in_errors(error_text: str) -> frozenset[str]:

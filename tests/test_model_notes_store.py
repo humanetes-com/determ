@@ -101,3 +101,43 @@ def test_extract_self_note_retries_on_empty(tmp_path) -> None:
     fake = _FakeAsk("", note)  # first empty → think=False retry
     assert _store(ask=fake).extract_self_note("fb", "err", "fix") == note
     assert fake.calls == 2
+
+
+def test_escalated_grade_drops_the_regression_note_from_the_prompt(tmp_path) -> None:
+    """Slice C, at the seam the prompt is actually built from.
+
+    The `[regression]` note and the ESCALATED grade land in the same prompt and
+    say opposite things about the same fn. The measurement is newer, it is
+    scoped to one unit where the note's blame is spread over a whole batch, and
+    the prompt's instruction is built from it — so the note goes."""
+    note = ("[regression] In error.rs, after `construct_from_adhoc` was written, "
+            "previously-passing test(s) FAILED: t (cluster pass count dropped "
+            "83→25). Body applied:\n"
+            "    Self::construct_from_std(MessageError(message), backtrace)")
+    other = "I tried X because Y; use Z instead of X in this crate"
+    fr = _fr(tmp_path, [note, other])
+    tree = "fn construct_from_adhoc() { Self::construct_from_std(MessageError(message), backtrace) }"
+    logged: list[str] = []
+    store = _store(log=lambda m, *a, **k: logged.append(m))
+
+    ungraded = store.filter_for_prompt(fr, "src/error.rs", "construct_from_adhoc",
+                                       file_text=tree)
+    assert "construct_from_adhoc` was written" in ungraded      # live without the grade
+    graded = store.filter_for_prompt(fr, "src/error.rs", "construct_from_adhoc",
+                                     file_text=tree,
+                                     escalated_fns=frozenset({"construct_from_adhoc"}))
+    assert "construct_from_adhoc` was written" not in graded
+    assert other in graded                                      # unrelated notes stay
+    assert any("ESCALATED" in m for m in logged)                # the drop is reported
+
+
+def test_bodyless_regression_note_never_reaches_a_prompt(tmp_path) -> None:
+    """Slice A end to end: no grade needed, no FR rewrite needed."""
+    bodyless = ("[regression] In error.rs, after `construct_from_display` was "
+                "written, previously-passing test(s) FAILED: t (cluster pass "
+                "count dropped 83→25). Body applied:")
+    fr = _fr(tmp_path, [bodyless, "I tried X because Y; use Z instead here"])
+    out = _store().filter_for_prompt(fr, "src/error.rs", "construct_from_display",
+                                     file_text="fn construct_from_display() {}")
+    assert "[regression]" not in out
+    assert "I tried X" in out

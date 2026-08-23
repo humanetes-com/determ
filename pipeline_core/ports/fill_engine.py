@@ -104,6 +104,7 @@ class Cargo(Protocol):
     ) -> U2Verdict: ...
     def test_regression_baseline(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
+        raw_sink: list[str] | None = ...,
     ) -> TestStateReading | None: ...
     def test_regression_gate(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
@@ -251,6 +252,7 @@ class ImplFillPath(Protocol):
         cluster: BuildCluster | None, check_cmd: str,
         cluster_env: dict[str, str], fr_path: Path | None,
         tdd_frontier_keys: set[FnLocator] | None,
+        escalated_keys: frozenset[FnLocator] = ...,
         tdd_frontier_tests: FailureFrontier | None, tdd_test_cmd: str | None,
         parallelism: int = 1,
         crash_evidence: dict[FnLocator, str] | None = None,

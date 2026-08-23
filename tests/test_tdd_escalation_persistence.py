@@ -59,7 +59,8 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
         batches.append(tuple(kw.get("tdd_frontier_keys") or ()))
         return ClusterFillResult(attempts=1)
 
-    def _escalate(src_dir: Path, tname: str, units: set[FnLocator]):
+    def _escalate(src_dir: Path, tname: str, units: set[FnLocator],
+                  producers_out=None):
         escalations.append((tname, frozenset(units)))
         return {_PROD: {tname}}
 

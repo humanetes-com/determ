@@ -40,9 +40,56 @@ def test_slice_stops_at_next_top_heading_not_subheading() -> None:
     assert "## Other Section" in body and "tail" in body
 
 
-def test_parse_bullets_joins_continuations() -> None:
+def test_parse_bullets_keeps_continuations_as_lines() -> None:
+    # NEWLINE-joined, not space-joined: a note's continuation is usually a Rust
+    # body, and one run-on line is not code the model can read.
     _, notes = slice_model_notes(f"{H}\n\n- first line\n  continued\n\n- second\n")
-    assert parse_note_bullets(notes) == ["first line continued", "second"]
+    assert parse_note_bullets(notes) == ["first line\ncontinued", "second"]
+
+
+def test_parse_bullets_keeps_column_zero_body_lines() -> None:
+    # THE ROUND-TRIP DEFECT. A Rust body opens at column 0 (`#[cold]`,
+    # `pub(crate) fn …`). The old reader kept only lines starting with two
+    # spaces and dropped the rest silently, so every `[regression]` note lost
+    # its body on the next append (a read-modify-write) and became an
+    # unretirable accusation. This is the pin that fails on the pre-fix reader.
+    # Column 0 is the shape the OLD writer put on disk — it rendered the note
+    # verbatim after `- `, so the body kept its own indentation.
+    section = (f"{H}\n\n- [regression] In error.rs, after `f` was written. "
+               "Body applied:\n"
+               "#[cold]\n"
+               "pub(crate) fn f<M>(m: M) -> Self {\n"
+               "    Self::g(MessageError(m))\n"
+               "}\n"
+               "Re-implement `f` so t keep passing.\n")
+    (note,) = parse_note_bullets(section)
+    assert "#[cold]" in note
+    assert "pub(crate) fn f<M>(m: M) -> Self {" in note
+    assert "Re-implement `f` so t keep passing." in note
+
+
+def test_multiline_note_round_trips_through_the_fr_file() -> None:
+    # Every FR append is load → dedup → save, so one lossy read destroys the
+    # body permanently. Ten cycles must be a fixed point.
+    note = ("[regression] In error.rs, after `f` was written. Body applied:\n"
+            "#[cold]\n"
+            "pub(crate) fn f<M>(m: M) -> Self {\n"
+            "    Self::g(MessageError(m))\n"
+            "}\n"
+            "Re-implement `f` so t keep passing.")
+    text = "# FR\n\nbody\n"
+    for _ in range(10):
+        text = render_with_notes(text, [note])
+        _, section = slice_model_notes(text)
+        assert parse_note_bullets(section) == [note]
+
+
+def test_parse_bullets_does_not_swallow_a_heading() -> None:
+    # `#` + SPACE is markdown structure and closes the note; `#[cold]` is a
+    # Rust attribute and is body — the two must not be confused.
+    _, notes = slice_model_notes(
+        f"{H}\n\n- a\n### sub\n- b\n")
+    assert parse_note_bullets(notes) == ["a", "b"]
 
 
 def test_preserve_reattaches_old_notes() -> None:

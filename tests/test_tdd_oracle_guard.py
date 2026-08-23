@@ -627,7 +627,7 @@ def test_deterministic_unattributed_crash_synthesizes_chain_blame(
                 retrigger=_retrig,
                 reverse_map={"t3": {("src/error.rs", "new")}},
                 localize=lambda *a, **k: (_unattributed_uaf_site(),),
-                escalate=lambda src, tname, units: {
+                escalate=lambda src, tname, units, producers_out=None: {
                     FnLocator("src/error.rs", "construct_from_std"): {tname}},
                 fill=_fill, logs=logs)
 
@@ -756,7 +756,7 @@ def test_the_chain_is_derived_from_the_crashed_test_not_only_the_vanished_set(
     escalated: list[str] = []
     events: list[tuple[str, dict]] = []
 
-    def _escalate(src, tname, units):
+    def _escalate(src, tname, units, producers_out=None):
         escalated.append(tname)
         return {FnLocator("src/error.rs", f"producer_of_{tname}"): {tname}}
 
@@ -801,7 +801,7 @@ def test_a_double_drop_narrows_the_pack_to_the_destruction_family(
                 attribution_kwargs=[], checkpoints=[], events=events,
                 reverse_map={},
                 localize=lambda *a, **k: (_double_drop_site(),),
-                escalate=lambda src, tname, units: {
+                escalate=lambda src, tname, units, producers_out=None: {
                     FnLocator("src/error.rs", f"construct_{i}"): {tname}
                     for i in range(20)},
                 enumerate_fns=lambda src: [
@@ -851,7 +851,7 @@ def test_without_the_fn_enumerator_the_chain_is_unchanged(
                 attribution_kwargs=[], checkpoints=[], events=events,
                 reverse_map={},
                 localize=lambda *a, **k: (_double_drop_site(),),
-                escalate=lambda src, tname, units: {
+                escalate=lambda src, tname, units, producers_out=None: {
                     FnLocator("src/error.rs", f"construct_{i}"): {tname}
                     for i in range(20)})
 
@@ -893,7 +893,7 @@ def test_no_chain_blame_without_the_unattributed_site(
                 retrigger=_retrig,
                 reverse_map={"t3": {("src/error.rs", "new")}},
                 localize=lambda *a, **k: (),
-                escalate=lambda src, tname, units: {
+                escalate=lambda src, tname, units, producers_out=None: {
                     FnLocator("src/error.rs", "construct_from_std"): {tname}},
                 fill=_fill)
 

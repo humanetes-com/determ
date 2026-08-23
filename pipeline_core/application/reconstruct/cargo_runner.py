@@ -491,7 +491,8 @@ def u2_test_gate(
             return U2Verdict.accept_external_only(_pairs, frozenset(_aborted))
         return U2Verdict.reject(
             frozenset(_aborted) | {f.test_name for f in scoped.failures},
-            _render_u2_abort(_aborted, scoped, err_cap))
+            _render_u2_abort(_aborted, scoped, err_cap),
+            sites=scoped.failures)
     if not scoped.failures:
         # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
         # Carrying the names is what lets the caller's verdict row say so —
@@ -513,7 +514,8 @@ def u2_test_gate(
     detail = _render_u2_reject(blame, err_cap)
     return U2Verdict.reject(
         frozenset(f.test_name for f in blame.self_failures), detail, unjudged,
-        self_passed=frozenset(report.passed & fn_tests))
+        self_passed=frozenset(report.passed & fn_tests),
+        sites=blame.self_failures)
 
 
 def run_check_diag(

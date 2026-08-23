@@ -542,6 +542,10 @@ def run_phase_c_tdd(
     # a traversal that never touched the escalated slice. Only the
     # flat-score guard's stop scheduling pre-empted it.
     escalation_products: dict[str, FiredProduct] = {}
+    #: test -> the PRODUCER subset of its fire (see the fire site below). Lives
+    #: and dies with `escalation_products`, so a dropped product cannot leave a
+    #: stale ESCALATED grade behind.
+    escalation_producers: dict[str, frozenset[FnLocator]] = {}
     last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
     # Self-contained snapshot for the exhaustion-reset gate below — deliberately
@@ -757,6 +761,15 @@ def run_phase_c_tdd(
     # tdd_floor.py::cursor_carry`). Same lifetime as `_pass_landed` — cleared
     # with the cursor, persisted with it, reset when the pass closes.
     _pass_declined: set[FnLocator] = set()
+    # Units dispatched this pass under the ESCALATED grade. An escalated unit
+    # that comes back unchanged is NOT a declined re-check: its instruction was
+    # "rewrite", so "unchanged" is a failed try and the flat-sweep refutation
+    # must count it as one. Run 55484-84c991f1 (2026-08-22) filed
+    # `construct`, `construct_from_std`, `construct_from_adhoc` and
+    # `construct_from_display` as "INFERRED, unchanged (not a failed try)" at
+    # iter 3 while the prompt that dispatched them graded every one ESCALATED
+    # — the audit split by conviction alone and could not see the grade.
+    _pass_escalated: set[FnLocator] = set()
     # The frontier the current pass OPENED over. A traversal is over this set,
     # not over the frontier as it stands now: escalation and crash evidence add
     # units mid-pass, and a closure condition that waits for them cannot be met
@@ -1961,6 +1974,7 @@ def run_phase_c_tdd(
             _pass_attempted.clear()
             _pass_landed.clear()
             _pass_declined.clear()
+            _pass_escalated.clear()
             _pass_cohort = None
             _resumed_cursor_window = frozenset()
         # `best_metric` is -inf until some iter improves, and a compile-broken
@@ -2534,6 +2548,7 @@ def run_phase_c_tdd(
                 frontier.setdefault(k, set()).update(ts)
             for tname, _why in _sustain.dropped:
                 del escalation_products[tname]
+                escalation_producers.pop(tname, None)
                 deps.log(
                     f"  {tag} [attribution/escalate] {tname}: escalation "
                     "product dropped — "
@@ -2599,12 +2614,21 @@ def run_phase_c_tdd(
                                     for u in _stub_accessors)})
                         prev_test_units[tname] = frozenset(units)
                         continue
+                    _fired_producers: set[FnLocator] = set()
                     extra = deps.escalate_to_producers(
-                        src_dir, tname, set(units))
+                        src_dir, tname, set(units), _fired_producers)
                     if extra:
                         escalation_products[tname] = (
                             frozenset(units),
                             {k: set(ts) for k, ts in extra.items()})
+                        # Kept APART from the merged additions above: only the
+                        # producer subset earns the ESCALATED grade in the
+                        # prompt. A traversal step was named because a futile
+                        # accessor calls it, which is not a measurement about
+                        # it, and the merged set also carries the accessors'
+                        # own file.
+                        escalation_producers[tname] = frozenset(
+                            _fired_producers)
                         _futile_fired.update(units)
                         _futile_fired_tests.add(tname)
                         # The escalation IS new evidence about its targets: a
@@ -2677,6 +2701,32 @@ def run_phase_c_tdd(
                         "accessors this sweep's escalation declared futile — "
                         "a record advising the rewrite futility just measured "
                         "as changing nothing may not steer the next one.")
+                # …and on the PRODUCERS the fire names, which the accessor-only
+                # suspension above never covered. The prompt is about to tell
+                # them "the defect is in what this fn constructs — rewrite it";
+                # their stored records say the opposite in the model's own
+                # words. On the live tree
+                # `src/error.rs::construct_from_std::Error` carries
+                # WRONG_TYPE_CHOICE with the guidance "Build a single static
+                # per-E `ErrorVTable` as before, then construct the erased
+                # `ErrorImpl` …" — the delegation shape the escalation exists
+                # to get rewritten. Two instructions in one prompt is not a
+                # steer, and the retro one has the history.
+                _esc_targets = frozenset(
+                    k for ks in escalation_producers.values() for k in ks)
+                if _esc_targets:
+                    _esc_susp = deps.suspend_futile_guidance(
+                        project_dir, src_dir, _esc_targets,
+                        cluster.name, frozenset(_futile_fired_tests))
+                    if _esc_susp:
+                        deps.log(
+                            f"  {tag} [attribution/escalate] suspended stored "
+                            f"guidance on {len(_esc_susp)} ESCALATED "
+                            "producer(s) — the prompt now states the "
+                            "measurement that their consumers' rewrites moved "
+                            "no verdict, and a stored record advising the "
+                            "shape that measurement convicts may not steer "
+                            "against it: " + ", ".join(sorted(_esc_susp)[:4]))
 
         # Union remaining cluster-active stubs into the frontier so a helper
         # that no failing test attributes directly (called only transitively)
@@ -3568,6 +3618,7 @@ def run_phase_c_tdd(
                     _pass_attempted = set()
                     _pass_landed = set()
                     _pass_declined = set()
+                    _pass_escalated = set()
                     _pass_cohort = None
                     _resumed_cursor_window = frozenset()
                     _unmoved = _unmoved.moved()
@@ -3818,6 +3869,13 @@ def run_phase_c_tdd(
         _bodies_before = (
             unit_bodies(deps.enumerate_fns(target_src_dir) or [], frontier_keys)
             if deps.enumerate_fns is not None else None)
+        # Only the units the escalation MEASURED, scoped to the batch exactly
+        # as the two frontier projections are. Computed once here because the
+        # landed-change audit below grades an unchanged escalated unit as a
+        # failed try, and it must read the same set the prompt did.
+        _batch_escalated = frozenset(
+            k for ks in escalation_producers.values() for k in ks
+            if k in frontier_keys)
         # Drive the per-fn fill machinery with this frontier. The engine runs its
         # own graceful-stop checks (worker pools included), so this is where a
         # stop lands in practice — it owns the hours of the iter — and it exits by
@@ -3850,6 +3908,7 @@ def run_phase_c_tdd(
                     # assertion), so a re-fill prompt can show WHY the test
                     # failed instead of asserting that it did.
                     evidence=failure_evidence_by_test(output)),
+                escalated_keys=_batch_escalated,
                 tdd_test_cmd=test_cmd,     # scoped cluster test cmd
                 skip_end_pass_test=True,
                 crash_evidence=crash_texts or None,
@@ -3933,18 +3992,23 @@ def run_phase_c_tdd(
                     if _ledger_cache is not None:
                         _ledger_cache.extend(_new_rows)
             _pass_landed |= _batch_landed
-            # An unchanged unit that NO failing test convicts (reached by
-            # inference: escalation producer, traversal step) was told to
-            # return a right body unchanged — `[REFILL?]` — so its
+            # An unchanged unit that NO failing test convicts and that the
+            # escalation did not MEASURE (a traversal step, a name match) was
+            # told to return a right body unchanged — `[REFILL?]` — so its
             # "unchanged" is the instructed outcome, not a failed try, and
-            # the refutation reading must not count it as one. The split is
-            # by conviction because that is the distinction the record
-            # holds; the body comparison cannot see WHY nothing landed.
+            # the refutation reading must not count it as one. An ESCALATED
+            # unit is the opposite case: its instruction was "rewrite", so an
+            # unchanged body is a failed try, and it is reported under its
+            # own name so the batch line says which grade declined. The body
+            # comparison cannot see WHY nothing landed; the grades can.
             _batch_unchanged = frontier_keys - _batch_landed
+            _batch_esc_unchanged = _batch_unchanged & _batch_escalated
             _batch_declined = frozenset(
-                k for k in _batch_unchanged if not convicting.get(k))
+                k for k in _batch_unchanged
+                if not convicting.get(k) and k not in _batch_escalated)
             _batch_unchanged -= _batch_declined
             _pass_declined |= _batch_declined
+            _pass_escalated |= _batch_escalated
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: landed-change audit — "
                 f"{len(_batch_landed)} of {len(frontier_keys)} dispatched "
@@ -3954,7 +4018,12 @@ def run_phase_c_tdd(
                    if _batch_unchanged else "")
                 + ("; INFERRED, unchanged (not a failed try): " + ", ".join(
                     sorted(f"{k.file}::{k.fn_name}" for k in _batch_declined)[:12])
-                   if _batch_declined else "") + ".")
+                   if _batch_declined else "")
+                + ("; ESCALATED, unchanged (a FAILED try — the instruction "
+                   "was rewrite): " + ", ".join(sorted(
+                       f"{k.file}::{k.fn_name}"
+                       for k in _batch_esc_unchanged)[:12])
+                   if _batch_esc_unchanged else "") + ".")
             deps.emit("phase_c.tdd.landed_change", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "dispatched": len(frontier_keys),
@@ -3978,7 +4047,8 @@ def run_phase_c_tdd(
                 # qualifies.
                 _declined_pass = frozenset(
                     k for k in _unchanged_pass
-                    if k in _pass_declined or not convicting.get(k))
+                    if (k in _pass_declined or not convicting.get(k))
+                    and k not in _pass_escalated)
                 _unchanged_pass -= _declined_pass
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: PASS AUDIT — "
@@ -4007,6 +4077,7 @@ def run_phase_c_tdd(
         if _batch.completes_pass:
             _pass_landed = set()
             _pass_declined = set()
+            _pass_escalated = set()
         last_newly_filled = newly_filled   # hook 3: next iter attributes regressions to these
         for k in newly_filled:
             recently_filled.append(k)

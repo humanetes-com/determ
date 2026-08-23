@@ -50,7 +50,7 @@ def _process(monkeypatch, tmp_path: Path, floor: dict,
 
     logs = replay(load_walk(_WALK), monkeypatch, tmp_path, events=events,
                   gpu_guard="2", max_stalls="9", floor=floor,
-                  escalate=lambda src, t, units: (
+                  escalate=lambda src, t, units, producers_out=None: (
                       escalations.append(t) or {_PROD: {t}}),
                   fill=_fill)
     return logs, batches, escalations
