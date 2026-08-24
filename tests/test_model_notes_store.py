@@ -53,10 +53,22 @@ def test_append_dedup(tmp_path) -> None:
     assert s.append(fr, "tiny") is False
 
 
+def _prov(**kw):
+    from pipeline_core.domain.model_notes import NoteProvenance
+    base = {"unit": "src/a.rs::foo", "error_codes": ("E0599",),
+            "rejected_symbols": ("uninit_array",),
+            "failed_body_hash": "ab" * 8}
+    base.update(kw)
+    return NoteProvenance(**base)
+
+
 def test_append_tags_error_codes(tmp_path) -> None:
+    # A lesson is durable only WITH its premise (204 N1) — provenance rides
+    # beside the prose here so the tag pin stays about the tag.
     s = _store()
     fr = _fr(tmp_path, [])
-    s.append(fr, "use the proper construct path not the raw new call here", {"E0599"})
+    s.append(fr, "use the proper construct path not the raw new call here",
+             {"E0599"}, provenance=_prov())
     assert s.load(fr)[0].startswith("[E0599]")
 
 
@@ -141,3 +153,140 @@ def test_bodyless_regression_note_never_reaches_a_prompt(tmp_path) -> None:
                                      file_text="fn construct_from_display() {}")
     assert "[regression]" not in out
     assert "I tried X" in out
+
+
+# ---------------------------------------------------------------------------
+# 204 — the notes-channel contract: N1 (premise kept at write time, else
+# run-scoped), N2 (a measured producer grade outranks every remembered
+# [E0xxx] lesson), N3 (premise-checked retirement on disk).
+# The live instance: the `[E0425]` lesson below sat at line 1213 of prompt
+# `f4d593f8…` (run `40938-f4e8e94b`) while the write list ordered the very
+# vtable it forbids; the three literal constructors came back
+# `ESCALATED, unchanged`.
+# ---------------------------------------------------------------------------
+
+E0425_LESSON = (
+    "[E0425] I tried building the error with an unsafe constructor and a "
+    "manually referenced ad-hoc vtable because the vtable value isn't in "
+    "scope, use the std-compatible construction helper that omits the "
+    "vtable instead of referencing a manual one.")
+
+
+def test_n1_a_lesson_without_provenance_is_run_scoped(tmp_path) -> None:
+    """No premise recorded → the lesson steers THIS run's prompts and never
+    reaches disk, so it cannot become immortal standing guidance."""
+    logs: list[str] = []
+    s = _store(log=logs.append)
+    fr = _fr(tmp_path, [])
+    assert s.append(fr, "I tried a manual vtable reference, use the helper "
+                        "construction path instead", {"E0425"}) is True
+    assert s.load(fr) == []                       # nothing durable
+    assert any("run-scoped" in ln for ln in logs)
+    out = s.filter_for_prompt(fr, "src/error.rs", "context")
+    assert "manual vtable reference" in out       # but it does steer this run
+    # a fresh store (a new process) never sees it
+    assert _store().filter_for_prompt(fr, "src/error.rs", "context") == ""
+
+
+def test_n1_a_lesson_with_provenance_is_durable_and_recorded(tmp_path) -> None:
+    s = _store()
+    fr = _fr(tmp_path, [])
+    assert s.append(fr, "I tried a manual vtable reference, use the helper "
+                        "construction path instead", {"E0425"},
+                    provenance=_prov(rejected_symbols=("vtable",))) is True
+    assert len(s.load(fr)) == 1
+    sidecar = fr.with_name(fr.name + ".note_provenance.json")
+    assert sidecar.exists() and "vtable" in sidecar.read_text()
+
+
+def test_n2_the_producer_grade_keeps_every_lesson_out_of_the_prompt(tmp_path) -> None:
+    """The blanket over the class, not a filter on one note: the live prompt
+    carried nine numbered lessons besides the vtable one, and legacy prose
+    carries no premise a narrower rule could check (204.3)."""
+    logs: list[str] = []
+    s = _store(log=logs.append)
+    fr = _fr(tmp_path, [
+        E0425_LESSON,
+        "[E0308] I tried returning a reference, return the owned value.",
+        "plain prose advice with no code tag that must survive the drop",
+    ])
+    out = s.filter_for_prompt(fr, "src/error.rs", "construct_from_context",
+                              escalated_grade="REWRITE WITH THE PRODUCER")
+    assert "[E0425]" not in out and "[E0308]" not in out
+    assert "plain prose advice" in out
+    assert any("kept out of the prompt" in ln
+               and "REWRITE WITH THE PRODUCER" in ln
+               for ln in logs), "the exclusion must be logged with its grade"
+    # nothing was retired: the lessons keep steering ordinary fills
+    assert any(n.startswith("[E0425]") for n in s.load(fr))
+
+
+def test_n2_negative_control_no_grade_keeps_the_lessons(tmp_path) -> None:
+    """Byte-identical `<MODEL_NOTES>` on the pre-fix shape: a prompt whose
+    write list carries no producer grade still renders the `[E0425]` lesson —
+    proof the exclusion bites only where the measured grade stands."""
+    s = _store()
+    fr = _fr(tmp_path, [E0425_LESSON])
+    with_flag = s.filter_for_prompt(fr, "src/error.rs", "construct_from_std",
+                                    escalated_grade="")
+    assert "[E0425]" in with_flag
+    assert with_flag == _store().filter_for_prompt(
+        fr, "src/error.rs", "construct_from_std")
+
+
+def test_n3_a_void_premise_retires_the_lesson_on_disk(tmp_path) -> None:
+    """The rejected symbol is now writable → the premise the lesson was
+    learned under is gone, and the retirement is durable and logged."""
+    logs: list[str] = []
+    s = _store(log=logs.append)
+    fr = _fr(tmp_path, [])
+    s.append(fr, "I tried referencing the vtable value directly, use the "
+                 "helper construction path instead", {"E0425"},
+             provenance=_prov(rejected_symbols=("context_downcast",)))
+    assert len(s.load(fr)) == 1
+    out = s.filter_for_prompt(
+        fr, "src/error.rs", "construct_from_context",
+        writable_fns=frozenset({"context_downcast", "construct_from_context"}))
+    assert "vtable value" not in out
+    assert s.load(fr) == []                       # retired ON DISK
+    assert any("VOID premise" in ln and "context_downcast" in ln
+               for ln in logs)
+    sidecar = fr.with_name(fr.name + ".note_provenance.json")
+    assert "context_downcast" not in sidecar.read_text()
+
+
+def test_n3_negative_control_an_absent_symbol_keeps_the_lesson(tmp_path) -> None:
+    """Symbols still missing from tree and write list → the premise stands,
+    the lesson survives — and a legacy note with no provenance is never
+    retired here (N2 is the only sound rule for it)."""
+    s = _store()
+    fr = _fr(tmp_path, [])
+    s.append(fr, "I tried referencing the vtable value directly, use the "
+                 "helper construction path instead", {"E0425"},
+             provenance=_prov(rejected_symbols=("nonexistent_symbol",)))
+    s.filter_for_prompt(fr, "src/error.rs", "construct_from_context",
+                        writable_fns=frozenset({"construct_from_context"}))
+    assert any("vtable value" in n for n in s.load(fr))
+    # legacy prose (no provenance): untouchable by N3, whatever is writable
+    fr2 = tmp_path / "functional_requirements_legacy.md"
+    fr2.write_text("# FR\n\nspec.\n\n" + HEADER + "\n\n- " + E0425_LESSON + "\n")
+    s.filter_for_prompt(fr2, "src/error.rs", "construct_from_context",
+                        writable_fns=frozenset({"construct_from_std"}))
+    assert s.load(fr2) == [E0425_LESSON]
+
+
+def test_n2_fires_on_the_per_block_fallback_grade_and_logs_it(tmp_path) -> None:
+    """CHANNEL-level, not route-level: the previous run's file-first
+    compile-failed twice and fell back to per-block prompts that re-injected
+    the `[E0425]` lesson beside the same ESCALATED rewrite instruction (run
+    `40938-f4e8e94b`, iter 2). The per-block caller passes the plain grade;
+    the log must name the grade that was actually passed — a bypass-only
+    context.rs prompt must not be logged as an installable offer."""
+    logs: list[str] = []
+    s = _store(log=logs.append)
+    fr = _fr(tmp_path, [E0425_LESSON])
+    out = s.filter_for_prompt(fr, "src/error.rs", "construct_from_context",
+                              escalated_grade="ESCALATED REWRITE")
+    assert "[E0425]" not in out
+    assert any("ESCALATED REWRITE" in ln and "kept out" in ln for ln in logs)
+    assert not any("REWRITE WITH THE PRODUCER" in ln for ln in logs)

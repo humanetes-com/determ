@@ -15,6 +15,8 @@ from pipeline_core.domain.installable_fns import (
     fn_pointer_shape,
     installable_fns,
     offer_producers,
+    producer_bypasses,
+    wrapper_producers,
 )
 from pipeline_core.domain.models import FieldRecord, FnLocator, TypeRecord
 
@@ -206,3 +208,149 @@ def test_the_extractors_token_spaced_field_types_match_verbatim_declarations() -
         "object_ref": "object_ref",
         "no_backtrace": "object_backtrace",
     }
+
+
+# ---------------------------------------------------------------------------
+# The closure's OTHER population: call sites that construct the wrapper the
+# producer erases without invoking the producer (`producer_bypasses`).
+# Bodies below are the LIVE tree's, verbatim shapes
+# (tmp/anyhow/.skeleton-filled/stable, 2026-08-24): the census the review of
+# THE PLAN demanded as the negative control — `new`, `From::from` and
+# `construct` must NOT be re-admitted, and the extra hits must be zero.
+# ---------------------------------------------------------------------------
+
+WRAPPER_TY = TypeRecord(file=REL, kind="struct", name="ContextError", fields=())
+
+CONTEXT_PRODUCER = {
+    "file": REL, "fn_name": "construct_from_context", "container": "impl Error",
+    "sig_text": "",
+    "body_text": (
+        "let vtable = Box::leak(Box::new(ErrorVTable {\n"
+        "    object_drop: object_drop::<crate::error::ContextError<C, E>>,\n"
+        "    object_downcast: context_downcast::<C, E>,\n"
+        "    object_drop_rest: context_drop_rest::<C, E>,\n"
+        "}));\n"
+        "unsafe { Self::construct(crate::error::ContextError { context, error }"
+        ", vtable, backtrace) }"),
+}
+
+ERROR_RS_CALLERS = [
+    # THE bypass: run `40938-f4e8e94b`'s thinking named it, the write list
+    # omitted it, the sweep moved nothing (`error.rs:297` on the live tree).
+    {"file": REL, "fn_name": "context", "container": "impl Error",
+     "sig_text": "", "body_text":
+         "Self::new(crate::error::ContextError { context, error: self })"},
+    # Generic path itself — constructs no wrapper literal. Re-admitting it
+    # would re-buy the accessor slice the record convicted (199.21).
+    {"file": REL, "fn_name": "new", "container": "impl Error",
+     "sig_text": "", "body_text":
+         "let bt = backtrace_if_absent!(&error);\n"
+         "Self::construct_from_std(error, bt)"},
+    {"file": REL, "fn_name": "from", "container": "impl<E> From<E> for Error",
+     "sig_text": "", "body_text": "Self::new(error)"},
+    # Takes the wrapper as a PARAMETER; constructs only ErrorImpl.
+    {"file": REL, "fn_name": "construct", "container": "impl Error",
+     "sig_text": "", "body_text":
+         "let inner = Box::new(ErrorImpl { vtable, backtrace, _object: error });\n"
+         "Error { inner: Own::new(inner) }"},
+    # Calls the producer — the correct shape must never be re-listed.
+    {"file": REL, "fn_name": "wrapped", "container": "impl Error",
+     "sig_text": "", "body_text":
+         "Self::construct_from_context(context, error, backtrace)"},
+]
+
+CTX = "src/context.rs"
+CONTEXT_RS_CALLERS = [
+    # Both `ext_context` impls route ContextError through `Error::new` — the
+    # path `tests/test_context.rs::make_chain` actually takes, so the five
+    # failing downcast pairs never even reach `Error::context` (measured
+    # 2026-08-24, live tree `context.rs:24`/`:32`).
+    {"file": CTX, "fn_name": "ext_context", "container": "impl<E> StdError for E",
+     "sig_text": "", "body_text":
+         "crate::Error::new(crate::error::ContextError { context, error: self })"},
+    {"file": CTX, "fn_name": "ext_context", "container": "impl StdError for Error",
+     "sig_text": "", "body_text":
+         "crate::Error::new(crate::error::ContextError { context, error: self })"},
+    # Delegates to ext_context; constructs nothing itself.
+    {"file": CTX, "fn_name": "context",
+     "container": "impl<T, E> Context<T, E> for Result<T, E>",
+     "sig_text": "", "body_text":
+         "match self { Ok(v) => Ok(v), Err(e) => Err(e.ext_context(context)) }"},
+]
+
+ALL_RECORDS = [CONTEXT_PRODUCER, PRODUCER, *ERROR_RS_CALLERS,
+               *CONTEXT_RS_CALLERS, *FREE_RECS]
+ALL_TYPES = [VTABLE, WRAPPER_TY]
+MEASURED = frozenset({FnLocator(REL, "construct_from_context"),
+                      FnLocator(REL, "construct_from_std")})
+
+
+def test_the_wrapper_relation_requires_a_typed_producer() -> None:
+    """`construct_from_context` instantiates its table at `ContextError` — a
+    crate nominal type — so it IS a typed producer of that wrapper.
+    `construct_from_std` instantiates at the generic parameter `E`, which
+    names every type and therefore none: the `type_production` discipline,
+    and the type check the review demanded be real."""
+    rels = wrapper_producers(ALL_RECORDS, ALL_TYPES, MEASURED)
+    assert rels == (("ContextError", "construct_from_context", REL),)
+    std_only = frozenset({FnLocator(REL, "construct_from_std")})
+    assert wrapper_producers(ALL_RECORDS, ALL_TYPES, std_only) == ()
+
+
+def test_the_census_flags_exactly_the_bypassing_call_site() -> None:
+    """On the live error.rs shapes: `context` and nothing else. `new` and
+    `From::from` construct no wrapper literal, `construct` builds ErrorImpl
+    (not a wrapper any producer erases), and a body that CALLS the producer
+    is the correct shape, not a bypass. Extra hits: zero."""
+    got = producer_bypasses(ALL_RECORDS, ALL_TYPES, MEASURED, REL)
+    assert [(b.fn_name, b.wrapper, b.producer, b.same_file) for b in got] == [
+        ("context", "ContextError", "construct_from_context", True)]
+    assert got[0].container == "impl Error"
+
+
+def test_the_bypass_crosses_files_because_the_defect_does() -> None:
+    """`make_chain` builds BOTH wraps through `context.rs::ext_context`, so a
+    closure bound to the producer's file can never reach the defect's actual
+    call path. Both impls are flagged, the producer's home file is named for
+    the instruction line, and the delegating `Result::context` is not
+    re-admitted (it constructs nothing)."""
+    got = producer_bypasses(ALL_RECORDS, ALL_TYPES, MEASURED, CTX)
+    assert [(b.fn_name, b.container, b.same_file) for b in got] == [
+        ("ext_context", "impl StdError for Error", False),
+        ("ext_context", "impl<E> StdError for E", False)]
+    assert all(b.producer == "construct_from_context"
+               and b.producer_file == REL for b in got)
+
+
+def test_an_accessor_only_measurement_offers_no_bypass() -> None:
+    """NEGATIVE CONTROL (199.21): no typed producer in the measured set — an
+    accessor batch — must offer nothing, in either file."""
+    accessors = frozenset({FnLocator(REL, "downcast"),
+                           FnLocator(REL, "context")})
+    assert producer_bypasses(ALL_RECORDS, ALL_TYPES, accessors, REL) == ()
+    assert producer_bypasses(ALL_RECORDS, ALL_TYPES, accessors, CTX) == ()
+
+
+def test_the_producer_never_convicts_itself() -> None:
+    """`construct_from_context` constructs the wrapper in its own body and
+    does not name itself — the table-builder exclusion is what keeps it out."""
+    got = producer_bypasses(ALL_RECORDS, ALL_TYPES, MEASURED, REL)
+    assert all(b.fn_name != "construct_from_context" for b in got)
+
+
+def test_producer_name_absence_is_a_token_test() -> None:
+    """A body calling `construct_from_context` must not read as calling a
+    producer named `construct` by substring accident — and vice versa."""
+    ty = TypeRecord(file=REL, kind="struct", name="Wrap", fields=())
+    producer = {"file": REL, "fn_name": "construct", "container": "impl E",
+                "sig_text": "", "body_text":
+                    "let v = Box::leak(Box::new(ErrorVTable {\n"
+                    "    object_drop: object_drop::<Wrap>,\n}));\n"
+                    "Self::install(Wrap { x }, v)"}
+    caller = {"file": REL, "fn_name": "maker", "container": "impl E",
+              "sig_text": "", "body_text":
+                  "Self::constructor(Wrap { x: 1 })"}
+    got = producer_bypasses(
+        [producer, caller], [VTABLE, ty],
+        frozenset({FnLocator(REL, "construct")}), REL)
+    assert [(b.fn_name, b.producer) for b in got] == [("maker", "construct")]

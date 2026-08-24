@@ -40,6 +40,7 @@ when it should not is worse than one that never resumes.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -135,6 +136,20 @@ class TddFloor:
     # record of which is which is per-batch and would otherwise die with the
     # process that made it.
     declined: tuple[str, ...] = ()
+    # The futility evidence's PREMISE, stamped at save time: a content
+    # fingerprint per FILE holding a convicted unit. The grade describes the
+    # TREE — "these accessors' rewrites changed nothing" — not the pipeline
+    # build, so a `code_id` move does not invalidate it; what invalidates it
+    # is the convicted bodies changing (a re-stub, a restore, a layout
+    # re-author). FILE granularity, deliberately: across a stop→fix→relaunch
+    # the tree is untouched so every hash matches, and every path that CAN
+    # change these files between entries is a destruction class where
+    # falling through to re-measure is the correct outcome anyway. The cost
+    # 202.2 measured for lacking this: the identical 7-accessor entry
+    # traversal re-bought on every one of six consecutive `code_id` moves,
+    # ~2 h each, and twice in one evening on the same git tree
+    # (`21368-93f6a589` → `40938-f4e8e94b`, 2026-08-23).
+    futile_files: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {"cluster": self.cluster, "best_pass": self.best_pass,
@@ -144,7 +159,8 @@ class TddFloor:
                 "landed": list(self.landed),
                 "declined": list(self.declined),
                 "futile_units": {t: list(units)
-                                 for t, units in self.futile_units}}
+                                 for t, units in self.futile_units},
+                "futile_files": dict(self.futile_files)}
 
     @staticmethod
     def from_dict(raw: Any) -> TddFloor | None:
@@ -156,6 +172,7 @@ class TddFloor:
             return None
         try:
             _fut = raw.get("futile_units")
+            _ff = raw.get("futile_files")
             return TddFloor(
                 cluster=str(raw["cluster"]),
                 best_pass=int(raw["best_pass"]),
@@ -173,7 +190,10 @@ class TddFloor:
                     (str(t), tuple(str(u) for u in units))
                     for t, units in _fut.items()
                     if isinstance(units, list))
-                    if isinstance(_fut, dict) else ()))
+                    if isinstance(_fut, dict) else ()),
+                futile_files=tuple(sorted(
+                    (str(f), str(h)) for f, h in _ff.items())
+                    if isinstance(_ff, dict) else ()))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -207,14 +227,51 @@ class FloorResume:
     # rather than deferred to the next pass. Reported, never acted on: they
     # are simply absent from `attempted`, so the frontier offers them again.
     released: tuple[str, ...] = ()
-    # The futility evidence, resumed on the CURSOR's identity rule (cluster,
-    # never the code, the oracle or the tree): like the cursor it is a record
-    # of what this cluster's dispatches already established, not a claim
-    # about a score, and it self-validates at the live sweep — the escalation
-    # trigger re-compares it against the CURRENT attribution, so evidence a
+    # The futility evidence: a record of what this cluster's dispatches
+    # already established, resumed on the cursor's cluster identity PLUS a
+    # premise re-check when the code identity moved (`futility_premise_holds`
+    # — the convicted bodies unchanged since the measurement). It
+    # self-validates at the live sweep besides: the escalation trigger
+    # re-compares it against the CURRENT attribution, so evidence a
     # retrigger or restore has invalidated simply fails the equality and
     # escalates nothing. ``None`` means "no evidence to carry".
     futility: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+
+
+def futility_files(
+    futile_units: tuple[tuple[str, tuple[str, ...]], ...],
+) -> frozenset[str]:
+    """The files holding the futility evidence's convicted units — the set a
+    caller must fingerprint before saving a floor or resuming one."""
+    return frozenset(
+        u.partition("::")[0] for _, units in futile_units for u in units
+        if "::" in u)
+
+
+def futility_premise_holds(
+    saved: TddFloor, current_file_hashes: Mapping[str, str],
+) -> bool:
+    """True iff the futility evidence's premise re-checks against the live
+    tree: every file holding a convicted unit was fingerprinted at save time
+    and its content is unchanged now.
+
+    The evidence's claim is about BODIES — "rewriting these accessors changed
+    no verdict" — so the bodies standing unchanged is what licenses carrying
+    the claim across a `code_id` move. An old floor with no fingerprints, a
+    unit whose file was never stamped, or any hash mismatch all answer False:
+    the fall-through is re-measurement, never a stale conviction. (The other
+    half of the premise — the graded tests still fail — is enforced by the
+    escalation trigger itself, which only ever fires for a currently-failing
+    test whose live attribution equals the seeded set.)"""
+    if not saved.futile_units:
+        return False
+    stamped = dict(saved.futile_files)
+    needed = futility_files(saved.futile_units)
+    if not needed or not stamped:
+        return False
+    return all(
+        f in stamped and current_file_hashes.get(f) == stamped[f]
+        for f in needed)
 
 
 def resume_mismatch(
@@ -377,7 +434,7 @@ def cursor_carry(saved: TddFloor, *, cluster: str, code_id: str) -> CursorCarry:
 
 def resume_floor(
     saved: TddFloor | None, *, cluster: str, tree_sha: str, oracle_size: int,
-    code_id: str,
+    code_id: str, current_file_hashes: Mapping[str, str] | None = None,
 ) -> FloorResume:
     """Which halves of ``saved`` this process may adopt, and why not the rest.
 
@@ -434,18 +491,26 @@ def resume_floor(
         # (the cursor by frontier intersection, the evidence by the
         # escalation's own equality re-check).
         #
-        # It keeps the OLD rule on the code identity, deliberately, while the
-        # cursor drops it. The two are not the same question: a cursor entry
-        # records that a model call was spent, which stays true however the
-        # code changed, whereas the evidence records WHICH UNITS a failing test
-        # attributed — and attribution is one of the things a code change
-        # rewrites. Carrying a stale attribution across such a change would let
-        # the escalation's "unchanged across two judged sweeps" equality be
-        # satisfied by two different attributors. Narrowing the cursor's
-        # identity is this entry's whole scope; the evidence's identity is a
-        # separate question and is left where it was.
+        # The evidence survives a `code_id` move ONLY under a premise
+        # re-check. The grade describes the TREE ("rewriting these accessors
+        # changed no verdict"), not the pipeline build — but attribution is
+        # one of the things a code change rewrites, so a blanket carry could
+        # let the escalation's "unchanged across two judged sweeps" equality
+        # be satisfied by two different attributors. The re-check is what
+        # squares the two: the convicted bodies unchanged since the
+        # measurement (`futility_premise_holds`, file fingerprints stamped at
+        # save time) and the graded tests still failing (enforced at the
+        # first sweep by the trigger's own equality against the LIVE
+        # attribution — a seeded set the new attributor does not reproduce
+        # escalates nothing). Any mismatch, or a floor with no fingerprints,
+        # falls through to re-measurement — the pre-existing behaviour, whose
+        # measured price was the identical 7-accessor entry traversal
+        # re-bought on every validation launch (~2 h each; twice in one
+        # evening on the same git tree, `21368-93f6a589` → `40938-f4e8e94b`).
+        _premise_ok = futility_premise_holds(saved, current_file_hashes or {})
         _futility = (saved.futile_units
-                     if _ok and saved.code_id == code_id else None)
+                     if _ok and (saved.code_id == code_id or _premise_ok)
+                     else None)
         return FloorResume(
             stall=None, best_pass=None, attempted=_cursor,
             landed=_carry.landed if _ok else None,
@@ -457,6 +522,9 @@ def resume_floor(
                "cluster, not to the oracle or the code"
                if _cursor else "")
             + (f"; futility evidence resumed for {len(_futility)} test(s)"
+               + (" across the code move — premise re-checked: the convicted "
+                  "bodies are unchanged since the measurement"
+                  if saved.code_id != code_id else "")
                if _futility else ""))
     # The CURSOR resumes on the identity check alone, deliberately not on
     # `tree_sha`. It is not a claim about a score — it is the list of units

@@ -50,6 +50,11 @@ from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.model_notes import (
+    NoteProvenance,
+    body_fingerprint,
+    rejected_symbols_in_errors,
+)
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refine import (
@@ -904,10 +909,20 @@ class FillOneFn:
                     )
                     # P6.4: tag the note with the error codes from the
                     # original failure so it can be surfaced next time
-                    # any of those codes recurs.
+                    # any of those codes recurs. 204 N1: the premise rides
+                    # beside it — the prose may generalise, the record may
+                    # not, and without the record the lesson is run-scoped.
                     _ecodes = ecodes_in_text(first_error_excerpt or "")
+                    _prov = NoteProvenance(
+                        unit=f"{rel_file}::{fn_name}",
+                        error_codes=tuple(sorted(_ecodes)),
+                        rejected_symbols=tuple(sorted(
+                            rejected_symbols_in_errors(
+                                first_error_excerpt or ""))),
+                        failed_body_hash=body_fingerprint(first_failed_body))
                     if note and self.retros.append_note(ctx.fr_path, note,
-                                                        error_codes=_ecodes):
+                                                        error_codes=_ecodes,
+                                                        provenance=_prov):
                         self.tel.log(f"  [model-notes] +1 note (recovered): {note[:80]}...")
                         self.tel.emit("phase_c.note.added", data={
                             "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
@@ -1321,10 +1336,23 @@ class FillOneFn:
                 )
                 # P6.4: tag exhausted-fail notes with the codes seen
                 # across the run so they re-surface for the same code.
+                # 204 N1: same premise record as the recovered path — an
+                # exhausted lesson is the MORE dangerous one to leave
+                # premise-less, since nothing ever validated its advice.
                 _ecodes2 = ecodes_in_text((error_excerpt or "")
                                           + " " + (first_error_excerpt or ""))
+                _prov2 = NoteProvenance(
+                    unit=f"{rel_file}::{fn_name}",
+                    error_codes=tuple(sorted(_ecodes2)),
+                    rejected_symbols=tuple(sorted(
+                        rejected_symbols_in_errors(
+                            (error_excerpt or "")
+                            + "\n" + (first_error_excerpt or "")))),
+                    failed_body_hash=body_fingerprint(
+                        last_body or first_failed_body or ""))
                 if note and self.retros.append_note(ctx.fr_path, note,
-                                                    error_codes=_ecodes2):
+                                                    error_codes=_ecodes2,
+                                                    provenance=_prov2):
                     self.tel.log(f"  [model-notes] +1 note (exhausted): {note[:80]}...")
                     self.tel.emit("phase_c.note.added", data={
                         "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,

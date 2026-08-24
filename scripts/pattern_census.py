@@ -1153,7 +1153,14 @@ def immortal_accusations(root: Path) -> list[dict]:
             continue
         notes = parse_note_bullets(section)
         regressions = [n for n in notes if n.lstrip().startswith("[regression]")]
-        bodyless = [n for n in regressions if not regression_note_body_probe(n)]
+        # A multi-body regression EVENT note ("Bodies filled this pass: …;
+        # no single body is accused") is body-less BY DESIGN — it accuses
+        # nobody, so it is not this class. Counting it here would make the
+        # detector fire on the very writer change that removed the shotgun
+        # accusations it was built to count.
+        bodyless = [n for n in regressions
+                    if not regression_note_body_probe(n)
+                    and "no single body is accused" not in n]
         if not regressions:
             continue
         out.append({

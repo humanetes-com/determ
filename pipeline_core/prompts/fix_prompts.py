@@ -140,6 +140,16 @@ class BlockFillPlan:
     # SAME reply as the producer that names it — the two halves of one defect,
     # which across three runs were never writable in one prompt.
     installable: tuple[str, ...] = ()
+    # Call sites that construct a wrapper an escalated producer erases WITHOUT
+    # invoking its typed producer (`domain.installable_fns.producer_bypasses`)
+    # — the closure's third population. `(fn, wrapper, producer, producer_ref)`
+    # where `producer_ref` says where the producer lives ("declared in this
+    # file", "declared in `src/error.rs` — pub(crate), callable from here").
+    # Run `40938-f4e8e94b` measured what omitting them costs: the model's
+    # thinking named the `Self::new` → `construct_from_std` bypass in
+    # `Error::context`, wrote "Error::context is not listed for rewrite", and
+    # spent the rest of its budget special-casing the generic constructor.
+    bypass: tuple[tuple[str, str, str, str], ...] = ()
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -147,15 +157,17 @@ def _plan_line(p: BlockFillPlan) -> str:
     parts = []
     if p.stubs:
         parts.append("write: " + ", ".join(p.stubs))
+    bypass_names = frozenset(b[0] for b in p.bypass)
     direct = tuple(r for r in p.refills
                    if r not in p.inferred and r not in p.escalated
-                   and r not in p.installable)
+                   and r not in p.installable and r not in bypass_names)
     escalated = tuple(r for r in p.refills
-                      if r in p.escalated and r not in p.installable)
+                      if r in p.escalated and r not in p.installable
+                      and r not in bypass_names)
     installable = tuple(r for r in p.refills if r in p.installable)
     inferred = tuple(r for r in p.refills
                      if r in p.inferred and r not in p.escalated
-                     and r not in p.installable)
+                     and r not in p.installable and r not in bypass_names)
     if direct:
         parts.append("rewrite (a body exists, but its test still fails): "
                      + ", ".join(direct))
@@ -181,6 +193,23 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "written in the same reply — return it unchanged only if "
                      "it is already right for the type the producer erases): "
                      + ", ".join(installable))
+    for wrapper, producer, producer_ref in sorted(
+            {(b[1], b[2], b[3]) for b in p.bypass}):
+        fns = tuple(b[0] for b in p.bypass
+                    if (b[1], b[2], b[3]) == (wrapper, producer, producer_ref)
+                    and b[0] in p.refills)
+        if not fns:
+            continue
+        # The relation is stated, not a verdict on the body: what was measured
+        # is that rewriting the producer moved no verdict WHILE this body kept
+        # routing `wrapper` values around it, so the per-type table is
+        # installed on nothing this body creates.
+        parts.append(f"REWRITE TO INVOKE THE PRODUCER (this body constructs "
+                     f"`{wrapper}` and hands it to the generic construction "
+                     f"path, so the per-type table its typed producer "
+                     f"`{producer}` builds ({producer_ref}) is never installed "
+                     f"on the values this body creates; rewrite it to call "
+                     f"`{producer}` instead): " + ", ".join(fns))
     if inferred:
         parts.append("re-check (a body exists; implicated by NAME only — "
                      "rewrite ONLY if it is wrong for its bounds, else leave it "

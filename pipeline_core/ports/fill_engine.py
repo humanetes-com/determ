@@ -203,6 +203,7 @@ class Retros(Protocol):
     def append_note(
         self, fr_path: Path, note: str,
         error_codes: list[str] | set[str] | None = ...,
+        provenance: Any | None = ...,
     ) -> bool: ...
     def extract_self_note(
         self, failed_body: str, error_excerpt: str, fixed_body: str,

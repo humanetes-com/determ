@@ -137,6 +137,7 @@ from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
+    futility_files,
     render_pass_floor,
     resume_floor,
 )
@@ -337,6 +338,26 @@ def _log_attribution_gap(
         f"{fail_count} test(s) fail, parsed={len(names)} name(s), "
         f"candidates(pre-exhaust-filter)={frontier_size} (last kind={kind}). "
         f"failing: {sample or '(none parsed)'}")
+
+
+def _futility_file_hashes(
+    src_dir: Path, files: frozenset[str],
+) -> dict[str, str]:
+    """Content fingerprints for the files the futility evidence names.
+
+    The premise half of `futility_premise_holds`: the evidence's claim is
+    about the convicted BODIES, so the files holding them are stamped at save
+    time and re-read at cluster entry. A file that cannot be read simply has
+    no entry, which the premise check reads as a mismatch — the fall-through
+    is re-measurement, never a stale conviction."""
+    out: dict[str, str] = {}
+    for rel in sorted(files):
+        try:
+            out[rel] = hashlib.md5(
+                (src_dir / rel).read_bytes()).hexdigest()[:16]
+        except OSError:
+            continue
+    return out
 
 
 def run_phase_c_tdd(
@@ -1811,9 +1832,18 @@ def run_phase_c_tdd(
         if not _floor_resolved and not _sweep_compile_broke:
             _floor_resolved = True
             _oracle_size = pass_count + fail_count
+            # The futility evidence's premise re-check needs the LIVE
+            # fingerprints of the files its convicted units live in — the
+            # same fingerprint `_futility_file_hashes` stamps at save time.
+            # Computed only for the files the saved floor names, so this is
+            # a handful of reads once per cluster entry.
+            _saved_fut_files = (futility_files(_saved_floor.futile_units)
+                                if _saved_floor is not None else frozenset())
             _resume = resume_floor(
                 _saved_floor, cluster=cluster.name, tree_sha=_tree_sha,
-                oracle_size=_oracle_size, code_id=_code_id)
+                oracle_size=_oracle_size, code_id=_code_id,
+                current_file_hashes=_futility_file_hashes(
+                    src_dir, _saved_fut_files))
             if _resume.stall is not None:
                 stall = _resume.stall
                 # LoopState is the source of truth the mirrors read back
@@ -2299,6 +2329,16 @@ def run_phase_c_tdd(
                     (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}"
                                       for _l in _us)))
                     for _t, _us in prev_test_units.items())),
+                # The evidence's premise, stamped with it: content
+                # fingerprints of the files holding the convicted units, so
+                # a resume across a `code_id` move can re-check that the
+                # bodies the measurement was taken on are unchanged
+                # (`futility_premise_holds`) instead of dying with the code
+                # identity and re-buying the entry traversal.
+                futile_files=tuple(sorted(_futility_file_hashes(
+                    src_dir,
+                    frozenset(_l.file for _us in prev_test_units.values()
+                              for _l in _us)).items())),
             ).to_dict())
 
         # Attribute failures via the full chain (panics → compile → behavior →

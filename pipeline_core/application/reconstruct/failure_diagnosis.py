@@ -159,23 +159,41 @@ def record_tdd_regression(
     if int(now_pass) >= int(prev_best):
         return ""
     broken = ", ".join(sorted(broken_tests)[:6])
-    batch_caveat = ("" if len(filled_keys) == 1 else
-                    f" ({len(filled_keys)} bodies were filled this pass — the"
-                    " culprit is ONE of them, treat this as a suspect, not a"
-                    " verdict)")
-    for key in filled_keys:
+    # A per-fn accusation is written ONLY when the causal claim actually
+    # holds: one body filled, tests fell — that body is the culprit. A
+    # 12-body pass used to produce 12 identical accusations, each carrying
+    # "the culprit is ONE of them": a note that says it is 1/12 likely to be
+    # about this fn is not evidence about this fn, and 29 such notes sat on
+    # disk blaming 29 different fns (measured 2026-08-22). A multi-body
+    # regression gets ONE note naming the event — the pass, its filled set,
+    # the fallen tests — and accuses nobody.
+    if len(filled_keys) == 1:
+        key = next(iter(filled_keys))
         fn = key[1] if isinstance(key, tuple) and len(key) > 1 else str(key)
         rec = by_name.get(fn)
-        if not rec:
-            continue
-        file_rel = rec.get("file", "")
-        body = (rec.get("body_text", "") or "").strip()
+        if rec:
+            file_rel = rec.get("file", "")
+            body = (rec.get("body_text", "") or "").strip()
+            note = (
+                f"[regression] In {Path(file_rel).name or '?'}, after `{fn}` "
+                f"was written, previously-passing test(s) FAILED: {broken} "
+                f"(cluster pass count dropped {int(prev_best)}→"
+                f"{int(now_pass)}). Body applied:\n{body[:body_cap]}\n"
+                f"Re-implement `{fn}` so {broken} keep passing."
+            )
+            with suppress(Exception):
+                append_note(fr_path, note)
+    else:
+        names = sorted("::".join(k) if isinstance(k, tuple) else str(k)
+                       for k in filled_keys)
+        filled = ", ".join(names[:12]) + (
+            f" (+{len(names) - 12} more)" if len(names) > 12 else "")
         note = (
-            f"[regression] In {Path(file_rel).name or '?'}, after `{fn}` was "
-            f"written, previously-passing test(s) FAILED: {broken} (cluster "
-            f"pass count dropped {int(prev_best)}→{int(now_pass)})"
-            f"{batch_caveat}. Body applied:\n{body[:body_cap]}\n"
-            f"Re-implement `{fn}` so {broken} keep passing."
+            f"[regression] A fill pass over {len(filled_keys)} bodies broke "
+            f"previously-passing test(s): {broken} (cluster pass count "
+            f"dropped {int(prev_best)}→{int(now_pass)}). Bodies filled this "
+            f"pass: {filled}. The culprit is ONE of them; no single body is "
+            f"accused."
         )
         with suppress(Exception):
             append_note(fr_path, note)

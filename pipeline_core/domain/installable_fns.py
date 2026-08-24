@@ -37,6 +37,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnLocator, TypeRecord
+from pipeline_core.domain.rust_idents import identifier_tokens
 from pipeline_core.domain.type_production import constructs_type
 
 
@@ -48,6 +49,37 @@ class Installable:
     type_name: str        # the struct whose field would hold it
     field: str            # the field's name
     references: int       # occurrences of the fn's name in the file
+
+
+@dataclass(frozen=True, slots=True)
+class ProducerBypass:
+    """One fn whose body constructs a wrapper the typed producer erases,
+    WITHOUT invoking that producer — the call-site half of the split defect.
+
+    `installable_fns` above makes the table's *callees* writable beside the
+    producer. This is its complement, and the record shows the complement is
+    where the defect survives once the callees are written: run
+    `40938-f4e8e94b`'s FILE FILLED 20 carried the twelve installables and the
+    six constructors, the model's own thinking diagnosed that `Error::context`
+    routes `ContextError` through `Self::new` → `construct_from_std` (so the
+    per-type table `construct_from_context` builds is installed on nothing),
+    named the fix, then wrote "Error::context is not listed for rewrite" and
+    complied. The sweep after moved none of the ten vtable pairs. The
+    predicate — constructs W through the generic path while bypassing W's
+    typed producer — IS the defect, so the predicate sets the scope: any fn
+    of the prompted file, in any impl, whatever file the producer lives in.
+    (The producer is `pub(crate)`, so a cross-file bypass CAN invoke it; on
+    the live tree the five failing `test_context` downcasts never even reach
+    `Error::context` — `tests/test_context.rs::make_chain` builds both wraps
+    through `src/context.rs::ext_context`, measured 2026-08-24.)
+    """
+
+    fn_name: str
+    container: str        # one-line impl header ("" for a free fn)
+    wrapper: str          # W — the type the body constructs
+    producer: str         # the typed producer the body must invoke
+    producer_file: str    # where that producer is declared
+    same_file: bool       # producer declared in the prompted file itself
 
 
 def _split_top_level(text: str, sep: str = ",") -> list[str]:
@@ -284,4 +316,132 @@ def installable_fns(
                                            counts.get(name, 0)))
                     break
     out.sort(key=lambda i: (i.references, i.fn_name))
+    return tuple(out[:cap])
+
+
+def _turbofish_types(body_text: str) -> frozenset[str]:
+    """Base identifiers of every ``::<...>`` type argument in ``body_text``.
+
+    ``object_drop::<crate::error::ContextError<C, E>>`` yields ``ContextError``
+    (the last path segment before the argument's own generic list). This is how
+    a typed producer states WHICH type its table erases, so it is the only
+    honest source for W: the table literal's field VALUES are instantiated at
+    W, whereas the literal's field types never name it."""
+    out: set[str] = set()
+    pos = body_text.find("::<")
+    while pos != -1:
+        i = pos + 2  # at '<'
+        depth = 0
+        for j in range(i, len(body_text)):
+            if body_text[j] == "<":
+                depth += 1
+            elif body_text[j] == ">":
+                depth -= 1
+                if depth == 0:
+                    for arg in _split_top_level(body_text[i + 1:j]):
+                        base = arg.split("<", 1)[0].strip()
+                        seg = base.rsplit("::", 1)[-1].strip()
+                        if seg and (seg[0].isalpha() or seg[0] == "_"):
+                            out.add(seg)
+                    break
+        pos = body_text.find("::<", pos + 3)
+    return frozenset(out)
+
+
+def _table_type_names(type_records: Iterable[TypeRecord]) -> frozenset[str]:
+    """Nominal types with at least one fn-pointer field — the tables."""
+    return frozenset(
+        tr.name for tr in type_records
+        if tr.name and tr.kind in ("struct", "enum")
+        and any(fn_pointer_shape(f.ty) is not None for f in tr.fields))
+
+
+def wrapper_producers(
+    fn_records: Sequence[Mapping[str, object]],
+    type_records: Iterable[TypeRecord],
+    escalated: frozenset[FnLocator],
+) -> tuple[tuple[str, str, str], ...]:
+    """``(wrapper W, producer fn, producer file)`` for every typed producer in
+    the MEASURED escalated set, whatever file it lives in.
+
+    A typed producer is an escalated fn whose body constructs a fn-pointer
+    TABLE literal and whose turbofish instantiations name a crate nominal type:
+    that type is the wrapper W the table erases. `construct_from_std` is
+    correctly NOT one — its instantiations are all the generic parameter `E`,
+    which names every type and therefore none (the `type_production`
+    discipline). The type check is what keeps the closure from re-admitting
+    `From`/`new`, the accessor slice the record already convicted."""
+    trs = list(type_records)
+    tables = _table_type_names(trs)
+    if not tables:
+        return ()
+    nominal = frozenset(tr.name for tr in trs
+                        if tr.name and tr.kind in ("struct", "enum"))
+    esc = {(k.file, k.fn_name) for k in escalated}
+    out: list[tuple[str, str, str]] = []
+    for r in fn_records:
+        f, n = str(r.get("file", "")), str(r.get("fn_name", ""))
+        if (f, n) not in esc:
+            continue
+        body = str(r.get("body_text", "") or "")
+        if not any(constructs_type(body, t) for t in tables):
+            continue
+        for w in sorted(_turbofish_types(body) & (nominal - tables)):
+            out.append((w, n, f))
+    return tuple(sorted(set(out)))
+
+
+def producer_bypasses(
+    fn_records: Sequence[Mapping[str, object]],
+    type_records: Iterable[TypeRecord],
+    escalated: frozenset[FnLocator],
+    file_rel: str,
+    *,
+    # Same bound as the installable offer's, for the same reason (prompt
+    # room); on the live tree the census finds 3 across both files.
+    cap: int = 12,
+) -> tuple[ProducerBypass, ...]:
+    """Fns of ``file_rel`` that construct a wrapper W without invoking W's
+    typed producer — the call sites the closure makes writable.
+
+    The predicate, per fn of the prompted file: the body constructs a struct
+    literal of W (`constructs_type` — a TOKEN match, so `E` never matches
+    `Error`), the producer's name is absent from the body's identifier tokens
+    (a token test too: a body calling `construct_from_context` must not read
+    as calling `construct`), and the fn is not itself a table builder (the
+    producer constructs W inside its own body by definition and must not
+    convict itself). Deterministic, extractor-based, no LLM, no name
+    heuristics — the same contract as `installable_fns`.
+
+    Returns () when the measured set holds no typed producer, which is the
+    same gate as the installable offer: this fires only where the loop has
+    already MEASURED that the writable set is not paying."""
+    trs = list(type_records)
+    relations = wrapper_producers(fn_records, trs, escalated)
+    if not relations:
+        return ()
+    tables = _table_type_names(trs)
+    out: list[ProducerBypass] = []
+    for r in fn_records:
+        if str(r.get("file", "")) != file_rel:
+            continue
+        name = str(r.get("fn_name", ""))
+        body = str(r.get("body_text", "") or "")
+        if not name or not body:
+            continue
+        if any(constructs_type(body, t) for t in tables):
+            continue  # a table builder IS a producer, not a bypass
+        tokens = frozenset(identifier_tokens(body))
+        for w, producer, pfile in relations:
+            if name == producer and str(r.get("file", "")) == pfile:
+                continue
+            if constructs_type(body, w) and producer not in tokens:
+                out.append(ProducerBypass(
+                    fn_name=name,
+                    container=" ".join(
+                        str(r.get("container", "")).split("{", 1)[0].split()),
+                    wrapper=w, producer=producer, producer_file=pfile,
+                    same_file=pfile == file_rel))
+                break
+    out.sort(key=lambda b: (b.fn_name, b.container))
     return tuple(out[:cap])

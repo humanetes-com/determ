@@ -78,7 +78,11 @@ from pipeline_core.domain.impl_routing import (
 from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
-from pipeline_core.domain.installable_fns import installable_fns, offer_producers
+from pipeline_core.domain.installable_fns import (
+    installable_fns,
+    offer_producers,
+    producer_bypasses,
+)
 from pipeline_core.domain.llm_output import (
     bind_headerless_names,
     extract_fn_bodies,
@@ -865,15 +869,11 @@ def fill_impl_blocks(
                          for t in _container_names(b.container)),
                        Path(file_rel).stem]),
             cap=int(os.getenv("BLUEPRINT_SLICE_CAP", "2500")))
-        notes_section = ""
-        if fr_path is not None:
-            notes_section = _filter_model_notes_for_prompt(
-                fr_path, file_rel=file_rel, fn_name=wanted[0],
-                file_text=snapshot, current_error="",
-                escalated_fns=frozenset(
-                    k.fn_name for k in escalated_keys if k.file == file_rel))
         # Any localized crash inside THIS file applies: the prompt renders the
         # whole file, so a crashing body is visible as an idiom to imitate.
+        # (The notes read happens BELOW the offer computation: 204 N2 needs to
+        # know whether this prompt carries a measured producer grade before it
+        # can decide which remembered lessons may enter.)
         _file_crash = "\n\n".join(dict.fromkeys(
             txt for loc, txt in (crash_evidence or {}).items()
             if loc.file == file_rel))
@@ -889,15 +889,39 @@ def fill_impl_blocks(
         # entry, not a dispatch change. Computed ONCE per file: the tree the
         # attempts below see is the same snapshot (a failed attempt reverts),
         # and the extractor run is not free.
+        _all_fn_records = _enumerate_fns_via_extractor(target_src_dir) or []
+        _offer_keys = offer_producers(escalated_measured, escalated_keys)
         _installable = installable_fns(
-            _enumerate_fns_via_extractor(target_src_dir) or [],
-            _crate_type_records,
-            offer_producers(escalated_measured, escalated_keys), file_rel,
+            _all_fn_records, _crate_type_records, _offer_keys, file_rel,
             reference_counts=fn_reference_counts(snapshot))
+        # The closure's OTHER population: fns of THIS file that construct a
+        # wrapper an escalated producer erases while bypassing that producer
+        # (`Error::context` building `ContextError` through `Self::new`, run
+        # `40938-f4e8e94b`). Keyed on the wrapper TYPE, not on the producer's
+        # file: the producer is pub(crate), and the record shows the bypass
+        # class crosses files (`src/context.rs::ext_context`, both impls).
+        _bypasses = producer_bypasses(
+            _all_fn_records, _crate_type_records, _offer_keys, file_rel)
+        _bypass_by_container: dict[str, list[tuple[str, str, str, str]]] = {}
+        for _bp in _bypasses:
+            _bypass_by_container.setdefault(_bp.container, []).append((
+                _bp.fn_name, _bp.wrapper, _bp.producer,
+                "declared in this file" if _bp.same_file else
+                f"declared in `{_bp.producer_file}` — pub(crate), callable "
+                "from here"))
+
+        def _bypass_for(container: str) -> tuple[tuple[str, str, str, str], ...]:
+            return tuple(_bypass_by_container.get(
+                " ".join(container.split("{", 1)[0].split()), ()))
+
+        _free_bypass = _bypass_for("")
         _free_plan = ([BlockFillPlan(
-            "", (), tuple(i.fn_name for i in _installable),
-            installable=tuple(i.fn_name for i in _installable))]
-            if _installable else [])
+            "", (),
+            tuple(dict.fromkeys((*(i.fn_name for i in _installable),
+                                 *(x[0] for x in _free_bypass)))),
+            installable=tuple(i.fn_name for i in _installable),
+            bypass=_free_bypass)]
+            if _installable or _free_bypass else [])
         # The evidence section's entry for them: the relation, stated per fn,
         # so the model can see WHICH table field each one answers to. The
         # refill-evidence renderer is per impl block and these are free fns.
@@ -921,6 +945,68 @@ def fill_impl_blocks(
             _emit("phase_c.file.installable_offered", data={
                 "cluster": cluster_name, "file": file_rel,
                 "fns": [i.fn_name for i in _installable]})
+        _bypass_evidence = ""
+        if _bypasses:
+            _bypass_evidence = "\n".join(
+                f"in `{_bp.container or 'free fns'}`:\n"
+                f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` without "
+                f"invoking its typed producer `{_bp.producer}` "
+                f"({'this file' if _bp.same_file else _bp.producer_file}), so "
+                "the per-type table that producer builds is installed on "
+                "nothing this body creates — the failing downcasts walk that "
+                "table."
+                for _bp in _bypasses)
+            _log(f"  [phase-c/file] {file_rel}: {len(_bypasses)} fn(s) "
+                 "construct a wrapper an escalated producer erases without "
+                 "invoking its typed producer — writable in this prompt: "
+                 + ", ".join(f"{_bp.fn_name}->{_bp.wrapper} via {_bp.producer}"
+                             for _bp in _bypasses[:5]))
+            _emit("phase_c.file.producer_bypass_offered", data={
+                "cluster": cluster_name, "file": file_rel,
+                "fns": [_bp.fn_name for _bp in _bypasses],
+                "producers": sorted({_bp.producer for _bp in _bypasses})})
+        # The full plan is loop-invariant: per-block entries carry their bypass
+        # complement, and a bypass whose impl block is not in this dispatch
+        # gets its own entry — the splice's joint-overwrite widening already
+        # lands any declared member the reply answers once a re-fill target
+        # answers, so this is a PLAN entry, not a dispatch change.
+        _block_plans = [BlockFillPlan(
+            b.container,
+            tuple(m.fn_name for m in b.stub_members),
+            tuple(dict.fromkeys((*(m.fn_name for m in b.refill_members),
+                                 *(x[0] for x in _bypass_for(b.container))))),
+            inferred=tuple(sorted(inferred_refill_names(
+                _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+            escalated=tuple(sorted(escalated_refill_names(
+                _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+            bypass=_bypass_for(b.container))
+            for b in fblocks]
+        _covered = {" ".join(b.container.split("{", 1)[0].split())
+                    for b in fblocks} | {""}
+        _extra_plans = [BlockFillPlan(
+            _c, (), tuple(x[0] for x in _entries), bypass=tuple(_entries))
+            for _c, _entries in sorted(_bypass_by_container.items())
+            if _c not in _covered]
+        # The grade label for 204 N2, naming what this prompt's write list
+        # actually carries so the exclusion log reads true on every file — a
+        # context.rs prompt can be bypass-only with zero installables.
+        _grade_parts = [g for g, present in (
+            ("REWRITE WITH THE PRODUCER", bool(_installable)),
+            ("REWRITE TO INVOKE THE PRODUCER", bool(_bypasses)),
+        ) if present]
+        if not _grade_parts and any(p.escalated for p in _block_plans):
+            _grade_parts = ["ESCALATED REWRITE"]
+        notes_section = ""
+        if fr_path is not None:
+            notes_section = _filter_model_notes_for_prompt(
+                fr_path, file_rel=file_rel, fn_name=wanted[0],
+                file_text=snapshot, current_error="",
+                escalated_fns=frozenset(
+                    k.fn_name for k in escalated_keys if k.file == file_rel),
+                escalated_grade=" + ".join(_grade_parts),
+                writable_fns=frozenset(
+                    n for p in (*_free_plan, *_block_plans, *_extra_plans)
+                    for n in (*p.stubs, *p.refills)))
         prior_error = ""
         _prev_prompt: str | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
@@ -931,18 +1017,11 @@ def fill_impl_blocks(
                 "", snapshot, prior_error, "", "", _crate_type_records)
             prompt = build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
-                fill_plan=[*_free_plan, *[BlockFillPlan(
-                    b.container,
-                    tuple(m.fn_name for m in b.stub_members),
-                    tuple(m.fn_name for m in b.refill_members),
-                    inferred=tuple(sorted(inferred_refill_names(
-                        _file_refill_evs[_impl_block_id(b.file, b.container)]))),
-                    escalated=tuple(sorted(escalated_refill_names(
-                        _file_refill_evs[_impl_block_id(b.file, b.container)]))))
-                    for b in fblocks]],
+                fill_plan=[*_free_plan, *_block_plans, *_extra_plans],
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
                 refill_evidence="\n".join(
-                    s for s in (_file_refill_evidence, _install_evidence) if s),
+                    s for s in (_file_refill_evidence, _install_evidence,
+                                _bypass_evidence) if s),
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
                 crash_evidence=_file_crash,
                 module_name=module_name, cluster_name=cluster_name,
@@ -1704,12 +1783,21 @@ def fill_impl_blocks(
             _log(f"  {_rline}")
         notes_section = ""
         if fr_path is not None:
+            # 204 N2 on the per-block route too — this is the FALLBACK the
+            # file-first takes after a compile-failed attempt (run
+            # `40938-f4e8e94b` iter 2: three reverts, then per-block fills
+            # whose prompts re-injected the `[E0425]` lesson beside the same
+            # ESCALATED rewrite instruction). A route-scoped rule would
+            # survive on exactly that path.
+            _esc_targets = escalated_refill_names(_refill_evs)
             notes_section = _filter_model_notes_for_prompt(
                 fr_path, file_rel=block.file,
                 fn_name=_fill_target_names[0] if _fill_target_names else "",
                 file_text=snapshot, current_error="",
                 escalated_fns=frozenset(
                     k.fn_name for k in escalated_keys if k.file == block.file),
+                escalated_grade="ESCALATED REWRITE" if _esc_targets else "",
+                writable_fns=frozenset(_block_target_names),
             )
         last_error_excerpt = ""
         # The last failed attempt's REAL two-tier metric. Re-deriving it from

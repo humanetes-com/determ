@@ -56,6 +56,42 @@ iteration that does none of these is the pathology, whatever the log calls
 it — and an analysis that ends without a change aimed at making the next
 iteration clear this bar is unfinished.
 
+## The most correct fix, never the cheapest — this project is pre-launch and exists to validate a theory
+
+The theory under test is that the loop can reconstruct the crate. Every fix
+is judged by one question: after it ships, does the next reading measure the
+THEORY, or does it measure the patch? A cheap fix that mutes a symptom —
+filtering one bad note, special-casing one shape, suppressing one log line —
+leaves the mechanism that produced it in place, so the next reading is
+contaminated: a pass proves the patch papered over the instance, a failure
+does not localize, and either way the theory is no better tested than before.
+We are not in production; there is no uptime to protect and no reason to
+prefer the small diff. Cost, diff size and LOC are NEVER the criterion for
+choosing between two candidate fixes — correctness of the mechanism is. When
+the correct fix wants a refactoring or a plan across several mechanisms,
+plan and refactor; the final goal outranks the session's convenience.
+
+**The rule, checkable.** When two fixes are on the table, name the mechanism
+defect each one leaves alive. The right fix is the one after which the defect
+CLASS cannot recur — not the one after which the observed instance stops. The
+tell that the rule is being broken is the sentence "the minimal fix is …" (or
+sizing a fix by its diff): minimal scopes the fix to the instance, and the
+instance is never the defect. The instance that named the rule, 2026-08-24:
+a stored `[E0425]` lesson ("use the construction helper that omits the
+vtable") was steering escalated rewrites toward the exact wrong body holding
+the pass-93 lock. The cheap fix was to filter that note from escalated
+prompts. The defect was the channel's contract — notes are ordered at write
+time to erase their premise ("do NOT mention the function name"), are
+retirable only by compile evidence, and carry no scope — so ANY situational
+workaround the model ever records becomes immortal standing guidance, and
+the next one would have needed the same session over again. Fix the
+contract, not the note.
+
+This rule composes with, and does not license violating, the others in this
+file: the correct fix still may not touch the crate under reconstruction,
+still requires the walk + negative control, and still names the reading that
+validates it before launch.
+
 ## Nothing leaves this machine
 
 **Never transmit repository or workspace content to any external service.**

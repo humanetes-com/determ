@@ -13,6 +13,7 @@ instance — eliminating the former pipeline.py module globals (`_NOTE_HASH_CACH
 """
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +25,7 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 )
 from pipeline_core.domain import model_notes as mn
 from pipeline_core.domain.llm_output import parse_self_note
+from pipeline_core.domain.rust_scan import item_names
 
 _NOTE_EXTRACTION_PROMPT = """A model attempted to implement a Rust function and
 the first attempt did not compile. The second (or later) attempt did compile.
@@ -91,9 +93,48 @@ class FileModelNotesStore:
         self._excerpt_max_chars = excerpt_max_chars
         self._hash_cache: dict[Path, set[str]] = {}
         self._layout_retired_logged: set[str] = set()
+        # 204 N1: a lesson that carries no checkable premise is run-scoped,
+        # never durable — it steers this run's prompts and dies with the
+        # process instead of becoming immortal standing guidance.
+        self._run_notes: dict[Path, list[str]] = {}
         # Run-scoped recurring-error accumulators.
         self.error_code_counts: Counter[str] = Counter()
         self.error_code_excerpts: dict[str, list[str]] = {}
+
+    # -- provenance sidecar (204 N1) ---------------------------------------
+    @staticmethod
+    def _provenance_path(fr_path: Path) -> Path:
+        """Sidecar beside the FR file, keyed by note hash. A separate file
+        because the FR round-trip (TASK 1 regeneration, the bullet re-render)
+        has destroyed in-prose records before — the sidecar is written by this
+        store alone and travels through none of those printers."""
+        return fr_path.with_name(fr_path.name + ".note_provenance.json")
+
+    def _load_provenance(self, fr_path: Path) -> dict[str, mn.NoteProvenance]:
+        try:
+            raw = json.loads(
+                self._provenance_path(fr_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, mn.NoteProvenance] = {}
+        for h, entry in raw.items():
+            prov = mn.NoteProvenance.from_dict(entry)
+            if prov is not None:
+                out[str(h)] = prov
+        return out
+
+    def _save_provenance(
+        self, fr_path: Path, records: dict[str, mn.NoteProvenance],
+    ) -> None:
+        try:
+            self._provenance_path(fr_path).write_text(
+                json.dumps({h: p.to_dict() for h, p in sorted(records.items())},
+                           indent=1),
+                encoding="utf-8")
+        except OSError as e:
+            self._log(f"  [model-notes] provenance write failed: {e}")
 
     # -- persistence -------------------------------------------------------
     def load(self, fr_path: Path) -> list[str]:
@@ -123,9 +164,18 @@ class FileModelNotesStore:
         fr_path: Path,
         note: str,
         error_codes: list[str] | set[str] | None = None,
+        provenance: mn.NoteProvenance | None = None,
     ) -> bool:
         """Append ``note`` to FR (after normalise + literal/semantic dedup +
-        LRU trim). Returns True iff it was added."""
+        LRU trim). Returns True iff it was added.
+
+        204 N1: an ``[E0xxx]`` lesson is durable only WITH its premise —
+        ``provenance`` (unit, codes, the symbols the compiler rejected, the
+        failed body's fingerprint) is recorded in the sidecar so N3 can retire
+        the lesson the day its premise voids. A lesson arriving without
+        provenance is kept run-scoped: it steers this run's prompts and is
+        never written to disk, so no future scope change can be steered by a
+        premise nobody recorded."""
         prepared = mn.prepare_note(note, error_codes)
         if prepared is None:
             return False
@@ -134,10 +184,27 @@ class FileModelNotesStore:
         if existing_hashes is None:
             existing_hashes = {mn.note_hash(n) for n in existing}
             self._hash_cache[fr_path] = existing_hashes
+        if provenance is None and mn.is_error_code_lesson(prepared):
+            run = self._run_notes.setdefault(fr_path, [])
+            if (mn.note_hash(prepared) in existing_hashes
+                    or any(mn.notes_are_semantic_dupes(prev, prepared)
+                           for prev in (*existing, *run))):
+                return False
+            run.append(prepared)
+            self._log("  [model-notes] lesson kept run-scoped (no premise "
+                      f"recorded, so it may not outlive the run): "
+                      f"{prepared[:80]}…")
+            return True
         new_notes, added = mn.dedup_append(
             prepared, existing, existing_hashes, self._max_entries)
         if added:
             self.save(fr_path, new_notes)
+            if provenance is not None:
+                records = self._load_provenance(fr_path)
+                records[mn.note_hash(prepared)] = provenance
+                kept = {mn.note_hash(n) for n in new_notes}
+                self._save_provenance(
+                    fr_path, {h: p for h, p in records.items() if h in kept})
         return added
 
     # -- prompt selection --------------------------------------------------
@@ -150,13 +217,54 @@ class FileModelNotesStore:
         current_error: str = "",
         max_chars: int | None = None,
         escalated_fns: frozenset[str] = frozenset(),
+        escalated_grade: str = "",
+        writable_fns: frozenset[str] = frozenset(),
     ) -> str:
         """Relevance-ranked ``<MODEL_NOTES>`` block for the current (file, fn).
 
         ``escalated_fns`` are the fns this prompt grades ESCALATED; a
         `[regression]` note blaming one of them is dropped and logged, for the
-        reason `mn.escalation_superseded_notes` states."""
-        notes = [n for n in self.load(fr_path)
+        reason `mn.escalation_superseded_notes` states.
+
+        ``escalated_grade`` is the measured rewrite instruction the prompt's
+        write list carries ("" when it carries none) — `REWRITE WITH THE
+        PRODUCER`, `REWRITE TO INVOKE THE PRODUCER`, or the plain `ESCALATED
+        REWRITE`. When present, no `[E0xxx]` lesson enters the prompt: a
+        measured instruction outranks a remembered workaround, and two
+        instructions in one prompt is not a steer. CHANNEL-level, both fill
+        routes: the previous run's own file-first compile-failed twice and
+        fell back to per-impl prompts that re-injected the lesson beside the
+        same escalated grade — a route-scoped rule survives on exactly the
+        fallback the live lock used. The lessons keep steering ordinary
+        fills, their home turf. The label is logged verbatim so the log
+        names the grade that actually outranked the lesson. ``writable_fns``
+        is the prompt's full write list — half of N3's premise check (a
+        rejected symbol that is now writable voids the lesson that rejected
+        it)."""
+        disk_notes = self.load(fr_path)
+        # 204 N3 — premise-checked retirement, on disk, before any prompt
+        # filtering: a provenance-carrying lesson whose rejected symbols now
+        # exist in the shown file or sit in the write list has a void premise.
+        prov = self._load_provenance(fr_path)
+        if prov:
+            declared = (frozenset(item_names(file_text))
+                        if file_text else frozenset())
+            void = mn.void_premise_lessons(
+                disk_notes, prov,
+                declared_symbols=declared, writable_fns=writable_fns)
+            if void:
+                dead = {n for n, _ in void}
+                disk_notes = [n for n in disk_notes if n not in dead]
+                self.save(fr_path, disk_notes)
+                self._hash_cache.pop(fr_path, None)
+                self._save_provenance(fr_path, {
+                    h: p for h, p in prov.items()
+                    if h in {mn.note_hash(n) for n in disk_notes}})
+                for n, syms in void:
+                    self._log("  [notes] retired lesson with a VOID premise — "
+                              "its rejected symbol(s) now exist or are "
+                              f"writable ({', '.join(syms)}): {n[:100]}…")
+        notes = [n for n in (*disk_notes, *self._run_notes.get(fr_path, ()))
                  if not mn.is_bogus_regression_note(n)
                  and not mn.is_stale_regression_note(n, file_text)]
         superseded = mn.escalation_superseded_notes(notes, escalated_fns)
@@ -170,6 +278,23 @@ class FileModelNotesStore:
                 "cost tests): "
                 + ", ".join(sorted({mn.regression_note_subject(n)
                                     for n in superseded})))
+        # 204 N2 — the channel-level precedence rule. Not note-level: the live
+        # FILE FILLED 20 prompt carried nine numbered lessons besides the
+        # `[E0425]` one, and legacy prose carries no premise a narrower rule
+        # could check, so the blanket over the class is the only sound rule
+        # for them (204.3). Dropped from THIS prompt only, never from disk.
+        if escalated_grade:
+            lessons = mn.error_code_lessons(notes)
+            if lessons:
+                dropped_lessons = set(lessons)
+                notes = [n for n in notes if n not in dropped_lessons]
+                self._log(
+                    f"  [notes] {len(lessons)} [E0xxx] lesson(s) kept out of "
+                    "the prompt — the write list carries a measured "
+                    f"{escalated_grade} grade, and a measured instruction "
+                    "outranks a remembered workaround: "
+                    + "; ".join(n[:60] for n in lessons[:4])
+                    + ("; …" if len(lessons) > 4 else ""))
         contradicted = mn.layout_contradicted_notes(notes, file_text)
         if contradicted:
             dropped = set(contradicted)

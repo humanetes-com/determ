@@ -215,3 +215,60 @@ def test_a_fired_escalation_suspends_the_futile_units_stored_guidance(
          tmp_path, monkeypatch)
     assert suspensions == [(frozenset({_ACC}), frozenset({"t2"}))]
     assert any("suspended stored guidance" in ln for ln in logs)
+
+
+def test_futility_survives_a_code_move_when_the_convicted_bodies_are_unchanged(
+        tmp_path, monkeypatch) -> None:
+    """THE PLAN step 4 (202.5's bar, reachability only). The grade describes
+    the TREE: with the convicted file fingerprinted at save time and
+    unchanged at the resume, a `code_id` move no longer voids the evidence —
+    the resumed process escalates at its FIRST sweep and iter 1's batch
+    carries the producer instead of re-buying the accessor traversal (the
+    toll runs `21368-93f6a589` → `40938-f4e8e94b` paid twice in one evening
+    on the same git tree)."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.rs").write_text("fn fmt() { 1 }", encoding="utf-8")
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    row = dict(floor["row"])
+    assert row.get("futile_files"), "the save must stamp the premise"
+    row["code_id"] = "a-different-build"   # the validation-launch shape
+    floor["row"] = row
+
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    escalations: list[tuple[str, frozenset[FnLocator]]] = []
+    _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
+               escalations=escalations), tmp_path, monkeypatch)
+    assert escalations and escalations[0] == ("t2", frozenset({_ACC})), (
+        "escalation must fire from the premise-checked evidence")
+    assert batches and _PROD in batches[0], (
+        f"iter 1's batch must hold the escalated producer, got {batches[0]}")
+    assert any("premise re-checked" in ln for ln in logs)
+
+
+def test_futility_dies_on_a_code_move_when_a_convicted_body_changed(
+        tmp_path, monkeypatch) -> None:
+    """NEGATIVE CONTROL: the same move with the convicted file rewritten
+    between the runs (a re-stub / restore / re-author) falls through to
+    re-measurement — the pre-fix lock shape, which is the SAFE outcome
+    there: a stale conviction about a changed body must not steer."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.rs").write_text("fn fmt() { 1 }", encoding="utf-8")
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    row = dict(floor["row"])
+    row["code_id"] = "a-different-build"
+    floor["row"] = row
+    (tmp_path / "src" / "a.rs").write_text("fn fmt() { 2 }", encoding="utf-8")
+
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    escalations: list[tuple[str, frozenset[FnLocator]]] = []
+    _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
+               escalations=escalations), tmp_path, monkeypatch)
+    assert any("GPU_GUARD_STOP" in ln for ln in logs)
+    assert all(_PROD not in b for b in batches), (
+        "a voided premise must re-measure, never seed the stale conviction")

@@ -11,6 +11,8 @@ from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
     cursor_mismatch,
+    futility_files,
+    futility_premise_holds,
     render_pass_floor,
     resume_floor,
     resume_mismatch,
@@ -243,6 +245,66 @@ def test_futility_evidence_follows_the_cursor_identity_rule() -> None:
     r = resume_floor(f, **{**_KEY, "oracle_size": 103})
     assert r.stall is None and r.futility == _EVIDENCE
     assert "futility evidence resumed" in r.note
-    # A changed code build: a different attribution/routes — evidence dies.
+    # A changed code build with NO stamped premise (`futile_files` empty):
+    # nothing licenses the carry, so the evidence dies — the fall-through is
+    # re-measurement. The premise re-check that CAN carry it is pinned below.
     r = resume_floor(f, **{**_KEY, "code_id": "other"})
     assert r.futility is None
+
+
+def test_futility_survives_a_code_move_under_the_premise_re_check() -> None:
+    """The grade describes the TREE, not the pipeline build: with the
+    convicted files fingerprinted at save time and unchanged now, the
+    evidence resumes across a `code_id` move — the cost of dying with the
+    code identity was the identical 7-accessor entry traversal re-bought on
+    every validation launch (~2 h; twice in one evening on the same git
+    tree, runs `21368-93f6a589` → `40938-f4e8e94b`, 2026-08-23)."""
+    stamped = replace(
+        _FLOOR, futile_units=_EVIDENCE,
+        futile_files=(("src/chain.rs", "aaaa"), ("src/error.rs", "bbbb")))
+    live = {"src/chain.rs": "aaaa", "src/error.rs": "bbbb"}
+    r = resume_floor(stamped, **{**_KEY, "code_id": "other"},
+                     current_file_hashes=live)
+    assert r.futility == _EVIDENCE
+    assert "premise re-checked" in r.note
+    assert futility_premise_holds(stamped, live)
+
+
+def test_futility_dies_on_a_code_move_when_the_premise_fails() -> None:
+    """NEGATIVE CONTROLS — every mismatch falls through to re-measurement,
+    which is the pre-fix behaviour and the safe outcome after a re-stub,
+    a restore or a layout re-author."""
+    stamped = replace(
+        _FLOOR, futile_units=_EVIDENCE,
+        futile_files=(("src/chain.rs", "aaaa"), ("src/error.rs", "bbbb")))
+    moved = {**_KEY, "code_id": "other"}
+    # a convicted body's file changed since the measurement
+    changed = {"src/chain.rs": "aaaa", "src/error.rs": "CHANGED"}
+    assert resume_floor(stamped, **moved,
+                        current_file_hashes=changed).futility is None
+    # a file the evidence names was never stamped (partial fingerprint)
+    partial = replace(_FLOOR, futile_units=_EVIDENCE,
+                      futile_files=(("src/chain.rs", "aaaa"),))
+    assert resume_floor(partial, **moved, current_file_hashes={
+        "src/chain.rs": "aaaa", "src/error.rs": "bbbb"}).futility is None
+    # a pre-fix floor carries no fingerprints at all
+    unstamped = replace(_FLOOR, futile_units=_EVIDENCE)
+    assert resume_floor(unstamped, **moved, current_file_hashes={
+        "src/chain.rs": "aaaa", "src/error.rs": "bbbb"}).futility is None
+    # and under the SAME code the evidence still resumes without any hashes —
+    # the premise re-check is only the code-move gate, not a new obstacle.
+    assert resume_floor(unstamped, **{**_KEY, "oracle_size": 103},
+                        current_file_hashes={}).futility == _EVIDENCE
+
+
+def test_futile_files_round_trips_and_an_old_floor_parses_empty() -> None:
+    f = replace(_FLOOR, futile_units=_EVIDENCE,
+                futile_files=(("src/error.rs", "bbbb"),))
+    r = TddFloor.from_dict(f.to_dict())
+    assert r is not None and r.futile_files == (("src/error.rs", "bbbb"),)
+    old = dict(_FLOOR.to_dict())
+    old.pop("futile_files")
+    parsed = TddFloor.from_dict(old)
+    assert parsed is not None and parsed.futile_files == ()
+    assert futility_files(_EVIDENCE) == frozenset(
+        {"src/error.rs", "src/chain.rs"})

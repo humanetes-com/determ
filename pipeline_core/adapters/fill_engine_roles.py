@@ -393,8 +393,12 @@ class RetrosAdapter:
             bound_methods_section=bound_methods_section)
 
     def append_note(self, fr_path: Path, note: str,
-                    error_codes: list[str] | set[str] | None = None) -> bool:
-        return self.append_note_fn(fr_path, note, error_codes=error_codes)
+                    error_codes: list[str] | set[str] | None = None,
+                    provenance: Any | None = None) -> bool:
+        # `provenance` is 204 N1's premise record (`mn.NoteProvenance`); an
+        # [E0xxx] lesson without one is kept run-scoped by the store.
+        return self.append_note_fn(fr_path, note, error_codes=error_codes,
+                                   provenance=provenance)
 
     def extract_self_note(self, failed_body: str, error_excerpt: str,
                           fixed_body: str) -> str | None:

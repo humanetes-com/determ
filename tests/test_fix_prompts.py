@@ -217,3 +217,44 @@ def test_file_fill_states_inference_as_re_check_and_carries_the_evidence() -> No
     bare = _file_fill([BlockFillPlan("impl Error", (), ("chain",))])
     assert "<REFILL_EVIDENCE>" not in bare
     assert "rewrite (a body exists, but its test still fails): chain" in bare
+
+
+def test_file_fill_plan_renders_the_bypass_under_its_impl_with_the_producer_named() -> None:
+    """The closure's call-site half (THE PLAN step 1): a fn that constructs
+    the wrapper through the generic path is listed under its own impl header
+    with an instruction NAMING the typed producer — the exact information the
+    FILE FILLED 20 reply lacked when its thinking wrote "Error::context is
+    not listed for rewrite" and complied (run `40938-f4e8e94b`). The step-5
+    bar greps for "in `impl Error` -> REWRITE"; this line satisfies it."""
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), ("context",),
+        bypass=(("context", "ContextError", "construct_from_context",
+                 "declared in this file"),))])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert line.startswith("  in `impl Error` -> REWRITE TO INVOKE THE PRODUCER")
+    assert "construct_from_context" in line and "ContextError" in line
+    assert line.rstrip().endswith("context")
+    # NEGATIVE CONTROL: without the bypass entry the same refill renders as
+    # the plain rewrite line — the pre-fix shape the thinking complied with.
+    bare = _file_fill([BlockFillPlan("impl Error", (), ("context",))])
+    bare_line = next(ln for ln in bare.splitlines()
+                     if ln.startswith("  in `impl Error`"))
+    assert "PRODUCER" not in bare_line
+
+
+def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
+    """A fn both ESCALATED and a bypass gets the bypass line: the producer's
+    name is the half of the instruction the plain REWRITE grade lacks."""
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), ("context", "construct_from_std"),
+        escalated=("context", "construct_from_std"),
+        bypass=(("context", "ContextError", "construct_from_context",
+                 "declared in this file"),))])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert "REWRITE TO INVOKE THE PRODUCER" in line
+    # the other escalated member keeps the measured-grade line
+    assert "REWRITE (the fns that consume" in line
+    assert line.split("REWRITE (the fns that consume")[1].startswith(
+        " what this one produces")

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -918,6 +920,95 @@ def is_stale_regression_note(note: str, file_text: str) -> bool:
     if not file_text:
         return False
     return probe[:60] not in file_text
+
+
+@dataclass(frozen=True, slots=True)
+class NoteProvenance:
+    """The premise a durable lesson was learned under — the record the writer
+    may not erase even though the prose generalises.
+
+    The note-extraction prompt orders the model to name no function, file or
+    crate ("the note should generalise"), which is right for the PROSE and was
+    fatal for the RECORD: the `[E0425]` lesson "use the std-compatible
+    construction helper that omits the vtable" was learned when the vtable
+    free fns were neither writable nor on the tree — a scope-conditional
+    workaround — and with the condition erased it stood as immortal design
+    guidance, steering the pass-93 escalated rewrites into the exact wrong
+    body (run `40938-f4e8e94b`, prompt line 1213). Provenance is stored BESIDE
+    the prose, never inside it, so the anonymity order is inverted at the
+    store level only. A lesson that carries no provenance is run-scoped,
+    never durable."""
+
+    unit: str                          # "<file>::<fn>" the failed attempt was on
+    error_codes: tuple[str, ...]       # the codes the attempt died with
+    rejected_symbols: tuple[str, ...]  # what the compiler said does not exist
+    failed_body_hash: str              # fingerprint of the rejected body
+
+    def to_dict(self) -> dict[str, object]:
+        return {"unit": self.unit, "error_codes": list(self.error_codes),
+                "rejected_symbols": list(self.rejected_symbols),
+                "failed_body_hash": self.failed_body_hash}
+
+    @staticmethod
+    def from_dict(raw: object) -> NoteProvenance | None:
+        """Total by design — a corrupt sidecar entry reads as no provenance."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return NoteProvenance(
+                unit=str(raw.get("unit", "")),
+                error_codes=tuple(str(c) for c in raw.get("error_codes") or ()),
+                rejected_symbols=tuple(
+                    str(s) for s in raw.get("rejected_symbols") or ()),
+                failed_body_hash=str(raw.get("failed_body_hash", "")))
+        except (TypeError, ValueError):
+            return None
+
+
+def body_fingerprint(text: str) -> str:
+    """Whitespace-normalised md5 of a body — the failed-body identity a
+    `NoteProvenance` records (case preserved: Rust identifiers are cased)."""
+    return hashlib.md5(" ".join(text.split()).encode("utf-8")).hexdigest()[:16]
+
+
+def is_error_code_lesson(note: str) -> bool:
+    """True for a note carrying an ``[E0xxx,...]`` tag — the compile-lesson
+    class 204 is about. `[regression]` notes have their own class and rules."""
+    return parse_error_code_note(note.strip()) is not None
+
+
+def error_code_lessons(notes: list[str]) -> list[str]:
+    """The subset of ``notes`` that are ``[E0xxx]`` compile lessons."""
+    return [n for n in notes if is_error_code_lesson(n)]
+
+
+def void_premise_lessons(
+    notes: list[str],
+    provenance: Mapping[str, NoteProvenance],
+    *,
+    declared_symbols: frozenset[str],
+    writable_fns: frozenset[str],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """``(note, voiding symbols)`` for every provenance-carrying lesson whose
+    premise no longer holds — 204 N3, the premise-checked retirement.
+
+    A lesson's premise is that its rejected symbols did not exist in the scope
+    of the failed attempt. When EVERY rejected symbol now exists on the shown
+    tree or sits in the current prompt's write list, the premise is void and
+    the lesson is retirable ON DISK — the discipline the retro store received
+    (a conviction by no test dies once a test blames the unit) and the floor
+    received (the cursor trim), applied to the last claim-store without it.
+    Legacy prose notes carry no provenance and are never retired here — N2 is
+    the only sound rule for them (204.3)."""
+    out: list[tuple[str, tuple[str, ...]]] = []
+    known = declared_symbols | writable_fns
+    for n in notes:
+        prov = provenance.get(note_hash(n))
+        if prov is None or not prov.rejected_symbols:
+            continue
+        if all(sym in known for sym in prov.rejected_symbols):
+            out.append((n, tuple(sorted(prov.rejected_symbols))))
+    return out
 
 
 def rejected_symbols_in_errors(error_text: str) -> frozenset[str]:

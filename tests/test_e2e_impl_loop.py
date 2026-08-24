@@ -1450,3 +1450,142 @@ def test_impl_retry_flips_a_sibling_that_carries_the_rejected_expression(
     sib2 = second.split("<SIBLING_REFERENCE>", 1)[1].split("</SIBLING_REFERENCE>", 1)[0]
     assert "CAUTION" in sib2 and "`self.tag.wrapping_add(1)`" in sib2
     assert "follow the same structural pattern" not in sib2
+
+
+# --- THE PLAN step 1: the producer-bypass closure, route → prompt ------------
+
+BYPASS_LIB = """\
+pub struct W { x: u32 }
+pub struct Vt { f: fn(u32) -> u32 }
+
+pub fn drop_w(v: u32) -> u32 { v }
+
+impl W {
+    pub fn maker(x: u32) -> W {
+        let t = Vt { f: drop_w::<W> };
+        let _ = t;
+        W { x }
+    }
+    pub fn caller(x: u32) -> W {
+        W { x }
+    }
+    pub fn other(&self) -> u32 {
+        unimplemented!()
+    }
+}
+impl Default for W {
+    fn default() -> W {
+        unimplemented!()
+    }
+}
+impl Clone for W {
+    fn clone(&self) -> W {
+        W { x: self.x }
+    }
+}
+"""
+
+E0425_NOTE = ("[E0425] I tried building the value with a manually referenced "
+              "table because the value isn't in scope, use the plain "
+              "construction helper that omits the table instead.")
+
+
+def _bypass_blocks() -> list[ImplBlock]:
+    mk = FnRecord(file="lib.rs", fn_name="maker", container="impl W",
+                  sig_text="fn maker (x : u32) -> W")
+    ca = FnRecord(file="lib.rs", fn_name="caller", container="impl W",
+                  sig_text="fn caller (x : u32) -> W")
+    ot = FnRecord(file="lib.rs", fn_name="other", container="impl W",
+                  sig_text="fn other (& self) -> u32",
+                  has_unimplemented_body=True)
+    de = FnRecord(file="lib.rs", fn_name="default",
+                  container="impl Default for W",
+                  sig_text="fn default () -> W", has_unimplemented_body=True)
+    cl = FnRecord(file="lib.rs", fn_name="clone", container="impl Clone for W",
+                  sig_text="fn clone (& self) -> W")
+    return [
+        ImplBlock(file="lib.rs", container="impl W",
+                  members=(mk, ca, ot), stub_members=(ot,)),
+        ImplBlock(file="lib.rs", container="impl Default for W",
+                  members=(de,), stub_members=(de,)),
+        ImplBlock(file="lib.rs", container="impl Clone for W",
+                  members=(cl,), stub_members=()),
+    ]
+
+
+def _bypass_setup(monkeypatch, tmp_path: Path) -> tuple[Path, list[str]]:
+    from pipeline_core.domain.models import FieldRecord, TypeRecord
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(BYPASS_LIB)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _bypass_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    install_fake_extractor(
+        monkeypatch, fns=lambda sd: pipeline._STRUCTURE.enumerate_fns(sd),
+        types=[TypeRecord(file="lib.rs", kind="struct", name="Vt", fields=(
+                   FieldRecord(name="f", ty="fn(u32) -> u32"),)),
+               TypeRecord(file="lib.rs", kind="struct", name="W", fields=())],
+        dispatch_families=[])
+    (ws / "fr.md").write_text(
+        "# FR\n\nspec.\n\n## Model Notes — Confusions to Avoid\n\n"
+        f"- {E0425_NOTE}\n")
+    prompts: list[str] = []
+
+    def _ask(prompt, *a, **k):
+        prompts.append(prompt)
+        return ('<FN name="other" block="impl W">self.x</FN>\n'
+                '<FN name="default" block="impl Default for W">W { x: 0 }</FN>')
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _ask)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    return ws, prompts
+
+
+def test_file_first_prompt_lists_the_bypass_callers_and_drops_the_lesson(
+        monkeypatch, tmp_path):
+    """199.21's stated test, at the route seam: with the typed producer
+    (`maker` builds a `Vt` table instantiated at `W`) in the MEASURED
+    escalated set, the file-first prompt lists every fn that constructs `W`
+    without invoking `maker` — `caller` inside a dispatched block, `clone`
+    inside a block this dispatch does not even carry (`_extra_plans`) — under
+    `REWRITE TO INVOKE THE PRODUCER`, naming the producer. And the same
+    prompt's `<MODEL_NOTES>` carries no `[E0xxx]` lesson: the route passes
+    the grade, so the channel rule fires where the measured instruction is
+    (the contradiction run `40938-f4e8e94b` carried at line 1213)."""
+    ws, prompts = _bypass_setup(monkeypatch, tmp_path)
+    res = pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=ws / "fr.md",
+        tdd_frontier_keys=None,
+        escalated_measured=frozenset({FnLocator("lib.rs", "maker")}),
+        escalated_keys=frozenset({FnLocator("lib.rs", "maker")}))
+    assert res.fns_filled >= 2
+    file_prompt = prompts[0]
+    assert "REWRITE TO INVOKE THE PRODUCER" in file_prompt
+    assert "`maker`" in file_prompt
+    line = next(ln for ln in file_prompt.splitlines()
+                if ln.startswith("  in `impl W`") and "caller" in ln)
+    assert "REWRITE TO INVOKE THE PRODUCER" in line
+    extra = next(ln for ln in file_prompt.splitlines()
+                 if ln.startswith("  in `impl Clone for W`"))
+    assert "clone" in extra and "PRODUCER" in extra
+    assert "[E0425]" not in file_prompt
+
+
+def test_file_first_prompt_without_the_measured_set_offers_no_bypass(
+        monkeypatch, tmp_path):
+    """NEGATIVE CONTROL, pre-fix shape: no escalated measurement → no bypass
+    line anywhere, and the `[E0425]` lesson still reaches the prompt — the
+    exact state the FILE FILLED 20 reply complied with."""
+    ws, prompts = _bypass_setup(monkeypatch, tmp_path)
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=ws / "fr.md",
+        tdd_frontier_keys=None)
+    file_prompt = prompts[0]
+    assert "REWRITE TO INVOKE THE PRODUCER" not in file_prompt
+    # the undispatched block gets no plan entry without the measured set
+    plan = file_prompt.split("Functions to write", 1)[1].split("```rust", 1)[0]
+    assert "impl Clone for W" not in plan
+    assert "[E0425]" in file_prompt

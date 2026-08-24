@@ -214,3 +214,46 @@ def test_backward_scan_still_covers_a_file_the_extractor_never_parsed(
     cargo = "error[E0308]: mismatched types\n  --> a.rs:2:13\n"
     assert implicated_fns_from_cargo_errors(
         cargo, tmp_path, enumerate_fns=lambda d: recs) == [("a.rs", "helper")]
+
+
+def test_record_tdd_regression_multi_fill_writes_one_event_note(tmp_path: Path) -> None:
+    """201 slice D: a per-fn accusation is written only when the causal claim
+    holds (one filled body). A 12-body pass used to produce 12 identical
+    accusations each admitting it was 1/12 likely to be about its fn — 29 such
+    notes sat on disk blaming 29 different fns (measured 2026-08-22). A
+    multi-body regression now records ONE note naming the event and its
+    filled set, accusing nobody."""
+    fr = tmp_path / "fr.md"
+    notes: list[tuple[Path, str]] = []
+    recs = [{"fn_name": "foo", "file": "src/a.rs", "body_text": "0 // wrong"},
+            {"fn_name": "bar", "file": "src/b.rs", "body_text": "1 // wrong"}]
+    msg = record_tdd_regression(
+        fr, tmp_path, [("src/a.rs", "foo"), ("src/b.rs", "bar")],
+        {"t1"}, 14, 11,
+        enumerate_fns=lambda d: recs, append_note=lambda p, n: notes.append((p, n)),
+        body_cap=200,
+    )
+    assert msg == "regressed t1"
+    assert len(notes) == 1, "one note per regression EVENT, not per fn"
+    note = notes[0][1]
+    assert "2 bodies" in note and "no single body is accused" in note
+    assert "src/a.rs::foo" in note and "src/b.rs::bar" in note
+    assert "after `" not in note, "the event note accuses no subject"
+    assert "0 // wrong" not in note, "no body — the causal claim is 1/N"
+
+
+def test_record_tdd_regression_single_fill_still_accuses(tmp_path: Path) -> None:
+    """The len==1 case keeps the concrete WRONG-body accusation — that claim
+    actually holds, and it is the actionable half the model reacts to."""
+    fr = tmp_path / "fr.md"
+    notes: list[tuple[Path, str]] = []
+    recs = [{"fn_name": "foo", "file": "src/a.rs", "body_text": "0 // wrong"}]
+    record_tdd_regression(
+        fr, tmp_path, [("src/a.rs", "foo")], {"t1"}, 14, 11,
+        enumerate_fns=lambda d: recs, append_note=lambda p, n: notes.append((p, n)),
+        body_cap=200,
+    )
+    assert len(notes) == 1
+    assert "after `foo` was written" in notes[0][1]
+    assert "0 // wrong" in notes[0][1]
+    assert "the culprit is ONE of them" not in notes[0][1]
