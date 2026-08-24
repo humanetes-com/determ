@@ -29,6 +29,17 @@ pub struct FnRecord {
     // this is a SEPARATE field from `is_pub` rather than a redefinition.
     pub is_exactly_pub: bool,
     pub container: String, // "" for free fn, "impl X for Y" for inherent/trait impl, "trait T" for trait method
+    // True iff the enclosing impl's SELF TYPE is one of that impl's own
+    // generic type parameters (`impl<E> Trait for E`). `container` cannot
+    // carry this: `render_impl_header` drops the generics list and the where
+    // clause, so `impl Trait for E` (E generic — the method's `self` is still
+    // an UNERASED value the caller chose) and `impl Trait for Error` (concrete
+    // self) print identically. The producer-bypass instruction split keys on
+    // exactly this fact: a generic self can be handed to a typed generic
+    // producer; a concrete self needs its own per-type table (three identical
+    // instructed `E0277`s on `Error::context`, run 57025-6ba652f2,
+    // 2026-08-24). False for free fns and trait default methods.
+    pub impl_self_generic: bool,
     // `::`-joined inline-module path within the file ("" at file scope). Rust
     // forbids two items of one name in one module, so (file, mod_path, fn_name)
     // identifies at most ONE compiled fn — the key that lets a test inventory

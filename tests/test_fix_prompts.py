@@ -219,41 +219,70 @@ def test_file_fill_states_inference_as_re_check_and_carries_the_evidence() -> No
     assert "rewrite (a body exists, but its test still fails): chain" in bare
 
 
-def test_file_fill_plan_renders_the_bypass_under_its_impl_with_the_producer_named() -> None:
-    """The closure's call-site half (THE PLAN step 1): a fn that constructs
-    the wrapper through the generic path is listed under its own impl header
-    with an instruction NAMING the typed producer — the exact information the
-    FILE FILLED 20 reply lacked when its thinking wrote "Error::context is
-    not listed for rewrite" and complied (run `40938-f4e8e94b`). The step-5
-    bar greps for "in `impl Error` -> REWRITE"; this line satisfies it."""
+def test_file_fill_plan_renders_the_call_form_only_for_a_generic_self() -> None:
+    """The bypass instruction's call form — invoke the typed producer, by
+    name — is rendered ONLY where the fn's impl erases its own generic
+    parameter (`erases_generic=True`, the live `impl<E> StdError for E`
+    `ext_context`): there the producer call is the correct shape, and reply
+    sha `96b99782…` executed it verbatim. The entry still lands under its own
+    impl header — the information the FILE FILLED 20 reply lacked when its
+    thinking wrote "Error::context is not listed for rewrite" and complied
+    (run `40938-f4e8e94b`)."""
     out = _file_fill([BlockFillPlan(
-        "impl Error", (), ("context",),
-        bypass=(("context", "ContextError", "construct_from_context",
-                 "declared in this file"),))])
+        "impl<E> StdError for E", (), ("ext_context",),
+        bypass=(("ext_context", "ContextError", "construct_from_context",
+                 "declared in `src/error.rs` — pub(crate), callable from here",
+                 True),))])
     line = next(ln for ln in out.splitlines()
-                if ln.startswith("  in `impl Error`"))
-    assert line.startswith("  in `impl Error` -> REWRITE TO INVOKE THE PRODUCER")
-    assert "construct_from_context" in line and "ContextError" in line
-    assert line.rstrip().endswith("context")
+                if ln.startswith("  in `impl<E> StdError for E`"))
+    assert "REWRITE TO INVOKE THE PRODUCER" in line
+    assert "rewrite it to call `construct_from_context`" in line
+    assert "ContextError" in line
+    assert line.rstrip().endswith("ext_context")
     # NEGATIVE CONTROL: without the bypass entry the same refill renders as
     # the plain rewrite line — the pre-fix shape the thinking complied with.
-    bare = _file_fill([BlockFillPlan("impl Error", (), ("context",))])
+    bare = _file_fill([BlockFillPlan("impl<E> StdError for E", (),
+                                     ("ext_context",))])
     bare_line = next(ln for ln in bare.splitlines()
-                     if ln.startswith("  in `impl Error`"))
+                     if ln.startswith("  in `impl<E> StdError for E`"))
     assert "PRODUCER" not in bare_line
 
 
+def test_file_fill_plan_concrete_self_gets_the_table_form_and_no_producer_name() -> None:
+    """A concrete-self bypass (`Error::context` — `erases_generic=False`)
+    renders the TABLE form: the measured relation and the goal, and the
+    producer's name NOWHERE in it. The call form for exactly this entry is
+    what the model executed over the compiler three times (run
+    `57025-6ba652f2`, identical `E0277` at 17:45/17:55/18:05 UTC — the
+    recorded pre-fix control: prompt sha `09a55899…` carries "rewrite it to
+    call `construct_from_context`" for `context`); and upstream's own body
+    here builds the wrapper's chain vtable inline rather than calling the
+    typed producer, so the call would be wrong even where bounds could be
+    arranged."""
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), ("context",),
+        bypass=(("context", "ContextError", "construct_from_context",
+                 "declared in this file", False),))])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert "BUILD THE PER-TYPE TABLE" in line
+    assert "construct_from_context" not in line
+    assert "REWRITE TO INVOKE" not in line
+    assert "ContextError" in line and "writable in this prompt" in line
+    assert line.rstrip().endswith("context")
+
+
 def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
-    """A fn both ESCALATED and a bypass gets the bypass line: the producer's
-    name is the half of the instruction the plain REWRITE grade lacks."""
+    """A fn both ESCALATED and a bypass gets the bypass line: the wrapper
+    relation is the half of the instruction the plain REWRITE grade lacks."""
     out = _file_fill([BlockFillPlan(
         "impl Error", (), ("context", "construct_from_std"),
         escalated=("context", "construct_from_std"),
         bypass=(("context", "ContextError", "construct_from_context",
-                 "declared in this file"),))])
+                 "declared in this file", False),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
-    assert "REWRITE TO INVOKE THE PRODUCER" in line
+    assert "BUILD THE PER-TYPE TABLE" in line
     # the other escalated member keeps the measured-grade line
     assert "REWRITE (the fns that consume" in line
     assert line.split("REWRITE (the fns that consume")[1].startswith(

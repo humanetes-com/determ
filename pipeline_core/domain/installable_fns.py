@@ -77,9 +77,22 @@ class ProducerBypass:
     fn_name: str
     container: str        # one-line impl header ("" for a free fn)
     wrapper: str          # W — the type the body constructs
-    producer: str         # the typed producer the body must invoke
+    producer: str         # the typed producer the generic path bypasses
     producer_file: str    # where that producer is declared
     same_file: bool       # producer declared in the prompted file itself
+    # True iff this fn's impl erases the impl's OWN generic parameter
+    # (`impl<E> Trait for E` — the extractor's `impl_self_generic`, decided on
+    # the syn AST). This is the fact the instruction split keys on, and it is
+    # the ERASED INNER TYPE, not bound coverage: upstream `Error::context`
+    # builds the `ContextError<C, Error>` CHAIN vtable inline and never calls
+    # the typed producer, even where bounds could be arranged — so a concrete
+    # self must NEVER be instructed to call the producer. On the live tree the
+    # call-form instruction produced three identical `E0277`s on
+    # `Error::context` (run 57025-6ba652f2, 17:45/17:55/18:05 UTC), while the
+    # generic `ext_context` in the same reply executed it correctly. False for
+    # free fns and anything undecidable — the cautious instruction can cost a
+    # missed shortcut, never an instructed compile error.
+    erases_generic: bool
 
 
 def _split_top_level(text: str, sep: str = ",") -> list[str]:
@@ -404,6 +417,13 @@ def producer_bypasses(
     """Fns of ``file_rel`` that construct a wrapper W without invoking W's
     typed producer — the call sites the closure makes writable.
 
+    Each hit carries ``erases_generic``, the fact the INSTRUCTION split keys
+    on (see the field): a generic-self hit may be told to invoke the producer,
+    a concrete-self hit must be told to build W's own per-type table and the
+    producer's name must stay out of its instruction entirely — told with an
+    offer line naming the call, the model complied over the compiler three
+    times (run 57025-6ba652f2, identical `E0277` at 17:45/17:55/18:05 UTC).
+
     The predicate, per fn of the prompted file: the body constructs a struct
     literal of W (`constructs_type` — a TOKEN match, so `E` never matches
     `Error`), the producer's name is absent from the body's identifier tokens
@@ -441,7 +461,8 @@ def producer_bypasses(
                     container=" ".join(
                         str(r.get("container", "")).split("{", 1)[0].split()),
                     wrapper=w, producer=producer, producer_file=pfile,
-                    same_file=pfile == file_rel))
+                    same_file=pfile == file_rel,
+                    erases_generic=bool(r.get("impl_self_generic", False))))
                 break
     out.sort(key=lambda b: (b.fn_name, b.container))
     return tuple(out[:cap])

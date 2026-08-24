@@ -142,14 +142,19 @@ class BlockFillPlan:
     installable: tuple[str, ...] = ()
     # Call sites that construct a wrapper an escalated producer erases WITHOUT
     # invoking its typed producer (`domain.installable_fns.producer_bypasses`)
-    # — the closure's third population. `(fn, wrapper, producer, producer_ref)`
-    # where `producer_ref` says where the producer lives ("declared in this
-    # file", "declared in `src/error.rs` — pub(crate), callable from here").
-    # Run `40938-f4e8e94b` measured what omitting them costs: the model's
-    # thinking named the `Self::new` → `construct_from_std` bypass in
-    # `Error::context`, wrote "Error::context is not listed for rewrite", and
-    # spent the rest of its budget special-casing the generic constructor.
-    bypass: tuple[tuple[str, str, str, str], ...] = ()
+    # — the closure's third population. `(fn, wrapper, producer, producer_ref,
+    # erases_generic)` where `producer_ref` says where the producer lives
+    # ("declared in this file", "declared in `src/error.rs` — pub(crate),
+    # callable from here") and `erases_generic` selects the INSTRUCTION: True
+    # (the fn's impl erases its own generic parameter) renders the call form —
+    # invoke the producer; False renders the table form, which never names the
+    # producer. Run `40938-f4e8e94b` measured what omitting the entries costs
+    # (the model's thinking named the `Self::new` → `construct_from_std`
+    # bypass in `Error::context`, wrote "Error::context is not listed for
+    # rewrite", and complied); run `57025-6ba652f2` measured what the WRONG
+    # form costs (told to call the producer on a concrete self, the model
+    # complied over the compiler through three identical `E0277`s).
+    bypass: tuple[tuple[str, str, str, str, bool], ...] = ()
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -193,23 +198,46 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "written in the same reply — return it unchanged only if "
                      "it is already right for the type the producer erases): "
                      + ", ".join(installable))
-    for wrapper, producer, producer_ref in sorted(
-            {(b[1], b[2], b[3]) for b in p.bypass}):
+    for wrapper, producer, producer_ref, erases_generic in sorted(
+            {(b[1], b[2], b[3], b[4]) for b in p.bypass}):
         fns = tuple(b[0] for b in p.bypass
-                    if (b[1], b[2], b[3]) == (wrapper, producer, producer_ref)
+                    if (b[1], b[2], b[3], b[4])
+                    == (wrapper, producer, producer_ref, erases_generic)
                     and b[0] in p.refills)
         if not fns:
             continue
         # The relation is stated, not a verdict on the body: what was measured
         # is that rewriting the producer moved no verdict WHILE this body kept
         # routing `wrapper` values around it, so the per-type table is
-        # installed on nothing this body creates.
-        parts.append(f"REWRITE TO INVOKE THE PRODUCER (this body constructs "
-                     f"`{wrapper}` and hands it to the generic construction "
-                     f"path, so the per-type table its typed producer "
-                     f"`{producer}` builds ({producer_ref}) is never installed "
-                     f"on the values this body creates; rewrite it to call "
-                     f"`{producer}` instead): " + ", ".join(fns))
+        # installed on nothing this body creates. The INSTRUCTION splits on
+        # the erased inner type. Call form only where the fn's impl erases its
+        # own generic parameter — there the producer call is the correct shape
+        # and the model demonstrably executes it. Everywhere else the table
+        # form, which states the relation and the goal and NEVER names the
+        # producer: named in the instruction, the model complied with the call
+        # over the compiler through three identical `E0277`s (run
+        # `57025-6ba652f2`), and upstream's own concrete-self body builds the
+        # wrapper's chain table inline rather than calling the typed producer
+        # even where bounds could be arranged.
+        if erases_generic:
+            parts.append(f"REWRITE TO INVOKE THE PRODUCER (this body "
+                         f"constructs `{wrapper}` and hands it to the generic "
+                         f"construction path, so the per-type table its typed "
+                         f"producer `{producer}` builds ({producer_ref}) is "
+                         f"never installed on the values this body creates; "
+                         f"rewrite it to call `{producer}` instead): "
+                         + ", ".join(fns))
+        else:
+            parts.append(f"BUILD THE PER-TYPE TABLE (this body constructs "
+                         f"`{wrapper}` and hands it to the generic "
+                         f"construction path, so the per-type table its "
+                         f"values need for dispatch is installed on nothing "
+                         f"this body creates — the failing downcasts walk "
+                         f"that table. No generic producer call is the fix "
+                         f"here: the value this body wraps needs `{wrapper}`'s "
+                         f"own table, built in this body, dispatching through "
+                         f"the table fns that fit these types — the candidate "
+                         f"fns are writable in this prompt): " + ", ".join(fns))
     if inferred:
         parts.append("re-check (a body exists; implicated by NAME only — "
                      "rewrite ONLY if it is wrong for its bounds, else leave it "

@@ -1483,6 +1483,14 @@ impl Clone for W {
         W { x: self.x }
     }
 }
+pub trait Tagged {
+    fn wrap(self) -> W;
+}
+impl<Z> Tagged for Z {
+    fn wrap(self) -> W {
+        W { x: 0 }
+    }
+}
 """
 
 E0425_NOTE = ("[E0425] I tried building the value with a manually referenced "
@@ -1546,11 +1554,19 @@ def test_file_first_prompt_lists_the_bypass_callers_and_drops_the_lesson(
     (`maker` builds a `Vt` table instantiated at `W`) in the MEASURED
     escalated set, the file-first prompt lists every fn that constructs `W`
     without invoking `maker` — `caller` inside a dispatched block, `clone`
-    inside a block this dispatch does not even carry (`_extra_plans`) — under
-    `REWRITE TO INVOKE THE PRODUCER`, naming the producer. And the same
-    prompt's `<MODEL_NOTES>` carries no `[E0xxx]` lesson: the route passes
-    the grade, so the channel rule fires where the measured instruction is
-    (the contradiction run `40938-f4e8e94b` carried at line 1213)."""
+    inside a block this dispatch does not even carry (`_extra_plans`), `wrap`
+    inside a generic impl. And the same prompt's `<MODEL_NOTES>` carries no
+    `[E0xxx]` lesson: the route passes the grade, so the channel rule fires
+    where the measured instruction is (the contradiction run `40938-f4e8e94b`
+    carried at line 1213).
+
+    The INSTRUCTION splits on the erased inner type, through the REAL
+    extractor's `impl_self_generic`: `wrap` (`impl<Z> Tagged for Z` — generic
+    self) gets the call form naming `maker`; `caller` and `clone` (concrete
+    self `W`) get the table form, with the producer's name NOWHERE in their
+    lines. The pre-fix control is recorded live: the call form rendered for
+    the concrete-self `Error::context` is what run `57025-6ba652f2` complied
+    with over the compiler through three identical `E0277`s."""
     ws, prompts = _bypass_setup(monkeypatch, tmp_path)
     res = pipeline._phase_c_fill_impl_blocks(
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
@@ -1561,14 +1577,18 @@ def test_file_first_prompt_lists_the_bypass_callers_and_drops_the_lesson(
         escalated_keys=frozenset({FnLocator("lib.rs", "maker")}))
     assert res.fns_filled >= 2
     file_prompt = prompts[0]
-    assert "REWRITE TO INVOKE THE PRODUCER" in file_prompt
-    assert "`maker`" in file_prompt
     line = next(ln for ln in file_prompt.splitlines()
                 if ln.startswith("  in `impl W`") and "caller" in ln)
-    assert "REWRITE TO INVOKE THE PRODUCER" in line
+    assert "BUILD THE PER-TYPE TABLE" in line
+    assert "maker" not in line and "REWRITE TO INVOKE" not in line
     extra = next(ln for ln in file_prompt.splitlines()
                  if ln.startswith("  in `impl Clone for W`"))
-    assert "clone" in extra and "PRODUCER" in extra
+    assert "clone" in extra and "BUILD THE PER-TYPE TABLE" in extra
+    assert "maker" not in extra
+    generic = next(ln for ln in file_prompt.splitlines()
+                   if ln.startswith("  in `impl Tagged for Z`"))
+    assert "REWRITE TO INVOKE THE PRODUCER" in generic
+    assert "rewrite it to call `maker`" in generic and "wrap" in generic
     assert "[E0425]" not in file_prompt
 
 
@@ -1585,6 +1605,7 @@ def test_file_first_prompt_without_the_measured_set_offers_no_bypass(
         tdd_frontier_keys=None)
     file_prompt = prompts[0]
     assert "REWRITE TO INVOKE THE PRODUCER" not in file_prompt
+    assert "BUILD THE PER-TYPE TABLE" not in file_prompt
     # the undispatched block gets no plan entry without the measured set
     plan = file_prompt.split("Functions to write", 1)[1].split("```rust", 1)[0]
     assert "impl Clone for W" not in plan

@@ -44,6 +44,14 @@ REACTED.  The classes and their defining instances:
      pass landing after the last sweep is never scored at all, so the
      regression it caused ships to the next run as that run's baseline.
 
+  P14 compliance over compiler — the same unit fails consecutive attempts
+     with an IDENTICAL primary diagnostic: the retry prompt carried the
+     diagnostic and the reply made the same call anyway, the tell that a
+     prompt input (a write-list instruction, a stored lesson, the model's own
+     prior) outranks compile feedback.  Run 57025-6ba652f2 (2026-08-24):
+     `Error::context` instructed into `construct_from_context`'s
+     unsatisfiable bound, three identical `E0277`; the unprompted shape on
+     the per-fn route dates to 2026-05-26.
   P8 fire that never lands — the layout retrigger SPENDS a full authoring
      round and the re-author dies in splice/locate infrastructure, so nothing
      reaches the tree.  Distinct from P6, which declines to spend.  Invisible
@@ -215,6 +223,26 @@ RE_CFG_INACTIVE = re.compile(
     r"(?P<fns>.+)")
 RE_LOCATE_MISS = re.compile(
     r"could not locate a frozen definition to replace: (?P<item>[^\s(]+)")
+# P14 — compliance over compiler: the same unit failing consecutive attempts
+# with an IDENTICAL primary diagnostic, the tell that something in the prompt
+# (a write-list instruction, a stored lesson) is overriding compile feedback.
+# The byte-identical resample skip catches only identical REPLIES; in the
+# defining instance the replies differed while the error did not (run
+# 57025-6ba652f2: three `E0277` on the same instructed call, 17:45/17:55/18:05
+# UTC, and the class predates the instruction — the per-fn route hit the
+# identical diagnostic on `src/error.rs::context` on 2026-05-26). Two line
+# shapes: the per-fn/per-block route prints `compile failed (attempt N)` and
+# then the first diagnostic on the unit's next line; the file-first route
+# prints codes and the primary diagnostic on its revert line (added
+# 2026-08-24 — earlier file-route logs carry no diagnostic, so file-route
+# repeats before that date are invisible here rather than guessed at).
+RE_ATTEMPT_FAIL = re.compile(
+    r"\[phase-c/impl\] (?P<unit>\S+): compile failed \(attempt (?P<n>\d+)\)")
+RE_ATTEMPT_DIAG = re.compile(
+    r"\[phase-c/impl\] (?P<unit>\S+): +error\[(?P<code>E\d+)\]: (?P<msg>.+)")
+RE_FILE_REVERT_DIAG = re.compile(
+    r"\[phase-c/file\] (?P<unit>\S+): reverted \(compile failed; "
+    r"codes=\[[^\]]*\] first: error\[(?P<code>E\d+)\]: (?P<msg>.+?)\) — ")
 
 # Reaction markers: a line matching one of these is the pipeline ANSWERING a
 # pattern (the value is the short name shown as REACTED(<name>)).  Grouped by
@@ -294,6 +322,17 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # …and the line itself now separates the cfg-dead population, so a hit
         # is a routing gap rather than the cfg filter working.
         ("are cfg-inactive in this cluster", "cfg-dead-excluded"),
+    ],
+    "P14": [
+        # The per-block loop's own stopper: it ends the SPEND after the
+        # repeat, which is damage control, not an answer to what keeps
+        # instructing the same call — a hit that only ever shows this
+        # reaction is still an open class.
+        ("identical errors after attempt", "identical-error-stop"),
+        # The resample skip fires only when the whole PROMPT rebuilt
+        # byte-identical; it cannot see identical ERRORS under differing
+        # replies, which is this class's defining shape.
+        ("rebuilt a byte-identical prompt", "resample-skip"),
     ],
 }
 
@@ -971,10 +1010,75 @@ def detect_p12(run: Run, iters: list[dict]) -> list[dict]:
         "refs": [ref for ref, _ in fires[:4]]}]
 
 
+def _diag_symbols(msg: str) -> tuple[str, ...]:
+    """The backticked symbols of a diagnostic's first line — `Error:
+    core::error::Error` out of "the trait bound `Error: core::error::Error`
+    is not satisfied".  The log prints only the diagnostic's HEADER line, so
+    the called symbol of E0277's "required by a bound in ..." note is not
+    recoverable here; (unit, code, header symbols) identifies the class just
+    as uniquely, and hashes the 2026-05 per-fn shape and the 2026-08
+    instructed shape to the same key.  Falls back to the whole message when
+    the header carries no backticks."""
+    syms = tuple(re.findall(r"`([^`]+)`", msg))
+    return syms if syms else (msg.strip(),)
+
+
+def _compliance_seqs(
+        run: Run) -> dict[str, list[tuple[str, tuple, str]]]:
+    """Per unit, in log order: (ref, (code, symbols), attempt-label) for every
+    failed attempt whose primary diagnostic the log carries.  Units interleave
+    in the log, so consecutiveness is judged per unit, never per line."""
+    seqs: dict[str, list[tuple[str, tuple, str]]] = defaultdict(list)
+    pending: dict[str, str] = {}   # unit -> attempt n awaiting its first diag
+    for ref, text in run.lines:
+        if (m := RE_ATTEMPT_FAIL.search(text)):
+            pending[m["unit"]] = m["n"]
+        elif (m := RE_ATTEMPT_DIAG.search(text)) and m["unit"] in pending:
+            seqs[m["unit"]].append(
+                (ref, (m["code"], _diag_symbols(m["msg"])),
+                 pending.pop(m["unit"])))
+        elif (m := RE_FILE_REVERT_DIAG.search(text)):
+            seqs[m["unit"]].append(
+                (ref, (m["code"], _diag_symbols(m["msg"])), "file"))
+    return seqs
+
+
+def detect_p14(run: Run, iters: list[dict]) -> list[dict]:
+    """Compliance over compiler: >=2 CONSECUTIVE failed attempts of one unit
+    with an identical primary diagnostic (code + header symbols).  One
+    identical repeat is already the class — the second attempt's prompt
+    carried the first attempt's diagnostic and the reply made the same call
+    anyway — and the defining instance ran to three (run 57025-6ba652f2,
+    `Error::context` instructed into `construct_from_context`'s unsatisfiable
+    bound by the write list).  The row names unit, code, and the repeated
+    symbols, so the next instance is a lookup, not an investigation."""
+    hits = []
+    for unit, seq in _compliance_seqs(run).items():
+        i = 0
+        while i < len(seq):
+            j = i
+            while j + 1 < len(seq) and seq[j + 1][1] == seq[i][1]:
+                j += 1
+            if j > i:
+                code, syms = seq[i][1]
+                hits.append({
+                    "evidence": f"{unit}: {j - i + 1} consecutive attempt(s) "
+                                f"({', '.join(s[2] for s in seq[i:j + 1])}) "
+                                f"failed with the identical {code} on "
+                                f"{', '.join(repr(s) for s in syms[:3])} — "
+                                "the diagnostic was in the record before "
+                                "every attempt after the first",
+                    "key": [unit, code, list(syms)],
+                    "refs": [s[0] for s in seq[i:j + 1]][:4]})
+            i = j + 1
+    return hits
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
-             "P10": detect_p10, "P11": detect_p11, "P12": detect_p12}
+             "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
+             "P14": detect_p14}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -983,7 +1087,8 @@ CLASS_NAMES = {
     "P9": "destruction authorised by progress",
     "P10": "undispatchable frontier unit",
     "P11": "discarded answer (reader)",
-    "P12": "silent complement (escalation without installable offer)"}
+    "P12": "silent complement (escalation without installable offer)",
+    "P14": "compliance over compiler (identical diagnostic across attempts)"}
 
 
 # -------------------------------------------------------------------- report
@@ -1040,8 +1145,13 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
     conv: dict[str, list[str]] = defaultdict(list)
     fired: dict[str, list[str]] = defaultdict(list)
     nobody: dict[str, int] = defaultdict(int)
+    compl: dict[tuple, list[str]] = defaultdict(list)
     for run in runs:
         seen_e, seen_c, seen_f = set(), set(), set()
+        for h in detect_p14(run, []):
+            key = json.dumps(h["key"])
+            if run.run_id not in compl[key]:
+                compl[key].append(run.run_id)
         for _ref, m in run.find(RE_ESCALATE):
             key = (m["test"], m["head"].strip())
             if key not in seen_e:
@@ -1074,6 +1184,16 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
         "frame_blind": [
             {"what": f"blamed NOBODY x{n}", "runs": [rid]}
             for rid, n in nobody.items()],
+        # The same (unit, code, symbols) repeating identically across RUNS is
+        # the model reaching for the same wrong call under different prompts
+        # and different code — the strongest evidence that a prompt input
+        # (instruction, lesson, or its own prior) is steering it, and the key
+        # that hashes the 2026-05 unprompted shape and the 2026-08 instructed
+        # shape together.
+        "compliance": [
+            {"what": " ".join(str(x) for x in json.loads(k)), "runs": r}
+            for k, r in sorted(compl.items(), key=lambda kv: -len(kv[1]))
+            if len(r) >= 2][:12],
     }
 
 
@@ -1198,6 +1318,8 @@ def print_chronics(ch: dict) -> None:
         "conviction": "same unit skipped-under-conviction in >=2 runs",
         "component": "same component re-authored in >=2 runs",
         "frame_blind": "runs where the localizer blamed NOBODY",
+        "compliance": "same identical-diagnostic repeat (unit code symbols)"
+                      " in >=2 runs",
     }
     for key, title in titles.items():
         entries = ch.get(key) or []

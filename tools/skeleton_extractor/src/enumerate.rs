@@ -33,11 +33,20 @@ impl<'a> FnEnumerator<'a> {
         &mut self,
         fn_name: &str,
         attrs: &[syn::Attribute],
-        is_pub: bool,
-        is_exactly_pub: bool,
+        vis: &syn::Visibility,
         sig: &syn::Signature,
         block: &syn::Block,
+        impl_self_generic: bool,
     ) {
+        // Both visibility fields derive from the one syn node; deriving them
+        // here keeps the call sites from repeating the same two `matches!`
+        // (trait default methods carry no `vis` in syn and pass `Inherited`,
+        // which reads false on both — the values they always had).
+        let is_pub = matches!(
+            vis,
+            syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
+        );
+        let is_exactly_pub = matches!(vis, syn::Visibility::Public(_));
         // sig_byte_start: best-effort using the fn token's span, fallback to
         // the first attribute's span if attrs are present.
         let fn_span = sig.fn_token.span;
@@ -86,6 +95,7 @@ impl<'a> FnEnumerator<'a> {
             is_pub,
             is_exactly_pub,
             container,
+            impl_self_generic,
             mod_path: self
                 .container_stack
                 .iter()
@@ -152,17 +162,15 @@ impl<'a> FnEnumerator<'a> {
                     self.record_from_fn(
                         &item_fn.sig.ident.to_string(),
                         &item_fn.attrs,
-                        matches!(
-                            item_fn.vis,
-                            syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
-                        ),
-                        matches!(item_fn.vis, syn::Visibility::Public(_)),
+                        &item_fn.vis,
                         &item_fn.sig,
                         &item_fn.block,
+                        false,
                     );
                 }
                 Item::Impl(item_impl) => {
                     let container = render_impl_header(item_impl);
+                    let impl_self_generic = impl_self_ty_is_own_generic(item_impl);
                     self.container_stack.push(container);
                     for impl_item in &item_impl.items {
                         let ii_cfgs = extract_cfg_predicates(impl_item_attrs(impl_item));
@@ -173,13 +181,10 @@ impl<'a> FnEnumerator<'a> {
                             self.record_from_fn(
                                 &item_fn.sig.ident.to_string(),
                                 &item_fn.attrs,
-                                matches!(
-                                    item_fn.vis,
-                                    syn::Visibility::Public(_) | syn::Visibility::Restricted(_)
-                                ),
-                                matches!(item_fn.vis, syn::Visibility::Public(_)),
+                                &item_fn.vis,
                                 &item_fn.sig,
                                 &item_fn.block,
+                                impl_self_generic,
                             );
                         }
                         for _ in &ii_cfgs {
@@ -202,10 +207,10 @@ impl<'a> FnEnumerator<'a> {
                             self.record_from_fn(
                                 &item_fn.sig.ident.to_string(),
                                 &item_fn.attrs,
-                                false,
-                                false,
+                                &syn::Visibility::Inherited,
                                 &item_fn.sig,
                                 block,
+                                false,
                             );
                         }
                         for _ in &ti_cfgs {
@@ -273,6 +278,34 @@ pub(crate) fn trait_item_attrs(it: &TraitItem) -> &[syn::Attribute] {
         TraitItem::Type(i) => &i.attrs,
         _ => &[],
     }
+}
+
+/// True iff the impl's self type is one of the impl's OWN generic type
+/// parameters — `impl<E> Trait for E`, where a method's `self` is a value the
+/// caller chose that this crate has not yet erased. Decided here, on the syn
+/// AST, because it is undecidable downstream: `render_impl_header` below
+/// deliberately drops the generics list, so `impl Trait for E` prints the
+/// same whether `E` is the impl's parameter or a concrete type named `E`.
+/// Deliberately strict — a qualified self (`<E as T>::X`), a multi-segment
+/// path, or a self type with its own arguments (`Wrapper<E>`) all return
+/// false: the consumer (the producer-bypass instruction split) treats false
+/// as "undecidable, take the cautious instruction", so a miss costs a missed
+/// shortcut, never a wrong claim.
+pub(crate) fn impl_self_ty_is_own_generic(item_impl: &ItemImpl) -> bool {
+    let syn::Type::Path(tp) = &*item_impl.self_ty else {
+        return false;
+    };
+    if tp.qself.is_some() || tp.path.segments.len() != 1 {
+        return false;
+    }
+    let seg = &tp.path.segments[0];
+    if !matches!(seg.arguments, syn::PathArguments::None) {
+        return false;
+    }
+    item_impl
+        .generics
+        .type_params()
+        .any(|p| p.ident == seg.ident)
 }
 
 pub(crate) fn render_impl_header(item_impl: &ItemImpl) -> String {

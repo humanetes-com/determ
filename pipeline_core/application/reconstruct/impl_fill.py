@@ -902,15 +902,17 @@ def fill_impl_blocks(
         # class crosses files (`src/context.rs::ext_context`, both impls).
         _bypasses = producer_bypasses(
             _all_fn_records, _crate_type_records, _offer_keys, file_rel)
-        _bypass_by_container: dict[str, list[tuple[str, str, str, str]]] = {}
+        _bypass_by_container: dict[
+            str, list[tuple[str, str, str, str, bool]]] = {}
         for _bp in _bypasses:
             _bypass_by_container.setdefault(_bp.container, []).append((
                 _bp.fn_name, _bp.wrapper, _bp.producer,
                 "declared in this file" if _bp.same_file else
                 f"declared in `{_bp.producer_file}` — pub(crate), callable "
-                "from here"))
+                "from here", _bp.erases_generic))
 
-        def _bypass_for(container: str) -> tuple[tuple[str, str, str, str], ...]:
+        def _bypass_for(
+                container: str) -> tuple[tuple[str, str, str, str, bool], ...]:
             return tuple(_bypass_by_container.get(
                 " ".join(container.split("{", 1)[0].split()), ()))
 
@@ -947,23 +949,40 @@ def fill_impl_blocks(
                 "fns": [i.fn_name for i in _installable]})
         _bypass_evidence = ""
         if _bypasses:
+            # The evidence line carries the same instruction split as the plan
+            # line: the producer's name appears ONLY for a generic-self hit.
+            # An evidence sentence naming the call reads as an instruction to
+            # make it — the compliance-over-compiler class this split removes.
             _bypass_evidence = "\n".join(
                 f"in `{_bp.container or 'free fns'}`:\n"
-                f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` without "
-                f"invoking its typed producer `{_bp.producer}` "
-                f"({'this file' if _bp.same_file else _bp.producer_file}), so "
-                "the per-type table that producer builds is installed on "
-                "nothing this body creates — the failing downcasts walk that "
-                "table."
+                + (f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` "
+                   f"without invoking its typed producer `{_bp.producer}` "
+                   f"({'this file' if _bp.same_file else _bp.producer_file}), "
+                   "so the per-type table that producer builds is installed "
+                   "on nothing this body creates — the failing downcasts walk "
+                   "that table."
+                   if _bp.erases_generic else
+                   f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` and "
+                   "hands it to the generic construction path, so the "
+                   "per-type table its values need for dispatch is installed "
+                   "on nothing this body creates — the failing downcasts walk "
+                   "that table. No generic producer call fits what this body "
+                   f"wraps; it needs `{_bp.wrapper}`'s own table, built in "
+                   "this body from the table fns writable in this prompt.")
                 for _bp in _bypasses)
             _log(f"  [phase-c/file] {file_rel}: {len(_bypasses)} fn(s) "
                  "construct a wrapper an escalated producer erases without "
                  "invoking its typed producer — writable in this prompt: "
-                 + ", ".join(f"{_bp.fn_name}->{_bp.wrapper} via {_bp.producer}"
-                             for _bp in _bypasses[:5]))
+                 + ", ".join(
+                     f"{_bp.fn_name}->{_bp.wrapper} "
+                     + (f"via {_bp.producer}" if _bp.erases_generic
+                        else "(build the per-type table)")
+                     for _bp in _bypasses[:5]))
             _emit("phase_c.file.producer_bypass_offered", data={
                 "cluster": cluster_name, "file": file_rel,
                 "fns": [_bp.fn_name for _bp in _bypasses],
+                "forms": ["call" if _bp.erases_generic else "table"
+                          for _bp in _bypasses],
                 "producers": sorted({_bp.producer for _bp in _bypasses})})
         # The full plan is loop-invariant: per-block entries carry their bypass
         # complement, and a bypass whose impl block is not in this dispatch
@@ -987,12 +1006,17 @@ def fill_impl_blocks(
             _c, (), tuple(x[0] for x in _entries), bypass=tuple(_entries))
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
-        # The grade label for 204 N2, naming what this prompt's write list
-        # actually carries so the exclusion log reads true on every file — a
-        # context.rs prompt can be bypass-only with zero installables.
+        # The grade label naming what this prompt's write list actually
+        # carries so the exclusion log reads true on every file — a context.rs
+        # prompt can be bypass-only with zero installables, and a bypass
+        # prompt can carry either instruction form (or both: the two
+        # ext_context impls split call/table on the same file).
         _grade_parts = [g for g, present in (
             ("REWRITE WITH THE PRODUCER", bool(_installable)),
-            ("REWRITE TO INVOKE THE PRODUCER", bool(_bypasses)),
+            ("REWRITE TO INVOKE THE PRODUCER",
+             any(_bp.erases_generic for _bp in _bypasses)),
+            ("BUILD THE PER-TYPE TABLE",
+             any(not _bp.erases_generic for _bp in _bypasses)),
         ) if present]
         if not _grade_parts and any(p.escalated for p in _block_plans):
             _grade_parts = ["ESCALATED REWRITE"]
@@ -1490,8 +1514,24 @@ def fill_impl_blocks(
                     validity=ValidityVector(binary_completed=rc == 0),
                     model_calls=_attempt, route="file")
                 _more = _attempt < _FILE_FIRST_MAX_ATTEMPTS
+                # The codes and the primary diagnostic go in the LOG LINE, not
+                # only the event: the pattern census reads logs, and its
+                # compliance-over-compiler detector keys on the same unit
+                # failing consecutive attempts with an IDENTICAL primary
+                # diagnostic. The class's costliest instance was this route —
+                # three `reverted (compile failed)` on src/error.rs, all the
+                # same `E0277` on the same instructed call (run
+                # `57025-6ba652f2`) — and the bare line made those three
+                # indistinguishable from three different failures.
+                _first_diag = next(
+                    (ln.strip() for ln in prior_error.splitlines()
+                     if ln.lstrip().startswith("error[")), "")
                 _log(f"  [phase-c/file] {glabel}: reverted "
-                     f"({_revert_reason}) — "
+                     f"({_revert_reason}"
+                     + (f"; codes={sorted(ecodes_in_text(prior_error))}"
+                        + (f" first: {_first_diag}" if _first_diag else "")
+                        if _revert_reason == "compile failed" else "")
+                     + ") — "
                      + ("retrying file-first once more."
                         if _more else "falling back to per-block fills."))
                 # The route emits `start`, `done` and `mismatch` and emitted

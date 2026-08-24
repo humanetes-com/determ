@@ -264,9 +264,12 @@ CONTEXT_RS_CALLERS = [
     # Both `ext_context` impls route ContextError through `Error::new` — the
     # path `tests/test_context.rs::make_chain` actually takes, so the five
     # failing downcast pairs never even reach `Error::context` (measured
-    # 2026-08-24, live tree `context.rs:24`/`:32`).
+    # 2026-08-24, live tree `context.rs:24`/`:32`). `impl_self_generic` is the
+    # extractor's AST-decided fact (True only where the impl's self type is
+    # its own generic parameter); the live extractor emits True for exactly
+    # this record and False for its concrete-self sibling below.
     {"file": CTX, "fn_name": "ext_context", "container": "impl<E> StdError for E",
-     "sig_text": "", "body_text":
+     "impl_self_generic": True, "sig_text": "", "body_text":
          "crate::Error::new(crate::error::ContextError { context, error: self })"},
     {"file": CTX, "fn_name": "ext_context", "container": "impl StdError for Error",
      "sig_text": "", "body_text":
@@ -301,10 +304,18 @@ def test_the_census_flags_exactly_the_bypassing_call_site() -> None:
     """On the live error.rs shapes: `context` and nothing else. `new` and
     `From::from` construct no wrapper literal, `construct` builds ErrorImpl
     (not a wrapper any producer erases), and a body that CALLS the producer
-    is the correct shape, not a bypass. Extra hits: zero."""
+    is the correct shape, not a bypass. Extra hits: zero.
+
+    `context`'s self is the concrete `Error` — this crate's own already-erased
+    type — so `erases_generic` is False: the instruction split must render the
+    table form for it and never name the producer. The call-form offer line
+    for exactly this record is what the model complied with over the compiler
+    through three identical `E0277`s (run `57025-6ba652f2`, 17:45/17:55/18:05
+    UTC — the pre-fix negative control, recorded live)."""
     got = producer_bypasses(ALL_RECORDS, ALL_TYPES, MEASURED, REL)
-    assert [(b.fn_name, b.wrapper, b.producer, b.same_file) for b in got] == [
-        ("context", "ContextError", "construct_from_context", True)]
+    assert [(b.fn_name, b.wrapper, b.producer, b.same_file, b.erases_generic)
+            for b in got] == [
+        ("context", "ContextError", "construct_from_context", True, False)]
     assert got[0].container == "impl Error"
 
 
@@ -313,11 +324,17 @@ def test_the_bypass_crosses_files_because_the_defect_does() -> None:
     closure bound to the producer's file can never reach the defect's actual
     call path. Both impls are flagged, the producer's home file is named for
     the instruction line, and the delegating `Result::context` is not
-    re-admitted (it constructs nothing)."""
+    re-admitted (it constructs nothing).
+
+    The two impls SPLIT on the erased inner type: the generic impl erases its
+    own parameter (call form — the shape reply sha `96b99782…` executed
+    correctly), the Error impl erases the crate's own type (table form — the
+    shape upstream builds a chain vtable for, never a producer call)."""
     got = producer_bypasses(ALL_RECORDS, ALL_TYPES, MEASURED, CTX)
-    assert [(b.fn_name, b.container, b.same_file) for b in got] == [
-        ("ext_context", "impl StdError for Error", False),
-        ("ext_context", "impl<E> StdError for E", False)]
+    assert [(b.fn_name, b.container, b.same_file, b.erases_generic)
+            for b in got] == [
+        ("ext_context", "impl StdError for Error", False, False),
+        ("ext_context", "impl<E> StdError for E", False, True)]
     assert all(b.producer == "construct_from_context"
                and b.producer_file == REL for b in got)
 

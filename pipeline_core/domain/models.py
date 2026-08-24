@@ -191,6 +191,15 @@ class FnRecord:
     # only set `is_pub` keep their prior meaning.
     is_exactly_pub: bool = True
     container: str = ""         # "" free fn | "impl X for Y" | "trait T"
+    # True iff the enclosing impl's self type is one of that impl's OWN generic
+    # type parameters (`impl<E> Trait for E`): the method's `self` is a value
+    # this crate has not yet erased. Decided by the extractor on the syn AST —
+    # `container` cannot carry it, because the rendered header drops the
+    # generics list and `impl Trait for E` prints the same for a generic E and
+    # a concrete type named E. The producer-bypass instruction split keys on
+    # it; False (free fns, concrete self, anything undecidable) takes the
+    # cautious table-form instruction.
+    impl_self_generic: bool = False
     # `::`-joined inline-module path within the file ("" at file scope). Rust
     # forbids two items of one name in one module, so (file, mod_path, fn_name)
     # names at most one COMPILED fn even when the source declares several
@@ -213,6 +222,7 @@ class FnRecord:
             is_pub=bool(d.get("is_pub", False)),
             is_exactly_pub=bool(d.get("is_exactly_pub", True)),
             container=d.get("container", ""),
+            impl_self_generic=bool(d.get("impl_self_generic", False)),
             mod_path=d.get("mod_path", ""),
             has_unimplemented_body=bool(d.get("has_unimplemented_body", False)),
             is_test=bool(d.get("is_test", False)),
@@ -231,6 +241,7 @@ class FnRecord:
             "is_pub": self.is_pub,
             "is_exactly_pub": self.is_exactly_pub,
             "container": self.container,
+            "impl_self_generic": self.impl_self_generic,
             "mod_path": self.mod_path,
             "has_unimplemented_body": self.has_unimplemented_body,
             "is_test": self.is_test,
