@@ -590,17 +590,43 @@ def _attr_is_terminated(text: str, pos: int) -> bool:
             or _tag_terminator(text, q) != -1)
 
 
+def _bare_tag_gt(text: str, start: int, limit: int) -> int:
+    """Index of a `>` that can close an FN open tag in `text[start:limit]`, or -1.
+
+    A generic closer (`Foo<E>`) is seen at depth 1 and skipped. `->` and `=>`
+    are skipped too. The live hole is a `>` at depth 0 that is none of those:
+    `block="impl>#[cfg…]`. Taking the first `>` instead split
+    `block="impl Foo<E>"</FN>` at the generic closer (body became the leftover
+    `"`), which is the missing-`>` recovery this helper must not steal.
+    """
+    depth = 0
+    i = start
+    while i < limit:
+        ch = text[i]
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth > 0:
+                depth -= 1
+            elif i > start and text[i - 1] in "-=":
+                pass
+            else:
+                return i
+        i += 1
+    return -1
+
+
 def _block_closed_by_bare_gt(text: str, pos: int) -> tuple[str, int] | None:
     """`(block-header, body-start)` for `block="impl>BODY`.
 
     The model dropped the attribute's closing quote and used `>` as the
     tag terminator — the protocol's own `block="IMPL_HEADER">` minus one
-    `"`. Only fires when a `>` appears before any `"` after `block="`, so
-    an unescaped `"std"` in the BODY cannot steal the attribute close.
-    Reply `eb7b448cd4c1…` (2026-08-22T13:57Z): 6 of 20 tags were this
-    shape (`context_backtrace`, `context_downcast`, `context_drop_rest`,
-    `no_backtrace`, `object_boxed`, `object_reallocate_boxed`) and the
-    first-quote path dropped every one.
+    `"`. Only fires when a tag-closing `>` appears before any `"` after
+    `block="`, so an unescaped `"std"` in the BODY cannot steal the
+    attribute close. Reply `eb7b448cd4c1…` (2026-08-22T13:57Z): 6 of 20
+    tags were this shape (`context_backtrace`, `context_downcast`,
+    `context_drop_rest`, `no_backtrace`, `object_boxed`,
+    `object_reallocate_boxed`) and the first-quote path dropped every one.
     """
     q = _skip_ws(text, pos)
     if not text.startswith('block="', q):
@@ -611,8 +637,8 @@ def _block_closed_by_bare_gt(text: str, pos: int) -> tuple[str, int] | None:
     window = min(cands) if cands else len(text)
     quote = text.find('"', start, window)
     limit = quote if quote != -1 else window
-    gt = text.find(">", start, limit)
-    if gt == -1 or (gt > start and text[gt - 1] == "-"):
+    gt = _bare_tag_gt(text, start, limit)
+    if gt == -1:
         return None
     raw = text[start:gt].rstrip()
     # `>` in `new<E>` / `-> Self` is not a tag closer. The live hole is

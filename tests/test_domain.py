@@ -248,8 +248,44 @@ def test_impl_gt_then_unescaped_std_quote_is_a_body_not_an_attribute_close() -> 
 
     recs = lo.extract_fn_bodies(dropped + sibling)
     assert [r["fn_name"] for r in recs] == ["context_backtrace", "object_drop"]
-    assert "None" in recs[0]["body"]
+    assert recs[0]["body"] == "None"
     assert recs[0]["block"] == "impl"
+    assert recs[1]["body"] == "drop(e)"
+
+
+def test_a_bare_gt_does_not_steal_an_unterminated_impl_header_with_generics() -> None:
+    """`block="impl Foo<E>"</FN>` is the missing-`>` recovery, not `block="impl>`.
+
+    `_block_closed_by_bare_gt` used to take the first `>` in the window, so
+    the generic closer split the header and the body became the leftover `"`.
+    A `>` that closes `<E>` is at angle-bracket depth 1; a `>` in `=>` is
+    not a tag closer either. Both stay on `_unterminated_open_tag_value`.
+    The first assertion is the negative control: that helper still returns
+    None on the live `impl>#[cfg… "std"]` opening.
+    """
+    from pipeline import _find_fn_blocks
+    from pipeline_core.domain import llm_output as lo
+    live = (
+        '<FN name="context_backtrace" block="impl>'
+        '#[cfg(all(not(error_generic_member_access), feature = "std"))]\n'
+        'unsafe fn context_backtrace<C>(e: Ref<ErrorImpl>) '
+        '-> Option<&Backtrace> { None }</FN>'
+    )
+    name = lo._read_quoted_attr(live, live.find("name="), "name")
+    assert name is not None
+    _, after_name = name
+    assert lo._unterminated_open_tag_value(live, after_name) is None
+    assert lo._block_closed_by_bare_gt(live, after_name) is not None
+
+    generic = '<FN name="new" block="impl Foo<E>"</FN>'
+    assert _find_fn_blocks(generic) == [("new", "impl Foo<E>", "")]
+    recs = lo.extract_fn_bodies(generic)
+    assert recs[0]["fn_name"] == "new"
+    assert recs[0]["body"] == "impl Foo<E>"
+
+    arrow = '<FN name="new" block="impl Foo { match x { 0 => 1 } }"</FN>'
+    assert _find_fn_blocks(arrow) == [
+        ("new", "impl Foo { match x { 0 => 1 } }", "")]
 
 
 def test_an_unterminated_open_tag_with_no_block_attribute_is_still_dropped() -> None:
