@@ -7,6 +7,7 @@ strings are the originals' rendered form.
 
 from __future__ import annotations
 
+from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
     build_behavior_fix_prompt,
@@ -230,13 +231,16 @@ def test_file_fill_plan_renders_the_call_form_only_for_a_generic_self() -> None:
     (run `40938-f4e8e94b`)."""
     out = _file_fill([BlockFillPlan(
         "impl<E> StdError for E", (), ("ext_context",),
-        bypass=(("ext_context", "ContextError", "construct_from_context",
-                 "declared in `src/error.rs` — pub(crate), callable from here",
-                 True),))])
+        bypass=(ProducerBypass(
+            fn_name="ext_context", container="impl<E> StdError for E",
+            wrapper="ContextError", producer="construct_from_context",
+            producer_file="src/error.rs", same_file=False,
+            erases_generic=True),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl<E> StdError for E`"))
     assert "REWRITE TO INVOKE THE PRODUCER" in line
     assert "rewrite it to call `construct_from_context`" in line
+    assert "declared in `src/error.rs` — pub(crate), callable from here" in line
     assert "ContextError" in line
     assert line.rstrip().endswith("ext_context")
     # NEGATIVE CONTROL: without the bypass entry the same refill renders as
@@ -261,15 +265,69 @@ def test_file_fill_plan_concrete_self_gets_the_table_form_and_no_producer_name()
     arranged."""
     out = _file_fill([BlockFillPlan(
         "impl Error", (), ("context",),
-        bypass=(("context", "ContextError", "construct_from_context",
-                 "declared in this file", False),))])
+        bypass=(ProducerBypass(
+            fn_name="context", container="impl Error",
+            wrapper="ContextError", producer="construct_from_context",
+            producer_file="src/error.rs", same_file=True,
+            erases_generic=False),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
     assert "BUILD THE PER-TYPE TABLE" in line
     assert "construct_from_context" not in line
     assert "REWRITE TO INVOKE" not in line
-    assert "ContextError" in line and "writable in this prompt" in line
+    assert "ContextError" in line
+    assert "CHAIN-walking" in line
+    assert "different impl" in line
+    # Unconditional "candidate fns are writable in this prompt" is false
+    # for context.rs (chain fns live in error.rs). Writability is only a
+    # condition: name them, do not rewrite unless listed.
+    assert "the candidate fns are writable in this prompt" not in line
     assert line.rstrip().endswith("context")
+
+
+def test_file_fill_plan_call_and_table_forms_in_one_prompt_stay_split() -> None:
+    """context.rs writes both ext_context impls in one prompt. The generic
+    impl's call form names the producer; the Error-impl's table form must
+    not, and must say that sibling instruction does not apply — otherwise
+    the model copies the named call onto the concrete self (run
+    57025-6ba652f2, the generic body correct, the Error-impl the same
+    E0277, peel dropped both).
+
+    The Error-impl entry is CROSS-FILE (the producer and the table machinery
+    live in src/error.rs), so its form is ROUTE, not BUILD: `ErrorVTable`,
+    `context_chain_downcast` and `context_chain_drop_rest` carry no `pub`
+    (live tree error.rs:660/:789/:804), so a context.rs body instructed to
+    build the table cannot compile — the instructed-impossibility class
+    again. Upstream's own body here is the delegation `self.context(context)`."""
+    out = _file_fill([
+        BlockFillPlan(
+            "impl StdError for E", (), ("ext_context",),
+            bypass=(ProducerBypass(
+                fn_name="ext_context", container="impl StdError for E",
+                wrapper="ContextError", producer="construct_from_context",
+                producer_file="src/error.rs", same_file=False,
+                erases_generic=True),)),
+        BlockFillPlan(
+            "impl StdError for Error", (), ("ext_context",),
+            bypass=(ProducerBypass(
+                fn_name="ext_context", container="impl StdError for Error",
+                wrapper="ContextError", producer="construct_from_context",
+                producer_file="src/error.rs", same_file=False,
+                erases_generic=False),)),
+    ])
+    call = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl StdError for E`"))
+    table = next(ln for ln in out.splitlines()
+                 if ln.startswith("  in `impl StdError for Error`"))
+    assert "REWRITE TO INVOKE THE PRODUCER" in call
+    assert "construct_from_context" in call
+    assert "ROUTE TO THE PER-TYPE TABLE" in table
+    assert "construct_from_context" not in table
+    assert "different impl" in table
+    assert "delegate" in table and "`src/error.rs`" in table
+    # The cross-file table form must NOT instruct building the table here.
+    assert "do NOT construct `ContextError` in this body" in table
+    assert "BUILD THE PER-TYPE TABLE" not in table
 
 
 def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
@@ -278,8 +336,11 @@ def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
     out = _file_fill([BlockFillPlan(
         "impl Error", (), ("context", "construct_from_std"),
         escalated=("context", "construct_from_std"),
-        bypass=(("context", "ContextError", "construct_from_context",
-                 "declared in this file", False),))])
+        bypass=(ProducerBypass(
+            fn_name="context", container="impl Error",
+            wrapper="ContextError", producer="construct_from_context",
+            producer_file="src/error.rs", same_file=True,
+            erases_generic=False),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
     assert "BUILD THE PER-TYPE TABLE" in line

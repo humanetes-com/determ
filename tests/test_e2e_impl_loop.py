@@ -1581,10 +1581,12 @@ def test_file_first_prompt_lists_the_bypass_callers_and_drops_the_lesson(
                 if ln.startswith("  in `impl W`") and "caller" in ln)
     assert "BUILD THE PER-TYPE TABLE" in line
     assert "maker" not in line and "REWRITE TO INVOKE" not in line
+    assert "CHAIN-walking" in line and "different impl" in line
     extra = next(ln for ln in file_prompt.splitlines()
                  if ln.startswith("  in `impl Clone for W`"))
     assert "clone" in extra and "BUILD THE PER-TYPE TABLE" in extra
     assert "maker" not in extra
+    assert "CHAIN-walking" in extra
     generic = next(ln for ln in file_prompt.splitlines()
                    if ln.startswith("  in `impl Tagged for Z`"))
     assert "REWRITE TO INVOKE THE PRODUCER" in generic

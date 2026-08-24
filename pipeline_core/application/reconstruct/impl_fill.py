@@ -79,6 +79,7 @@ from pipeline_core.domain.impl_routing import (
     norm_src_rel as _norm_src_rel,
 )
 from pipeline_core.domain.installable_fns import (
+    ProducerBypass,
     installable_fns,
     offer_producers,
     producer_bypasses,
@@ -902,17 +903,15 @@ def fill_impl_blocks(
         # class crosses files (`src/context.rs::ext_context`, both impls).
         _bypasses = producer_bypasses(
             _all_fn_records, _crate_type_records, _offer_keys, file_rel)
-        _bypass_by_container: dict[
-            str, list[tuple[str, str, str, str, bool]]] = {}
+        # The plan carries the DOMAIN objects: the renderer reads
+        # `erases_generic`/`same_file`/`producer_file` off one source of
+        # truth (`ProducerBypass`) instead of a parallel tuple encoding —
+        # the display prose, call-form-only, is derived in `_plan_line`.
+        _bypass_by_container: dict[str, list[ProducerBypass]] = {}
         for _bp in _bypasses:
-            _bypass_by_container.setdefault(_bp.container, []).append((
-                _bp.fn_name, _bp.wrapper, _bp.producer,
-                "declared in this file" if _bp.same_file else
-                f"declared in `{_bp.producer_file}` — pub(crate), callable "
-                "from here", _bp.erases_generic))
+            _bypass_by_container.setdefault(_bp.container, []).append(_bp)
 
-        def _bypass_for(
-                container: str) -> tuple[tuple[str, str, str, str, bool], ...]:
+        def _bypass_for(container: str) -> tuple[ProducerBypass, ...]:
             return tuple(_bypass_by_container.get(
                 " ".join(container.split("{", 1)[0].split()), ()))
 
@@ -920,7 +919,7 @@ def fill_impl_blocks(
         _free_plan = ([BlockFillPlan(
             "", (),
             tuple(dict.fromkeys((*(i.fn_name for i in _installable),
-                                 *(x[0] for x in _free_bypass)))),
+                                 *(x.fn_name for x in _free_bypass)))),
             installable=tuple(i.fn_name for i in _installable),
             bypass=_free_bypass)]
             if _installable or _free_bypass else [])
@@ -950,25 +949,47 @@ def fill_impl_blocks(
         _bypass_evidence = ""
         if _bypasses:
             # The evidence line carries the same instruction split as the plan
-            # line: the producer's name appears ONLY for a generic-self hit.
-            # An evidence sentence naming the call reads as an instruction to
-            # make it — the compliance-over-compiler class this split removes.
+            # line: the producer's name appears ONLY for a generic-self hit
+            # (an evidence sentence naming the call reads as an instruction to
+            # make it — the compliance-over-compiler class this split
+            # removes), and the table form splits on `same_file` for the same
+            # reason the plan line does: the table machinery carries no `pub`,
+            # so "build it in this body" is only a possible instruction in
+            # the file that declares it. No claim about what the wrapped
+            # value IS — `erases_generic=False` covers the undecidable cases.
+            def _bp_evidence(_bp: ProducerBypass) -> str:
+                if _bp.erases_generic:
+                    return (
+                        f"`{_bp.fn_name}` — BYPASS: constructs "
+                        f"`{_bp.wrapper}` without invoking its typed producer "
+                        f"`{_bp.producer}` "
+                        f"({'this file' if _bp.same_file else _bp.producer_file}), "
+                        "so the per-type table that producer builds is "
+                        "installed on nothing this body creates — the failing "
+                        "downcasts walk that table.")
+                if _bp.same_file:
+                    return (
+                        f"`{_bp.fn_name}` — BYPASS: constructs "
+                        f"`{_bp.wrapper}` and hands it to the generic "
+                        "construction path, so the per-type table its values "
+                        "need is installed on nothing this body creates. "
+                        f"Build `{_bp.wrapper}`'s own table in this body from "
+                        "the table fns of this file; a producer-call "
+                        "instruction on a different impl in this prompt does "
+                        "not apply here.")
+                return (
+                    f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` "
+                    "and hands it to the generic construction path, so the "
+                    "per-type table its values need is installed on nothing "
+                    "this body creates. The machinery that builds that table "
+                    f"lives in `{_bp.producer_file}`, not this file — do not "
+                    f"construct `{_bp.wrapper}` here; delegate the wrap to "
+                    "the path that file declares for its inner value. A "
+                    "producer-call instruction on a different impl in this "
+                    "prompt does not apply here.")
+
             _bypass_evidence = "\n".join(
-                f"in `{_bp.container or 'free fns'}`:\n"
-                + (f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` "
-                   f"without invoking its typed producer `{_bp.producer}` "
-                   f"({'this file' if _bp.same_file else _bp.producer_file}), "
-                   "so the per-type table that producer builds is installed "
-                   "on nothing this body creates — the failing downcasts walk "
-                   "that table."
-                   if _bp.erases_generic else
-                   f"`{_bp.fn_name}` — BYPASS: constructs `{_bp.wrapper}` and "
-                   "hands it to the generic construction path, so the "
-                   "per-type table its values need for dispatch is installed "
-                   "on nothing this body creates — the failing downcasts walk "
-                   "that table. No generic producer call fits what this body "
-                   f"wraps; it needs `{_bp.wrapper}`'s own table, built in "
-                   "this body from the table fns writable in this prompt.")
+                f"in `{_bp.container or 'free fns'}`:\n" + _bp_evidence(_bp)
                 for _bp in _bypasses)
             _log(f"  [phase-c/file] {file_rel}: {len(_bypasses)} fn(s) "
                  "construct a wrapper an escalated producer erases without "
@@ -976,14 +997,25 @@ def fill_impl_blocks(
                  + ", ".join(
                      f"{_bp.fn_name}->{_bp.wrapper} "
                      + (f"via {_bp.producer}" if _bp.erases_generic
-                        else "(build the per-type table)")
+                        else "(build the per-type table)" if _bp.same_file
+                        else "(route to the per-type table)")
                      for _bp in _bypasses[:5]))
             _emit("phase_c.file.producer_bypass_offered", data={
                 "cluster": cluster_name, "file": file_rel,
                 "fns": [_bp.fn_name for _bp in _bypasses],
-                "forms": ["call" if _bp.erases_generic else "table"
+                "forms": ["call" if _bp.erases_generic
+                          else "table-build" if _bp.same_file
+                          else "table-route"
                           for _bp in _bypasses],
-                "producers": sorted({_bp.producer for _bp in _bypasses})})
+                # Producer names only for the call form: putting them on a
+                # table-form-only offer reintroduces the name the instruction
+                # exists to keep out of that prompt (events never reach a
+                # prompt, but the record should read as the prompt does). The
+                # wrapper names keep the RELATION auditable when the producer
+                # set is empty — which wrapper's census fired, per fn.
+                "producers": sorted({_bp.producer for _bp in _bypasses
+                                     if _bp.erases_generic}),
+                "wrappers": [_bp.wrapper for _bp in _bypasses]})
         # The full plan is loop-invariant: per-block entries carry their bypass
         # complement, and a bypass whose impl block is not in this dispatch
         # gets its own entry — the splice's joint-overwrite widening already
@@ -993,7 +1025,8 @@ def fill_impl_blocks(
             b.container,
             tuple(m.fn_name for m in b.stub_members),
             tuple(dict.fromkeys((*(m.fn_name for m in b.refill_members),
-                                 *(x[0] for x in _bypass_for(b.container))))),
+                                 *(x.fn_name
+                                   for x in _bypass_for(b.container))))),
             inferred=tuple(sorted(inferred_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             escalated=tuple(sorted(escalated_refill_names(
@@ -1003,7 +1036,8 @@ def fill_impl_blocks(
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
         _extra_plans = [BlockFillPlan(
-            _c, (), tuple(x[0] for x in _entries), bypass=tuple(_entries))
+            _c, (), tuple(x.fn_name for x in _entries),
+            bypass=tuple(_entries))
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
         # The grade label naming what this prompt's write list actually
@@ -1016,7 +1050,11 @@ def fill_impl_blocks(
             ("REWRITE TO INVOKE THE PRODUCER",
              any(_bp.erases_generic for _bp in _bypasses)),
             ("BUILD THE PER-TYPE TABLE",
-             any(not _bp.erases_generic for _bp in _bypasses)),
+             any(not _bp.erases_generic and _bp.same_file
+                 for _bp in _bypasses)),
+            ("ROUTE TO THE PER-TYPE TABLE",
+             any(not _bp.erases_generic and not _bp.same_file
+                 for _bp in _bypasses)),
         ) if present]
         if not _grade_parts and any(p.escalated for p in _block_plans):
             _grade_parts = ["ESCALATED REWRITE"]

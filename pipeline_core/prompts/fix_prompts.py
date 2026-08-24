@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pipeline_core.domain.installable_fns import ProducerBypass
+
 # The file/impl view handed to the model can itself contain HTML-escaped Rust —
 # rustdoc comments legitimately write `Vec&lt;T&gt;` inside a `<code>` tag — and
 # a model that has just read that mirrors the rendering into its own answer.
@@ -142,19 +144,21 @@ class BlockFillPlan:
     installable: tuple[str, ...] = ()
     # Call sites that construct a wrapper an escalated producer erases WITHOUT
     # invoking its typed producer (`domain.installable_fns.producer_bypasses`)
-    # — the closure's third population. `(fn, wrapper, producer, producer_ref,
-    # erases_generic)` where `producer_ref` says where the producer lives
-    # ("declared in this file", "declared in `src/error.rs` — pub(crate),
-    # callable from here") and `erases_generic` selects the INSTRUCTION: True
-    # (the fn's impl erases its own generic parameter) renders the call form —
-    # invoke the producer; False renders the table form, which never names the
-    # producer. Run `40938-f4e8e94b` measured what omitting the entries costs
-    # (the model's thinking named the `Self::new` → `construct_from_std`
-    # bypass in `Error::context`, wrote "Error::context is not listed for
-    # rewrite", and complied); run `57025-6ba652f2` measured what the WRONG
-    # form costs (told to call the producer on a concrete self, the model
-    # complied over the compiler through three identical `E0277`s).
-    bypass: tuple[tuple[str, str, str, str, bool], ...] = ()
+    # — the closure's third population, carried as the domain objects so the
+    # renderer reads `erases_generic`/`same_file`/`producer_file` from one
+    # source of truth instead of a parallel tuple encoding. `erases_generic`
+    # selects the INSTRUCTION: True (the fn's impl erases its own generic
+    # parameter) renders the call form — invoke the producer; False renders a
+    # table form, which never names the producer and splits again on
+    # `same_file` (build the table here vs route to the file that declares
+    # the machinery). Run `40938-f4e8e94b` measured what omitting the entries
+    # costs (the model's thinking named the `Self::new` →
+    # `construct_from_std` bypass in `Error::context`, wrote "Error::context
+    # is not listed for rewrite", and complied); run `57025-6ba652f2`
+    # measured what the WRONG form costs (told to call the producer on a
+    # concrete self, the model complied over the compiler through three
+    # identical `E0277`s).
+    bypass: tuple[ProducerBypass, ...] = ()
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -162,7 +166,7 @@ def _plan_line(p: BlockFillPlan) -> str:
     parts = []
     if p.stubs:
         parts.append("write: " + ", ".join(p.stubs))
-    bypass_names = frozenset(b[0] for b in p.bypass)
+    bypass_names = frozenset(b.fn_name for b in p.bypass)
     direct = tuple(r for r in p.refills
                    if r not in p.inferred and r not in p.escalated
                    and r not in p.installable and r not in bypass_names)
@@ -198,12 +202,15 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "written in the same reply — return it unchanged only if "
                      "it is already right for the type the producer erases): "
                      + ", ".join(installable))
-    for wrapper, producer, producer_ref, erases_generic in sorted(
-            {(b[1], b[2], b[3], b[4]) for b in p.bypass}):
-        fns = tuple(b[0] for b in p.bypass
-                    if (b[1], b[2], b[3], b[4])
-                    == (wrapper, producer, producer_ref, erases_generic)
-                    and b[0] in p.refills)
+    for wrapper, producer, producer_file, same_file, erases_generic in sorted(
+            {(b.wrapper, b.producer, b.producer_file, b.same_file,
+              b.erases_generic) for b in p.bypass}):
+        fns = tuple(b.fn_name for b in p.bypass
+                    if (b.wrapper, b.producer, b.producer_file, b.same_file,
+                        b.erases_generic)
+                    == (wrapper, producer, producer_file, same_file,
+                        erases_generic)
+                    and b.fn_name in p.refills)
         if not fns:
             continue
         # The relation is stated, not a verdict on the body: what was measured
@@ -212,14 +219,28 @@ def _plan_line(p: BlockFillPlan) -> str:
         # installed on nothing this body creates. The INSTRUCTION splits on
         # the erased inner type. Call form only where the fn's impl erases its
         # own generic parameter — there the producer call is the correct shape
-        # and the model demonstrably executes it. Everywhere else the table
+        # and the model demonstrably executes it. Everywhere else a table
         # form, which states the relation and the goal and NEVER names the
         # producer: named in the instruction, the model complied with the call
         # over the compiler through three identical `E0277`s (run
         # `57025-6ba652f2`), and upstream's own concrete-self body builds the
         # wrapper's chain table inline rather than calling the typed producer
-        # even where bounds could be arranged.
+        # even where bounds could be arranged. The table form splits AGAIN on
+        # `same_file`, because "build it in this body" is only a possible
+        # instruction in the file that declares the machinery: the live
+        # table type and chain fns carry no `pub` (`ErrorVTable`
+        # error.rs:660, `context_chain_downcast`/`context_chain_drop_rest`
+        # error.rs:789/:804), so a context.rs body told to build the table
+        # cannot compile — the instructed-impossibility class again. Upstream's
+        # own cross-file body is a delegation (`self.context(context)`) for
+        # exactly this reason. Neither table form claims what the wrapped
+        # value IS: `erases_generic=False` covers the undecidable cases too,
+        # and the only claims below are the measured relation and the
+        # instruction itself.
         if erases_generic:
+            producer_ref = ("declared in this file" if same_file else
+                            f"declared in `{producer_file}` — pub(crate), "
+                            "callable from here")
             parts.append(f"REWRITE TO INVOKE THE PRODUCER (this body "
                          f"constructs `{wrapper}` and hands it to the generic "
                          f"construction path, so the per-type table its typed "
@@ -227,17 +248,36 @@ def _plan_line(p: BlockFillPlan) -> str:
                          f"never installed on the values this body creates; "
                          f"rewrite it to call `{producer}` instead): "
                          + ", ".join(fns))
-        else:
+        elif same_file:
             parts.append(f"BUILD THE PER-TYPE TABLE (this body constructs "
                          f"`{wrapper}` and hands it to the generic "
                          f"construction path, so the per-type table its "
                          f"values need for dispatch is installed on nothing "
                          f"this body creates — the failing downcasts walk "
-                         f"that table. No generic producer call is the fix "
-                         f"here: the value this body wraps needs `{wrapper}`'s "
-                         f"own table, built in this body, dispatching through "
-                         f"the table fns that fit these types — the candidate "
-                         f"fns are writable in this prompt): " + ", ".join(fns))
+                         f"that table. A producer-call instruction on a "
+                         f"different impl in this prompt does not apply "
+                         f"here: build `{wrapper}`'s own table in this body, "
+                         f"dispatching through the table fns of this file "
+                         f"that fit `{wrapper}`'s types — for a wrapper whose "
+                         f"inner value this crate has already erased, those "
+                         f"are its CHAIN-walking fns, not the leaf ones. "
+                         f"Name the fns; rewrite them only where this prompt "
+                         f"lists them as writable): " + ", ".join(fns))
+        else:
+            parts.append(f"ROUTE TO THE PER-TYPE TABLE (this body constructs "
+                         f"`{wrapper}` and hands it to the generic "
+                         f"construction path, so the per-type table its "
+                         f"values need for dispatch is installed on nothing "
+                         f"this body creates — the failing downcasts walk "
+                         f"that table. A producer-call instruction on a "
+                         f"different impl in this prompt does not apply "
+                         f"here, and the machinery that builds `{wrapper}`'s "
+                         f"table lives in `{producer_file}`, not in this "
+                         f"file: do NOT construct `{wrapper}` in this body — "
+                         f"delegate this wrap to the path that file declares "
+                         f"for `{wrapper}`'s inner value, so the value "
+                         f"carries the table built where it is declared): "
+                         + ", ".join(fns))
     if inferred:
         parts.append("re-check (a body exists; implicated by NAME only — "
                      "rewrite ONLY if it is wrong for its bounds, else leave it "

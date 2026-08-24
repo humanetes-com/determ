@@ -228,7 +228,8 @@ class FileModelNotesStore:
 
         ``escalated_grade`` is the measured rewrite instruction the prompt's
         write list carries ("" when it carries none) — `REWRITE WITH THE
-        PRODUCER`, `REWRITE TO INVOKE THE PRODUCER`, or the plain `ESCALATED
+        PRODUCER`, `REWRITE TO INVOKE THE PRODUCER`, `BUILD THE PER-TYPE
+        TABLE`, `ROUTE TO THE PER-TYPE TABLE`, or the plain `ESCALATED
         REWRITE`. When present, no `[E0xxx]` lesson enters the prompt: a
         measured instruction outranks a remembered workaround, and two
         instructions in one prompt is not a steer. CHANNEL-level, both fill
