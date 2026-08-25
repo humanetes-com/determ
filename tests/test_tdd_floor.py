@@ -11,8 +11,6 @@ from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
     cursor_mismatch,
-    futility_files,
-    futility_premise_holds,
     render_pass_floor,
     resume_floor,
     resume_mismatch,
@@ -231,10 +229,12 @@ def test_futility_evidence_round_trips_and_an_old_floor_parses_empty() -> None:
 
 def test_futility_evidence_follows_the_cursor_identity_rule() -> None:
     """Like the cursor, the evidence records what this cluster's dispatches
-    already established: it answers to cluster+code_id and self-validates at
-    the live sweep (the escalation re-compares it against the CURRENT
-    attribution), so an oracle move or a tree change must NOT void it — the
-    flat-score stop, its whole reason to exist, moves both."""
+    already established: it answers to the CLUSTER alone and self-validates
+    at the live sweep (the escalation re-compares it against the CURRENT
+    attribution and withholds on a stubbed accessor), so an oracle move, a
+    tree change AND a code move must NOT void it — the flat-score stop, its
+    whole reason to exist, is a code move every time (a validation relaunch
+    ships a fix)."""
     f = replace(_FLOOR, futile_units=_EVIDENCE)
     # Identical measurement: everything resumes.
     assert resume_floor(f, **_KEY).futility == _EVIDENCE
@@ -245,66 +245,39 @@ def test_futility_evidence_follows_the_cursor_identity_rule() -> None:
     r = resume_floor(f, **{**_KEY, "oracle_size": 103})
     assert r.stall is None and r.futility == _EVIDENCE
     assert "futility evidence resumed" in r.note
-    # A changed code build with NO stamped premise (`futile_files` empty):
-    # nothing licenses the carry, so the evidence dies — the fall-through is
-    # re-measurement. The premise re-check that CAN carry it is pinned below.
-    r = resume_floor(f, **{**_KEY, "code_id": "other"})
-    assert r.futility is None
 
 
-def test_futility_survives_a_code_move_under_the_premise_re_check() -> None:
-    """The grade describes the TREE, not the pipeline build: with the
-    convicted files fingerprinted at save time and unchanged now, the
-    evidence resumes across a `code_id` move — the cost of dying with the
-    code identity was the identical 7-accessor entry traversal re-bought on
-    every validation launch (~2 h; twice in one evening on the same git
-    tree, runs `21368-93f6a589` → `40938-f4e8e94b`, 2026-08-23)."""
-    stamped = replace(
-        _FLOOR, futile_units=_EVIDENCE,
-        futile_files=(("src/chain.rs", "aaaa"), ("src/error.rs", "bbbb")))
-    live = {"src/chain.rs": "aaaa", "src/error.rs": "bbbb"}
-    r = resume_floor(stamped, **{**_KEY, "code_id": "other"},
-                     current_file_hashes=live)
+def test_futility_survives_a_code_move_unconditionally() -> None:
+    """THE FIX. The evidence describes the TREE ("rewriting these accessors
+    moved no verdict"), not the pipeline build, so it rides across a
+    `code_id` move on the cluster identity alone — no fingerprint gate. The
+    stricter file-fingerprint premise this replaces never held once: the
+    escalated producers live in the SAME file as the accessors they replace
+    (`src/error.rs` holds `downcast`/`is`/`from` and the `context_*`/
+    `object_*` chain fns), so the escalated dispatch the evidence exists to
+    reach splices that file after the stamp and the next entry mismatches by
+    construction — seven consecutive relaunches, zero resumes, each re-buying
+    the 7-accessor traversal (2h03m/2h18m/4h02m in one night, runs
+    `189964-ae3c1379` → `264297` → `349271`, 2026-08-25)."""
+    f = replace(_FLOOR, futile_units=_EVIDENCE)
+    r = resume_floor(f, **{**_KEY, "code_id": "a-different-build"})
     assert r.futility == _EVIDENCE
-    assert "premise re-checked" in r.note
-    assert futility_premise_holds(stamped, live)
+    assert "across the code move" in r.note
+    # The live-sweep self-validation — a re-stubbed accessor or a changed
+    # attributor firing nothing — is the tree-level premise, and it lives in
+    # the escalation trigger, not here; it is pinned end-to-end in
+    # tests/test_tdd_escalation_persistence.py and the walk.
 
 
-def test_futility_dies_on_a_code_move_when_the_premise_fails() -> None:
-    """NEGATIVE CONTROLS — every mismatch falls through to re-measurement,
-    which is the pre-fix behaviour and the safe outcome after a re-stub,
-    a restore or a layout re-author."""
-    stamped = replace(
-        _FLOOR, futile_units=_EVIDENCE,
-        futile_files=(("src/chain.rs", "aaaa"), ("src/error.rs", "bbbb")))
-    moved = {**_KEY, "code_id": "other"}
-    # a convicted body's file changed since the measurement
-    changed = {"src/chain.rs": "aaaa", "src/error.rs": "CHANGED"}
-    assert resume_floor(stamped, **moved,
-                        current_file_hashes=changed).futility is None
-    # a file the evidence names was never stamped (partial fingerprint)
-    partial = replace(_FLOOR, futile_units=_EVIDENCE,
-                      futile_files=(("src/chain.rs", "aaaa"),))
-    assert resume_floor(partial, **moved, current_file_hashes={
-        "src/chain.rs": "aaaa", "src/error.rs": "bbbb"}).futility is None
-    # a pre-fix floor carries no fingerprints at all
-    unstamped = replace(_FLOOR, futile_units=_EVIDENCE)
-    assert resume_floor(unstamped, **moved, current_file_hashes={
-        "src/chain.rs": "aaaa", "src/error.rs": "bbbb"}).futility is None
-    # and under the SAME code the evidence still resumes without any hashes —
-    # the premise re-check is only the code-move gate, not a new obstacle.
-    assert resume_floor(unstamped, **{**_KEY, "oracle_size": 103},
-                        current_file_hashes={}).futility == _EVIDENCE
-
-
-def test_futile_files_round_trips_and_an_old_floor_parses_empty() -> None:
-    f = replace(_FLOOR, futile_units=_EVIDENCE,
-                futile_files=(("src/error.rs", "bbbb"),))
-    r = TddFloor.from_dict(f.to_dict())
-    assert r is not None and r.futile_files == (("src/error.rs", "bbbb"),)
+def test_a_pre_fix_floor_that_stamped_futile_files_still_parses() -> None:
+    """Forward-compat: a floor written by the build that persisted
+    `futile_files` fingerprints resumes — the retired key is simply not
+    read, and the evidence rides on `futile_units` alone."""
     old = dict(_FLOOR.to_dict())
-    old.pop("futile_files")
+    old["futile_units"] = {t: list(u) for t, u in _EVIDENCE}
+    old["futile_files"] = {"src/error.rs": "bbbb"}
     parsed = TddFloor.from_dict(old)
-    assert parsed is not None and parsed.futile_files == ()
-    assert futility_files(_EVIDENCE) == frozenset(
-        {"src/error.rs", "src/chain.rs"})
+    assert parsed is not None and parsed.futile_units == _EVIDENCE
+    assert not hasattr(parsed, "futile_files")
+    # And a round trip no longer writes the key at all.
+    assert "futile_files" not in parsed.to_dict()

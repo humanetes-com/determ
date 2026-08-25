@@ -217,21 +217,17 @@ def test_a_fired_escalation_suspends_the_futile_units_stored_guidance(
     assert any("suspended stored guidance" in ln for ln in logs)
 
 
-def test_futility_survives_a_code_move_when_the_convicted_bodies_are_unchanged(
-        tmp_path, monkeypatch) -> None:
+def test_futility_survives_a_code_move(tmp_path, monkeypatch) -> None:
     """THE PLAN step 4 (202.5's bar, reachability only). The grade describes
-    the TREE: with the convicted file fingerprinted at save time and
-    unchanged at the resume, a `code_id` move no longer voids the evidence —
-    the resumed process escalates at its FIRST sweep and iter 1's batch
-    carries the producer instead of re-buying the accessor traversal (the
-    toll runs `21368-93f6a589` → `40938-f4e8e94b` paid twice in one evening
-    on the same git tree)."""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.rs").write_text("fn fmt() { 1 }", encoding="utf-8")
+    the TREE, so a `code_id` move — the shape of every validation launch —
+    no longer voids the evidence: the resumed process escalates at its FIRST
+    sweep and iter 1's batch carries the producer instead of re-buying the
+    accessor traversal (the toll runs `21368-93f6a589` → `40938-f4e8e94b`
+    paid twice in one evening on the same git tree, and the three runs of
+    2026-08-25 paid it once each — 2h03m/2h18m/4h02m)."""
     floor: dict = {}
     _stopped_process(tmp_path, monkeypatch, floor)
     row = dict(floor["row"])
-    assert row.get("futile_files"), "the save must stamp the premise"
     row["code_id"] = "a-different-build"   # the validation-launch shape
     floor["row"] = row
 
@@ -242,33 +238,29 @@ def test_futility_survives_a_code_move_when_the_convicted_bodies_are_unchanged(
     _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
                escalations=escalations), tmp_path, monkeypatch)
     assert escalations and escalations[0] == ("t2", frozenset({_ACC})), (
-        "escalation must fire from the premise-checked evidence")
+        "escalation must fire from the resumed evidence across the code move")
     assert batches and _PROD in batches[0], (
         f"iter 1's batch must hold the escalated producer, got {batches[0]}")
-    assert any("premise re-checked" in ln for ln in logs)
+    assert any("across the code move" in ln for ln in logs)
 
 
-def test_futility_dies_on_a_code_move_when_a_convicted_body_changed(
+def test_a_resumed_process_re_saves_the_seed_it_did_not_re_measure(
         tmp_path, monkeypatch) -> None:
-    """NEGATIVE CONTROL: the same move with the convicted file rewritten
-    between the runs (a re-stub / restore / re-author) falls through to
-    re-measurement — the pre-fix lock shape, which is the SAFE outcome
-    there: a stale conviction about a changed body must not steer."""
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.rs").write_text("fn fmt() { 1 }", encoding="utf-8")
+    """The seed cannot be erased by a relaunch that never re-measures it.
+    A stopped process escalates and re-persists `prev_test_units` from the
+    resumed evidence on its own first boundary; without this, run
+    `4911-9ab8852e` (2026-08-25) saved an empty `futile_units: {}` one sweep
+    into a fresh resume and blanked the seed for every later relaunch — the
+    file-fingerprint premise had refused the carry, so nothing seeded
+    `prev_test_units` and the boundary save wrote it empty."""
     floor: dict = {}
     _stopped_process(tmp_path, monkeypatch, floor)
     row = dict(floor["row"])
     row["code_id"] = "a-different-build"
     floor["row"] = row
-    (tmp_path / "src" / "a.rs").write_text("fn fmt() { 2 }", encoding="utf-8")
 
-    logs: list[str] = []
-    events: list[tuple[str, dict]] = []
-    batches: list[tuple[FnLocator, ...]] = []
-    escalations: list[tuple[str, frozenset[FnLocator]]] = []
-    _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
-               escalations=escalations), tmp_path, monkeypatch)
-    assert any("GPU_GUARD_STOP" in ln for ln in logs)
-    assert all(_PROD not in b for b in batches), (
-        "a voided premise must re-measure, never seed the stale conviction")
+    _run(_deps(logs=[], events=[], batches=[], floor=floor,
+               escalations=[]), tmp_path, monkeypatch)
+    assert (floor["row"].get("futile_units") or {}).get("t2") == [
+        "src/a.rs::fmt"], (
+        "the resumed process must re-persist the evidence, not blank it")

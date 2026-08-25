@@ -137,7 +137,6 @@ from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
-    futility_files,
     render_pass_floor,
     resume_floor,
 )
@@ -340,24 +339,41 @@ def _log_attribution_gap(
         f"failing: {sample or '(none parsed)'}")
 
 
-def _futility_file_hashes(
-    src_dir: Path, files: frozenset[str],
-) -> dict[str, str]:
-    """Content fingerprints for the files the futility evidence names.
+def _floor_snapshot(
+    *, cluster: str, best_pass: int, stall: int, tree_sha: str,
+    oracle_size: int, code_id: str,
+    attempted: set[FnLocator], landed: set[FnLocator],
+    declined: set[FnLocator],
+    futility: dict[str, frozenset[FnLocator]],
+) -> dict[str, Any]:
+    """The floor as the loop persists it — ONE spelling for both saves.
 
-    The premise half of `futility_premise_holds`: the evidence's claim is
-    about the convicted BODIES, so the files holding them are stamped at save
-    time and re-read at cluster entry. A file that cannot be read simply has
-    no entry, which the premise check reads as a mismatch — the fall-through
-    is re-measurement, never a stale conviction."""
-    out: dict[str, str] = {}
-    for rel in sorted(files):
-        try:
-            out[rel] = hashlib.md5(
-                (src_dir / rel).read_bytes()).hexdigest()[:16]
-        except OSError:
-            continue
-    return out
+    The floor is written twice per iteration: at the sweep boundary and again
+    the moment the batch is taken. The cursor (`attempted`) is a DISPATCH
+    fact, and a cursor persisted only at the next boundary dies with any stop
+    that lands inside the fill phase, which is where the hours are. Run
+    `349271-d876e4a9` (2026-08-25): the floor written at iter 2's start read
+    `attempted: []`, iter 2 then dispatched 12 of 28 escalated units, the
+    process was killed 29 minutes later, and the relaunch's deterministic
+    `order_frontier` would have re-sent the same 12 first.
+
+    `futility` is `prev_test_units` as it stands at the call: at the boundary
+    save that is the PREVIOUS sweep's attribution (the save runs before this
+    sweep's), at the dispatch save it is this sweep's. Either is a valid
+    first observation for the resume's first sweep to be the second."""
+    return TddFloor(
+        cluster=cluster, best_pass=best_pass, stall=stall,
+        tree_sha=tree_sha, oracle_size=oracle_size, code_id=code_id,
+        attempted=tuple(sorted(
+            f"{_l.file}::{_l.fn_name}" for _l in attempted)),
+        landed=tuple(sorted(
+            f"{_l.file}::{_l.fn_name}" for _l in landed)),
+        declined=tuple(sorted(
+            f"{_l.file}::{_l.fn_name}" for _l in declined)),
+        futile_units=tuple(sorted(
+            (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}" for _l in _us)))
+            for _t, _us in futility.items())),
+    ).to_dict()
 
 
 def run_phase_c_tdd(
@@ -1832,18 +1848,9 @@ def run_phase_c_tdd(
         if not _floor_resolved and not _sweep_compile_broke:
             _floor_resolved = True
             _oracle_size = pass_count + fail_count
-            # The futility evidence's premise re-check needs the LIVE
-            # fingerprints of the files its convicted units live in — the
-            # same fingerprint `_futility_file_hashes` stamps at save time.
-            # Computed only for the files the saved floor names, so this is
-            # a handful of reads once per cluster entry.
-            _saved_fut_files = (futility_files(_saved_floor.futile_units)
-                                if _saved_floor is not None else frozenset())
             _resume = resume_floor(
                 _saved_floor, cluster=cluster.name, tree_sha=_tree_sha,
-                oracle_size=_oracle_size, code_id=_code_id,
-                current_file_hashes=_futility_file_hashes(
-                    src_dir, _saved_fut_files))
+                oracle_size=_oracle_size, code_id=_code_id)
             if _resume.stall is not None:
                 stall = _resume.stall
                 # LoopState is the source of truth the mirrors read back
@@ -2307,39 +2314,22 @@ def run_phase_c_tdd(
         # real floor with its own zero.
         # A tainted sweep cannot set a floor either — same rule as the
         # checkpoint and the ratchet above.
-        if (deps.save_tdd_floor is not None and not _sweep_compile_broke
-                and _rec.reconciled):
-            deps.save_tdd_floor(project_dir, cluster.name, TddFloor(
+        # The futility evidence saved here is the PREVIOUS sweep's
+        # attribution (this save runs before this sweep's): the stopped run's
+        # last boundary save carries the unit-sets its final sweep compared
+        # equal, and the resume's first sweep is the second observation. A
+        # process that resumed the evidence re-saves it unchanged here, so a
+        # relaunch can no longer erase the seed at its first boundary.
+        _floor_persistable = (deps.save_tdd_floor is not None
+                              and not _sweep_compile_broke
+                              and _rec.reconciled)
+        if _floor_persistable and deps.save_tdd_floor is not None:
+            deps.save_tdd_floor(project_dir, cluster.name, _floor_snapshot(
                 cluster=cluster.name, best_pass=best_pass, stall=stall,
                 tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
-                code_id=_code_id,
-                attempted=tuple(sorted(
-                    f"{_l.file}::{_l.fn_name}" for _l in _pass_attempted)),
-                landed=tuple(sorted(
-                    f"{_l.file}::{_l.fn_name}" for _l in _pass_landed)),
-                declined=tuple(sorted(
-                    f"{_l.file}::{_l.fn_name}" for _l in _pass_declined)),
-                # The futility evidence as of the PREVIOUS sweep's end (this
-                # save runs before this sweep's attribution). That is the
-                # ordering that makes the persisted evidence usable: the
-                # stopped run's last save carries the unit-sets its final
-                # sweep compared equal, and the resume's first sweep is the
-                # second observation.
-                futile_units=tuple(sorted(
-                    (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}"
-                                      for _l in _us)))
-                    for _t, _us in prev_test_units.items())),
-                # The evidence's premise, stamped with it: content
-                # fingerprints of the files holding the convicted units, so
-                # a resume across a `code_id` move can re-check that the
-                # bodies the measurement was taken on are unchanged
-                # (`futility_premise_holds`) instead of dying with the code
-                # identity and re-buying the entry traversal.
-                futile_files=tuple(sorted(_futility_file_hashes(
-                    src_dir,
-                    frozenset(_l.file for _us in prev_test_units.values()
-                              for _l in _us)).items())),
-            ).to_dict())
+                code_id=_code_id, attempted=_pass_attempted,
+                landed=_pass_landed, declined=_pass_declined,
+                futility=prev_test_units))
 
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
@@ -3782,6 +3772,19 @@ def run_phase_c_tdd(
                 iter=iter_n, cluster=cluster.name,
                 cohort_size=_cohort_at_close,
                 attempted=_batch.attempted_before + len(_batch.keys)))
+        # The cursor is on disk BEFORE the fill phase it describes: a stop
+        # or a kill inside the hours that follow leaves a floor that says
+        # which units this pass already spent a model call on, so the
+        # relaunch takes the next slice instead of re-sending this one
+        # (`_floor_snapshot`). Same guard as the boundary save above; the
+        # score halves are unchanged since it, only the cursor moved.
+        if _floor_persistable and deps.save_tdd_floor is not None:
+            deps.save_tdd_floor(project_dir, cluster.name, _floor_snapshot(
+                cluster=cluster.name, best_pass=best_pass, stall=stall,
+                tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
+                code_id=_code_id, attempted=_pass_attempted,
+                landed=_pass_landed, declined=_pass_declined,
+                futility=prev_test_units))
         frontier_keys = set(_batch.keys)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "

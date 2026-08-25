@@ -56,6 +56,44 @@ iteration that does none of these is the pathology, whatever the log calls
 it — and an analysis that ends without a change aimed at making the next
 iteration clear this bar is unfinished.
 
+## A plan addendum is judged by whether the proposed change would work, not by whether its hashes match
+
+When the user asks to analyze a `technical_debt.md` point and add an
+addendum, the deliverable is whether the PLAN, walked through the source,
+would actually close the class it names — a fix, an improvement, or a
+named gap the code already shows the plan cannot close. It is not a
+proofreading pass.
+
+Cosmetic findings are not findings. A launch `code_id` that does not match
+the working-tree hash, a floor field whose value is `98` rather than `93`,
+a log line whose wording is off by a clause, a count that is 6 rather than
+7: those are recoverable from one grep of a line the plan already cited.
+They belong in an addendum only when they change whether the proposed
+mechanism would fire or what it would do. If they do not, leave them out.
+
+**The question the addendum has to answer, checkable.** For each change
+the plan proposes, name the function (or the absence of one) that would
+carry it, and say one of: it would close the class; it would not, because
+<this path already does X / still does Y>; or the class is real and the
+plan aims at the wrong owner. Then say what that means for the next
+iteration — the same bar as the section above. An addendum that lists
+identity nits and never walks the proposed code path is the same failure
+as a stall write-up that never names a fill: a report the user could
+produce themselves.
+
+**The instance that motivated the rule, 2026-08-25.** Asked to analyze the
+re-buy-class roadmap and add an addendum, the first screen of the
+addendum was that a launch hash was the pre-edit identity, that the
+frontier was 6 not 7, that a floor field was empty. All true, all already
+on the cluster-entry line and the on-disk floor. The question that
+mattered was one screen later and was the actual validation: the plan's
+persistence protocol would wrap stores that already atomically write and
+already resume per-premise, and would not touch the in-memory producer
+dict that is still the re-buy; a confirmation gated on "dispatch a
+producer rather than the seven accessors" cannot distinguish the theory
+from a tree whose failing set had already moved. That is the addendum.
+The hashes were not.
+
 ## The most correct fix, never the cheapest — this project is pre-launch and exists to validate a theory
 
 The theory under test is that the loop can reconstruct the crate. Every fix
