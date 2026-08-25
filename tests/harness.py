@@ -121,7 +121,31 @@ def install_scripted_cargo(
     if frontier is not None:
         fscript = _Script(frontier)
         scripts["frontier"] = fscript
-        install_app_seams(monkeypatch, frontier_from_diags=lambda *a, **k: fscript())
+
+        def _implicated_keys(_diags: Any, src_dir: Any, *a: Any,
+                             **k: Any) -> frozenset:
+            # The peel implicates per BODY — (file, fn_name, one-line
+            # container) — while the scripted frontier speaks FnLocator.
+            # Resolve containers through the live structure reader (the fake
+            # or the real syn extractor, whichever the test installed),
+            # mirroring production: a span that resolves to no record
+            # implicates nothing.
+            from pathlib import Path as _P
+
+            from pipeline_core.domain.attribution import container_key
+            locs = fscript()
+            recs = pipeline._APP.structure.enumerate_fns(_P(src_dir)) or []
+            return frozenset(
+                (loc.file, loc.fn_name,
+                 container_key(str(r.get("container", "") or "")))
+                for loc in locs
+                for r in recs
+                if r.get("file") == loc.file
+                and r.get("fn_name") == loc.fn_name)
+
+        install_app_seams(monkeypatch,
+                          frontier_from_diags=lambda *a, **k: fscript(),
+                          implicated_keys_from_diags=_implicated_keys)
     return scripts
 
 

@@ -20,15 +20,39 @@ the bodies the compiler's own diagnostics implicate, keep the rest, re-check.
 
 The attribution is not invented here. `Diagnostic` already carries the primary
 span, the macro invocation call-sites and every labelled secondary span, and
-records in its own comment that those exist for "the real culprit a fn-granular
-revert must reach"; `_frontier_from_diags` already walks all three to
-`FnLocator(file, fn_name)`. The caller passes that mapping in.
+`attribution.implicated_fn_keys` walks all three to the whole fn record. The
+caller passes that mapping in.
 
-`None` is the honest outcome whenever the diagnostics cannot isolate a proper
-subset — nothing implicated, everything implicated, or a re-stub that fails.
-The caller then reverts the whole file exactly as before, so this is strictly
-additive: it can convert a total loss into a partial win, never a partial win
-into a loss.
+Two defects this module itself produced, both on run `57025-6ba652f2`
+(2026-08-24), both fixed here and pinned in `tests/test_peel_revert.py`:
+
+- **Implication was keyed by fn NAME, and two impls legally share one.** The
+  context.rs reply held six bodies over three names (two `ext_context` impls
+  among them); the name-keyed drop removed BOTH impls per implicated name,
+  the all-implicated guard compared 3 names against 6 bodies and did not
+  fire, `reapply([])` restored the pristine snapshot (which compiled), and a
+  TOTAL loss returned as a peel win (`phase_c.file.fill.peeled` 17:40:17 UTC:
+  reverted six, kept 0, rounds 1) — deleting the first correct-shaped generic
+  `ext_context` in the project's record alongside its doomed concrete-self
+  sibling. Implication, drop and the guard are now all per BODY:
+  `(fn_name, one-line container)`.
+- **A fixed round budget returned a total loss mid-progress.** Every round
+  that finds a proper implicated subset drops at least one body, so the loop
+  terminates on its own in at most len(landed) rounds — each one cargo
+  check, seconds — at compiling, none-implicated, or all-implicated. The
+  old `max_rounds=3` cut that walk short while it was still converging,
+  which is the one outcome the module's own contract forbids ("can convert
+  a total loss into a partial win, never a partial win into a loss"). The
+  cap is now structural; an explicit override remains for tests.
+
+A refusal is the honest outcome whenever the diagnostics cannot isolate a
+proper subset — nothing implicated, everything implicated, or a re-splice
+that fails. The caller then reverts the whole file exactly as before, so this
+is strictly additive. The refusal now says WHICH path declined and what had
+been dropped by then: run `57025-6ba652f2`'s three error.rs reverts left no
+record of their peel path at all (no event is emitted on a decline), and the
+one-error record that survives — E0277 primary span at `context`, a proper
+subset — proves only that round 1 progressed, not where the walk died.
 """
 from __future__ import annotations
 
@@ -37,7 +61,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["LandedBody", "PeelResult", "peel_file_first", "peel_to_compiling"]
+from pipeline_core.domain.attribution import container_key
+
+__all__ = [
+    "LandedBody",
+    "PeelRefusal",
+    "PeelResult",
+    "peel_file_first",
+    "peel_to_compiling",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +86,20 @@ class LandedBody:
     sig_text: str = ""
     body: str = ""
     where_clause: str | None = None
+    # Whether the ORIGINAL splice was authorized to overwrite a non-stub body
+    # (`allow_nonstub` — a refill target). The re-splice must replay the same
+    # authorization: a refill's pristine body is non-stub by definition, and a
+    # reapply without the flag refuses `target_not_stub` on the first kept
+    # refill — every peel of an all-refill file then dies `reapply_failed`
+    # (run `349271-d876e4a9`, 2026-08-25: context.rs implicated a proper
+    # subset for the first time, dropped 2, and lost the whole reply anyway).
+    overwrite_authorized: bool = False
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """The identity implication and drop run on: (fn_name, one-line
+        container). A bare name is not an identity — two impls share one."""
+        return (self.fn_name, container_key(self.container))
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,21 +112,42 @@ class PeelResult:
     rounds: int
 
 
+@dataclass(frozen=True, slots=True)
+class PeelRefusal:
+    """Why the peel declined, so a decline leaves a record — the three
+    error.rs reverts of run `57025-6ba652f2` left none, and which None-path
+    they took is unrecoverable from that run.
+
+    `reason` is one of: `none_implicated` (the compiler blames nothing this
+    attempt wrote — scaffold, import or sibling), `all_implicated` (no proper
+    subset to keep; whole-file revert is exactly right), `reapply_failed`
+    (a kept body would not re-splice), `no_bodies`, `exhausted_rounds` (an
+    explicit `max_rounds` override ran out — unreachable under the
+    structural bound). `dropped` is what had been peeled before declining;
+    the caller's whole-file revert restores those along with everything else.
+    """
+
+    reason: str
+    rounds: int
+    dropped: tuple[str, ...] = ()
+
+
 def peel_to_compiling(
     *,
     landed: Sequence[LandedBody],
-    implicated_now: Callable[[], frozenset[str]],
+    implicated_now: Callable[[], frozenset[tuple[str, str]]],
     reapply: Callable[[Sequence[LandedBody]], bool],
     recheck: Callable[[], int],
-    max_rounds: int = 3,
-) -> PeelResult | None:
-    """Drop the implicated bodies until the crate compiles, or give up.
+    max_rounds: int | None = None,
+) -> PeelResult | PeelRefusal:
+    """Drop the implicated bodies until the crate compiles, or refuse.
 
-    `implicated_now` reports the fn names the CURRENT diagnostics blame;
-    `reapply` restores the pristine file and re-splices exactly the subset it
-    is handed, reporting whether all of them landed; `recheck` re-runs the
-    compile and returns its return code. All three are injected so the
-    decision sequence is testable without cargo or a tree.
+    `implicated_now` reports the `(fn_name, one-line container)` keys the
+    CURRENT diagnostics blame; `reapply` restores the pristine file and
+    re-splices exactly the subset it is handed, reporting whether all of them
+    landed; `recheck` re-runs the compile and returns its return code. All
+    three are injected so the decision sequence is testable without cargo or
+    a tree.
 
     Re-splicing a subset onto the pristine text is deliberate — the alternative,
     writing `unimplemented!()` over the bodies to drop, is refused by the splice
@@ -89,32 +156,40 @@ def peel_to_compiling(
     This way the kept bodies land by the same call that landed them the first
     time.
 
-    Bounded by `max_rounds` because each round costs a real compile, and an
-    error set that keeps naming fresh bodies is one where the whole reply is
-    wrong — precisely the case the caller's existing whole-file revert handles.
+    Bounded structurally: every round that proceeds drops at least one body,
+    so at most ``len(landed)`` rounds are possible, and rustc's error WAVES —
+    each drop surfacing diagnostics the previous abort had masked — walk to
+    completion instead of dying on a fixed cap. `max_rounds` remains as an
+    explicit override for tests; passing it back at 3 restores the budget
+    that returned mid-progress total losses.
     """
     kept = list(landed)
     reverted: list[str] = []
-    for rnd in range(1, max_rounds + 1):
+    bound = len(kept) if max_rounds is None else max_rounds
+    for rnd in range(1, bound + 1):
         if not kept:
-            return None
-        bad = implicated_now() & {b.fn_name for b in kept}
-        if not bad:
+            return PeelRefusal("no_bodies", rnd - 1, tuple(reverted))
+        bad = implicated_now()
+        to_drop = [b for b in kept if b.key in bad]
+        if not to_drop:
             # The compiler blames nothing this attempt wrote — the error is in
             # the scaffold, an import, or a sibling. Peeling this reply cannot
             # reach it, and dropping bodies on a guess would discard good ones.
-            return None
-        if len(bad) == len(kept):
-            # Every body is implicated; there is no proper subset to keep, and
-            # "revert them all" is exactly what the caller already does.
-            return None
-        reverted.extend(b.fn_name for b in kept if b.fn_name in bad)
-        kept = [b for b in kept if b.fn_name not in bad]
+            return PeelRefusal("none_implicated", rnd, tuple(reverted))
+        if len(to_drop) == len(kept):
+            # Every BODY is implicated; there is no proper subset to keep, and
+            # "revert them all" is exactly what the caller already does. The
+            # comparison is body-to-body: comparing implicated NAMES against
+            # kept bodies is how six bodies over three names slipped this
+            # guard and a total loss returned as a peel win.
+            return PeelRefusal("all_implicated", rnd, tuple(reverted))
+        reverted.extend(b.fn_name for b in to_drop)
+        kept = [b for b in kept if b.key not in bad]
         if not reapply(kept):
-            return None
+            return PeelRefusal("reapply_failed", rnd, tuple(reverted))
         if recheck() == 0:
             return PeelResult(tuple(kept), tuple(reverted), rnd)
-    return None
+    return PeelRefusal("exhausted_rounds", bound, tuple(reverted))
 
 
 def peel_file_first(
@@ -127,15 +202,20 @@ def peel_file_first(
     target_src_dir: Path,
     check_cmd: str,
     cluster_env: Any,
-    frontier_from_diags: Callable[..., Any],
+    implicated_keys_from_diags: Callable[..., frozenset[tuple[str, str, str]]],
     run_cargo_check_diag: Callable[..., tuple[int, Any, Sequence[Any]]],
     splice_fn_with_where: Callable[..., tuple[Any, Any, Any]],
     norm_src_rel: Callable[[str], str],
-    max_rounds: int = 3,
-) -> tuple[PeelResult | None, int, Any, Sequence[Any]]:
+    max_rounds: int | None = None,
+) -> tuple[PeelResult | PeelRefusal, int, Any, Sequence[Any]]:
     """Wire :func:`peel_to_compiling` to a tree, returning the peel outcome
     together with the check state it leaves behind (`rc`, cargo output,
     diagnostics) so the caller can carry on with its own gates.
+
+    `implicated_keys_from_diags` is `attribution.implicated_fn_keys` (or a
+    test double): `(file, fn_name, one-line container)` per span-resolved fn,
+    filtered here to the prompted file and projected to the peel's per-body
+    key.
 
     Lives here rather than inline in the fill route because its collaborators
     are all reassigned inside that route's attempt loop, and closing over loop
@@ -145,18 +225,24 @@ def peel_file_first(
     state: dict[str, Any] = {"rc": 101, "out": None, "diags": list(diags)}
     want = norm_src_rel(file_rel)
 
-    def _implicated() -> frozenset[str]:
+    def _implicated() -> frozenset[tuple[str, str]]:
         return frozenset(
-            k.fn_name for k in frontier_from_diags(state["diags"], target_src_dir)
-            if norm_src_rel(k.file) == want)
+            (fn, cont)
+            for f, fn, cont in implicated_keys_from_diags(
+                state["diags"], target_src_dir)
+            if norm_src_rel(f) == want)
 
     def _reapply(keep: Sequence[LandedBody]) -> bool:
         # Pristine text, then exactly the kept subset through the same splice
-        # that landed them the first time.
+        # that landed them the first time — INCLUDING the same overwrite
+        # authorization: a refill's pristine body is non-stub, and replaying
+        # the splice without `allow_nonstub` refuses `target_not_stub` on the
+        # first kept refill (run `349271-d876e4a9`).
         file_path.write_text(snapshot, encoding="utf-8")
         for b in keep:
             ok, _reason, _delta = splice_fn_with_where(
                 file_path, b.container, b.fn_name, b.body, b.where_clause,
+                allow_nonstub=b.overwrite_authorized,
                 sig_text=b.sig_text)
             if not ok:
                 return False

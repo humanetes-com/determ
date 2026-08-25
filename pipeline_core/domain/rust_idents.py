@@ -82,6 +82,35 @@ def _is_ascii_ident_char(c: str) -> bool:
     return c == "_" or c.isalnum()
 
 
+def canon_token_text(text: str) -> str:
+    """Rust text in its printer-insensitive comparable form: whitespace runs
+    collapsed, then every space dropped unless it separates two identifier
+    characters.
+
+    Two printers render the same Rust: the extractor's pretty-printer is
+    token-spaced (`Own < ErrorImpl >`, `impl Context < T , E > for
+    Result < T , E >`) while source-verbatim text is not, and any identity
+    comparison across that seam splits on formatting unless both sides pass
+    through this. Instances of the class: field-type matching returned () on
+    every file-first prompt for five sweeps (run 55484-84c991f1, 2026-08-22,
+    `installable_fns._canon`), and the peel's per-body implication refused
+    `none_implicated` on its first live compile failure because the
+    diagnostics resolved to extractor-shaped container keys while the landed
+    bodies carried source-shaped ones (run `264297-dd681686`, 2026-08-24).
+    `dyn StdError + Send` keeps its word-separating spaces; everything else
+    loses them on both sides."""
+    t = " ".join(text.split())
+    out: list[str] = []
+    for i, ch in enumerate(t):
+        if ch == " " and not (
+                i > 0 and i + 1 < len(t)
+                and _is_ascii_ident_char(t[i - 1])
+                and _is_ascii_ident_char(t[i + 1])):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def _skip_generics(s: str) -> str:
     """`s` past a leading balanced ``<...>`` list (unchanged when absent)."""
     if not s.startswith("<"):

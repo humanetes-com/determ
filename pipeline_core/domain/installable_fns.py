@@ -37,7 +37,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnLocator, TypeRecord
-from pipeline_core.domain.rust_idents import identifier_tokens
+from pipeline_core.domain.rust_idents import canon_token_text, identifier_tokens
 from pipeline_core.domain.type_production import constructs_type
 
 
@@ -137,20 +137,12 @@ def _canon(text: str) -> str:
     and the escalated constructors were dispatched without the `context_*`
     bodies their tables name — the split defect this module exists to make
     writable in one prompt stayed split. `dyn StdError + Send` keeps its one
-    word-separating space (`dyn StdError`) and loses the rest on both sides."""
-    t = _norm(text)
-    out: list[str] = []
-    for i, ch in enumerate(t):
-        if ch == " " and not (
-                i > 0 and i + 1 < len(t)
-                and _is_ident(t[i - 1]) and _is_ident(t[i + 1])):
-            continue
-        out.append(ch)
-    return "".join(out)
-
-
-def _is_ident(c: str) -> bool:
-    return c.isalnum() or c == "_"
+    word-separating space (`dyn StdError`) and loses the rest on both sides.
+    The algorithm lives in `rust_idents.canon_token_text` — the peel's
+    container identity met the identical class on its first live outing (run
+    `264297-dd681686`, 2026-08-24) and both seams now share the one
+    mechanism."""
+    return canon_token_text(text)
 
 
 def _matching_paren(text: str, open_at: int) -> int:

@@ -13,6 +13,7 @@ from enum import StrEnum
 from typing import Any, NamedTuple
 
 from pipeline_core.domain.models import FnLocator, Frontier
+from pipeline_core.domain.rust_idents import _skip_generics, canon_token_text
 
 
 class FailureKind(StrEnum):
@@ -142,6 +143,53 @@ class AttributionResult(NamedTuple):
     frontier: Frontier
     kind: FailureKind
     convicting: Frontier
+
+
+def container_key(container: str) -> str:
+    """A container header in its comparable form: everything before the body
+    brace, whitespace collapsed, then every space dropped unless it separates
+    two identifier characters.
+
+    Two printers produce container text and identity comparisons must not
+    split on their formatting. Whitespace-collapse ALONE is not enough: the
+    extractor's rendered header is token-spaced (`impl Context < T , E > for
+    Result < T , E >`) while a routed body's header is source-verbatim
+    (`impl<T, E> Context<T, E> for Result<T, E>`), and comparing the merely
+    collapsed forms keys them apart. That is the identical two-printers class
+    `installable_fns._canon` records for field types (five sweeps of silent
+    offers, 2026-08-22), and it recurred here on the peel's first live
+    outing: run `264297-dd681686`'s context.rs compile failure resolved its
+    diagnostics to extractor-shaped keys, matched none of the source-shaped
+    landed bodies, and refused `none_implicated` — the whole-reply revert the
+    per-body peel exists to prevent (2026-08-24 ~22:5x UTC). The space
+    canonicalization is `rust_idents.canon_token_text`, the one mechanism
+    both sides of every such seam go through.
+
+    Spacing is only half of that seam: the extractor's `render_impl_header`
+    also OMITS the impl's generics list (`impl<T, E> Context<T, E> for
+    Result<T, E>` renders as `impl Context < T , E > for Result < T , E >`)
+    and never carries a `where` clause, while a routed body's source-shaped
+    header can carry both. The comparable form therefore drops a leading
+    `impl<...>` generics list and everything from a depth-0 ` where ` on —
+    the identity the extractor's own container convention already uses.
+    Distinct impls stay distinct: the self/trait types keep their generic
+    ARGUMENTS (`impl Tr for X<u32>` vs `impl Tr for X<T>`)."""
+    t = " ".join(container.split("{", 1)[0].split())
+    if t.startswith("impl"):
+        rest = t[len("impl"):].lstrip()
+        if rest.startswith("<"):
+            rest = _skip_generics(rest)
+        t = "impl " + rest.lstrip()
+    depth = 0
+    for i, ch in enumerate(t):
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        elif depth == 0 and t.startswith(" where ", i):
+            t = t[:i]
+            break
+    return canon_token_text(t)
 
 
 def line_to_fn_record(

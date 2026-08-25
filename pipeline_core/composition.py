@@ -1024,6 +1024,10 @@ class App:
     extract_tdd_frontier: Callable[..., Any]
     fn_container_index: Callable[..., Any]
     frontier_from_diags: Callable[..., Any]
+    # The peel's per-body implication: same span resolution as
+    # `frontier_from_diags`, keeping the container the FnLocator projection
+    # erases (two impls legally share a method name — run `57025-6ba652f2`).
+    implicated_keys_from_diags: Callable[..., Any]
     u2_test_gate: Callable[..., Any]
     # Per-fn exhaustion diagnosis: the retrospective model call, bound
     # over the same PhaseCRetroDeps held at App.phase_c_retro_deps.
@@ -2436,6 +2440,7 @@ def build_app(
             find_tests_referencing_fn=_find_tests_referencing_fn,
             focus_cargo_errors=focus_cargo_errors,
             frontier_from_diags=_via("frontier_from_diags"),
+            implicated_keys_from_diags=_via("implicated_keys_from_diags"),
             impl_block_id=_impl_block_id,
             is_fn_fully_exhausted=_retros_is_exhausted,
             load_retrospectives=_retros_load,
@@ -2624,6 +2629,8 @@ def build_app(
         fn_container_index=functools.partial(
             _fn_container_index_impl, enumerate_fns=enumerate_fns),
         frontier_from_diags=functools.partial(_attribution.frontier_from_diags, _attr_deps),
+        implicated_keys_from_diags=functools.partial(
+            _attribution.implicated_fn_keys, _attr_deps),
         u2_test_gate=u2_test_gate,
         fill_roles=fill_roles,
         model_notes_store=model_notes_store,

@@ -151,6 +151,72 @@ def test_frontier_reaches_both_definitions(tmp_path: Path) -> None:
     assert FnLocator("fmt.rs", "debug") not in without
 
 
+def test_implicated_keys_carry_the_container_the_frontier_erases(
+        tmp_path: Path) -> None:
+    """`implicated_fn_keys` is the peel's implication identity: the SAME span
+    resolution as `frontier_from_diags`, keeping the container. Two impls
+    legally share a method name, and projecting to `FnLocator` welds them —
+    which is how run `57025-6ba652f2`'s peel deleted the first correct-shaped
+    generic `ext_context` alongside its doomed same-named sibling
+    (`phase_c.file.fill.peeled` 17:40:17 UTC: reverted six, kept 0). Here two
+    impls of one file declare `ext_context`; a diagnostic on one line must
+    key exactly that impl's body, and the frontier projection of the same
+    diag shows the weld the key exists to undo."""
+    from pipeline_core.application.reconstruct.attribution import (
+        implicated_fn_keys,
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    text = ("struct Error;\n"
+            "impl StdError for E {\n"
+            "    fn ext_context(self) -> Error {\n"
+            "        Error\n"
+            "    }\n"
+            "}\n"
+            "impl StdError for Error {\n"
+            "    fn ext_context(self) -> Error {\n"
+            "        Error\n"
+            "    }\n"
+            "}\n")
+    (src / "context.rs").write_text(text, encoding="utf-8")
+
+    def _recs(_d: Path) -> list[dict[str, Any]]:
+        raw = text.encode("utf-8")
+        out = []
+        pos = 0
+        for cont in ("impl StdError for E", "impl StdError for Error"):
+            sig_start = raw.index(b"fn ext_context", pos)
+            body_start = raw.index(b"{", sig_start) + 1
+            depth, i = 1, body_start
+            while depth and i < len(raw):
+                depth += (raw[i] == 0x7B) - (raw[i] == 0x7D)
+                i += 1
+            out.append({
+                "file": "context.rs", "fn_name": "ext_context",
+                "container": cont,
+                "sig_text": raw[sig_start:body_start - 1].decode(),
+                "sig_byte_start": sig_start,
+                "body_byte_start": body_start, "body_byte_end": i - 1,
+            })
+            pos = i
+        return out
+
+    class _Structure:
+        def enumerate_fns(self, d: Path) -> list[dict[str, Any]]:
+            return _recs(d)
+
+    deps = type("D", (), {"structure": _Structure(), "log": print})()
+    # Line 8 is inside the SECOND impl's ext_context.
+    d = Diagnostic(code="E0277", file="context.rs", line=8)
+    keys = implicated_fn_keys(deps, [d], src)
+    assert keys == frozenset(
+        {("context.rs", "ext_context", "impl StdError for Error")})
+    # The frontier projection of the same diagnostic cannot tell the impls
+    # apart — the weld the container key exists to undo.
+    assert set(frontier_from_diags(deps, [d], src)) == {
+        FnLocator("context.rs", "ext_context")}
+
+
 # --- the deletion ----------------------------------------------------------
 
 def test_delete_fn_item_removes_the_item_with_its_attributes(tmp_path: Path) -> None:

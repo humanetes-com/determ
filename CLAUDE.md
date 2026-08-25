@@ -636,6 +636,21 @@ nothing even if one is written. The tracker-id ban above applies here as it
 does everywhere else, and `commit.sh` refuses a subject that opens with one
 (`debt 91.2`, `FR-018`, `#82`) rather than letting it reach `git log`.
 
+**No assistant attribution, ever — no `Co-Authored-By:`, no "Generated with",
+no mention of Claude or Anthropic, no 🤖.** Not in the subject, not in the
+body, not as a trailer. This holds even though the tooling's own default
+convention appends a `Co-Authored-By: Claude ...` line to every commit
+message it drafts: that default is overridden here and the override is not
+negotiable per-batch. The commits are the user's, authored under the user's
+name; `git log` is the project's record of what changed and why, not of which
+editor typed it. A trailer naming a model adds nothing a reader can act on,
+survives forever in the object, and travels to everyone who ever clones the
+repository — the same reason the tracker-id ban exists one paragraph up.
+`commit.sh` refuses a message carrying any of these markers rather than
+letting one reach `git log`, so the rule is mechanical and not a matter of
+remembering; a refusal means rewriting `last_commit_message.txt` without the
+line, never `--no-verify`-ing past it.
+
 A batch that touched only the untracked trackers (`technical_debt.md`,
 `handover.md`, the plan files — `.gitignore` is `*.md`) has nothing to commit:
 say that plainly and leave `last_commit_message.txt` alone.

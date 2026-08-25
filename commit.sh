@@ -33,10 +33,18 @@
 # HOW TO READ THE OUTPUT
 #   "refusing: ..."      nothing was committed and the tree is untouched —
 #                        the message file is missing/empty, nothing is staged,
-#                        or the subject carries a tracker id (`debt 91.2`,
+#                        the subject carries a tracker id (`debt 91.2`,
 #                        `FR-018`, `#82`), which is banned in commit messages
 #                        because git log travels with the repo and the .md
-#                        trackers do not.
+#                        trackers do not, or the message carries assistant
+#                        attribution (`Co-Authored-By:`, "Generated with",
+#                        Claude/Anthropic, 🤖). The commits are the user's,
+#                        authored under the user's name; a trailer naming a
+#                        model adds nothing a reader can act on and stays in
+#                        the object forever. The assistant tooling appends
+#                        such a trailer by default, so this check is what
+#                        makes the override mechanical rather than something
+#                        each batch has to remember.
 #   "warning: ..."       the commit happened; the subject is over 72 columns
 #                        and will be truncated in `git log --oneline`.
 #   "committed <sha> <subject>"   done; the file is left in place.
@@ -74,6 +82,17 @@ if [[ "$SUBJECT" =~ ^[[:space:]]*(debt|FR-|plan[[:space:]]+#|#[0-9]) ]]; then
     echo "refusing: the subject opens with a tracker id — '$SUBJECT'" >&2
     echo "          state the fact the entry stood for instead (run ids, dates, symbols, numbers are fine)" >&2
     exit 4
+fi
+
+# Assistant attribution never reaches the object: the commits are the user's,
+# and the drafting tool's default convention appends a Co-Authored-By trailer
+# naming the model. Checked over the whole message, not just the subject —
+# the trailer lands at the bottom.
+if ATTRIB="$(grep -n -i -E 'co-authored-by|generated with|claude|anthropic|🤖' "$NORMALIZED")"; then
+    echo "refusing: the message carries assistant attribution —" >&2
+    echo "$ATTRIB" | sed 's/^/          /' >&2
+    echo "          rewrite $MSG_FILE without it; the commit is yours, not a model's" >&2
+    exit 5
 fi
 
 # Anything staged? --amend and -a/--all/--include supply their own content.

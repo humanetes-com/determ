@@ -26,6 +26,7 @@ from pipeline_core.application.reconstruct.test_targets import (
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureKind,
+    container_key,
     line_to_fn_record,
 )
 from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite, Frontier
@@ -292,6 +293,67 @@ def extract_tdd_compile_frontier(deps: AttributionDeps,
         frontier.setdefault(FnLocator(rel, rec["fn_name"]), set()).add("<compile>")
     return frontier
 
+def _resolved_diag_records(
+    diagnostics: list[Diagnostic], src_dir: Path,
+    enumerate_fns: Any,
+) -> list[tuple[str, dict[str, Any]]]:
+    """(file_rel, fn record) for every span of `diagnostics` that resolves to
+    a fn — the ONE span walk both consumers below share, so the two cannot
+    drift. Per diagnostic: the primary span, falling back to the recorded
+    macro invocation chain only when the primary fails to attribute (an error
+    raised inside a macro expansion renders its primary span at the macro
+    DEFINITION — `backtrace_if_absent!`'s two E0605s pointed at
+    src/backtrace.rs:21 while the fillable culprits sat parsed in
+    `macro_call_sites`, run `2514529-5e77dafb`, 2026-08-10); then every
+    labelled secondary span that resolves to a DIFFERENT fn (a cross-file
+    error names both of its ends and only one is primary — `E0592`,
+    2026-08-11). A diagnostic whose primary attributes to nothing contributes
+    nothing, secondaries included — byte-compatible with the frontier this
+    walk was extracted from.
+    """
+    fn_records_by_file: dict[str, list[dict[str, Any]]] = {}
+    file_text_cache: dict[str, str] = {}
+
+    def _rec(rel: str, line_no: int) -> dict[str, Any] | None:
+        if not rel or line_no < 1:
+            return None
+        if rel not in fn_records_by_file:
+            _all_recs = enumerate_fns(src_dir) or []
+            fn_records_by_file[rel] = [r for r in _all_recs
+                                       if r.get("file") == rel]
+        recs = fn_records_by_file[rel]
+        if not recs:
+            return None
+        if rel not in file_text_cache:
+            try:
+                file_text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
+            except Exception:
+                return None
+        return line_to_fn_record(file_text_cache[rel], line_no, recs)
+
+    out: list[tuple[str, dict[str, Any]]] = []
+    for d in diagnostics or []:
+        p_rel = d.file or ""
+        rec = _rec(p_rel, int(d.line or 0))
+        if rec is None:
+            for m_file, m_line in d.macro_call_sites:
+                rec = _rec(m_file or "", int(m_line or 0))
+                if rec is not None:
+                    p_rel = m_file or ""
+                    break
+        if rec is None:
+            continue
+        out.append((p_rel, rec))
+        p_loc = (p_rel, str(rec.get("fn_name", "")))
+        for s_file, s_line in d.secondary_spans:
+            s_rel = s_file or ""
+            s_rec = _rec(s_rel, int(s_line or 0))
+            if (s_rec is not None
+                    and (s_rel, str(s_rec.get("fn_name", ""))) != p_loc):
+                out.append((s_rel, s_rec))
+    return out
+
+
 def frontier_from_diags(deps: AttributionDeps,
     diagnostics: list[Diagnostic], src_dir: Path,
 ) -> Frontier:
@@ -304,62 +366,38 @@ def frontier_from_diags(deps: AttributionDeps,
     frontier and silently defeats any "is this fn still broken?" check.
     """
     frontier: Frontier = {}
-    fn_records_by_file: dict[str, list[dict[str, Any]]] = {}
-    file_text_cache: dict[str, str] = {}
-
-    def _locate(rel: str, line_no: int) -> FnLocator | None:
-        if not rel or line_no < 1:
-            return None
-        if rel not in fn_records_by_file:
-            _all_recs = deps.structure.enumerate_fns(src_dir) or []
-            fn_records_by_file[rel] = [r for r in _all_recs if r.get("file") == rel]
-        recs = fn_records_by_file[rel]
-        if not recs:
-            return None
-        if rel not in file_text_cache:
-            try:
-                file_text_cache[rel] = (src_dir / rel).read_text(encoding="utf-8")
-            except Exception:
-                return None
-        rec = line_to_fn_record(file_text_cache[rel], line_no, recs)
-        if rec is None:
-            return None
-        return FnLocator(rel, rec["fn_name"])
-
-    for d in diagnostics or []:
-        loc = _locate(d.file or "", int(d.line or 0))
-        if loc is None:
-            # An error raised inside a macro expansion renders its primary span
-            # at the macro DEFINITION, where there is usually no fn record to
-            # attribute to. `backtrace_if_absent!`'s nightly variant casts
-            # `$err as &dyn core::error::Error`; two filled bodies invoked it by
-            # value, the two E0605s pointed at src/backtrace.rs:21 (only fn
-            # record nearby: `_assert_send_sync`), the frontier came back empty
-            # and BUILD mode aborted `unattributed_compile_errors` — while the
-            # fillable culprits (src/error.rs `new` line 47, `from_boxed` line
-            # 151) sat parsed in `macro_call_sites` the whole time (run
-            # `2514529-5e77dafb`, 2026-08-10). Walk the recorded invocation
-            # chain only after the primary span fails to attribute, so
-            # non-macro behaviour is byte-identical.
-            for m_file, m_line in d.macro_call_sites:
-                loc = _locate(m_file or "", int(m_line or 0))
-                if loc is not None:
-                    break
-        if loc is None:
-            continue
-        frontier.setdefault(loc, set()).add("<compile>")
-        # A cross-file error has a second end, and a repair that cannot see it
-        # can only rewrite the body of the end it can. `E0592`'s two
-        # definitions (`src/error.rs:301` + `src/fmt.rs:11` on the merged tree
-        # of 2026-08-11) are both culprits and neither is fixable from the
-        # other's file. Attribute every labelled secondary span that resolves
-        # to a fn record; a span pointing into a type or a `use` resolves to
-        # nothing and is skipped, so single-file errors are unaffected.
-        for s_file, s_line in d.secondary_spans:
-            s_loc = _locate(s_file or "", int(s_line or 0))
-            if s_loc is not None and s_loc != loc:
-                frontier.setdefault(s_loc, set()).add("<compile>")
+    for rel, rec in _resolved_diag_records(
+            diagnostics, src_dir, deps.structure.enumerate_fns):
+        frontier.setdefault(
+            FnLocator(rel, rec["fn_name"]), set()).add("<compile>")
     return frontier
+
+
+def implicated_fn_keys(deps: AttributionDeps,
+    diagnostics: list[Diagnostic], src_dir: Path,
+) -> frozenset[tuple[str, str, str]]:
+    """(file, fn_name, one-line container) for every fn the diagnostics'
+    spans resolve to — the PER-BODY implication identity the fn-granular
+    peel keys on.
+
+    `frontier_from_diags` projects the same resolution to
+    `FnLocator(file, fn_name)`, which erases the container — and two impls
+    legally share a method name. Keyed by name, the peel that met run
+    `57025-6ba652f2`'s context.rs reply (six bodies over three names, two
+    `ext_context` impls among them) dropped BOTH impls for every implicated
+    name, slipped its all-implicated guard on the name-vs-body cardinality
+    (3 != 6), re-applied the empty subset onto the pristine snapshot and
+    returned the total loss as a peel win (`phase_c.file.fill.peeled`
+    17:40:17 UTC: reverted six, kept 0, rounds 1) — deleting the first
+    correct-shaped generic `ext_context` the project ever produced alongside
+    its doomed concrete-self sibling. The span resolution has the container
+    all along (`line_to_fn_record` returns the whole record); this keeps it.
+    """
+    return frozenset(
+        (rel, str(rec.get("fn_name", "")),
+         container_key(str(rec.get("container", "") or "")))
+        for rel, rec in _resolved_diag_records(
+            diagnostics, src_dir, deps.structure.enumerate_fns))
 
 def compile_error_frontier(
     deps: AttributionDeps,

@@ -35,6 +35,7 @@ from pipeline_core.application.reconstruct.import_repair import (
 )
 from pipeline_core.application.reconstruct.peel_revert import (
     LandedBody,
+    PeelResult,
     peel_file_first,
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
@@ -260,6 +261,10 @@ class ImplFillDeps:
     focus_cargo_errors: Callable[..., str]
     frontier_from_diags: Callable[..., Frontier]
     impl_block_id: Callable[..., ContainerId]
+    # The peel's per-body implication: the same span resolution as
+    # `frontier_from_diags`, keeping the container the FnLocator projection
+    # erases — (file, fn_name, one-line container) per resolved span.
+    implicated_keys_from_diags: Callable[..., frozenset[tuple[str, str, str]]]
     is_fn_fully_exhausted: Callable[..., bool]
     load_retrospectives: Callable[..., dict[str, Any]]
     log: Callable[[str], None]
@@ -461,6 +466,7 @@ def fill_impl_blocks(
     _focus_cargo_errors = deps.focus_cargo_errors
     _frontier_from_diags = deps.frontier_from_diags
     _impl_block_id = deps.impl_block_id
+    _implicated_keys_from_diags = deps.implicated_keys_from_diags
     _is_fn_fully_exhausted = deps.is_fn_fully_exhausted
     _load_retrospectives = deps.load_retrospectives
     _log = deps.log
@@ -1210,7 +1216,8 @@ def fill_impl_blocks(
                         spliced_now += 1
                         _landed.append(LandedBody(
                             _fn, rb.container, rb.sig_text,
-                            rb.fn_data["body"], wc))
+                            rb.fn_data["body"], wc,
+                            overwrite_authorized=_fn in _refill_names))
                         if rb.via_member_name:
                             _log(f"  [phase-c/file] {file_rel}: `{_fn}` was "
                                  f"tagged {rb.fn_data['block']!r}, which names "
@@ -1340,18 +1347,22 @@ def fill_impl_blocks(
                     # All-or-nothing at this width never lands anything: see
                     # `peel_revert`. Revert only the bodies the compiler
                     # actually blames and re-check, so the reply's correct
-                    # bodies survive its wrong ones. On None nothing was kept
-                    # back and the whole-file revert below runs unchanged.
+                    # bodies survive its wrong ones. On a refusal nothing was
+                    # kept back and the whole-file revert below runs
+                    # unchanged — but the refusal is logged and emitted:
+                    # run `57025-6ba652f2`'s three error.rs reverts left no
+                    # record of their peel path, and which branch declined
+                    # was unrecoverable afterwards.
                     _peel, rc, _p_out, _p_diags = peel_file_first(
                         file_path=file_path, snapshot=snapshot,
                         file_rel=file_rel, landed=list(_landed), diags=_diags,
                         target_src_dir=target_src_dir, check_cmd=check_cmd,
                         cluster_env=cluster_env,
-                        frontier_from_diags=_frontier_from_diags,
+                        implicated_keys_from_diags=_implicated_keys_from_diags,
                         run_cargo_check_diag=_run_cargo_check_diag,
                         splice_fn_with_where=_splice_fn_with_where,
                         norm_src_rel=_norm_src_rel)
-                    if _peel is not None:
+                    if isinstance(_peel, PeelResult):
                         cargo_out, _diags = _p_out, list(_p_diags)
                         _landed = list(_peel.kept)
                         spliced_now = len(_landed)
@@ -1365,6 +1376,19 @@ def fill_impl_blocks(
                             "group": glabel,
                             "reverted": sorted(_peel.reverted),
                             "kept": spliced_now, "rounds": _peel.rounds})
+                    else:
+                        _log(f"  [phase-c/file] {glabel}: peel refused "
+                             f"({_peel.reason}) after {_peel.rounds} "
+                             "round(s)"
+                             + (f" — {len(_peel.dropped)} body(ies) dropped "
+                                "before refusing"
+                                if _peel.dropped else "")
+                             + "; whole-file revert stands.")
+                        _emit("phase_c.file.fill.peel_refused", data={
+                            "cluster": cluster_name, "file": file_rel,
+                            "group": glabel, "reason": _peel.reason,
+                            "rounds": _peel.rounds,
+                            "dropped": sorted(_peel.dropped)})
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
                     # Stubs AND re-fills. A behavioral re-fill block has no stub
