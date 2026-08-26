@@ -287,6 +287,12 @@ def test_promote_product_ahead_lifts_producers_over_new_accessors():
     final = promote_crash_evidence(mid, {crash: 0})
     assert [k for k, _ in final] == [crash, build, deleg, acc]
     assert promote_product_ahead(ordered, frozenset()) == ordered
+    # Escalated keys that are not in `ordered` leave it untouched.
+    assert promote_producers(
+        ordered, frozenset({_k("z.rs", "absent")}),
+        frozenset(), frozenset()) == list(ordered)
+    assert promote_product_ahead(
+        ordered, frozenset({_k("z.rs", "absent")})) == list(ordered)
 
 
 def _types():

@@ -270,7 +270,9 @@ def render_refill_evidence(
             lines.append(f"  {test} said:")
             lines.extend("    " + ln for ln in text.splitlines())
     if pins:
-        lines.append(f"  the attributed tests pin: {pins}")
+        lines.append(
+            f"  the attributed tests pin: {pins}"
+            + typeid_pin_consequence(pins))
     return "\n".join(lines)
 
 
@@ -424,3 +426,22 @@ def pinned_observables_from_tests(
     if any(items):
         return pinned_observables(*items)
     return pinned_observables(*file_list)
+
+
+def typeid_pin_consequence(pins: str) -> str:
+    """The TypeId consequence a `downcast::<T>` / `is::<T>` pin implies.
+
+    Run `82157-476ddc16` listed those pins on the constructor `_plan_line`
+    (`logs/prompts/49385be….txt`) and the reply still re-emitted a wrap
+    before the generic constructor — a list of call forms is not the
+    statement that wrapping the pinned type stores a different TypeId, so
+    `downcast::<T>()` returns Err. Empty when `pins` has no TypeId
+    observable (ALTDEBUG-only). Does not name a crate wrapper type.
+    """
+    if not pins:
+        return ""
+    if "downcast::<" not in pins and "is::<" not in pins:
+        return ""
+    return (" — wrapping the pinned type before the generic constructor "
+            "stores a different TypeId, so those downcast::<T>() / is::<T>() "
+            "calls return Err")

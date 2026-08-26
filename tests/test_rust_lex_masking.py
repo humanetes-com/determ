@@ -39,6 +39,10 @@ def test_mask_strings_raw_and_escaped():
     assert _masked(t, "fn s")
     assert _masked(t, "fn raw")
     assert not _masked(t, "fn real")
+    escaped = 'let s = "fn x\\ny() {"; fn real() {}'
+    assert _masked(escaped, "fn x")
+    byte_s = 'let s = b"fn bytes() {"; fn real() {}'
+    assert _masked(byte_s, "fn bytes")
 
 
 def test_mask_char_literal_but_not_lifetime():

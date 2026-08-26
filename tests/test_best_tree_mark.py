@@ -199,6 +199,18 @@ def test_an_empty_fill_tree_does_not_wipe_a_good_slot(tmp_path) -> None:
     assert mark is not None and mark.pass_count == 95
 
 
+def test_best_tree_mark_from_dict_skips_malformed_payloads() -> None:
+    """A half-written mark must cost the row, not the run."""
+    assert BestTreeMark.from_dict(None) is None
+    assert BestTreeMark.from_dict({"iteration": 1}) is None
+    mark = BestTreeMark.from_dict(
+        {"pass_count": 81, "iteration": "x", "oracle_size": "y",
+         "missing_count": "z", "tree_sha": 12})
+    assert mark is not None and mark.pass_count == 81
+    assert mark.iteration == 0 and mark.oracle_size == 0
+    assert mark.missing_count == 0
+
+
 def test_no_staging_or_retired_dirs_survive_a_clean_save(tmp_path) -> None:
     """Heal walks `.best_tree/<cluster>`; a leftover sibling would shadow
     nothing but would be committed by the checkpoint's `git add`."""

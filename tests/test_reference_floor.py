@@ -35,11 +35,13 @@ from pipeline_core.domain.cfg import CfgSet  # noqa: E402
 from pipeline_core.domain.models import FnLocator  # noqa: E402
 from pipeline_core.domain.reference_floor import (  # noqa: E402
     ClusterReference,
+    FloorVerdict,
     ReferenceMeasurement,
     is_doc_pair,
     judge_against_reference,
     normalize_pair,
     orphaned_stubs,
+    pairs_of,
 )
 
 _UI = ("tests/compiletest.rs", "ui")
@@ -567,3 +569,23 @@ def test_the_floor_never_upgrades_an_incomplete_cluster(tmp_path: Path) -> None:
         tmp_path, [_cluster()], _deps(reference=ref, out=silent))
     assert all_pass is False
     assert results[0]["status"] == "incomplete"
+
+
+def test_floor_verdict_reason_names_unmet_and_unexcused() -> None:
+    """The reason string is what the done-criterion logs; both halves of a
+    miss must appear, and a long list is capped."""
+    many = frozenset(("bin", f"t{i}") for i in range(8))
+    v = FloorVerdict(cluster="stable", unmet=frozenset({("a", "t")}),
+                     unexcused_failures=frozenset({("b", "u")}))
+    assert "do not pass here" in v.reason and "does not excuse" in v.reason
+    long = FloorVerdict(cluster="stable", unmet=many)
+    assert "…" in long.reason
+    healthy = ClusterReference(
+        cluster="stable", passed=frozenset({("a", "t")}),
+        announced=1, reported=1)
+    assert healthy.unhealthy_reason == ""
+    from types import SimpleNamespace
+    _p, _f, _i, incomplete = pairs_of([
+        SimpleNamespace(label="bin", passed=(), failed=(), ignored=(),
+                        completed=False)])
+    assert "bin" in incomplete

@@ -379,3 +379,22 @@ def test_resume_carries_products_on_cluster_identity() -> None:
     other = resume_floor(saved, cluster="nightly", tree_sha="t" * 16,
                          oracle_size=105, code_id="c" * 12)
     assert other.products is None
+
+
+def test_malformed_product_entries_parse_as_empty() -> None:
+    """A floor written with a non-dict body or non-dict additions must not
+    take down resume — skip those entries."""
+    from pipeline_core.domain.tdd_floor import TddFloor
+    raw = _floor_with().to_dict()
+    raw["escalation_products"] = {
+        "t_bad": "not-a-dict",
+        "t_adds": {"earned": [], "additions": ["not", "a", "dict"],
+                   "producers": []},
+        "t_ok": {"earned": ["src/a.rs::fmt"],
+                 "additions": {"src/b.rs::producer": ["t_ok"]},
+                 "producers": ["src/b.rs::producer"]},
+    }
+    parsed = TddFloor.from_dict(raw)
+    assert parsed is not None
+    names = {t for t, *_ in parsed.escalation_products}
+    assert names == {"t_ok"}

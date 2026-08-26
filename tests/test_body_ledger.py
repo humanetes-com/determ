@@ -17,6 +17,7 @@ from pipeline_core.domain.body_ledger import (
     LayoutDep,
     LedgerEntry,
     LedgerKey,
+    ReseedPlan,
     SweepView,
     authored_layout_fp,
     body_layout_deps,
@@ -27,6 +28,8 @@ from pipeline_core.domain.body_ledger import (
     rebuy_hits,
     reseed_allowed,
     sig_sha_of,
+    strip_comments,
+    text_sha,
 )
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.retro_gate import layout_fingerprint
@@ -346,3 +349,29 @@ def test_rebuy_hits_a_prior_process_empty_delta_and_skips_the_rest() -> None:
     assert [u for u, _ in rebuy_hits(
         [loc], unmeas, project="anyhow", cluster="stable",
         run_id="this-process")] == [loc]
+
+
+def test_ledger_helpers_the_index_and_fingerprint_actually_call() -> None:
+    assert _KEY.as_str() == "anyhow/stable/src/error.rs::new"
+    assert text_sha("Error::from(e)") == text_sha("  Error::from(e)\n")
+    nested = "/* outer /* inner */ still */ code // trailing\nkept"
+    assert "code" in strip_comments(nested)
+    assert "inner" not in strip_comments(nested)
+    assert "kept" in strip_comments(nested)
+    assert strip_comments("ok // no newline").startswith("ok")
+    deps = body_layout_deps(
+        "Error", "fn new", {"Error": ("struct", "struct Error {}")})
+    assert deps and deps[0].name == "Error"
+    proven = _entry(state=BodyState.PROVEN, body_sha="aaa")
+    later = _entry(state=BodyState.UNMEASURED, body_sha="bbb",
+                   bodies=("other",))
+    stand = latest_by_unit([proven, later])
+    assert stand[_KEY].state is BodyState.PROVEN
+    plan = ReseedPlan()
+    plan.take.append(proven)
+    assert "1 unit(s)" in plan.render() and "1 proven" in plan.render()
+    e = _entry(state=BodyState.LANDED)
+    before, after = _views((set(), {"test_old"}), ({"test_new"}, set()))
+    state, delta = classify(e, attributed={"test_new"}, before=before,
+                            after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.UNMEASURED and delta == ()

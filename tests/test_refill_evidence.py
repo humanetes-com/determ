@@ -21,6 +21,7 @@ from pipeline_core.domain.refill_evidence import (
     container_header,
     inferred_refill_names,
     render_refill_evidence,
+    typeid_pin_consequence,
 )
 
 FILE = "src/context.rs"
@@ -271,3 +272,51 @@ def test_pinned_observables_extract_the_2932_defect_pins() -> None:
     assert "the attributed tests pin:" in text
     assert "downcast::<&str>" in text
     assert "the attributed tests pin:" not in render_refill_evidence([ev])
+    # Run `82157-476ddc16`: pins listed in evidence was not enough; the
+    # TypeId consequence sits on the same line when the pins name
+    # downcast::<T>/is::<T>, and not when they are ALTDEBUG-only.
+    live_pins = (
+        "downcast::<&str>, downcast::<String>, is::<&str>, "
+        'assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))'
+    )
+    typed = render_refill_evidence([ev], pins=live_pins)
+    assert "stores a different TypeId" in typed
+    assert typeid_pin_consequence(live_pins)
+    alt_only = 'assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))'
+    assert "stores a different TypeId" not in render_refill_evidence(
+        [ev], pins=alt_only)
+    assert typeid_pin_consequence(alt_only) == ""
+    assert typeid_pin_consequence("") == ""
+
+
+def test_pinned_observables_edges_the_prefix_and_bracket_fixes_named() -> None:
+    """The review's residual branches: empty needle, unterminated generic,
+    `->` inside the argument, fn at byte 0 (no prior line), skipped empty
+    source, and a `downcast::<` that never closes."""
+    from pipeline_core.domain.refill_evidence import (
+        _generic_inner,
+        pinned_observables,
+        test_item_source,
+    )
+    assert test_item_source("", "test_downcast") == ""
+    assert test_item_source("fn other() {}", "test_downcast") == ""
+    assert test_item_source("fn test_downcast() { x }", "") == ""
+    at_start = "fn test_downcast() { bail_literal().downcast::<&str>(); }"
+    assert "downcast::<&str>" in test_item_source(at_start, "test_downcast")
+    assert _generic_inner("nope", 0) == ""
+    assert _generic_inner("downcast::<&str", 10) == ""
+    # `->` must not close the generic (`Fn() -> i32` inside the arg).
+    arrow = "fn test_x() { err.downcast::<fn() -> i32>(); }"
+    assert "downcast::<fn() -> i32>" in pinned_observables(arrow)
+    assert pinned_observables("", "fn test_x() { err.downcast::<(); }") == ""
+    generic = "fn test_foo<T>() { err.is::<&str>(); }"
+    assert "is::<&str>" in pinned_observables(test_item_source(generic, "test_foo"))
+
+
+def test_escalated_grade_is_stated_when_the_frontier_does_not_convict() -> None:
+    generic = _block(GENERIC, "Some(&self.error)")
+    key = FnLocator(FILE, "source")
+    (ev,) = collect_refill_evidence(
+        generic, [generic], _frontier(direct=False),
+        escalated=frozenset({key}))
+    assert ev.attribution is Attribution.ESCALATED

@@ -468,3 +468,13 @@ def test_the_callee_walk_respects_its_cap_and_can_be_switched_off(tmp_path: Path
     assert len(capped) == 2
     off, hops = expand_frontier_by_calls(_deps(recs), seed, src, max_hops=0)
     assert off == seed and hops == {("a.rs", "a"): 0}
+
+
+def test_line_to_fn_record_rejects_bad_lines_and_uses_col() -> None:
+    from pipeline_core.domain.attribution import line_to_fn_record
+    recs = [{"sig_byte_start": 0, "body_byte_end": 20, "fn_name": "a"}]
+    text = "fn a() { x }\nfn b() {}\n"
+    assert line_to_fn_record(text, 0, recs) is None
+    assert line_to_fn_record(text, 99, recs) is None
+    hit = line_to_fn_record(text, 1, recs, col_no=4)
+    assert hit is not None and hit["fn_name"] == "a"

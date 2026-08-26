@@ -60,3 +60,16 @@ def test_select_empty_when_nothing_matches():
     specs = (_spec("a", "foo();"),)
     assert select_usage_examples(specs, fn_name="bar", container="",
                                  char_budget=1000) == ""
+    assert select_usage_examples(specs, fn_name="bar", container="",
+                                 char_budget=0) == ""
+    matching = (_spec("a", 'let e = anyhow!("x"); e.chain();'),
+                _spec("b", 'let e = anyhow!("y"); e.chain();'))
+    capped = select_usage_examples(matching, fn_name="chain", container="",
+                                   char_budget=10_000, max_examples=1)
+    assert capped.count("chain()") == 1
+    empty_code = BehaviourSpec(
+        behaviour_id="e", given="", when="", then=None,
+        subkind=BehaviourSubKind.ASSERTION, fence=FenceDirective.RUN,
+        exercises=frozenset({"chain"}), source_ref="e")
+    assert select_usage_examples(
+        (empty_code,), fn_name="chain", container="", char_budget=1000) == ""

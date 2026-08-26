@@ -373,3 +373,61 @@ def test_file_fill_plan_line_carries_the_oracle_pins_on_escalated() -> None:
     assert "the attributed tests pin:" not in bare_line
     assert "downcast::<&str>" not in bare_line
     assert "EXPECTED_ALTDEBUG_F" not in bare_line
+
+
+# Recorded constructor `_plan_line` from run `82157-476ddc16`
+# (`logs/prompts/49385be….txt` line 7). Pins listed; TypeId consequence
+# absent. The FILE FILLED 21 reply left `construct_from_adhoc` wrapping
+# before the generic constructor.
+_LIVE_82157_PINS = (
+    "downcast::<Box<dyn StdError + Send + Sync>>, downcast::<&str>, "
+    "downcast::<String>, downcast::<io::Error>, is::<&str>, "
+    "is::<<str as ToOwned>::Owned>, "
+    'assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …)), '
+    'assert_eq!(EXPECTED_ALTDEBUG_G, format!("{:#?}", …)), '
+    'assert_eq!(EXPECTED_ALTDEBUG_H, format!("{:#?}", …))'
+)
+_LIVE_82157_CONSTRUCTORS = (
+    "new", "msg", "construct_from_std", "construct_from_adhoc",
+    "construct_from_display", "construct_from_context",
+    "construct_from_boxed", "construct", "context",
+)
+_LIVE_82157_PLAN_LINE = (
+    "  in `impl Error` -> REWRITE (the fns that consume what this one "
+    "produces were rewritten over repeated sweeps and no test changed "
+    "its verdict — the defect is not in them, it is in what this fn "
+    "constructs or returns — the attributed tests pin: "
+    + _LIVE_82157_PINS
+    + "): " + ", ".join(_LIVE_82157_CONSTRUCTORS)
+)
+
+
+def test_plan_line_states_typeid_consequence_of_downcast_pins() -> None:
+    """Run `82157-476ddc16`: the constructor `_plan_line` listed
+    `downcast::<&str>` and the reply still wrapped. The claim is that the
+    same pins now produce a line that states wrapping the pinned type
+    before the generic constructor stores a different TypeId."""
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), _LIVE_82157_CONSTRUCTORS,
+        escalated=_LIVE_82157_CONSTRUCTORS, pins=_LIVE_82157_PINS)])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert "the attributed tests pin:" in line
+    assert "downcast::<&str>" in line
+    assert "stores a different TypeId" in line
+    assert "downcast::<T>()" in line
+    # NEGATIVE CONTROL: the recorded prompt had the pin list and not the
+    # TypeId sentence. That is the pre-fix instruction the fill actually
+    # read.
+    assert "the attributed tests pin:" in _LIVE_82157_PLAN_LINE
+    assert "downcast::<&str>" in _LIVE_82157_PLAN_LINE
+    assert "stores a different TypeId" not in _LIVE_82157_PLAN_LINE
+    # ALTDEBUG-only pins must not grow a TypeId sentence.
+    alt = _file_fill([BlockFillPlan(
+        "impl Error", (), ("debug",),
+        escalated=("debug",),
+        pins='assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))')])
+    alt_line = next(ln for ln in alt.splitlines()
+                    if ln.startswith("  in `impl Error`"))
+    assert "stores a different TypeId" not in alt_line
+    assert "EXPECTED_ALTDEBUG_F" in alt_line

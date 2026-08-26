@@ -87,3 +87,13 @@ def test_derive_scoped_test_cmd_sorts_multiple_names():
 def test_derive_scoped_test_cmd_appends_after_existing_harness_args():
     assert (derive_scoped_test_cmd("cargo test -p x -- --test-threads=1", {"foo"})
             == "cargo test -p x -- --test-threads=1 foo")
+
+
+def test_parse_cmd_falls_back_when_shlex_rejects_and_honors_toolchain() -> None:
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.test_cmd import build_test_cmd, parse_cmd
+    assert parse_cmd("'unterminated") == ["'unterminated"]
+    cmd = build_test_cmd(
+        ["foo"], SimpleNamespace(toolchain="nightly"))
+    assert "+nightly" in cmd and "--test foo" in cmd

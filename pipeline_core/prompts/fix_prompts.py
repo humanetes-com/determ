@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pipeline_core.domain.installable_fns import ProducerBypass
+from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
 # The file/impl view handed to the model can itself contain HTML-escaped Rust —
 # rustdoc comments legitimately write `Vec&lt;T&gt;` inside a `<code>` tag — and
@@ -161,8 +162,10 @@ class BlockFillPlan:
     bypass: tuple[ProducerBypass, ...] = ()
     # Oracle pins extracted from the attributed tests (`pinned_observables`).
     # Empty on a prompt that has no attributed test source. Appended to the
-    # ESCALATED clause: run `2932-cf516410` had the pin in the quoted test
-    # and still wrapped, so the instruction line is the slot that was empty.
+    # ESCALATED clause with `typeid_pin_consequence`: run `2932-cf516410` had
+    # the pin in the quoted test and still wrapped (instruction slot empty);
+    # run `82157-476ddc16` listed the pins on this line and still wrapped
+    # (a call-form list is not the TypeId statement).
     pins: str = ""
 
 
@@ -196,6 +199,7 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "its verdict — the defect is not in them, it is in what "
                      "this fn constructs or returns"
                      + (f" — the attributed tests pin: {p.pins}"
+                        + typeid_pin_consequence(p.pins)
                         if p.pins else "")
                      + "): " + ", ".join(escalated))
     if installable:
