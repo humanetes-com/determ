@@ -118,27 +118,37 @@ def returns_type(sig_text: str, type_name: str, *, own_type: str = "") -> bool:
     return bool(own_type) and own_type == type_name and "Self" in tokens
 
 
-def constructs_type(body_text: str, type_name: str) -> bool:
-    """True iff the body contains a struct-literal construction of `type_name`.
+def constructs_type(body_text: str, type_name: str, *,
+                    tuple_struct: bool = False) -> bool:
+    """True iff the body contains a construction of `type_name`.
 
     ``Error { .. }`` counts; ``MyError { .. }`` must not, which the old
     ``f"{name} {{" in body`` substring test could not express. Whitespace
     between the name and the brace is allowed — the extractor's bodies are
-    re-emitted by a pretty-printer that chooses its own spacing."""
+    re-emitted by a pretty-printer that chooses its own spacing.
+
+    A TUPLE struct is constructed by a call, not a literal — ``MessageError(
+    message)``, ``BoxedError(error)`` — so with `tuple_struct=True` the name
+    followed by ``(`` counts too. The caller says which shape the type has
+    (the extractor's record names unnamed fields ``0``, ``1``, …) rather than
+    this function guessing: for a brace struct ``Name(`` cannot be a
+    construction (its constructors read ``Name::new(``), so the default keeps
+    every existing consumer's brace-only answer byte-identical."""
     if not type_name:
         return False
     pos = body_text.find(type_name)
     while pos != -1:
         end = pos + len(type_name)
-        before_ok = pos == 0 or not _is_ident_char(body_text[pos - 1])
+        before_ok = pos == 0 or not is_ident_char(body_text[pos - 1])
         rest = body_text[end:].lstrip()
-        if before_ok and rest.startswith("{"):
+        if before_ok and (rest.startswith("{")
+                          or (tuple_struct and rest.startswith("("))):
             return True
         pos = body_text.find(type_name, pos + 1)
     return False
 
 
-def _is_ident_char(c: str) -> bool:
+def is_ident_char(c: str) -> bool:
     return c.isalnum() or c == "_"
 
 
@@ -160,7 +170,7 @@ def called_method_names(body_text: str) -> frozenset[str]:
         i = dot + 1
         # `..` (range) and `.0` (tuple index) are not method names.
         j = i
-        while j < n and _is_ident_char(body_text[j]):
+        while j < n and is_ident_char(body_text[j]):
             j += 1
         name = body_text[i:j]
         if not name or name[0].isdigit():

@@ -92,3 +92,19 @@ def test_construction_tolerates_pretty_printer_spacing() -> None:
 def test_empty_name_never_matches() -> None:
     assert not returns_type("fn f() -> Error", "")
     assert not constructs_type("Error { }", "")
+
+
+def test_tuple_struct_construction_is_a_call_and_only_when_asked() -> None:
+    """A tuple struct is constructed by a call — `MessageError(message)` — so
+    the call form counts iff the caller says the type IS a tuple struct
+    (`tuple_struct=True`, from the record's unnamed fields). The default stays
+    brace-only, byte-identical for every existing consumer."""
+    body = "Self::construct_from_std(crate::wrapper::MessageError(message), bt)"
+    assert constructs_type(body, "MessageError", tuple_struct=True)
+    assert not constructs_type(body, "MessageError")
+    # A path call on the type is not a construction under either setting.
+    assert not constructs_type("Error::msg(x)", "Error", tuple_struct=True)
+    # Token-exact under the call form too: `MyMessageError(x)` is not it.
+    assert not constructs_type("MyMessageError(x)", "MessageError", tuple_struct=True)
+    # Pretty-printer spacing between name and paren is tolerated.
+    assert constructs_type("MessageError (message)", "MessageError", tuple_struct=True)

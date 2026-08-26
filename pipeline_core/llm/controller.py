@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipeline_core.domain.reasoning_cap import record_stream_meta
 from pipeline_core.domain.text import PromptDigest
 
 from .budget import BudgetSpec, BudgetState, Plan, request_max_tokens
@@ -57,7 +58,7 @@ class Hooks:
     guard: Callable[[str, str], None] = field(default=_noop_guard)
     dbg: Callable[[str], None] = field(default=_noop_dbg)
     persist_thinking: Callable[[str, str], None] = field(default=_noop_persist)
-    # debt#7: structured vLLM-runtime events for the monitor (replaces guard-log scrapes).
+    # Structured vLLM-runtime events for the monitor (replaces guard-log scrapes).
     emit: Callable[[str, dict[str, Any]], None] = field(default=_noop_emit)
 
 
@@ -218,6 +219,18 @@ class LLMController:
             "request_max": plan.request_max,
             "enable_thinking": enable_thinking,
         })
+        record_stream_meta({
+            "prompt_sha": PromptDigest.of(prompt).sha256,
+            "model": model,
+            "finish_reason": meta.finish_reason,
+            "prompt_tokens": meta.prompt_tokens,
+            "content_chars": len(result),
+            "reasoning_chars": len(reasoning_text),
+            "stop": cap.stop,
+            "followup": bool(followup),
+            "request_max": plan.request_max,
+            "enable_thinking": enable_thinking,
+        })
 
         self._h.sock_close()
         if not result:
@@ -288,7 +301,7 @@ class LLMController:
         """Recompute the budget plan from the server's reported input-token
         count. The server reports "at least N" — a LOWER bound, not exact;
         treating it as exact left the retry ~1 token over ctx on every
-        attempt (debt #32, anyhow 2026-07-02: 25365+40172 = 65537 > 65536).
+        attempt (anyhow 2026-07-02: 25365+40172 = 65537 > 65536).
         Pad it before capping so the retry actually fits."""
         thinking_reserve = prev_plan.thinking_reserve
         content_cap = prev_plan.content_cap

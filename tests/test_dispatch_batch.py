@@ -166,7 +166,7 @@ def test_cohort_none_is_exactly_the_pre_cohort_behaviour():
 
 
 def test_crash_evidence_is_promoted_ahead_of_the_static_ranking():
-    """The 180.2 defect: the evidence pack granted eligibility and the ranking
+    """The defect (run `1692702-94e6163a`): the evidence pack granted eligibility and the ranking
     decided WHEN, so the five fns a double drop named waited for their
     alphabetical turn. Promotion puts every graded unit ahead of the frontier,
     best grade first — an observed frame above an inference above a synthesized
@@ -215,3 +215,276 @@ def test_rendered_marks_a_mid_pass_batch_for_the_iteration_line():
     ordered = [f"u{i}" for i in range(30)]
     assert "mid-pass" in take_batch(ordered, set(), 12).rendered
     assert "mid-pass" not in take_batch(ordered, set(), 0).rendered
+
+
+# --- promote_producers: the constructors before the delegators ---------------
+
+def _k(file, fn):
+    from pipeline_core.domain.models import FnLocator
+    return FnLocator(file, fn)
+
+
+def test_promote_producers_puts_builders_first_in_the_escalated_cohort():
+    from pipeline_core.domain.dispatch_batch import promote_producers
+    # order_frontier's name-frequency ranking put the delegators first.
+    msg, frm, new = _k("e.rs", "msg"), _k("e.rs", "from"), _k("e.rs", "new")
+    cfa, cfs, construct = (_k("e.rs", "construct_from_adhoc"),
+                           _k("e.rs", "construct_from_std"),
+                           _k("e.rs", "construct"))
+    ordered = [(msg, {"t"}), (frm, {"t"}), (new, {"t"}),
+               (cfa, {"t"}), (cfs, {"t"}), (construct, {"t"})]
+    escalated = frozenset({msg, frm, new, cfa, cfs, construct})
+    builders = frozenset({cfa, cfs, construct})
+    callees = frozenset({cfa, cfs, construct})  # msg/from/new call them
+    out = [k for k, _ in promote_producers(ordered, escalated, builders, callees)]
+    # builders lead, delegators follow — same set, reordered.
+    assert set(out[:3]) == {cfa, cfs, construct}
+    assert set(out[3:]) == {msg, frm, new}
+
+
+def test_promote_producers_leaves_non_escalated_units_in_place():
+    from pipeline_core.domain.dispatch_batch import promote_producers
+    crash = _k("x.rs", "crash_fn")      # a non-escalated, higher-ranked unit
+    deleg = _k("e.rs", "msg")
+    build = _k("e.rs", "construct_from_adhoc")
+    ordered = [(crash, {"t"}), (deleg, {"t"}), (build, {"t"})]
+    escalated = frozenset({deleg, build})
+    out = [k for k, _ in promote_producers(
+        ordered, escalated, frozenset({build}), frozenset({build}))]
+    # crash stays at its slot (position 0); only the two escalated slots swap.
+    assert out[0] == crash
+    assert out[1] == build and out[2] == deleg
+
+
+def test_promote_producers_noop_without_escalation():
+    from pipeline_core.domain.dispatch_batch import promote_producers
+    ordered = [(_k("a.rs", "f"), {"t"}), (_k("a.rs", "g"), {"t"})]
+    assert promote_producers(
+        ordered, frozenset(), frozenset(), frozenset()) == ordered
+
+
+def test_promote_product_ahead_lifts_producers_over_new_accessors():
+    """The attribution-shift re-buy: order_frontier ranks the new accessor
+    first; persist keeps the producer in the cohort; without this lift
+    cap=1 dispatches the accessor and parks the producer."""
+    from pipeline_core.domain.dispatch_batch import (
+        promote_crash_evidence,
+        promote_producers,
+        promote_product_ahead,
+    )
+    acc = _k("a.rs", "other_accessor")
+    deleg = _k("e.rs", "msg")
+    build = _k("e.rs", "construct_from_adhoc")
+    crash = _k("x.rs", "crash_fn")
+    ordered = [(acc, {"t"}), (deleg, {"t"}), (crash, {"t"}), (build, {"t"})]
+    product = frozenset({deleg, build})
+    ahead = promote_product_ahead(ordered, product)
+    assert [k for k, _ in ahead] == [deleg, build, acc, crash]
+    # Constructors first inside the product block; crash still wins after.
+    mid = promote_producers(
+        ahead, product, frozenset({build}), frozenset({build}))
+    assert [k for k, _ in mid] == [build, deleg, acc, crash]
+    final = promote_crash_evidence(mid, {crash: 0})
+    assert [k for k, _ in final] == [crash, build, deleg, acc]
+    assert promote_product_ahead(ordered, frozenset()) == ordered
+
+
+def _types():
+    from pipeline_core.domain.models import FieldRecord, TypeRecord
+    F = FieldRecord
+    return [
+        TypeRecord(kind="struct", name="ErrorVTable",
+                   fields=(F(name="object_drop", ty="unsafe fn(Own<ErrorImpl>)"),
+                           F(name="object_downcast",
+                             ty="unsafe fn(Ref<ErrorImpl>, TypeId) -> Option<Ref<()>>"))),
+        TypeRecord(kind="struct", name="ErrorImpl", generics="<E = ()>",
+                   fields=(F(name="vtable", ty="&'static ErrorVTable"),
+                           F(name="backtrace", ty="Option<Backtrace>"),
+                           F(name="value", ty="E"))),
+        TypeRecord(kind="struct", name="Error",
+                   fields=(F(name="inner", ty="Own<ErrorImpl>"),
+                           F(name="ptr", ty="PhantomData<Error>"))),
+        TypeRecord(kind="struct", name="ContextError", generics="<C, E>",
+                   fields=(F(name="context", ty="C"), F(name="error", ty="E"))),
+        # Tuple structs: the extractor names their fields 0, 1, …
+        TypeRecord(kind="struct", name="MessageError", generics="<M>",
+                   fields=(F(name="0", ty="M", is_pub=True),)),
+        TypeRecord(kind="struct", name="DisplayError", generics="<M>",
+                   fields=(F(name="0", ty="M", is_pub=True),)),
+        TypeRecord(kind="struct", name="BoxedError",
+                   fields=(F(name="0", ty="Box<dyn StdError + Send + Sync>"),)),
+        TypeRecord(kind="struct", name="Own", generics="<T>",
+                   fields=(F(name="ptr", ty="NonNull<T>"),)),
+    ]
+
+
+def test_producer_dispatch_ranks_from_records():
+    from pipeline_core.domain.installable_fns import producer_dispatch_ranks
+    from pipeline_core.domain.models import FnLocator
+    recs = [
+        # The Defect-1 wrong body: delegates to the std producer, builds no
+        # table — but CONSTRUCTS the wrapper (a tuple-struct call), which is
+        # the constructor role.
+        {"file": "e.rs", "fn_name": "construct_from_adhoc", "container": "impl Error",
+         "body_text": "Self::construct_from_std(crate::wrapper::MessageError(message), backtrace)"},
+        {"file": "e.rs", "fn_name": "construct_from_std", "container": "impl Error",
+         "body_text": ("let vtable = Box::leak(Box::new(ErrorVTable { object_drop: object_drop::<E>, "
+                       "object_downcast: object_downcast::<E> })); unsafe { Self::construct(error, vtable, backtrace) }")},
+        # The funnel: a builder because it constructs the payload literal, not
+        # because of its name.
+        {"file": "e.rs", "fn_name": "construct", "container": "impl Error",
+         "body_text": ("let err_impl = ErrorImpl { vtable, backtrace, value: error }; "
+                       "let boxed = Box::new(err_impl); let inner = Own::new(boxed).cast::<ErrorImpl>(); "
+                       "Self { inner, ptr: PhantomData }")},
+        {"file": "e.rs", "fn_name": "msg", "container": "impl Error",
+         "body_text": "Self::construct_from_adhoc(message, backtrace!())"},
+        # `Box::new(` and `String::from(` appear in bodies; the crate's `new`
+        # and `from` are NOT thereby called.
+        {"file": "e.rs", "fn_name": "new", "container": "impl Error",
+         "body_text": "let bt = backtrace_if_absent!(&error); Self::construct_from_std(error, bt)"},
+        {"file": "e.rs", "fn_name": "from", "container": "impl<E> From<E> for Error",
+         "body_text": "let s = alloc::string::String::from(x); Self::construct_from_std(error, bt)"},
+        {"file": "l.rs", "fn_name": "format_err", "container": "",
+         "body_text": "crate::Error::msg(s)"},
+    ]
+    esc = frozenset(FnLocator(r["file"], r["fn_name"]) for r in recs)
+    builders, callees = producer_dispatch_ranks(esc, recs, _types())
+    assert builders == {FnLocator("e.rs", "construct_from_adhoc"),
+                        FnLocator("e.rs", "construct_from_std"),
+                        FnLocator("e.rs", "construct")}
+    # Resolved calls: Self::construct_from_std / Self::construct /
+    # Self::construct_from_adhoc / crate::Error::msg.
+    assert callees == {FnLocator("e.rs", "construct_from_std"),
+                       FnLocator("e.rs", "construct"),
+                       FnLocator("e.rs", "construct_from_adhoc"),
+                       FnLocator("e.rs", "msg")}
+    assert FnLocator("e.rs", "new") not in callees      # `Box::new(` is not it
+    assert FnLocator("e.rs", "from") not in callees     # `String::from(` is not it
+
+
+def test_calls_unit_resolves_on_call_shape_not_token_presence():
+    from pipeline_core.domain.installable_fns import calls_unit
+    kw = {"callee_self_types": frozenset({"Error"}), "callee_is_free": False,
+          "callee_is_method": True}
+    assert calls_unit("crate::Error::msg(s)", "", "msg", **kw)
+    assert calls_unit("Self::msg(s)", "Error", "msg", **kw)
+    assert not calls_unit("Self::msg(s)", "Other", "msg", **kw)
+    assert calls_unit("e.msg(s)", "", "msg", **kw)
+    assert calls_unit("Self::msg::<E>(s)", "Error", "msg", **kw)
+    assert not calls_unit("Box::new(x)", "Error", "new", **kw)
+    assert not calls_unit("let msg = 1; msg + 1", "", "msg", **kw)
+    assert not calls_unit("fn msg(x: u8) {}", "", "msg", callee_self_types=frozenset(),
+                          callee_is_free=True, callee_is_method=False)
+    assert calls_unit("render(a, b)", "", "render", callee_self_types=frozenset(),
+                      callee_is_free=True, callee_is_method=False)
+    assert not calls_unit("render(a, b)", "", "render", callee_self_types=frozenset(),
+                          callee_is_free=False, callee_is_method=True)
+
+
+# The stable cluster's escalated cohort as run `95878-aaf5bf1d` iter 1 ordered
+# it (`order_frontier` on the baked leaf counts; the `attempted` batch on the
+# floor was the first twelve). Bodies are the live tree's, abbreviated to the
+# construction and call facts the ranking reads.
+_COHORT_ORDER = [
+    ("src/context.rs", "context"), ("src/error.rs", "context"),
+    ("src/error.rs", "msg"), ("src/error.rs", "new"), ("src/kind.rs", "new"),
+    ("src/error.rs", "downcast"), ("src/error.rs", "from"),
+    ("src/lib.rs", "must_use"), ("src/error.rs", "from_boxed"),
+    ("src/context.rs", "with_context"), ("src/ensure.rs", "__dispatch_ensure"),
+    ("src/error.rs", "deref"), ("src/lib.rs", "format_err"),
+    ("src/context.rs", "ext_context"), ("src/error.rs", "deref_mut"),
+    ("src/ensure.rs", "render"), ("src/error.rs", "construct"),
+    ("src/error.rs", "construct_from_adhoc"), ("src/error.rs", "construct_from_boxed"),
+    ("src/error.rs", "construct_from_context"), ("src/error.rs", "construct_from_display"),
+    ("src/error.rs", "construct_from_std"), ("src/lib.rs", "Ok"),
+    ("src/error.rs", "error"), ("src/error.rs", "is"),
+    ("src/error.rs", "downcast_ref"), ("src/error.rs", "erase"),
+]
+_NOT_ESCALATED = {("src/lib.rs", "Ok"), ("src/error.rs", "error"),
+                  ("src/error.rs", "is"), ("src/error.rs", "downcast_ref")}
+def _table(t: str) -> str:
+    return ("let vtable = Box::leak(Box::new(ErrorVTable { object_drop: object_drop::<T>, "
+            "object_downcast: object_downcast::<T> }));").replace("T>", t + ">")
+_COHORT_RECS = [
+    ("src/context.rs", "context", "impl<T, E> Context<T, E> for Result<T, E>",
+     "match self { Ok(v) => Ok(v), Err(e) => Err(e.ext_context(context)) }"),
+    ("src/context.rs", "context", "impl<T> Context<T, Infallible> for Option<T>",
+     "match self { Some(v) => Ok(v), None => Err(crate::Error::construct_from_display(context, backtrace!())) }"),
+    ("src/error.rs", "context", "impl Error",
+     _table("ContextError<C, Error>") + " unsafe { Self::construct(ContextError { context, error: self }, vtable, backtrace) }"),
+    ("src/error.rs", "msg", "impl Error", "Self::construct_from_adhoc(message, backtrace!())"),
+    ("src/error.rs", "new", "impl Error", "let bt = backtrace_if_absent!(&error); Self::construct_from_std(error, bt)"),
+    ("src/kind.rs", "new", "impl Adhoc", "crate::Error::msg(message)"),
+    ("src/kind.rs", "new", "impl Trait", "error.into()"),
+    ("src/kind.rs", "new", "impl Boxed", "crate::Error::from_boxed(error)"),
+    ("src/error.rs", "downcast", "impl Error", "let target = TypeId::of::<E>(); unsafe { let inner = self.inner.by_mut(); (vtable(inner.ptr).object_downcast)(inner.by_ref(), target) }"),
+    ("src/error.rs", "from", "impl<E> From<E> for Error", "let bt = backtrace_if_absent!(&error); Self::construct_from_std(error, bt)"),
+    ("src/lib.rs", "must_use", "", "error"),
+    ("src/error.rs", "from_boxed", "impl Error", "let bt = backtrace_if_absent!(&*boxed_error); Self::construct_from_boxed(boxed_error, bt)"),
+    ("src/context.rs", "with_context", "impl<T, E> Context<T, E> for Result<T, E>",
+     "match self { Ok(v) => Ok(v), Err(e) => Err(e.ext_context(context())) }"),
+    ("src/ensure.rs", "__dispatch_ensure", "impl<A, B> BothDebug for (A, B)",
+     "let mut sb = SmallBuf { buf: [0; 128], pos: 0 }; let owned = alloc::string::String::from(s); crate::Error::msg(owned)"),
+    ("src/ensure.rs", "__dispatch_ensure", "impl<A, B> NotBothDebug for &(A, B)", "crate::Error::msg(msg)"),
+    ("src/error.rs", "deref", "impl Deref for Error", "unsafe { ErrorImpl::error(self.inner.by_ref()) }"),
+    ("src/lib.rs", "format_err", "", "if let Some(s) = args.as_str() { crate::Error::msg(s) } else { crate::Error::msg(s) }"),
+    ("src/context.rs", "ext_context", "impl<E> StdError for E", "let bt = backtrace_if_absent!(self); crate::Error::construct_from_context(context, self, bt)"),
+    ("src/context.rs", "ext_context", "impl StdError for Error", "self.context(context)"),
+    ("src/error.rs", "deref_mut", "impl DerefMut for Error", "unsafe { ErrorImpl::error_mut(self.inner.by_mut()) }"),
+    ("src/ensure.rs", "render", "", "let mut buf = Buf::new(); let owned = alloc::string::String::from(s); crate::Error::msg(owned)"),
+    ("src/error.rs", "construct", "impl Error",
+     "let err_impl = ErrorImpl { vtable, backtrace, value: error }; let boxed = Box::new(err_impl); let inner = Own::new(boxed).cast::<ErrorImpl>(); Self { inner, ptr: PhantomData }"),
+    ("src/error.rs", "construct_from_adhoc", "impl Error", "Self::construct_from_std(crate::wrapper::MessageError(message), backtrace)"),
+    ("src/error.rs", "construct_from_boxed", "impl Error",
+     _table("BoxedError") + " unsafe { Self::construct(crate::error::BoxedError(error), vtable, backtrace) }"),
+    ("src/error.rs", "construct_from_context", "impl Error",
+     _table("ContextError<C, E>") + " unsafe { Self::construct(ContextError { context, error }, vtable, backtrace) }"),
+    ("src/error.rs", "construct_from_display", "impl Error", "Self::construct_from_std(crate::wrapper::DisplayError(message), backtrace)"),
+    ("src/error.rs", "construct_from_std", "impl Error", _table("E") + " unsafe { Self::construct(error, vtable, backtrace) }"),
+    ("src/lib.rs", "Ok", "", "Result::Ok(value)"),
+    ("src/error.rs", "error", "impl ErrorImpl", "unsafe { &*(vtable(this.ptr).object_ref)(this).ptr }"),
+    ("src/error.rs", "is", "impl Error", "self.downcast_ref::<E>().is_some()"),
+    ("src/error.rs", "downcast_ref", "impl Error", "unsafe { let addr = (vtable(self.inner.ptr).object_downcast)(self.inner.by_ref(), target)?; Some(&*addr.cast::<E>().ptr.as_ptr()) }"),
+    ("src/error.rs", "erase", "impl ErrorImpl", "Ref::new(self).cast::<ErrorImpl>()"),
+]
+_SIX = {("src/error.rs", n) for n in (
+    "construct", "construct_from_adhoc", "construct_from_boxed",
+    "construct_from_context", "construct_from_display", "construct_from_std")}
+
+
+def test_recorded_95878_cohort_dispatches_the_constructors_in_batch_one():
+    from pipeline_core.domain.dispatch_batch import promote_producers
+    from pipeline_core.domain.installable_fns import producer_dispatch_ranks
+    from pipeline_core.domain.models import FnLocator
+    recs = [{"file": f, "fn_name": n, "container": c, "body_text": b}
+            for f, n, c, b in _COHORT_RECS]
+    ordered = [(FnLocator(f, n), {"t"}) for f, n in _COHORT_ORDER]
+    esc = frozenset(FnLocator(f, n) for f, n in _COHORT_ORDER
+                    if (f, n) not in _NOT_ESCALATED)
+    builders, callees = producer_dispatch_ranks(esc, recs, _types())
+    # The constructor ROLE — every unit that constructs a crate type — and
+    # nothing else: the six `construct*` plus `Error::context` (its own table).
+    assert {(k.file, k.fn_name) for k in builders} == _SIX | {("src/error.rs", "context")}
+    # The token-pollution control: `Box::new(` / `String::from(` in the bodies
+    # do not make the crate's `new` / `from` callees; the resolved ones are.
+    assert FnLocator("src/error.rs", "new") not in callees
+    assert FnLocator("src/kind.rs", "new") not in callees
+    assert FnLocator("src/error.rs", "from") not in callees
+    assert {FnLocator("src/error.rs", "msg"), FnLocator("src/error.rs", "from_boxed"),
+            FnLocator("src/context.rs", "ext_context"),
+            FnLocator("src/error.rs", "construct_from_display")} <= callees  # noqa: SIM300
+    after = [k for k, _ in promote_producers(ordered, esc, builders, callees)]
+    first = {(k.file, k.fn_name) for k in after[:12]}
+    assert first >= _SIX, sorted(first)
+    # NEGATIVE CONTROL: the recorded order (what the floor's `attempted` batch
+    # was) carried none of the six in its first twelve.
+    before = {(k.file, k.fn_name) for k, _ in ordered[:12]}
+    assert not (_SIX & before)
+    # Non-escalated units keep their slots; the ensure pair (`render`, its
+    # intended caller `__dispatch_ensure`) moves to the NEXT batch together,
+    # where one ensure.rs file-first prompt carries both.
+    for i, (k, _) in enumerate(ordered):
+        if (k.file, k.fn_name) in _NOT_ESCALATED:
+            assert after[i] == k
+    second = {(k.file, k.fn_name) for k in after[12:24]}
+    assert second >= {("src/ensure.rs", "render"), ("src/ensure.rs", "__dispatch_ensure")}

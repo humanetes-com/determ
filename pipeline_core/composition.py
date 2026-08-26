@@ -17,7 +17,7 @@ import subprocess as _subprocess_mod
 import sys
 import time as _time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -2321,6 +2321,7 @@ def build_app(
         return _app_localize_crashes(
             _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env)
 
+    _run_id = (run_context or {}).get("run_id") or ""
     return App(
         adapters=adapters,
         settings=settings,
@@ -2395,6 +2396,7 @@ def build_app(
             implicated_fns=lambda out, tsd: _implicated_fns_from_cargo_impl(
                 out, tsd, enumerate_fns=enumerate_fns),
             enumerate_fns=enumerate_fns,
+            enumerate_types=enumerate_types,
             # --- the proven-body ledger. The store lives OUTSIDE the
             # workspace (`logs/body_ledger/<project>/`) because every
             # workspace-level destruction can reach inside it: the augmented
@@ -2404,7 +2406,8 @@ def build_app(
             ledger_load=lambda pd, cl: _body_ledger_load(
                 _body_ledger_root(), pd.name, cluster=cl),
             ledger_append=lambda pd, rows: _body_ledger_append(
-                _body_ledger_root(), pd.name, rows),
+                _body_ledger_root(), pd.name,
+                [replace(r, run_id=r.run_id or _run_id) for r in rows]),
             ledger_size=lambda pd: _body_ledger_size(
                 _body_ledger_root(), pd.name),
             layout_items=lambda pd: {
@@ -2414,6 +2417,7 @@ def build_app(
                 splice=splice_bodies, revert=revert_fns_to_stub,
                 signatures=current_signatures, bodies=current_bodies),
             check_tree_builds=lambda pd, cl: compile_filled_check(pd, cl),
+            run_id=_run_id,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

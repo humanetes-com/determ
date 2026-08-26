@@ -325,3 +325,76 @@ def test_format_impl_block_related_candidate_is_shown_in_full():
     assert "line59;" in out and "/* ... */" not in out
     plain = format_impl_block_for_prompt(block, mark_target=False)
     assert "/* FILLED */" in plain and "/* ... */" in plain
+
+
+def test_repr_transparent_rendered_above_the_type_line():
+    # A producer rewrite reasoning about a transparent wrapper needs the repr
+    # to know the cast (object_downcast::<M>) is sound. The compact type line
+    # dropped it; now it is rendered from `definition`.
+    rec = TypeRecord(
+        kind="struct", name="MessageError", generics="<M>",
+        definition="#[repr(transparent)]\npub struct MessageError<M>(pub M);",
+        fields=(FieldRecord(name="0", ty="M", is_pub=True),))
+    out = format_type_for_prompt(rec)
+    assert "#[repr(transparent)]" in out
+    # It precedes the struct line.
+    assert out.index("#[repr(transparent)]") < out.index("struct MessageError<M>")
+
+
+def test_derive_kept_repr_and_derive_only_cfg_dropped():
+    rec = TypeRecord(
+        kind="struct", name="Foo", generics="",
+        definition=('#[cfg(feature = "std")]\n#[derive(Clone, Debug)]\n'
+                    "#[repr(C)]\npub struct Foo { a: u8 }"),
+        fields=(FieldRecord(name="a", ty="u8"),))
+    out = format_type_for_prompt(rec)
+    assert "#[derive(Clone, Debug)]" in out
+    assert "#[repr(C)]" in out
+    assert "#[cfg" not in out          # cfg gates presence, not the cast/trait contract
+
+
+def test_no_attrs_when_definition_bare():
+    rec = TypeRecord(kind="struct", name="Bare",
+                     definition="pub struct Bare { a: u8 }",
+                     fields=(FieldRecord(name="a", ty="u8"),))
+    out = format_type_for_prompt(rec)
+    assert out.startswith("struct Bare")
+    assert "#[" not in out
+
+
+def test_repr_behind_doc_comments_is_still_found():
+    # The extractor renders `definition` with prettyplease, which prints the
+    # doc comments FIRST and the attributes after them — so a documented type
+    # reads `/// …` then `#[repr(…)]`. A scan that stops at the first
+    # non-`#[` line would hide every documented type's repr behind its docs.
+    rec = TypeRecord(
+        kind="struct", name="Chain", generics="<'a>",
+        definition=("/// Iterator of a chain of source errors.\n"
+                    "///\n"
+                    "/// This type is the iterator returned by [`Error::chain`].\n"
+                    "#[derive(Clone)]\n"
+                    "#[repr(transparent)]\n"
+                    "pub struct Chain<'a> { state: ChainState<'a> }"),
+        fields=(FieldRecord(name="state", ty="ChainState<'a>"),))
+    out = format_type_for_prompt(rec)
+    assert "#[derive(Clone)]" in out and "#[repr(transparent)]" in out
+    assert out.index("#[repr(transparent)]") < out.index("struct Chain")
+    assert "///" not in out
+
+
+def test_multi_line_attribute_is_joined_before_the_head_is_read():
+    rec = TypeRecord(
+        kind="struct", name="Wide", generics="",
+        definition=("#[derive(\n    Clone,\n    Debug,\n)]\n"
+                    "#[repr(C)]\n"
+                    "pub struct Wide { a: u8 }"),
+        fields=(FieldRecord(name="a", ty="u8"),))
+    out = format_type_for_prompt(rec)
+    assert "#[derive( Clone, Debug, )]" in out
+    assert "#[repr(C)]" in out
+    # A field attribute inside the body is never hoisted.
+    rec2 = TypeRecord(
+        kind="struct", name="Inner", generics="",
+        definition="pub struct Inner {\n    #[repr(C)]\n    a: u8,\n}",
+        fields=(FieldRecord(name="a", ty="u8"),))
+    assert "#[" not in format_type_for_prompt(rec2)

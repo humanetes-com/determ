@@ -5,6 +5,7 @@ frontier nobody measured)."""
 from __future__ import annotations
 
 from pipeline_core.domain.escalation_lifetime import (
+    product_addition_keys,
     sustain_escalation_products,
 )
 from pipeline_core.domain.models import FnLocator
@@ -22,6 +23,14 @@ def _fired(*, earned=frozenset({_ACC}), cached=None):
             else {_PROD: {"t"}, _STEP: {"t"}})
 
 
+def test_product_addition_keys_are_the_cached_frontier_not_the_earned_set() -> None:
+    """Dispatch ranks what sustain merges, not the earned accessors and
+    not a `producers_out` side channel that a stub (or an empty persist)
+    can leave blank."""
+    assert product_addition_keys({"t": _fired()}) == frozenset({_PROD, _STEP})
+    assert product_addition_keys({}) == frozenset()
+
+
 def test_unchanged_evidence_sustains_the_cached_product() -> None:
     out = sustain_escalation_products(
         {"t": _fired()}, {"t": {_ACC}}, _NO_STUBS)
@@ -30,14 +39,16 @@ def test_unchanged_evidence_sustains_the_cached_product() -> None:
     assert out.merges == {_PROD: {"t"}, _STEP: {"t"}}
 
 
-def test_a_changed_unit_set_drops_the_product() -> None:
-    """The attribution moved: the set that earned the fire no longer
-    describes the test, so nothing measured supports the additions."""
+def test_a_changed_unit_set_still_sustains_the_product() -> None:
+    """The product is keyed by TEST, not by the accessor set that earned the
+    fire. An attribution shift on a still-failing test is the re-buy the
+    persisted product exists to close — dropping here would send iter 1
+    back to the new accessors."""
     out = sustain_escalation_products(
         {"t": _fired()}, {"t": {_ACC, _ACC2}}, _NO_STUBS)
-    assert out.sustained == ()
-    assert out.dropped == (("t", "evidence_changed"),)
-    assert out.merges == {}
+    assert out.sustained == ("t",)
+    assert out.dropped == ()
+    assert out.merges == {_PROD: {"t"}, _STEP: {"t"}}
 
 
 def test_an_accessor_that_is_a_stub_again_drops_the_product() -> None:
@@ -70,3 +81,52 @@ def test_merges_union_across_sustained_tests_and_products_are_untouched():
     assert out.dropped == (("t3", "not_failing"),)
     assert out.merges == {_PROD: {"t1", "t2"}}
     assert set(products) == {"t1", "t2", "t3"}, "input mapping not mutated"
+
+
+# --- escalation_fire_due: identity is not service under the dispatch cap ----
+
+def _u(name: str) -> FnLocator:
+    return FnLocator("src/fmt.rs", name)
+
+
+def test_fire_needs_every_unit_served_since_the_set_was_observed() -> None:
+    """Run `263474-b0e608d3` iter 2: `test_altdebug`'s only unit, `debug`, was
+    attributed at iter 1 and parked in batch 3 under a cap of 12. Its set was
+    identical at iter 2 — the OLD rule fired and escalated past the body the
+    verdict pins. Service, not identity, is the evidence."""
+    from pipeline_core.domain.escalation_lifetime import escalation_fire_due
+    units = frozenset({_u("debug")})
+    # NEGATIVE CONTROL = the old rule: unchanged set alone.
+    assert units == units  # the identity the old rule keyed on held
+    d = escalation_fire_due(units, units, served_at={}, since=1)
+    assert not d.due and d.unserved == (_u("debug"),)
+    # Dispatched at iter 3 (its batch): the sweep after it may fire.
+    d = escalation_fire_due(units, units, served_at={_u("debug"): 3}, since=1)
+    assert d.due and d.unserved == ()
+    # Served BEFORE the current set was observed does not count.
+    d = escalation_fire_due(units, units, served_at={_u("debug"): 0}, since=1)
+    assert not d.due
+
+
+def test_fire_rule_is_the_old_rule_when_every_unit_is_served() -> None:
+    """Cap off: every frontier unit is dispatched every sweep, so an unchanged
+    set is exactly the old trigger."""
+    from pipeline_core.domain.escalation_lifetime import escalation_fire_due
+    units = frozenset({_u("a"), _u("b")})
+    served = {_u("a"): 1, _u("b"): 1}
+    assert escalation_fire_due(units, units, served, since=1).due
+    # A changed set never fires, served or not.
+    assert not escalation_fire_due(units, frozenset({_u("a")}), served, 1).due
+    assert not escalation_fire_due(units, None, served, 1).due
+    # Partial service is no service.
+    d = escalation_fire_due(units, units, {_u("a"): 1}, since=1)
+    assert not d.due and d.unserved == (_u("b"),)
+
+
+def test_persisted_futility_seed_counts_as_served() -> None:
+    """The floor's `futile_units`, resumed across a code move, seed the set
+    at since=0 and every unit at served_at=0: the resumed process fires at
+    its FIRST sweep, before its own batch (the `2773540` lock walk)."""
+    from pipeline_core.domain.escalation_lifetime import escalation_fire_due
+    units = frozenset({_u("downcast")})
+    assert escalation_fire_due(units, units, {_u("downcast"): 0}, since=0).due

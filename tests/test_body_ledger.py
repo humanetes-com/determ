@@ -24,9 +24,11 @@ from pipeline_core.domain.body_ledger import (
     classify,
     latest_by_unit,
     plan_reseed,
+    rebuy_hits,
     reseed_allowed,
     sig_sha_of,
 )
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.retro_gate import layout_fingerprint
 
 _KEY = LedgerKey(project="anyhow", cluster="stable", file="src/error.rs",
@@ -300,3 +302,47 @@ def test_the_plan_answers_only_about_the_units_it_was_asked_about() -> None:
                        sig_sha={_KEY: e.sig_sha, other: "x"})
     assert [t.key for t in plan.take] == [_KEY]
     assert plan.skipped == []
+
+
+# --- re-buy detector --------------------------------------------------------
+
+def test_rebuy_hits_a_prior_process_empty_delta_and_skips_the_rest() -> None:
+    """The join `pattern_census.py` computed after the fact, at dispatch time.
+    Run `349271-d876e4a9` re-bought 7 of 7 accessors a prior process had
+    already graded with an empty verdict delta. Detector only."""
+    loc = FnLocator(_KEY.file, _KEY.fn_name)
+    prior = {_KEY: _entry(run_id="349271-d876e4a9", verdict_delta=())}
+    hits = rebuy_hits([loc], prior, project="anyhow", cluster="stable",
+                      run_id="this-process")
+    assert [u for u, _ in hits] == [loc]
+    # Empty process id cannot express "a prior process".
+    assert rebuy_hits([loc], prior, project="anyhow", cluster="stable",
+                      run_id="") == ()
+    # Same process: this process just wrote the row.
+    same = {_KEY: _entry(run_id="this-process", verdict_delta=())}
+    assert rebuy_hits([loc], same, project="anyhow", cluster="stable",
+                      run_id="this-process") == ()
+    # A verdict actually moved: not a re-buy.
+    moved = {_KEY: _entry(run_id="349271-d876e4a9",
+                          verdict_delta=(("t", "gained"),))}
+    assert rebuy_hits([loc], moved, project="anyhow", cluster="stable",
+                      run_id="this-process") == ()
+    # First dispatch: no prior row.
+    assert rebuy_hits([loc], {}, project="anyhow", cluster="stable",
+                      run_id="this-process") == ()
+    # Prior row with no run_id (every live row before this field): skip.
+    blank = {_KEY: _entry(run_id="", verdict_delta=())}
+    assert rebuy_hits([loc], blank, project="anyhow", cluster="stable",
+                      run_id="this-process") == ()
+    # LANDED is not a grade: fill returned, no sweep has spoken (a kill
+    # after fill-return, before the sweep).
+    landed = {_KEY: _entry(state=BodyState.LANDED, run_id="349271-d876e4a9",
+                           verdict_delta=())}
+    assert rebuy_hits([loc], landed, project="anyhow", cluster="stable",
+                      run_id="this-process") == ()
+    # UNMEASURED is a grade (the sweep ran; the tests did not).
+    unmeas = {_KEY: _entry(state=BodyState.UNMEASURED,
+                           run_id="349271-d876e4a9", verdict_delta=())}
+    assert [u for u, _ in rebuy_hits(
+        [loc], unmeas, project="anyhow", cluster="stable",
+        run_id="this-process")] == [loc]

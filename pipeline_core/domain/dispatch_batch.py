@@ -201,3 +201,85 @@ def promote_crash_evidence[K: Hashable, V](
         out.extend(graded[grade])
     out.extend(rest)
     return out
+
+
+def promote_product_ahead[K: Hashable, V](
+    ordered: Sequence[tuple[K, V]], product: frozenset[K],
+) -> list[tuple[K, V]]:
+    """`ordered` with the product units moved to the front, stable on both
+    sides.
+
+    WHY. `promote_producers` reorders only the escalated units' own slots,
+    so a newly attributed accessor — the unit `order_frontier` ranks first
+    — keeps the head of the batch. Persist-the-product then keeps the
+    constructors in the cohort and still spends the first dispatch on the
+    accessors: runs `4911`/`2932` (2026-08-25/26), and the cap=1 replay of
+    that shift (new accessor at slot 0, producer parked). The product is
+    already the measurement that those accessors cannot pay; leaving them
+    at the front is the re-buy persist exists to close. Crash promotion
+    still runs after this, so an observed fault keeps the very front.
+    """
+    if not product:
+        return list(ordered)
+    head = [item for item in ordered if item[0] in product]
+    if not head:
+        return list(ordered)
+    tail = [item for item in ordered if item[0] not in product]
+    return head + tail
+
+
+def promote_producers[K: Hashable, V](
+    ordered: Sequence[tuple[K, V]], escalated: frozenset[K],
+    builders: frozenset[K], callees: frozenset[K],
+) -> list[tuple[K, V]]:
+    """`ordered` with the ESCALATED units reordered so the table-builders lead
+    and a callee precedes its caller — leaving every non-escalated unit exactly
+    where it was.
+
+    WHY, and the measurement. A futility escalation dispatches the crate's
+    constructors as one cohort, and `order_frontier`'s final tiebreak is
+    `-leaf_name_counts[fn]` — the fn's own name as a word across the tree. The
+    crate's most frequent words are its accessors and delegators (`new`, `from`,
+    `msg`, `context`, `deref`), while the table-BUILDERS the escalation actually
+    needs rewritten (`construct_from_adhoc`, …) occur a handful of times, so
+    they sort to the BACK of the cohort and arrive one dispatch (one ~3h sweep)
+    later than the delegators that merely call them. Three producer passes ran
+    the identical first batch — `context`/`with_context`/`__dispatch_ensure`/
+    `error.rs::{context,deref,downcast,from,from_boxed,msg,new}`/`kind.rs::new`/
+    `lib.rs::must_use`, zero table-builders — and each was stopped or re-bought
+    on exactly that batch-1/batch-2 boundary (`40938-f4e8e94b`,
+    `4911-9ab8852e`, `95878-aaf5bf1d`, `349271-d876e4a9`). The delegators cannot
+    pay the test until the body they delegate to is right, so the first batch of
+    every producer pass was spending its GPU on the half of the defect that
+    cannot move first.
+
+    The reorder is confined to the escalated units' own positions: the
+    subsequence of `ordered` whose keys are in `escalated` is stably re-sorted
+    by `(0 if builder else 1, 0 if callee else 1, original index)` and dropped
+    back into those same slots, so a directly-convicting non-escalated unit
+    keeps its rank and the crash-evidence promotion that runs after this is
+    undisturbed. `builders` are the escalated units that CONSTRUCT a crate
+    nominal type — the table literal, the funnel's payload literal, a wrapper's
+    tuple constructor — the constructor ROLE read off the body's shape, so the
+    delegating wrong constructor ranks with the table-builders it should be one
+    of; `callees` are the escalated units another escalated unit calls (a
+    resolved call, not a name token), so a delegator follows what it delegates
+    to. Both are computed by the caller from the fn/type records
+    (`installable_fns.producer_dispatch_ranks`) — this function is pure
+    ordering."""
+    if not escalated:
+        return list(ordered)
+    esc_positions = [i for i, (k, _) in enumerate(ordered) if k in escalated]
+    if not esc_positions:
+        return list(ordered)
+    esc_items = [ordered[i] for i in esc_positions]
+
+    def _rank(idx_item: tuple[int, tuple[K, V]]) -> tuple[int, int, int]:
+        idx, (k, _) = idx_item
+        return (0 if k in builders else 1, 0 if k in callees else 1, idx)
+
+    reordered = [it for _, it in sorted(enumerate(esc_items), key=_rank)]
+    out = list(ordered)
+    for slot, item in zip(esc_positions, reordered, strict=True):
+        out[slot] = item
+    return out

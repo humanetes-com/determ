@@ -12,7 +12,7 @@ import hashlib
 import os
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +50,7 @@ from pipeline_core.domain.body_ledger import (
     body_sha,
     classify,
     latest_by_unit,
+    rebuy_hits,
     sig_sha_of,
 )
 from pipeline_core.domain.crash_site import (
@@ -76,10 +77,14 @@ from pipeline_core.domain.dispatch import (
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
     promote_crash_evidence,
+    promote_producers,
+    promote_product_ahead,
     take_batch,
 )
 from pipeline_core.domain.escalation_lifetime import (
     FiredProduct,
+    escalation_fire_due,
+    product_addition_keys,
     sustain_escalation_products,
 )
 from pipeline_core.domain.flat_score import (
@@ -89,6 +94,7 @@ from pipeline_core.domain.flat_score import (
     flat_score,
 )
 from pipeline_core.domain.graceful_stop import request_graceful_stop
+from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
     render_pass_audit,
@@ -128,6 +134,10 @@ from pipeline_core.domain.pass_highwater import PassHighWater
 from pipeline_core.domain.plateau import (
     plateau_exit_disabled,
     plateau_exit_due,
+)
+from pipeline_core.domain.reasoning_cap import (
+    collect_stream_meta,
+    summarize_capped,
 )
 from pipeline_core.domain.refine import (
     Attempt,
@@ -276,6 +286,12 @@ class PhaseCTddDeps:
     # that narrowing; the chain-derived pack is then the full producer closure
     # it always was.
     enumerate_fns: Callable[..., list[dict[str, Any]] | None] | None = None
+    # Every type the tree declares, as extractor `TypeRecord`s. Read to tell
+    # which escalated units CONSTRUCT a crate type (the constructor role), so
+    # the escalated-producer ordering can put them ahead of the delegators
+    # that merely call them. None disables that ordering; the escalated cohort
+    # then dispatches in `order_frontier`'s name-frequency order as before.
+    enumerate_types: Callable[..., list[Any] | None] | None = None
     # --- the proven-body ledger (`domain/body_ledger.py`). Every one of these
     # is None-disabled: with none of them wired the loop behaves exactly as it
     # did before the ledger existed, which is what makes the write path
@@ -302,6 +318,11 @@ class PhaseCTddDeps:
     check_tree_builds: Callable[..., tuple[bool, str]] | None = None
     # `(rows, bytes)` for the cluster-entry size line.
     ledger_size: Callable[..., tuple[int, int]] | None = None
+    # This process's run identity, stamped on every ledger append so a later
+    # process can tell "a prior process graded this unit" from "this process
+    # just wrote the row". Empty in tests that do not exercise the re-buy
+    # detector.
+    run_id: str = ""
 
 
 class SweepReading(NamedTuple):
@@ -343,8 +364,10 @@ def _floor_snapshot(
     *, cluster: str, best_pass: int, stall: int, tree_sha: str,
     oracle_size: int, code_id: str,
     attempted: set[FnLocator], landed: set[FnLocator],
-    declined: set[FnLocator],
+    declined: set[FnLocator], served: Iterable[FnLocator],
     futility: dict[str, frozenset[FnLocator]],
+    products: Mapping[str, FiredProduct] | None = None,
+    producers: Mapping[str, frozenset[FnLocator]] | None = None,
 ) -> dict[str, Any]:
     """The floor as the loop persists it — ONE spelling for both saves.
 
@@ -360,7 +383,26 @@ def _floor_snapshot(
     `futility` is `prev_test_units` as it stands at the call: at the boundary
     save that is the PREVIOUS sweep's attribution (the save runs before this
     sweep's), at the dispatch save it is this sweep's. Either is a valid
-    first observation for the resume's first sweep to be the second."""
+    first observation for the resume's first sweep to be the second.
+
+    `products` is the escalation's producer set, keyed by test. A fire that
+    happens AFTER the boundary save (the GPU-guard stop on the same sweep)
+    would otherwise die in memory; the after-fire save is what carries it.
+    """
+    _prods = products or {}
+    _pset = producers or {}
+    _encoded: list[tuple[str, tuple[str, ...],
+                         tuple[tuple[str, tuple[str, ...]], ...],
+                         tuple[str, ...]]] = []
+    for _t, (_earned, _cached) in _prods.items():
+        _encoded.append((
+            _t,
+            tuple(sorted(f"{_u.file}::{_u.fn_name}" for _u in _earned)),
+            tuple(sorted(
+                (f"{_k.file}::{_k.fn_name}", tuple(sorted(_ts)))
+                for _k, _ts in _cached.items())),
+            tuple(sorted(f"{_u.file}::{_u.fn_name}"
+                         for _u in _pset.get(_t, ())))))
     return TddFloor(
         cluster=cluster, best_pass=best_pass, stall=stall,
         tree_sha=tree_sha, oracle_size=oracle_size, code_id=code_id,
@@ -370,10 +412,23 @@ def _floor_snapshot(
             f"{_l.file}::{_l.fn_name}" for _l in landed)),
         declined=tuple(sorted(
             f"{_l.file}::{_l.fn_name}" for _l in declined)),
+        served=tuple(sorted(
+            f"{_l.file}::{_l.fn_name}" for _l in served)),
         futile_units=tuple(sorted(
             (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}" for _l in _us)))
             for _t, _us in futility.items())),
+        escalation_products=tuple(sorted(_encoded)),
     ).to_dict()
+
+
+def _keys_to_locators(keys: Iterable[str]) -> frozenset[FnLocator]:
+    """`file::fn` strings from a floor row → locators; drop malformed."""
+    out: set[FnLocator] = set()
+    for k in keys:
+        f, _, fn = k.partition("::")
+        if fn:
+            out.add(FnLocator(f, fn))
+    return frozenset(out)
 
 
 def run_phase_c_tdd(
@@ -560,6 +615,17 @@ def run_phase_c_tdd(
     # unit-set of the previous iteration; a test whose set is UNCHANGED while
     # it kept failing has exhausted its attributed fns — escalate.
     prev_test_units: dict[str, frozenset[FnLocator]] = {}
+    # The fire's premise, tracked instead of assumed: the iteration each unit
+    # last RETURNED from a fill (`_served_at`), and the iteration each test's
+    # current unit-set was first observed (`_set_since`). Dispatch is not
+    # service: a kill mid-fill persists the cursor so a relaunch does not
+    # re-send the same 12, but those units were never rewritten. The
+    # escalation fires only when every attributed unit was served at or after
+    # the set's first observation — under the dispatch cap an unchanged set
+    # no longer means "served"; see `escalation_fire_due`. A persisted
+    # futility seed counts as served at 0.
+    _served_at: dict[FnLocator, int] = {}
+    _set_since: dict[str, int] = {}
     # Escalated test -> (the futile unit-set that EARNED its fire, the
     # additions the fire computed). The escalation's product lives exactly as
     # long as this evidence: while a test's attribution still equals the
@@ -841,6 +907,9 @@ def run_phase_c_tdd(
     _saved_floor = (TddFloor.from_dict(deps.load_tdd_floor(project_dir, cluster.name))
                     if deps.load_tdd_floor is not None else None)
     _floor_resolved = False
+    _code_moved = False
+    _floor_persistable = False
+    _unowned: tuple[str, ...] = ()
     # TDD-iter batch ratchet: snapshot the src tree at each pass_count
     # high-water; restore it when a later iter's fills net-regress the count.
     _batch_ratchet = os.getenv("PHASE_C_TDD_BATCH_RATCHET", "1") not in ("", "0", "false")
@@ -1376,6 +1445,23 @@ def run_phase_c_tdd(
     # max_stalls` on the pass_count floor. The 10k backstop here mirrors
     # `_improvement_loop`'s safety net and should never fire in practice.
     _tdd_backstop = int(os.getenv("PHASE_C_TDD_BACKSTOP", "10000"))
+
+    def _persist_floor() -> None:
+        # ONE spelling for every save. The cursor is a dispatch fact (written
+        # before fill so a kill does not re-send the same 12). Served is a
+        # fill-return fact. Products are an after-fire fact — GPU_GUARD_STOP
+        # fires before the dispatch save, so a product computed on the
+        # stopping sweep used to die in memory (run `2773540-e47c3754`).
+        if not _floor_persistable or deps.save_tdd_floor is None:
+            return
+        deps.save_tdd_floor(project_dir, cluster.name, _floor_snapshot(
+            cluster=cluster.name, best_pass=best_pass, stall=stall,
+            tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
+            code_id=_code_id, attempted=_pass_attempted,
+            landed=_pass_landed, declined=_pass_declined,
+            served=_served_at, futility=prev_test_units,
+            products=escalation_products, producers=escalation_producers))
+
     while True:
         iter_n += 1
         if iter_n > _tdd_backstop:
@@ -1651,7 +1737,8 @@ def run_phase_c_tdd(
                     body_now_sha=_now)
                 _judged.append(replace(_row, state=_state,
                                        verdict_delta=_delta, iteration=iter_n,
-                                       epoch=_destruction_epoch))
+                                       epoch=_destruction_epoch,
+                                       run_id=_row.run_id or deps.run_id))
             deps.ledger_append(project_dir, _judged)
             if _ledger_cache is not None:
                 _ledger_cache.extend(_judged)
@@ -1851,6 +1938,9 @@ def run_phase_c_tdd(
             _resume = resume_floor(
                 _saved_floor, cluster=cluster.name, tree_sha=_tree_sha,
                 oracle_size=_oracle_size, code_id=_code_id)
+            _code_moved = bool(
+                _saved_floor is not None
+                and _saved_floor.code_id != _code_id)
             if _resume.stall is not None:
                 stall = _resume.stall
                 # LoopState is the source of truth the mirrors read back
@@ -1950,11 +2040,51 @@ def run_phase_c_tdd(
             # in every process, forever (run `2773540-e47c3754`). Seeded, the
             # first sweep's own attribution is the second observation, and
             # the escalation can fire before the one batch this process gets.
+            # The service record, seeded BEFORE the futility evidence so the
+            # first sweep's fire is checked against what this cluster really
+            # dispatched, not against the evidence's own say-so: the floor
+            # `263474-b0e608d3` wrote carried `test_altdebug: [src/fmt.rs::
+            # debug]` from a fire the pre-service rule manufactured on a unit
+            # it never dispatched. A floor from before the field attests only
+            # its open cursor.
+            _served_seed = _resume.served
+            if _served_seed is None:
+                _served_seed = tuple(
+                    set(_resume.attempted or ()) | set(_resume.landed or ())
+                    | set(_resume.declined or ()))
+            for _sv_key in _served_seed:
+                _sv_file, _, _sv_fn = _sv_key.partition("::")
+                if _sv_fn:
+                    _served_at.setdefault(FnLocator(_sv_file, _sv_fn), 0)
             if _resume.futility:
                 for _fut_test, _fut_units in _resume.futility:
-                    prev_test_units.setdefault(_fut_test, frozenset(
+                    _seeded = frozenset(
                         FnLocator(_f, _fn) for _f, _, _fn
-                        in (u.partition("::") for u in _fut_units) if _fn))
+                        in (u.partition("::") for u in _fut_units) if _fn)
+                    prev_test_units.setdefault(_fut_test, _seeded)
+                    # First observation at 0: the resumed process may fire at
+                    # its first sweep — for the units the service record
+                    # says were dispatched. The others defer until served.
+                    _set_since.setdefault(_fut_test, 0)
+            # Products resume only under the same judged-service premise as
+            # the fire: every earned unit is in `_served_at`. A kill that
+            # never returned a rewrite is not service, and seeding the
+            # product on it would inject producers at iter 1 of a rewrite
+            # that never landed (the hole that shipping the product while
+            # served was still a dispatch stamp would open).
+            if _resume.products:
+                _served_keys = set(_served_at)
+                for _t, _earned_s, _adds_s, _prods_s in _resume.products:
+                    _earned = _keys_to_locators(_earned_s)
+                    if any(u not in _served_keys for u in _earned):
+                        continue
+                    _cached: dict[FnLocator, set[str]] = {}
+                    for _ak, _ats in _adds_s:
+                        _af, _, _afn = _ak.partition("::")
+                        if _afn:
+                            _cached[FnLocator(_af, _afn)] = set(_ats)
+                    escalation_products[_t] = (_earned, _cached)
+                    escalation_producers[_t] = _keys_to_locators(_prods_s)
             deps.log(f"  {tag} [phase-c/tdd] persisted floor for "
                      f"{cluster.name}: {_resume.note} "
                      f"(stall now {stall}/{max_stalls}, "
@@ -2323,13 +2453,7 @@ def run_phase_c_tdd(
         _floor_persistable = (deps.save_tdd_floor is not None
                               and not _sweep_compile_broke
                               and _rec.reconciled)
-        if _floor_persistable and deps.save_tdd_floor is not None:
-            deps.save_tdd_floor(project_dir, cluster.name, _floor_snapshot(
-                cluster=cluster.name, best_pass=best_pass, stall=stall,
-                tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
-                code_id=_code_id, attempted=_pass_attempted,
-                landed=_pass_landed, declined=_pass_declined,
-                futility=prev_test_units))
+        _persist_floor()
 
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
@@ -2582,10 +2706,7 @@ def run_phase_c_tdd(
                 deps.log(
                     f"  {tag} [attribution/escalate] {tname}: escalation "
                     "product dropped — "
-                    + {"evidence_changed":
-                        "its attributed unit-set changed, so the evidence "
-                        "that earned the fire is gone",
-                       "stub_accessor":
+                    + {"stub_accessor":
                         "an attributed unit is a stub again (never served "
                         "by any rewrite, so 'futile' no longer describes "
                         "it)",
@@ -2610,6 +2731,8 @@ def run_phase_c_tdd(
                                     for k in _sustain.merges)})
             for tname, units in units_by_test.items():
                 prev = prev_test_units.get(tname)
+                if prev != frozenset(units):
+                    _set_since[tname] = iter_n
                 if tname in escalation_products or any(
                         tname == _t for _t, _ in _sustain.dropped):
                     # Fired: handled above. A dropped product's test does not
@@ -2617,8 +2740,25 @@ def run_phase_c_tdd(
                     # the new set, exactly as a never-fired test earns one.
                     prev_test_units[tname] = frozenset(units)
                     continue
-                if (prev is not None
-                        and prev == frozenset(units)):
+                _fire = escalation_fire_due(
+                    frozenset(units), prev, _served_at,
+                    _set_since.get(tname, iter_n))
+                if _fire.unserved:
+                    # The old rule fires here: the set is unchanged. Under the
+                    # dispatch cap that is not evidence — these units were
+                    # never a batch target since the set was observed.
+                    deps.log(
+                        f"  {tag} [attribution/escalate] {tname}: NOT "
+                        f"escalating — unit-set unchanged but "
+                        f"{len(_fire.unserved)} attributed unit(s) never "
+                        "dispatched since it was observed (parked under the "
+                        "dispatch cap, not served): " + ", ".join(
+                            f"{u.file}::{u.fn_name}" for u in _fire.unserved))
+                    deps.emit("phase_c.attribution.escalation_deferred", data={
+                        "test": tname, "iter": iter_n,
+                        "unserved": sorted(f"{u.file}::{u.fn_name}"
+                                           for u in _fire.unserved)})
+                if _fire.due:
                     # An accessor that is STILL A STUB was never served by any
                     # rewrite — it is the target, not futile. On 2026-08-11/12
                     # `display_formats_error` escalated past the still-stubbed
@@ -2758,6 +2898,11 @@ def run_phase_c_tdd(
                             "shape that measurement convicts may not steer "
                             "against it: " + ", ".join(sorted(_esc_susp)[:4]))
 
+        # After-fire persist: GPU_GUARD_STOP fires before the dispatch save,
+        # so a product computed on the stopping sweep never reached disk
+        # (run `2773540-e47c3754`). This write is what a resume seeds.
+        _persist_floor()
+
         # Union remaining cluster-active stubs into the frontier so a helper
         # that no failing test attributes directly (called only transitively)
         # still fills in phase-c instead of surviving to the post-TASK3 sweep
@@ -2773,6 +2918,16 @@ def run_phase_c_tdd(
         # `Error::` inside gen_tests bodies and proposed those tests as
         # "producers"), so the filter is re-applied over everything that landed.
         frontier = deps.filter_test_targets(frontier, src_dir)
+
+        # Tests this sweep failed that no frontier unit owns — after
+        # attribution, format-only fallback, and escalation. Always on the
+        # cargo-test line; the event is the foldable form.
+        _owned = {bare_test_name(t) for ts in frontier.values() for t in ts}
+        _unowned = tuple(sorted(
+            {bare_test_name(t) for t in last_failed} - _owned))
+        deps.emit("phase_c.attribution.unattributed", data={
+            "cluster": cluster.name, "iter": iter_n,
+            "tests": list(_unowned), "count": len(_unowned)})
 
         # D3 — re-entry filter for fns that already exhausted the per-fn
         # fix loop in a prior iter (avoid burning compute on the same fn
@@ -3490,6 +3645,49 @@ def run_phase_c_tdd(
             **dict.fromkeys(_chain_keys, 1),
             **dict.fromkeys(crash_blamed, 0),
         }
+        # ESCALATED-PRODUCER ORDERING. Two steps, then crash still wins.
+        # (1) The product as a block ranks ahead of attributed accessors —
+        # `promote_producers` only shuffles the product's own slots, so a
+        # newly attributed accessor kept the head of the batch and persist
+        # still spent iter 1 on the re-buy (runs `4911`/`2932`; cap=1
+        # replay: accessor at slot 0, producer parked). (2) Inside that
+        # block, constructors before delegators, so the constructor reading
+        # arrives in the FIRST batch of a producer pass instead of one ~3h
+        # sweep later (`40938-f4e8e94b`, `4911-9ab8852e`, `95878-aaf5bf1d`).
+        # Crash promotion runs AFTER both, so an observed fault keeps the
+        # very front.
+        _esc_keys = frozenset(
+            k for ks in escalation_producers.values() for k in ks)
+        # Rank the cached additions, not the prompt-grade producer subset.
+        # `escalation_producers` is filled through `producers_out`; a fire
+        # that returned extras without that side channel (and a resume of
+        # an empty persisted producer tuple) would skip this lift and
+        # spend cap=1 on the new accessor.
+        _product_keys = product_addition_keys(escalation_products)
+        if _product_keys:
+            _before_prod = [k for k, _ in ordered]
+            ordered = promote_product_ahead(ordered, _product_keys)
+            if [k for k, _ in ordered] != _before_prod:
+                deps.log(
+                    f"  {tag} [phase-c/dispatch] product ahead: "
+                    f"{len(_product_keys)} escalated addition(s) rank before "
+                    "attributed accessors (crash evidence still outranks)")
+        if (_esc_keys and deps.enumerate_fns is not None
+                and deps.enumerate_types is not None):
+            _pr_recs = deps.enumerate_fns(target_src_dir) or []
+            _pr_types = deps.enumerate_types(target_src_dir) or []
+            _builders, _callees = producer_dispatch_ranks(
+                _esc_keys, _pr_recs, _pr_types)
+            _before = [k for k, _ in ordered]
+            ordered = promote_producers(ordered, _esc_keys, _builders, _callees)
+            if [k for k, _ in ordered] != _before and _builders:
+                deps.log(
+                    f"  {tag} [phase-c/dispatch] producer order: "
+                    f"{len(_builders)} constructor(s) promoted ahead of the "
+                    f"delegators in the escalated cohort ({len(_callees)} "
+                    "resolved callee(s) next): " + ", ".join(
+                        sorted(f"{k.file}::{k.fn_name}" for k in _builders)[:8]))
+        # Crash evidence outranks everything, including the producer order above.
         ordered = promote_crash_evidence(ordered, _crash_grades)
         if _pass_cohort is None:
             _pass_cohort = tuple(key for key, _ in ordered)
@@ -3753,6 +3951,10 @@ def run_phase_c_tdd(
         # pass, the audit after the fill phase reports the WHOLE traversal —
         # everything the pass dispatched (across relaunches, via the resumed
         # cursor), not just this batch.
+        # Served is NOT stamped here: dispatch is the cursor, fill-return is
+        # service. A kill mid-fill must leave these keys attempted but not
+        # served (run `308884` persisted dispatch-time served; resume `2932`
+        # fired `test_altdebug` at iter 1).
         _pass_units_at_close = _pass_attempted | set(_batch.keys)
         _cohort_at_close = len(_pass_cohort or ())
         _pass_attempted = (set() if _batch.completes_pass
@@ -3778,20 +3980,32 @@ def run_phase_c_tdd(
         # relaunch takes the next slice instead of re-sending this one
         # (`_floor_snapshot`). Same guard as the boundary save above; the
         # score halves are unchanged since it, only the cursor moved.
-        if _floor_persistable and deps.save_tdd_floor is not None:
-            deps.save_tdd_floor(project_dir, cluster.name, _floor_snapshot(
-                cluster=cluster.name, best_pass=best_pass, stall=stall,
-                tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
-                code_id=_code_id, attempted=_pass_attempted,
-                landed=_pass_landed, declined=_pass_declined,
-                futility=prev_test_units))
+        # Served is whatever fill-return has already stamped — not this batch.
+        _persist_floor()
         frontier_keys = set(_batch.keys)
+        if not _code_moved:
+            _hits = rebuy_hits(
+                _batch.keys, latest_by_unit(_ledger_entries()),
+                project=project_dir.name, cluster=cluster.name,
+                run_id=deps.run_id)
+            if _hits:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: RE-BUY — "
+                    f"{len(_hits)} unit(s) a prior process already graded "
+                    "with an empty verdict delta: "
+                    + ", ".join(f"{u.file}::{u.fn_name}" for u, _ in _hits[:8])
+                    + (f" (+{len(_hits) - 8} more)" if len(_hits) > 8 else ""))
+                deps.emit("phase_c.re_buy", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "units": [f"{u.file}::{u.fn_name}" for u, _ in _hits],
+                    "prior_run_id": _hits[0][1].run_id})
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
              f"oracle={_measure.oracle_size} "
              f"(improved={improved}, stall={stall}/{max_stalls}); "
              f"frontier={len(eligible)} fn(s) ({kind}), "
              f"{skipped_perm} skipped as exhausted; "
+             f"unowned={len(_unowned)}; "
              f"dispatching {_batch.rendered}.")
         # The ordered frontier this iteration walked, as one digest. It is a
         # DIAGNOSTIC and never a gate: a hash of the population cannot decide
@@ -3830,6 +4044,7 @@ def run_phase_c_tdd(
             "improved": improved, "stall": stall,
             "dispatched": len(_batch.keys),
             "pass_completed": _batch.completes_pass,
+            "unowned": len(_unowned),
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
         })
 
@@ -3929,46 +4144,54 @@ def run_phase_c_tdd(
         # own graceful-stop checks (worker pools included), so this is where a
         # stop lands in practice — it owns the hours of the iter — and it exits by
         # raising past every `break` below.
+        _fill_meta: list[dict[str, Any]] = []
         try:
-            sub = deps.task2_fill_fns_one_by_one(
-                project_dir=project_dir,
-                target_src_dir=target_src_dir,
-                tests_dir_files=tests_dir_files,
-                module_name=module,
-                cluster_name=cluster.name,
-                cluster=cluster,
-                check_cmd=check_cmd,
-                cluster_env=cluster_env,
-                max_passes=1,
-                leaf_name_counts=leaf_counts,
-                fr_path=fr_path,
-                tdd_frontier_keys=frontier_keys,
-                # Both projections are built from the BATCH, not from `eligible`.
-                # `FailureFrontier` exists so dispatch and conviction can never
-                # drift apart; handing it the full frontier while the keys are
-                # capped would reintroduce that drift at the one seam the type
-                # was written to close — and a unit convicted by tests it was
-                # never dispatched against is the fatal direction its own
-                # docstring names.
-                tdd_frontier_tests=FailureFrontier.build(
-                    {k: t for k, t in eligible.items() if k in frontier_keys},
-                    convicting,
-                    # The sweep's own words per failing test (panic site +
-                    # assertion), so a re-fill prompt can show WHY the test
-                    # failed instead of asserting that it did.
-                    evidence=failure_evidence_by_test(output)),
-                escalated_keys=_batch_escalated,
-                escalated_measured=_measured_escalated,
-                tdd_test_cmd=test_cmd,     # scoped cluster test cmd
-                skip_end_pass_test=True,
-                crash_evidence=crash_texts or None,
-                crash_blamed=crash_blamed or None,
-                crash_blocked=crash_blocked_units,
-            )
+            with collect_stream_meta() as _fill_meta:
+                sub = deps.task2_fill_fns_one_by_one(
+                    project_dir=project_dir,
+                    target_src_dir=target_src_dir,
+                    tests_dir_files=tests_dir_files,
+                    module_name=module,
+                    cluster_name=cluster.name,
+                    cluster=cluster,
+                    check_cmd=check_cmd,
+                    cluster_env=cluster_env,
+                    max_passes=1,
+                    leaf_name_counts=leaf_counts,
+                    fr_path=fr_path,
+                    tdd_frontier_keys=frontier_keys,
+                    # Both projections are built from the BATCH, not from `eligible`.
+                    # `FailureFrontier` exists so dispatch and conviction can never
+                    # drift apart; handing it the full frontier while the keys are
+                    # capped would reintroduce that drift at the one seam the type
+                    # was written to close — and a unit convicted by tests it was
+                    # never dispatched against is the fatal direction its own
+                    # docstring names.
+                    tdd_frontier_tests=FailureFrontier.build(
+                        {k: t for k, t in eligible.items() if k in frontier_keys},
+                        convicting,
+                        # The sweep's own words per failing test (panic site +
+                        # assertion), so a re-fill prompt can show WHY the test
+                        # failed instead of asserting that it did.
+                        evidence=failure_evidence_by_test(output)),
+                    escalated_keys=_batch_escalated,
+                    escalated_measured=_measured_escalated,
+                    tdd_test_cmd=test_cmd,     # scoped cluster test cmd
+                    skip_end_pass_test=True,
+                    crash_evidence=crash_texts or None,
+                    crash_blamed=crash_blamed or None,
+                    crash_blocked=crash_blocked_units,
+                )
         except BaseException:
             _restore_abandoned_bet("stopped during the fill pass")
             _final_sweep("stopped during the fill pass")
             raise
+        # Fill returned — this batch was served. A kill that never returned
+        # is not service (the dispatch persist above left these keys off
+        # `_served_at` on purpose).
+        _served_at.update(dict.fromkeys(frontier_keys, iter_n))
+        _persist_floor()
+        _capped_n, _capped_m = summarize_capped(_fill_meta)
         total_filled += sub.fns_filled
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
@@ -4035,7 +4258,8 @@ def run_phase_c_tdd(
                             "\n".join(_led_bodies), "\n".join(_led_sigs),
                             _items,
                             file_of=_file_of),
-                        iteration=iter_n, epoch=_destruction_epoch))
+                        iteration=iter_n, epoch=_destruction_epoch,
+                        run_id=deps.run_id))
                 if _new_rows:
                     deps.ledger_append(project_dir, _new_rows)
                     _ledger_rows.extend(_new_rows)
@@ -4073,7 +4297,10 @@ def run_phase_c_tdd(
                    "was rewrite): " + ", ".join(sorted(
                        f"{k.file}::{k.fn_name}"
                        for k in _batch_esc_unchanged)[:12])
-                   if _batch_esc_unchanged else "") + ".")
+                   if _batch_esc_unchanged else "")
+                + (f"; {_capped_n} of {_capped_m} fill replies reasoning-capped"
+                   if _capped_m else "")
+                + ".")
             deps.emit("phase_c.tdd.landed_change", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "dispatched": len(frontier_keys),
@@ -4121,6 +4348,14 @@ def run_phase_c_tdd(
                                         for k in _unchanged_pass),
                     "declined": sorted(f"{k.file}::{k.fn_name}"
                                        for k in _declined_pass)})
+        elif _capped_m:
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                f"{_capped_n} of {_capped_m} fill replies reasoning-capped")
+        if _capped_m:
+            deps.emit("phase_c.batch.reasoning_capped", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "capped": _capped_n, "replies": _capped_m})
         # The landed record's lifetime is the pass's, exactly like the
         # cursor: a closed pass releases both (the audit above has already
         # reported this one), and the next pass accumulates fresh.

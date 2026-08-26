@@ -33,12 +33,14 @@ decisions; the builders render what it returns.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, ImplBlock
+from pipeline_core.domain.test_report import parse_panic_location
 
 
 class Attribution(Enum):
@@ -102,6 +104,42 @@ def container_header(container: str) -> str:
     return " ".join(lines)
 
 
+def quote_panic_site(
+    text: str, read_source: Callable[[str], str | None], *, context: int = 2,
+) -> str:
+    """`text` (a failing test's own words, as `failure_evidence_by_test`
+    keeps them) with the SOURCE LINE its panic names quoted beneath it.
+
+    The evidence block used to carry the panic MESSAGE only — `panicked at
+    tests/test_downcast.rs:17:56: called Result::unwrap() on an Err value:
+    oh no!` — while the line at 17:56,
+    `bail_literal().unwrap_err().downcast::<&str>().unwrap()`, is the
+    observable itself, sitting in a test file the loop already holds. Run
+    `263474-b0e608d3` batch 1 (2026-08-25): the constructor prompt carried
+    the constructors first, the `#[repr(transparent)]` line, and this
+    message; the model's trace read "test_downcast expects downcast for
+    &str, String, io::Error … Should work." and re-emitted the delegating
+    `construct_from_adhoc` verbatim. The message says a downcast failed; the
+    line says WHICH payload must survive the round trip. `read_source`
+    serves the crate's own trees (the reconstruction's `src/`, the oracle's
+    `tests/`) and nothing else; a path it cannot serve, or a line past the
+    file's end, leaves `text` unchanged."""
+    file, line, _col, _msg = parse_panic_location(text)
+    if not file or line is None:
+        return text
+    src = read_source(file)
+    if not src:
+        return text
+    lines = src.splitlines()
+    if not 1 <= line <= len(lines):
+        return text
+    lo, hi = max(1, line - context), min(len(lines), line + context)
+    quoted = [f"{'>' if n == line else ' '} {n:>4} | {lines[n - 1]}"
+              for n in range(lo, hi + 1)]
+    return (text + f"\nat {file}:{line} — the line that panicked "
+            "(the observable this test pins):\n" + "\n".join(quoted))
+
+
 def collect_refill_evidence(
     block: ImplBlock,
     blocks: Iterable[ImplBlock],
@@ -109,6 +147,7 @@ def collect_refill_evidence(
     *,
     max_tests: int = 6,
     escalated: frozenset[FnLocator] = frozenset(),
+    read_source: Callable[[str], str | None] | None = None,
 ) -> tuple[RefillEvidence, ...]:
     """What the frontier supports for each of `block.refill_members`.
 
@@ -116,7 +155,9 @@ def collect_refill_evidence(
     `collect_impl_refill_targets`, so a same-named member of another block in
     the same file that carries the same stamp is reported as a sibling
     candidate. With no frontier every member is INFERRED with no tests — the
-    honest reading of a re-fill nobody can name a test for."""
+    honest reading of a re-fill nobody can name a test for. With
+    `read_source`, each excerpt carries the source line its panic names
+    (`quote_panic_site`); without it the excerpt is the message alone."""
     out: list[RefillEvidence] = []
     for m in block.refill_members:
         key = FnLocator(block.file, m.fn_name)
@@ -138,6 +179,8 @@ def collect_refill_evidence(
         if frontier is not None:
             for t in tests:
                 text = frontier.evidence_for(t)
+                if text and read_source is not None:
+                    text = quote_panic_site(text, read_source)
                 if text:
                     excerpts.append((t, text))
         out.append(RefillEvidence(
@@ -180,9 +223,15 @@ def attributed_test_leaves(
     return tuple(seen)
 
 
-def render_refill_evidence(evidence: Iterable[RefillEvidence]) -> str:
+def render_refill_evidence(
+    evidence: Iterable[RefillEvidence], *, pins: str = "",
+) -> str:
     """The REFILL section's body: per member, the strength of the claim, the
-    attributed tests, and what they said. "" when there is nothing to say."""
+    attributed tests, and what they said. "" when there is nothing to say.
+
+    `pins` is the oracle extraction of `pinned_observables` — the same
+    instruction `_plan_line` carries for an ESCALATED write-list, so the
+    per-impl route (which never calls `_plan_line`) still sees it."""
     lines: list[str] = []
     for e in evidence:
         if e.direct:
@@ -220,4 +269,158 @@ def render_refill_evidence(evidence: Iterable[RefillEvidence]) -> str:
         for test, text in e.excerpts:
             lines.append(f"  {test} said:")
             lines.extend("    " + ln for ln in text.splitlines())
+    if pins:
+        lines.append(f"  the attributed tests pin: {pins}")
     return "\n".join(lines)
+
+
+_DOWNCAST_OR_IS_OPEN = re.compile(
+    r"\b(downcast(?:_ref|_mut)?|is)\s*::\s*<")
+_ASSERT_EQ_ALTDEBUG = re.compile(
+    r'assert_eq!\s*\(\s*([^,]+?)\s*,\s*format!\s*\(\s*("{:#\?}")',
+)
+_FORMAT_ALT = re.compile(r'format!\s*\(\s*("{:#\?}")')
+
+
+def _generic_inner(src: str, open_idx: int) -> str:
+    """Inner of a `<…>` at `open_idx`, scanned by bracket depth.
+
+    `[^>]+?` stops at the first `>`, so `is::<<str as ToOwned>::Owned>`
+    truncated to `is::<<str as ToOwned>` — a form that is not Rust and
+    is not what the test comment claimed the live glob returned."""
+    if open_idx >= len(src) or src[open_idx] != "<":
+        return ""
+    depth = 0
+    i = open_idx
+    while i < len(src):
+        c = src[i]
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            if i > 0 and src[i - 1] in "-=":
+                i += 1
+                continue
+            depth -= 1
+            if depth == 0:
+                return " ".join(src[open_idx + 1:i].split())
+        i += 1
+    return ""
+
+
+def _item_start_including_attrs(src: str, fn_idx: int) -> int:
+    """Start of the `#[test]` / attribute / comment lines immediately above
+    `fn`, or of the fn's own line. Does not walk into the previous item."""
+    line_start = src.rfind("\n", 0, fn_idx)
+    fn_line_start = 0 if line_start < 0 else line_start + 1
+    head = src[:fn_line_start]
+    if not head:
+        return fn_line_start
+    lines = head.splitlines(keepends=True)
+    take = 0
+    for line in reversed(lines):
+        stripped = line.strip()
+        if (stripped.startswith("#[") or stripped.startswith("//")
+                or stripped == ""):
+            take += 1
+            continue
+        break
+    if take == 0:
+        return fn_line_start
+    return len("".join(lines[: len(lines) - take]))
+
+
+def test_item_source(file_src: str, leaf: str) -> str:
+    """The `fn {leaf}` item from a test file, or "" if the name is absent.
+
+    The needle is `fn {leaf}` followed by `(` or `<` so `fn test_downcast`
+    does not take `fn test_downcast_ref` (`str.find("fn test_downcast")`
+    is a prefix: glob-earlier `test_context.rs` answered with
+    `test_downcast_ref`'s body — the 263257 leaf shape in
+    `attributed_test_blocks`). Includes the `#[test]` / attribute lines
+    immediately above the fn. Used so the write-list pin is taken from
+    the attributed TEST, not from sibling tests in the same file
+    (`test_drop`'s `downcast::<DetectDrop>` is not `test_downcast`'s
+    TypeId pin)."""
+    if not leaf or not file_src:
+        return ""
+    m = re.search(rf"\bfn\s+{re.escape(leaf)}\s*[<(]", file_src)
+    if not m:
+        return ""
+    idx = m.start()
+    start = _item_start_including_attrs(file_src, idx)
+    rest = file_src[m.end():]
+    nxt = rest.find("\nfn ")
+    end = len(file_src) if nxt < 0 else m.end() + nxt
+    return file_src[start:end]
+
+
+def pinned_observables(*sources: str) -> str:
+    """Oracle pins extracted from attributed test SOURCE.
+
+    Run `2932-cf516410` (2026-08-26) quoted `test_downcast.rs` and the panic
+    line `bail_literal().unwrap_err().downcast::<&str>()` in the constructor
+    prompt's evidence block; the thinking named the TypeId wrap at trace
+    line 45 and the reply still re-emitted `construct_from_std(MessageError(
+    …))`. The missing slot was the INSTRUCTION (`_plan_line`), not another
+    evidence channel. This quotes the test — `downcast::<T>`, `is::<T>`,
+    `assert_eq!(EXPECTED_…, format!("{:#?}", …))` — never a crate-internal
+    recipe (`divergences.md` forbids original internals on the write-list).
+
+    `downcast_ref`/`downcast_mut` collapse to `downcast::<T>`: the TypeId
+    the round-trip must preserve is the pin, not the method that reads it.
+    Generic arguments are scanned by bracket depth so nested forms
+    (`is::<<str as ToOwned>::Owned>`, `downcast::<Box<dyn StdError + Send
+    + Sync>>`) survive; a `[^>]+?` regex stops at the first `>`.
+    """
+    pins: list[str] = []
+    seen: set[str] = set()
+
+    def _add(pin: str) -> None:
+        pin = " ".join(pin.split())
+        if pin and pin not in seen:
+            seen.add(pin)
+            pins.append(pin)
+
+    for src in sources:
+        if not src:
+            continue
+        for m in _DOWNCAST_OR_IS_OPEN.finditer(src):
+            inner = _generic_inner(src, m.end() - 1)
+            if not inner:
+                continue
+            method = m.group(1)
+            if method.startswith("downcast"):
+                _add(f"downcast::<{inner}>")
+            else:
+                _add(f"{method}::<{inner}>")
+        for m in _ASSERT_EQ_ALTDEBUG.finditer(src):
+            lhs = m.group(1).strip()
+            _add(f'assert_eq!({lhs}, format!("{m.group(2)[1:-1]}", …))')
+        if _FORMAT_ALT.search(src) and not any(
+                'format!("{:#?}"' in p for p in pins):
+            _add('format!("{:#?}", …)')
+    return ", ".join(pins)
+
+
+def pinned_observables_from_tests(
+    leaves: Iterable[str], files: Iterable[str],
+) -> str:
+    """Pins of the attributed leaves.
+
+    Whole-file fallback only when NO leaf produced a slice. An unsliceable
+    leaf among successes is skipped (empty string) so a sibling's pins do
+    not leak — per-leaf whole-file fallback is the poison the slice exists
+    to prevent (`test_drop`'s `DetectDrop` into `test_downcast`'s prompt).
+    """
+    file_list = tuple(files)
+    items: list[str] = []
+    for leaf in leaves:
+        found = ""
+        for src in file_list:
+            found = test_item_source(src, leaf)
+            if found:
+                break
+        items.append(found or "")
+    if any(items):
+        return pinned_observables(*items)
+    return pinned_observables(*file_list)

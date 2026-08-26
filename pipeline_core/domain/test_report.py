@@ -74,7 +74,7 @@ class TestRunReport:
 _STUB_MARKERS = ("not yet implemented", "not implemented")
 
 
-def _parse_panic_location(body: str) -> tuple[str | None, int | None, int | None, str]:
+def parse_panic_location(body: str) -> tuple[str | None, int | None, int | None, str]:
     """First panic in a test's stdout section → (file, line, col, message).
 
     Handles both libtest forms:
@@ -231,7 +231,7 @@ def parse_test_output(text: str) -> TestRunReport:
             continue
         seen.add(name)
         body = text if no_sections else bodies.get(name, "")
-        pf, pl, pc, msg = _parse_panic_location(body)
+        pf, pl, pc, msg = parse_panic_location(body)
         failures.append(TestFailure(
             test_name=name, kind=_classify(msg, body),
             panic_file=pf, panic_line=pl, panic_col=pc, body=body))
@@ -329,7 +329,7 @@ def _iter_located_panics(
 ) -> Iterator[tuple[str, int, str] | None]:
     """Every ``panicked at`` occurrence in a raw capture → (file, line,
     message), or None for one whose location does not parse (unknown
-    evidence). Same two libtest forms as :func:`_parse_panic_location`, but
+    evidence). Same two libtest forms as :func:`parse_panic_location`, but
     ALL occurrences: a crash capture can hold several — the drop panic that
     aborted the process plus the panic it interrupted — and attribution must
     see every one before it may exonerate."""

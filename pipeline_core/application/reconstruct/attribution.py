@@ -33,9 +33,12 @@ from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite, Frontier
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_idents import (
     ascii_word_tokens,
+    impl_self_type,
+    impl_trait_name,
     is_compile_fail_test_source,
     test_fn_names,
 )
+from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.test_report import FailureKind as TestFailureKind
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
@@ -198,6 +201,164 @@ def behavior_frontier(
     return behavior_frontier_from_texts(deps, test_output, texts, project_dir)
 
 
+def _format_traits_used(test_src: str) -> frozenset[str]:
+    """Which std formatting traits a test's OWN source invokes, from its format
+    placeholders and stringify calls: `{:?}`/`{:#?}` need `Debug`, `{}`/`{:#}`/
+    `.to_string()` need `Display`. Used only to hand an owner to a test whose
+    single contact with the crate is a formatting-macro dispatch that no
+    identifier in it names."""
+    traits: set[str] = set()
+    if "{:?}" in test_src or "{:#?}" in test_src:
+        traits.add("Debug")
+    if ("{}" in test_src or "{:#}" in test_src
+            or ".to_string()" in test_src):
+        traits.add("Display")
+    return frozenset(traits)
+
+
+def _impl_trait_and_self(container: str) -> tuple[str, str] | None:
+    """``('Debug', 'Error')`` for a trait-impl header, read by the domain's own
+    parsers (`impl_trait_name`, `impl_self_type`) — the same ones the producer
+    ranking and the retrospectives store read, so an HRTB binder, a
+    `for dyn …` self type or a where-clause parses here exactly as it parses
+    there rather than through a second ``split(" for ")`` that agreed with
+    them only on the shapes the live extractor happens to emit. ``None`` for
+    an inherent impl or a non-impl."""
+    trait = impl_trait_name(container)
+    self_ty = impl_self_type(container)
+    if not trait or not self_ty:
+        return None
+    return trait, self_ty
+
+
+def _format_impl_calls(body_text: str) -> frozenset[tuple[str, str]]:
+    """Qualified formatting-method calls `Qualifier::(fmt|debug)` in a body, as
+    `(qualifier, method)` pairs. `unsafe { ErrorImpl::debug(r, f) }` yields
+    `('ErrorImpl', 'debug')`; `Self::debug(r, f)` yields `('Self', 'debug')`,
+    which the caller resolves to the dispatcher's own self-type. Std-trait
+    dispatch (`Display::fmt(x, f)`) yields `('Display', 'fmt')` and is dropped
+    downstream because the qualifier is matched against a fn record's
+    SELF-TYPE (`impl_self_type` of its container), never against any token of
+    the container: `Display`/`Debug` are std traits, the self-type of no crate
+    impl, so they match no record."""
+    out: set[tuple[str, str]] = set()
+    for method in ("fmt", "debug"):
+        needle = f"::{method}"
+        pos = body_text.find(needle)
+        while pos != -1:
+            j = pos - 1
+            while j >= 0 and body_text[j] in " \t":
+                j -= 1
+            end = j + 1
+            while j >= 0 and (body_text[j].isalnum() or body_text[j] == "_"):
+                j -= 1
+            qual = body_text[j + 1:end]
+            after = pos + len(needle)
+            # method must be a whole token (call/path), not a prefix
+            if qual and not (after < len(body_text)
+                             and (body_text[after].isalnum()
+                                  or body_text[after] == "_")):
+                out.add((qual, method))
+            pos = body_text.find(needle, pos + len(needle))
+    return frozenset(out)
+
+
+def _attribute_format_only_test(
+    tname: str, tsrc: str, file_text: str,
+    by_name: dict[str, list[dict[str, Any]]], frontier: Frontier,
+    log: Callable[[str], None],
+) -> None:
+    """Give a frontier owner to a failing test whose only crate contact is a
+    formatting macro (`format!("{:#?}", v)`), which names no crate fn — so
+    `identifiers_in(tsrc)` meets nothing, the test owns no unit, is never
+    dispatched, and no iteration can move it. Measured on `test_altdebug`,
+    every sweep of the 98-plateau (runs `4911-9ab8852e` / `95878-aaf5bf1d`,
+    `fail=7 frontier=6`): 0 of 68 393 fill prompts in the project's history
+    ever carried it as an attributed test.
+
+    The candidate is the crate's `fmt` method for the trait the test's
+    placeholder needs (`{:#?}` -> `Debug`) whose SELF-TYPE is named in the test
+    FILE — a `{:#?}`-on-`Error` test attributes toward `Debug for Error`
+    (`src/error.rs`) and never `Debug for MessageError`, which it never names.
+
+    But the matched `fmt` body is often NOT the defect — it is the dispatcher.
+    On the live tree `Debug for Error::fmt` is already correct: it branches on
+    `formatter.alternate()` and delegates the `{:#?}` case to
+    `unsafe { ErrorImpl::debug(r, formatter) }`; the wrong body is
+    `src/fmt.rs::debug` (both branches `write!("{}", err)` = Display). Escalating
+    the `fmt` accessor cannot reach `debug` — the futility escalation adds fns
+    that construct/return the accessor's container type `Error`, and
+    `ErrorImpl::debug` returns `fmt::Result` — and `FnLocator` erases the
+    container, so `src/error.rs::fmt` dispatch is coarser than `Debug for Error`
+    anyway. So follow ONE hop: if the matched `fmt` body calls a crate
+    formatting method (`Qualifier::fmt`/`::debug` where the qualifier is a real
+    fn record's container token), attribute THAT implementer — the body the
+    verdict actually pins. Only when the matched `fmt` calls no sibling
+    formatter (it IS the implementer) is the `fmt` itself attributed. Called
+    ONLY for a test the primary attribution left unowned, so it adds an owner
+    and never changes one."""
+    traits = _format_traits_used(tsrc)
+    fmt_recs = by_name.get("fmt")
+    if not traits or not fmt_recs:
+        return
+    # Scope self-type matching to identifiers in the file's CODE, not its
+    # string/char literals: a `{:#?}` test's EXPECTED-output constant quotes
+    # `Error { ... }`, `Custom { ... }` and other type names, and matching
+    # those would attribute the test to every Debug impl whose type is merely
+    # printed in an expected string (4 spurious `fmt` dispatchers on the live
+    # `test_fmt.rs`). `code_mask` masks string/char/comment spans, so the only
+    # survivors are types the test's real code names (`io::Error` etc.).
+    _mask = code_mask(file_text)
+    _code_only = "".join(
+        ch if not m else " " for ch, m in zip(file_text, _mask, strict=False))
+    file_idents = identifiers_in(_code_only)
+    added: set[FnLocator] = set()
+
+    def _add(key: FnLocator) -> None:
+        if tname not in frontier.get(key, set()):
+            added.add(key)
+        frontier.setdefault(key, set()).add(tname)
+
+    for rec in fmt_recs:
+        parsed = _impl_trait_and_self(str(rec.get("container", "")))
+        if parsed is None:
+            continue
+        trait, self_ty = parsed
+        if not (trait in traits and self_ty in file_idents):
+            continue
+        # Follow the dispatcher's call to its real formatting implementer.
+        implementers: set[FnLocator] = set()
+        for qual, method in _format_impl_calls(str(rec.get("body_text", "") or "")):
+            if qual == "Self":
+                # `Self::debug(r, f)` inside `impl Debug for Error` names the
+                # dispatcher's own self-type: resolve it before matching.
+                qual = self_ty
+            for irec in by_name.get(method, []):
+                icont = str(irec.get("container", ""))
+                # Match the call's QUALIFIER against the record's SELF-TYPE, not
+                # any container token: `ErrorImpl::debug` -> the `debug` on
+                # `impl ErrorImpl`; a trait-dispatch `Display::fmt` names the
+                # trait, which is no fn's self-type, so it is correctly ignored
+                # (else it would match every `impl Display for X`).
+                if (icont != str(rec.get("container", ""))
+                        and qual == (impl_self_type(icont) or "")):
+                    implementers.add(FnLocator(irec["file"], method))
+        if implementers:
+            for k in implementers:
+                _add(k)
+        else:
+            # The matched fmt is self-contained — it IS the implementer.
+            _add(FnLocator(rec["file"], "fmt"))
+    if added:
+        log(f"  [attribution/behavior] {tname}: no crate fn named in its "
+            "source (formatting-macro test) — attributed to "
+            + ", ".join(f"{k.file}::{k.fn_name}"
+                        for k in sorted(added, key=lambda k: (k.file, k.fn_name)))
+            + f" via {'/'.join(sorted(traits))} on a self-type the test file "
+            "names, following the dispatcher to its formatting implementer; "
+            "without this the test owns no unit and no sweep can move it.")
+
+
 def behavior_frontier_from_texts(
     deps: AttributionDeps,
     test_output: str, texts: dict[str, str], fns_root: Path,
@@ -244,6 +405,7 @@ def behavior_frontier_from_texts(
         tsrc = f"{sig_text} {{{texts[trel][_bs:_be]}}}"
         idents = identifiers_in(tsrc)
         test_srcs[tname] = (trel, tsrc)
+        _owned = False
         for fn_name in idents & set(by_name):
             recs = by_name[fn_name]
             for rec in recs:
@@ -251,6 +413,13 @@ def behavior_frontier_from_texts(
                         identifiers_in(rec.get("container", "")) & idents):
                     continue
                 frontier.setdefault(FnLocator(rec["file"], fn_name), set()).add(tname)
+                _owned = True
+        if not _owned:
+            # A formatting-macro test names no crate fn and so owns no unit;
+            # attribute it through the format trait it uses (additive only —
+            # runs solely because the primary attribution left it unowned).
+            _attribute_format_only_test(
+                tname, tsrc, texts[trel], by_name, frontier, deps.log)
     return frontier, test_srcs
 
 def extract_tdd_compile_frontier(deps: AttributionDeps,

@@ -1090,6 +1090,68 @@ def _construct_hint(rec: TypeRecord) -> str | None:
     return None
 
 
+def _type_layout_attrs(definition: str) -> list[str]:
+    """The layout-deciding outer attributes on a type — `#[repr(...)]` and
+    `#[derive(...)]` — pulled from the record's rendered `definition`.
+
+    A `repr` is part of a type's contract exactly as its fields are: it decides
+    which casts are legal, and the pipeline already treats it as load-bearing
+    elsewhere (`carry_frozen_repr`, the layout pins). The compact type line the
+    prompt renders from `name`/`fields` drops it, so a producer rewrite that has
+    to reason about a transparent wrapper — `object_downcast::<M>` is sound only
+    because `MessageError<M>` is `#[repr(transparent)]` — never sees the fact
+    that makes its own cast legal (measured: `95878` iter 2, the constructor
+    REWRITE reached the delegation defect in its own reasoning and could not
+    name the transparent-cast escape; the type line read bare
+    `struct MessageError< M >`). `cfg` is deliberately excluded — it gates
+    presence, not the type's cast/trait contract, and is carried on other
+    channels. Scans only the LEADING attribute block (before the `struct`/
+    `enum`/`pub` keyword) so an attribute on an inner field is never hoisted.
+
+    The block is whatever precedes the item's first code line: `definition`
+    is `prettyplease::unparse` of the whole item (`render_item_definition`
+    in the extractor), which prints the doc comments FIRST, as `///` lines,
+    and only then the attributes — so a documented type reads
+    `/// Iterator of a chain…` / `#[derive(Clone)]` / `pub struct Chain`.
+    Comment lines (`///`, `//!`, `//`) and blank lines are skipped, not
+    treated as the end of the block, or every documented type would hide its
+    own repr behind its docs (live stable tree: `Chain`). An attribute the
+    printer wraps across lines (`#[derive(\\n    Clone,\\n    Debug\\n)]`) is
+    joined on its bracket depth before the head is read."""
+    out: list[str] = []
+    pending: list[str] = []
+    depth = 0
+    for raw in definition.splitlines():
+        line = raw.strip()
+        if pending:
+            pending.append(line)
+            depth += line.count("[") - line.count("]")
+            if depth <= 0:
+                _emit_layout_attr(" ".join(pending), out)
+                pending = []
+                depth = 0
+            continue
+        if not line or line.startswith(("///", "//!", "//")):
+            continue
+        if not line.startswith("#["):
+            break  # the item's first code line ends the outer-attribute block
+        depth = line.count("[") - line.count("]")
+        if depth > 0:
+            pending = [line]
+            continue
+        _emit_layout_attr(line, out)
+    return out
+
+
+def _emit_layout_attr(attr_line: str, out: list[str]) -> None:
+    """Append `#[repr(...)]` / `#[derive(...)]` from one complete attribute
+    line; any other attribute (`cfg`, `doc`, `must_use`, …) is dropped."""
+    inner = attr_line[2:].rsplit("]", 1)[0].strip()
+    head = inner.split("(", 1)[0].strip()
+    if head in ("repr", "derive"):
+        out.append(f"#[{' '.join(inner.split())}]")
+
+
 def format_type_for_prompt(rec: TypeRecord) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
@@ -1100,6 +1162,9 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
     exactly what each takes/returns. Without this it kept calling e.g.
     `Ref::new(NonNull<T>)` when `Ref::new` actually takes `&T` — visible
     method NAME but invisible argument types.
+
+    The layout-deciding outer attributes (`repr`, `derive`) are rendered above
+    the type line — see `_type_layout_attrs`.
     """
     kind = rec.kind or "?"
     name = rec.name or "?"
@@ -1107,7 +1172,7 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
     fields = rec.fields
     variants = rec.variants
     methods = rec.methods
-    lines = [f"{kind} {name}{generics}"]
+    lines = [*_type_layout_attrs(rec.definition or ""), f"{kind} {name}{generics}"]
     if fields:
         lines.append("  fields (access with .name):")
         for f in fields:

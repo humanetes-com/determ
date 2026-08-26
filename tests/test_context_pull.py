@@ -104,6 +104,57 @@ def test_workspace_reader_contains_paths(tmp_path: Path) -> None:
     assert read("src/missing.rs") is None
 
 
+def _dual_root_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    """A task2a-shaped workspace: a cluster tree whose `src/` holds the fills
+    and whose `tests` is a symlink into the project's real `tests/`, and a
+    project dir whose own `src/` is only the post-strip shell."""
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests/common.rs").write_text("pub fn bail_literal() {}")
+    (project / "src").mkdir()
+    (project / "src/error.rs").write_text("// one-line shell")   # stripped
+    cluster = project / ".skeleton-filled" / "stable"
+    (cluster / "src").mkdir(parents=True)
+    (cluster / "src/error.rs").write_text("pub fn construct() { /* filled */ }")
+    (cluster / "tests").symlink_to(project / "tests")            # as the pipeline builds it
+    return cluster, project
+
+
+def test_single_root_reader_cannot_reach_the_oracle_tests(tmp_path: Path) -> None:
+    # NEGATIVE CONTROL for reconstruction_file_reader: a reader locked to the
+    # cluster tree alone refuses `tests/common.rs`, because the cluster's
+    # `tests` symlink resolves outside the cluster root before containment.
+    # This is the `4911-9ab8852e` `no such file in this crate` refusal.
+    cluster, _project = _dual_root_workspace(tmp_path)
+    cluster_only = workspace_file_reader(cluster)
+    assert cluster_only("tests/common.rs") is None                # the bug
+    assert "filled" in (cluster_only("src/error.rs") or "")       # src ok already
+
+
+def test_reconstruction_reader_serves_cluster_src_and_project_tests(
+    tmp_path: Path,
+) -> None:
+    from pipeline_core.application.reconstruct.pull_resolver import (
+        reconstruction_file_reader,
+    )
+    cluster, project = _dual_root_workspace(tmp_path)
+    read = reconstruction_file_reader(cluster, project)
+    # tests/ now served (from the project root) — the fix.
+    assert read("tests/common.rs") == "pub fn bail_literal() {}"
+    # src/ still served from the CLUSTER tree, never the project shell.
+    assert "filled" in (read("src/error.rs") or "")
+    assert "shell" not in (read("src/error.rs") or "")
+    # containment still holds on both roots; still `.rs`-only.
+    assert read("../secret.rs") is None
+    assert read("tests/common.txt") is None
+    # Fall-through is on ABSENCE only: an EMPTY cluster file is the
+    # reconstruction's answer for that path and must not be replaced by the
+    # project root's version of it.
+    (cluster / "src/empty.rs").write_text("")
+    (project / "src/empty.rs").write_text("// project-side text")
+    assert read("src/empty.rs") == ""
+
+
 def test_resolve_file_and_unavailable(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src/a.rs").write_text("x")

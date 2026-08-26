@@ -281,3 +281,101 @@ def test_a_pre_fix_floor_that_stamped_futile_files_still_parses() -> None:
     assert not hasattr(parsed, "futile_files")
     # And a round trip no longer writes the key at all.
     assert "futile_files" not in parsed.to_dict()
+
+
+# --- the service record rides the floor ------------------------------------
+
+def _floor_with(**kw):
+    from pipeline_core.domain.tdd_floor import TddFloor
+    base = {"cluster": "stable", "best_pass": 98, "stall": 0,
+            "tree_sha": "t" * 16, "oracle_size": 105, "code_id": "c" * 12}
+    base.update(kw)
+    return TddFloor(**base)
+
+
+def test_served_round_trips_and_an_old_floor_reads_empty() -> None:
+    from pipeline_core.domain.tdd_floor import TddFloor
+    f = _floor_with(served=("src/error.rs::downcast", "src/error.rs::msg"))
+    d = f.to_dict()
+    assert d["served"] == ["src/error.rs::downcast", "src/error.rs::msg"]
+    assert TddFloor.from_dict(d) == f
+    # A floor written before the field: parses as missing, not as empty.
+    del d["served"]
+    assert TddFloor.from_dict(d) is not None
+    assert TddFloor.from_dict(d).served is None
+
+
+def test_resume_carries_served_on_cluster_identity_and_none_for_an_old_floor() -> None:
+    """The record `263474-b0e608d3` left: `futile_units` names
+    `test_altdebug: [src/fmt.rs::debug]` from a fire on a unit it never
+    dispatched. The resume hands the loop the service record SEPARATELY so
+    the first-sweep fire is checked against dispatches, not against the
+    evidence's own claim — and an old floor hands it None, so the loop
+    falls back to the open cursor rather than trusting the claim."""
+    from pipeline_core.domain.tdd_floor import resume_floor
+    saved = _floor_with(
+        served=("src/error.rs::downcast",),
+        futile_units=(("test_altdebug", ("src/fmt.rs::debug",)),
+                      ("test_downcast", ("src/error.rs::downcast",))))
+    same = resume_floor(saved, cluster="stable", tree_sha="t" * 16,
+                        oracle_size=105, code_id="c" * 12)
+    assert same.served == ("src/error.rs::downcast",)
+    moved = resume_floor(saved, cluster="stable", tree_sha="t" * 16,
+                         oracle_size=105, code_id="d" * 12)
+    assert moved.served == ("src/error.rs::downcast",)   # a dispatch is a dispatch
+    assert moved.futility is not None
+    other = resume_floor(saved, cluster="nightly", tree_sha="t" * 16,
+                         oracle_size=105, code_id="c" * 12)
+    assert other.served is None and other.futility is None
+    old = resume_floor(_floor_with(), cluster="stable", tree_sha="t" * 16,
+                       oracle_size=105, code_id="c" * 12)
+    assert old.served is None
+
+
+def test_empty_served_is_not_a_missing_field() -> None:
+    """A kill mid-fill persists `served: []` — the field is present and empty,
+    not absent. Collapsing that into the cursor fallback would count the
+    attempted units as served and re-open the `308884` → `2932` fire."""
+    from pipeline_core.domain.tdd_floor import TddFloor, resume_floor
+    f = _floor_with(served=(), attempted=("src/a.rs::fmt",))
+    d = f.to_dict()
+    assert d["served"] == []
+    parsed = TddFloor.from_dict(d)
+    assert parsed is not None and parsed.served == ()
+    r = resume_floor(parsed, cluster="stable", tree_sha="t" * 16,
+                     oracle_size=105, code_id="c" * 12)
+    assert r.served == ()
+    assert r.attempted == ("src/a.rs::fmt",)
+
+
+_PRODUCT = (
+    ("t2",
+     ("src/a.rs::fmt",),
+     (("src/b.rs::producer", ("t2",)),),
+     ("src/b.rs::producer",)),
+)
+
+
+def test_escalation_products_round_trip_and_an_old_floor_reads_empty() -> None:
+    from pipeline_core.domain.tdd_floor import TddFloor
+    f = _floor_with(escalation_products=_PRODUCT)
+    d = f.to_dict()
+    assert TddFloor.from_dict(d) == f
+    del d["escalation_products"]
+    assert TddFloor.from_dict(d) is not None
+    assert TddFloor.from_dict(d).escalation_products == ()
+
+
+def test_resume_carries_products_on_cluster_identity() -> None:
+    from pipeline_core.domain.tdd_floor import resume_floor
+    saved = _floor_with(escalation_products=_PRODUCT,
+                        served=("src/a.rs::fmt",))
+    same = resume_floor(saved, cluster="stable", tree_sha="t" * 16,
+                        oracle_size=105, code_id="c" * 12)
+    assert same.products == _PRODUCT
+    moved = resume_floor(saved, cluster="stable", tree_sha="t" * 16,
+                         oracle_size=105, code_id="d" * 12)
+    assert moved.products == _PRODUCT
+    other = resume_floor(saved, cluster="nightly", tree_sha="t" * 16,
+                         oracle_size=105, code_id="c" * 12)
+    assert other.products is None

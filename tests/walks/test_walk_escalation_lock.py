@@ -69,22 +69,27 @@ def test_the_recorded_lock_and_the_evidence_the_stop_leaves_behind(
         "the escalated unit was computed and never dispatched — the lock")
     assert (floor.get("row") or {}).get("futile_units"), (
         "the stop must leave the evidence on disk")
+    assert (floor.get("row") or {}).get("escalation_products"), (
+        "after-fire persist must leave the product — GPU_GUARD_STOP fires "
+        "before the dispatch save")
 
 
 def test_a_relaunch_dispatches_the_escalated_slice_in_its_one_batch(
         monkeypatch, tmp_path: Path) -> None:
     """THE FIX, on the recorded readings: the resumed process seeds the
-    evidence, escalates at its FIRST sweep, and the one batch the guard's
-    design grants it carries the escalated unit — the guard's own relaunch
-    arithmetic ("a slice the previous process never reached") becomes true
-    for escalation targets."""
+    product (and the trigger), and the one batch the guard's design grants
+    it carries the escalated unit — the guard's own relaunch arithmetic
+    ("a slice the previous process never reached") becomes true for
+    escalation targets. Re-calling `escalate_to_producers` is not required:
+    a persisted product is re-merged by sustain."""
     floor: dict = {}
     _process(monkeypatch, tmp_path, floor)
     logs, batches, escalations = _process(monkeypatch, tmp_path, floor)
-    assert escalations, "the resumed process escalated"
     assert batches and _PROD in batches[0], (
         f"the resumed process's first batch must carry the escalated unit, "
         f"got {batches[0]}")
+    assert (escalations or any("re-merged" in ln for ln in logs)), (
+        "resume either re-fires or re-merges the persisted product")
 
 
 def test_the_product_survives_to_the_sweep_the_guard_stops(
@@ -135,13 +140,14 @@ def test_negative_control_blinding_the_sustain_restores_the_shrink(
 def test_negative_control_the_pre_fix_floor_reproduces_the_lock(
         monkeypatch, tmp_path: Path) -> None:
     """The same relaunch over a floor a pre-fix build wrote (no
-    `futile_units`) re-runs the recorded shape: escalation waits for its own
-    second sweep, the guard stops it before dispatch, the escalated unit
-    reaches no batch."""
+    `futile_units`, no `escalation_products`) re-runs the recorded shape:
+    escalation waits for its own second sweep, the guard stops it before
+    dispatch, the escalated unit reaches no batch."""
     floor: dict = {}
     _process(monkeypatch, tmp_path, floor)
     row = dict(floor["row"])
     row.pop("futile_units", None)
+    row.pop("escalation_products", None)
     floor["row"] = row
     logs, batches, _ = _process(monkeypatch, tmp_path, floor)
     assert any("GPU_GUARD_STOP" in ln for ln in logs)

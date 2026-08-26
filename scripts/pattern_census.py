@@ -44,6 +44,11 @@ REACTED.  The classes and their defining instances:
      pass landing after the last sweep is never scored at all, so the
      regression it caused ships to the next run as that run's baseline.
 
+  P15 parked accessor — a failing test's owner waits under the dispatch cap,
+     its unit-set unchanged for want of a dispatch, not served; the escalation
+     used to fire on that identity (run 263474-b0e608d3 iter 2, test_altdebug
+     past its never-tried src/fmt.rs::debug) and now defers, printing the line
+     the detector counts.
   P14 compliance over compiler — the same unit fails consecutive attempts
      with an IDENTICAL primary diagnostic: the retry prompt carried the
      diagnostic and the reply made the same call anyway, the tell that a
@@ -1074,11 +1079,49 @@ def detect_p14(run: Run, iters: list[dict]) -> list[dict]:
     return hits
 
 
+RE_ESC_DEFERRED = re.compile(
+    r"\[attribution/escalate\] (?P<test>\S+): NOT escalating — unit-set "
+    r"unchanged but (?P<n>\d+) attributed unit\(s\) never dispatched since "
+    r"it was observed \(parked under the dispatch cap, not served\): "
+    r"(?P<units>.+)$")
+
+
+def detect_p15(run: Run, iters: list[dict]) -> list[dict]:
+    """Parked accessor: a failing test whose attributed unit-set is unchanged
+    across sweeps because its units are WAITING under the dispatch cap, not
+    because rewrites served them.  Before 2026-08-25 the escalation fired on
+    set identity alone and declared such a unit futile without a dispatch —
+    run 263474-b0e608d3 iter 2, `test_altdebug` escalated past its never-tried
+    owner `src/fmt.rs::debug` to the producers of `ErrorImpl`; the accessor
+    then met its own batch under a "measured futile" grade.  The loop now
+    DEFERS the fire and prints the line matched here, so a hit is the class
+    observed and answered: the row counts, per test, how many sweeps its owner
+    waited and names the units.  Pre-fix instances leave no log signature (the
+    fire line names producers, not the futile units) — they are recoverable
+    only from `events.jsonl`: an `escalated` event whose `futile_units` appear
+    in no earlier dispatch of the same run."""
+    hits: dict[str, dict] = {}
+    for ref, m in run.find(RE_ESC_DEFERRED):
+        h = hits.setdefault(m["test"], {
+            "evidence": "", "key": [m["test"]], "refs": [], "sweeps": 0,
+            "units": m["units"].strip()})
+        h["sweeps"] += 1
+        if len(h["refs"]) < 4:
+            h["refs"].append(ref)
+    out = []
+    for test, h in hits.items():
+        h["evidence"] = (f"{test}: escalation deferred {h['sweeps']} sweep(s) "
+                         f"— owner(s) parked under the dispatch cap, never "
+                         f"served: {h['units']}")
+        out.append({k: h[k] for k in ("evidence", "key", "refs")})
+    return out
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
-             "P14": detect_p14}
+             "P14": detect_p14, "P15": detect_p15}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1088,7 +1131,8 @@ CLASS_NAMES = {
     "P10": "undispatchable frontier unit",
     "P11": "discarded answer (reader)",
     "P12": "silent complement (escalation without installable offer)",
-    "P14": "compliance over compiler (identical diagnostic across attempts)"}
+    "P14": "compliance over compiler (identical diagnostic across attempts)",
+    "P15": "parked accessor (escalation deferred: unit-set unchanged, never dispatched)"}
 
 
 # -------------------------------------------------------------------- report

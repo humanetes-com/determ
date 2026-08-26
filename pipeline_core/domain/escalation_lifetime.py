@@ -15,26 +15,29 @@ touched the escalated slice. Only the flat-score guard's stop scheduling
 pre-empted it.
 
 The rule this module holds: **the product lives exactly as long as the
-evidence.** While a fired test still fails and its attribution still equals
-the set that earned the fire, the additions stay merged (and therefore stay
-in the pass denominator). The moment the evidence changes — the attributed
-set moved, an accessor is a stub again (never served by any rewrite, so
-"futile" no longer describes it), or the test stopped failing — the product
-dies with it, and the test re-earns a fire from the new set under the
-ordinary two-sweep rule.
+evidence.** Evidence is "this failing test still fails" (and no attributed
+accessor is a stub again). The product is keyed by TEST, not by the
+accessor set that earned the fire: an attribution shift that still names
+the same failing test is not new evidence — it is the re-buy that
+persisting the product exists to close (run `4911`/`2932`, 2026-08-25/26:
+the trigger seed keyed on exact accessor-set equality and iter 1
+re-dispatched the new accessors). A stubbed accessor or a passing test
+still kills the product, and the test re-earns a fire from the live set
+under the ordinary two-sweep rule.
 
 A sustain is NOT new evidence: no guidance suspension, no exhaustion
 re-admission, no per-test logging. Those belong to the fire alone.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
 from pipeline_core.domain.models import FnLocator
 
 #: Why a fired product was dropped this sweep.
-DropReason = Literal["evidence_changed", "stub_accessor", "not_failing"]
+DropReason = Literal["stub_accessor", "not_failing"]
 
 #: A fired escalation as the loop remembers it: the futile unit-set that
 #: EARNED the fire, and the additions the fire computed. The additions are
@@ -70,15 +73,12 @@ def sustain_escalation_products(
     merges: dict[FnLocator, set[str]] = {}
     sustained: list[str] = []
     dropped: list[tuple[str, DropReason]] = []
-    for tname, (earned, cached) in products.items():
+    for tname, (_earned, cached) in products.items():
         units = units_by_test.get(tname)
         if units is None:
             dropped.append((tname, "not_failing"))
             continue
-        if frozenset(units) != earned:
-            dropped.append((tname, "evidence_changed"))
-            continue
-        if any(u in stub_keys for u in units):
+        if any(u in stub_keys for u in (units or ())):
             dropped.append((tname, "stub_accessor"))
             continue
         for key, tests in cached.items():
@@ -86,3 +86,70 @@ def sustain_escalation_products(
         sustained.append(tname)
     return SustainResult(merges=merges, sustained=tuple(sorted(sustained)),
                          dropped=tuple(sorted(dropped)))
+
+
+def product_addition_keys(
+    products: Mapping[str, FiredProduct],
+) -> frozenset[FnLocator]:
+    """Units the fired products cache as frontier additions.
+
+    This is the set `promote_product_ahead` ranks, not `escalation_producers`.
+    The producers dict is a prompt-grade split (constructors vs traversal
+    steps) filled through `producers_out`; the harness stubs that return the
+    extras dict without writing that side channel would otherwise leave
+    ranking empty, and persist would save an empty producer tuple. The
+    cached additions are what sustain actually merges, and they survive
+    resume even when the side channel was empty (the cap=1 attribution
+    shift: new accessor at slot 0, producer parked).
+    """
+    return frozenset(
+        k for _earned, cached in products.values() for k in cached)
+
+
+@dataclass(frozen=True, slots=True)
+class FireDecision:
+    """Whether a not-yet-fired test earns its escalation this sweep."""
+
+    due: bool
+    #: Attributed units the evidence does NOT cover: never dispatched since
+    #: this unit-set was first observed. Non-empty only when the set is
+    #: unchanged (the old rule would have fired) and service is what is
+    #: missing — the case worth a log line.
+    unserved: tuple[FnLocator, ...]
+
+
+def escalation_fire_due(
+    units: frozenset[FnLocator],
+    prev: frozenset[FnLocator] | None,
+    served_at: Mapping[FnLocator, int],
+    since: int,
+) -> FireDecision:
+    """The fire rule, with the premise it always had made explicit.
+
+    "This failing test's attributed unit-set is unchanged across two judged
+    sweeps" was the whole trigger, and it MEANT "its accessors were served by
+    rewrites that changed nothing" — true by construction while every
+    frontier unit was dispatched every sweep. Under the dispatch cap
+    (`PHASE_C_TDD_MAX_DISPATCH`, 12 of a 28-unit frontier) identity no longer
+    implies service: a unit parked in batch 3 has an identical set at iters 1
+    and 2 because NOTHING happened to it. Run `263474-b0e608d3`, iter 2
+    (2026-08-25): `test_altdebug`'s owner `src/fmt.rs::debug` — attributed at
+    iter 1, never dispatched — was declared futile on identity alone and the
+    test escalated to `construct`/`erase`, the (correct) producers of
+    `ErrorImpl`; the accessor then meets its batch carrying a "measured
+    futile" grade that steers the rewrite away from the body the verdict
+    pins. That is the mis-target class, manufactured by the gate.
+
+    So the rule is: unchanged set AND every unit in it dispatched at or after
+    the sweep the set was first observed (`served_at[u] >= since`). With the
+    cap off every unit is served every sweep and this is byte-for-byte the
+    old rule; a persisted futility seed (the floor's `futile_units`, resumed
+    across a code move) counts as served at 0, since that evidence IS the
+    record of service — the resumed process still escalates at its first
+    sweep."""
+    if prev is None or prev != units:
+        return FireDecision(due=False, unserved=())
+    unserved = tuple(sorted(
+        (u for u in units if served_at.get(u, -1) < since),
+        key=lambda u: (u.file, u.fn_name)))
+    return FireDecision(due=not unserved, unserved=unserved)

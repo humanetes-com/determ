@@ -80,6 +80,48 @@ def workspace_file_reader(root: Path) -> Callable[[str], str | None]:
     return _read
 
 
+def reconstruction_file_reader(
+    cluster_root: Path, project_root: Path,
+) -> Callable[[str], str | None]:
+    """FILE-kind reader for the task2a fill routes, which see the crate across
+    TWO trees that a single-root reader cannot both serve.
+
+    During task2a the cluster's reconstruction lives under `cluster_root`
+    (`.skeleton-filled/<cluster>`, whose `src/` holds the bodies being filled),
+    while the oracle tests live under `project_root` (`tmp/<project>/tests`,
+    which the crate's own `tests/*.rs` call helpers from) — and
+    `project_root/src` is only the post-strip shell (a one-line `lib.rs` plus
+    the `*.gen_tests_*.rs`). A reader locked to `cluster_root` alone refuses a
+    `tests/common.rs` request, because the cluster tree's `tests` is a symlink
+    to `project_root/tests` and `_read` resolves symlinks before the
+    containment check, so the target lands outside `cluster_root` and is
+    dropped (measured: `4911-9ab8852e` iter 1, the `src/error.rs` file-first
+    reply asked `tests/common.rs` — where `bail_literal()`/`bail_fmt()` that
+    the quoted `tests/test_downcast.rs` calls are defined — and got
+    `no such file in this crate`). A reader locked to `project_root` alone
+    instead serves the shell for every `src/*.rs` request, blinding the route
+    to the reconstruction's own sibling bodies.
+
+    So try `cluster_root` first (the reconstruction's `src/`), then fall
+    through to `project_root` (the oracle's `tests/`). Containment holds on
+    EACH root, and no upstream body is reachable from either: `cluster_root`
+    is the reconstruction the loop authored, `project_root/src` is the stripped
+    shell, `project_root/tests` IS the oracle, and no `.rs` under
+    `.original_structure`/`.cluster_augmented` exists (only API `.md`/`.json`).
+    """
+    _cluster = workspace_file_reader(cluster_root)
+    _project = workspace_file_reader(project_root)
+
+    def _read(rel: str) -> str | None:
+        # Fall through on ABSENCE only (`None`), never on emptiness: an empty
+        # cluster file is the reconstruction's answer for that path, and the
+        # project root must not be consulted for it — its `src/` is the shell.
+        text = _cluster(rel)
+        return text if text is not None else _project(rel)
+
+    return _read
+
+
 def _cap(kind: PullKind, payload: str) -> tuple[str, bool]:
     cap = _CAPS[kind]
     if len(payload) > cap:

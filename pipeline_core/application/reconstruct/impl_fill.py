@@ -41,7 +41,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     ask_with_pulls,
-    workspace_file_reader,
+    reconstruction_file_reader,
 )
 from pipeline_core.application.reconstruct.test_locator import (
     attributed_test_blocks,
@@ -110,6 +110,7 @@ from pipeline_core.domain.refill_evidence import (
     container_header,
     escalated_refill_names,
     inferred_refill_names,
+    pinned_observables_from_tests,
     render_refill_evidence,
 )
 from pipeline_core.domain.refine import (
@@ -655,8 +656,12 @@ def fill_impl_blocks(
     _pulls_on = os.getenv("CONTEXT_PULLS", "1") != "0"
     _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
     _last_full_out: list[str] = [""]  # set by _splice_and_verify per check
+    # One reader for both crate trees (the reconstruction's `src/`, the
+    # oracle's `tests/`): the pull route and the evidence block's panic-site
+    # quote read the same files under the same containment.
+    _read_source = reconstruction_file_reader(target_src_dir, project_dir)
     _pull_sources = PullSources(
-        read_file=workspace_file_reader(target_src_dir),
+        read_file=_read_source,
         find_tests=lambda name: "\n\n".join(
             f"// {p}\n{t}" for p, t in _find_tests_referencing_fn(
                 tests_dir_files, name, max_blocks=4)),
@@ -848,7 +853,8 @@ def fill_impl_blocks(
         _file_refill_evs = {
             _impl_block_id(b.file, b.container):
                 collect_refill_evidence(b, fblocks, _frontier_tests,
-                                        escalated=escalated_keys)
+                                        escalated=escalated_keys,
+                                        read_source=_read_source)
             for b in fblocks}
         # …capped by distinct FILES, not by leaf names (`attributed_test_blocks`
         # carries the measurement).
@@ -860,9 +866,16 @@ def fill_impl_blocks(
                 tests_dir_files, leaf, max_blocks=1),
             file_cap=_ATTRIBUTED_TEST_FILE_CAP,
             into=test_blocks)
+        _pins = pinned_observables_from_tests(
+            attributed_test_leaves(
+                (e for evs in _file_refill_evs.values() for e in evs),
+                cap=_ATTRIBUTED_TEST_LEAF_CAP),
+            (t for _, t in test_blocks))
         _file_refill_evidence = "\n".join(
             f"in `{container_header(b.container) or 'free fns'}`:\n"
-            + render_refill_evidence(_file_refill_evs[_impl_block_id(b.file, b.container)])
+            + render_refill_evidence(
+                _file_refill_evs[_impl_block_id(b.file, b.container)],
+                pins=_pins)
             for b in fblocks
             if _file_refill_evs[_impl_block_id(b.file, b.container)])
         for fn_name in wanted[:6]:
@@ -927,7 +940,7 @@ def fill_impl_blocks(
             tuple(dict.fromkeys((*(i.fn_name for i in _installable),
                                  *(x.fn_name for x in _free_bypass)))),
             installable=tuple(i.fn_name for i in _installable),
-            bypass=_free_bypass)]
+            bypass=_free_bypass, pins=_pins)]
             if _installable or _free_bypass else [])
         # The evidence section's entry for them: the relation, stated per fn,
         # so the model can see WHICH table field each one answers to. The
@@ -1037,13 +1050,13 @@ def fill_impl_blocks(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             escalated=tuple(sorted(escalated_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
-            bypass=_bypass_for(b.container))
+            bypass=_bypass_for(b.container), pins=_pins)
             for b in fblocks]
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
         _extra_plans = [BlockFillPlan(
             _c, (), tuple(x.fn_name for x in _entries),
-            bypass=tuple(_entries))
+            bypass=tuple(_entries), pins=_pins)
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
         # The grade label naming what this prompt's write list actually
@@ -1806,8 +1819,8 @@ def fill_impl_blocks(
         # `ext_context`, while the frontier that stamped the re-fill named
         # `test_iter`/`test_len`/`test_rev` (run `902902-daee577d`).
         _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests,
-                                              escalated=escalated_keys)
-        _refill_evidence_text = render_refill_evidence(_refill_evs)
+                                              escalated=escalated_keys,
+                                              read_source=_read_source)
         _inferred_refill = inferred_refill_names(_refill_evs)
         # Capped by distinct FILES, as on the file route.
         test_blocks = attributed_test_blocks(
@@ -1816,6 +1829,10 @@ def fill_impl_blocks(
                 tests_dir_files, leaf, max_blocks=1),
             file_cap=_ATTRIBUTED_TEST_FILE_CAP,
             into=test_blocks)
+        _pins = pinned_observables_from_tests(
+            attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
+            (t for _, t in test_blocks))
+        _refill_evidence_text = render_refill_evidence(_refill_evs, pins=_pins)
         # Reuse the per-fn test finder by unioning tests touching any
         # stub/refill target.
         for fn_name in _fill_target_names[:4]:

@@ -104,3 +104,170 @@ def test_container_header_is_one_line_without_the_body() -> None:
         "impl<C, E> StdError for ContextError<C, E> where C: Display, E: StdError + 'static,")
     assert container_header("impl Error {") == "impl Error"
     assert container_header("") == ""
+
+
+# --- the panic-site quote: the observable, not just the message ------------
+
+_DOWNCAST_RS = (
+    "use common::*;\n"            # 1
+    "\n"                          # 2
+    "#[test]\n"                   # 3
+    "fn test_downcast() {\n"      # 4
+    "    assert_eq!(\n"           # 5
+    "        \"oh no!\",\n"       # 6
+    "        bail_literal().unwrap_err().downcast::<&str>().unwrap(),\n"  # 7
+    "    );\n"                    # 8
+    "}\n"                         # 9
+)
+_MSG = ("thread 'test_downcast' (263947) panicked at tests/test_downcast.rs:7:56:\n"
+        "called `Result::unwrap()` on an `Err` value: oh no!")
+
+
+def test_panic_site_line_is_quoted_beneath_the_message() -> None:
+    """Run `263474-b0e608d3` batch 1: the message alone let the model write
+    'test_downcast … Should work.' — the line names the `&str` payload that
+    has to survive the downcast."""
+    from pipeline_core.domain.refill_evidence import quote_panic_site
+    reader = lambda rel: _DOWNCAST_RS if rel == "tests/test_downcast.rs" else None  # noqa: E731
+    out = quote_panic_site(_MSG, reader)
+    assert out.startswith(_MSG)
+    assert "at tests/test_downcast.rs:7 — the line that panicked" in out
+    assert ">    7 |         bail_literal().unwrap_err().downcast::<&str>().unwrap()," in out
+    # ±2 lines of context, no more.
+    assert "     5 |     assert_eq!(" in out and "     9 | }" in out
+    assert "use common::*;" not in out
+    # NEGATIVE CONTROLS: unchanged when the path cannot be served, when the
+    # line is past the file's end, or when there is no panic location at all.
+    assert quote_panic_site(_MSG, lambda rel: None) == _MSG
+    short = _MSG.replace(":7:56:", ":70:56:")
+    assert quote_panic_site(short, reader) == short
+    assert quote_panic_site("assertion failed", reader) == "assertion failed"
+
+
+def test_evidence_block_carries_the_quoted_site_when_a_reader_is_given() -> None:
+    generic = _block(GENERIC, "Some(&self.error)")
+    fr = _frontier(direct=False, evidence={"test_len": _MSG})
+    reader = lambda rel: _DOWNCAST_RS if rel == "tests/test_downcast.rs" else None  # noqa: E731
+    (ev,) = collect_refill_evidence(generic, [generic], fr, read_source=reader)
+    text = render_refill_evidence([ev])
+    assert "test_len said:" in text
+    assert "downcast::<&str>().unwrap()," in text
+    # Without a reader the block is the message alone — the pre-fix shape.
+    (ev0,) = collect_refill_evidence(generic, [generic], fr)
+    assert "downcast::<&str>" not in render_refill_evidence([ev0])
+
+
+# --- write-list pins: the instruction 2932 was missing ----------------------
+#
+# Computed on the live authored tests (tmp/anyhow/tests, 2026-08-26). The
+# pre-fix extractor (`str.find("fn test_downcast")` + `[^>]+?`) on this
+# same command returned HighLevel/MidLevel/LowLevel with no
+# `downcast::<&str>` (glob-earlier `test_context.rs` answered with
+# `test_downcast_ref`; nested `is::<<str as ToOwned>::Owned>` truncated).
+# This output is the post-fix run (needle `fn <leaf>` then `(` or `<`,
+# generic scanned by bracket depth):
+#   python -c 'from pathlib import Path; from pipeline_core.domain.refill_evidence import pinned_observables_from_tests;
+#     files = {p.name: p.read_text() for p in Path("tmp/anyhow/tests").glob("test_*.rs")};
+#     print(pinned_observables_from_tests(("test_downcast","test_altdebug","test_whitespace","test_trailer"), files.values()))'
+# → downcast::<&str>, downcast::<String>, downcast::<io::Error>, assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …)), assert_eq!(EXPECTED_ALTDEBUG_G, format!("{:#?}", …)), assert_eq!(EXPECTED_ALTDEBUG_H, format!("{:#?}", …)), is::<&str>, is::<<str as ToOwned>::Owned>
+# No standalone `format!("{:#?}", …)`: the extractor suppresses it when an
+# ALTDEBUG pin already carries that substring. Negative control: a
+# BlockFillPlan with empty `pins` carries none of these.
+
+_DOWNCAST_FN = """
+#[test]
+fn test_downcast() {
+    assert_eq!(
+        "oh no!",
+        bail_literal().unwrap_err().downcast::<&str>().unwrap(),
+    );
+    assert_eq!(
+        "oh no!",
+        bail_fmt().unwrap_err().downcast::<String>().unwrap(),
+    );
+    assert_eq!(
+        "oh no!",
+        bail_error()
+            .unwrap_err()
+            .downcast::<io::Error>()
+            .unwrap()
+            .to_string(),
+    );
+}
+"""
+_ALTDEBUG_FN = """
+#[test]
+fn test_altdebug() {
+    assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", f().unwrap_err()));
+    assert_eq!(EXPECTED_ALTDEBUG_G, format!("{:#?}", g().unwrap_err()));
+    assert_eq!(EXPECTED_ALTDEBUG_H, format!("{:#?}", h().unwrap_err()));
+}
+"""
+_ENSURE_FNS = """
+#[test]
+fn test_trailer() {
+    let err = anyhow!("");
+    let test = || Ok(ensure!(err.is::<&str>() == false));
+    assert_err(test, "Condition failed: `err.is::<&str>() == false`");
+}
+#[test]
+fn test_whitespace() {
+    let test = || Ok(ensure!("" == format!("{:#?}", point)));
+}
+"""
+
+
+def test_pinned_observables_extract_the_2932_defect_pins() -> None:
+    """The plan's fixture: 2932's attributed tests pin downcast::<&str>,
+    is::<&str>, and assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))."""
+    from pipeline_core.domain.refill_evidence import (
+        pinned_observables,
+        pinned_observables_from_tests,
+        test_item_source,
+    )
+    # Whole-file extraction of test_downcast would also pick test_drop's
+    # DetectDrop — slicing by leaf is the contract.
+    assert "DetectDrop" not in test_item_source(
+        _DOWNCAST_RS + "\nfn test_drop() { error.downcast::<DetectDrop>() }\n",
+        "test_downcast")
+    pins = pinned_observables_from_tests(
+        ("test_downcast", "test_altdebug", "test_whitespace", "test_trailer"),
+        (_DOWNCAST_FN, _ALTDEBUG_FN, _ENSURE_FNS))
+    assert "downcast::<&str>" in pins
+    assert "downcast::<String>" in pins
+    assert "downcast::<io::Error>" in pins
+    assert 'assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))' in pins
+    assert "is::<&str>" in pins
+    # Three ALTDEBUG pins each contain the format substring; a standalone
+    # whitespace pin is suppressed when those exist (the assertion
+    # `'format!("{:#?}", …)' in pins` used to pass on that substring).
+    assert pins.count('format!("{:#?}", …)') == 3
+    ws = test_item_source(_ENSURE_FNS, "test_whitespace")
+    assert pinned_observables(ws) == 'format!("{:#?}", …)'
+    assert "#[test]" in test_item_source(_DOWNCAST_FN, "test_downcast")
+    # Prefix: glob-earlier test_downcast_ref must not answer for test_downcast.
+    early = (
+        "fn test_downcast_ref() { error.downcast::<DetectDrop>(); }\n"
+        "fn test_downcast() { bail_literal().downcast::<&str>(); }\n"
+    )
+    assert "DetectDrop" not in pinned_observables_from_tests(
+        ("test_downcast",), (early,))
+    assert "downcast::<&str>" in pinned_observables_from_tests(
+        ("test_downcast",), (early,))
+    # Bracket depth: nested generics must survive the first `>`.
+    nested = (
+        "fn test_boxed_str() { err.is::<<str as ToOwned>::Owned>(); "
+        "err.downcast::<Box<dyn StdError + Send + Sync>>(); }\n"
+    )
+    nested_pins = pinned_observables(nested)
+    assert "is::<<str as ToOwned>::Owned>" in nested_pins
+    assert "downcast::<Box<dyn StdError + Send + Sync>>" in nested_pins
+    # NEGATIVE CONTROL: a body with no pin-shaped assert yields nothing.
+    assert pinned_observables("fn test_len() { assert_eq!(1, 4); }") == ""
+    # Evidence block carries the same pins.
+    ev = RefillEvidence("construct_from_adhoc", ("test_downcast",),
+                        Attribution.ESCALATED, (), ())
+    text = render_refill_evidence([ev], pins=pins)
+    assert "the attributed tests pin:" in text
+    assert "downcast::<&str>" in text
+    assert "the attributed tests pin:" not in render_refill_evidence([ev])

@@ -28,11 +28,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pipeline_core.application.reconstruct.phase_c_tdd import (
     PhaseCTddDeps,
     run_phase_c_tdd,
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
+from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, LedgerKey
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
 
 _ACC = FnLocator("src/a.rs", "fmt")        # the futile accessor (consumer)
@@ -49,7 +52,9 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
           batches: list[tuple[FnLocator, ...]], floor: dict,
           escalations: list[tuple[str, frozenset[FnLocator]]],
           suspensions: list[tuple[frozenset[FnLocator], frozenset[str]]]
-          | None = None) -> PhaseCTddDeps:
+          | None = None,
+          fill=None, attribute=None, run_id: str = "",
+          ledger_load=None) -> PhaseCTddDeps:
     """One process's deps. Pass the SAME `floor` dict to two calls to model
     two processes sharing the on-disk `.phase_c_logs` floor file."""
     def _cargo(*a: Any, **k: Any) -> tuple[int, str]:
@@ -57,11 +62,19 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
 
     def _fill(**kw: Any) -> ClusterFillResult:
         batches.append(tuple(kw.get("tdd_frontier_keys") or ()))
+        if fill is not None:
+            return fill(**kw)
         return ClusterFillResult(attempts=1)
 
     def _escalate(src_dir: Path, tname: str, units: set[FnLocator],
                   producers_out=None):
         escalations.append((tname, frozenset(units)))
+        # Live `escalate_to_producers` writes the producer subset here.
+        # Product-ahead ranking reads the cached additions instead, so a
+        # stub that skips this still lifts; filling it matches the live
+        # fire so persist's producer tuple is not empty on resume.
+        if producers_out is not None:
+            producers_out.add(_PROD)
         return {_PROD: {tname}}
 
     def _suspend(pd: Path, sd: Path, units, cl: str, tests) -> list[str]:
@@ -69,9 +82,14 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
             suspensions.append((frozenset(units), frozenset(tests)))
         return ["src/a.rs::fmt::impl Fmt"]
 
+    def _attr(*a: Any, **k: Any) -> AttributionResult:
+        if attribute is not None:
+            return attribute()
+        return AttributionResult(
+            {_ACC: {"t2"}}, FailureKind.RUNTIME, {_ACC: {"t2"}})
+
     return PhaseCTddDeps(
-        attribute_failures=lambda *a, **k: AttributionResult(
-            {_ACC: {"t2"}}, FailureKind.RUNTIME, {_ACC: {"t2"}}),
+        attribute_failures=_attr,
         build_test_reverse_map=lambda *a, **k: {},
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=lambda *a, **k: None,
@@ -92,11 +110,13 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
         suspend_futile_guidance=_suspend,
         load_tdd_floor=lambda *a, **k: floor.get("row"),
         save_tdd_floor=lambda p, c, row: floor.__setitem__("row", row),
+        ledger_load=ledger_load,
+        run_id=run_id,
     )
 
 
 def _run(deps: PhaseCTddDeps, tmp_path: Path, monkeypatch, *,
-         guard: str = "2") -> None:
+         guard: str = "2", dispatch_cap: str = "0") -> None:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     # High enough that the plateau budget never terminates these two-sweep
     # processes: the terminator under test is the flat-score guard, exactly as
@@ -106,7 +126,7 @@ def _run(deps: PhaseCTddDeps, tmp_path: Path, monkeypatch, *,
     # repeat rule and the escalation's two-sweep trigger.
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", guard)
     monkeypatch.setenv("TDD_REFILL_MAX_ATTEMPTS", "99")
-    monkeypatch.setenv("PHASE_C_TDD_MAX_DISPATCH", "0")
+    monkeypatch.setenv("PHASE_C_TDD_MAX_DISPATCH", dispatch_cap)
     run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
@@ -149,6 +169,9 @@ def test_the_stopped_process_computes_the_escalation_and_never_dispatches_it(
     row = floor.get("row") or {}
     assert row.get("futile_units") == {"t2": ["src/a.rs::fmt"]}, (
         "the stopped process's floor must carry the evidence the resume needs")
+    assert "t2" in (row.get("escalation_products") or {}), (
+        "after-fire persist must carry the product — GPU_GUARD_STOP fires "
+        "before the dispatch save")
 
 
 def test_a_resumed_process_escalates_at_its_first_sweep_and_dispatches_the_producer(
@@ -166,11 +189,11 @@ def test_a_resumed_process_escalates_at_its_first_sweep_and_dispatches_the_produ
     escalations: list[tuple[str, frozenset[FnLocator]]] = []
     _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
                escalations=escalations), tmp_path, monkeypatch)
-    assert escalations and escalations[0] == ("t2", frozenset({_ACC})), (
-        "escalation must fire from the persisted evidence")
-    # It fired BEFORE the first dispatch: iter 1's batch carries the addition.
     assert batches and _PROD in batches[0], (
         f"iter 1's batch must hold the escalated producer, got {batches[0]}")
+    assert (escalations or any("re-merged" in ln for ln in logs)), (
+        "resume either re-fires from the trigger seed or re-merges the "
+        "persisted product")
     assert any("futility evidence" in ln for ln in logs), (
         "the floor line must say the evidence was resumed")
 
@@ -186,6 +209,7 @@ def test_without_the_persisted_evidence_the_lock_reproduces(
     _stopped_process(tmp_path, monkeypatch, floor)
     row = dict(floor["row"])
     row.pop("futile_units", None)   # what an old build persisted
+    row.pop("escalation_products", None)
     floor["row"] = row
 
     logs: list[str] = []
@@ -201,9 +225,9 @@ def test_without_the_persisted_evidence_the_lock_reproduces(
 
 def test_a_fired_escalation_suspends_the_futile_units_stored_guidance(
         tmp_path, monkeypatch) -> None:
-    """187.2's driver seam: when the escalation fires, the futile accessors'
-    retro guidance is handed to the suspension hook — the record advises the
-    exact rewrite the escalation just measured as changing nothing."""
+    """When the escalation fires, the futile accessors' retro guidance is
+    handed to the suspension hook — the record advises the exact rewrite
+    the escalation just measured as changing nothing."""
     floor: dict = {}
     logs: list[str] = []
     events: list[tuple[str, dict]] = []
@@ -213,18 +237,24 @@ def test_a_fired_escalation_suspends_the_futile_units_stored_guidance(
     _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
                escalations=escalations, suspensions=suspensions),
          tmp_path, monkeypatch)
-    assert suspensions == [(frozenset({_ACC}), frozenset({"t2"}))]
+    # Accessors first, then the producer subset the live fire writes to
+    # `producers_out` (a stub that skipped that side channel used to hide
+    # the second call).
+    assert suspensions == [
+        (frozenset({_ACC}), frozenset({"t2"})),
+        (frozenset({_PROD}), frozenset({"t2"})),
+    ]
     assert any("suspended stored guidance" in ln for ln in logs)
 
 
 def test_futility_survives_a_code_move(tmp_path, monkeypatch) -> None:
-    """THE PLAN step 4 (202.5's bar, reachability only). The grade describes
-    the TREE, so a `code_id` move — the shape of every validation launch —
-    no longer voids the evidence: the resumed process escalates at its FIRST
-    sweep and iter 1's batch carries the producer instead of re-buying the
-    accessor traversal (the toll runs `21368-93f6a589` → `40938-f4e8e94b`
-    paid twice in one evening on the same git tree, and the three runs of
-    2026-08-25 paid it once each — 2h03m/2h18m/4h02m)."""
+    """The grade describes the TREE, so a `code_id` move — the shape of
+    every validation launch — no longer voids the evidence: the resumed
+    process escalates at its FIRST sweep and iter 1's batch carries the
+    producer instead of re-buying the accessor traversal (the toll runs
+    `21368-93f6a589` → `40938-f4e8e94b` paid twice in one evening on the
+    same git tree, and the three runs of 2026-08-25 paid it once each —
+    2h03m/2h18m/4h02m)."""
     floor: dict = {}
     _stopped_process(tmp_path, monkeypatch, floor)
     row = dict(floor["row"])
@@ -237,8 +267,6 @@ def test_futility_survives_a_code_move(tmp_path, monkeypatch) -> None:
     escalations: list[tuple[str, frozenset[FnLocator]]] = []
     _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
                escalations=escalations), tmp_path, monkeypatch)
-    assert escalations and escalations[0] == ("t2", frozenset({_ACC})), (
-        "escalation must fire from the resumed evidence across the code move")
     assert batches and _PROD in batches[0], (
         f"iter 1's batch must hold the escalated producer, got {batches[0]}")
     assert any("across the code move" in ln for ln in logs)
@@ -264,3 +292,164 @@ def test_a_resumed_process_re_saves_the_seed_it_did_not_re_measure(
     assert (floor["row"].get("futile_units") or {}).get("t2") == [
         "src/a.rs::fmt"], (
         "the resumed process must re-persist the evidence, not blank it")
+    assert "t2" in (floor["row"].get("escalation_products") or {}), (
+        "the product must re-persist too — a resume that blanked it would "
+        "re-buy accessors on the next attribution shift")
+
+
+_NEW_ACC = FnLocator("src/a.rs", "other_accessor")
+
+
+def test_a_kill_mid_fill_does_not_stamp_served(tmp_path, monkeypatch) -> None:
+    """Dispatch persist advances the cursor; fill-return stamps served.
+    A kill inside fill must leave the unit off the service record."""
+    floor: dict = {}
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+
+    def _die(**kw: Any) -> ClusterFillResult:
+        raise KeyboardInterrupt("killed mid-fill")
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
+                   escalations=[], fill=_die), tmp_path, monkeypatch)
+    row = floor.get("row") or {}
+    assert "served" in row, "the field must be present (empty), not missing"
+    assert not any("fmt" in k for k in (row.get("served") or [])), (
+        "a rewrite that never returned is not service")
+
+
+def test_unserved_futility_does_not_fire_on_resume(
+        tmp_path, monkeypatch) -> None:
+    """THE FIX. A floor that names the unit futile but not served — the
+    `308884` → `2932` shape once served was a dispatch stamp — must NOT
+    escalate at the resume's first sweep."""
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    row = dict(floor["row"])
+    row["served"] = []
+    floor["row"] = row
+
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    escalations: list[tuple[str, frozenset[FnLocator]]] = []
+    _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
+               escalations=escalations), tmp_path, monkeypatch)
+    assert any("NOT escalating" in ln for ln in logs)
+    assert all(_PROD not in b for b in batches), (
+        "an unserved fire must not inject producers")
+
+
+def test_dispatch_time_served_reproduces_the_iter1_fire(
+        tmp_path, monkeypatch) -> None:
+    """NEGATIVE CONTROL: stamp served at dispatch (the pre-fix rule). The
+    stopped process's fill DID return, so served already includes the
+    accessor — resume injects the producer. That is 2932's iter-1 fire
+    when the kill never happened and the stamp was honest, and it is
+    what a dispatch-time stamp of a killed fill would have looked like."""
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    logs: list[str] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    _run(_deps(logs=logs, events=[], batches=batches, floor=floor,
+               escalations=[]), tmp_path, monkeypatch)
+    assert batches and _PROD in batches[0]
+
+
+def test_a_persisted_product_survives_an_attribution_shift(
+        tmp_path, monkeypatch) -> None:
+    """The product is keyed by TEST. Under the live cap, iter 1 dispatches
+    the producer, not the new accessor (runs `4911`/`2932`). Cap=0 cannot
+    distinguish: both keys share one batch."""
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+
+    logs: list[str] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    _run(_deps(
+        logs=logs, events=[], batches=batches, floor=floor, escalations=[],
+        attribute=lambda: AttributionResult(
+            {_NEW_ACC: {"t2"}}, FailureKind.RUNTIME, {_NEW_ACC: {"t2"}}),
+    ), tmp_path, monkeypatch, dispatch_cap="1")
+    assert batches and batches[0] == (_PROD,), (
+        f"under cap=1 iter 1 must dispatch the producer, not the new "
+        f"accessor; got {batches[0]}")
+
+
+def test_without_the_persisted_product_an_attribution_shift_re_buys_accessors(
+        tmp_path, monkeypatch) -> None:
+    """NEGATIVE CONTROL — the trigger seed keyed on exact accessor-set
+    equality, so a shift spent iter 1 on the new accessors."""
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    row = dict(floor["row"])
+    row.pop("escalation_products", None)
+    floor["row"] = row
+
+    batches: list[tuple[FnLocator, ...]] = []
+    _run(_deps(
+        logs=[], events=[], batches=batches, floor=floor, escalations=[],
+        attribute=lambda: AttributionResult(
+            {_NEW_ACC: {"t2"}}, FailureKind.RUNTIME, {_NEW_ACC: {"t2"}}),
+    ), tmp_path, monkeypatch, dispatch_cap="1")
+    assert all(_PROD not in b for b in batches), (
+        "pre-product-persist shape: the shift re-buys the new accessors")
+    assert batches and batches[0] == (_NEW_ACC,)
+
+
+def test_rebuy_emits_at_dispatch_for_a_prior_process_empty_delta(
+        tmp_path, monkeypatch) -> None:
+    """Walk-shaped: `349271-d876e4a9`'s 7-of-7 accessor re-buy, here as one
+    unit a prior process already graded with an empty delta."""
+    prior = [LedgerEntry(
+        key=LedgerKey(project=tmp_path.name, cluster="stable",
+                      file=_ACC.file, fn_name=_ACC.fn_name),
+        body_sha="x", bodies=("x",), sig_sha="s", layout_fp="f",
+        run_id="349271-d876e4a9", verdict_delta=(),
+        state=BodyState.PROVEN)]
+    events: list[tuple[str, dict]] = []
+    _run(_deps(logs=[], events=events, batches=[], floor={},
+               escalations=[], ledger_load=lambda *a, **k: prior,
+               run_id="this-process"),
+         tmp_path, monkeypatch, guard="9")
+    buys = [d for ev, d in events if ev == "phase_c.re_buy"]
+    assert buys and f"{_ACC.file}::{_ACC.fn_name}" in buys[0]["units"]
+
+
+def test_rebuy_does_not_fire_on_the_same_process_or_after_a_code_move(
+        tmp_path, monkeypatch) -> None:
+    """NEGATIVE: first dispatch (no prior), same run_id, and a code-move
+    resume do not emit."""
+    events: list[tuple[str, dict]] = []
+    _run(_deps(logs=[], events=events, batches=[], floor={},
+               escalations=[], run_id="this-process"),
+         tmp_path, monkeypatch, guard="9")
+    assert not any(ev == "phase_c.re_buy" for ev, _ in events)
+
+    prior = [LedgerEntry(
+        key=LedgerKey(project=tmp_path.name, cluster="stable",
+                      file=_ACC.file, fn_name=_ACC.fn_name),
+        body_sha="x", bodies=("x",), sig_sha="s", layout_fp="f",
+        run_id="this-process", verdict_delta=(),
+        state=BodyState.PROVEN)]
+    events = []
+    _run(_deps(logs=[], events=events, batches=[], floor={},
+               escalations=[], ledger_load=lambda *a, **k: prior,
+               run_id="this-process"),
+         tmp_path, monkeypatch, guard="9")
+    assert not any(ev == "phase_c.re_buy" for ev, _ in events)
+
+    # Code-move: resume a floor from another identity; skip the detector.
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    row = dict(floor["row"])
+    row["code_id"] = "a-different-build"
+    floor["row"] = row
+    events = []
+    _run(_deps(logs=[], events=events, batches=[], floor=floor,
+               escalations=[], ledger_load=lambda *a, **k: prior,
+               run_id="new-process"),
+         tmp_path, monkeypatch)
+    assert not any(ev == "phase_c.re_buy" for ev, _ in events)

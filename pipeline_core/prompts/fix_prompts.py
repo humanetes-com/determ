@@ -159,6 +159,11 @@ class BlockFillPlan:
     # concrete self, the model complied over the compiler through three
     # identical `E0277`s).
     bypass: tuple[ProducerBypass, ...] = ()
+    # Oracle pins extracted from the attributed tests (`pinned_observables`).
+    # Empty on a prompt that has no attributed test source. Appended to the
+    # ESCALATED clause: run `2932-cf516410` had the pin in the quoted test
+    # and still wrapped, so the instruction line is the slot that was empty.
+    pins: str = ""
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -189,7 +194,10 @@ def _plan_line(p: BlockFillPlan) -> str:
         parts.append("REWRITE (the fns that consume what this one produces "
                      "were rewritten over repeated sweeps and no test changed "
                      "its verdict — the defect is not in them, it is in what "
-                     "this fn constructs or returns): " + ", ".join(escalated))
+                     "this fn constructs or returns"
+                     + (f" — the attributed tests pin: {p.pins}"
+                        if p.pins else "")
+                     + "): " + ", ".join(escalated))
     if installable:
         # Nothing was measured about these bodies themselves; what was
         # measured is that rewriting the producer that names them in its table

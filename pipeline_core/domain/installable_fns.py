@@ -37,8 +37,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.models import FnLocator, TypeRecord
-from pipeline_core.domain.rust_idents import canon_token_text, identifier_tokens
-from pipeline_core.domain.type_production import constructs_type
+from pipeline_core.domain.rust_idents import (
+    canon_token_text,
+    identifier_tokens,
+    impl_self_type,
+)
+from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +398,162 @@ def wrapper_producers(
         for w in sorted(_turbofish_types(body) & (nominal - tables)):
             out.append((w, n, f))
     return tuple(sorted(set(out)))
+
+
+def _is_tuple_struct(tr: TypeRecord) -> bool:
+    """The extractor names a tuple struct's fields ``0``, ``1``, … — so its
+    construction in a body is a CALL (`MessageError(message)`), never a brace
+    literal."""
+    return (tr.kind == "struct" and bool(tr.fields)
+            and all(f.name.isdigit() for f in tr.fields))
+
+
+def _skip_turbofish(body: str, p: int) -> int:
+    """Index just past a ``::<…>`` starting at `p` (angle-depth aware, so
+    ``::<ContextError<C, E>>`` is one unit), or `p` when none starts there."""
+    if not body.startswith("::<", p):
+        return p
+    depth = 0
+    for j in range(p + 2, len(body)):
+        if body[j] == "<":
+            depth += 1
+        elif body[j] == ">":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return p
+
+
+def calls_unit(
+    body: str, caller_self: str, name: str, *,
+    callee_self_types: frozenset[str], callee_is_free: bool,
+    callee_is_method: bool,
+) -> bool:
+    """True iff `body` CALLS a fn named `name`, resolved on how the call is
+    written rather than on the name occurring as a token:
+
+    - a path call ``Q::name(`` resolves when ``Q`` is the callee's impl
+      self-type (``crate::Error::msg(`` → the `msg` on `impl Error`) or
+      ``Self`` inside the callee's own impl (`caller_self`); ``Box::new(``
+      and ``String::from(`` name std types and resolve to nothing;
+    - a method call ``.name(`` resolves to any impl/trait method of that name
+      (the pipeline's own unit identity, `FnLocator`, already erases the
+      container, so the ambiguity is the loop's, not this function's);
+    - a bare ``name(`` resolves to a free fn of that name; the declaration
+      ``fn name(`` is not a call.
+
+    A turbofish between the name and the paren (``::<E>(``) is a call too.
+    The token test this replaces counted `new`/`from`/`context` as calls of
+    the crate's `new`/`from`/`context` in nearly every body they appear in."""
+    n = len(body)
+    i = 0
+    while (k := body.find(name, i)) != -1:
+        i = k + 1
+        e = k + len(name)
+        if (k > 0 and is_ident_char(body[k - 1])) or (
+                e < n and is_ident_char(body[e])):
+            continue
+        p = e
+        while p < n and body[p].isspace():
+            p += 1
+        p2 = _skip_turbofish(body, p)
+        if p2 != p:
+            p = p2
+            while p < n and body[p].isspace():
+                p += 1
+        if p >= n or body[p] != "(":
+            continue
+        j = k - 1
+        while j >= 0 and body[j].isspace():
+            j -= 1
+        if j >= 1 and body[j] == ":" and body[j - 1] == ":":
+            q_end = j - 2
+            q_start = q_end
+            while q_start >= 0 and is_ident_char(body[q_start]):
+                q_start -= 1
+            qual = body[q_start + 1:q_end + 1]
+            if qual == "Self":
+                qual = caller_self
+            if qual and qual in callee_self_types:
+                return True
+            continue
+        if j >= 0 and body[j] == ".":
+            if callee_is_method:
+                return True
+            continue
+        if (j >= 1 and body[j - 1:j + 1] == "fn"
+                and (j < 2 or not is_ident_char(body[j - 2]))):
+            continue  # `fn name(` — a declaration, not a call
+        if callee_is_free:
+            return True
+    return False
+
+
+def producer_dispatch_ranks(
+    escalated: frozenset[FnLocator],
+    fn_records: Sequence[Mapping[str, object]],
+    type_records: Iterable[TypeRecord],
+) -> tuple[frozenset[FnLocator], frozenset[FnLocator]]:
+    """`(builders, callees)` over the escalated set, for the ordering of the
+    escalated cohort (`dispatch_batch.promote_producers`) — pure over records,
+    no LLM.
+
+    `builders` are the escalated units whose body CONSTRUCTS a crate nominal
+    type: a fn-pointer table literal (`ErrorVTable { … }`), the funnel's
+    payload literal (`ErrorImpl { … }`), or a wrapper's tuple constructor
+    (`MessageError(message)`). That is the escalation's own subject — "the
+    defect is in what this fn constructs" — and it is a ROLE, read off the
+    body's shape, not a name and not the current body's correctness. It has
+    to be: on the stable 98-tree the Defect-1 wrong body,
+    `construct_from_adhoc` = `Self::construct_from_std(MessageError(message),
+    bt)`, builds no table precisely because it is wrong, yet it constructs
+    `MessageError` and so ranks with the table-builders it should be one of.
+    The first draft ranked "constructs a table, or is named `construct`", and
+    a walk of run `95878-aaf5bf1d`'s 27-unit cohort (2026-08-25) classified
+    exactly the two wrong constructors as non-builders: `construct_from_adhoc`
+    landed at slot 12 and `construct_from_display` at slot 13 — outside the
+    first batch the ordering exists to put them in.
+
+    `callees` are the escalated units another escalated unit CALLS, resolved
+    by `calls_unit` (path call on the callee's self-type or `Self`, method
+    call, or bare free-fn call). The first draft tested identifier-token
+    presence, and `new` / `from` / `context` occur as tokens in nearly every
+    body (`Box::new`, `String::from`, the `context` field), so the same walk
+    promoted the delegators the ordering exists to demote — `error.rs::new`,
+    `kind.rs::new`, `from`, `from_boxed`, `context.rs::context` — into slots
+    6–11 as "callees", ahead of the constructors."""
+    trs = list(type_records)
+    nominal = [tr for tr in trs if tr.name and tr.kind in ("struct", "enum")]
+    esc = {(k.file, k.fn_name) for k in escalated}
+    recs: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for r in fn_records:
+        key = (str(r.get("file", "")), str(r.get("fn_name", "")))
+        if key in esc:
+            recs.setdefault(key, []).append((
+                str(r.get("container", "") or ""),
+                str(r.get("body_text", "") or "")))
+    builders: set[FnLocator] = set()
+    for (f, n), items in recs.items():
+        if any(constructs_type(body, tr.name, tuple_struct=_is_tuple_struct(tr))
+               for _, body in items for tr in nominal):
+            builders.add(FnLocator(f, n))
+    shapes: dict[tuple[str, str], tuple[frozenset[str], bool, bool]] = {}
+    for key, items in recs.items():
+        selfs = frozenset(
+            s for c, _ in items if c and (s := impl_self_type(c)) is not None)
+        shapes[key] = (selfs, any(not c for c, _ in items),
+                       any(bool(c) for c, _ in items))
+    callees: set[FnLocator] = set()
+    for (f, n), items in recs.items():
+        for container, body in items:
+            caller_self = (impl_self_type(container) or "") if container else ""
+            for (f2, n2), (selfs, free, method) in shapes.items():
+                if (f2, n2) == (f, n) or FnLocator(f2, n2) in callees:
+                    continue
+                if calls_unit(body, caller_self, n2, callee_self_types=selfs,
+                              callee_is_free=free, callee_is_method=method):
+                    callees.add(FnLocator(f2, n2))
+    return frozenset(builders), frozenset(callees)
 
 
 def producer_bypasses(

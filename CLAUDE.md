@@ -94,6 +94,114 @@ producer rather than the seven accessors" cannot distinguish the theory
 from a tree whose failing set had already moved. That is the addendum.
 The hashes were not.
 
+## A proposed lever is judged by the builder the live fill actually ran, not by a sibling channel that describes the same defect
+
+When a stall is a wrong body, the next change is whatever would have sat
+in THAT prompt, not whatever tracker entry names the same defect. The FR
+file, the generated tests, the notes store, and the write-list are four
+channels; a fill uses one builder; a change to a channel that builder does
+not take cannot convert that fill.
+
+**The rule, checkable.** Before proposing a prompt-contract / FR /
+gen-test / notes / packing change as the lever for a recorded fill, name
+(1) the prompt builder that fill used (`build_file_fill_prompt`,
+`build_per_fn_prompt`, `build_per_impl_prompt`, …) and (2) the argument —
+or the absence of one — that would carry the proposed content. Then one
+of: it would have been in that prompt; it would not, because this builder
+omits that argument; or the content was already in that prompt and the
+fill still wrapped — so the missing thing is a different slot of the
+**same** builder (instruction vs evidence).
+
+**The instance, 2026-08-26, run `2932-cf516410`.** The remaining Defect 1
+lever was filed as FR completeness: put `Error::msg("x").is::<&str>() ==
+true` in `functional_requirements_anyhow.md`. The live constructor call
+was file-first. `build_file_fill_prompt` has no `functional_req`
+argument. Completing the FR file cannot enter that prompt. What that call
+actually carried — quoted `test_downcast.rs`, the panic line
+`bail_literal().unwrap_err().downcast::<&str>()`, `#[repr(transparent)]`
+on `MessageError` — the thinking used (trace line 45 names the TypeId
+wrap) and the reply still re-emitted `construct_from_std(MessageError(…))`.
+The missing slot was `_plan_line` (the instruction), not another evidence
+channel and not the FR file. Shipping FR completeness as the Defect 1
+lever for that fill would have been the addenda-judging failure: a named
+owner the live path does not call.
+
+**Corollary: do not undo a load-bearing complement to shrink a prompt.**
+The 25-fn dump is `installable_fns` added after the `PHASE_C_FILE_MAX_FNS`
+check — so an escalated producer is dispatched with the table it
+installs. Splitting constructors from `object_*` re-opens producers
+dispatched without that table. A prompt that is large because a previous
+class was closed is not a packing bug.
+
+**The tells.** “The FR should name X” without reading
+`build_file_fill_prompt`’s signature; “isolate the constructors into
+their own prompt” against a file whose installable complement was the
+previous session’s entire fight; “the observable is already in the quoted
+test, so a write-list sentence is redundant” offered after a live fill
+that had the quote and still wrapped.
+
+## A plan's fixture is COMPUTED on the live records, never described — and a test asserts the plan's claim, not the code's output
+
+When a plan names a checkable fixture ("on `95878`'s 27-unit frontier the
+first batch of 12 contains all five `construct_from_*`"), shipping the
+mechanism means RUNNING that fixture on the real inputs — the extractor's
+records from the tree the loop reads, the frontier from the events, the
+ordering the loop actually applies — and pasting the OUTPUT into the tracker
+beside the claim. "Validated on the live cohort" followed by a list of what
+the function returned is not a validation; it is the function's output read
+as confirmation. The test module pins the same claim with the recorded input
+as its fixture and the pre-fix behaviour as its negative control — never a
+hand-made list of five units that the function is guaranteed to pass because
+the test was written after the code, from the code.
+
+**The rule, checkable.** Before writing "validated", "verified live" or
+"confirmed" about a mechanism, the session must be able to point at three
+things: the command that computed the plan's fixture on the live records;
+its output, quoted; and the negative control — the same computation under
+the old code or the old input, producing the bad outcome. Missing any one,
+the sentence is "implemented, not yet validated". The test asserts the
+PLAN's sentence ("the first 12 contain all six constructors"), not a
+paraphrase of the implementation's rule ("builders sort first"): a test that
+mirrors the code is a second copy of the same guess and fails on nothing.
+And the class the fix names is checked at the contract that WRITES the
+artefact — the docstring of the function that renders the definition, not
+three examples that happen to work.
+
+**The instance, 2026-08-25: three defects in one review batch, one
+failure.** The escalated-producer ranking shipped with the tracker note
+"validated on the live cohort (builders = `construct_from_std`/`construct`/
+`construct_from_boxed`/`construct_from_context`/`context`)". That list is the
+function's own output, and it is missing exactly the two wrong constructors
+(`construct_from_adhoc`, `construct_from_display`) the ordering existed to
+promote — the session read their absence as "correctly mid-chain callees".
+The plan's fixture was never computed; when it was, one screen of Python
+later, `construct_from_display` sat at slot 13 and `__dispatch_ensure` had
+been DEMOTED out of the batch it was already in. The domain tests asserted
+builder-first on a 6-unit toy list and could not fail. The same batch's
+type-line slice verified that three UNDOCUMENTED types render their
+`#[repr]` and never read the extractor's rendering contract one docstring
+away (`render_item_definition`: doc comments print FIRST), so every
+documented type rendered nothing. And the first attribution cut checked "the
+test now has an owner" instead of "the owner is the body the verdict pins",
+and attributed the dispatcher. Each check that was run was a check the code
+was guaranteed to pass.
+
+**Why a higher effort setting does not cover this.** More deliberation per
+step improves the answer to the question asked; it does not make a session
+run the check it decided it did not need. Deliberation applied to the wrong
+question produces a confident, well-argued wrong answer — which is what
+those tracker notes read like. The skipped check is always the cheap one:
+compute the fixture, on real inputs, before writing the word.
+
+**The tells.** "Validated on the live cohort" followed by a list and no
+batch; a test whose fixture is a hand-made list of 3–6 units carrying the
+plan's names; a tracker note quoting what the function returned rather than
+what the plan predicted; "correctly ranks as …" explaining away a unit the
+plan named as a target; a walk script that gets an empty join and moves on
+(records enumerated from `src/` carry `error.rs`, the loop's carry
+`src/error.rs` — an empty intersection is a rooting bug, not a no-op). On
+any of them, run the fixture.
+
 ## The most correct fix, never the cheapest — this project is pre-launch and exists to validate a theory
 
 The theory under test is that the loop can reconstruct the crate. Every fix
@@ -891,6 +999,35 @@ predicted. On-theory: say nothing. Off-theory — the gate the fix targeted did 
 fire by the iteration the walk said it would — stop, fix, validate; not
 "watching, N iterations left". A pathology no walk covers: distill it from the
 live log into a fixture, so the expensive path funds the cheap one.
+
+**Every monitor also watches the stall, and a stall is a finding, not weather.**
+Whatever a monitor was armed to check, it ALSO evaluates the `stall=a/b` field on
+every iteration summary — because a run that is not crashing can still be
+spending GPU on fills that move no verdict, which is the most expensive silent
+failure this project has. A non-zero and CLIMBING stall is normally bad: the
+sweeps since the last improvement landed bodies and changed no verdict. Do NOT
+dismiss it as routine, and in particular do not dismiss it because `max_stalls=0`
+has disabled the exit — a disabled exit means the stall will never STOP the run,
+not that it is harmless; it makes an uninvestigated stall more costly, not less,
+because nothing else will end the churn either. On a rising stall, investigate
+the cause from the frontier and the fill outcomes per "Diagnose a stalled loop
+from the frontier, not from the score" (is the frontier all blocked-by-sibling,
+are the fills reverting, is the dispatched slice a re-buy the record already
+convicts?), name which of the four per-fill classes it is (this file's opening
+section), and when the cause is a pipeline defect write it — and any fix — to
+`technical_debt.md`. A stall investigated and found to be an expected bounded
+transient (a producer chain that has not closed yet) is fine to note and pass; a
+stall waved off as "nothing to act on" is the pathology this rule exists to stop.
+
+The instance, 2026-08-25, run `4911-9ab8852e`: `stall=1/0` was reported and
+dismissed as "nothing to act on" because `max_stalls=0` meant it could fire no
+exit. That was true and beside the point — the escalated producer pass was
+reverting (`context.rs`/`ensure.rs` on `E0277`/`test_too_long`), the documented
+re-buy of producers that cannot cash the crate's remaining test-pinned failures
+without a prompt-contract change, so the run was burning GPU on a known-flat pass
+while a due reading waited. The stall was the signal to stop the churn and take
+the reading; reading it as "not an exit trigger, therefore nothing to do" is the
+exact miss the rule forbids.
 
 ## An armed watcher's wait loop carries a hard deadline — always
 

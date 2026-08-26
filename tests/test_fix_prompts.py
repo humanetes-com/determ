@@ -348,3 +348,28 @@ def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
     assert "REWRITE (the fns that consume" in line
     assert line.split("REWRITE (the fns that consume")[1].startswith(
         " what this one produces")
+
+
+def test_file_fill_plan_line_carries_the_oracle_pins_on_escalated() -> None:
+    """Run `2932-cf516410`: the constructor prompt's `_plan_line` stated the
+    measurement and never the pin. The attributed tests already named
+    `downcast::<&str>`; putting that on the instruction is the slot the
+    live fill actually read."""
+    pins = 'downcast::<&str>, is::<&str>, assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))'
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), ("construct_from_adhoc",),
+        escalated=("construct_from_adhoc",), pins=pins)])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert "the attributed tests pin: downcast::<&str>" in line
+    assert "is::<&str>" in line
+    assert "EXPECTED_ALTDEBUG_F" in line
+    # NEGATIVE CONTROL: today's `_plan_line` (no pins field) contains none.
+    bare = _file_fill([BlockFillPlan(
+        "impl Error", (), ("construct_from_adhoc",),
+        escalated=("construct_from_adhoc",))])
+    bare_line = next(ln for ln in bare.splitlines()
+                     if ln.startswith("  in `impl Error`"))
+    assert "the attributed tests pin:" not in bare_line
+    assert "downcast::<&str>" not in bare_line
+    assert "EXPECTED_ALTDEBUG_F" not in bare_line

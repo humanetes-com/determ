@@ -43,7 +43,7 @@ from pipeline_core.application.reconstruct.import_repair import (
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     make_request_answerer,
-    workspace_file_reader,
+    reconstruction_file_reader,
 )
 from pipeline_core.domain.behaviour_select import select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
@@ -425,7 +425,8 @@ class FillOneFn:
         if os.getenv("CONTEXT_PULLS", "1") != "0":
             _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
             _pull_sources = PullSources(
-                read_file=workspace_file_reader(ctx.target_src_dir),
+                read_file=reconstruction_file_reader(
+                    ctx.target_src_dir, ctx.project_dir),
                 find_tests=lambda name: "\n\n".join(
                     f"// {p}\n{t}" for p, t in self.tests.find_tests_for_fn(
                         ctx.tests_dir_files, name)),

@@ -169,15 +169,55 @@ class TddFloor:
     # record of which is which is per-batch and would otherwise die with the
     # process that made it.
     declined: tuple[str, ...] = ()
+    # Every unit this cluster has EVER dispatched as a batch target, across
+    # passes and processes — the service record the futility escalation's
+    # premise ("this test's accessors were served by rewrites that changed
+    # nothing") is checked against. `attempted` cannot play that role: it is
+    # the OPEN pass's cursor and empties when the pass closes. Without a
+    # durable record a resumed process could only take the persisted
+    # `futile_units` on faith, and on 2026-08-25 that faith was misplaced:
+    # run `263474-b0e608d3` persisted `test_altdebug: [src/fmt.rs::debug]`
+    # from a fire the pre-service rule manufactured on a unit it had never
+    # dispatched (parked in batch 3 under the cap), and the next process would
+    # have re-fired it at its first sweep. Monotone; a floor written before
+    # this field parses as ``None`` and the resume falls back to the cursor's
+    # `attempted ∪ landed ∪ declined` for that one transition. An empty
+    # tuple is not missing: it is a floor that recorded "nothing has been
+    # fill-returned yet" (a kill mid-fill after the dispatch persist), and
+    # collapsing it into the fallback would re-count the attempted units as
+    # served — the kill-mid-fill hole, run `308884` → `2932`.
+    served: tuple[str, ...] | None = None
+    # The escalation PRODUCT: per still-failing test, the producer set the
+    # fire computed, keyed by TEST (not by the accessor set). The trigger
+    # (`futile_units`) re-derives producers by re-firing on exact accessor-set
+    # equality; an attribution shift then spends iter 1 on the new accessors.
+    # The product survives that shift. Resume re-checks with the same
+    # judged-service premise as the fire (`served`): a kill that never
+    # returned a rewrite is not service, and a product whose earned units
+    # are not in `served` is not seeded. Defaulted so a floor written
+    # before the field parses.
+    escalation_products: tuple[tuple[str, tuple[str, ...],
+                                     tuple[tuple[str, tuple[str, ...]], ...],
+                                     tuple[str, ...]], ...] = ()
+
     def to_dict(self) -> dict[str, Any]:
-        return {"cluster": self.cluster, "best_pass": self.best_pass,
-                "stall": self.stall, "tree_sha": self.tree_sha,
-                "oracle_size": self.oracle_size, "code_id": self.code_id,
-                "attempted": list(self.attempted),
-                "landed": list(self.landed),
-                "declined": list(self.declined),
-                "futile_units": {t: list(units)
-                                 for t, units in self.futile_units}}
+        d: dict[str, Any] = {
+            "cluster": self.cluster, "best_pass": self.best_pass,
+            "stall": self.stall, "tree_sha": self.tree_sha,
+            "oracle_size": self.oracle_size, "code_id": self.code_id,
+            "attempted": list(self.attempted),
+            "landed": list(self.landed),
+            "declined": list(self.declined),
+            "futile_units": {t: list(units)
+                             for t, units in self.futile_units},
+            "escalation_products": {
+                t: {"earned": list(earned),
+                    "additions": {k: list(ts) for k, ts in adds},
+                    "producers": list(prods)}
+                for t, earned, adds, prods in self.escalation_products}}
+        if self.served is not None:
+            d["served"] = list(self.served)
+        return d
 
     @staticmethod
     def from_dict(raw: Any) -> TddFloor | None:
@@ -191,6 +231,7 @@ class TddFloor:
             # A floor written by the build that stamped `futile_files`
             # fingerprints still parses: the key is simply not read.
             _fut = raw.get("futile_units")
+            _prod = raw.get("escalation_products")
             return TddFloor(
                 cluster=str(raw["cluster"]),
                 best_pass=int(raw["best_pass"]),
@@ -204,13 +245,43 @@ class TddFloor:
                     str(k) for k in (raw.get("landed") or ())),
                 declined=tuple(
                     str(k) for k in (raw.get("declined") or ())),
+                served=(None if "served" not in raw else tuple(
+                    str(k) for k in (raw.get("served") or ()))),
                 futile_units=tuple(sorted(
                     (str(t), tuple(str(u) for u in units))
                     for t, units in _fut.items()
                     if isinstance(units, list))
-                    if isinstance(_fut, dict) else ()))
+                    if isinstance(_fut, dict) else ()),
+                escalation_products=_parse_products(_prod))
         except (KeyError, TypeError, ValueError):
             return None
+
+
+def _parse_products(raw: Any) -> tuple[tuple[str, tuple[str, ...],
+        tuple[tuple[str, tuple[str, ...]], ...], tuple[str, ...]], ...]:
+    """A floor written before the field, or a malformed value, is empty."""
+    if not isinstance(raw, dict):
+        return ()
+    out: list[tuple[str, tuple[str, ...],
+                    tuple[tuple[str, tuple[str, ...]], ...],
+                    tuple[str, ...]]] = []
+    for t, body in raw.items():
+        if not isinstance(body, dict):
+            continue
+        earned = body.get("earned") or ()
+        adds = body.get("additions") or {}
+        prods = body.get("producers") or ()
+        if not isinstance(adds, dict):
+            continue
+        out.append((
+            str(t),
+            tuple(str(u) for u in earned),
+            tuple(sorted((str(k), tuple(str(x) for x in ts))
+                         for k, ts in adds.items()
+                         if isinstance(ts, (list, tuple)))),
+            tuple(str(u) for u in prods),
+        ))
+    return tuple(sorted(out))
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +322,20 @@ class FloorResume:
     # simply fails those checks and escalates nothing. ``None`` means "no
     # evidence to carry".
     futility: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+    # The cluster's service record (`TddFloor.served`), resumed on the
+    # cluster identity exactly as the futility evidence is — a dispatch
+    # happened whatever the code was. ``None`` means the saved floor predates
+    # the field (or there is no floor): the loop then seeds service from the
+    # cursor's own `attempted ∪ landed ∪ declined`, which is what the old
+    # floor can honestly attest.
+    served: tuple[str, ...] | None = None
+    # The escalation product (`TddFloor.escalation_products`), resumed on
+    # the cluster identity like the trigger. ``None`` means the saved floor
+    # predates the field (or there is no floor). The loop seeds only those
+    # whose earned units are in `served` — judged service, not a kill.
+    products: tuple[tuple[str, tuple[str, ...],
+                          tuple[tuple[str, tuple[str, ...]], ...],
+                          tuple[str, ...]], ...] | None = None
 
 
 def resume_mismatch(
@@ -488,6 +573,8 @@ def resume_floor(
             declined=_carry.declined if _ok else None,
             released=_carry.released if _ok else (),
             futility=_futility,
+            served=saved.served if _ok else None,
+            products=(saved.escalation_products or None) if _ok else None,
             note=why + " changed"
             + (f"; {_carry.note} resumed anyway — a cursor answers to the "
                "cluster, not to the oracle or the code"
@@ -514,6 +601,8 @@ def resume_floor(
             landed=carry.landed, declined=carry.declined,
             released=carry.released,
             futility=saved.futile_units or None,
+            served=saved.served,
+            products=saved.escalation_products or None,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
                   "changed, so nothing here can restore that peak"
@@ -527,6 +616,8 @@ def resume_floor(
         landed=carry.landed, declined=carry.declined,
         released=carry.released,
         futility=saved.futile_units or None,
+        served=saved.served,
+        products=saved.escalation_products or None,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
               + (f" {carry.note}" if carry.attempted else "")
               + (f" futility evidence={len(saved.futile_units)} test(s)"

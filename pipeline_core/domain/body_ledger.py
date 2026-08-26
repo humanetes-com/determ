@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from pipeline_core.domain.models import FnLocator
+
 GATE_VERSION = "bl1"
 """Bumped when the layout gate's meaning changes.
 
@@ -534,6 +536,41 @@ def latest_by_unit(entries: Iterable[LedgerEntry]) -> dict[LedgerKey, LedgerEntr
             continue
         best[e.key] = e
     return best
+
+
+def rebuy_hits(
+    dispatched: Iterable[FnLocator],
+    prior: Mapping[LedgerKey, LedgerEntry],
+    *, project: str, cluster: str, run_id: str,
+) -> tuple[tuple[FnLocator, LedgerEntry], ...]:
+    """Units this process is about to dispatch that a PRIOR process in the
+    same cluster already graded with an empty `verdict_delta`.
+
+    The join `pattern_census.py` computed after the fact, moved to dispatch
+    time. Detector only — a re-buy is sometimes the correct move (new
+    context); this makes it visible. A row with no `run_id` cannot express
+    "a prior process" (every live row before this field is `""`), so those
+    are skipped. A first dispatch (no prior row) and a repeat under a
+    non-empty delta (a verdict actually moved) do not fire. `LANDED` is
+    not a grade: the fill returned and no sweep has spoken yet (a kill
+    after fill-return, before the sweep, leaves this row; logging it as
+    "already graded" is a lie).
+    """
+    if not run_id:
+        return ()
+    hits: list[tuple[FnLocator, LedgerEntry]] = []
+    for loc in dispatched:
+        entry = prior.get(LedgerKey(project, cluster, loc.file, loc.fn_name))
+        if entry is None:
+            continue
+        if not entry.run_id or entry.run_id == run_id:
+            continue
+        if entry.state is BodyState.LANDED:
+            continue
+        if entry.verdict_delta:
+            continue
+        hits.append((loc, entry))
+    return tuple(hits)
 
 
 def plan_reseed(
