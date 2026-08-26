@@ -43,7 +43,7 @@ class AskClient:
 
     def ask(self, prompt: str, system: str | None = None, model: str | None = None,
             max_tokens: int | None = None, think: bool | None = None,
-            temperature: float | None = None) -> str:
+            temperature: float | None = None, followup_think: bool = False) -> str:
         disclaimer = self.disclaimer()
         system = f"{disclaimer}\n\n{system}" if system else disclaimer
         sys_len = len(system)
@@ -62,6 +62,11 @@ class AskClient:
             kwargs["think"] = think
         if temperature is not None:
             kwargs["temperature"] = temperature
+        # Forwarded only when set: `ask_raw` is late-bound and the fakes that
+        # stand in for it take `(prompt, system, **k)` or `(*a, **k)` today,
+        # but the default call must stay byte-identical to what it was.
+        if followup_think:
+            kwargs["followup_think"] = True
         self.hot_reload()
 
         prompt_meta = self.store_prompt_content(prompt)

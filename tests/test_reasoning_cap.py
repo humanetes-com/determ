@@ -12,8 +12,10 @@ from __future__ import annotations
 from pipeline_core.domain.reasoning_cap import (
     collect_stream_meta,
     is_reasoning_capped,
+    record_followup_meta,
     record_stream_meta,
     summarize_capped,
+    summarize_followup_cut,
 )
 
 # 5 of 9 is the fold of the first nine of 2932's 21 iter-1 stream_meta
@@ -58,3 +60,44 @@ def test_collect_stream_meta_is_windowed_and_silent_outside() -> None:
     record_stream_meta({"finish_reason": "length"})
     with collect_stream_meta() as rows:
         assert rows == []
+
+
+# --------------------------------------------------------------------------- #
+# followup rows: a second kind in the same window, folded apart
+# --------------------------------------------------------------------------- #
+def test_followup_rows_fold_separately_and_never_inflate_the_reply_total() -> None:
+    """The `82157-476ddc16` shape: 8 file-first replies, all 8 forced
+    followups (`followup=True`, main `finish_reason=length`); of those
+    followups 5 were themselves cut at `length`. The audit line must keep
+    reading 8 of 8 replies capped — one row per CALL — and gain the count
+    that was unrecordable: 5 followups cut."""
+    with collect_stream_meta() as rows:
+        for _ in range(8):
+            record_stream_meta({"finish_reason": "length", "stop": None, "followup": True})
+        for fr in ["length"] * 5 + ["stop"] * 3:
+            record_followup_meta({"finish_reason": fr, "content_chars": 8192})
+        assert summarize_capped(rows) == (8, 8)
+        assert summarize_followup_cut(rows) == 5
+        assert all(r["kind"] == "followup" for r in rows[8:])
+        assert all("kind" not in r for r in rows[:8])
+
+
+def test_an_untagged_followup_row_would_inflate_the_total() -> None:
+    """NEGATIVE CONTROL: the same 13 payloads with no `kind` tag read 13 of
+    13, and the followup fold sees none of them — the tag is what keeps the
+    two folds apart, and `record_followup_meta` is where it is applied."""
+    untagged = ([{"finish_reason": "length", "stop": None, "followup": True}] * 8
+                + [{"finish_reason": "length", "content_chars": 8192}] * 5)
+    assert summarize_capped(untagged) == (13, 13)
+    assert summarize_followup_cut(untagged) == 0
+
+
+def test_followup_cut_ignores_stream_rows_and_clean_followups() -> None:
+    rows = [
+        {"finish_reason": "length", "stop": None, "followup": True},           # stream, capped
+        {"kind": "followup", "finish_reason": "stop"},                          # followup, clean
+        {"kind": "followup", "finish_reason": None, "stop": "think_cap"},       # followup, client break
+    ]
+    assert summarize_followup_cut(rows) == 0
+    assert summarize_capped(rows) == (1, 1)
+    assert summarize_followup_cut([]) == 0

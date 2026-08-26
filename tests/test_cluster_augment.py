@@ -24,9 +24,17 @@ class FakeAdapter:
     a scripted per-(cluster,module) coverage sequence."""
 
     def __init__(self, *, augment_script: dict[tuple[str, str], list[tuple[float, int, bool, str]]],
-                 pre_check: bool = True, tarpaulin: Path | None = None) -> None:
+                 pre_check: bool = True, tarpaulin: Path | None = None,
+                 behaviour_readings: list[tuple[int, int]] | None = None,
+                 behaviour_pass_result: bool = True) -> None:
         self._script = augment_script
         self._pre_check = pre_check
+        # Scripted `(pinned, total)` readings, consumed one per behaviour_coverage
+        # call; the last one repeats. Every behaviour_pass call is recorded.
+        self._behaviour_readings = list(behaviour_readings or [(0, 0)])
+        self._behaviour_pass_result = behaviour_pass_result
+        self.behaviour_passes: list[tuple[str, str]] = []
+        self.behaviour_reads: list[tuple[str, str]] = []
         self.cluster_sentinels: dict[tuple[str, str], float] = {}
         self.module_sentinels: dict[str, float] = {}
         self.active: list[str | None] = []
@@ -80,6 +88,16 @@ class FakeAdapter:
         seq = self._script[(self._cur_cluster, m)]
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
+    def behaviour_coverage(self, pd: Path, cluster: BuildCluster, m: str, md: Path) -> tuple[int, int]:
+        self.behaviour_reads.append((cluster.name, m))
+        seq = self._behaviour_readings
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def behaviour_pass(self, pd: Path, cluster: BuildCluster, m: str, md: Path, *,
+                       project_context: str, coverage_strategy: str) -> bool:
+        self.behaviour_passes.append((cluster.name, m))
+        return self._behaviour_pass_result
+
     # CommitGate
     def commit_and_mark(self, pd: Path, key: str, status: str, *,
                         commit_message: str, detail: str = "",
@@ -100,7 +118,8 @@ class _TruthyPath:
 
 
 def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
-         module_coverage: dict[str, float] | None = None) -> AugmentContext:
+         module_coverage: dict[str, float] | None = None,
+         behaviour_target_pct: float = 0.0) -> AugmentContext:
     return AugmentContext(
         project_dir=Path("/proj"),
         clusters=clusters,
@@ -113,6 +132,7 @@ def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
         coverage_strategy="",
         target_pct=100.0,
         tarpaulin_bin=_TruthyPath(),  # type: ignore[arg-type]
+        behaviour_target_pct=behaviour_target_pct,
     )
 
 
@@ -194,3 +214,57 @@ def test_resume_recovers_missing_main_sentinel_on_last_cluster() -> None:
     fake.cluster_sentinels[("stable", "anyhow")] = 95.0
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     assert fake.module_sentinels["anyhow"] == 95.0  # recovered from the cluster value
+
+
+# --- behaviour rounds after the coverage loop ---------------------------------
+#
+# Line coverage is the loop's only stop; a module at target can still have
+# pinned none of the harvested observables. With a behaviour target the
+# augmentor reads pinned/total per module and runs bounded passes until the
+# share is reached, a pass admits nothing, or three rounds are spent.
+
+_DONE = {("stable", "anyhow"): [(100.0, 10, False, "")]}
+
+
+def test_behaviour_target_zero_runs_no_behaviour_round() -> None:
+    fake = FakeAdapter(augment_script=dict(_DONE), behaviour_readings=[(0, 4)])
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+    assert fake.behaviour_reads == [] and fake.behaviour_passes == []
+    assert "task0c.behaviour_coverage" not in fake.events
+    assert fake.commits == ["pipeline: task0c/stable — anyhow:100.0%"]
+
+
+def test_behaviour_rounds_stop_once_the_target_is_reached() -> None:
+    """Readings 1/4, 1/4, 3/4 against a 50 % target: two passes, then the
+    75 % reading stops the loop before a third."""
+    fake = FakeAdapter(augment_script=dict(_DONE), behaviour_readings=[(1, 4), (1, 4), (3, 4)])
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], behaviour_target_pct=50.0))
+    assert fake.behaviour_passes == [("stable", "anyhow"), ("stable", "anyhow")]
+    assert fake.events.count("task0c.behaviour_coverage") == 3
+    assert any("behaviour coverage 3/4 (75%) target 50%" in m for m in fake.logs)
+    # the rounds run BEFORE the cluster commit, so the pinning blocks ship with it
+    assert fake.commits == ["pipeline: task0c/stable — anyhow:100.0%"]
+
+
+def test_behaviour_rounds_are_bounded_at_three_passes() -> None:
+    fake = FakeAdapter(augment_script=dict(_DONE), behaviour_readings=[(1, 4)])
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], behaviour_target_pct=50.0))
+    assert len(fake.behaviour_passes) == ClusterAugmentor.BEHAVIOUR_ROUNDS_MAX == 3
+    assert any("3 behaviour round(s) spent" in m for m in fake.logs)
+
+
+def test_behaviour_rounds_stop_when_a_pass_admits_nothing() -> None:
+    fake = FakeAdapter(augment_script=dict(_DONE), behaviour_readings=[(1, 4)],
+                       behaviour_pass_result=False)
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], behaviour_target_pct=50.0))
+    assert len(fake.behaviour_passes) == 1
+    assert any("admitted no block" in m for m in fake.logs)
+
+
+def test_behaviour_rounds_skip_a_suite_with_nothing_pinnable_and_a_dead_cluster() -> None:
+    fake = FakeAdapter(augment_script=dict(_DONE), behaviour_readings=[(0, 0)])
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], behaviour_target_pct=50.0))
+    assert fake.behaviour_passes == []
+    dead = FakeAdapter(augment_script={}, pre_check=False, behaviour_readings=[(0, 4)])
+    _augmentor(dead).run(_ctx(dead, [_cluster("nightly")], ["a"], behaviour_target_pct=50.0))
+    assert dead.behaviour_reads == [] and dead.behaviour_passes == []

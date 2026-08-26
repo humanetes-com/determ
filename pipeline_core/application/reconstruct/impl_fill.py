@@ -112,6 +112,8 @@ from pipeline_core.domain.refill_evidence import (
     inferred_refill_names,
     pinned_observables_from_tests,
     render_refill_evidence,
+    tuple_struct_names,
+    wraps_crate_tuple_struct,
 )
 from pipeline_core.domain.refine import (
     CompilingSalvage,
@@ -130,10 +132,13 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
     impossibility_claim_is_unfounded,
     judge_guidance,
+    regressed_tests_from_excerpt,
+    regression_scoped,
     retired_guidance_line,
     screen_guidance,
     stamp_conviction,
@@ -509,6 +514,21 @@ def fill_impl_blocks(
             out |= _frontier_tests.convicting_for(FnLocator(b.file, _m.fn_name))
         return frozenset(out)
 
+    def _answers_for_block(b: ImplBlock) -> frozenset[str]:
+        """Every test attributed to one of this block's members — DIRECT and
+        ESCALATED, the dispatch projection. This is what a record earned from
+        TEST outcomes is stamped with and read under (`evidence_for_record`),
+        and what the guidance screen judges every record against. The
+        convicting subset above stays the acceptance gate's definition; the
+        two differ exactly on escalated tests, and the live
+        `src/ensure.rs::*impl*::BothDebugfor(A,B)` record (`error_count 0,
+        convicted_by []`) was supported by `[] <= {}` under the convicting
+        reading while thirteen escalated ensure tests sat on the block."""
+        out: set[str] = set()
+        for _m in (*b.stub_members, *b.refill_members):
+            out |= _frontier_tests.tests_for(FnLocator(b.file, _m.fn_name))
+        return frozenset(out)
+
     target_src_dir.mkdir(parents=True, exist_ok=True)
     # Rebound BEFORE any nested route defines itself, so every splice this
     # module performs — block, file-first, free-fn reroute, last-resort — goes
@@ -635,6 +655,9 @@ def fill_impl_blocks(
         s for s in (_no_std_invariant, _macro_invariants) if s)
     _crate_type_records = _cluster_filter_type_methods(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
+    # The crate's tuple structs — the wrappers a body can construct by
+    # `Name(…)` — for the wrap reading that gates the TypeId sentence.
+    _tuple_structs = tuple_struct_names(_crate_type_records)
     macros_section = _collect_crate_macros(_src_for_macros)
 
     # The crate blueprint — the model's own design doc, sliced per block
@@ -675,13 +698,25 @@ def fill_impl_blocks(
     _pull_menu = (pull_menu_section(_pull_sources.available_kinds(), _max_pulls)
                   if _pulls_on else "")
 
-    def _ask_fill(prompt: str) -> str:
+    def _ask_fill(prompt: str, *, followup_think: bool = False) -> str:
         """The shared ask seam: pull round-trips when enabled, plain ask
-        otherwise. Deliverable-first — FN bodies short-circuit."""
+        otherwise. Deliverable-first — FN bodies short-circuit.
+
+        `followup_think` is the escalated grade's completion policy: on the
+        strength dialect the thinking-exhausted followup otherwise runs at
+        the lowest rung with no thinking reserve, and on run `82157-476ddc16`
+        (2026-08-26) every one of the 8 file-first replies — the constructor
+        rewrite included — was written by that followup (guard
+        `thinking_len=71584 result_len=8192`). Accessor and stub calls keep
+        today's followup; only a prompt whose write list carries an
+        escalated grade asks for the reserve and the ON rung."""
         if not _pulls_on:
-            return str(ask(prompt, model=_TASK2_MODEL))
+            return str(ask(prompt, model=_TASK2_MODEL,
+                           followup_think=followup_think))
         return ask_with_pulls(
-            lambda p: str(ask(p, model=_TASK2_MODEL)), prompt + _pull_menu,
+            lambda p: str(ask(p, model=_TASK2_MODEL,
+                              followup_think=followup_think)),
+            prompt + _pull_menu,
             sources=_pull_sources,
             has_deliverable=lambda r: bool(extract_fn_bodies(r)),
             log=_log, emit=_emit, max_pulls=_max_pulls)
@@ -866,18 +901,21 @@ def fill_impl_blocks(
                 tests_dir_files, leaf, max_blocks=1),
             file_cap=_ATTRIBUTED_TEST_FILE_CAP,
             into=test_blocks)
-        _pins = pinned_observables_from_tests(
-            attributed_test_leaves(
-                (e for evs in _file_refill_evs.values() for e in evs),
-                cap=_ATTRIBUTED_TEST_LEAF_CAP),
-            (t for _, t in test_blocks))
-        _file_refill_evidence = "\n".join(
-            f"in `{container_header(b.container) or 'free fns'}`:\n"
-            + render_refill_evidence(
-                _file_refill_evs[_impl_block_id(b.file, b.container)],
-                pins=_pins)
-            for b in fblocks
-            if _file_refill_evs[_impl_block_id(b.file, b.container)])
+        # Pins PER BLOCK, from that block's own attributed tests. One
+        # file-wide pin list handed to every block put `test_downcast`'s
+        # `downcast::<&str>` on the `BothDebug` plan line of run
+        # `82157-476ddc16`'s ensure prompt (`logs/prompts/97e9b596….txt`,
+        # line 6): the constructors' pins on a unit whose tests pin `ensure!`
+        # messages. The test texts are the file-capped union; a block's leaf
+        # is sliced out of them by NAME, so a sibling block's file
+        # contributes nothing to this block's pins, and a block with no
+        # attributed test gets none.
+        _test_texts = tuple(t for _, t in test_blocks)
+        _block_pins = {
+            bid: pinned_observables_from_tests(
+                attributed_test_leaves(evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
+                _test_texts)
+            for bid, evs in _file_refill_evs.items()}
         for fn_name in wanted[:6]:
             for path_str, txt in _find_tests_referencing_fn(
                     tests_dir_files, fn_name, max_blocks=2):
@@ -910,6 +948,55 @@ def fill_impl_blocks(
         # attempts below see is the same snapshot (a failed attempt reverts),
         # and the extractor run is not free.
         _all_fn_records = _enumerate_fns_via_extractor(target_src_dir) or []
+        # Whether an ESCALATED member of each block WRAPS — constructs a
+        # crate tuple struct inside another call's argument list
+        # (`wraps_crate_tuple_struct`) — read off the extractor's body of that
+        # member, fresh from disk (the same records `installable_fns` reads;
+        # the block's own member record is the fallback). Gates the TypeId
+        # sentence on the plan line AND the evidence block: the pins say what
+        # the tests observe, this says what the body does.
+        _bodies_here = {
+            (str(r.get("fn_name") or ""),
+             canon_container(str(r.get("container") or ""))):
+                str(r.get("body_text") or "")
+            for r in _all_fn_records if r.get("file") == file_rel}
+
+        def _wraps(b: ImplBlock) -> bool:
+            names = escalated_refill_names(
+                _file_refill_evs[_impl_block_id(b.file, b.container)])
+            return any(
+                wraps_crate_tuple_struct(
+                    _bodies_here.get(
+                        (m.fn_name, canon_container(b.container)), m.body_text),
+                    _tuple_structs)
+                for m in b.refill_members if m.fn_name in names)
+
+        _block_wraps = {_impl_block_id(b.file, b.container): _wraps(b)
+                        for b in fblocks}
+        _file_refill_evidence = "\n".join(
+            f"in `{container_header(b.container) or 'free fns'}`:\n"
+            + render_refill_evidence(
+                _file_refill_evs[_impl_block_id(b.file, b.container)],
+                pins=_block_pins[_impl_block_id(b.file, b.container)],
+                wraps=_block_wraps[_impl_block_id(b.file, b.container)])
+            for b in fblocks
+            if _file_refill_evs[_impl_block_id(b.file, b.container)])
+        # The bypass-only and installable-only plans render no ESCALATED
+        # clause, so their pins reach no line today; they carry the pins of
+        # the block(s) whose escalated producer they complement, so a
+        # renderer that grows one reads the right tests. Block pin strings
+        # are unioned whole — a literal pin may itself contain ", ".
+        _union_pins = ", ".join(dict.fromkeys(
+            s for s in _block_pins.values() if s))
+
+        def _pins_for_bypass(entries: list[ProducerBypass]) -> str:
+            producers = {e.producer for e in entries}
+            return ", ".join(dict.fromkeys(
+                _block_pins[_impl_block_id(b.file, b.container)]
+                for b in fblocks
+                if producers & escalated_refill_names(
+                    _file_refill_evs[_impl_block_id(b.file, b.container)])
+                and _block_pins[_impl_block_id(b.file, b.container)]))
         _offer_keys = offer_producers(escalated_measured, escalated_keys)
         _installable = installable_fns(
             _all_fn_records, _crate_type_records, _offer_keys, file_rel,
@@ -940,7 +1027,7 @@ def fill_impl_blocks(
             tuple(dict.fromkeys((*(i.fn_name for i in _installable),
                                  *(x.fn_name for x in _free_bypass)))),
             installable=tuple(i.fn_name for i in _installable),
-            bypass=_free_bypass, pins=_pins)]
+            bypass=_free_bypass, pins=_union_pins)]
             if _installable or _free_bypass else [])
         # The evidence section's entry for them: the relation, stated per fn,
         # so the model can see WHICH table field each one answers to. The
@@ -1050,13 +1137,15 @@ def fill_impl_blocks(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             escalated=tuple(sorted(escalated_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
-            bypass=_bypass_for(b.container), pins=_pins)
+            bypass=_bypass_for(b.container),
+            pins=_block_pins[_impl_block_id(b.file, b.container)],
+            wraps_pinned_type=_block_wraps[_impl_block_id(b.file, b.container)])
             for b in fblocks]
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
         _extra_plans = [BlockFillPlan(
             _c, (), tuple(x.fn_name for x in _entries),
-            bypass=tuple(_entries), pins=_pins)
+            bypass=tuple(_entries), pins=_pins_for_bypass(_entries))
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
         # The grade label naming what this prompt's write list actually
@@ -1138,7 +1227,8 @@ def fill_impl_blocks(
                 "refills": len(refill_names)})
             attempts_total += 1
             try:
-                _file_reply = _ask_fill(prompt)
+                _file_reply = _ask_fill(
+                    prompt, followup_think=bool(_grade_parts))
                 parsed = extract_fn_bodies(_file_reply)
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
@@ -1662,6 +1752,12 @@ def fill_impl_blocks(
         _block_anchors = anchor_types_for_container(block.container)
         _retro_rec = retros_cache.get(
             _retro_key(block.file, "*impl*", block.container), {}) or {}
+        # Two readings of what this block answers for: the convicting tests
+        # (the acceptance gate's definition) and every attributed test,
+        # escalated included. A record earned from test outcomes is stamped
+        # with and read under the second; see `evidence_for_record`.
+        _block_evidence = ConvictionEvidence(_convicting_for_block(block))
+        _block_answers = ConvictionEvidence(_answers_for_block(block))
         _poisoned_retro = _retro_gate.record(judge_guidance(
             _retro_rec.get("guidance", ""), _cur_text,
             anchor_types=_block_anchors)) is RetroGateVerdict.RETIRED
@@ -1669,6 +1765,17 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: retro guidance contradicts the "
                  "current layout — guidance withheld, exhaustion not honoured "
                  "(layout-contradicted).")
+        # The record was written from a REGRESSION of tests this block does
+        # not answer for: its lesson explains what un-reddens those, which
+        # on a re-fill for other tests can be the removal of the observable
+        # they pin (the ensure `SmallBuf` record, `regression_scoped`). The
+        # exhaustion it carries counted attempts judged on the wrong tests.
+        elif regression_scoped(_retro_rec, _block_answers):
+            _poisoned_retro = True
+            _log(f"  [phase-c/impl] {block_id}: retro guidance was written "
+                 "from a regression of test(s) this block does not answer "
+                 "for — retro guidance withheld (regression_scoped), "
+                 "exhaustion not honoured (regression-scoped).")
         # The second way stored guidance goes bad, and the one the layout sieve
         # above cannot see: a claim that the crate CANNOT do this, made against
         # a tree that has since moved (or against no recorded tree at all). This
@@ -1686,10 +1793,10 @@ def fill_impl_blocks(
         # absolute acceptance gate, the pre-group route set) sampled a
         # different problem — it cannot convict this block. Neither can one
         # drawn from tests that no longer convict these members.
-        _block_evidence = ConvictionEvidence(_convicting_for_block(block))
         _standing = conviction_standing(
             _retro_rec, RetroProvenance.current(cluster_name, _cur_text),
-            _block_evidence)
+            evidence_for_record(_retro_rec, convicting=_block_evidence,
+                                answers=_block_answers))
         _stale_conviction = (bool(_retro_rec.get("fully_exhausted"))
                              and _standing is not ConvictionStanding.CURRENT)
         if _stale_conviction:
@@ -1832,7 +1939,15 @@ def fill_impl_blocks(
         _pins = pinned_observables_from_tests(
             attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
             (t for _, t in test_blocks))
-        _refill_evidence_text = render_refill_evidence(_refill_evs, pins=_pins)
+        # The block's own escalated bodies, as the frontier recorded them
+        # (this route is the file-first fallback; a member the file route
+        # landed is no longer a refill here).
+        _esc_names = escalated_refill_names(_refill_evs)
+        _block_wraps_here = any(
+            wraps_crate_tuple_struct(m.body_text, _tuple_structs)
+            for m in block.refill_members if m.fn_name in _esc_names)
+        _refill_evidence_text = render_refill_evidence(
+            _refill_evs, pins=_pins, wraps=_block_wraps_here)
         # Reuse the per-fn test finder by unioning tests touching any
         # stub/refill target.
         for fn_name in _fill_target_names[:4]:
@@ -1889,7 +2004,7 @@ def fill_impl_blocks(
         _prior_key = _retro_key(block.file, "*impl*", block.container)
         _prior_rec = retros_cache.get(_prior_key, {})
         _prior_verdict = screen_guidance(
-            _prior_rec, snapshot, evidence=_block_evidence,
+            _prior_rec, snapshot, evidence=_block_answers,
             anchor_types=anchor_types_for_container(block.container),
             cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file))
         prior_retro = _prior_verdict.text
@@ -1901,14 +2016,17 @@ def fill_impl_blocks(
                 _prior_key, _prior_rec, _prior_verdict)):
             _log(f"  {_rline}")
         notes_section = ""
+        # Computed OUTSIDE the notes branch: the escalated set also decides
+        # the completion policy of the ask below (`followup_think`), which
+        # must not depend on whether an FR file exists.
+        _esc_targets = escalated_refill_names(_refill_evs)
         if fr_path is not None:
-            # 204 N2 on the per-block route too — this is the FALLBACK the
-            # file-first takes after a compile-failed attempt (run
-            # `40938-f4e8e94b` iter 2: three reverts, then per-block fills
-            # whose prompts re-injected the `[E0425]` lesson beside the same
-            # ESCALATED rewrite instruction). A route-scoped rule would
+            # The notes filter applies on the per-block route too — this is
+            # the FALLBACK the file-first takes after a compile-failed attempt
+            # (run `40938-f4e8e94b` iter 2: three reverts, then per-block
+            # fills whose prompts re-injected the `[E0425]` lesson beside the
+            # same ESCALATED rewrite instruction). A route-scoped rule would
             # survive on exactly that path.
-            _esc_targets = escalated_refill_names(_refill_evs)
             notes_section = _filter_model_notes_for_prompt(
                 fr_path, file_rel=block.file,
                 fn_name=_fill_target_names[0] if _fill_target_names else "",
@@ -2033,7 +2151,8 @@ def fill_impl_blocks(
                 fr_path=fr_path,
             )
             try:
-                response = _ask_fill(prompt)
+                response = _ask_fill(
+                    prompt, followup_think=bool(_esc_targets))
             except Exception as e:
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
                 return FixOutcome("stop")
@@ -2684,10 +2803,14 @@ def fill_impl_blocks(
                     error_excerpt=last_error_excerpt,
                     fix_attempts=fix_attempt,
                     prior_retrospective=admissible_guidance(
-                        prior, snapshot, evidence=_block_evidence,
+                        prior, snapshot, evidence=_block_answers,
                         anchor_types=anchor_types_for_container(block.container),
                         cluster=cluster_name,
                         cfg_dead=_cfg_dead_fns(block.file)),
+                    # The pins of the tests this block answers for: the
+                    # diagnosis may not prescribe away an observable they
+                    # name (`build_phase_c_retro_prompt`).
+                    pinned_observables=_pins,
                 )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
@@ -2761,7 +2884,18 @@ def fill_impl_blocks(
                            if new_best is not None else {}),
                         "fully_exhausted": full_exhaust,
                         "last_error_preview": last_error_excerpt[:240],
-                    }, _prov, _block_evidence, _blockers)
+                    }, _prov,
+                        # A compiled attempt learned from test outcomes, and
+                        # is answerable to every test the block answers for;
+                        # a compile failure is the compiler's verdict and is
+                        # stamped with the convicting tests of the moment.
+                        (_block_answers if cur_progress.compile_errors == 0
+                         else _block_evidence),
+                        _blockers,
+                        # From the FULL excerpt: the 240-char preview above
+                        # cuts a regression's test list mid-name.
+                        regressed=regressed_tests_from_excerpt(
+                            last_error_excerpt))
                     _save_retrospectives(project_dir, retros_cache)
                 _verdict_row(
                     block_id,
@@ -2801,7 +2935,7 @@ def fill_impl_blocks(
             _prior_key = _retro_key(block.file, "*impl*", block.container)
             _prior_rec = retros_cache.get(_prior_key, {})
             _prior_verdict = screen_guidance(
-                _prior_rec, snapshot, evidence=_block_evidence,
+                _prior_rec, snapshot, evidence=_block_answers,
                 anchor_types=anchor_types_for_container(block.container),
                 cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file))
             prior_retro = _prior_verdict.text

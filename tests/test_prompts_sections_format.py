@@ -4,6 +4,8 @@ format_impl_block_for_prompt (ImplBlock → target-form member listing).
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pipeline_core.domain.models import (
     FieldRecord,
     FnRecord,
@@ -379,7 +381,14 @@ def test_repr_behind_doc_comments_is_still_found():
     out = format_type_for_prompt(rec)
     assert "#[derive(Clone)]" in out and "#[repr(transparent)]" in out
     assert out.index("#[repr(transparent)]") < out.index("struct Chain")
-    assert "///" not in out
+    # The docs used to be dropped here (this line asserted `"///" not in
+    # out`); they are the contract channel now and print ABOVE the attrs,
+    # with the blank `///` separator skipped.
+    assert out.splitlines()[:2] == [
+        "/// Iterator of a chain of source errors.",
+        "/// This type is the iterator returned by [`Error::chain`].",
+    ]
+    assert out.index("///") < out.index("#[derive(Clone)]")
 
 
 def test_multi_line_attribute_is_joined_before_the_head_is_read():
@@ -398,3 +407,72 @@ def test_multi_line_attribute_is_joined_before_the_head_is_read():
         definition="pub struct Inner {\n    #[repr(C)]\n    a: u8,\n}",
         fields=(FieldRecord(name="a", ty="u8"),))
     assert "#[" not in format_type_for_prompt(rec2)
+
+
+# ---------------------------------------------------------------------------
+# Authored `///` contract lines reach the fill prompt through this renderer
+# ---------------------------------------------------------------------------
+
+_CONTRACT = ("/// The TypeId stored for a message error is the message's own "
+             "type, so a user's downcast::<&str>() finds it.")
+
+
+def _documented_record(doc: str = _CONTRACT) -> TypeRecord:
+    return TypeRecord(
+        kind="struct", name="MessageError", generics="<M>",
+        definition=f"{doc}\n#[repr(transparent)]\npub struct MessageError<M>(pub M);",
+        fields=(FieldRecord(name="0", ty="M", is_pub=True),))
+
+
+def test_type_doc_line_renders_above_the_layout_attrs():
+    rec = _documented_record()
+    out = format_type_for_prompt(rec)
+    lines = out.splitlines()
+    assert lines[0] == _CONTRACT
+    assert lines[1] == "#[repr(transparent)]"
+    assert lines[2] == "struct MessageError<M>"
+
+
+def test_pre_change_renderer_never_carried_the_doc_line():
+    """Control: the renderer used to read `definition` for its attributes only,
+    so a documented record rendered exactly as the same record with the doc
+    line stripped. That stripped rendering is reproduced here — it carries no
+    `///` — and the documented rendering is that text plus the doc line, so
+    the doc line is the ONLY thing this change adds."""
+    rec = _documented_record()
+    bare = format_type_for_prompt(
+        replace(rec, definition=rec.definition.split("\n", 1)[1]))
+    assert "///" not in bare
+    assert bare.startswith("#[repr(transparent)]\nstruct MessageError<M>")
+    assert format_type_for_prompt(rec) == _CONTRACT + "\n" + bare
+
+
+def test_type_doc_lines_are_bounded_and_only_the_leading_block_counts():
+    long = "/// " + "x" * 300
+    rec = TypeRecord(
+        kind="struct", name="Chatty",
+        definition=("//! inner doc of the module, not of the item\n"
+                    "// a plain comment\n"
+                    "/// one\n/// two\n" + long + "\n/// four\n/// five\n"
+                    "#[derive(Debug)]\n"
+                    "/// not leading — after an attribute\n"
+                    "pub struct Chatty { a: u8 }"),
+        fields=(FieldRecord(name="a", ty="u8"),))
+    out = format_type_for_prompt(rec)
+    lines = out.splitlines()
+    assert lines[0] == "/// one" and lines[1] == "/// two"
+    assert lines[2].startswith("/// " + "x" * 190) and lines[2].endswith("…")
+    assert len(lines[2]) <= len("/// ") + 200
+    assert lines[3] == "#[derive(Debug)]"
+    assert lines[4] == "struct Chatty"
+    assert "four" not in out and "five" not in out
+    assert "inner doc" not in out and "plain comment" not in out
+    assert "not leading" not in out
+
+
+def test_type_doc_truncation_marks_the_last_kept_line():
+    rec = TypeRecord(kind="struct", name="T",
+                     definition="/// a\n/// b\n/// c\n/// d\npub struct T;")
+    out = format_type_for_prompt(rec)
+    assert out.splitlines()[:3] == ["/// a", "/// b", "/// c …"]
+    assert "/// d" not in out

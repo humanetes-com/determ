@@ -1,11 +1,15 @@
 """Workspace layout vocabulary — the well-known directory names the pipeline
-writes under a project workspace. Pure constants (stdlib only); the single
-source of truth so adapters and the composition root agree on the on-disk layout
-instead of each repeating a string literal.
+writes under a project workspace, plus the pure rules over pipeline_state
+phase keys and git tag names that the workspace restores decide with. Stdlib
+only; the single source of truth so adapters and the composition root agree on
+the on-disk layout instead of each repeating a string literal.
 
 (``ORIGINAL_STRUCTURE_DIR`` currently lives in ``adapters/strip.py`` for
 historical reasons; consolidate it here in a later slice.)"""
 from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 # Per-module locked source + the `locked.txt` ledger live here once a module's
 # tests pass and it is frozen as a dependency for later modules.
@@ -138,6 +142,114 @@ def drop_iteration_phases(phases: dict[str, object]) -> dict[str, object]:
         k: v for k, v in phases.items()
         if not k.startswith(ITERATION_PHASE_PREFIXES)
     }
+
+
+# --- the PRE-augmentation restore point ------------------------------------
+# `task0c-augmented-<module>` marks the commit AFTER task0c: a restore to it
+# brings the generated tests back from the tag, so a run whose test generator
+# or admission rule changed had no restore point short of `--repo <URL>
+# --clean` — a re-clone that bypasses continue.sh's pre-run gate. This tag
+# marks the commit task0c BUILDS ON (the `pipeline: task0b done` commit in a
+# git-managed workspace), written once, right before the cluster augmentation
+# starts. It sits after task0a/0b rather than at the clone because their
+# outputs (project profile, behavioural context, coverage strategy,
+# build_configs, the cfg scan) are computed from the ORIGINAL source and tests,
+# never from the generated ones — so re-running task0c cannot invalidate them,
+# and keeping them costs nothing while regenerating them costs LLM calls.
+PRE_AUGMENT_TAG_PREFIX = "task0c-pre-"
+
+# Written by task0c's attempt ledger (`application/tasks/task0c.py` keeps its
+# own `TASK0C_ATTEMPTS_LOG` copy — that module owns the writer; this name is
+# what the pre-augmentation restore wipes, and a test pins the two equal).
+TASK0C_ATTEMPTS_LOG_NAME = ".task0c_attempts.jsonl"
+
+# pipeline_state.md entries a pre-augmentation restore KEEPS: exactly the
+# phases that ran before task0c. A keep-list rather than a drop-list, because
+# every phase added after task0c (a future task0d, the bake, strip, task1, the
+# reconstruct loop) is by construction something the restore must forget, and
+# a drop-list would have to be extended for each of them.
+PRE_AUGMENT_KEPT_PHASES: tuple[str, ...] = ("cfg_scan", "test_cmd", "task0b")
+PRE_AUGMENT_KEPT_PHASE_PREFIXES: tuple[str, ...] = ("task0a",)   # task0a, task0a-context
+
+
+def pre_augment_tag(module_name: str) -> str:
+    """The pre-augmentation tag for `module_name`: `task0c-pre-<module>`."""
+    return f"{PRE_AUGMENT_TAG_PREFIX}{module_name}"
+
+
+def drop_pre_augment_phases(phases: dict[str, object]) -> dict[str, object]:
+    """Return only the entries of `phases` that predate task0c
+    (:data:`PRE_AUGMENT_KEPT_PHASES` + keys under
+    :data:`PRE_AUGMENT_KEPT_PHASE_PREFIXES`). Everything task0c and later wrote
+    — `task0c/<cluster>`, `task0c/<cluster>/<module>`, strip, task1, the
+    reconstruct loop — is dropped so it re-runs from the pre-augmentation
+    commit."""
+    return {
+        k: v for k, v in phases.items()
+        if k in PRE_AUGMENT_KEPT_PHASES or k.startswith(PRE_AUGMENT_KEPT_PHASE_PREFIXES)
+    }
+
+
+def augmentation_has_started(phases: Iterable[str]) -> bool:
+    """True once any `task0c` phase entry exists — the tell that HEAD has moved
+    past (or into) the augmentation, so it is no longer a pre-augmentation
+    commit and must not be tagged as one."""
+    return any(k == "task0c" or k.startswith("task0c/") for k in phases)
+
+
+@dataclass(frozen=True, slots=True)
+class PreAugmentTagPlan:
+    """Which `task0c-pre-*` tags to write at HEAD before task0c starts.
+
+    `to_write` are the modules' tags not yet in the workspace; `present` the
+    ones already there (never re-pointed: `git tag -f` at a later HEAD would
+    silently move the restore point onto a post-augmentation commit, and on a
+    resumed run HEAD is exactly that); `refusal` is set when HEAD cannot be a
+    pre-augmentation commit at all, in which case nothing is written."""
+
+    to_write: tuple[str, ...]
+    present: tuple[str, ...]
+    refusal: str | None = None
+
+    def summary(self) -> str:
+        """The one log line the orchestrator prints for this decision."""
+        if self.refusal:
+            return f"NOT tagged: {self.refusal}"
+        parts: list[str] = []
+        if self.to_write:
+            parts.append(f"tagged {', '.join(self.to_write)} at HEAD "
+                         "(pre-augmentation restore point for --restart-from-pre-augment)")
+        if self.present:
+            parts.append(f"{', '.join(self.present)} already present — HEAD not re-tagged")
+        return "; ".join(parts) or "no modules to tag"
+
+
+def plan_pre_augment_tags(
+    modules: Iterable[str], existing_tags: Iterable[str], phases: Mapping[str, object],
+) -> PreAugmentTagPlan:
+    """Decide the pre-augmentation tags for `modules` given the workspace's
+    existing tags and its pipeline_state phases. Pure.
+
+    A workspace built before the tag existed (the live `tmp/anyhow`, whose
+    HEAD is a task2a checkpoint) must NOT be tagged at HEAD: the restore would
+    then "return" to a stripped tree and run task0c against no source. Such a
+    workspace is tagged by hand at its `pipeline: task0b done` commit, which
+    the refusal text says."""
+    started = sorted(k for k in phases if k == "task0c" or k.startswith("task0c/"))
+    if started:
+        shown = ", ".join(started[:3]) + (", …" if len(started) > 3 else "")
+        return PreAugmentTagPlan(
+            to_write=(), present=(),
+            refusal=(f"task0c has already run in this workspace (phase(s) {shown}), so HEAD is "
+                     "not a pre-augmentation commit. To add the restore point by hand, tag the "
+                     "`pipeline: task0b done` commit: git tag task0c-pre-<module> <sha>"),
+        )
+    existing = set(existing_tags)
+    wanted = [pre_augment_tag(m) for m in modules]
+    return PreAugmentTagPlan(
+        to_write=tuple(t for t in wanted if t not in existing),
+        present=tuple(t for t in wanted if t in existing),
+    )
 
 # Legacy whole-workspace manifest of generated files.
 MANIFEST_NAME = ".generated_files.txt"

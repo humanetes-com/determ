@@ -43,15 +43,13 @@ from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.body_ledger import (
     BodyState,
     LedgerEntry,
-    LedgerKey,
     SweepView,
     authored_layout_fp,
-    body_layout_deps,
     body_sha,
     classify,
     latest_by_unit,
     rebuy_hits,
-    sig_sha_of,
+    rows_for_units,
 )
 from pipeline_core.domain.crash_site import (
     blamed_locators,
@@ -138,6 +136,7 @@ from pipeline_core.domain.plateau import (
 from pipeline_core.domain.reasoning_cap import (
     collect_stream_meta,
     summarize_capped,
+    summarize_followup_cut,
 )
 from pipeline_core.domain.refine import (
     Attempt,
@@ -323,6 +322,16 @@ class PhaseCTddDeps:
     # just wrote the row". Empty in tests that do not exercise the re-buy
     # detector.
     run_id: str = ""
+    # The fingerprint of the oracle scoring the cluster tree: `(src_dir,
+    # project_dir, cluster) -> str` over the tree's gen_tests siblings, the
+    # crate's `tests/` and the baked behaviour suite
+    # (`adapters/oracle_fingerprint.py`). Stamped on every row the ledger
+    # writes; required by the re-seed gate and the re-buy detector. None
+    # stamps "" and the gate then refuses every row — the honest reading of
+    # "nobody recorded which tests graded this" (a layout-only ledger would
+    # have re-seeded 73 of 85 stable units onto the cold run's regenerated
+    # oracle, 2026-08-26).
+    oracle_fp: Callable[..., str] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -693,6 +702,30 @@ def run_phase_c_tdd(
                              if deps.ledger_load is not None else [])
         return _ledger_cache
 
+    _oracle_fp_cache: dict[int, str] = {}
+
+    def _oracle_fp(iter_no: int) -> str:
+        """The fingerprint of the oracle scoring this tree, computed once per
+        iteration and stamped on every row that iteration writes.
+
+        Once per iteration rather than once per process: the gen_tests are
+        written by task0c and do not move inside a run, but the set is 34
+        files plus `tests/` and the cost of re-reading them at an iteration
+        boundary is nothing next to a sweep, whereas a fingerprint cached
+        for a whole process would silently outlive a test file any future
+        mechanism rewrote mid-run. Once per row would read the set for each
+        of a 12-unit batch. `""` when no oracle is wired, which every gate
+        reads as "unrecorded" and refuses."""
+        if deps.oracle_fp is None:
+            return ""
+        hit = _oracle_fp_cache.get(iter_no)
+        if hit is None:
+            hit = str(deps.oracle_fp(target_src_dir, project_dir,
+                                     cluster.name) or "")
+            _oracle_fp_cache.clear()
+            _oracle_fp_cache[iter_no] = hit
+        return hit
+
     def _skeleton_root() -> Path:
         """The cluster's AUTHORED layout crate — what the bodies answer to.
 
@@ -790,8 +823,8 @@ def run_phase_c_tdd(
             site=site, entries=_ledger_entries(), wanted=stubs,
             project=project_dir.name, cluster=cluster.name,
             src_dir=target_src_dir, skeleton_root=_skeleton_root(),
-            writer=deps.tree_writer, check_builds=_check,
-            log=deps.log)
+            writer=deps.tree_writer, oracle_fp=_oracle_fp(iter_no),
+            check_builds=_check, log=deps.log)
         if not (out.seeded or out.rejected or out.skipped):
             return out
         deps.log(f"  {tag} [phase-c/ledger] iter {iter_no}: {site} — "
@@ -1434,7 +1467,12 @@ def run_phase_c_tdd(
         _rows, _bytes = deps.ledger_size(project_dir)
         deps.log(f"  {tag} [phase-c/ledger] {_rows} row(s), "
                  f"{_bytes / 1024:.0f} KiB on disk (append-only, untracked, "
-                 "machine-local — a cache of provenance, never the only copy)")
+                 "machine-local — a cache of provenance, never the only copy)"
+                 + (f"; oracle {_oracle_fp(0)} — rows graded under another "
+                    "oracle are refused by the gate and skipped by the "
+                    "re-buy detector"
+                    if deps.oracle_fp is not None else
+                    "; NO oracle fingerprint wired — every row is refused"))
     _reseed_site("cluster entry", 0)
     if _ledger_adopt():
         deps.log(f"  {tag} [phase-c/ledger] {len(_ledger_rows)} backfilled "
@@ -1735,10 +1773,15 @@ def run_phase_c_tdd(
                     _row, attributed=_attributed,
                     before=_ledger_before or _sweep_view, after=_sweep_view,
                     body_now_sha=_now)
+                # The oracle is stamped HERE, at the grade, not carried
+                # from the landing: an adopted backfilled row arrives with
+                # no oracle at all, and a verdict is a claim about the tests
+                # that were run to reach it.
                 _judged.append(replace(_row, state=_state,
                                        verdict_delta=_delta, iteration=iter_n,
                                        epoch=_destruction_epoch,
-                                       run_id=_row.run_id or deps.run_id))
+                                       run_id=_row.run_id or deps.run_id,
+                                       oracle_fp=_oracle_fp(iter_n)))
             deps.ledger_append(project_dir, _judged)
             if _ledger_cache is not None:
                 _ledger_cache.extend(_judged)
@@ -3987,7 +4030,7 @@ def run_phase_c_tdd(
             _hits = rebuy_hits(
                 _batch.keys, latest_by_unit(_ledger_entries()),
                 project=project_dir.name, cluster=cluster.name,
-                run_id=deps.run_id)
+                run_id=deps.run_id, oracle_fp=_oracle_fp(iter_n))
             if _hits:
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: RE-BUY — "
@@ -4192,6 +4235,11 @@ def run_phase_c_tdd(
         _served_at.update(dict.fromkeys(frontier_keys, iter_n))
         _persist_floor()
         _capped_n, _capped_m = summarize_capped(_fill_meta)
+        # The forced followup's own outcome, folded beside the main-stream
+        # count: run `82157-476ddc16` (2026-08-26) had 8 of 8 file-first
+        # replies written by the followup and no record of whether any of them
+        # was itself cut — `llm.stream_meta` carries the main finish reason.
+        _fu_cut = summarize_followup_cut(_fill_meta)
         total_filled += sub.fns_filled
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
@@ -4229,43 +4277,8 @@ def run_phase_c_tdd(
             # `" ".join(text.split())` collapses a body onto one line, and a
             # body holding a `//` comment then comments out its own remainder
             # the moment it is spliced back.
-            if deps.ledger_append is not None and _batch_landed:
-                _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
-                _new_rows: list[LedgerEntry] = []
-                for _key in sorted(_batch_landed):
-                    _recs = [r for r in _recs_after
-                             if str(r.get("file") or "") == _key.file
-                             and str(r.get("fn_name") or "") == _key.fn_name]
-                    # `_led_*` rather than `_bodies`/`_sigs`: the durable
-                    # restore below unpacks `_bodies, _layout_n, _leftover`
-                    # as COUNTS in this same function scope, and two meanings
-                    # of one name inside a 3,900-line body is how a value
-                    # crosses between mechanisms that never meant to meet.
-                    _led_bodies = tuple(str(r.get("body_text") or "")
-                                        for r in _recs)
-                    _led_sigs = tuple(str(r.get("sig_text") or "")
-                                      for r in _recs)
-                    if not _led_bodies:
-                        continue
-                    _new_rows.append(LedgerEntry(
-                        key=LedgerKey(project=project_dir.name,
-                                      cluster=cluster.name, file=_key.file,
-                                      fn_name=_key.fn_name),
-                        body_sha=body_sha(_led_bodies), bodies=_led_bodies,
-                        sig_sha=sig_sha_of(_led_sigs),
-                        layout_fp=_fps.get(_key.file, ""),
-                        layout_deps=body_layout_deps(
-                            "\n".join(_led_bodies), "\n".join(_led_sigs),
-                            _items,
-                            file_of=_file_of),
-                        iteration=iter_n, epoch=_destruction_epoch,
-                        run_id=deps.run_id))
-                if _new_rows:
-                    deps.ledger_append(project_dir, _new_rows)
-                    _ledger_rows.extend(_new_rows)
-                    if _ledger_cache is not None:
-                        _ledger_cache.extend(_new_rows)
-            _pass_landed |= _batch_landed
+            #
+            # The grade split comes FIRST because the write path needs it.
             # An unchanged unit that NO failing test convicts and that the
             # escalation did not MEASURE (a traversal step, a name match) was
             # told to return a right body unchanged — `[REFILL?]` — so its
@@ -4281,6 +4294,50 @@ def run_phase_c_tdd(
                 k for k in _batch_unchanged
                 if not convicting.get(k) and k not in _batch_escalated)
             _batch_unchanged -= _batch_declined
+            if deps.ledger_append is not None and (_batch_landed
+                                                   or _batch_esc_unchanged):
+                _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
+                _new_rows = rows_for_units(
+                    [(k.file, k.fn_name) for k in _batch_landed], _recs_after,
+                    project=project_dir.name, cluster=cluster.name,
+                    state=BodyState.LANDED, items=_items, file_of=_file_of,
+                    file_fp=_fps, run_id=deps.run_id, iteration=iter_n,
+                    epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n))
+                if _new_rows:
+                    deps.ledger_append(project_dir, _new_rows)
+                    _ledger_rows.extend(_new_rows)
+                    if _ledger_cache is not None:
+                        _ledger_cache.extend(_new_rows)
+                # THE FLAT ARM. An escalated unit that came back unchanged
+                # is a GRADED try with an empty verdict delta: the rewrite
+                # instruction was issued because its convicting tests ran
+                # and failed, and the body on the tree is the one the model
+                # returned. Before this arm the set was logged and dropped
+                # — run `82157-476ddc16` iter 1 left nine such constructors
+                # with no row, so the next process's re-buy detector, which
+                # joins on prior graded rows, had nothing to fire on. The
+                # row is already graded, so it is appended to the store and
+                # the cache but NOT to `_ledger_rows`: the promotion pass
+                # would otherwise re-judge it against a sweep that measures
+                # a body nothing changed.
+                _flat_rows = rows_for_units(
+                    [(k.file, k.fn_name) for k in _batch_esc_unchanged],
+                    _recs_after, project=project_dir.name,
+                    cluster=cluster.name, state=BodyState.FLAT, items=_items,
+                    file_of=_file_of, file_fp=_fps, run_id=deps.run_id,
+                    iteration=iter_n, epoch=_destruction_epoch,
+                    oracle_fp=_oracle_fp(iter_n))
+                if _flat_rows:
+                    deps.ledger_append(project_dir, _flat_rows)
+                    if _ledger_cache is not None:
+                        _ledger_cache.extend(_flat_rows)
+                    deps.log(
+                        f"  {tag} [phase-c/ledger] iter {iter_n}: "
+                        f"{len(_flat_rows)} escalated unit(s) came back "
+                        "unchanged — recorded as `flat` (a graded try with "
+                        "an empty verdict delta; not re-seedable; the next "
+                        "process's re-buy detector fires on it).")
+            _pass_landed |= _batch_landed
             _pass_declined |= _batch_declined
             _pass_escalated |= _batch_escalated
             deps.log(
@@ -4299,6 +4356,7 @@ def run_phase_c_tdd(
                        for k in _batch_esc_unchanged)[:12])
                    if _batch_esc_unchanged else "")
                 + (f"; {_capped_n} of {_capped_m} fill replies reasoning-capped"
+                   + (f" ({_fu_cut} followup replies cut)" if _fu_cut else "")
                    if _capped_m else "")
                 + ".")
             deps.emit("phase_c.tdd.landed_change", data={
@@ -4309,7 +4367,14 @@ def run_phase_c_tdd(
                 "unchanged": sorted(f"{k.file}::{k.fn_name}"
                                     for k in _batch_unchanged),
                 "declined": sorted(f"{k.file}::{k.fn_name}"
-                                   for k in _batch_declined)})
+                                   for k in _batch_declined),
+                # The escalated-unchanged set under its own name. It is a
+                # subset of `unchanged`, and before this key the nine
+                # constructors of `82157-476ddc16` iter 1 sat inside it
+                # unlabelled — a consumer of the event could not tell a
+                # failed rewrite from an unchanged re-fill.
+                "esc_unchanged": sorted(f"{k.file}::{k.fn_name}"
+                                        for k in _batch_esc_unchanged)})
             if _batch.completes_pass:
                 _unchanged_pass = _pass_units_at_close - _pass_landed
                 # The pass's own record FIRST, the current conviction map
@@ -4351,11 +4416,13 @@ def run_phase_c_tdd(
         elif _capped_m:
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: "
-                f"{_capped_n} of {_capped_m} fill replies reasoning-capped")
+                f"{_capped_n} of {_capped_m} fill replies reasoning-capped"
+                + (f" ({_fu_cut} followup replies cut)" if _fu_cut else ""))
         if _capped_m:
             deps.emit("phase_c.batch.reasoning_capped", data={
                 "cluster": cluster.name, "iter": iter_n,
-                "capped": _capped_n, "replies": _capped_m})
+                "capped": _capped_n, "replies": _capped_m,
+                "followups_cut": _fu_cut})
         # The landed record's lifetime is the pass's, exactly like the
         # cursor: a closed pass releases both (the audit above has already
         # reported this one), and the next pass accumulates fresh.

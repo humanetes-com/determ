@@ -1134,7 +1134,8 @@ def _run_layout_attempt(
                      # `#[derive(Debug, Default, Clone, PartialEq, Eq)]`, a
                      # later attempt none, another a private struct).
                      guard_replaced_layout=True),
-        extra_guidance=guidance)
+        extra_guidance=guidance,
+        behaviour_specs=suite.specs)
 
     if not res.all_authored:
         # The cap bounds MODEL attempts. A failure whose reason is splice/

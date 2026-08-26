@@ -10,6 +10,7 @@ any internal call-sequence — synthesis is black-box usage, not implementation.
 """
 from __future__ import annotations
 
+from pipeline_core.domain.behaviour import MAY_REPRESENTATION_NOTE
 from pipeline_core.prompts.sections import tag_block
 
 
@@ -23,8 +24,10 @@ def build_behaviour_synthesis_prompt(
     example_usages: str = "",
 ) -> str:
     """Prompt the model to write self-contained public-API programs exercising
-    `target_units`. Each program prints an observable and/or asserts — the
-    harness runs it against the real lib to capture the golden Then."""
+    `target_units`. Each program PRINTS an observable — the harness runs it
+    against the real lib and records stdout as the golden Then. Asserting a
+    guessed literal is the failure mode: the model has no access to the
+    output, so a panicking probe is discarded and buys nothing."""
     targets = ", ".join(target_units) or "(the crate's public API)"
     surface_block = tag_block("PUBLIC_API_SURFACE", public_surface)
     symbols_block = tag_block("IN_SCOPE_SYMBOLS", symbol_inventory)
@@ -43,10 +46,14 @@ Rules:
   black box. Never guess or transcribe how a function is implemented internally.
 - Each program is self-contained: a `fn main()` (or a `#[test]`) that constructs
   values via the public API, exercises the target unit, and OBSERVES the result
-  (print the Display/Debug, assert an equality, or trigger a documented panic).
+  (print the Display/Debug or the rendered return value).
 - Observe OUTPUTS, never internal call-order. The observable IS the behaviour.
-- Prefer a structured observable (`println!("{{}}", x)` / `assert_eq!`) over raw
-  formatting so the captured value is deterministic.
+- Prefer a structured observable (`println!("{{}}", x)` / `println!("{{:?}}", x)`)
+  over raw formatting so the captured value is deterministic.
+- Each program PRINTS the observable with `println!` — the harness records stdout
+  as the behaviour's Then; a program that asserts a guessed literal and panics is
+  discarded. You do not know the exact output: print it, never assert it.
+- {MAY_REPRESENTATION_NOTE}
 
 Output one or more blocks:
   <BEHAVIOUR unit="UNIT_ID">

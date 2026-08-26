@@ -89,6 +89,24 @@ def _retro_prompt(bound_methods_section: str = "") -> str:
         bound_methods_section=bound_methods_section)
 
 
+def test_prompt_carries_the_pins_the_unit_answers_for():
+    """The live `src/ensure.rs::*impl*::BothDebugfor(A,B)` retrospective
+    prescribed away the 40-byte overflow fallback `test_trailer` pins; a
+    diagnosis that sees the pins is told it may not."""
+    pins = 'is::<&str>, "Condition failed: `(|| 1)() == 2` (1 vs 2)"'
+    p = build_phase_c_retro_prompt(
+        "f", "fn f<E>() where E: Bound", "impl X", "src/x.rs", "c",
+        "let x = 1;", "E0277", 3, "", "",
+        failed_body_cap=2000, fix_err_cap=2000, pinned_observables=pins)
+    assert (f"The tests this unit answers for pin: {pins}. A prescription "
+            "may not remove an observable those pins name.") in p
+    # NEGATIVE CONTROL: no pins, no section — and a blank string is no pins.
+    assert "answers for pin" not in _retro_prompt()
+    assert "answers for pin" not in build_phase_c_retro_prompt(
+        "f", "fn f()", "", "src/x.rs", "c", "", "E0277", 1, "", "",
+        failed_body_cap=10, fix_err_cap=10, pinned_observables="  ")
+
+
 def test_prompt_forbids_signature_edits_body_only():
     # the retro must constrain guidance to BODY-ONLY edits so it
     # never proposes a frozen-signature/bound/where change → no re-submit thrash.

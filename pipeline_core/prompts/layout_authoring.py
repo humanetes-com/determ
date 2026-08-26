@@ -12,10 +12,12 @@ Pure text→text; no IO.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
+from pipeline_core.domain import behaviour as _behaviour
 from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.behaviour_select import behaviour_class_name, class_rank
 from pipeline_core.domain.private_surface import PrivateSurfaceItem, SurfaceItemKind
 
 _PROTOCOL = (
@@ -140,6 +142,34 @@ _AUTOTRAIT_RULE = (
 )
 
 
+# Every authored item opens with the contract it serves, as `///` lines. The
+# sentence is the one channel that survives from t1.5 to the fill prompts:
+# the splice is textual (`scaffold_rewrite.replace_surface_definitions`), so
+# the lines land in the skeleton iff they are in the authored block, the
+# extractor renders them first in the type's `definition`
+# (`render_item_definition`), and `prompts.sections.format_type_for_prompt`
+# prints them above the type line. Rendered ALWAYS, not only when behaviours
+# are listed: the rule is a few lines, and the layout pins alone justify a
+# contract sentence on the type they pin.
+_DOC_CONTRACT_RULE = (
+    "EVERY ITEM OPENS WITH ITS CONTRACT, AS `///` DOC LINES:\n"
+    "Begin each block you author with one or two `///` lines that state, in\n"
+    "your own words, the contract that item serves — which behaviour listed\n"
+    "above (or which layout-pinning test) its representation makes\n"
+    "expressible. Write the sentence from THIS prompt's BEHAVIOURS and\n"
+    "LAYOUT-PINNING sections; never copy any library's documentation. At most\n"
+    "two lines. They stay on the item and are shown again to whoever fills\n"
+    "its bodies, so a wrong contract misleads every later fill.\n"
+    "RIGHT:\n"
+    "/// The TypeId stored for a message error is the message's own type, so a user's downcast::<&str>() finds it.\n"
+    "#[repr(transparent)]\n"
+    "struct Payload<M>(M);\n"
+    "RIGHT (a fn):\n"
+    "/// Yields the wrapped payload's own address, so downcast_ref on it sees the payload's TypeId.\n"
+    "fn payload_ptr(&self) -> *const () { unimplemented!() }\n"
+)
+
+
 # Only emitted when the chunk actually contains a PUB_FIELDS item — a rule
 # about items that are not on the list reads as a contradiction of the one
 # above it ("the PUBLIC items are frozen").
@@ -176,6 +206,137 @@ def _fmt_pins(pins: list[BehaviourSpec]) -> str:
     for p in pins:
         expr = p.then.static_expr if p.then else p.when
         lines.append(f"- {expr}")
+    return "\n".join(lines)
+
+
+# What the model may still decide once the behaviours are stated. Read from
+# the behaviour module when it defines the sentence (so the two channels that
+# quote it — this prompt and the fill-side evidence — cannot drift), with an
+# identical local fallback until it does: the attribute is looked up at call
+# time, not import time, so no import can fail on its absence.
+_MAY_REPRESENTATION_FALLBACK = (
+    "The layout, allocation strategy and private names are yours (MAY); "
+    "every behaviour listed is a MUST.")
+
+
+def _may_note() -> str:
+    return str(getattr(_behaviour, "MAY_REPRESENTATION_NOTE",
+                       _MAY_REPRESENTATION_FALLBACK))
+
+
+# Bounds on the behaviours section. The constructor fill prompt already
+# measures 121 147 chars on the live `stable` tree (2026-08-26); the
+# authoring prompt is smaller, but a suite can hold hundreds of harvested
+# doc-tests and a whole-crate dump would drown the pins and the item list.
+_BEHAVIOUR_MAX = 40
+_BEHAVIOUR_CHAR_CAP = 6000
+
+# Group headers: the class name plus what it decides about a representation,
+# so the model reads the grouping as a design constraint, not a taxonomy.
+_CLASS_GLOSS = {
+    "IDENTITY": "what a TypeId lookup / downcast on the value finds",
+    "TRAIT_OBJECT_IDENTITY": "what the value is as a trait object",
+    "EXACT_FORMAT": "byte-exact Display / Debug / chain text",
+    "BOUNDED_RESOURCE": "allocation and size bounds the value keeps",
+    "OPTION_SEMANTICS": "when an Option / Result is Some / None / Ok / Err",
+    "LAYOUT_PIN": "compile-time layout facts",
+    "CFG_WORLD": "cfg-dependent outcomes",
+    "OTHER": "usage the public API must keep accepting",
+}
+
+
+def _fenced(text: str, indent: str = "  ") -> str:
+    body = "\n".join(f"{indent}{ln}" for ln in text.splitlines())
+    return f"\n{indent}```\n{body}\n{indent}```"
+
+
+def _with_value(prefix: str, value: str) -> str:
+    """`prefix` followed by a behaviour's exact value: quoted on the same line,
+    or — when the value spans lines — a fenced block opening right after the
+    prefix (no trailing blank before the fence)."""
+    return f"{prefix}{_fenced(value)}" if "\n" in value else f'{prefix} "{value}"'
+
+
+def _chain_values(chain: tuple[str, ...]) -> str:
+    if any("\n" in c for c in chain):
+        return "".join(_fenced(c) for c in chain)
+    return " " + ", ".join(f'"{c}"' for c in chain)
+
+
+def _fmt_outcome(then: _behaviour.ObservableOutcome | None) -> str:
+    """The Then of one behaviour, as the observable the representation must
+    produce. Keyed by the kind's NAME so kinds added beside the current ones
+    (`TYPE_IDENTITY`, `ALT_DEBUG_STRING`) render as soon as they exist."""
+    if then is None:
+        return "the snippet's own assertions hold"
+    kind = then.kind.name
+    ok = "true" if then.ok else "false"
+    if kind == "TYPE_IDENTITY":
+        return (f"`is::<{then.value}>()` / `downcast::<{then.value}>()` on "
+                f"that value is {ok} — the TypeId a user downcasts to is the "
+                "payload's type, never a wrapper's")
+    if kind == "DOWNCAST_OK":
+        return f"the downcast is {'Some' if then.ok else 'None'} ({ok})"
+    if kind == "DISPLAY_STRING":
+        return _with_value("to_string() ==", then.value)
+    if kind == "DEBUG_STRING":
+        return _with_value('format!("{:?}") ==', then.value)
+    if kind == "ALT_DEBUG_STRING":
+        return _with_value('format!("{:#?}") ==', then.value)
+    if kind == "CHAIN_SEQUENCE":
+        return "chain() yields, in order:" + _chain_values(then.chain)
+    if kind == "PANIC_MESSAGE":
+        return _with_value("panics with", then.value)
+    if kind == "RETURN_RENDERED":
+        return _with_value("returns", then.value)
+    if kind == "NORMALIZED_STDOUT":
+        return _with_value("prints", then.value)
+    if kind == "STATIC_ASSERTION":
+        return f"`{then.static_expr}` holds"
+    return _with_value(f"{kind.lower()} ==", then.value)
+
+
+def _fmt_behaviour_line(spec: BehaviourSpec) -> str:
+    when = spec.when.strip() or spec.given.strip() or spec.behaviour_id
+    then = _fmt_outcome(spec.then)
+    if "\n" in when:
+        return f"- when:{_fenced(when)}\n  then {then}"
+    return f"- when `{when}` then {then}"
+
+
+def _fmt_behaviours(specs: Sequence[BehaviourSpec]) -> str:
+    """The behaviours section body: one line per behaviour, grouped by class,
+    MUST-classes first, capped by count and by chars with a trailing
+    `(+n more)`, then the MAY sentence. Empty input renders nothing — the
+    caller omits the section, so a prompt built without behaviours is
+    byte-identical to one built before the section existed."""
+    ordered = sorted(specs, key=lambda s: class_rank(behaviour_class_name(s)))
+    lines: list[str] = []
+    used = 0
+    shown = 0
+    current = ""
+    for spec in ordered:
+        if shown >= _BEHAVIOUR_MAX:
+            break
+        group = behaviour_class_name(spec)
+        entry = _fmt_behaviour_line(spec)
+        header = None
+        if group != current:
+            gloss = _CLASS_GLOSS.get(group)
+            header = f"{group} ({gloss}):" if gloss else f"{group}:"
+        cost = len(entry) + 1 + (len(header) + 1 if header else 0)
+        if used + cost > _BEHAVIOUR_CHAR_CAP and shown:
+            break
+        if header:
+            lines.append(header)
+            current = group
+        lines.append(entry)
+        used += cost
+        shown += 1
+    rest = len(ordered) - shown
+    if rest > 0:
+        lines.append(f"(+{rest} more)")
+    lines.append(_may_note())
     return "\n".join(lines)
 
 
@@ -246,6 +407,7 @@ def build_layout_authoring_prompt(
     authored_scheme: str = "",
     item_uids: tuple[str, ...] | None = None,
     item_anchors: Mapping[str, str] | None = None,
+    behaviours: Sequence[BehaviourSpec] = (),
 ) -> str:
     """Assemble the t1.5 prompt for one connected component of the private
     surface (or ONE CHUNK of a large component — `items` is then the chunk and
@@ -255,7 +417,11 @@ def build_layout_authoring_prompt(
     the definitions already authored by earlier chunks of the same pass —
     fixed context the new items must fit. `item_anchors` maps a uid to the
     frozen PUBLIC type that reaches it, the only disambiguation the listing
-    offers (never the item's current definition — see `_fmt_items`)."""
+    offers (never the item's current definition — see `_fmt_items`).
+    `behaviours` are the RUNTIME behaviours the component's representation
+    must make expressible (`domain.behaviour_select.
+    select_component_behaviours`); empty, the section is omitted and the
+    prompt is byte-for-byte what it was before the section existed."""
     uids = item_uids if item_uids is not None else component_uids(items)
     return "\n".join([s for s in [
         f"You are designing the PRIVATE layout of the `{module_name}` crate "
@@ -272,6 +438,10 @@ def build_layout_authoring_prompt(
         "=== LAYOUT-PINNING TESTS (your layout MUST satisfy every one) ===",
         _fmt_pins(layout_pins),
         "",
+        ("=== BEHAVIOURS THIS REPRESENTATION MUST MAKE EXPRESSIBLE (MUST) ==="
+         if behaviours else None),
+        _fmt_behaviours(behaviours) if behaviours else None,
+        "" if behaviours else None,
         "=== IN-SCOPE SYMBOL INVENTORY ===",
         symbol_inventory.strip() or "(std/core only)",
         "",
@@ -287,6 +457,7 @@ def build_layout_authoring_prompt(
         _RULES,
         _DERIVED_TRAIT_RULE,
         _AUTOTRAIT_RULE,
+        _DOC_CONTRACT_RULE,
         (_PUB_FIELDS_RULE
          if any(i.kind is SurfaceItemKind.PUB_FIELDS for i in items) else None),
         "",

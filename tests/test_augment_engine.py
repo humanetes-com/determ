@@ -55,3 +55,26 @@ def test_commit_gate_forwards_all_args() -> None:
                          commit_message="m", detail="d", source_hash="h")
     assert seen["args"] == (Path("/p"), "task3", "done")
     assert seen["kwargs"] == {"commit_message": "m", "detail": "d", "source_hash": "h"}
+
+
+def test_behaviour_methods_unwired_read_nothing_and_pass_nothing() -> None:
+    """A composition root that predates the wiring must not crash the cluster
+    loop: the engine reads 0/0 (the loop then skips the rounds) and passes False."""
+    logs: list[str] = []
+    eng = _engine(log=logs.append)
+    assert eng.behaviour_coverage(Path("/p"), _cluster([]), "m", Path("/p")) == (0, 0)
+    assert eng.behaviour_pass(Path("/p"), _cluster([]), "m", Path("/p"),
+                              project_context="", coverage_strategy="") is False
+    assert any("not wired" in m for m in logs)
+
+
+def test_behaviour_methods_forward_to_the_bound_callables() -> None:
+    seen: list = []
+    eng = _engine(
+        behaviour_coverage=lambda pd, m, md: seen.append(("cov", pd, m, md)) or (2, 5),
+        behaviour_pass=lambda pd, m, md, *, project_context, coverage_strategy:
+            seen.append(("pass", m, project_context, coverage_strategy)) or True)
+    assert eng.behaviour_coverage(Path("/p"), _cluster([]), "m", Path("/p/m")) == (2, 5)
+    assert eng.behaviour_pass(Path("/p"), _cluster([]), "m", Path("/p/m"),
+                              project_context="ctx", coverage_strategy="strat") is True
+    assert seen == [("cov", Path("/p"), "m", Path("/p/m")), ("pass", "m", "ctx", "strat")]

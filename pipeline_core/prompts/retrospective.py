@@ -16,7 +16,22 @@ def build_phase_c_retro_prompt(
     prior_retrospective: str, sibling_bodies: str,
     *, failed_body_cap: int, fix_err_cap: int,
     bound_methods_section: str = "",
+    pinned_observables: str = "",
 ) -> str:
+    """`pinned_observables` is the oracle extraction of the tests the unit
+    answers for (`domain.refill_evidence.pinned_observables_from_tests`).
+    Rendered as a bound on the prescription: the live
+    `src/ensure.rs::*impl*::BothDebugfor(A,B)` record (cluster `stable`,
+    2026-08) was written from a compiled attempt that REGRESSED 13 ensure
+    tests, and its guidance — "Drop the fixed 40-byte SmallBuf and format
+    into an allocating Write … avoids the overflow fallback" — prescribes
+    exactly the observable `test_trailer`/`test_whitespace` pin (the 40-byte
+    overflow and the whitespace fallback). A diagnosis that never sees the
+    pins cannot know that the fallback it removes is the behaviour."""
+    pins_section = (
+        f"\nThe tests this unit answers for pin: {pinned_observables}. "
+        "A prescription may not remove an observable those pins name.\n"
+    ) if pinned_observables.strip() else ""
     prior_section = (
         f"\nPrior retrospective for this fn (you said this LAST time it failed; "
         f"if the same approach still failed, escalate to GENUINELY_HARD):\n"
@@ -40,7 +55,8 @@ def build_phase_c_retro_prompt(
         f"Compile errors from that attempt:\n```\n{error_excerpt[:fix_err_cap]}\n```\n"
         f"{prior_section}"
         f"{siblings_section}"
-        f"{bound_section}\n"
+        f"{bound_section}"
+        f"{pins_section}\n"
         # R1 (debt #28): the skeleton FREEZES the signature. The fixer can ONLY
         # rewrite the body, so guidance that proposes editing a bound / where /
         # generic / return type is un-actionable → identical re-submit → thrash.

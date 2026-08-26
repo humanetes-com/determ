@@ -17,8 +17,12 @@ Names compare on their last `::` segment — libtest prints
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
+from .behaviour import BehaviourSpec
+from .behaviour_pinning import behaviours_pinned_by, weak_assertion_reason
+from .oracle_visibility import names_private_items
 from .rust_scan import attributed_test_fn_names, count_attrs, count_test_attrs
 from .test_report import TestFailure, cap_at_line_boundary, parse_test_output
 
@@ -94,3 +98,67 @@ def weakening_reason(before: str, after: str) -> str | None:
     if count_test_attrs(before) > 0 and count_test_attrs(after) == 0:
         return "dropped every #[test] fn"
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionPolicy:
+    """What the contract gate demands of a block the oracle already admitted.
+
+    `require_pin`: the block must pin at least one of the behaviours it was
+    shown (`behaviour_pinning`); off when the file has nothing left to pin or
+    the behaviour target is 0. `refuse_private`: the block may not name a
+    private fn / field / type of the file (`oracle_visibility`). Both False is
+    the pre-contract admission — a compiling, passing block, whatever it
+    asserts and whatever it reads."""
+
+    require_pin: bool
+    refuse_private: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ContractVerdict:
+    """The contract's reading of one admitted block. `pinned` are the listed
+    behaviour ids the block pins exactly; `private` the non-`pub` items it
+    names; `weak` why its assertions pin no exact value (None when some test
+    asserts one). `refused_reason` applies `policy`: naming a private item
+    outranks a missing pin, because a private read is refused whatever the
+    block asserts."""
+
+    pinned: frozenset[str]
+    private: tuple[str, ...]
+    weak: str | None
+    policy: AdmissionPolicy
+
+    @property
+    def refused_reason(self) -> str | None:
+        if self.policy.refuse_private and self.private:
+            return "names private items: " + ", ".join(self.private)
+        if self.policy.require_pin and not self.pinned:
+            why = self.weak or "its exact assertions match no listed observable"
+            return f"pins no listed behaviour ({why})"
+        return None
+
+    @property
+    def stop_word(self) -> str:
+        """The log word for a second refusal of the same file/pass."""
+        return "NEEDS_INTERNALS" if (self.policy.refuse_private and self.private) else "WEAK_ASSERTION"
+
+
+def judge_block_contract(
+    block_text: str, *,
+    specs: Iterable[BehaviourSpec],
+    file_source: str,
+    policy: AdmissionPolicy,
+) -> ContractVerdict:
+    """Judge an admitted block against the test contract: pins a listed
+    behaviour exactly, stays on the public API. Pure — `specs` are the
+    behaviours the block was SHOWN (the file's unpinned, pinnable ones), and
+    `file_source` is the file the block tests, with its gen_tests declarations
+    stripped."""
+    listed = tuple(specs)
+    return ContractVerdict(
+        pinned=behaviours_pinned_by(block_text, listed),
+        private=names_private_items(block_text, file_source),
+        weak=weak_assertion_reason(block_text),
+        policy=policy,
+    )

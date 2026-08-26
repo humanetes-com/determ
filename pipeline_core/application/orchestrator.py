@@ -19,6 +19,7 @@ from typing import Any, Protocol
 
 from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.application.tasks.task0d import run_task0d
 from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
@@ -26,6 +27,7 @@ from pipeline_core.domain.generation import GenerationRequest
 from pipeline_core.domain.models import BuildCluster, FnLocator
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
+from pipeline_core.domain.workspace_layout import PRE_AUGMENT_TAG_PREFIX, plan_pre_augment_tags
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +165,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "failure log). Keeps task0a/0b/0c outputs. Strip + task1+ "
                             "re-run from scratch with the augmented test suite. "
                             "Single-module workspaces only for now."
+                        ))
+    parser.add_argument("--restart-from-pre-augment", action="store_true",
+                        help=(
+                            "Restore the workspace to the commit BEFORE task0c "
+                            "(tag: task0c-pre-{module}, written right before the cluster "
+                            "augmentation) and forget everything task0c and later wrote: "
+                            "generated tests, augmentation sentinels, strip/task1+ state. "
+                            "Keeps task0a/0b outputs. task0c + strip + task1+ re-run — the "
+                            "lever for a changed test generator or admission rule, which "
+                            "otherwise needs --repo <URL> --clean. The reconstruction dirs "
+                            "are archived beside the workspace first."
                         ))
     parser.add_argument("--audit", action="store_true",
                         help=(
@@ -625,6 +638,7 @@ class RunDeps:
     augment_store: Any
     cluster_augmentor: Any
     strip_bake_deps: Any
+    task0d_deps: Any
     ws_scan_deps: Any
     phase_subcommand_deps: Any
     requirements_phase: Any
@@ -645,6 +659,11 @@ class RunDeps:
     clean_state: Callable[..., None]
     state_path: Callable[..., Path]
     restart_from_augmented: Callable[..., None]
+    restart_from_pre_augment: Callable[..., None]
+    # Pre-augmentation restore point: `git_tag(project_dir, tag)` (a no-op off
+    # git) + `list_git_tags(project_dir, glob)`, so the tag is never re-pointed.
+    git_tag: Callable[..., None]
+    list_git_tags: Callable[..., list[str]]
     source_hash: Callable[..., str]
     log_state_summary: Callable[..., None]
     read: Callable[..., str]
@@ -789,6 +808,8 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         _params.append("--from-spec")
     if plan.restart_from_augmented:
         _params.append("--restart-from-augmented")
+    if plan.restart_from_pre_augment:
+        _params.append("--restart-from-pre-augment")
     deps.log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
     _backend = deps.SETTINGS.backend
@@ -811,6 +832,10 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     if plan.clean and plan.restart_from_augmented:
         deps.log("\n-- ERROR: --clean and --restart-from-augmented are mutually exclusive --")
         sys.exit(2)
+    if plan.restart_from_pre_augment and (plan.clean or plan.restart_from_augmented):
+        deps.log("\n-- ERROR: --restart-from-pre-augment is mutually exclusive with "
+                 "--clean and --restart-from-augmented --")
+        sys.exit(2)
 
     if plan.clean:
         deps.log("\n-- --clean requested: wiping all generated state --")
@@ -825,6 +850,14 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
             deps.restart_from_augmented(root, project_dir)
         except Exception as e:
             deps.log(f"  [ABORT] restart-from-augmented failed: {e}")
+            sys.exit(2)
+
+    if plan.restart_from_pre_augment:
+        deps.log("\n-- --restart-from-pre-augment: restoring workspace to the commit before task0c --")
+        try:
+            deps.restart_from_pre_augment(root, project_dir)
+        except Exception as e:
+            deps.log(f"  [ABORT] restart-from-pre-augment failed: {e}")
             sys.exit(2)
 
     _src_hash = deps.source_hash(project_dir)
@@ -956,6 +989,24 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     if not modules:
         modules = [project_dir.name]
 
+    # Pre-augmentation restore point (`task0c-pre-<module>`), consumed by
+    # --restart-from-pre-augment. On a fresh git-managed run HEAD is the
+    # `pipeline: task0b done` commit here — the last commit before task0c
+    # writes a test — and this is the one place that knows it: the tag must be
+    # written BEFORE the cluster augmentation (and before any phase inserted
+    # ahead of it), never re-pointed on a resume (HEAD is then a post-t0c or
+    # post-fill commit, and `git tag -f` would move the restore point there
+    # silently), and never written into a workspace whose task0c already ran —
+    # the decision refuses and its line names the by-hand command. `git_tag` is
+    # a no-op off git; the tag listing is not, hence the guard.
+    if not _from_spec and deps.run_state.git_managed:
+        _tag_plan = plan_pre_augment_tags(
+            modules, deps.list_git_tags(project_dir, f"{PRE_AUGMENT_TAG_PREFIX}*"),
+            deps.read_state(project_dir)["phases"])
+        for _tag in _tag_plan.to_write:
+            deps.git_tag(project_dir, _tag)
+        deps.log(f"  [task0c-pre] {_tag_plan.summary()}")
+
     locked_modules: set[str] = set()
     if is_multi_module:
         locked_modules = deps.load_locked_modules(project_dir)
@@ -991,12 +1042,37 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                     for m in modules}
     _module_types = {m: (dep_graph.crate_type(m) if is_multi_module else "lib")
                      for m in modules}
+    # TASK 0d — the behaviour specification, harvested from the ORIGINAL
+    # before any generated test exists: test assertions, doc-tests and layout
+    # pins, probes executed on the original with stdout recorded as the Then,
+    # exercises by coverage. t0c admits generated tests by what they PIN in
+    # this suite and t1.5 authors the layout against it; harvesting after
+    # t0c would pull the generated tests' private-layout names into the spec
+    # (24 % of the private surface was frozen that way on anyhow).
+    # Refused once t0c has run for the module: the original bodies are gone
+    # after strip (a doc-fence tier over the shell reads nothing, a probe
+    # cannot compile) and the generated tests would enter the spec. A
+    # workspace restored to its pre-t0c tag has no sentinel and harvests.
+    if not _from_spec:
+        for _t0d_module in modules:
+            if deps.augment_store.is_module_augmented(project_dir, _t0d_module):
+                deps.log(f"  [task0d] '{_t0d_module}' already augmented — the "
+                         "behaviour harvest runs only BEFORE task0c; skipping.")
+                continue
+            run_task0d(deps.task0d_deps, project_dir, _t0d_module, list(_clusters),
+                       _module_dirs[_t0d_module] / "src")
     deps.cluster_augmentor.run(AugmentContext(
         project_dir=project_dir, clusters=_clusters, modules=modules,
         module_coverage=module_coverage, module_dirs=_module_dirs,
         module_types=_module_types, src_hash=_src_hash,
         project_context=project_context, coverage_strategy=coverage_strategy,
         target_pct=deps.COVERAGE_AUGMENTATION_TARGET, tarpaulin_bin=deps.TARPAULIN_BIN,
+        # Percent of the cluster's harvested behaviours the generated tests
+        # must pin (BEHAVIOUR_COVERAGE_TARGET; 0 = off). Read from the typed
+        # settings rather than a new RunDeps field: the value is a knob, not
+        # a collaborator.
+        behaviour_target_pct=float(
+            getattr(deps.SETTINGS, "behaviour_coverage_target", 0.0) or 0.0),
     ))
 
     total_iters = 0

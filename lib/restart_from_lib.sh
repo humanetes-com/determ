@@ -11,7 +11,14 @@
 #   task2/task2a → re-run the loop (per-cluster fill → merge → merged-fill → test → genesis)
 #   task2b/task2c → skip the expensive per-cluster fill (kept in .skeleton-filled/)
 #   task3/task4   → keep all fills done; straight to test/fix
-# task0c/strip and earlier need the original source → use redo.sh (Hard Rule 11).
+#   task0c  → re-run the test augmentation itself and everything after it. The
+#             state keys alone do not bring the original source back: the
+#             caller must ALSO launch with --restart-from-pre-augment, which
+#             resets the workspace to the task0c-pre-<module> tag (restart_from.sh
+#             does; run_hardcrate.sh/run_microcrate.sh do not and refuse it).
+#             task0d and bake are listed for the phase keys those stages will
+#             write; a key that never appears in the state file clears nothing.
+# task0a/task0b and earlier still need redo.sh or a re-clone.
 restart_from_keys() {
     # Accept the monitor's short labels too (t1, t2, t2a, t2b, t2c, t3, t4): a
     # leading `t<digit>` normalises to `task<digit>` so callers (run_hardcrate
@@ -19,6 +26,7 @@ restart_from_keys() {
     local s="$1"
     [[ "$s" =~ ^t[0-9] ]] && s="task${s#t}"
     case "$s" in
+        task0c)        echo "task0c task0d bake strip task1 task2a task2b task2c task2-4" ;;
         task1)         echo "task1 task2a task2b task2c task2-4" ;;
         task2|task2a)  echo "task2a task2b task2c task2-4" ;;
         task2b|task2c) echo "task2b task2c task2-4" ;;

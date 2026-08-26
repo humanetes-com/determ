@@ -29,6 +29,10 @@ from pipeline_core.domain.authored_layout import (
     shared_definitions_text,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.behaviour_select import (
+    behaviour_class_name,
+    select_component_behaviours,
+)
 from pipeline_core.domain.failure_classification import first_diagnostic
 from pipeline_core.domain.layout_chunking import plan_author_chunks
 from pipeline_core.domain.layout_probe import (
@@ -327,6 +331,7 @@ def author_layout(
     deps: AuthorLayoutDeps,
     extra_guidance: str = "",
     registry: Mapping[str, AuthoredItem] | None = None,
+    behaviour_specs: Sequence[BehaviourSpec] = (),
 ) -> AuthorLayoutResult:
     """Author every connected component of `surface`. Each component is
     committed to the skeleton only after the rewritten scaffold compiles; a
@@ -336,7 +341,15 @@ def author_layout(
     public type's size/niche) but reaches here with NO layout pins is a harvest
     gap, not a free layout — authoring it blind produces a wrong-sized public
     type that compiles yet fails the repr tests a whole sweep later. Such a
-    component is left FROZEN (gated), loud in the log, never authored blind."""
+    component is left FROZEN (gated), loud in the log, never authored blind.
+
+    `behaviour_specs` is the cluster's whole behaviour suite — the same list
+    `select_pins` draws the STATIC_ASSERTION pins from. Per component the
+    RUNTIME behaviours its representation must make expressible are
+    selected from it (`select_component_behaviours`) and put in the prompt;
+    the pins alone let a layout that wraps a payload and keys the wrapper's
+    own TypeId pass every gate and fail `Error::msg("x").is::<&str>()`.
+    Empty (the default) leaves the prompt exactly as it was."""
     results: list[ComponentResult] = []
     oracle = _oracle_sources(deps)
     frozen_tests = _frozen_test_sources(deps) or oracle
@@ -357,6 +370,13 @@ def author_layout(
             continue
         anchors = _public_anchors(surface, comp)
         uids = component_uids(comp)
+        behaviours = select_component_behaviours(
+            behaviour_specs, component_names=names,
+            public_types=_pinned_public_types(surface, comp))
+        if behaviour_specs:
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
+                     f"{len(behaviours)} behaviour(s) in the authoring "
+                     f"prompt ({_behaviour_breakdown(behaviours)})")
         # snapshot the pristine skeleton files this component touches, so a
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
@@ -441,6 +461,7 @@ def author_layout(
         def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
                     chunk_uids: tuple[str, ...], scheme: str, hint: str,
                     *, _pins: list[BehaviourSpec] = pins,
+                    _behaviours: list[BehaviourSpec] = behaviours,
                     _anchors: dict[str, str] = anchors,
                     _shared: str = shared, _paths: str = paths_note,
                     _derives: str = derives_note,
@@ -452,7 +473,8 @@ def author_layout(
                 extra_guidance=(extra_guidance + _shared + _paths + _derives
                                 + _members),
                 authored_scheme=scheme,
-                item_uids=chunk_uids, item_anchors=_anchors) + hint
+                item_uids=chunk_uids, item_anchors=_anchors,
+                behaviours=_behaviours) + hint
         committed = False
         reason = "no attempt"
         committed_defs: tuple[tuple[str, str], ...] = ()
@@ -716,6 +738,27 @@ def _public_anchors(
     return out
 
 
+def _pinned_public_types(
+    surface: PrivateSurface, comp: tuple[PrivateSurfaceItem, ...],
+) -> tuple[str, ...]:
+    """The frozen PUBLIC types whose layout reaches this component — the
+    types the layout probe pins and the behaviour selection matches on, so
+    both read one definition of "reaches"."""
+    return tuple(sorted(
+        name for name in surface.public_direct_refs
+        if surface.reachable_from_public(name) & {i.name for i in comp}))
+
+
+def _behaviour_breakdown(behaviours: Sequence[BehaviourSpec]) -> str:
+    """`identity 1, exact_format 2` — per-class counts for the log line, in
+    prompt order (the selection is already MUST-classes first)."""
+    counts: dict[str, int] = {}
+    for b in behaviours:
+        k = behaviour_class_name(b).lower()
+        counts[k] = counts.get(k, 0) + 1
+    return ", ".join(f"{k} {n}" for k, n in counts.items()) or "none"
+
+
 def _calibrated_pin_probe(
     surface: PrivateSurface,
     comp: tuple[PrivateSurfaceItem, ...],
@@ -735,10 +778,8 @@ def _calibrated_pin_probe(
     """
     if deps.write_pin_probe is None or not pins:
         return LayoutProbe()
-    pinned_types = tuple(sorted(
-        name for name in surface.public_direct_refs
-        if surface.reachable_from_public(name) & {i.name for i in comp}))
-    probe = build_layout_probe(pins, pinned_types=pinned_types)
+    probe = build_layout_probe(
+        pins, pinned_types=_pinned_public_types(surface, comp))
     names = tuple(i.name for i in comp)
     if probe.skipped:
         deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "

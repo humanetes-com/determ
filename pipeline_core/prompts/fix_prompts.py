@@ -167,6 +167,15 @@ class BlockFillPlan:
     # run `82157-476ddc16` listed the pins on this line and still wrapped
     # (a call-form list is not the TypeId statement).
     pins: str = ""
+    # Whether an ESCALATED member of this block constructs a crate tuple
+    # struct inside another call's argument list
+    # (`domain.refill_evidence.wraps_crate_tuple_struct`) — the gate on the
+    # TypeId sentence. The pins say what the TESTS observe; this says what
+    # the BODY does, and the sentence is a claim about the body. The same
+    # run's ensure prompt (`logs/prompts/97e9b596….txt` line 6) rendered it
+    # on `impl<A, B> BothDebug for (A, B)` -> `__dispatch_ensure`, which
+    # builds a `SmallBuf` and wraps nothing.
+    wraps_pinned_type: bool = False
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -199,7 +208,8 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "its verdict — the defect is not in them, it is in what "
                      "this fn constructs or returns"
                      + (f" — the attributed tests pin: {p.pins}"
-                        + typeid_pin_consequence(p.pins)
+                        + typeid_pin_consequence(
+                            p.pins, wraps=p.wraps_pinned_type)
                         if p.pins else "")
                      + "): " + ", ".join(escalated))
     if installable:

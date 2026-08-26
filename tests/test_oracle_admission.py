@@ -152,3 +152,113 @@ def test_fix_heads_render_and_teach_the_honest_correction() -> None:
     assert "{" not in rendered.replace("{ /* … */ }", "")
     assert "does not compile" in _COMPILE_FIX_HEAD.format(
         rel_path="src/x.rs", directive="", history="", err="E0308")
+
+
+# --- the test contract, at the microcrate bar ----------------------------------
+#
+# `judge_block` admits any block whose tests pass on the on-disk implementation.
+# On the 2026-08 anyhow trees that admitted `contains` fragments of `{:#?}`
+# renderings the crate's own tests pin whole, and tests reading private fields
+# (24 % of the private surface). The contract gate below is judged on the L3
+# fixture crate: `lib.rs` displays `MathError::DivByZero` as "division by zero";
+# `counter.rs` keeps `Counter.value` private.
+
+from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSubKind, ObservableOutcome
+from pipeline_core.domain.oracle_admission import AdmissionPolicy, judge_block_contract
+
+_MICROCRATE = Path(__file__).parent / "fixtures" / "microcrate" / "src"
+_STRICT = AdmissionPolicy(require_pin=True, refuse_private=True)
+_LEGACY = AdmissionPolicy(require_pin=False, refuse_private=False)
+
+
+def _lib_specs() -> list[BehaviourSpec]:
+    return [BehaviourSpec(
+        "display::div_by_zero", "", "MathError::DivByZero.to_string()",
+        then=ObservableOutcome.display("division by zero"), subkind=BehaviourSubKind.OUTCOME)]
+
+
+def _identity_spec() -> SimpleNamespace:
+    then = SimpleNamespace(kind=SimpleNamespace(name="TYPE_IDENTITY"), value="MathError", ok=True)
+    return SimpleNamespace(behaviour_id="identity::math_error", given="", when="", then=then,
+                           exercises=frozenset())
+
+
+CONTAINS_ONLY = """#[cfg(test)]
+mod gen_tests_1 {
+    use super::*;
+
+    #[test]
+    fn test_error_impl_debug_fmt() {
+        let err = checked_div(1, 0).unwrap_err();
+        assert!(format!("{:#?}", err).contains("DivByZero"));
+    }
+}
+"""
+
+EXACT = """#[cfg(test)]
+mod gen_tests_1 {
+    use super::*;
+
+    #[test]
+    fn test_construct_from_display() {
+        let err = checked_div(1, 0).unwrap_err();
+        assert_eq!(err.to_string(), "division by zero");
+    }
+}
+"""
+
+
+def test_contains_only_block_is_refused_as_weak() -> None:
+    lib = (_MICROCRATE / "lib.rs").read_text(encoding="utf-8")
+    v = judge_block_contract(CONTAINS_ONLY, specs=_lib_specs(), file_source=lib, policy=_STRICT)
+    assert v.pinned == frozenset() and v.private == ()
+    assert v.refused_reason is not None and v.refused_reason.startswith("pins no listed behaviour")
+    assert "contains(" in v.refused_reason
+    assert v.stop_word == "WEAK_ASSERTION"
+
+
+def test_exact_equality_block_is_admitted_and_pins() -> None:
+    lib = (_MICROCRATE / "lib.rs").read_text(encoding="utf-8")
+    v = judge_block_contract(EXACT, specs=_lib_specs(), file_source=lib, policy=_STRICT)
+    assert v.refused_reason is None
+    assert v.pinned == {"display::div_by_zero"} and v.weak is None
+
+
+def test_identity_pin_is_admitted() -> None:
+    lib = (_MICROCRATE / "lib.rs").read_text(encoding="utf-8")
+    block = ('#[test]\nfn test_downcast() {\n    let e: Box<dyn std::error::Error> = '
+             'Box::new(checked_div(1, 0).unwrap_err());\n'
+             '    assert!(e.downcast_ref::<MathError>().is_some());\n}\n')
+    v = judge_block_contract(block, specs=[_identity_spec()], file_source=lib, policy=_STRICT)
+    assert v.refused_reason is None and v.pinned == {"identity::math_error"}
+
+
+def test_private_field_read_is_refused_with_the_path_named() -> None:
+    counter = (_MICROCRATE / "counter.rs").read_text(encoding="utf-8")
+    block = ('#[test]\nfn test_value() {\n    let c = Counter::new(4);\n'
+             '    assert_eq!(c.value, 4);\n}\n')
+    v = judge_block_contract(block, specs=[], file_source=counter,
+                             policy=AdmissionPolicy(require_pin=False, refuse_private=True))
+    assert v.private == ("Counter.value",)
+    assert v.refused_reason == "names private items: Counter.value"
+    assert v.stop_word == "NEEDS_INTERNALS"
+
+
+def test_private_outranks_a_missing_pin() -> None:
+    counter = (_MICROCRATE / "counter.rs").read_text(encoding="utf-8")
+    block = '#[test]\nfn t() { let c = Counter::new(4); assert!(c.value > 0); }\n'
+    v = judge_block_contract(block, specs=_lib_specs(), file_source=counter, policy=_STRICT)
+    assert v.refused_reason is not None and v.refused_reason.startswith("names private items")
+
+
+def test_negative_control_legacy_policy_admits_the_contains_block() -> None:
+    """Today's admission: no pin required, private reads allowed. The same
+    block the strict policy refuses passes — so the refusal is the contract's
+    doing, not the block's."""
+    lib = (_MICROCRATE / "lib.rs").read_text(encoding="utf-8")
+    v = judge_block_contract(CONTAINS_ONLY, specs=_lib_specs(), file_source=lib, policy=_LEGACY)
+    assert v.refused_reason is None
+    assert v.weak is not None                     # the weakness is still measured
+    counter = (_MICROCRATE / "counter.rs").read_text(encoding="utf-8")
+    block = '#[test]\nfn t() { let c = Counter::new(4); assert_eq!(c.value, 4); }\n'
+    assert judge_block_contract(block, specs=[], file_source=counter, policy=_LEGACY).refused_reason is None

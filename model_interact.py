@@ -90,12 +90,12 @@ def _get_controller() -> LLMController:
 
 def ask(prompt: str, system: str | None = None, model: str | None = None,
         max_tokens: int = MAX_TOKENS, think: bool | None = None,
-        temperature: float | None = None) -> str:
+        temperature: float | None = None, followup_think: bool = False) -> str:
     if model is None:
         model = MODEL
     return _get_controller().run(
         _get_backend(), system=system, prompt=prompt, model=model,
-        max_tokens=max_tokens, want_think=think, temperature=temperature,
+        max_tokens=max_tokens, want_think=think, temperature=temperature, followup_think=followup_think,
     )
 
 

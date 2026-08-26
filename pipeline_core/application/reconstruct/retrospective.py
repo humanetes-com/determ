@@ -66,6 +66,7 @@ def diagnose_phase_c(
     deps: PhaseCRetroDeps,
     prior_retrospective: str = "", sibling_bodies: str = "",
     bound_methods_section: str = "",
+    pinned_observables: str = "",
 ) -> dict[str, str]:
     if not last_body and not error_excerpt:
         return {"category": "", "guidance": "", "signal": "no_data"}
@@ -121,6 +122,7 @@ def diagnose_phase_c(
         error_excerpt, fix_attempts, prior_retrospective, sibling_bodies,
         failed_body_cap=deps.failed_body_cap, fix_err_cap=deps.fix_err_cap,
         bound_methods_section=bound_methods_section,
+        pinned_observables=pinned_observables,
     )
     # Retro runs think=True with a bounded output budget (think=False
     # returns empty content on the vLLM reasoning-parser endpoint). One retry on

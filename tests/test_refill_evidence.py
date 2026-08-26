@@ -279,14 +279,21 @@ def test_pinned_observables_extract_the_2932_defect_pins() -> None:
         "downcast::<&str>, downcast::<String>, is::<&str>, "
         'assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))'
     )
-    typed = render_refill_evidence([ev], pins=live_pins)
+    typed = render_refill_evidence([ev], pins=live_pins, wraps=True)
     assert "stores a different TypeId" in typed
-    assert typeid_pin_consequence(live_pins)
+    assert typeid_pin_consequence(live_pins, wraps=True)
     alt_only = 'assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))'
     assert "stores a different TypeId" not in render_refill_evidence(
-        [ev], pins=alt_only)
-    assert typeid_pin_consequence(alt_only) == ""
-    assert typeid_pin_consequence("") == ""
+        [ev], pins=alt_only, wraps=True)
+    assert typeid_pin_consequence(alt_only, wraps=True) == ""
+    assert typeid_pin_consequence("", wraps=True) == ""
+    # The gate: the same TypeId pins on a body that wraps nothing (the
+    # `__dispatch_ensure` block of the same run's ensure prompt) carry no
+    # sentence, on the evidence block as on the plan line.
+    assert typeid_pin_consequence(live_pins, wraps=False) == ""
+    untyped = render_refill_evidence([ev], pins=live_pins)
+    assert "the attributed tests pin: downcast::<&str>" in untyped
+    assert "stores a different TypeId" not in untyped
 
 
 def test_pinned_observables_edges_the_prefix_and_bracket_fixes_named() -> None:
@@ -320,3 +327,141 @@ def test_escalated_grade_is_stated_when_the_frontier_does_not_convict() -> None:
         generic, [generic], _frontier(direct=False),
         escalated=frozenset({key}))
     assert ev.attribution is Attribution.ESCALATED
+
+
+# --- helper-mediated exact strings: the ensure pins -------------------------
+#
+# Computed on the live authored tests (tmp/anyhow/tests/test_ensure.rs,
+# 2026-08-26) BEFORE the helper shape existed:
+#   python -c 'from pathlib import Path; from pipeline_core.domain.refill_evidence import pinned_observables, test_item_source;
+#     src = Path("tmp/anyhow/tests/test_ensure.rs").read_text();
+#     print(repr(pinned_observables(test_item_source(src, "test_trailer"))))
+#     print(repr(pinned_observables(test_item_source(src, "test_whitespace"))))'
+# → 'is::<&str>, is::<<str as ToOwned>::Owned>'
+# → 'format!("{:#?}", …)'
+# Every `ensure!` message those tests pin goes through
+# `assert_err(test, "Condition failed: …")` (test_ensure.rs:78, signature
+# `(closure, &'static str)`), and no pin named one — so the `BothDebug`
+# retrospective's "drop the 40-byte buffer … avoid the overflow fallback"
+# removed an observable the pins never stated. The fixtures below are the
+# live items verbatim: lines 77-90 (the helper), 455-492 (`test_trailer`,
+# eight `assert_err` calls) and 494-510 (`test_whitespace`).
+_LIVE_ENSURE_HELPER = '#[track_caller]\nfn assert_err<T: Debug>(result: impl FnOnce() -> Result<T>, expected: &\'static str) {\n    let actual = result().unwrap_err().to_string();\n\n    // In general different rustc versions will format the interpolated lhs and\n    // rhs $:expr fragment with insignificant differences in whitespace or\n    // punctuation, so we check the message in full against nightly and do just\n    // a cursory test on older toolchains.\n    if rustversion::cfg!(nightly) && !cfg!(miri) {\n        assert_eq!(actual, expected);\n    } else {\n        assert_eq!(actual.contains(" vs "), expected.contains(" vs "));\n    }\n}\n'
+_LIVE_ENSURE_TRAILER = '#[test]\nfn test_trailer() {\n    let test = || Ok(ensure!((|| 1)() == 2));\n    assert_err(test, "Condition failed: `(|| 1)() == 2` (1 vs 2)");\n\n    let test = || Ok(ensure!(b"hmm"[1] == b\'c\'));\n    assert_err(test, "Condition failed: `b\\"hmm\\"[1] == b\'c\'` (109 vs 99)");\n\n    let test = || Ok(ensure!(PhantomData::<u8> {} != PhantomData));\n    assert_err(\n        test,\n        "Condition failed: `PhantomData::<u8> {} != PhantomData` (PhantomData<u8> vs PhantomData<u8>)",\n    );\n\n    let result = Ok::<_, Error>(1);\n    let test = || Ok(ensure!(result? == 2));\n    assert_err(test, "Condition failed: `result? == 2` (1 vs 2)");\n\n    let test = || Ok(ensure!((2, 3).1 == 2));\n    assert_err(test, "Condition failed: `(2, 3).1 == 2` (3 vs 2)");\n\n    #[rustfmt::skip]\n    let test = || Ok(ensure!((2, (3, 4)). 1.1 == 2));\n    assert_err(test, "Condition failed: `(2, (3, 4)).1.1 == 2` (4 vs 2)");\n\n    let err = anyhow!("");\n    let test = || Ok(ensure!(err.is::<&str>() == false));\n    assert_err(\n        test,\n        "Condition failed: `err.is::<&str>() == false` (true vs false)",\n    );\n\n    let test = || Ok(ensure!(err.is::<<str as ToOwned>::Owned>() == true));\n    assert_err(\n        test,\n        "Condition failed: `err.is::<<str as ToOwned>::Owned>() == true` (false vs true)",\n    );\n}\n'
+_LIVE_ENSURE_WHITESPACE = '#[test]\nfn test_whitespace() {\n    #[derive(Debug)]\n    pub struct Point {\n        #[allow(dead_code)]\n        pub x: i32,\n        #[allow(dead_code)]\n        pub y: i32,\n    }\n\n    let point = Point { x: 0, y: 0 };\n    let test = || Ok(ensure!("" == format!("{:#?}", point)));\n    assert_err(\n        test,\n        "Condition failed: `\\"\\" == format!(\\"{:#?}\\", point)`",\n    );\n}\n'
+_LIVE_ENSURE_FILE = (_LIVE_ENSURE_HELPER + "\n" + _LIVE_ENSURE_TRAILER + "\n"
+                     + _LIVE_ENSURE_WHITESPACE)
+_PRE_CHANGE_TRAILER_PINS = "is::<&str>, is::<<str as ToOwned>::Owned>"
+_PRE_CHANGE_WHITESPACE_PINS = 'format!("{:#?}", …)'
+
+
+def test_helper_asserted_literals_are_pinned_on_the_live_ensure_items() -> None:
+    """The plan's fixture: `test_trailer` keeps its two `is::<T>` pins and
+    gains exactly its eight `Condition failed:` literals; `test_whitespace`
+    keeps `format!("{:#?}", …)` and gains its one; `test_downcast` items,
+    whose literal is the FIRST `assert_eq!` argument, gain nothing."""
+    from pipeline_core.domain.refill_evidence import (
+        assertion_helper_names,
+        helper_asserted_literals,
+        pinned_observables,
+        pinned_observables_from_tests,
+        test_item_source,
+    )
+    assert assertion_helper_names(_LIVE_ENSURE_FILE) == {"assert_err"}
+    item = test_item_source(_LIVE_ENSURE_FILE, "test_trailer")
+    literals = helper_asserted_literals(item, frozenset())
+    assert len(literals) == 8
+    assert literals[0] == '"Condition failed: `(|| 1)() == 2` (1 vs 2)"'
+    assert literals[-1] == (
+        '"Condition failed: `err.is::<<str as ToOwned>::Owned>() == true` '
+        '(false vs true)"')
+    # Escapes survive as written — this is the string the test compares.
+    assert '"Condition failed: `b\\"hmm\\"[1] == b\'c\'` (109 vs 99)"' in literals
+    pins = pinned_observables_from_tests(("test_trailer",), (_LIVE_ENSURE_FILE,))
+    # ADDS: the pre-change output is the prefix, unchanged and in order…
+    assert pins.startswith(_PRE_CHANGE_TRAILER_PINS + ", ")
+    # …and what follows is exactly the eight literals.
+    assert pins == _PRE_CHANGE_TRAILER_PINS + ", " + ", ".join(literals)
+    assert pins.count("Condition failed:") == 8
+    ws = pinned_observables_from_tests(("test_whitespace",), (_LIVE_ENSURE_FILE,))
+    assert ws == (_PRE_CHANGE_WHITESPACE_PINS + ', '
+                  '"Condition failed: `\\"\\" == format!(\\"{:#?}\\", point)`"')
+    # NEGATIVE CONTROL (the `assert` prefix half): `assert_err` starts with
+    # `assert`, so the item alone already yields the literals; a helper
+    # named `check_err` does NOT, and is recovered only through the file's
+    # helper set (`assertion_helper_names` sees its `assert_eq!`).
+    renamed = _LIVE_ENSURE_FILE.replace("assert_err", "check_err")
+    renamed_item = test_item_source(renamed, "test_trailer")
+    assert pinned_observables(renamed_item) == _PRE_CHANGE_TRAILER_PINS
+    assert helper_asserted_literals(renamed_item, frozenset()) == []
+    assert assertion_helper_names(renamed) == {"check_err"}
+    assert pinned_observables_from_tests(("test_trailer",), (renamed,)) == pins
+    # NEGATIVE CONTROL (unchanged pins): the downcast items' `assert_eq!`
+    # carries its literal FIRST — the shape is last-argument only.
+    assert pinned_observables_from_tests(("test_downcast",), (_DOWNCAST_FN,)) == (
+        "downcast::<&str>, downcast::<String>, downcast::<io::Error>")
+    assert pinned_observables_from_tests(("test_downcast",), (_DOWNCAST_FN,)) == (
+        pinned_observables(test_item_source(_DOWNCAST_FN, "test_downcast")))
+    # A test fn is never a helper, and a call with no literal last arg pins
+    # nothing.
+    assert "test_trailer" not in assertion_helper_names(_LIVE_ENSURE_FILE)
+    assert helper_asserted_literals("assert_eq!(a, b); check(x, 4);",
+                                    frozenset({"check"})) == []
+
+
+def test_pins_are_per_block_and_a_block_with_no_attributed_test_has_none() -> None:
+    """Run `82157-476ddc16`'s ensure prompt handed one file-wide pin list
+    to every block; per block, a block with no leaf pins nothing, and the
+    whole-file fallback is only for a leaf that could not be sliced."""
+    from pipeline_core.domain.refill_evidence import pinned_observables_from_tests
+    assert pinned_observables_from_tests((), (_LIVE_ENSURE_FILE, _DOWNCAST_FN)) == ""
+    unsliceable = "fn helper() { err.is::<u8>(); }"
+    assert pinned_observables_from_tests(("nope",), (unsliceable,)) == "is::<u8>"
+
+
+# --- the wrap reading that gates the TypeId sentence -------------------------
+#
+# Live bodies from tmp/anyhow/.skeleton-filled/stable/src (2026-08-26):
+# `src/error.rs::construct_from_adhoc` (the positive of run `82157-476ddc16`)
+# and `src/ensure.rs::__dispatch_ensure` (the negative of the same run's
+# ensure prompt), verbatim.
+_LIVE_ADHOC_BODY = '\n        Self::construct_from_std(crate::wrapper::MessageError(message), backtrace)\n    '
+_LIVE_DISPATCH_ENSURE_BODY = '\n        struct SmallBuf {\n            buf: [u8; 128],\n            pos: usize,\n        }\n        impl core::fmt::Write for SmallBuf {\n            fn write_str(&mut self, s: &str) -> core::fmt::Result {\n                let remaining = self.buf.len() - self.pos;\n                if s.len() > remaining {\n                    return Err(core::fmt::Error);\n                }\n                self.buf[self.pos..self.pos + s.len()].copy_from_slice(s.as_bytes());\n                self.pos += s.len();\n                Ok(())\n            }\n        }\n\n        let mut sb = SmallBuf { buf: [0; 128], pos: 0 };\n        let ok = core::fmt::write(&mut sb, format_args!("{} ({:?} vs {:?})", msg, self.0, self.1)).is_ok();\n\n        if ok {\n            let slice = &sb.buf[..sb.pos];\n            let s = core::str::from_utf8(slice).unwrap_or(msg);\n            let owned = alloc::string::String::from(s);\n            crate::Error::msg(owned)\n        } else {\n            crate::Error::msg(msg)\n        }\n    '
+
+
+def test_wrap_reading_on_the_live_constructor_and_ensure_bodies() -> None:
+    from pipeline_core.domain.models import FieldRecord, TypeRecord
+    from pipeline_core.domain.refill_evidence import (
+        tuple_struct_names,
+        wraps_crate_tuple_struct,
+    )
+    # The extractor names unnamed fields "0", "1", …: only those structs.
+    names = tuple_struct_names([
+        TypeRecord(kind="struct", name="MessageError", generics="<M>",
+                   fields=(FieldRecord(name="0", ty="M", is_pub=True),)),
+        TypeRecord(kind="struct", name="BoxedError",
+                   fields=(FieldRecord(name="0", ty="Box<dyn StdError>"),)),
+        TypeRecord(kind="struct", name="Error",
+                   fields=(FieldRecord(name="inner", ty="Own<ErrorImpl>"),)),
+        TypeRecord(kind="struct", name="Adhoc"),
+        TypeRecord(kind="enum", name="Kind", variants=("A",)),
+    ])
+    assert names == {"MessageError", "BoxedError"}
+    live = {"MessageError", "DisplayError", "BoxedError", "Quoted"}
+    assert wraps_crate_tuple_struct(_LIVE_ADHOC_BODY, live)
+    assert not wraps_crate_tuple_struct(_LIVE_DISPATCH_ENSURE_BODY, live)
+    # `crate::Error::msg(owned)` is a path call, not `Error(`; an
+    # `Err(core::fmt::Error)` is a unit struct in an argument, not a
+    # construction — the negative is not an accident of the name set.
+    assert not wraps_crate_tuple_struct(_LIVE_DISPATCH_ENSURE_BODY, live | {"Error"})
+    # CONTROL: the CORRECT constructor shape — the wrapper bound to a local
+    # and handed to `construct` with its own table — is not a wrap; nor is
+    # a tuple or a `let` binding that never enters a call.
+    assert not wraps_crate_tuple_struct(
+        "let error = BoxedError(error);\n        let vtable = &ErrorVTable { "
+        "object_drop: object_drop::<BoxedError> };\n        unsafe { "
+        "Error::construct(error, vtable, backtrace) }", live)
+    assert not wraps_crate_tuple_struct("let pair = (MessageError(m), 1);", live)
+    assert wraps_crate_tuple_struct(
+        "Self::construct_from_std(DisplayError(message), backtrace)", live)
+    assert not wraps_crate_tuple_struct(_LIVE_ADHOC_BODY, frozenset())

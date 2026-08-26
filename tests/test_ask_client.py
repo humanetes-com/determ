@@ -141,3 +141,29 @@ def test_trim_events_forwarded_to_guard():
     c, _, guards = _client(lambda *a, **k: "ok", context_chars=2_000)
     c.ask("z" * 10_000)
     assert any(g.startswith("context-guard/") for g in guards)
+
+
+# --- followup_think threads through to the transport only when set ---
+
+def test_followup_think_forwarded_only_when_true():
+    # The default call must stay byte-identical: `ask_raw` is late-bound and a
+    # fake standing in for it may not take the keyword at all.
+    seen = {}
+    def raw(prompt, system=None, **k):
+        seen.clear()
+        seen.update(k)
+        return "ok"
+    c, _, _ = _client(raw)
+    c.ask("hi")
+    assert "followup_think" not in seen
+    c.ask("hi", followup_think=False)
+    assert "followup_think" not in seen
+    c.ask("hi", followup_think=True)
+    assert seen.get("followup_think") is True
+
+
+def test_followup_think_false_keeps_a_keywordless_fake_working():
+    def raw(prompt, system=None, model=None, max_tokens=None, think=None, temperature=None):
+        return "ok"
+    c, _, _ = _client(raw)
+    assert c.ask("hi", followup_think=False) == "ok"

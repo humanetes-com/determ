@@ -115,6 +115,14 @@ class Settings:
     intermediate_char_limit: int
     task_models: TaskModels
     fix_caps: FixLoopCaps
+    # Behaviour specification knobs (the harvest before task0c and the
+    # admission contract in task0c). Percent of the cluster's harvested
+    # behaviours the generated tests must pin before task0c stops; 0 turns the
+    # pin requirement and the extra behaviour passes off. Probe cap = admitted
+    # public-API programs per cluster, each one model batch plus one cargo run.
+    behaviour_coverage_target: float = 0.0
+    task0d_probe_max: int = 12
+    task0d_exercises: bool = True
 
     @classmethod
     def from_env(cls, model: str = "") -> Settings:
@@ -148,4 +156,7 @@ class Settings:
             intermediate_char_limit=mcc // 2,
             task_models=TaskModels.from_env(model),
             fix_caps=FixLoopCaps.from_env(single_call),
+            behaviour_coverage_target=float(os.getenv("BEHAVIOUR_COVERAGE_TARGET", "0")),
+            task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
+            task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",
         )

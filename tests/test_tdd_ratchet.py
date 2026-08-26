@@ -255,6 +255,11 @@ def _ledger_writer():
                       signatures=current_signatures, bodies=current_bodies)
 
 
+def _oracle_fp_adapter():
+    from pipeline_core.adapters.oracle_fingerprint import cluster_oracle_fp
+    return cluster_oracle_fp
+
+
 def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  frontier=None, fills_per_iter=0, graceful_stop=None, fill=None,
                  best_mark=None, checkpoints=None, resets=None, stubs=None,
@@ -348,6 +353,11 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
             "check_tree_builds": (
                 None if ledger.get("check") is None
                 else (lambda pd, cl: ledger["check"]())),
+            # The REAL oracle adapter over the test's tmp tree, for the same
+            # reason `_ledger_writer` wires the real splice: what the wiring
+            # tests are about is the driver reaching the adapters. A test
+            # moves the oracle by writing a gen_tests sibling into `src/`.
+            "oracle_fp": _oracle_fp_adapter(),
         }),
         **({} if floor is None else {
             "load_tdd_floor": lambda *a, **k: floor.get("row"),

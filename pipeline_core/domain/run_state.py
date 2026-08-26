@@ -41,6 +41,7 @@ class RunPlan:
     augment_tests: bool = False
     from_spec: bool = False
     restart_from_augmented: bool = False
+    restart_from_pre_augment: bool = False
     audit: bool = False
     phase_a_only: bool = False
     phase_b_only: bool = False

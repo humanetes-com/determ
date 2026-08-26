@@ -17,6 +17,7 @@ PHASES: list[tuple[str, str]] = [
     ("task0a-context", "Project context: writes project_context.md — architecture notes injected into prompts."),
     ("task0b", "Discovery: writes coverage_strategy.md — how to build, test and measure this crate."),
     ("cfg-scan", "Cluster identification (static, no LLM): cfg/feature/toolchain directives → build clusters (stable, nightly, …); each downstream phase is scoped per cluster."),
+    ("task0d", "Behaviour harvest: per cluster, before t0c — test assertions, doc-tests and layout pins from the ORIGINAL, probes run on the original with stdout recorded as the Then, exercises by coverage; the spec t0c and t1.5 read."),
     ("task0c", "Coverage augmentation: per cluster, LLM adds unit tests (gen_tests) until coverage reaches COVERAGE_AUGMENTATION_TARGET; every original + added test is preserved as the reconstruction oracle."),
     ("bake", "Pre-strip artifact capture (the ONLY read of original bodies): skeleton with unimplemented!() stubs, API surface, type/pub-item manifests, cluster manifest, leaf-first fn order."),
     ("strip", "Deletes the original implementation. From here on: tests + baked artifacts only (Hard Rule 11)."),

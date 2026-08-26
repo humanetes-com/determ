@@ -98,6 +98,21 @@ class AugmentEngine(Protocol):
         self, project_dir: Path, module_name: str, module_dir: Path, crate_type: str,
         *, existing_test_files: set[str], project_context: str, coverage_strategy: str,
     ) -> tuple[float, int, bool, str]: ...
+    def behaviour_coverage(
+        self, project_dir: Path, cluster: BuildCluster, module_name: str, module_dir: Path,
+    ) -> tuple[int, int]:
+        """`(pinned, total)` over the cluster's harvested behaviour suite: how
+        many of its pinnable behaviours some `*.gen_tests_*.rs` of the module
+        asserts exactly. `(0, 0)` when the suite lists nothing pinnable."""
+        ...
+    def behaviour_pass(
+        self, project_dir: Path, cluster: BuildCluster, module_name: str, module_dir: Path,
+        *, project_context: str, coverage_strategy: str,
+    ) -> bool:
+        """One bounded generation pass over the module's files that still have
+        unpinned behaviours, each block held to the pin contract; True when at
+        least one block was admitted. Costs one model call per such file."""
+        ...
 
 
 @runtime_checkable

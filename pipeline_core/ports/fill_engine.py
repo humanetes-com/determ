@@ -199,6 +199,7 @@ class Retros(Protocol):
         cluster_name: str, last_body: str, error_excerpt: str,
         fix_attempts: int, prior_retrospective: str = ...,
         bound_methods_section: str = ...,
+        pinned_observables: str = ...,
     ) -> dict[str, Any]: ...
     def append_note(
         self, fr_path: Path, note: str,

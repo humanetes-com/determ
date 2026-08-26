@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
-from pipeline_core.domain.behaviour import BehaviourSuite
+from pipeline_core.domain.behaviour import BehaviourSuite, merge_suites
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.inline_tests import find_inline_test_mods
 from pipeline_core.domain.models import (
@@ -40,6 +40,7 @@ from pipeline_core.domain.private_surface import (
     classify_private_surface,
 )
 from pipeline_core.domain.rust_name_scope import ModuleScopes
+from pipeline_core.domain.test_assertions import GEN_TESTS_MARKER
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 
@@ -74,14 +75,26 @@ class BakeArtifactsDeps:
     # because the API-surface capture is elided to match — the two are one
     # decision, taken once per workspace.
     author_private_fields: bool = False
+    # The suite an EARLIER phase (t0d) already wrote for the cluster. The bake
+    # re-harvests from the same source, so its ids coincide with t0d's; what
+    # only t0d can produce — probe specs with a recorded stdout, `exercises`
+    # filled by coverage — must survive the bake, so the bake MERGES (existing
+    # wins) instead of overwriting. Default: nothing earlier (a fresh bake).
+    load_behaviour_suite: Callable[[Path, str], BehaviourSuite] = (
+        lambda _p, c: BehaviourSuite(cfg_cluster=c))
 
 
 def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
     """(`rel_path`, `text`) for each crate source file whose doc-comments may
-    carry behaviours — skipping build/aux dirs. Read once, pre-strip."""
+    carry behaviours — skipping build/aux dirs and the pipeline's own
+    generated test siblings (`*.gen_tests_*.rs` were authored against the
+    private layout; a behaviour lifted from one pins the original's
+    internals). Read once, pre-strip."""
     out: list[tuple[str, str]] = []
     for rs in sorted(src_dir.rglob("*.rs")):
         if any(part in SKIP_DIR_NAMES for part in rs.parts):
+            continue
+        if GEN_TESTS_MARKER in rs.name:
             continue
         try:
             out.append((str(rs.relative_to(src_dir)),
@@ -116,6 +129,8 @@ def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
         return out
     for rs in sorted(tests_dir.rglob("*.rs")):
         if any(part in SKIP_DIR_NAMES for part in rs.parts):
+            continue
+        if GEN_TESTS_MARKER in rs.name:
             continue
         try:
             out.append((str(rs.relative_to(project_dir)),
@@ -252,12 +267,21 @@ def bake_skeleton_artifacts(
         try:
             sources = _behaviour_sources(src_dir)
             test_sources = _test_layout_sources(project_dir)
+            _default_name = next((c.name for c in clusters if c.is_default),
+                                 cluster.name)
             suite = harvest_behaviour_suite(
-                sources, cfg_cluster=cluster.name, test_sources=test_sources)
-            if suite.specs:
-                d.save_behaviour_suite(project_dir, suite)
+                sources, cfg_cluster=cluster.name, test_sources=test_sources,
+                default_cluster=_default_name)
+            # Never overwrite what t0d wrote: same ids → same spec, and the
+            # probe/exercises data only t0d has is kept (existing wins).
+            earlier = d.load_behaviour_suite(project_dir, cluster.name)
+            merged = merge_suites(earlier, suite)
+            if merged.specs:
+                d.save_behaviour_suite(project_dir, merged)
                 d.log(f"  [bake-skeleton] cluster {cluster.name}: harvested "
-                      f"{len(suite.specs)} behaviour(s) → "
+                      f"{len(suite.specs)} behaviour(s), {len(earlier.specs)} "
+                      f"already on disk from an earlier phase → "
+                      f"{len(merged.specs)} in "
                       f".skeleton/_behaviours_{cluster.name}.json")
         except Exception as e:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: behaviour harvest "

@@ -62,7 +62,12 @@ from pipeline_core.adapters.auto_operator import (
 from pipeline_core.adapters.auto_operator import (
     seed_auto_operator_default as _auto_op_seed_default,
 )
-from pipeline_core.adapters.behaviour_store import save_behaviour_suite
+from pipeline_core.adapters.behaviour_exercises import exercises_by_coverage
+from pipeline_core.adapters.behaviour_probe import run_probe
+from pipeline_core.adapters.behaviour_store import (
+    load_behaviour_suite,
+    save_behaviour_suite,
+)
 from pipeline_core.adapters.body_ledger_store import (
     append_entries as _body_ledger_append,
 )
@@ -170,6 +175,9 @@ from pipeline_core.adapters.model_notes_store import (
     write_fr_preserving_notes as _write_fr_preserving_notes,
 )
 from pipeline_core.adapters.mutation import MutationTester
+from pipeline_core.adapters.oracle_fingerprint import (
+    cluster_oracle_fp as _cluster_oracle_fp,
+)
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
@@ -320,7 +328,8 @@ from pipeline_core.adapters.workspace_files import (
 from pipeline_core.adapters.workspace_lifecycle import (
     clean_state as _clean_state_impl,
 )
-from pipeline_core.adapters.workspace_restore import RestoreFromAugmented
+from pipeline_core.adapters.workspace_restore import RestoreFromAugmented, RestoreFromPreAugment
+from pipeline_core.adapters.workspace_restore import list_git_tags as _ws_list_git_tags
 from pipeline_core.adapters.workspace_scan import (
     WorkspaceScanDeps,
     _dependency_graph_factory,
@@ -329,6 +338,7 @@ from pipeline_core.adapters.workspace_scan import (
 from pipeline_core.application import fix_loop as _fix_loop_mod
 from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.cluster_augment import ClusterAugmentor
+from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.fix_loop import GenerateFixLoopDeps
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.generators.task1_synthesizer import (
@@ -504,6 +514,12 @@ from pipeline_core.application.strip_bake import (
     StripBakeDeps,
 )
 from pipeline_core.application.strip_bake import (
+    _behaviour_sources as _t0d_behaviour_sources,
+)
+from pipeline_core.application.strip_bake import (
+    _test_layout_sources as _t0d_test_sources,
+)
+from pipeline_core.application.strip_bake import (
     bake_skeleton_artifacts as _bake_artifacts_impl,
 )
 from pipeline_core.application.strip_bake import (
@@ -543,6 +559,13 @@ from pipeline_core.application.tasks.task0c import (
 from pipeline_core.application.tasks.task0c import (
     task0c_augment_module as _task0c_augment_impl,
 )
+from pipeline_core.application.tasks.task0c import (
+    task0c_behaviour_coverage as _task0c_behaviour_coverage_impl,
+)
+from pipeline_core.application.tasks.task0c import (
+    task0c_behaviour_pass as _task0c_behaviour_pass_impl,
+)
+from pipeline_core.application.tasks.task0d import Task0dDeps
 from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task1 import (
     filter_proc_macro_test_files as _filter_proc_macro_test_files,
@@ -1055,8 +1078,9 @@ class App:
     cleanup_residuals_deps: _cleanup_residuals.CleanupResidualsDeps
     # Pre-strip API-surface capture; test seam pipeline._API_SURFACE.
     api_surface: ApiSurfaceCapture
-    # --restart-from-augmented workspace restore.
+    # --restart-from-augmented / --restart-from-pre-augment workspace restores.
     restore_from_augmented: RestoreFromAugmented
+    restore_from_pre_augment: RestoreFromPreAugment
     # Strip/bake pre-step deps + pre-strip bake deps.
     strip_bake_deps: StripBakeDeps
     # Per-run structure caches + cluster-membership queries; owns the
@@ -1166,6 +1190,15 @@ def build_app(
     def task0c_augment_module(pd: Path, mn: str, md: Path, crate_type: str = "",
                               **k: Any) -> Any:
         return _task0c_augment_impl(pd, mn, md, _live().task0c_deps, crate_type, **k)
+
+    def task0c_behaviour_coverage(pd: Path, mn: str, md: Path, /) -> tuple[int, int]:
+        return _task0c_behaviour_coverage_impl(pd, mn, md, _live().task0c_deps)
+
+    def task0c_behaviour_pass(pd: Path, mn: str, md: Path, /, *,
+                              project_context: str, coverage_strategy: str) -> bool:
+        return _task0c_behaviour_pass_impl(
+            pd, mn, md, _live().task0c_deps,
+            project_context=project_context, coverage_strategy=coverage_strategy)
 
     def bake_skeleton_artifacts(pd: Path, mn: str) -> Any:
         return _bake_artifacts_impl(pd, mn, _live().bake_artifacts_deps)
@@ -1508,6 +1541,9 @@ def build_app(
     restore_from_augmented = RestoreFromAugmented(
         read_state=_state_read_state, write_state=_state_write_state, log=ports.log,
     )
+    restore_from_pre_augment = RestoreFromPreAugment(
+        read_state=_state_read_state, write_state=_state_write_state, log=ports.log,
+    )
 
     # S71: per-run structure caches (mod records + cluster-specific symbols)
     # with the cluster-membership queries bound to them. enumerate seams go
@@ -1527,6 +1563,8 @@ def build_app(
         default_setup=cfg.setup_script,
         collect_test_files=collect_test_files,
         augment_module=task0c_augment_module,
+        behaviour_coverage=task0c_behaviour_coverage,
+        behaviour_pass=task0c_behaviour_pass,
     )
     augment_roles = AugmentRoles(
         store=augment_store, engine=augment_engine,
@@ -1589,12 +1627,54 @@ def build_app(
         is_gen_tests_file=helpers.is_gen_tests_file,
         gen_tests_origin_cfgs=_gen_tests_origin_cfgs,
         save_behaviour_suite=save_behaviour_suite,
+        # The bake MERGES into the suite task0d wrote before t0c (existing
+        # entries win) instead of re-harvesting the doc fences over it.
+        load_behaviour_suite=load_behaviour_suite,
         enumerate_types=enumerate_types,
         enumerate_fns=_typed_fn_records,
         enumerate_mods=enumerate_mods,
         enumerate_uses=enumerate_uses,
         save_private_surface=save_private_surface,
         author_private_fields=cfg.layout_author_private_fields,
+    )
+
+    def _t0d_public_surface(pd: Path, _cluster: str) -> str:
+        # The probe prompt needs the public API before the bake has captured
+        # it: capture it here from the ORIGINAL source (the same adapter the
+        # bake runs later, so the artefact is byte-identical), then read it.
+        # Single-module workspaces only — `module_dir` is the project dir, as
+        # `bake_skeleton_artifacts(project_dir, project_dir.name)` assumes.
+        try:
+            api_surface.capture(pd, pd, pd.name)
+        except Exception as exc:  # pragma: no cover - adapter failure is logged, not fatal
+            ports.log(f"  [task0d] API surface capture failed (probes get an "
+                      f"empty surface): {exc}")
+        return _load_api_surface(pd, pd.name)
+
+    # The behaviour harvest BEFORE task0c: test assertions, doc-tests and
+    # layout pins from the original, probes executed on it, exercises by
+    # coverage. Harvested 2026-08-26 over anyhow's tests/: 203 specs, 197
+    # with a runtime then, against 0 in the doc-fence-only suite on disk.
+    task0d_deps = Task0dDeps(
+        log=ports.log, emit=ports.emit,
+        mark_phase=mark_phase, phase_valid=phase_valid,
+        commit_and_mark=commit_and_mark,
+        read_sources=_t0d_behaviour_sources,
+        read_test_sources=_t0d_test_sources,
+        harvest=harvest_behaviour_suite,
+        save_suite=save_behaviour_suite, load_suite=load_behaviour_suite,
+        ask=lambda prompt: str(ports.ask(prompt, model=settings.task_models.task0c)),
+        public_surface=_t0d_public_surface,
+        # The same (empty) inventory t1.5 receives (`composition_layout`).
+        symbol_inventory=lambda _pd, _c: "",
+        enumerate_fns=_typed_fn_records,
+        enumerate_mods=enumerate_mods,
+        enumerate_types=enumerate_types,
+        run_probe=run_probe,
+        exercises_by_coverage=lambda pd, cl, specs, recs: exercises_by_coverage(
+            pd, cl, specs, recs, log=ports.log),
+        PROBE_MAX_PER_CLUSTER=settings.task0d_probe_max,
+        EXERCISES_ENABLED=settings.task0d_exercises,
     )
 
     model_notes_store = FileModelNotesStore(
@@ -2251,6 +2331,7 @@ def build_app(
         augment_store=augment_roles.store,
         cluster_augmentor=augment_roles.augmentor,
         strip_bake_deps=strip_bake_deps,
+        task0d_deps=task0d_deps,
         ws_scan_deps=ws_scan_deps,
         phase_subcommand_deps=phase_subcommand_deps,
         requirements_phase=requirements_phase,
@@ -2271,6 +2352,9 @@ def build_app(
             _clean_state_impl, delete_source_files=_wsf_delete_source_files),
         state_path=_state_path,
         restart_from_augmented=restore_from_augmented.run,
+        restart_from_pre_augment=restore_from_pre_augment.run,
+        git_tag=git_tag,
+        list_git_tags=_ws_list_git_tags,
         source_hash=source_hash,
         log_state_summary=_state_log_state_summary,
         read=_io_read,
@@ -2418,6 +2502,12 @@ def build_app(
                 signatures=current_signatures, bodies=current_bodies),
             check_tree_builds=lambda pd, cl: compile_filled_check(pd, cl),
             run_id=_run_id,
+            # The oracle scoring the cluster tree, `(src_dir, project_dir,
+            # cluster) -> fingerprint`: the tree's gen_tests siblings, the
+            # crate's `tests/` and the baked behaviour suite. The driver
+            # caches it per iteration (`_oracle_fp` in `phase_c_tdd.py`);
+            # this is the uncached adapter.
+            oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,
@@ -2474,6 +2564,8 @@ def build_app(
         task0c_deps=Task0cDeps(
             BUILD_TIMEOUT=cfg.build_timeout,
             COVERAGE_TARGET=helpers.coverage_target,
+            BEHAVIOUR_COVERAGE_TARGET=settings.behaviour_coverage_target,
+            load_behaviour_suite=load_behaviour_suite,
             coverage_ignore_pragma=cfg.ignore_pragma,
             TASK0C_PROMPT_CHAR_CAP=helpers.task0c_prompt_char_cap,
             FIX_ERR_CAP=cfg.fix_err_cap,
@@ -2641,6 +2733,7 @@ def build_app(
         cleanup_residuals_deps=cleanup_residuals_deps,
         api_surface=api_surface,
         restore_from_augmented=restore_from_augmented,
+        restore_from_pre_augment=restore_from_pre_augment,
         strip_bake_deps=strip_bake_deps,
         bake_artifacts_deps=bake_artifacts_deps,
         structure_cache=structure_cache,

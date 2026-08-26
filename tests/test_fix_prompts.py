@@ -7,6 +7,8 @@ strings are the originals' rendered form.
 
 from __future__ import annotations
 
+import dataclasses
+
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
@@ -405,11 +407,14 @@ _LIVE_82157_PLAN_LINE = (
 def test_plan_line_states_typeid_consequence_of_downcast_pins() -> None:
     """Run `82157-476ddc16`: the constructor `_plan_line` listed
     `downcast::<&str>` and the reply still wrapped. The claim is that the
-    same pins now produce a line that states wrapping the pinned type
-    before the generic constructor stores a different TypeId."""
+    same pins, on a block whose escalated body WRAPS (`construct_from_adhoc`
+    builds `MessageError(message)` inside `construct_from_std(…)`), now
+    produce a line that states wrapping the pinned type before the generic
+    constructor stores a different TypeId."""
     out = _file_fill([BlockFillPlan(
         "impl Error", (), _LIVE_82157_CONSTRUCTORS,
-        escalated=_LIVE_82157_CONSTRUCTORS, pins=_LIVE_82157_PINS)])
+        escalated=_LIVE_82157_CONSTRUCTORS, pins=_LIVE_82157_PINS,
+        wraps_pinned_type=True)])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
     assert "the attributed tests pin:" in line
@@ -422,12 +427,52 @@ def test_plan_line_states_typeid_consequence_of_downcast_pins() -> None:
     assert "the attributed tests pin:" in _LIVE_82157_PLAN_LINE
     assert "downcast::<&str>" in _LIVE_82157_PLAN_LINE
     assert "stores a different TypeId" not in _LIVE_82157_PLAN_LINE
-    # ALTDEBUG-only pins must not grow a TypeId sentence.
+    # ALTDEBUG-only pins must not grow a TypeId sentence, wrap or no wrap.
     alt = _file_fill([BlockFillPlan(
         "impl Error", (), ("debug",),
         escalated=("debug",),
-        pins='assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))')])
+        pins='assert_eq!(EXPECTED_ALTDEBUG_F, format!("{:#?}", …))',
+        wraps_pinned_type=True)])
     alt_line = next(ln for ln in alt.splitlines()
                     if ln.startswith("  in `impl Error`"))
     assert "stores a different TypeId" not in alt_line
     assert "EXPECTED_ALTDEBUG_F" in alt_line
+
+
+# Recorded `_plan_line` from the SAME run's ensure prompt
+# (`logs/prompts/97e9b596….txt` line 6, 2026-08-26): the file-wide pin list
+# — `test_downcast`'s pins — on `impl<A, B> BothDebug for (A, B)` ->
+# `__dispatch_ensure`, a body that builds a local `SmallBuf` and wraps
+# nothing. Pins listed, no TypeId sentence: the pre-fix line, verbatim.
+_LIVE_97E9_PINS = (
+    "downcast::<Box<dyn StdError + Send + Sync>>, downcast::<&str>, "
+    "downcast::<String>, downcast::<io::Error>, is::<&str>, "
+    "is::<<str as ToOwned>::Owned>"
+)
+_LIVE_97E9_PLAN_LINE = '  in `impl<A, B> BothDebug for (A, B)` -> REWRITE (the fns that consume what this one produces were rewritten over repeated sweeps and no test changed its verdict — the defect is not in them, it is in what this fn constructs or returns — the attributed tests pin: downcast::<Box<dyn StdError + Send + Sync>>, downcast::<&str>, downcast::<String>, downcast::<io::Error>, is::<&str>, is::<<str as ToOwned>::Owned>): __dispatch_ensure'
+
+
+def test_typeid_sentence_is_withheld_from_a_block_whose_body_wraps_nothing() -> None:
+    """The gate is the BODY, not the pins. The recorded BothDebug plan
+    (downcast pins present, body constructs no crate type) must not grow
+    the sentence; the same plan with `wraps_pinned_type` flipped grows it
+    — that flip is the control showing the flag, and only the flag, is
+    what withholds it."""
+    plan = BlockFillPlan(
+        "impl<A, B> BothDebug for (A, B)", (), ("__dispatch_ensure",),
+        escalated=("__dispatch_ensure",), pins=_LIVE_97E9_PINS)
+    assert plan.wraps_pinned_type is False
+    out = _file_fill([plan])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl<A, B> BothDebug"))
+    # Byte-identical to the recorded line: the pins are still stated, the
+    # sentence the run rendered here is gone, and nothing else moved.
+    assert line == _LIVE_97E9_PLAN_LINE
+    assert "downcast::<&str>" in line
+    assert "stores a different TypeId" not in line
+    # CONTROL: flip the flag on the identical plan -> the sentence renders.
+    flipped = _file_fill([dataclasses.replace(plan, wraps_pinned_type=True)])
+    flipped_line = next(ln for ln in flipped.splitlines()
+                        if ln.startswith("  in `impl<A, B> BothDebug"))
+    assert "stores a different TypeId" in flipped_line
+    assert flipped_line.startswith(_LIVE_97E9_PLAN_LINE.split("): __dispatch")[0])

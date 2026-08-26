@@ -152,6 +152,7 @@ def run_layout_phase(
             symbol_inventory=deps.symbol_inventory_text(project_dir, cluster),
             deps=deps.author_deps_for(project_dir, cluster),
             registry=registry,
+            behaviour_specs=suite.specs,
         )
         results[cluster] = res
         # A definition this cluster DISPROVED is dropped before anything is

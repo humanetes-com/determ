@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from pipeline_core.domain.reasoning_cap import record_stream_meta
+from pipeline_core.domain.reasoning_cap import record_followup_meta, record_stream_meta
 from pipeline_core.domain.text import PromptDigest
 
 from .budget import BudgetSpec, BudgetState, Plan, request_max_tokens
@@ -58,6 +58,13 @@ class Hooks:
     guard: Callable[[str, str], None] = field(default=_noop_guard)
     dbg: Callable[[str], None] = field(default=_noop_dbg)
     persist_thinking: Callable[[str, str], None] = field(default=_noop_persist)
+    # The forced followup's OWN reasoning, keyed on the same response sha as
+    # `persist_thinking` but stored beside it, never over it. Measured
+    # 2026-08-26 on run `82157-476ddc16`: 754 followups had no trace on disk
+    # at all — `persist_thinking` keeps the first writer of a sha, which is
+    # the main trace, so the reasoning that actually wrote the reply on
+    # record was discarded on every one of them.
+    persist_followup_thinking: Callable[[str, str], None] = field(default=_noop_persist)
     # Structured vLLM-runtime events for the monitor (replaces guard-log scrapes).
     emit: Callable[[str, dict[str, Any]], None] = field(default=_noop_emit)
 
@@ -68,6 +75,45 @@ class _Captured:
     reasoning: list[str] = field(default_factory=list)
     stop: str | None = None        # "block" / "file" / "think_cap" / None
     saw_content: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _FollowupOutcome:
+    """What the forced followup produced: its cleaned reply and its OWN
+    reasoning (distinct from the main trace it was re-fed)."""
+
+    result: str = ""
+    reasoning: str = ""
+
+
+def refed_reasoning_chars(reasoning_text: str, base_messages: list[dict[str, Any]],
+                          fu_messages: list[dict[str, Any]]) -> int:
+    """How many chars of the main trace the followup request actually carried.
+
+    MEASURED on the turns the transport appended, never assumed from its trim
+    rule: every `followup_messages` here re-feeds a SUFFIX of the trace (whole,
+    or trimmed from the front to keep the conclusion — vLLM by ctx arithmetic,
+    Ollama-compat/SGLang at 6 000 chars, the native-Ollama path in an
+    assistant `thinking` field), and the base transport re-feeds nothing. So
+    the answer is the longest suffix of `reasoning_text` that appears verbatim
+    in the appended turns' string fields. Suffix-containment is monotone (a
+    contained suffix contains every shorter suffix), which is what makes the
+    binary search below exact rather than heuristic. A transport that re-fed
+    nothing reads 0, which is the honest figure — the 2026-08-09 assistant-turn
+    bug (33 prompt tokens whatever the trace size) would have read 0 here."""
+    appended = fu_messages[len(base_messages):]
+    haystack = "\n".join(v for m in appended for v in m.values() if isinstance(v, str))
+    n = len(reasoning_text)
+    if not n or not haystack:
+        return 0
+    lo, hi = 0, n            # invariant: suffix of length `lo` is contained
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if reasoning_text[n - mid:] in haystack:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 class LLMController:
@@ -86,7 +132,13 @@ class LLMController:
         max_tokens: int,
         want_think: bool | None = None,
         temperature: float | None = None,
+        followup_think: bool = False,
     ) -> str:
+        """`followup_think` sizes and steers the forced followup (see
+        `_followup`): False keeps the followup a code-only completion with no
+        thinking reserve; True gives it the same reserve, rung and cap as the
+        main stream. Default False so every existing caller is byte-identical;
+        the escalated grade opts in at its own call site."""
         spec = transport.spec()
         state = transport.budget_state()
 
@@ -187,11 +239,23 @@ class LLMController:
         followup = (transport.supports_followup and reasoning_text
                     and (not result or meta.finish_reason == "length"
                          or cap.stop == "think_cap"))
+        prompt_sha = PromptDigest.of(prompt).sha256
+        fu = _FollowupOutcome()
         if followup:
-            result = self._followup(transport, messages, reasoning_text, model, max_tokens) or result
+            fu = self._followup(transport, messages, reasoning_text, model, max_tokens,
+                                prompt_sha=prompt_sha, followup_think=followup_think)
+            result = fu.result or result
 
+        # Both traces are keyed on the sha of the string this call RETURNS —
+        # the one `llm.response` records — so `logs/thinking/<sha>.txt` and
+        # `<sha>.followup.txt` are siblings a reader reaches from one event.
+        # Keying the followup trace on the followup's own (possibly empty)
+        # reply would strand it whenever `fu.result` was "" and the main
+        # result stood.
         if reasoning_text:
             self._h.persist_thinking(result, reasoning_text)
+        if fu.reasoning:
+            self._h.persist_followup_thinking(result, fu.reasoning)
 
         # Stream provenance. `llm.response` (adapters/ask_client.py) records only
         # `{prompt_sha, response: {sha256, char_count}}`, and StreamMeta cannot
@@ -208,7 +272,7 @@ class LLMController:
         # there from a short one, so four calls that each burned ~20 minutes of
         # GPU producing zero characters looked like ordinary slow calls.
         self._h.emit("llm.stream_meta", {
-            "prompt_sha": PromptDigest.of(prompt).sha256,
+            "prompt_sha": prompt_sha,
             "model": model,
             "finish_reason": meta.finish_reason,
             "prompt_tokens": meta.prompt_tokens,
@@ -220,7 +284,7 @@ class LLMController:
             "enable_thinking": enable_thinking,
         })
         record_stream_meta({
-            "prompt_sha": PromptDigest.of(prompt).sha256,
+            "prompt_sha": prompt_sha,
             "model": model,
             "finish_reason": meta.finish_reason,
             "prompt_tokens": meta.prompt_tokens,
@@ -269,31 +333,68 @@ class LLMController:
         return cap
 
     def _followup(self, transport: Transport, messages: list[dict[str, Any]], reasoning_text: str,
-                  model: str, max_tokens: int) -> str:
+                  model: str, max_tokens: int, *, prompt_sha: str,
+                  followup_think: bool) -> _FollowupOutcome:
+        """The forced code-only completion after a cut main stream.
+
+        `followup_think` is the one lever this turn has. With it False (every
+        caller until 2026-08-26) the followup is planned with NO thinking
+        reserve and streamed with thinking disabled — which on the strength
+        dialect is not "off" but the lowest rung, so the model reasons anyway,
+        inside a `request_max` that is the content budget alone, with no cap
+        on that reasoning. Measured on run `82157-476ddc16`: the escalated
+        constructor call (`49385be5…`) ran its main stream to `length` at
+        71 584 reasoning chars, and the 8 192-char reply on record was this
+        followup's (`[llm/followup] thinking_len=71584 result_len=8192`);
+        record-wide, 1 595 of 1 596 followup replies. With it True the
+        followup gets the same reserve, rung and mid-stream cap as the main
+        stream — a second full attempt that has the first attempt's trace.
+
+        The followup's own facts leave on `llm.followup_meta`, keyed on the
+        ORIGINAL prompt's sha so it joins `llm.request` / `llm.response` /
+        `llm.stream_meta` exactly. Until this event existed the stream_meta
+        row carried the MAIN stream's `finish_reason` beside the FOLLOWUP's
+        `content_chars`, and a followup cut at `length` was unrecordable."""
         spec = transport.spec()
         state = transport.budget_state()
         fu_messages = transport.followup_messages(messages, reasoning_text, model=model)
         fu_chars = sum(len(m.get("content") or "") for m in fu_messages)
         fu_plan = request_max_tokens(
             spec, state, input_chars=fu_chars, caller_max_tokens=max_tokens,
-            default_sentinel=self._sentinel, enable_thinking=False,
+            default_sentinel=self._sentinel, enable_thinking=followup_think,
         )
-        self._h.dbg(f"FOLLOWUP model={model} thinking_len={len(reasoning_text)} fu_max={fu_plan.request_max}")
-        self._h.sock_open(f"{transport.served_model}-followup think=False")
+        self._h.dbg(f"FOLLOWUP model={model} thinking_len={len(reasoning_text)} "
+                    f"fu_max={fu_plan.request_max} think={followup_think}")
+        self._h.sock_open(f"{transport.served_model}-followup think={followup_think}")
         self._h.sock_write("\n[FOLLOWUP — thinking budget exhausted, requesting code]\n")
         meta = StreamMeta()
         try:
             cap = self._consume(
                 transport.stream(fu_messages, model=model, max_tokens=fu_plan.request_max,
-                                 enable_thinking=False, meta=meta),
-                None, model,
+                                 enable_thinking=followup_think, meta=meta),
+                spec.thinking_char_cap if followup_think else None, model,
             )
         except (TransportTimeout, TransportUnavailable) as exc:
             self._h.guard("llm/followup_network", f"err={type(exc).__name__}: {exc}")
-            return ""
+            return _FollowupOutcome()
         result = transport.clean("".join(cap.content), model=model)
+        fu_reasoning = "".join(cap.reasoning)
         self._h.guard("llm/followup", f"model={model} thinking_len={len(reasoning_text)} result_len={len(result)}")
-        return result
+        fu_meta = {
+            "prompt_sha": prompt_sha,
+            "model": model,
+            "finish_reason": meta.finish_reason,
+            "content_chars": len(result),
+            "reasoning_chars": len(fu_reasoning),
+            "reasoning_chars_refed": refed_reasoning_chars(reasoning_text, messages, fu_messages),
+            "request_max": fu_plan.request_max,
+            "enable_thinking": followup_think,
+            "stop": cap.stop,
+            "fn_blocks": result.count("<FN "),
+        }
+        self._h.emit("llm.followup_meta", fu_meta)
+        record_followup_meta(fu_meta)
+        return _FollowupOutcome(result=result, reasoning=fu_reasoning)
 
     @staticmethod
     def _replan_with_input(spec: BudgetSpec, state: BudgetState, real_tokens: int,

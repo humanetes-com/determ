@@ -37,10 +37,12 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.test_report import parse_panic_location
+from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
 
 class Attribution(Enum):
@@ -224,14 +226,18 @@ def attributed_test_leaves(
 
 
 def render_refill_evidence(
-    evidence: Iterable[RefillEvidence], *, pins: str = "",
+    evidence: Iterable[RefillEvidence], *, pins: str = "", wraps: bool = False,
 ) -> str:
     """The REFILL section's body: per member, the strength of the claim, the
     attributed tests, and what they said. "" when there is nothing to say.
 
     `pins` is the oracle extraction of `pinned_observables` — the same
     instruction `_plan_line` carries for an ESCALATED write-list, so the
-    per-impl route (which never calls `_plan_line`) still sees it."""
+    per-impl route (which never calls `_plan_line`) still sees it. `wraps`
+    is the block's `wraps_crate_tuple_struct` reading, and gates the TypeId
+    sentence exactly as `BlockFillPlan.wraps_pinned_type` gates it on the
+    plan line: the two render the same sentence twice per file-first prompt,
+    as they render the pins twice."""
     lines: list[str] = []
     for e in evidence:
         if e.direct:
@@ -272,7 +278,7 @@ def render_refill_evidence(
     if pins:
         lines.append(
             f"  the attributed tests pin: {pins}"
-            + typeid_pin_consequence(pins))
+            + typeid_pin_consequence(pins, wraps=wraps))
     return "\n".join(lines)
 
 
@@ -356,7 +362,7 @@ def test_item_source(file_src: str, leaf: str) -> str:
     return file_src[start:end]
 
 
-def pinned_observables(*sources: str) -> str:
+def pinned_observables(*sources: str, helpers: Iterable[str] = ()) -> str:
     """Oracle pins extracted from attributed test SOURCE.
 
     Run `2932-cf516410` (2026-08-26) quoted `test_downcast.rs` and the panic
@@ -373,9 +379,26 @@ def pinned_observables(*sources: str) -> str:
     Generic arguments are scanned by bracket depth so nested forms
     (`is::<<str as ToOwned>::Owned>`, `downcast::<Box<dyn StdError + Send
     + Sync>>`) survive; a `[^>]+?` regex stops at the first `>`.
+
+    The fourth shape is the helper-mediated exact string: a call
+    `<ident>(…, "<literal>")` whose LAST argument is a string literal and
+    whose `<ident>` starts with `assert` (`assert_eq!`, `assert_err`) or is
+    one of `helpers` — fns the attributed test's own file defines around an
+    `assert!`/`assert_eq!` (`assertion_helper_names`). The literal is the
+    pin, rendered as the quoted source token. `tests/test_ensure.rs` pins
+    every `ensure!` message through `assert_err(test, "Condition failed:
+    …")` (`test_ensure.rs:78`, `(closure, &'static str)`), so before this
+    shape `test_trailer` pinned only its two `is::<T>` calls and
+    `test_whitespace` only `format!("{:#?}", …)` — the 40-byte overflow
+    and whitespace fallback the `BothDebug` retrospective prescribed away
+    were named by no pin. The first argument is not read: `test_downcast`'s
+    `assert_eq!("oh no!", … .downcast::<&str>() …)` keeps its `downcast`
+    pin and gains nothing, so every pin this function produced before the
+    shape was added is produced unchanged.
     """
     pins: list[str] = []
     seen: set[str] = set()
+    helper_names = frozenset(h for h in helpers if h)
 
     def _add(pin: str) -> None:
         pin = " ".join(pin.split())
@@ -401,7 +424,86 @@ def pinned_observables(*sources: str) -> str:
         if _FORMAT_ALT.search(src) and not any(
                 'format!("{:#?}"' in p for p in pins):
             _add('format!("{:#?}", …)')
+        for literal in helper_asserted_literals(src, helper_names):
+            _add(literal)
     return ", ".join(pins)
+
+
+_CALL_OPEN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*!?\s*\(")
+_STRING_LITERAL = re.compile(r'^"(?:[^"\\]|\\.)*"$')
+_ASSERT_MACRO = re.compile(r"\bassert(?:_eq|_ne)?!\s*\(")
+
+
+def _call_arguments(src: str, open_idx: int) -> tuple[list[str], int] | None:
+    """The top-level arguments of the call whose `(` is at `open_idx`, and
+    the index of its `)`; None when the call never closes. String literals
+    are skipped whole so a `)` or `,` inside one does not split; a trailing
+    comma (rustfmt's multi-line call form) yields no empty argument."""
+    depth = 0
+    args: list[str] = []
+    start = open_idx + 1
+    i = open_idx
+    n = len(src)
+    while i < n:
+        c = src[i]
+        if c == '"':
+            j = i + 1
+            while j < n and src[j] != '"':
+                j += 2 if src[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                args.append(src[start:i].strip())
+                return [a for a in args if a], i
+        elif c == "," and depth == 1:
+            args.append(src[start:i].strip())
+            start = i + 1
+        i += 1
+    return None
+
+
+def helper_asserted_literals(src: str, helpers: frozenset[str]) -> list[str]:
+    """String literals a test item pins through a helper-mediated
+    assertion: every call `<ident>(…, "<literal>")` in `src` whose last
+    argument is a string literal and whose `<ident>` starts with `assert`
+    or is in `helpers`. In source order, duplicates kept (the caller
+    dedups). The literal is the quoted source token verbatim — escapes and
+    all — because that is the string the test compares against."""
+    out: list[str] = []
+    for m in _CALL_OPEN.finditer(src):
+        ident = m.group(1)
+        if not (ident.startswith("assert") or ident in helpers):
+            continue
+        parsed = _call_arguments(src, m.end() - 1)
+        if parsed is None:
+            continue
+        args, _close = parsed
+        if len(args) >= 2 and _STRING_LITERAL.match(args[-1]):
+            out.append(" ".join(args[-1].split()))
+    return out
+
+
+def assertion_helper_names(file_src: str) -> frozenset[str]:
+    """Names of the fns `file_src` defines whose body asserts — the
+    `assert_err` of `tests/test_ensure.rs:78`. `#[test]` fns are excluded:
+    they are the items pins are taken FROM, and a test calling a sibling
+    test is not the helper shape. Item extent is `test_item_source`'s."""
+    if not file_src:
+        return frozenset()
+    out: set[str] = set()
+    for m in re.finditer(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]", file_src):
+        name = m.group(1)
+        item = test_item_source(file_src, name)
+        if not item or "#[test]" in item[: m.start() - _item_start_including_attrs(
+                file_src, m.start()) + 1]:
+            continue
+        if _ASSERT_MACRO.search(item):
+            out.add(name)
+    return frozenset(out)
 
 
 def pinned_observables_from_tests(
@@ -413,10 +515,21 @@ def pinned_observables_from_tests(
     leaf among successes is skipped (empty string) so a sibling's pins do
     not leak — per-leaf whole-file fallback is the poison the slice exists
     to prevent (`test_drop`'s `DetectDrop` into `test_downcast`'s prompt).
+    No leaves at all is "" and never the fallback: a block with no
+    attributed test has nothing to pin, and the file-first route now asks
+    per block, so a stub-only block beside an escalated one would otherwise
+    inherit the whole file's pins.
+
+    The helper names are taken from EVERY file handed in, not only the one
+    the leaf was sliced from: a helper is by definition outside the item.
     """
+    leaf_list = tuple(leaves)
+    if not leaf_list:
+        return ""
     file_list = tuple(files)
+    helpers = frozenset().union(*(assertion_helper_names(f) for f in file_list))
     items: list[str] = []
-    for leaf in leaves:
+    for leaf in leaf_list:
         found = ""
         for src in file_list:
             found = test_item_source(src, leaf)
@@ -424,12 +537,16 @@ def pinned_observables_from_tests(
                 break
         items.append(found or "")
     if any(items):
-        return pinned_observables(*items)
-    return pinned_observables(*file_list)
+        return pinned_observables(*items, helpers=helpers)
+    return pinned_observables(*file_list, helpers=helpers)
 
 
-def typeid_pin_consequence(pins: str) -> str:
-    """The TypeId consequence a `downcast::<T>` / `is::<T>` pin implies.
+_IS_TURBOFISH = re.compile(r"\bis::<")
+
+
+def typeid_pin_consequence(pins: str, *, wraps: bool) -> str:
+    """The TypeId consequence a `downcast::<T>` / `is::<T>` pin implies, for
+    a body that WRAPS.
 
     Run `82157-476ddc16` listed those pins on the constructor `_plan_line`
     (`logs/prompts/49385be….txt`) and the reply still re-emitted a wrap
@@ -437,11 +554,99 @@ def typeid_pin_consequence(pins: str) -> str:
     statement that wrapping the pinned type stores a different TypeId, so
     `downcast::<T>()` returns Err. Empty when `pins` has no TypeId
     observable (ALTDEBUG-only). Does not name a crate wrapper type.
+
+    `wraps` is the gate, and it is the caller's reading of the escalated
+    body (`wraps_crate_tuple_struct`), never inferred from the pins: the
+    pins are a property of the TESTS, the sentence is a claim about the
+    BODY. The same run's ensure prompt (`logs/prompts/97e9b596….txt`,
+    line 6) rendered the sentence on `impl<A, B> BothDebug for (A, B)` ->
+    `__dispatch_ensure`, whose body wraps nothing — the block's attributed
+    tests carried `downcast::<&str>` from the same file-wide pin list, and
+    the instruction told a unit that builds a `SmallBuf` that its wrap
+    stores the wrong TypeId. Rendered twice per file-first prompt (plan
+    line + evidence block), as the pins are.
     """
-    if not pins:
+    if not wraps or not pins:
         return ""
-    if "downcast::<" not in pins and "is::<" not in pins:
+    if "downcast::<" not in pins and not _IS_TURBOFISH.search(pins):
         return ""
     return (" — wrapping the pinned type before the generic constructor "
             "stores a different TypeId, so those downcast::<T>() / is::<T>() "
             "calls return Err")
+
+
+def tuple_struct_names(type_records: Iterable[Any]) -> frozenset[str]:
+    """Names of the crate's TUPLE structs, from the extractor's type records.
+
+    The extractor names unnamed fields `0`, `1`, … (`skeleton_extractor/src/
+    enumerate.rs`, `Fields::Unnamed`), so a struct whose every field is a
+    digit string is a tuple struct; a unit struct (no fields) and a brace
+    struct are not, and neither can be constructed by `Name(…)`. On the
+    live `stable` layout these are `MessageError`, `DisplayError`,
+    `BoxedError` (`src/wrapper.rs`) and `Quoted` (`src/context.rs`)."""
+    out: set[str] = set()
+    for rec in type_records:
+        if getattr(rec, "kind", "") != "struct":
+            continue
+        fields = tuple(getattr(rec, "fields", ()) or ())
+        if fields and all(str(getattr(f, "name", "")).isdigit() for f in fields):
+            out.add(str(getattr(rec, "name", "")))
+    out.discard("")
+    return frozenset(out)
+
+
+def _inside_call_arguments(body_text: str, pos: int) -> bool:
+    """Whether `pos` sits inside the argument list of a CALL — an unmatched
+    `(` before it whose preceding non-space char ends an identifier, a path
+    (`::`) or a turbofish (`>`). Scanned backwards by paren depth; a `(` that
+    opens a tuple or a grouping (`(a, b)`, `(x + y)`) has an operator or
+    another `(` before it and does not count."""
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        c = body_text[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth:
+                depth -= 1
+            else:
+                j = i - 1
+                while j >= 0 and body_text[j].isspace():
+                    j -= 1
+                return j >= 0 and (is_ident_char(body_text[j])
+                                   or body_text[j] in ">:")
+        i -= 1
+    return False
+
+
+def wraps_crate_tuple_struct(body_text: str, names: Iterable[str]) -> bool:
+    """Whether `body_text` constructs one of the crate's tuple structs
+    (`names`, see `tuple_struct_names`) and hands the value straight to
+    another call — the shape whose TypeId consequence
+    `typeid_pin_consequence` states.
+
+    The live positive is `src/error.rs::construct_from_adhoc`:
+    `Self::construct_from_std(crate::wrapper::MessageError(message),
+    backtrace)` — the wrapper is built inside the generic constructor's
+    argument list, so the erased payload's TypeId is the wrapper's. The
+    live negative is `src/ensure.rs::__dispatch_ensure`, which builds a
+    local `SmallBuf { .. }` and calls `crate::Error::msg(owned)`: no crate
+    tuple struct is constructed at all. `constructs_type(…,
+    tuple_struct=True)` decides the construction; the argument-list check
+    is what separates a wrap handed onward from a wrapper bound to a local
+    (`let error = BoxedError(error);` followed by a per-type table build
+    is the CORRECT shape and must not read as a wrap)."""
+    for name in names:
+        if not name or not constructs_type(body_text, name, tuple_struct=True):
+            continue
+        pos = body_text.find(name)
+        while pos != -1:
+            end = pos + len(name)
+            before_ok = pos == 0 or not is_ident_char(body_text[pos - 1])
+            rest = body_text[end:].lstrip()
+            if (before_ok and rest.startswith("(")
+                    and _inside_call_arguments(body_text, pos)):
+                return True
+            pos = body_text.find(name, pos + 1)
+    return False

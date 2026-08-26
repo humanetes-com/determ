@@ -3,21 +3,30 @@ stored guidance string (counts, not just per-unit lines) and when a stored
 `fully_exhausted` verdict may still convict a unit."""
 from __future__ import annotations
 
+import json
+
 from pipeline_core.domain.retro_gate import (
     GATE_VERSION,
     GUIDANCE_FROM_HOLLOW_TREE,
+    REGRESSION_SCOPED,
     ROUTE_VERSION,
     BlockedOnStubs,
     ConvictionEvidence,
     ConvictionStanding,
+    GuidanceScreening,
     RetroGateTally,
     RetroGateVerdict,
     RetroProvenance,
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    evidence_for_record,
     judge_guidance,
     layout_fingerprint,
+    regressed_tests_from_excerpt,
+    regression_scoped,
+    retired_guidance_line,
+    screen_guidance,
     stamp_conviction,
 )
 
@@ -607,3 +616,182 @@ def test_a_blocker_the_cluster_never_compiles_does_not_keep_a_claim_alive() -> N
     released = screen_guidance(rec, _CONTEXT_RS, evidence=ev,
                               cfg_dead=frozenset({"provide"}))
     assert released.text == "" and released.retired_by == "impossibility_unfounded"
+
+
+# --------------------------------------------------------------------------- #
+# The regression-derived prescription.
+# --------------------------------------------------------------------------- #
+# Recorded artefact: `tmp/anyhow/.phase_c_logs/retrospectives.json` key
+# `src/ensure.rs::*impl*::BothDebugfor(A,B)`, read 2026-08-26 (cluster
+# `stable`, layout_fp f95c2372; earned by the per-block route, one retro
+# round). `error_count 0, failing_test_count 13, convicted_by []`, the preview
+# cut at 240 characters mid-list. Its guidance prescribes the removal of the
+# 40-byte overflow fallback `test_trailer` / `test_whitespace` pin.
+_LIVE_BOTHDEBUG_KEY = "src/ensure.rs::*impl*::BothDebugfor(A,B)"
+_LIVE_BOTHDEBUG_RECORD_JSON = r'''{
+ "category": "WRONG_TYPE_CHOICE",
+ "guidance": "Drop the fixed 40-byte SmallBuf and format into an allocating Write so the debug output is never truncated; e.g. let mut s = alloc::string::String::new(); core::fmt::write(&mut s, format_args!(\"{} ({:?} vs {:?})\", msg, self.0, self.1)).unwrap(); return crate::Error::msg(s); This keeps the full \"{:?}\" rendering for self.0/self.1 and avoids the overflow fallback to crate::Error::msg(msg) that caused the regressions.",
+ "signal": "ok",
+ "retrospective_count": 1,
+ "error_count": 0,
+ "failing_test_count": 13,
+ "best_compile_errors": 0,
+ "best_failing_tests": 13,
+ "fully_exhausted": false,
+ "last_error_preview": "This compiled, but it REGRESSED previously-passing test(s): ['test_as', 'test_atom', 'test_high_precedence_binary_operator', 'test_if', 'test_loop', 'test_low_precedence_binary_operator', 'test_macro', 'test_match', 'test_pat', 'test_path',",
+ "cluster": "stable",
+ "layout_fp": "f95c2372",
+ "gate_ver": "comparative_2026_07",
+ "route_ver": "leakproof_revert_2026_07",
+ "convicted_by": [],
+ "guidance_from_hollow_tree": false,
+ "blocked_on": [],
+ "futility_suspended": {
+  "cluster": "stable",
+  "tests": [
+   "test_altdebug",
+   "test_boxed_str",
+   "test_downcast",
+   "test_downcast_high",
+   "test_downcast_low",
+   "test_downcast_mid",
+   "test_trailer"
+  ]
+ }
+}'''
+# `tmp/anyhow/.skeleton/stable/src/ensure.rs` lines 1-50 (2026-08-26): every
+# item before `macro_rules! __parse_ensure` — the declarations the layout
+# rule reads (`struct Buf { bytes: [MaybeUninit<u8>; 40], written: usize }`).
+_LIVE_ENSURE_LAYOUT = "#![allow(unused, dead_code, non_snake_case, clippy::all)]\nuse crate::Error;\nuse alloc::string::String;\nuse core::fmt::{self, Debug, Write};\nuse core::mem::MaybeUninit;\nuse core::ptr;\nuse core::slice;\nuse core::str;\n#[doc(hidden)]\npub trait BothDebug {\n    fn __dispatch_ensure(self, msg: &'static str) -> Error;\n}\nimpl<A, B> BothDebug for (A, B)\nwhere\n    A: Debug,\n    B: Debug,\n{\n    fn __dispatch_ensure(self, msg: &'static str) -> Error {\n        ::core::unimplemented!()\n    }\n}\n#[doc(hidden)]\npub trait NotBothDebug {\n    fn __dispatch_ensure(self, msg: &'static str) -> Error;\n}\nimpl<A, B> NotBothDebug for &(A, B) {\n    fn __dispatch_ensure(self, msg: &'static str) -> Error {\n        ::core::unimplemented!()\n    }\n}\nstruct Buf {\n    bytes: [core::mem::MaybeUninit<u8>; 40],\n    written: usize,\n}\nimpl Buf {\n    fn new() -> Self {\n        ::core::unimplemented!()\n    }\n    fn as_str(&self) -> &str {\n        ::core::unimplemented!()\n    }\n}\nimpl Write for Buf {\n    fn write_str(&mut self, s: &str) -> fmt::Result {\n        ::core::unimplemented!()\n    }\n}\nfn render(msg: &'static str, lhs: &dyn Debug, rhs: &dyn Debug) -> Error {\n    ::core::unimplemented!()\n}\n"
+_BOTHDEBUG_CONTAINER = "impl<A, B> BothDebug for (A, B)"
+
+
+def _live_bothdebug() -> dict:
+    rec = json.loads(_LIVE_BOTHDEBUG_RECORD_JSON)
+    assert rec["error_count"] == 0 and rec["convicted_by"] == []
+    return rec
+
+
+def _screen(rec: dict, tests: frozenset[str], *, cluster: str = "stable") -> GuidanceScreening:
+    return screen_guidance(
+        rec, _LIVE_ENSURE_LAYOUT, evidence=ConvictionEvidence(tests),
+        anchor_types=anchor_types_for_container(_BOTHDEBUG_CONTAINER),
+        cluster=cluster)
+
+
+def test_regressed_tests_parse_the_regression_head_and_survive_the_preview_cut() -> None:
+    # The live preview: the list is cut mid-name after `'test_path',` — the
+    # ten complete names before the cut are the answer.
+    assert regressed_tests_from_excerpt(_live_bothdebug()["last_error_preview"]) == (
+        "test_as", "test_atom", "test_high_precedence_binary_operator",
+        "test_if", "test_loop", "test_low_precedence_binary_operator",
+        "test_macro", "test_match", "test_pat", "test_path")
+    # The full render (`render_regression_detail`): closed list, trailing
+    # sentence, qualified names, a double-quoted repr for a name with `'`.
+    full = ("This compiled, but it REGRESSED previously-passing test(s): "
+            "['chain::test_rev', \"it's\", 'test_as'] (cluster pass count "
+            "93\u219291).\nKeep those tests passing while fixing the target.")
+    assert regressed_tests_from_excerpt(full) == ("chain::test_rev", "it's", "test_as")
+    # Not a regression verdict: a compile excerpt, a U2 failure, nothing.
+    assert regressed_tests_from_excerpt("error[E0277]: the trait bound") == ()
+    assert regressed_tests_from_excerpt("This body COMPILES but its attributed "
+                                        "test(s) below still FAIL.") == ()
+    assert regressed_tests_from_excerpt("") == ()
+
+
+def test_stamp_conviction_writes_the_regressed_tests() -> None:
+    prov = RetroProvenance(cluster="stable", layout_fp="x")
+    rec = stamp_conviction({"error_count": 0}, prov, NO_TESTS,
+                           regressed=("test_b", "test_a"))
+    assert rec["regressed"] == ["test_a", "test_b"]
+    # Always written: a compile-taught record reads as "not this class",
+    # never as a legacy record.
+    assert stamp_conviction({"error_count": 2}, prov, NO_TESTS)["regressed"] == []
+
+
+def test_live_bothdebug_record_is_regression_scoped_for_the_tests_it_prescribes_against() -> None:
+    """The plan's fixture: under the new screen, with evidence
+    `{test_trailer}`, the live record is withheld `regression_scoped`."""
+    rec = _live_bothdebug()
+    # Measured under `stable`: with the suspension in place the FIRST rule
+    # answers, and that is the control for the ordering (below). Stripped
+    # here so the verdict is the regression rule's.
+    rec.pop("futility_suspended")
+    stamped = stamp_conviction(
+        dict(rec), RetroProvenance(rec["cluster"], rec["layout_fp"]),
+        ConvictionEvidence(frozenset()),
+        regressed=regressed_tests_from_excerpt(rec["last_error_preview"]))
+    trailer = frozenset({"test_trailer"})
+    assert regression_scoped(stamped, ConvictionEvidence(trailer))
+    assert _screen(stamped, trailer) == GuidanceScreening("", REGRESSION_SCOPED)
+    assert admissible_guidance(
+        stamped, _LIVE_ENSURE_LAYOUT, evidence=ConvictionEvidence(trailer),
+        anchor_types=anchor_types_for_container(_BOTHDEBUG_CONTAINER),
+        cluster="stable") == ""
+    # The retirement has a log signature naming the class and the lesson.
+    line = retired_guidance_line(_LIVE_BOTHDEBUG_KEY, stamped,
+                                 _screen(stamped, trailer))
+    assert line.startswith(f"[phase-c/retro-retired] {_LIVE_BOTHDEBUG_KEY}: ")
+    assert "retro guidance withheld (regression_scoped)" in line
+    assert "10 test(s)" in line and "SmallBuf" in line
+    # On a re-fill FOR a regressed test the lesson is in scope, and the
+    # leaf rule reconciles the frontier's qualified names.
+    assert not regression_scoped(stamped, ConvictionEvidence(frozenset({"test_as"})))
+    assert not regression_scoped(stamped, ConvictionEvidence(frozenset({"ensure::test_as"})))
+    # NEGATIVE CONTROL 1: the record as it sits in the store — no
+    # `regressed` stamp — falls to today's rule, `stale_evidence`
+    # (`error_count 0`, `convicted_by []`, a test on the unit), and is not
+    # this class. That is what makes the stamp load-bearing.
+    assert not regression_scoped(rec, ConvictionEvidence(trailer))
+    assert _screen(rec, trailer).retired_by == "stale_evidence"
+    assert _screen(rec, trailer).text == ""
+    # NEGATIVE CONTROL 2: the suspension outranks it where it applies.
+    assert _screen(_live_bothdebug(), trailer).retired_by == "futility_suspended"
+    # NEGATIVE CONTROL 3: a compiler-taught record (`error_count 2`) is
+    # untouched — a compile excerpt carries no regression head, so its
+    # `regressed` is [] and the lesson is honoured (the layout rule has no
+    # field claim to contradict in this text).
+    taught = dict(stamped)
+    taught["error_count"] = 2
+    taught["regressed"] = list(regressed_tests_from_excerpt("error[E0277]: …"))
+    assert not regression_scoped(taught, ConvictionEvidence(trailer))
+    verdict = _screen(taught, trailer)
+    assert verdict.retired_by == ""
+    assert verdict.text.startswith("Drop the fixed 40-byte SmallBuf")
+    # A legacy record missing the key entirely, or with a non-list, is not
+    # this class either.
+    assert not regression_scoped({"regressed": "test_as"}, ConvictionEvidence(trailer))
+    assert not regression_scoped(None, ConvictionEvidence(trailer))
+
+
+def test_compiled_record_reads_under_the_tests_the_unit_answers_for() -> None:
+    """`convicted_by: []` on an `error_count 0` record supports nothing once
+    the unit has ANY attributed test, escalated included — the reading the
+    call sites now take (`evidence_for_record`). The pre-change read used
+    the convicting set alone, under which the live BothDebug record was
+    supported by `[] <= {}` while thirteen escalated tests sat on it."""
+    prov = RetroProvenance(cluster="stable", layout_fp="x")
+    compiled = stamp_conviction(
+        {"error_count": 0, "fully_exhausted": True}, prov, NO_TESTS)
+    convicting = ConvictionEvidence(frozenset())            # nothing convicts
+    answers = ConvictionEvidence(frozenset({"test_trailer"}))  # escalated
+    # NEGATIVE CONTROL: the convicting-only reading supports the record.
+    assert convicting.still_supports(compiled)
+    assert conviction_standing(compiled, prov, convicting) is ConvictionStanding.CURRENT
+    # The answered-for reading does not.
+    assert not answers.still_supports(compiled)
+    chosen = evidence_for_record(compiled, convicting=convicting, answers=answers)
+    assert chosen is answers
+    assert conviction_standing(compiled, prov, chosen) is ConvictionStanding.STALE_EVIDENCE
+    # A compile-taught record keeps the convicting reading, exactly as before.
+    taught = stamp_conviction({"error_count": 3, "fully_exhausted": True}, prov, NO_TESTS)
+    assert evidence_for_record(taught, convicting=convicting, answers=answers) is convicting
+    assert conviction_standing(taught, prov, convicting) is ConvictionStanding.CURRENT
+    # No record reads as compiled (the wider, safer default).
+    assert evidence_for_record(None, convicting=convicting, answers=answers) is answers
+    # And a compiled record stamped with the wider set stands under it.
+    wide = stamp_conviction({"error_count": 0, "fully_exhausted": True}, prov, answers)
+    assert wide["convicted_by"] == ["test_trailer"]
+    assert conviction_standing(
+        wide, prov, evidence_for_record(wide, convicting=convicting, answers=answers)
+    ) is ConvictionStanding.CURRENT

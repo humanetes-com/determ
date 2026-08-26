@@ -1090,6 +1090,52 @@ def _construct_hint(rec: TypeRecord) -> str | None:
     return None
 
 
+# Bounds on the doc lines a type carries into a fill prompt: the constructor
+# fill prompt already measures 121 147 chars on the live `stable` tree
+# (2026-08-26), and a contract sentence is one or two lines by the authoring
+# rule — three lines / 200 chars each keeps a documented type to ~600 chars.
+_TYPE_DOC_MAX_LINES = 3
+_TYPE_DOC_MAX_CHARS = 200
+
+
+def _type_doc_lines(definition: str) -> list[str]:
+    """The LEADING `///` doc lines of a type's rendered `definition`, trimmed,
+    at most `_TYPE_DOC_MAX_LINES` of `_TYPE_DOC_MAX_CHARS` each (an over-long
+    line ends in `…`, and so does the last kept line when more follow).
+
+    Authored contract lines reach the fill prompts only through this renderer.
+    `format_type_for_prompt` rebuilds the type line from kind/name/fields/
+    methods and, until this function existed, read `definition` for nothing
+    but its `repr`/`derive` attributes — so a `///` line t1.5 wrote on a type
+    was spliced into the skeleton, survived the extractor (which prints doc
+    comments FIRST in `render_item_definition`), and was dropped here: the
+    live `stable` tree's documented `Chain` rendered bare (2026-08-26). Only
+    the leading block counts — `//!` inner docs and `//` comments are not docs
+    of the item and are skipped; the first attribute or the item head ends
+    the block, exactly where `_type_layout_attrs` begins reading."""
+    out: list[str] = []
+    truncated = False
+    for raw in definition.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//!") or (
+                line.startswith("//") and not line.startswith("///")):
+            continue
+        if not line.startswith("///"):
+            break
+        text = line[3:].strip()
+        if not text:
+            continue
+        if len(out) >= _TYPE_DOC_MAX_LINES:
+            truncated = True
+            break
+        if len(text) > _TYPE_DOC_MAX_CHARS:
+            text = text[:_TYPE_DOC_MAX_CHARS - 1].rstrip() + "…"
+        out.append(f"/// {text}")
+    if truncated and out and not out[-1].endswith("…"):
+        out[-1] += " …"
+    return out
+
+
 def _type_layout_attrs(definition: str) -> list[str]:
     """The layout-deciding outer attributes on a type — `#[repr(...)]` and
     `#[derive(...)]` — pulled from the record's rendered `definition`.
@@ -1164,7 +1210,10 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
     method NAME but invisible argument types.
 
     The layout-deciding outer attributes (`repr`, `derive`) are rendered above
-    the type line — see `_type_layout_attrs`.
+    the type line — see `_type_layout_attrs` — and the type's leading `///`
+    doc lines above those (`_type_doc_lines`): the contract sentence t1.5
+    authors on an item has no other route into a fill prompt, and was
+    dropped here before that renderer existed.
     """
     kind = rec.kind or "?"
     name = rec.name or "?"
@@ -1172,7 +1221,9 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
     fields = rec.fields
     variants = rec.variants
     methods = rec.methods
-    lines = [*_type_layout_attrs(rec.definition or ""), f"{kind} {name}{generics}"]
+    definition = rec.definition or ""
+    lines = [*_type_doc_lines(definition), *_type_layout_attrs(definition),
+             f"{kind} {name}{generics}"]
     if fields:
         lines.append("  fields (access with .name):")
         for f in fields:

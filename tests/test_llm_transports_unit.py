@@ -179,3 +179,54 @@ def test_muse_glimmer_is_not_prompted_as_a_weak_model() -> None:
     from pipeline_core.domain.model_caps import model_tier
     assert model_tier("RedHatAI/Muse-Glimmer-30B-FP8-block") is ModelTier.MID
     assert model_tier("meta-models/Muse-Glimmer-30B") is ModelTier.MID
+
+
+# --------------------------------------------------------------------------- #
+# the followup trace: its own first-writer slot beside the main trace
+# --------------------------------------------------------------------------- #
+def test_followup_trace_persists_beside_the_main_trace_under_the_same_sha(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured 2026-08-26 on run `82157-476ddc16`: 754 followups had no
+    trace on disk — `_persist_thinking` keeps the first writer of `<sha>.txt`
+    and the main trace is written first. The followup's reasoning gets a
+    sibling slot, `<sha>.followup.txt`, under the SAME reply sha."""
+    import hashlib
+    monkeypatch.setattr(t, "_LOG_DIR", str(tmp_path))
+    sha = hashlib.sha256(b"code").hexdigest()
+    think = tmp_path / "thinking"
+
+    t._persist_thinking("code", "main trace")
+    t._persist_followup_thinking("code", "followup trace")
+
+    assert (think / f"{sha}.txt").read_text() == "main trace"
+    assert (think / f"{sha}.followup.txt").read_text() == "followup trace"
+
+    # First writer wins per slot: a later followup under the same reply sha
+    # does not overwrite (same rule as the main writer).
+    t._persist_followup_thinking("code", "later followup")
+    assert (think / f"{sha}.followup.txt").read_text() == "followup trace"
+
+    # Nothing to persist writes nothing.
+    t._persist_followup_thinking("other", "")
+    assert not (think / f"{hashlib.sha256(b'other').hexdigest()}.followup.txt").exists()
+
+
+def test_routing_the_followup_trace_through_the_main_writer_loses_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """NEGATIVE CONTROL: the record as it stood. The main writer's key cannot
+    be reused — it keeps the first writer, i.e. the main trace."""
+    import hashlib
+    monkeypatch.setattr(t, "_LOG_DIR", str(tmp_path))
+    sha = hashlib.sha256(b"code").hexdigest()
+
+    t._persist_thinking("code", "main trace")
+    t._persist_thinking("code", "followup trace")
+
+    assert (tmp_path / "thinking" / f"{sha}.txt").read_text() == "main trace"
+    assert not (tmp_path / "thinking" / f"{sha}.followup.txt").exists()
+
+
+def test_make_hooks_wires_both_trace_writers() -> None:
+    hooks = t._make_hooks()
+    assert hooks.persist_thinking is t._persist_thinking
+    assert hooks.persist_followup_thinking is t._persist_followup_thinking

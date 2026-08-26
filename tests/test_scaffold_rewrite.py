@@ -313,3 +313,26 @@ def test_a_fn_replacement_deletes_no_impl():
         fn_name="provide")])
     assert res.replaced
     assert "impl Send for Error {}" in res.text
+
+
+def test_replacement_keeps_the_authored_contract_lines():
+    """The splice is textual: whatever the authored block carries lands in the
+    skeleton verbatim, so a `///` contract line survives iff it is in the
+    block — for a type (span = the located definition) and for a fn (span =
+    the whole enclosing item, docs included)."""
+    skeleton = ("mod m {\n    struct ErrorImpl {\n        vtable: u8,\n    }\n"
+                "    fn vtable(p: u8) -> u8 { unimplemented!() }\n}\n")
+    new_type = ("/// Holds the payload under its own TypeId, so downcast::<T>() finds it.\n"
+                "#[repr(C)]\nstruct ErrorImpl { inner: Box<dyn StdError> }")
+    new_fn = ("/// Yields the payload's own address.\n"
+              "fn vtable(p: u8) -> u8 { unimplemented!() }")
+    res = replace_surface_definitions(skeleton, [
+        DefReplacement("struct ErrorImpl { vtable: u8, }", new_type),
+        DefReplacement("fn vtable(p: u8) -> u8", new_fn, "vtable"),
+    ])
+    assert res.replaced, res
+    assert new_type in res.text
+    assert new_fn in res.text
+    assert (res.text.index("/// Holds the payload") < res.text.index("#[repr(C)]")
+            < res.text.index("struct ErrorImpl {"))
+    assert res.text.count("///") == 2

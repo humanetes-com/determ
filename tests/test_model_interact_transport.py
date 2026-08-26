@@ -34,3 +34,25 @@ def test_overflow_matches_old_regex():
     ]
     for s in samples:
         assert _parse_input_token_overflow(s) == _old(s), s
+
+
+def test_ask_threads_followup_think_to_the_controller(monkeypatch):
+    """`ask` is the late-bound `ask_raw` behind `AskClient`; the flag has to
+    reach `LLMController.run` by keyword, and the default has to be the
+    pre-existing call (followup_think=False) so every other caller is
+    byte-identical."""
+    import model_interact as mi
+    seen: dict = {}
+
+    class Ctl:
+        def run(self, backend, **kw):
+            seen.clear()
+            seen.update(kw)
+            return "ok"
+
+    monkeypatch.setattr(mi, "_controller", Ctl())
+    monkeypatch.setattr(mi, "_backend", object())
+    assert mi.ask("p") == "ok"
+    assert seen["followup_think"] is False
+    mi.ask("p", followup_think=True)
+    assert seen["followup_think"] is True

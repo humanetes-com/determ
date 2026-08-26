@@ -88,8 +88,11 @@ def _tree(root: Path, *, filled: bool = False) -> Path:
     return crate
 
 
+_ORACLE = "oracle-A"
+
+
 def _entries(skeleton: Path, *, state: BodyState = BodyState.PROVEN,
-             ) -> list[LedgerEntry]:
+             oracle_fp: str = _ORACLE) -> list[LedgerEntry]:
     fps = skeleton_fingerprints(skeleton)
     rows = []
     for file, fn, body in (("src/error.rs", "depth", _DEPTH),
@@ -99,7 +102,8 @@ def _entries(skeleton: Path, *, state: BodyState = BodyState.PROVEN,
         rows.append(LedgerEntry(
             key=LedgerKey("anyhow", "stable", file, fn),
             body_sha=body_sha((body,)), bodies=(body,),
-            sig_sha=sig_sha_of(sigs), layout_fp=fps[file], state=state))
+            sig_sha=sig_sha_of(sigs), layout_fp=fps[file], state=state,
+            oracle_fp=oracle_fp))
     return rows
 
 
@@ -110,10 +114,11 @@ def _stubs() -> list[FnLocator]:
 
 
 def _reseed(tmp_path: Path, entries: list[LedgerEntry], filled: Path,
-            skeleton: Path, check=None):
+            skeleton: Path, check=None, oracle_fp: str = _ORACLE):
     return reseed(site="test", entries=entries, wanted=_stubs(),
                   project="anyhow", cluster="stable", src_dir=filled,
-                  skeleton_root=skeleton, writer=_WRITER, check_builds=check)
+                  skeleton_root=skeleton, writer=_WRITER, oracle_fp=oracle_fp,
+                  check_builds=check)
 
 
 def test_the_matching_units_come_back_and_the_control_leaves_them_stubbed(
@@ -226,8 +231,33 @@ def test_an_occurrence_count_mismatch_is_refused_rather_than_half_applied(
     entries[0] = LedgerEntry(
         key=entries[0].key, body_sha=entries[0].body_sha,
         bodies=(_DEPTH, _DEPTH), sig_sha=entries[0].sig_sha,
-        layout_fp=entries[0].layout_fp, state=BodyState.PROVEN)
+        layout_fp=entries[0].layout_fp, state=BodyState.PROVEN,
+        oracle_fp=_ORACLE)
     out = _reseed(tmp_path, entries, filled, skeleton)
     assert ("src/error.rs", "depth") not in {(k.file, k.fn_name)
                                          for k in out.seeded}
     assert any("occurrence count" in why for _k, why in out.skipped)
+
+
+def test_a_proven_row_under_oracle_a_is_refused_on_a_tree_scored_by_oracle_b(
+        tmp_path: Path) -> None:
+    """The plan's sentence at the transaction: the layout matches, the
+    signatures match, the bodies build — and nothing goes back, because the
+    tests that proved them are not the tests scoring this tree. The control
+    is the same site under oracle A, which re-seeds all three."""
+    skeleton = _tree(tmp_path)
+    filled = _tree(tmp_path, filled=True)
+    out = _reseed(tmp_path, _entries(skeleton, oracle_fp="oracle-A"), filled,
+                  skeleton, oracle_fp="oracle-B")
+    assert out.seeded == []
+    assert {why for _k, why in out.skipped} == {"oracle moved"}
+    assert "3 (oracle moved)" in out.render()
+    assert (filled / "src" / "error.rs").read_text().count("unimplemented!()") == 2
+    # Rows written before the field existed carry "" and are refused once.
+    blank = _reseed(tmp_path, _entries(skeleton, oracle_fp=""), filled,
+                    skeleton, oracle_fp="oracle-A")
+    assert blank.seeded == [] and len(blank.skipped) == 3
+    control_filled = _tree(tmp_path / "control", filled=True)
+    control = _reseed(tmp_path, _entries(skeleton, oracle_fp="oracle-A"),
+                      control_filled, skeleton, oracle_fp="oracle-A")
+    assert len(control.seeded) == 3 and control.skipped == []

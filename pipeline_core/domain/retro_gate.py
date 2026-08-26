@@ -223,7 +223,21 @@ class ConvictionEvidence:
     def still_supports(self, record: Mapping[str, Any] | None) -> bool:
         """True iff the verdict was drawn from the blame map it is read under:
         every test it names may still convict, and a verdict that named none is
-        read where none does."""
+        read where none does.
+
+        What "the blame map" is depends on what the record learned from,
+        and the call sites choose (`evidence_for_record`). A record earned
+        from TEST outcomes (`error_count` 0) is stamped with, and read
+        under, the tests the unit ANSWERS FOR — DIRECT and ESCALATED, the
+        dispatch projection — not the convicting subset alone: the live
+        `src/ensure.rs::*impl*::BothDebugfor(A,B)` record carried
+        `error_count 0, failing_test_count 13, convicted_by []` while
+        `test_trailer` sat on the unit through an escalation, and under the
+        convicting-only reading `[] <= {}` held, so the `[]` supported the
+        record on a unit that answered for thirteen red tests. Under this
+        reading `convicted_by: []` on such a record supports NOTHING once the
+        block has any attributed test, escalated included — `not self.tests`
+        is False the moment the dispatch projection names one."""
         if not record:
             return False
         stored = record.get("convicted_by")
@@ -239,6 +253,94 @@ class ConvictionEvidence:
             return not self.tests
         return frozenset(str(t) for t in stored) <= self.tests
 
+
+
+def evidence_for_record(
+    record: Mapping[str, Any] | None, *,
+    convicting: ConvictionEvidence, answers: ConvictionEvidence,
+) -> ConvictionEvidence:
+    """The evidence a stored record is READ under — the same choice
+    `stamp_conviction`'s callers make on write, so a record is judged by
+    the blame map it was stamped with.
+
+    A record that COMPILED (`error_count` 0) learned from test outcomes
+    alone, and the tests it is answerable to are every test the unit
+    answers for (`answers`: DIRECT ∪ ESCALATED). A record earned from
+    compile errors is a verdict on the compiler's question; it is stamped
+    with the convicting tests of the moment (`convicting`) and read under
+    them, exactly as before. A missing record reads as compiled: the
+    wider set is the safer default for a legacy record, since a wider
+    current set can only make a stored `[]` support less."""
+    rec = record or {}
+    if int(rec.get("error_count") or 0) == 0:
+        return answers
+    return convicting
+
+
+# The head `render_regression_detail` (`domain/test_results.py`) writes when a
+# compiled attempt reddened previously-passing tests: the list is Python's
+# `sorted(set)` repr, so every name is quoted with `'` (or `"` when the name
+# itself carries a `'`). Parsed tolerantly to the end of the text: the
+# store's `last_error_preview` is the excerpt cut at 240 characters, and a
+# 13-test list does not fit.
+_REGRESSED_HEAD = re.compile(
+    r"REGRESSED previously-passing test\(s\):\s*\[")
+_QUOTED_NAME = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+
+
+def regressed_tests_from_excerpt(text: str) -> tuple[str, ...]:
+    """The tests a regression verdict names, in the order it names them, or
+    () when `text` is not (or does not contain) a regression verdict — a
+    compile excerpt, a U2 failure, an empty string. A list cut mid-name by
+    the preview cap yields the complete names before the cut."""
+    if not text:
+        return ()
+    m = _REGRESSED_HEAD.search(text)
+    if not m:
+        return ()
+    tail = text[m.end():]
+    close = tail.find("]")
+    body = tail if close < 0 else tail[:close]
+    return tuple(a or b for a, b in _QUOTED_NAME.findall(body))
+
+
+REGRESSION_SCOPED = "regression_scoped"
+
+
+def _leaf(test: str) -> str:
+    return test.rsplit("::", 1)[-1]
+
+
+def regression_scoped(
+    record: Mapping[str, Any] | None, evidence: ConvictionEvidence,
+) -> bool:
+    """Whether ``record``'s lesson was written about tests this unit does
+    not answer for: its `regressed` stamp is non-empty and disjoint (on
+    leaf names) from ``evidence.tests``.
+
+    A retrospective written from a regression verdict diagnoses WHY the
+    attempt reddened those tests — and the diagnosis prescribes, for the
+    next attempt, whatever un-reddens them. When the reddened tests are
+    not the ones the unit is being re-filled FOR, the prescription is
+    scoped to the wrong tests: the live `src/ensure.rs::*impl*::
+    BothDebugfor(A,B)` record (cluster `stable`, `error_count 0,
+    failing_test_count 13, convicted_by []`, preview "This compiled, but it
+    REGRESSED previously-passing test(s): ['test_as', 'test_atom', …") was
+    earned when a `SmallBuf` body reddened thirteen `ensure!`-message
+    tests, and its guidance — "Drop the fixed 40-byte SmallBuf and format
+    into an allocating Write … avoids the overflow fallback" — is the
+    removal of the exact observable `test_trailer` and `test_whitespace`
+    pin (`tests/test_ensure.rs:456`, `:495`). Read on a re-fill for those
+    two tests, the lesson prescribes the defect. A record with no
+    `regressed` stamp (earned before the stamp, or from a compile error)
+    is not this class."""
+    if not record:
+        return False
+    stored = record.get("regressed")
+    if not isinstance(stored, list) or not stored:
+        return False
+    named = {_leaf(str(t)) for t in stored}
+    return named.isdisjoint(_leaf(t) for t in evidence.tests)
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,7 +699,16 @@ def screen_guidance(
       write `object_drop_rest::<E>`, which is an `ErrorVTable` FIELD and not a
       fn the crate declares. Three iterations and six hours held pass=13 with
       every constructor stubbed. The same run's one compiler-taught record
-      (`context::Error`, `error_count` 2) is a real lesson and stays."""
+      (`context::Error`, `error_count` 2) is a real lesson and stays;
+    - it was written from a REGRESSION of tests this unit does not answer
+      for (`regression_scoped`): the diagnosis explains why those tests
+      reddened and prescribes what un-reddens them, which on a re-fill for
+      OTHER tests can be the removal of the very observable they pin.
+
+    ``evidence`` is the tests the unit ANSWERS FOR (DIRECT ∪ ESCALATED,
+    `evidence_for_record`), not the convicting subset: a compiled record's
+    `convicted_by: []` must stop supporting it the moment any attributed
+    test names the unit, escalated included."""
     rec = record or {}
     guidance = str(rec.get("guidance") or "")
     if not guidance:
@@ -629,6 +740,13 @@ def screen_guidance(
     if impossibility_claim_is_unfounded(
             rec, stubbed_fn_names(file_text) - cfg_dead):
         return GuidanceScreening("", "impossibility_unfounded")
+    # The seventh way, judged before the evidence rule and the layout rule
+    # because both can PASS it: a lesson written from a regression of tests
+    # this unit does not answer for. `stale_evidence` reads `convicted_by`,
+    # which such a record stamps empty; the layout rule reads field claims,
+    # and "drop the 40-byte buffer" makes none. See `regression_scoped`.
+    if regression_scoped(rec, evidence):
+        return GuidanceScreening("", REGRESSION_SCOPED)
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return GuidanceScreening("", "stale_evidence")
     text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
@@ -644,9 +762,22 @@ def retired_guidance_line(
     The other retirements keep their existing silence (the per-batch tally
     counts them); this class gets a line because its instance steered the
     crawl's central unit for a week with no signature but the honoured line."""
+    rec = record or {}
+    if verdict.retired_by == REGRESSION_SCOPED:
+        # Same reason the class above gets a line: the record stays in the
+        # store, its text is what was dropped, and the ensure instance
+        # (`BothDebugfor(A,B)`, 2026-08) was honoured into a re-fill for
+        # `test_trailer` with no signature but the honoured line.
+        regressed = [str(t) for t in (rec.get("regressed") or [])]
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} was written "
+                f"from a regression of {len(regressed)} test(s) this unit "
+                f"does not answer for ({regressed[:4]}) — retro guidance "
+                f"withheld ({REGRESSION_SCOPED}): {head}")
     if verdict.retired_by != TEST_SACRIFICING_PRESCRIPTION:
         return ""
-    rec = record or {}
     convicted = rec.get("convicted_by")
     tests = (f"convicted_by={sorted(str(t) for t in convicted)}"
              if isinstance(convicted, list) and convicted else
@@ -706,15 +837,25 @@ def stamp_conviction(
     provenance: RetroProvenance,
     evidence: ConvictionEvidence,
     blockers: BlockedOnStubs | None = None,
+    *,
+    regressed: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Every half a later reader needs: the CONTEXT the verdict was earned in
-    (equality-checked), the EVIDENCE it rests on (subset-checked) and the hollow
-    siblings it ran against (`cleared_blockers`, difference-checked).
+    (equality-checked), the EVIDENCE it rests on (subset-checked), the hollow
+    siblings it ran against (`cleared_blockers`, difference-checked) and the
+    tests the failed attempt REGRESSED (`regression_scoped`,
+    disjointness-checked).
 
     `blockers` is optional so a caller with no file snapshot in hand still
     writes a well-formed record; such a record simply carries no tree claim and
-    is never released by `cleared_blockers`."""
+    is never released by `cleared_blockers`. `regressed` is
+    `regressed_tests_from_excerpt` of the attempt's FULL failure text (the
+    240-character preview the record also carries cuts a 13-test list
+    mid-name); always written, so a record earned from a compile error
+    carries `regressed: []` and reads as "not this class" rather than as a
+    legacy record."""
     stamped = evidence.stamp(provenance.stamp(record))
+    stamped["regressed"] = sorted(regressed)
     if blockers is None:
         return stamped
     stamped[GUIDANCE_FROM_HOLLOW_TREE] = bool(

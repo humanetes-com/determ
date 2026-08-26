@@ -6,7 +6,7 @@ from pipeline_core.monitor.legend import PHASES, legend_lines
 
 def test_every_pipeline_phase_has_a_legend_entry():
     tags = {t for t, _ in PHASES}
-    for expected in ("task0a", "task0b", "task0c", "cfg-scan", "bake", "strip",
+    for expected in ("task0a", "task0b", "task0d", "task0c", "cfg-scan", "bake", "strip",
                      "task1", "task2a", "task2b", "task2c", "task3", "task4",
                      "skeleton-validate", "retro"):
         assert expected in tags
@@ -30,3 +30,10 @@ def test_legend_window_scrolls_from_bottom():
     assert legend_window(60, 5, 0) == rows[-5:]          # bottom
     assert legend_window(60, 5, 3) == rows[-8:-3]        # scrolled up 3
     assert legend_window(60, len(rows) + 10, 0) == rows  # viewport bigger than content
+
+
+def test_task0d_legend_sits_between_cfg_scan_and_task0c():
+    tags = [t for t, _ in PHASES]
+    assert tags.index("cfg-scan") < tags.index("task0d") < tags.index("task0c")
+    desc = dict(PHASES)["task0d"]
+    assert "before t0c" in desc and "stdout recorded as the Then" in desc

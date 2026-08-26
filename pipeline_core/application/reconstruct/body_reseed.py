@@ -179,7 +179,8 @@ def _definition_checker(skeleton_root: Path) -> Callable[[LayoutDep], bool]:
 def reseed(
     *, site: str, entries: Iterable[LedgerEntry], wanted: Iterable[FnLocator],
     project: str, cluster: str, src_dir: Path, skeleton_root: Path,
-    writer: TreeWriter, check_builds: BuildCheck | None = None,
+    writer: TreeWriter, oracle_fp: str,
+    check_builds: BuildCheck | None = None,
     log: Callable[[str], None] | None = None,
 ) -> ReseedOutcome:
     """Put back every body the ledger can vouch for, and keep only what builds.
@@ -191,6 +192,13 @@ def reseed(
     at cluster entry it is the whole stub set. Units the ledger has nothing for
     are silently absent: an empty ledger makes this a no-op, which is what makes
     the write path shippable before any read path exists.
+
+    `oracle_fp` is the fingerprint of the test set scoring `src_dir`, computed
+    by the CALLER (`adapters/oracle_fingerprint.cluster_oracle_fp`, through
+    the driver's dep) — this module reads the layout to fingerprint it and
+    the tree to read signatures, and it deliberately does not also decide what
+    the oracle is. A row graded under another oracle is skipped as `oracle
+    moved`, which the outcome line counts by reason like every other refusal.
     """
     outcome = ReseedOutcome(site=site)
     wanted_keys = [LedgerKey(project=project, cluster=cluster, file=k.file,
@@ -203,7 +211,7 @@ def reseed(
             FnLocator(key.file, key.fn_name), src_dir))
         for key in wanted_keys}
     plan = plan_reseed(entries, wanted=wanted_keys, file_fp=file_fp,
-                       sig_sha=sig_sha,
+                       sig_sha=sig_sha, oracle_fp=oracle_fp,
                        definition_present=_definition_checker(skeleton_root))
     outcome.skipped = list(plan.skipped)
     if not plan.take:

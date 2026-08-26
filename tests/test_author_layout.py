@@ -985,3 +985,39 @@ def test_a_repeated_diagnostic_burned_the_third_attempt_before_the_stop(monkeypa
                   select_pins=_has_pins, symbol_inventory="", deps=d.deps())
     assert len(d.prompts) == 3
     assert not any("already answered for" in ln for ln in d.logs)
+
+
+def test_behaviour_suite_reaches_the_authoring_prompt_and_is_logged():
+    """The suite `select_pins` draws its STATIC_ASSERTION pins from is also
+    the source of the runtime behaviours: the identity behaviour naming the
+    public `Error` (whose layout reaches `ErrorImpl`) lands in the prompt's
+    MUST section, the pin does not (it has its own section), and one log line
+    per component says how many and of which class. Control: without a suite
+    the prompt carries no such section and nothing is logged."""
+    identity = BehaviourSpec(
+        behaviour_id="b-identity", given='let e = Error::msg("x");',
+        when="e.is::<&str>()", then=ObservableOutcome.downcast_ok(True),
+        subkind=BehaviourSubKind.OUTCOME)
+    unrelated = BehaviourSpec(
+        behaviour_id="b-other", given="", when="other()",
+        then=ObservableOutcome.display("o"), subkind=BehaviourSubKind.OUTCOME)
+    d = _Deps(_GOOD, [True])
+    res = author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
+                        select_pins=_has_pins, symbol_inventory="Box", deps=d.deps(),
+                        behaviour_specs=[_pin(), unrelated, identity])
+    assert res.all_authored
+    prompt = d.prompts[0]
+    header = "=== BEHAVIOURS THIS REPRESENTATION MUST MAKE EXPRESSIBLE (MUST) ==="
+    assert header in prompt
+    section = prompt[prompt.index(header):prompt.index("=== IN-SCOPE SYMBOL INVENTORY ===")]
+    assert "- when `e.is::<&str>()` then the downcast is Some (true)" in section
+    assert "other()" not in section
+    assert "size_of::<Error>()" not in section
+    assert any("('ErrorImpl',): 1 behaviour(s) in the authoring prompt (identity 1)" in m
+               for m in d.logs), d.logs
+    # control
+    d2 = _Deps(_GOOD, [True])
+    author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
+                  select_pins=_has_pins, symbol_inventory="Box", deps=d2.deps())
+    assert header not in d2.prompts[0]
+    assert not any("behaviour(s) in the authoring prompt" in m for m in d2.logs)

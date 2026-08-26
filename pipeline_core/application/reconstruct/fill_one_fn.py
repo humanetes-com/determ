@@ -57,6 +57,7 @@ from pipeline_core.domain.model_notes import (
 )
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reconstruction import SpliceOutcome
+from pipeline_core.domain.refill_evidence import pinned_observables_from_tests
 from pipeline_core.domain.refine import (
     CompilingSalvage,
     FixProgress,
@@ -73,9 +74,12 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
     judge_guidance,
+    regressed_tests_from_excerpt,
+    regression_scoped,
     retired_guidance_line,
     screen_guidance,
     stamp_conviction,
@@ -113,6 +117,10 @@ def _cfg_dead_fns_of(ctx: PerFnPassCtx, rel_file: str) -> frozenset[str]:
     never see it fill, so it must not keep the record alive."""
     rel = norm_src_rel(rel_file)
     return frozenset(fn for f, fn in ctx.cfg_dead if f == rel)
+
+# Attributed leaves whose source is sliced for pins — the impl routes' cap.
+_ATTRIBUTED_TEST_LEAF_CAP = 12
+
 
 @dataclass(frozen=True, slots=True)
 class FillCaps:
@@ -245,6 +253,19 @@ class FillOneFn:
         _anchor_types = anchor_types_for_container(container)
         _retro_rec = (ctx.retros_cache.get(
             self.retros.retro_key(rel_file, fn_name, container), {}) or {})
+        # Two readings of what this fn answers for: the convicting tests (the
+        # acceptance gate's definition, `u2_test_gate` below) and every
+        # attributed test, escalated included. A record earned from test
+        # outcomes is stamped with and read under the second
+        # (`evidence_for_record`); the guidance screen judges every record
+        # against it.
+        _unit_loc = FnLocator(rel_file, fn_name)
+        _evidence = ConvictionEvidence(
+            frozenset(ctx.tdd_frontier_tests.convicting_for(_unit_loc))
+            if ctx.tdd_frontier_tests is not None else frozenset())
+        _answers = ConvictionEvidence(
+            frozenset(ctx.tdd_frontier_tests.tests_for(_unit_loc))
+            if ctx.tdd_frontier_tests is not None else frozenset())
         _poisoned_retro = ctx.retro_gate.record(judge_guidance(
             _retro_rec.get("guidance", ""), snapshot,
             anchor_types=_anchor_types)) is RetroGateVerdict.RETIRED
@@ -253,16 +274,27 @@ class FillOneFn:
                          f"[{container}]: retro guidance contradicts the "
                          "current layout — guidance withheld, exhaustion not "
                          "honoured (layout-contradicted).")
+        # The record was written from a REGRESSION of tests this fn does not
+        # answer for: its lesson explains what un-reddens those, which on a
+        # re-fill for other tests can be the removal of the observable they
+        # pin (`regression_scoped`). The exhaustion it carries counted
+        # attempts judged on the wrong tests.
+        elif regression_scoped(_retro_rec, _answers):
+            _poisoned_retro = True
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
+                         f"[{container}]: retro guidance was written from a "
+                         "regression of test(s) this fn does not answer for "
+                         "— retro guidance withheld (regression_scoped), "
+                         "exhaustion not honoured (regression-scoped).")
         # …and a conviction earned in ANOTHER context (other cluster's layout,
         # the absolute acceptance gate, the pre-group route set), or drawn from
         # tests that no longer convict this fn, is proof of nothing here —
         # whatever its guidance says.
         _provenance = RetroProvenance.current(ctx.cluster_name, snapshot)
-        _evidence = ConvictionEvidence(
-            frozenset(ctx.tdd_frontier_tests.convicting_for(
-                FnLocator(rel_file, fn_name)))
-            if ctx.tdd_frontier_tests is not None else frozenset())
-        _standing = conviction_standing(_retro_rec, _provenance, _evidence)
+        _standing = conviction_standing(
+            _retro_rec, _provenance,
+            evidence_for_record(_retro_rec, convicting=_evidence,
+                                answers=_answers))
         _stale_conviction = (bool(_retro_rec.get("fully_exhausted"))
                              and _standing is not ConvictionStanding.CURRENT)
         if _stale_conviction:
@@ -344,6 +376,19 @@ class FillOneFn:
             file_rel=rel_file, src_dir=ctx.src_for_macros,
             container=container,
         )
+        # The pins of the tests this fn answers for, for the exhaustion
+        # retrospective: a diagnosis that never sees them can prescribe away
+        # the observable they name (`build_phase_c_retro_prompt`). Sliced by
+        # leaf out of the test files that mention the leaf, as the impl
+        # routes do.
+        _fn_leaves = tuple(dict.fromkeys(
+            t.rsplit("::", 1)[-1]
+            for t in sorted(_answers.tests)))[:_ATTRIBUTED_TEST_LEAF_CAP]
+        _fn_pins = pinned_observables_from_tests(
+            _fn_leaves,
+            (t for leaf in _fn_leaves
+             for _, t in self.tests.find_tests_for_fn(
+                 ctx.tests_dir_files, leaf)))
         # Crate idioms ranked by THIS fn's signature tokens.
         crate_idioms_section = self.prompt.extract_crate_idioms(
             ctx.idiom_blocks, rel_file, target_sig_text=sig_text,
@@ -515,7 +560,7 @@ class FillOneFn:
                 _retro_key = self.retros.retro_key(rel_file, fn_name, container)
                 _retro_rec = ctx.retros_cache.get(_retro_key, {})
                 _retro_verdict = screen_guidance(
-                    _retro_rec, cur_text, evidence=_evidence,
+                    _retro_rec, cur_text, evidence=_answers,
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
                     cfg_dead=_cfg_dead_fns_of(ctx, rel_file))
                 _retro_guidance = _retro_verdict.text
@@ -1088,7 +1133,7 @@ class FillOneFn:
                 # The diagnosis is asked to build ON the prior lesson — a lesson
                 # this layout disproves would just be restated in the new one.
                 _prior_guidance = admissible_guidance(
-                    _prior, snapshot, evidence=_evidence,
+                    _prior, snapshot, evidence=_answers,
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
                     cfg_dead=_cfg_dead_fns_of(ctx, rel_file))
                 _retro = self.retros.diagnose(
@@ -1100,6 +1145,7 @@ class FillOneFn:
                     fix_attempts=fix_attempt,
                     prior_retrospective=_prior_guidance,
                     bound_methods_section=retro_bound_methods,
+                    pinned_observables=_fn_pins,
                 )
                 # Transient empties (llm_error / empty_response) don't
                 # update state — we never saw a real fix attempt's
@@ -1185,7 +1231,18 @@ class FillOneFn:
                            if _new_best is not None else {}),
                         "fully_exhausted": _full_exhaust,
                         "last_error_preview": (error_excerpt or "")[:240],
-                    }, _provenance, _evidence, _blockers)
+                    }, _provenance,
+                        # A compiled attempt learned from test outcomes and is
+                        # answerable to every test the fn answers for; a
+                        # compile failure is stamped with the convicting
+                        # tests of the moment.
+                        (_answers if _cur_progress.compile_errors == 0
+                         else _evidence),
+                        _blockers,
+                        # From the FULL excerpt: the preview above cuts a
+                        # regression's test list mid-name.
+                        regressed=regressed_tests_from_excerpt(
+                            error_excerpt or first_error_excerpt or ""))
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to

@@ -73,6 +73,21 @@ class AugmentModuleFn(Protocol):
                  coverage_strategy: str) -> tuple[float, int, bool, str]: ...
 
 
+class BehaviourCoverageFn(Protocol):
+    """Call shape of the behaviour-coverage reader the composition root binds
+    (`task0c_behaviour_coverage` with its deps applied)."""
+
+    def __call__(self, project_dir: Path, module_name: str, module_dir: Path, /) -> tuple[int, int]: ...
+
+
+class BehaviourPassFn(Protocol):
+    """Call shape of the behaviour pass the composition root binds
+    (`task0c_behaviour_pass` with its deps applied)."""
+
+    def __call__(self, project_dir: Path, module_name: str, module_dir: Path, /, *,
+                 project_context: str, coverage_strategy: str) -> bool: ...
+
+
 class CargoAugmentEngine:
     def __init__(
         self, *,
@@ -82,6 +97,8 @@ class CargoAugmentEngine:
         default_setup: Path,
         collect_test_files: Callable[[Path], list[tuple[str, str]]],
         augment_module: AugmentModuleFn,
+        behaviour_coverage: BehaviourCoverageFn | None = None,
+        behaviour_pass: BehaviourPassFn | None = None,
     ) -> None:
         self._log = log
         self._cargo_env = cargo_env
@@ -89,6 +106,11 @@ class CargoAugmentEngine:
         self._default_setup = default_setup
         self._collect_test_files = collect_test_files
         self._augment_module = augment_module
+        # Unbound = the behaviour rounds read `(0, 0)` and pass nothing: the
+        # cluster loop then logs "no pinnable harvested behaviour" and moves
+        # on, rather than crashing a composition root that predates the wiring.
+        self._behaviour_coverage = behaviour_coverage
+        self._behaviour_pass = behaviour_pass
 
     def estimate_ceiling(self, project_dir: Path, cluster: BuildCluster) -> tuple[float, int, int]:
         """Max coverage % achievable in this cluster, using source line count as a
@@ -174,3 +196,19 @@ class CargoAugmentEngine:
             project_dir, module_name, module_dir, crate_type,
             existing_test_files=existing_test_files,
             project_context=project_context, coverage_strategy=coverage_strategy)
+
+    def behaviour_coverage(self, project_dir: Path, cluster: BuildCluster, module_name: str,
+                           module_dir: Path) -> tuple[int, int]:
+        if self._behaviour_coverage is None:
+            self._log(f"  cluster/{cluster.name}: behaviour coverage not wired — reading 0/0.")
+            return 0, 0
+        return self._behaviour_coverage(project_dir, module_name, module_dir)
+
+    def behaviour_pass(self, project_dir: Path, cluster: BuildCluster, module_name: str,
+                       module_dir: Path, *, project_context: str, coverage_strategy: str) -> bool:
+        if self._behaviour_pass is None:
+            self._log(f"  cluster/{cluster.name}: behaviour pass not wired — skipping.")
+            return False
+        return self._behaviour_pass(project_dir, module_name, module_dir,
+                                    project_context=project_context,
+                                    coverage_strategy=coverage_strategy)

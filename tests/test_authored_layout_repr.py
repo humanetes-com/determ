@@ -104,3 +104,15 @@ def test_the_splice_restores_the_repr_in_the_text_it_writes() -> None:
     edited, reason = _splice_component(items, authored, deps)
     assert reason == ""
     assert "#[repr(transparent)]\npub struct Error {" in edited["src/lib.rs"]
+
+
+def test_contract_line_stays_above_the_carried_repr() -> None:
+    """An authored block that opens with its `///` contract line and no repr
+    gets the frozen repr inserted between the docs and the declaration — the
+    docs are kept, and the repr still binds to the item."""
+    authored = ("/// The TypeId stored is the message's own type, so downcast::<&str>() finds it.\n"
+                "pub struct Error {\n    inner: Own<ErrorImpl>,\n}")
+    out = carry_frozen_repr(_FROZEN_ERROR, authored)
+    assert out == ("/// The TypeId stored is the message's own type, so downcast::<&str>() finds it.\n"
+                   "#[repr(transparent)]\n"
+                   "pub struct Error {\n    inner: Own<ErrorImpl>,\n}")

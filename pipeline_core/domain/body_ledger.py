@@ -87,6 +87,25 @@ class BodyState(StrEnum):
     """The attributed tests ran under those same conditions and regressed.
     Never re-seeded. This is not a conviction and the retro gate must not read
     it: it says one BODY was wrong, not that a unit is hard."""
+    FLAT = "flat"
+    """The unit was dispatched under an escalated REWRITE grade, its
+    attributed convicting tests had run, and the body came back IDENTICAL to
+    the one on the tree — a graded try with an empty verdict delta.
+
+    Before this state existed the row was never written: the landed-change
+    audit appended rows from the landed set only, and an escalated unit that
+    returned unchanged was logged under `ESCALATED, unchanged` and dropped.
+    Run `82157-476ddc16` iter 1 (2026-08-26) dispatched twelve escalated
+    units, nine of them (`src/error.rs::construct`, `construct_from_adhoc`,
+    `construct_from_boxed`, `construct_from_context`, `construct_from_display`,
+    `construct_from_std`, `context`, `msg`, `new`) came back unchanged, and
+    the ledger held no trace of the try — so the next process's re-buy
+    detector, which joins on prior graded rows, could not fire on them.
+
+    NOT re-seedable: an unchanged body under a rewrite instruction is the
+    later measurement of a body whose convicting tests still fail, and a
+    re-seed must not vouch for it on the strength of an earlier, weaker pass.
+    `reseedable` stays PROVEN/UNMEASURED only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +150,21 @@ class LayoutDep:
 
 @dataclass(frozen=True, slots=True)
 class LedgerEntry:
-    """A claim about one unit's body under one authored layout."""
+    """A claim about one unit's body under one authored layout AND one
+    oracle.
+
+    `oracle_fp` is the fingerprint of the test set that graded the row
+    (`oracle_fingerprint`): the cluster tree's `*.gen_tests_*.rs` siblings,
+    the crate's `tests/**/*.rs`, and the baked behaviour suite. It exists
+    because layout identity alone let a body proven under one oracle come
+    back on a tree graded by another: measured 2026-08-26 on the anyhow
+    ledger before the planned cold run (which re-runs t0c and therefore
+    regenerates the gen_tests), 568 stable rows collapsed to 85 latest units,
+    62 PROVEN + 23 UNMEASURED, and against the live `.skeleton/stable` the
+    gate would TAKE 73 of them — all 10 files' layout fingerprints matched —
+    every one graded by tests the cold run was about to replace. An empty
+    value means nobody recorded the oracle; the gate treats that as a moved
+    oracle (see `reseed_allowed`)."""
 
     key: LedgerKey
     body_sha: str
@@ -147,6 +180,7 @@ class LedgerEntry:
     gate_ver: str = GATE_VERSION
     source: str = "live"              # "live" | a backfill source label
     rejected_builds: int = 0          # times a re-seed of this body did not build
+    oracle_fp: str = ""               # fingerprint of the oracle that graded it
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,6 +194,7 @@ class LedgerEntry:
             "run_id": self.run_id, "iteration": self.iteration,
             "epoch": self.epoch, "gate_ver": self.gate_ver,
             "source": self.source, "rejected_builds": self.rejected_builds,
+            "oracle_fp": self.oracle_fp,
         }
 
     @staticmethod
@@ -200,6 +235,9 @@ class LedgerEntry:
                 gate_ver=str(raw.get("gate_ver") or ""),
                 source=str(raw.get("source") or "live"),
                 rejected_builds=int(raw.get("rejected_builds") or 0),
+                # Missing on every row written before the field existed:
+                # parses to "" and the gate refuses it once (`reseed_allowed`).
+                oracle_fp=str(raw.get("oracle_fp") or ""),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -324,6 +362,33 @@ def authored_layout_fp(file_text: str) -> str:
         canon_body(strip_comments(file_text)).encode("utf-8")).hexdigest()[:12]
 
 
+def oracle_fingerprint(files: Iterable[tuple[str, str]]) -> str:
+    """The identity of the test set a row was graded under: sha256 over the
+    sorted `(rel_path, whitespace-folded text)` pairs, 12 hex.
+
+    Whitespace is folded and nothing else: a reformatted test file is the
+    same oracle, a test with one assertion changed is not. Comments are kept
+    on purpose — a `// !! UNCOVERED` marker or a doc comment moving is not a
+    new oracle, but this digest is allowed to be stricter than the truth,
+    because its failure direction is a refused re-seed (one re-derivation)
+    and never a body vouched for by tests that no longer exist. The pairs
+    are sorted so the caller's enumeration order cannot move it, and the
+    path is part of the digest because two files with swapped contents are a
+    different oracle (a gen_tests sibling is attached to ITS parent module).
+
+    An empty file set has a fingerprint (the digest of nothing) and it is
+    deliberately not `""`: the empty string means "nobody recorded the
+    oracle", which the gate refuses, whereas a cluster with no oracle files
+    is a recorded fact the gate can compare."""
+    h = hashlib.sha256()
+    for rel, text in sorted(files):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(canon_body(text).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
 # --- the layout gate ---------------------------------------------------------
 
 def body_layout_deps(
@@ -364,6 +429,63 @@ def _words(text: str) -> Iterable[str]:
         yield "".join(cur)
 
 
+# --- row construction --------------------------------------------------------
+
+def rows_for_units(
+    units: Iterable[tuple[str, str]],
+    records: Iterable[Mapping[str, Any]],
+    *, project: str, cluster: str, state: BodyState,
+    items: Mapping[str, tuple[str, str]], file_of: Mapping[str, str],
+    file_fp: Mapping[str, str], run_id: str, iteration: int, epoch: int,
+    oracle_fp: str,
+) -> list[LedgerEntry]:
+    """One row per `(file, fn_name)` in `units`, built from the extractor's
+    per-fn `records` as they stand NOW — the one construction both audit arms
+    share, so a `flat` row and a `landed` row can never describe the same
+    tree two different ways.
+
+    `records` are the extractor's dicts (`file`, `fn_name`, `body_text`,
+    `sig_text`); a unit is the ORDERED tuple of every matching record, which
+    is what `landed_change.unit_bodies` keys on and what the revert seam
+    reverts (`src/context.rs::source` is two impls). RAW `body_text` goes into
+    the row, never the folded identity — folded, a body holding a `//` comment
+    comments out its own remainder the moment it is spliced back. A unit with
+    no record (the extractor could not see it) yields no row: a row with an
+    empty body tuple would be a re-seed of nothing.
+
+    The FLAT arm is why this is a function and not two copies. Before it,
+    the audit built landed rows inline and dropped the escalated-unchanged
+    set after logging it — the nine `src/error.rs` constructors of run
+    `82157-476ddc16` iter 1 left no row, so nothing downstream could tell
+    "graded, empty delta" from "never tried". With one constructor the FLAT
+    row carries the CURRENT body (the one the rewrite returned unchanged),
+    stamped with the same layout, oracle and process identity the landed rows
+    carry, and `rebuy_hits` fires on it in the next process without any rule
+    of its own."""
+    by_unit: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for r in records:
+        by_unit.setdefault(
+            (str(r.get("file") or ""), str(r.get("fn_name") or "")), []
+        ).append(r)
+    rows: list[LedgerEntry] = []
+    for file, fn_name in sorted(set(units)):
+        recs = by_unit.get((file, fn_name), [])
+        bodies = tuple(str(r.get("body_text") or "") for r in recs)
+        sigs = tuple(str(r.get("sig_text") or "") for r in recs)
+        if not bodies:
+            continue
+        rows.append(LedgerEntry(
+            key=LedgerKey(project=project, cluster=cluster, file=file,
+                          fn_name=fn_name),
+            body_sha=body_sha(bodies), bodies=bodies, sig_sha=sig_sha_of(sigs),
+            layout_fp=file_fp.get(file, ""),
+            layout_deps=body_layout_deps("\n".join(bodies), "\n".join(sigs),
+                                         items, file_of=file_of),
+            state=state, run_id=run_id, iteration=iteration, epoch=epoch,
+            oracle_fp=oracle_fp))
+    return rows
+
+
 @dataclass(frozen=True, slots=True)
 class GateDecision:
     """Whether a stored body may go back on the tree, and why not."""
@@ -377,25 +499,38 @@ class GateDecision:
 
 
 def reseed_allowed(
-    entry: LedgerEntry, *, file_fp: str, sig_sha: str,
+    entry: LedgerEntry, *, file_fp: str, sig_sha: str, oracle_fp: str,
     definition_present: Any = None,
 ) -> GateDecision:
     """May `entry`'s body be spliced into the tree as it stands now?
 
-    Three conditions, cheapest first:
+    Four conditions, cheapest first:
 
     1. the gate version is current — an entry earned under an older meaning of
        "the layout matched" is not re-seeded, it is re-derived;
-    2. the unit's SIGNATURE is unchanged, because a body answers to its own
+    2. the ORACLE that graded the row is the oracle this tree is scored by
+       (`oracle_fp`, the caller's fingerprint of the current test set). A
+       body is `proven` by tests; under different tests the word says nothing.
+       An EMPTY stored fingerprint refuses too: the row was graded under an
+       oracle nobody recorded, which is the same rule as `gate_ver !=
+       GATE_VERSION` — evidence whose premise cannot be checked is re-derived,
+       not trusted. This refuses every row written before the field existed
+       exactly once: the next process re-lands or re-judges the body under a
+       recorded oracle (the promotion pass and the audit stamp it), and from
+       then on the row is comparable. That one-time cost is correct because
+       the alternative was measured: 73 of 85 latest stable units would have
+       re-seeded onto the cold run's tree, all graded by the gen_tests that
+       run was regenerating (2026-08-26, `scripts/ledger_reseed_exposure.py`);
+    3. the unit's SIGNATURE is unchanged, because a body answers to its own
        signature before it answers to anything else;
-    3. the layout matches — either the file fingerprint is identical (the fast
+    4. the layout matches — either the file fingerprint is identical (the fast
        path, and the common one: fingerprinting all 12 files of the 08-14
        archive, the 08-16 archive and the live skeleton gave 12/12 identical,
        so a week and an augmented restart moved no layout at all), or every
        authored item this body actually references is still defined exactly as
        it was.
 
-    `definition_present(dep) -> bool` is how condition 3's fallback reaches the
+    `definition_present(dep) -> bool` is how condition 4's fallback reaches the
     tree; passing None makes the fallback unavailable and a moved fingerprint
     simply refuses. Refusing is never expensive: it costs a re-derivation of one
     unit and it is what keeps the 2026-08-08 `ErrorImpl` lesson — the tree that
@@ -407,6 +542,8 @@ def reseed_allowed(
         return GateDecision(False, "refuted")
     if not entry.reseedable:
         return GateDecision(False, f"state {entry.state}")
+    if not entry.oracle_fp or entry.oracle_fp != oracle_fp:
+        return GateDecision(False, "oracle moved")
     if entry.sig_sha and sig_sha and entry.sig_sha != sig_sha:
         return GateDecision(False, "signature moved")
     if entry.layout_fp and file_fp and entry.layout_fp == file_fp:
@@ -516,7 +653,17 @@ class ReseedPlan:
 
 def latest_by_unit(entries: Iterable[LedgerEntry]) -> dict[LedgerKey, LedgerEntry]:
     """The claim that stands for each unit: the LAST row wins, except that a
-    `proven` row outranks a later `unmeasured` one.
+    `proven` row outranks a later row about a DIFFERENT body that is not
+    `proven`.
+
+    A later word about the SAME body always wins, whatever its state. That
+    clause is what lets a `flat` row supersede a standing `proven` one: the
+    nine `src/error.rs` constructors of run `82157-476ddc16` were `proven` by
+    the weak-assertion Display pass, and the escalated rewrite that came back
+    identical is the LATER measurement of the same body — its convicting tests
+    still fail — so the standing claim is the flat one, not the pass. The
+    rule is not special-cased for `flat`; it falls out of "same body, later
+    word", exactly as a refutation does.
 
     The index is append-only precisely so that a body which was proven and then
     refuted keeps both rows — a reader must be able to tell that apart from a
@@ -541,10 +688,11 @@ def latest_by_unit(entries: Iterable[LedgerEntry]) -> dict[LedgerKey, LedgerEntr
 def rebuy_hits(
     dispatched: Iterable[FnLocator],
     prior: Mapping[LedgerKey, LedgerEntry],
-    *, project: str, cluster: str, run_id: str,
+    *, project: str, cluster: str, run_id: str, oracle_fp: str,
 ) -> tuple[tuple[FnLocator, LedgerEntry], ...]:
     """Units this process is about to dispatch that a PRIOR process in the
-    same cluster already graded with an empty `verdict_delta`.
+    same cluster already graded with an empty `verdict_delta`, under the
+    SAME oracle.
 
     The join `pattern_census.py` computed after the fact, moved to dispatch
     time. Detector only — a re-buy is sometimes the correct move (new
@@ -554,7 +702,19 @@ def rebuy_hits(
     non-empty delta (a verdict actually moved) do not fire. `LANDED` is
     not a grade: the fill returned and no sweep has spoken yet (a kill
     after fill-return, before the sweep, leaves this row; logging it as
-    "already graded" is a lie).
+    "already graded" is a lie). `FLAT` IS a grade — the escalated rewrite
+    returned the body unchanged with its convicting tests run — and it is the
+    row that makes the `82157-476ddc16` constructors visible to the next
+    process, which before it saw no row at all.
+
+    A row graded under another oracle (`entry.oracle_fp != oracle_fp`,
+    including the empty fingerprint of a row written before the field) is
+    skipped: a dispatch against NEW tests is new context by definition, so
+    the prior empty delta says nothing about what this dispatch can buy.
+    Measured 2026-08-26: with the oracle ignored the probe fired for
+    `src/context.rs::context`, `::ext_context` and `src/kind.rs::new` on
+    every fresh run id whatever the layout — rows the cold run's regenerated
+    gen_tests would never have graded.
     """
     if not run_id:
         return ()
@@ -569,6 +729,8 @@ def rebuy_hits(
             continue
         if entry.verdict_delta:
             continue
+        if entry.oracle_fp != oracle_fp:
+            continue
         hits.append((loc, entry))
     return tuple(hits)
 
@@ -576,7 +738,7 @@ def rebuy_hits(
 def plan_reseed(
     entries: Iterable[LedgerEntry], *, wanted: Iterable[LedgerKey],
     file_fp: Mapping[str, str], sig_sha: Mapping[LedgerKey, str],
-    definition_present: Any = None,
+    oracle_fp: str, definition_present: Any = None,
 ) -> ReseedPlan:
     """Which of `wanted` this ledger can put back, and why not the rest.
 
@@ -584,7 +746,9 @@ def plan_reseed(
     which units matter, it only answers about the ones it is asked about. That
     is the line between this store and a dispatch decider: it never removes a
     unit from the frontier, never marks one exhausted and never suppresses a
-    prompt."""
+    prompt. `oracle_fp` is the fingerprint of the test set scoring the tree
+    the bodies would go back onto; the caller computes it (this module never
+    reads a tree) and the gate refuses every row graded under another."""
     stand = latest_by_unit(entries)
     plan = ReseedPlan()
     for key in wanted:
@@ -593,7 +757,7 @@ def plan_reseed(
             continue
         decision = reseed_allowed(
             entry, file_fp=file_fp.get(entry.key.file, ""),
-            sig_sha=sig_sha.get(key, ""),
+            sig_sha=sig_sha.get(key, ""), oracle_fp=oracle_fp,
             definition_present=definition_present)
         if decision:
             plan.take.append(entry)

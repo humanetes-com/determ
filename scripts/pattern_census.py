@@ -57,6 +57,19 @@ REACTED.  The classes and their defining instances:
      `Error::context` instructed into `construct_from_context`'s
      unsatisfiable bound, three identical `E0277`; the unprompted shape on
      the per-fn route dates to 2026-05-26.
+  P16 regression-derived prescription — a retrospective written from a
+     compiled attempt's REGRESSION verdict ("This compiled, but it REGRESSED
+     previously-passing test(s): […]") diagnoses why THOSE tests reddened and
+     prescribes what un-reddens them; read on a later re-fill of the unit for
+     OTHER tests, the prescription can be the removal of the observable those
+     tests pin.  Live instance (store key
+     `src/ensure.rs::*impl*::BothDebugfor(A,B)`, cluster stable, 2026-08):
+     `error_count 0, failing_test_count 13, convicted_by []`, guidance "Drop
+     the fixed 40-byte SmallBuf … avoids the overflow fallback" — the exact
+     40-byte overflow and whitespace fallback `test_trailer`/`test_whitespace`
+     pin.  Screened since 2026-08-26 by the `regressed` stamp
+     (`regression_scoped`); a record earned BEFORE the stamp carries none and
+     is screened by nothing until it is re-earned.
   P8 fire that never lands — the layout retrigger SPENDS a full authoring
      round and the re-author dies in splice/locate infrastructure, so nothing
      reaches the tree.  Distinct from P6, which declines to spend.  Invisible
@@ -105,6 +118,15 @@ keeps it forever, in every prompt naming that file.  Decision rule: any nonzero
 BODY-LESS count is a backlog item, and a count that GROWS after 2026-08-22
 means the FR round trip is destroying bodies again — the subjects line names
 the fns whose prompts are affected.
+After P13 comes P16's standing state: per retrospectives store, the records
+on disk that were earned from a regression verdict (`error_count` 0 and a
+`REGRESSED previously-passing test(s)` preview), with whether each carries the
+`regressed` stamp the screen reads.  Decision rule: a record listed as
+UNSTAMPED is screened by nothing — every prompt for that unit whose tests are
+not the regressed ones is steered by a prescription about other tests until
+the unit's next retro round overwrites it; the per-run P16 rows say which
+runs it steered (SILENT: an honoured line on such a unit) and where the
+screen fired (REACTED: `retro guidance withheld (regression_scoped)`).
 The aggregate at the bottom counts, per class, total hits and how many were
 SILENT.  Decision rule: a class with recurring SILENT hits needs its detector
 and lever BEFORE any new bespoke mechanism is added; a class with only REACTED
@@ -171,6 +193,13 @@ RE_REVERTED_AFTER = re.compile(
 RE_RETRO_HONOURED = re.compile(
     r"\[phase-c/retro-honoured\] (?P<unit>\S+?):? category=(?P<cat>\S+) "
     r"rounds=(?P<rounds>\d+) (?P<premise>blocked_on\[\d+\]|NO tree premise)")
+# P16 — the screen's own line, printed by the per-block/per-fn judge sites
+# and by the prompt-build retirement line (`retired_guidance_line`), all
+# carrying the phrase in the same spelling. The unit is the block id / fn key
+# / store key that follows the route tag.
+RE_RETRO_REGRESSION_SCOPED = re.compile(
+    r"\[phase-c/(?:impl|per-fn|retro-retired)\] (?P<unit>\S+?):? .*?"
+    r"retro guidance withheld \(regression_scoped\)")
 RE_DEATH = re.compile(
     r"\[death-watch\] pipeline \d+ ended after (?P<dur>\S+) —"
     r" exit=(?P<exit>\d+)(?: signal=(?P<sig>\w+))?")
@@ -327,6 +356,11 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # …and the line itself now separates the cfg-dead population, so a hit
         # is a routing gap rather than the cfg filter working.
         ("are cfg-inactive in this cluster", "cfg-dead-excluded"),
+    ],
+    "P16": [
+        # The screen firing IS the answer: the record stays in the store,
+        # its text is what was dropped, and this line is the only trace.
+        ("retro guidance withheld (regression_scoped)", "regression-scoped"),
     ],
     "P14": [
         # The per-block loop's own stopper: it ends the SPEND after the
@@ -1117,11 +1151,64 @@ def detect_p15(run: Run, iters: list[dict]) -> list[dict]:
     return out
 
 
+#: Injectable for tests; None means "read the stores under tmp/ once".
+P16_UNSTAMPED_UNITS: set[str] | None = None
+
+
+def _p16_unstamped_units() -> set[str]:
+    """Store keys of regression-derived records carrying no `regressed`
+    stamp — the population nothing screens (see `regression_derived_records`).
+    Read once per process from the stores under the repo's tmp/."""
+    global P16_UNSTAMPED_UNITS
+    if P16_UNSTAMPED_UNITS is None:
+        root = Path(__file__).resolve().parent.parent
+        P16_UNSTAMPED_UNITS = {
+            r["unit"] for r in regression_derived_records(root)
+            if r["regressed"] is None}
+    return P16_UNSTAMPED_UNITS
+
+
+def detect_p16(run: Run, iters: list[dict]) -> list[dict]:
+    """Regression-derived prescription, two shapes.  (a) SILENT: an honoured
+    line (`[phase-c/retro-honoured]`) on a unit whose store record was earned
+    from a regression verdict and carries no `regressed` stamp — the record
+    steered the prompt and nothing could have screened it, because the stamp
+    the screen reads was never written.  (b) REACTED: the screen's own line,
+    `retro guidance withheld (regression_scoped)`, per unit.  The live
+    instance is (a): `src/ensure.rs::*impl*::BothDebugfor(A,B)` honoured
+    into re-fills for `test_trailer` while its lesson removed the 40-byte
+    overflow fallback that test pins.  A unit is keyed by the store key on
+    the honoured line and by the block id / fn key on the judge-site lines,
+    so the two shapes are reported separately rather than joined."""
+    steered: dict[str, list[str]] = defaultdict(list)
+    unstamped = _p16_unstamped_units()
+    for ref, m in run.find(RE_RETRO_HONOURED):
+        if m["unit"] in unstamped:
+            steered[m["unit"]].append(ref)
+    withheld: dict[str, list[str]] = defaultdict(list)
+    for ref, m in run.find(RE_RETRO_REGRESSION_SCOPED):
+        withheld[m["unit"]].append(ref)
+    hits = []
+    for unit, refs in sorted(steered.items(), key=lambda kv: -len(kv[1])):
+        hits.append({
+            "evidence": f"{unit} steered {len(refs)} prompt(s) on a record "
+                        "written from a regression verdict with NO `regressed` "
+                        "stamp — nothing screened it",
+            "refs": refs[:4]})
+    for unit, refs in sorted(withheld.items(), key=lambda kv: -len(kv[1])):
+        hits.append({
+            "evidence": f"{unit}: regression-scoped guidance withheld "
+                        f"{len(refs)}x — the lesson is about tests this unit "
+                        "does not answer for",
+            "refs": refs[:4]})
+    return hits[:6]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
-             "P14": detect_p14, "P15": detect_p15}
+             "P14": detect_p14, "P15": detect_p15, "P16": detect_p16}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1132,7 +1219,8 @@ CLASS_NAMES = {
     "P11": "discarded answer (reader)",
     "P12": "silent complement (escalation without installable offer)",
     "P14": "compliance over compiler (identical diagnostic across attempts)",
-    "P15": "parked accessor (escalation deferred: unit-set unchanged, never dispatched)"}
+    "P15": "parked accessor (escalation deferred: unit-set unchanged, never dispatched)",
+    "P16": "regression-derived prescription (retro written from a REGRESSED verdict)"}
 
 
 # -------------------------------------------------------------------- report
@@ -1351,6 +1439,70 @@ def print_immortal_accusations(rows: list[dict]) -> None:
             print(f"    subjects: {', '.join(r['fns'])}")
 
 
+def regression_derived_records(root: Path) -> list[dict]:
+    """P16 standing state — the records on disk earned from a regression
+    verdict: `error_count` 0 (the attempt compiled, so the lesson came from
+    test outcomes alone) and a `last_error_preview` opening on the
+    `REGRESSED previously-passing test(s)` head `render_regression_detail`
+    writes.  Per record: the store, the unit key, the failing-test count and
+    `convicted_by` it carries, whether it is `fully_exhausted`, the
+    `regressed` stamp (None when the record predates the stamp — the
+    population the screen cannot see), and the guidance head.  Measured on
+    `tmp/anyhow/.phase_c_logs/retrospectives.json` 2026-08-26: 5 of 23
+    compiled records, all `convicted_by []`, none stamped."""
+    out: list[dict] = []
+    for store in sorted(root.glob("tmp/*/.phase_c_logs/retrospectives.json")):
+        try:
+            data = json.loads(store.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key, rec in sorted(data.items()):
+            if not isinstance(rec, dict):
+                continue
+            if int(rec.get("error_count") or 0) != 0:
+                continue
+            preview = str(rec.get("last_error_preview") or "")
+            if "REGRESSED previously-passing test(s)" not in preview:
+                continue
+            stamped = rec.get("regressed")
+            out.append({
+                "store": str(store.relative_to(root)),
+                "unit": key,
+                "failing_tests": int(rec.get("failing_test_count") or 0),
+                "convicted_by": [str(t) for t in (rec.get("convicted_by") or [])],
+                "exhausted": bool(rec.get("fully_exhausted")),
+                "regressed": ([str(t) for t in stamped]
+                              if isinstance(stamped, list) else None),
+                "guidance": " ".join(str(rec.get("guidance") or "").split())[:100],
+            })
+    return out
+
+
+def print_regression_derived(rows: list[dict]) -> None:
+    print()
+    print("=" * 72)
+    print("P16 regression-derived prescription — retro records on disk earned")
+    print("from a REGRESSED verdict; UNSTAMPED ones are screened by nothing.")
+    if not rows:
+        print("\n  no regression-derived record in any store under tmp/")
+        return
+    by_store: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_store[r["store"]].append(r)
+    for store, recs in by_store.items():
+        unstamped = [r for r in recs if r["regressed"] is None]
+        print(f"\n  {store}: {len(recs)} record(s), {len(unstamped)} UNSTAMPED")
+        for r in recs:
+            stamp = ("UNSTAMPED" if r["regressed"] is None
+                     else f"regressed[{len(r['regressed'])}]")
+            print(f"    {r['unit']}: failing_tests={r['failing_tests']} "
+                  f"convicted_by={r['convicted_by']} "
+                  f"exhausted={r['exhausted']} {stamp}")
+            print(f"      guidance: {r['guidance']}")
+
+
 def print_chronics(ch: dict) -> None:
     print()
     print("=" * 72)
@@ -1393,14 +1545,18 @@ def main() -> int:
         print(f"missing: {missing}", file=sys.stderr)
         return 2
     rows, chron = census(paths, args.min_iters)
-    immortal = immortal_accusations(Path(__file__).resolve().parent.parent)
+    root = Path(__file__).resolve().parent.parent
+    immortal = immortal_accusations(root)
+    regression_derived = regression_derived_records(root)
     print_report(rows)
     print_chronics(chron)
     print_immortal_accusations(immortal)
+    print_regression_derived(regression_derived)
     if args.json:
         args.json.write_text(json.dumps(
             {"runs": rows, "chronics": chron,
-             "immortal_accusations": immortal}, indent=1))
+             "immortal_accusations": immortal,
+             "regression_derived": regression_derived}, indent=1))
         print(f"json written: {args.json}")
     return 0
 

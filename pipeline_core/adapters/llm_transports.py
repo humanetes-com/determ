@@ -902,8 +902,10 @@ class VLLMTransport(_BaseTransport):
                 time.sleep(5)
 
 
-def _persist_thinking(result: str, thinking: str) -> None:
-    """Persist the model's reasoning keyed by the response sha (callers read WHY)."""
+def _persist_trace(result: str, thinking: str, suffix: str) -> None:
+    """Write `thinking` to `logs/thinking/<sha256(result)><suffix>`, first
+    writer wins. `result` is the string the call returned — the one
+    `llm.response` records — so a reader reaches the trace from the event."""
     if not thinking:
         return
     try:
@@ -911,12 +913,34 @@ def _persist_thinking(result: str, thinking: str) -> None:
         _think_dir = os.path.join(_LOG_DIR, "thinking")
         os.makedirs(_think_dir, exist_ok=True)
         _sha = _hl.sha256(result.encode("utf-8", "replace")).hexdigest()
-        _tp = os.path.join(_think_dir, f"{_sha}.txt")
+        _tp = os.path.join(_think_dir, f"{_sha}{suffix}")
         if not os.path.exists(_tp):
             with open(_tp, "w", encoding="utf-8", errors="replace") as _tf:
                 _tf.write(thinking)
     except Exception:
         pass
+
+
+def _persist_thinking(result: str, thinking: str) -> None:
+    """Persist the model's reasoning keyed by the response sha (callers read WHY)."""
+    _persist_trace(result, thinking, ".txt")
+
+
+def _persist_followup_thinking(result: str, thinking: str) -> None:
+    """Persist the forced followup's OWN reasoning as `<sha>.followup.txt`,
+    beside the main trace under the same response sha.
+
+    Why not the main writer's key: `_persist_thinking` keeps the FIRST writer
+    of `<sha>.txt`, and the controller persists the main trace before the
+    followup's, so under one key the followup's would always lose — which is
+    the record as it stood. Measured 2026-08-26 on run `82157-476ddc16`:
+    1 595 of 1 596 recorded followup replies, and for 754 of them the file
+    under the reply's sha held the MAIN trace (length equal to the stream
+    row's `reasoning_chars`), i.e. the reasoning that wrote the reply on
+    record was on disk nowhere. A distinct suffix gives it its own
+    first-writer slot; the sha is shared so the two are siblings a reader
+    finds from one `llm.response` row."""
+    _persist_trace(result, thinking, ".followup.txt")
 
 
 def _make_hooks() -> Hooks:
@@ -927,6 +951,7 @@ def _make_hooks() -> Hooks:
         guard=_guard,
         dbg=_dbg,
         persist_thinking=_persist_thinking,
+        persist_followup_thinking=_persist_followup_thinking,
         emit=lambda event, data: _emit_event(event, data=data),
     )
 

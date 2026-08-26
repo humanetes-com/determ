@@ -26,6 +26,7 @@ def _args() -> SimpleNamespace:
     return SimpleNamespace(
         repo="dummy-repo", project="proj", clean=False, augment_tests=False,
         progress=False, nolog=False, from_spec=False, restart_from_augmented=False,
+        restart_from_pre_augment=False,
         audit=False, best_models_list=False, vram_gb=32.0,
         phase_a_only=False, phase_b_only=False, phase_c_only=False,
         phase_d_only=False, skeleton_backend=False,
@@ -142,3 +143,138 @@ def test_run_pipeline_baked_clusters_freeze_identity(tmp_path: Path) -> None:
     assert exc.value.code == 0
     deps.task0_cfg_scan.assert_not_called()
     deps.scope.reset.assert_called_once_with(baked)
+
+
+# --- the pre-augmentation restore point -----------------------------------
+
+def test_run_pipeline_tags_the_pre_augmentation_point_before_task0c(tmp_path: Path) -> None:
+    """A fresh git-managed run (repo given → git_managed) writes
+    `task0c-pre-<module>` at HEAD before the cluster augmentation runs, and
+    only after having listed the existing tags (never re-pointed)."""
+    deps = _run_deps(tmp_path)
+    deps.list_git_tags.return_value = []
+    deps.read_state.return_value = {"phases": {"task0b": {"status": "done"}}, "current": ""}
+    order: list[str] = []
+    deps.git_tag.side_effect = lambda *_a, **_k: order.append("tag")
+    deps.cluster_augmentor.run.side_effect = lambda *_a, **_k: order.append("task0c")
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    deps.git_tag.assert_called_once_with(tmp_path, "task0c-pre-mod")
+    deps.list_git_tags.assert_called_once_with(tmp_path, "task0c-pre-*")
+    assert order == ["tag", "task0c"]
+
+
+def test_run_pipeline_does_not_repoint_an_existing_pre_augmentation_tag(tmp_path: Path) -> None:
+    deps = _run_deps(tmp_path)
+    deps.list_git_tags.return_value = ["task0c-pre-mod"]
+    deps.read_state.return_value = {"phases": {"task0b": {"status": "done"}}, "current": ""}
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    deps.git_tag.assert_not_called()
+
+
+def test_run_pipeline_refuses_to_tag_a_workspace_whose_task0c_already_ran(tmp_path: Path) -> None:
+    """The live tmp/anyhow shape: no tag, HEAD a task2a checkpoint. Tagging
+    HEAD would point the restore at a stripped tree."""
+    deps = _run_deps(tmp_path)
+    deps.list_git_tags.return_value = []
+    deps.read_state.return_value = {
+        "phases": {"task0b": {"status": "done"}, "task0c/stable": {"status": "done"}},
+        "current": ""}
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    deps.git_tag.assert_not_called()
+    assert any("NOT tagged" in str(c) for c in deps.log.call_args_list)
+
+
+def test_run_pipeline_off_git_never_lists_or_writes_tags(tmp_path: Path) -> None:
+    deps = replace(_run_deps(tmp_path), is_git_repo=MagicMock(return_value=False))
+    args = _args()
+    args.repo = None                      # --project path → git_managed from is_git_repo
+    (tmp_path / "tmp" / "proj").mkdir(parents=True)
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, args, tmp_path)
+    deps.git_tag.assert_not_called()
+    deps.list_git_tags.assert_not_called()
+
+
+def test_run_pipeline_restart_from_pre_augment_runs_the_restore(tmp_path: Path) -> None:
+    deps = _run_deps(tmp_path)
+    args = _args()
+    args.restart_from_pre_augment = True
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, args, tmp_path)
+    deps.restart_from_pre_augment.assert_called_once_with(tmp_path, tmp_path)
+    deps.restart_from_augmented.assert_not_called()
+
+
+def test_run_pipeline_restart_from_pre_augment_failure_aborts(tmp_path: Path) -> None:
+    deps = _run_deps(tmp_path)
+    deps.restart_from_pre_augment.side_effect = RuntimeError("No task0c-pre-* tag")
+    args = _args()
+    args.restart_from_pre_augment = True
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.run_pipeline(deps, args, tmp_path)
+    assert exc.value.code == 2
+    deps.cluster_augmentor.run.assert_not_called()
+
+
+@pytest.mark.parametrize("other", ["clean", "restart_from_augmented"])
+def test_run_pipeline_pre_augment_is_exclusive_with_the_other_restores(tmp_path: Path, other: str) -> None:
+    deps = _run_deps(tmp_path)
+    args = _args()
+    args.restart_from_pre_augment = True
+    setattr(args, other, True)
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.run_pipeline(deps, args, tmp_path)
+    assert exc.value.code == 2
+    deps.restart_from_pre_augment.assert_not_called()
+    deps.restart_from_augmented.assert_not_called()
+    deps.git_clean_reset.assert_not_called()
+
+
+def test_run_pipeline_harvests_behaviours_after_the_tag_and_before_task0c(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plan's sentence: the behaviour harvest (task0d) reads the ORIGINAL,
+    so it runs after the pre-t0c tag and before the cluster augmentation, on
+    a module whose task0c has not run (no augmentation sentinel)."""
+    deps = _run_deps(tmp_path)
+    deps.list_git_tags.return_value = []
+    deps.read_state.return_value = {"phases": {"task0b": {"status": "done"}}, "current": ""}
+    deps.augment_store.is_module_augmented.return_value = False
+    order: list[str] = []
+    calls: list[tuple[object, ...]] = []
+    deps.git_tag.side_effect = lambda *_a, **_k: order.append("tag")
+    deps.cluster_augmentor.run.side_effect = lambda *_a, **_k: order.append("task0c")
+
+    def _fake_t0d(*a: object, **_k: object) -> None:
+        order.append("task0d")
+        calls.append(a)
+
+    monkeypatch.setattr(orchestrator, "run_task0d", _fake_t0d)
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert order == ["tag", "task0d", "task0c"]
+    (t0d_deps, project_dir, module, _clusters, src_dir), = calls
+    assert t0d_deps is deps.task0d_deps
+    assert (project_dir, module, src_dir) == (tmp_path, "mod", tmp_path / "src")
+
+
+def test_run_pipeline_refuses_the_harvest_once_the_module_is_augmented(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative control: a module whose task0c already ran (the augmentation
+    sentinel is set — the live `tmp/anyhow` on a `restart_from.sh task2a`) is
+    never harvested: its src/ is the stripped shell and its generated tests
+    would enter the spec. The refusal is logged, task0c still runs."""
+    deps = _run_deps(tmp_path)
+    deps.list_git_tags.return_value = []
+    deps.read_state.return_value = {"phases": {"task0b": {"status": "done"}}, "current": ""}
+    deps.augment_store.is_module_augmented.return_value = True
+    fake = MagicMock(name="run_task0d")
+    monkeypatch.setattr(orchestrator, "run_task0d", fake)
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    fake.assert_not_called()
+    deps.cluster_augmentor.run.assert_called_once()
+    logged = " ".join(str(c.args[0]) for c in deps.log.call_args_list)
+    assert "[task0d] 'mod' already augmented" in logged

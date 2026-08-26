@@ -43,9 +43,22 @@ class AugmentContext:
     coverage_strategy: str
     target_pct: float
     tarpaulin_bin: Path
+    # Percent of the cluster's pinnable harvested behaviours that must be pinned
+    # by some generated test before the cluster is committed; 0 = no behaviour
+    # rounds (the pin contract still applies to every block, the extra passes
+    # do not run).
+    behaviour_target_pct: float = 0.0
 
 
 class ClusterAugmentor:
+    # Each behaviour round is one model call per file that still has an
+    # unpinned behaviour, plus a compile and a filtered test run per block —
+    # on anyhow's 9 files that is a ~10-minute round. Three rounds is the
+    # budget for a suite the model does not converge on: a file that pins
+    # nothing in three informed shots is a prompt/harvest defect to read in
+    # the log, not a fourth round.
+    BEHAVIOUR_ROUNDS_MAX = 3
+
     def __init__(
         self, *, telemetry: AugmentTelemetry, scope: ClusterScope,
         store: AugmentStore, engine: AugmentEngine, gate: CommitGate,
@@ -114,9 +127,11 @@ class ClusterAugmentor:
 
             # Pre-check: verify base library compiles under this cluster's env.
             # Handles E0554 (nightly feature on stable) by auto-installing nightly toolchain.
+            precheck_ok = True
             if cluster_done != set(modules):
                 pc_mod = next((m for m in modules if m not in cluster_done), modules[0])
-                if not engine.pre_check(project_dir, pc_mod, cluster):
+                precheck_ok = engine.pre_check(project_dir, pc_mod, cluster)
+                if not precheck_ok:
                     tel.log(f"  cluster/{cluster.name}: pre-check failed — skipping all modules.")
                     tel.mark_phase(project_dir, f"task0c/{cluster.name}", "error",
                                    detail="pre-check failed — cluster skipped", source_hash=src_hash)
@@ -216,6 +231,9 @@ class ClusterAugmentor:
                     store.clear_module_sentinel(project_dir, mod_name)
                     continue
 
+            if precheck_ok:
+                self._behaviour_rounds(ctx, cluster, [m for m in modules if m in cluster_done])
+
             tel.log(f"\n  cluster/{cluster.name} complete — {len(cluster_done)} module(s) done.")
             tel.emit("cluster.done", cluster=cluster.name,
                      duration_ms=int((time.monotonic() - cluster_t0) * 1000),
@@ -233,3 +251,54 @@ class ClusterAugmentor:
             )
 
         scope.set_active(None)
+
+    def _behaviour_rounds(
+        self, ctx: AugmentContext, cluster: BuildCluster, modules: Sequence[str],
+    ) -> None:
+        """After a cluster's coverage loop: raise the share of the cluster's
+        harvested behaviours pinned by generated tests up to
+        `ctx.behaviour_target_pct`, one bounded pass per round, per module.
+
+        Line coverage is the loop's only stop, and a file at 100 % line
+        coverage can still have pinned none of the observables the crate's own
+        tests assert (`tests/test_fmt.rs` pins whole `{:#?}` renderings;
+        the generated blocks on the 2026-08 anyhow trees asserted `contains`).
+        The round reads the metric BEFORE each pass so a cluster already above
+        target spends nothing, and stops on the first pass that admits no block
+        — a pass that lands nothing cannot move the next reading."""
+        target = ctx.behaviour_target_pct
+        if target <= 0:
+            return
+        tel, engine = self._tel, self._engine
+        for mod_name in modules:
+            mod_dir = ctx.module_dirs[mod_name]
+            rounds = 0
+            progress = True
+            while True:
+                pinned, total = engine.behaviour_coverage(
+                    ctx.project_dir, cluster, mod_name, mod_dir)
+                pct = (pinned / total * 100.0) if total else 100.0
+                tel.log(f"  [task0c] cluster {cluster.name}: behaviour coverage {pinned}/{total} "
+                        f"({pct:.0f}%) target {target:.0f}% [{mod_name}, round {rounds}]")
+                tel.emit("task0c.behaviour_coverage", cluster=cluster.name, module=mod_name,
+                         data={"pinned": pinned, "total": total, "pct": pct,
+                               "target": target, "round": rounds})
+                if total == 0:
+                    tel.log(f"  [task0c] cluster {cluster.name}: no pinnable harvested "
+                            f"behaviour — no behaviour pass for '{mod_name}'.")
+                    break
+                if pct >= target:
+                    break
+                if not progress:
+                    tel.log(f"  [task0c] cluster {cluster.name}: behaviour pass admitted no block "
+                            f"for '{mod_name}' — stopping below target.")
+                    break
+                if rounds >= self.BEHAVIOUR_ROUNDS_MAX:
+                    tel.log(f"  [task0c] cluster {cluster.name}: {rounds} behaviour round(s) spent "
+                            f"on '{mod_name}' — stopping below target.")
+                    break
+                rounds += 1
+                progress = engine.behaviour_pass(
+                    ctx.project_dir, cluster, mod_name, mod_dir,
+                    project_context=ctx.project_context,
+                    coverage_strategy=ctx.coverage_strategy)

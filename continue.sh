@@ -41,6 +41,7 @@ source "$SCRIPT_DIR/lib/tree_stamp.sh"
 _YES=false
 _FORCE=false
 _KEEP_AUGMENTED=false
+_RESTART_FROM_PRE_AUGMENT=false
 _NO_TAIL=false
 _NO_PRE_RUN=false
 for _arg in "$@"; do
@@ -59,6 +60,11 @@ for _arg in "$@"; do
         exit 2
     }
     [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true
+    # Resets the workspace to the task0c-pre-<module> tag (the commit BEFORE the
+    # test augmentation) so task0c itself re-runs — the lever for a changed
+    # test generator or admission rule. --keep-augmented restores the POST-t0c
+    # tag and keeps the generated tests. Same name as the pipeline.py flag.
+    [[ "$_arg" == "--restart-from-pre-augment" ]] && _RESTART_FROM_PRE_AUGMENT=true
     [[ "$_arg" == "--no-tail" ]]        && _NO_TAIL=true
     [[ "$_arg" == "--no-pre-run" ]]     && _NO_PRE_RUN=true
 done
@@ -266,7 +272,13 @@ fi
 # act; invoke pipeline.py with those arguments directly when you mean it.
 # ---------------------------------------------------------------------------
 _PIPELINE_ARGS="--project anyhow --audit"
+if [[ "$_KEEP_AUGMENTED" == true && "$_RESTART_FROM_PRE_AUGMENT" == true ]]; then
+    echo "continue.sh: --keep-augmented and --restart-from-pre-augment name two" >&2
+    echo "  different restore points (after / before task0c); pass one." >&2
+    exit 2
+fi
 [[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented --audit"
+[[ "$_RESTART_FROM_PRE_AUGMENT" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-pre-augment --audit"
 
 # Final guard against a duplicate slipping in despite the flock (e.g. if
 # someone bypassed the lock or pgrep was momentarily wrong above).

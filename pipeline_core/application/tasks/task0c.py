@@ -22,10 +22,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ...domain.behaviour_pinning import (
+    behaviours_pinned_by,
+    pinnable_specs,
+    render_behaviour_list,
+    select_behaviours_for_file,
+)
 from ...domain.coverage import PerFileCoverage
 from ...domain.generation import merge_gen_tests_blocks
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
-from ...domain.oracle_admission import BlockAdmission, judge_block, weakening_reason
+from ...domain.oracle_admission import (
+    AdmissionPolicy,
+    BlockAdmission,
+    judge_block,
+    judge_block_contract,
+    weakening_reason,
+)
+from ...domain.oracle_visibility import declared_items, fn_line_spans, public_item_names
 from ...domain.refine import Attempt, FixProgress, LoopState
 from ...domain.rust_idents import camelcase_type_names, defined_type_names
 from ...domain.text import strip_think_blocks
@@ -109,6 +122,14 @@ class Task0cDeps:
     get_current_cluster: Any
     coverage_provider: Any
     check_stop: Any   # graceful-stop hook for the fix loops (#14: was a fix_loop global)
+    # Percent of the cluster's pinnable harvested behaviours the generated
+    # tests must pin (float; 0 = the pin requirement and the behaviour rounds
+    # are off, the public-API refusal still applies). Defaulted, last, so a
+    # composition root that does not pass it yet still constructs.
+    BEHAVIOUR_COVERAGE_TARGET: Any = 0.0
+    # (project_dir, cluster_name) -> BehaviourSuite — the baked
+    # `.skeleton/_behaviours_<cluster>.json` reader; None = no suite listed.
+    load_behaviour_suite: Any = None
 
 
 def _iter_module_rs(module_dir: Path) -> list[Path]:
@@ -576,6 +597,35 @@ _RUNTIME_FIX_HEAD = """The Rust test block you generated for `{rel_path}` COMPIL
     never kept as a tautology.
 """
 
+_CONTRACT_FIX_HEAD = """The Rust test block you generated for `{rel_path}` COMPILES and its tests PASS, but it
+    was REFUSED by the test contract. Rewrite the block so it satisfies the contract — keep the
+    same calls into the code under test — then return the corrected <FILE path="gen_tests_block"> block.
+    {directive}{history}
+    Refusal (read carefully — this is the ONLY thing to fix):
+    {err}
+
+    The contract: every test pins at least one listed harvested behaviour by asserting its EXACT
+    observable (`assert_eq!` against the whole listed `then`, or the `is::<T>()` identity form);
+    `contains(...)` / `.is_ok()` / `.unwrap()` alone pin nothing; and the block uses the PUBLIC API
+    only — no private fields, fns or types, even though `use super::*` makes them visible.
+"""
+
+# The generation contract, verbatim in the generator prompt, the medium
+# retry and the fix prompt, and enforced by `judge_block_contract` at the
+# admission site. It replaced "simply exercising the code path is acceptable":
+# on the 2026-08 anyhow trees that sentence produced admitted blocks asserting
+# `format!("{:?}", x).contains("…")` where the crate's own tests pin the whole
+# rendering, and tests reading private fields (24 % of the private surface).
+_TEST_CONTRACT = """Test contract — each test is judged against it after it compiles and passes; a block that fails it is refused:
+- PIN a behaviour: each test must pin at least one listed harvested behaviour (the "Harvested behaviours" section above, when present) by asserting its EXACT observable — `assert_eq!` against the listed `then` (the whole string, byte for byte; a `const EXPECTED: &str = "…";` is fine for multi-line values), or for a type identity the `assert!(e.is::<T>())` / `e.downcast_ref::<T>().is_some()` form. Where no behaviour is listed, still assert exact values of the public API (the exact Display/Debug string, the exact return value).
+- `contains(...)`, `.is_ok()`, `.is_some()`, `.is_err()`, `.unwrap()` or a bare call ALONE are not accepted as a test's assertion — they pin nothing an alternative implementation could violate.
+- PUBLIC API ONLY: use only `pub` fns, types and fields. No private fields, no private fns, no private types — `use super::*` makes them visible, but a block naming one is refused: a test of an internal freezes a layout the reconstruction is free to redesign.
+- Line coverage is secondary: also reach the uncovered lines shown in fn_bodies, through the public API.
+- Prefer edge cases and error conditions, not just happy paths.
+- When testing a function that returns `Result` or `Option`, test BOTH the Ok/Some path
+  AND the Err/None path if the code shows both branches.
+"""
+
 
 def _engine_runtime_gate(
     *,
@@ -730,6 +780,7 @@ def _engine_build_prompt_sections(
     retrospective: str = "",
     uncov_lines: set[int] | None = None,
     scaffold_chars: int = 0,
+    behaviours: str = "",
 ) -> dict[str, Any]:
     """
     BL-007: Build context sections for one TASK 0c per-file prompt.
@@ -795,7 +846,14 @@ def _engine_build_prompt_sections(
         f"```rust\n{pub_symbols}\n```\n"
     ) if pub_symbols.strip() else ""
 
-    used = len(cargo_section) + len(full_source_section) + len(fn_bodies_section) + len(symbols_section)
+    # Harvested behaviours the file has not pinned yet — priority 1, never
+    # dropped: the renderer caps the section itself, and a block is held to
+    # pinning one of them, so a prompt that lost the list would be refused
+    # for not doing what it was never shown.
+    behaviours_section = behaviours if behaviours.strip() else ""
+
+    used = (len(cargo_section) + len(full_source_section) + len(fn_bodies_section)
+            + len(symbols_section) + len(behaviours_section))
     remaining = budget - used
 
     # --- Optional sections (priority 2) ---
@@ -910,6 +968,7 @@ def _engine_build_prompt_sections(
         "cargo": cargo_section,
         "full_source": full_source_section,
         "fn_bodies": fn_bodies_section,
+        "behaviours": behaviours_section,
         "symbols": symbols_section,
         "history": history_section,
         "what_worked": what_worked_section,
@@ -1281,6 +1340,10 @@ class _PhaseCCtx:
     file_stall_limit: int
     retro_deep_at_stall: int
     stall_context: bool
+    # True for a behaviour pass (`task0c_behaviour_pass`): the "uncovered"
+    # lines are the fns the listed behaviours exercise, so the coverage
+    # retrospective/pragma machinery (which classifies real gaps) stays off.
+    behaviour_pass: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1290,6 +1353,7 @@ class _PhaseCOutcome:
     kind: str                                  # "continue" | "break" | "return"
     at_ceiling: bool = False
     result: tuple[float, int, bool, str] | None = None
+    blocks_admitted: int = 0                   # gen_tests blocks that passed every gate
 
 
 def _run_phase_c(
@@ -1371,6 +1435,10 @@ def _run_phase_c(
     _emit = emit
     _current_cluster = ctx.current_cluster
     _cluster_label = ctx.cluster_label
+    _behaviour_target = _behaviour_target_of(deps)
+    _suite_specs = _load_behaviour_specs(deps, project_dir, _cluster_label, log=_log)
+    _blocks_admitted = 0
+    _file_pinned_now: dict[str, frozenset[str]] = {}
     _split_n = ctx.split_n
     _allow_line = ctx.allow_line
     _prelude_block = ctx.prelude_block
@@ -1573,6 +1641,24 @@ def _run_phase_c(
         fn_bodies = _extract_uncovered_functions(existing_text, uncov_lines)
         pub_symbols = _extract_public_symbols(existing_text)
 
+        # The behaviours this file has not pinned yet: listed in the prompt and
+        # required of the block when the target is on. `already_pinned` is what
+        # the file's EXISTING gen_tests blocks pin, so the metric the cluster
+        # loop reads (`task0c_behaviour_coverage`) and the list the model sees
+        # agree on what is left.
+        _file_items = declared_items(existing_text)
+        _file_specs = select_behaviours_for_file(
+            _suite_specs,
+            file_fn_names={it.name for it in _file_items if it.kind == "fn"},
+            file_pub_items=public_item_names(_file_items),
+            already_pinned=behaviours_pinned_by(_old_block, _suite_specs))
+        _behaviours_section = render_behaviour_list(_file_specs, rel_path=rel_path)
+        _policy = AdmissionPolicy(require_pin=_behaviour_target > 0 and bool(_file_specs),
+                                  refuse_private=True)
+        if _file_specs:
+            _log(f"  [{module_name}] {rel_path} — {len(_file_specs)} harvested behaviour(s) not "
+                 f"yet pinned (pin {'required' if _policy.require_pin else 'requested'})")
+
         # BL-002: retrieve prior attempt history for this file.
         attempt_history = _get_task0c_history(project_dir, rel_path)
 
@@ -1613,6 +1699,11 @@ def _run_phase_c(
             f"The {len(uncov_lines)} line(s) in fn_bodies below are the ONLY remaining uncovered targets — "
             f"all other lines are already covered. Focus exclusively on these.\n"
         ) if coverage > 0 else ""
+        if ctx.behaviour_pass:
+            _coverage_status_probe = (
+                "\nBehaviour pass: the fns in fn_bodies below are the ones the listed harvested "
+                "behaviours exercise. Every test must pin one of the listed behaviours by asserting "
+                "its exact `then`; line coverage is secondary here.\n")
         _env_section = _describe_test_environment()
         _file_constraints = _load_file_constraints(project_dir)
         _target_basename = Path(rel_path).name
@@ -1624,14 +1715,7 @@ Target file: {rel_path}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
 Write a new test block covering the uncovered lines shown in fn_bodies above.
 
-Coverage guidance:
-- Prefer tests with at least one `assert!`, `assert_eq!`, `assert_ne!`, or `.unwrap()` —
-  asserting on return values adds spec value. If asserting is genuinely awkward (void
-  returns, side effects only), simply exercising the code path is acceptable.
-- Prefer testing edge cases and error conditions, not just happy paths.
-- When testing a function that returns `Result` or `Option`, test BOTH the Ok/Some path
-  AND the Err/None path if the code shows both branches.
-
+{_TEST_CONTRACT}
 Rust rules:
 - Each `#[test]` fn must have ZERO arguments.
 - Use `use super::*;` to access module items.
@@ -1668,6 +1752,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             retrospective=file_retrospectives.get(rel_path, ""),
             uncov_lines=uncov_lines,
             scaffold_chars=len(_scaffold_template),
+            behaviours=_behaviours_section,
         )
 
         # The full _coverage_status may add a dead-code hedge when there
@@ -1706,18 +1791,11 @@ project-specific import paths, type construction patterns, and hard constraints.
             return f"""You are writing Rust unit tests that specify the behavioral contract of source code.
 {_TASK0C_THINKING_DIRECTIVE}{_secs['strategy']}{_secs['history']}{_secs['what_worked']}{_secs['retrospective']}{_secs['context']}{_cov_status}
 Target file: {rel_path}
-{_env_section}{_secs['cargo']}{_secs['full_source']}{_secs['fn_bodies']}{_secs['symbols']}{_secs['examples']}{_secs['integ_tests']}{_secs['siblings']}{_secs['old_block']}
+{_env_section}{_secs['cargo']}{_secs['full_source']}{_secs['fn_bodies']}{_secs['behaviours']}{_secs['symbols']}{_secs['examples']}{_secs['integ_tests']}{_secs['siblings']}{_secs['old_block']}
 Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
 {"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if _secs['old_block'] else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
-Coverage guidance:
-- Prefer tests with at least one `assert!`, `assert_eq!`, `assert_ne!`, or `.unwrap()` —
-  asserting on return values adds spec value. If asserting is genuinely awkward (void
-  returns, side effects only), simply exercising the code path is acceptable.
-- Prefer testing edge cases and error conditions, not just happy paths.
-- When testing a function that returns `Result` or `Option`, test BOTH the Ok/Some path
-  AND the Err/None path if the code shows both branches.
-
+{_TEST_CONTRACT}
 Rust rules:
 - Each `#[test]` fn must have ZERO arguments.
 - Use `use super::*;` to access module items.
@@ -1748,7 +1826,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                            attempt_history: str = attempt_history,
                            _old_block: str = _old_block,
                            _scaffold_template: str = _scaffold_template,
-                           _coverage_status_probe: str = _coverage_status_probe) -> str:
+                           _coverage_status_probe: str = _coverage_status_probe,
+                           _behaviours_section: str = _behaviours_section) -> str:
             """Render a generation prompt targeting only a subset of the
                 file's uncovered lines (split-and-merge). Same file context as
                 the full prompt; only the fn_bodies/target section narrows, so
@@ -1770,6 +1849,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 retrospective=file_retrospectives.get(rel_path, ""),
                 uncov_lines=_subset_lines,
                 scaffold_chars=len(_scaffold_template),
+                behaviours=_behaviours_section,
             )
             return _render_prompt(_ssecs, _coverage_status_probe)
 
@@ -1799,6 +1879,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                                  existing_text: str = existing_text,
                                  secs: dict[str, str] = secs,
                                  _file_constraints_section: str = _file_constraints_section,
+                                 _file_specs: tuple[Any, ...] = _file_specs,
+                                 _policy: AdmissionPolicy = _policy,
+                                 _behaviours_section: str = _behaviours_section,
                                  ) -> tuple[str, str]:
             """Inject allow-line + prelude into a raw gen_tests block, reject
                 blocks with no #[test] fns, then write it as sibling `pass_n` on
@@ -1828,26 +1911,34 @@ project-specific import paths, type construction patterns, and hard constraints.
             # `err_text` carries whichever gate rejected the block last — compile
             # diagnostics or its own tests' panic output; `runtime` says which.
             _fc: dict[str, Any] = {"err_text": "", "sigs": frozenset(),
-                                   "reverted": False, "runtime": False}
+                                   "reverted": False, "runtime": False,
+                                   "contract": False, "contract_refusals": 0}
 
             def _attempt_block_fix(_fix_n: int) -> FixOutcome:
-                nonlocal block, _pass_had_work
+                nonlocal block, _pass_had_work, _blocks_admitted
                 _err_text = _fc["err_text"]
                 _runtime = bool(_fc["runtime"])
+                _contract = bool(_fc["contract"])
                 if _fix_n > 1:
-                    _log(f"  [{module_name}] {'Failing own test(s)' if _runtime else 'Compile error'}"
-                         f" in {rel_path} (fix attempt {_fix_n - 1}) — sending to LLM.")
-                    _emit("task0c.gen_tests_unsatisfiable" if _runtime else "task0c.compile_error",
-                          file=rel_path)
+                    _what = ("Contract refusal" if _contract
+                             else "Failing own test(s)" if _runtime else "Compile error")
+                    _log(f"  [{module_name}] {_what} in {rel_path} (fix attempt {_fix_n - 1}) "
+                         f"— sending to LLM.")
+                    if not _contract:
+                        _emit("task0c.gen_tests_unsatisfiable" if _runtime else "task0c.compile_error",
+                              file=rel_path)
                     _fix_history = _get_task0c_history(project_dir, rel_path)
                     _fix_history_section = (f"\n{_fix_history}\n") if _fix_history.strip() else ""
                     _err_capped = _err_text[-3_000:] if len(_err_text) > 3_000 else _err_text
                     _fix_extra = len(_err_capped) + len(block) + len(_fix_history_section) + 4000
-                    _fix_core = secs['cargo'] + secs['full_source'] + secs['fn_bodies'] + secs['symbols']
+                    _fix_core = (secs['cargo'] + secs['full_source'] + secs['fn_bodies']
+                                 + secs['behaviours'] + secs['symbols'])
                     _fix_optional = secs['integ_tests'] + secs['siblings']
                     _FIX_CHAR_LIMIT = TASK0C_PROMPT_CHAR_CAP
                     _fix_ctx = _fix_core + (_fix_optional if len(_fix_core) + len(_fix_optional) + _fix_extra < _FIX_CHAR_LIMIT else "")
-                    _fix_head = (_RUNTIME_FIX_HEAD if _runtime else _COMPILE_FIX_HEAD).format(
+                    _fix_head = (_CONTRACT_FIX_HEAD if _contract
+                                 else _RUNTIME_FIX_HEAD if _runtime
+                                 else _COMPILE_FIX_HEAD).format(
                         rel_path=rel_path, directive=_TASK0C_FIX_THINKING_DIRECTIVE,
                         history=_fix_history_section, err=_err_capped)
                     fix_prompt = f"""{_fix_head}
@@ -1868,6 +1959,7 @@ project-specific import paths, type construction patterns, and hard constraints.
       Construct values through direct API calls instead.
     - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
       Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+    {_TEST_CONTRACT}
     {_nightly_rules_for_cluster()}
     See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
     project-specific import paths, type construction patterns, and hard constraints.
@@ -1917,17 +2009,56 @@ project-specific import paths, type construction patterns, and hard constraints.
                                             block, _adm_detail, "test_failure")
                         _fc["err_text"] = _adm_detail
                         _fc["runtime"] = True
+                        _fc["contract"] = False
                         _fc["sigs"] = _adm.failed_names
                         # The harness compiled and RAN — a runtime test failure is a
                         # test-tier metric, never comparable to a compile-error
                         # count on the same gauge.
                         return FixOutcome("failed", err_sig=_adm.failed_names,
                                           metric=FixProgress(0, max(1, len(_adm.failed_names))))
+                    # Passing on the on-disk implementation is necessary, not
+                    # sufficient: the block must also pin a listed behaviour
+                    # EXACTLY and stay on the public API. A refusal re-prompts
+                    # once with the reason (and the list again, for the pin
+                    # case); a second refusal of the same file/pass reverts.
+                    _cv = judge_block_contract(block, specs=_file_specs,
+                                               file_source=existing_text, policy=_policy)
+                    _reason = _cv.refused_reason
+                    if _reason is not None:
+                        _fc["contract_refusals"] = int(_fc["contract_refusals"]) + 1
+                        _final = int(_fc["contract_refusals"]) >= 2
+                        _log(f"  [{module_name}] gen_tests_{pass_n} in {rel_path} admitted by the "
+                             f"oracle but REFUSED by contract: {_reason}")
+                        _emit("task0c.gen_tests_contract_refused", file=rel_path,
+                              data={"pass_n": pass_n, "reason": _reason,
+                                    "private": list(_cv.private), "pinned": sorted(_cv.pinned),
+                                    "stop": _cv.stop_word if _final else ""})
+                        _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1,
+                                            block, _reason, "contract_refused")
+                        if _final:
+                            _log(f"  [{module_name}] {_cv.stop_word}: gen_tests_{pass_n} in "
+                                 f"{rel_path} refused by contract twice — reverting.")
+                            _revert_gen_tests_pass(abs_path, base_text, _sib)
+                            _fc["reverted"] = True
+                            return FixOutcome("stop")
+                        _fc["err_text"] = _reason + (
+                            "\n" + _behaviours_section
+                            if (not _cv.private and _behaviours_section) else "")
+                        _fc["runtime"] = False
+                        _fc["contract"] = True
+                        _fc["sigs"] = frozenset({"contract:" + _reason})
+                        return FixOutcome("failed", err_sig=frozenset({"contract:" + _reason}),
+                                          metric=FixProgress(0, 1))
                     _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, "", "success")
+                    _pins = (", pins " + ", ".join(sorted(_cv.pinned))) if _cv.pinned else ""
                     _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
-                         f"({len(uncov_lines)} uncovered lines targeted)")
+                         f"({len(uncov_lines)} uncovered lines targeted{_pins})")
                     _emit("task0c.gen_tests_appended", file=rel_path,  # debt#7
                           data={"pass_n": pass_n, "uncovered": len(uncov_lines)})
+                    _emit("task0c.behaviours_pinned", file=rel_path,
+                          data={"pass_n": pass_n, "ids": sorted(_cv.pinned)})
+                    _file_pinned_now[rel_path] = _cv.pinned
+                    _blocks_admitted += 1
                     _pass_had_work = True
                     return FixOutcome("accepted")
                 compile_err = (check.stdout + check.stderr).strip()
@@ -1944,6 +2075,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, compile_err, "compile_error")
                 _fc["err_text"] = compile_err
                 _fc["runtime"] = False
+                _fc["contract"] = False
                 _fc["sigs"] = cur_sigs
                 return FixOutcome("failed", err_sig=cur_sigs,
                                   metric=FixProgress(max(1, len(cur_sigs)), 0))
@@ -2036,13 +2168,14 @@ project-specific import paths, type construction patterns, and hard constraints.
                     + _nightly_rules_for_cluster() + "\n"
                     + "- Do NOT use `assert_eq!`/`assert_ne!` on types without `PartialEq` — use `format!` or `matches!()`.\n"
                     "- Each `#[test]` fn must have ZERO arguments.\n"
-                    f"{_file_constraints_section}"
+                    + _TEST_CONTRACT
+                    + f"{_file_constraints_section}"
                 )
                 _query = (
                     f"You are writing Rust unit tests for `{rel_path}`.\n"
                     f"Target file: {rel_path}\n"
                     f"{_describe_test_environment()}"
-                    f"{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['symbols']}"
+                    f"{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['behaviours']}{secs['symbols']}"
                     f"{_medium_rules}"
                     f"\nWrite a `#[cfg(test)] mod {mod_name}` block covering the uncovered lines shown above.\n"
                     f"{output_format}\n"
@@ -2121,7 +2254,15 @@ project-specific import paths, type construction patterns, and hard constraints.
                 # generation attempt, so the slot is naturally reused.
                 _prev_qcov = file_last_qcov.get(rel_path)
                 file_last_qcov[rel_path] = _qcov
-                if _prev_qcov is not None and _qcov <= _prev_qcov:
+                _pinned_now = _file_pinned_now.get(rel_path, frozenset())
+                if (_prev_qcov is not None and _qcov <= _prev_qcov
+                        and _behaviour_target > 0 and _pinned_now):
+                    # No new line, but a harvested observable the oracle did
+                    # not carry before — that is the block's whole value.
+                    _log(f"  [{module_name}] {rel_path} — block added no line coverage "
+                         f"(was {_prev_qcov}, now {_qcov}) but pins {len(_pinned_now)} "
+                         f"behaviour(s) — kept.")
+                elif _prev_qcov is not None and _qcov <= _prev_qcov:
                     file_failed_blocks.setdefault(rel_path, []).append(block)
                     _log(f"  [{module_name}] {rel_path} — block produced no coverage "
                          f"increase (was {_prev_qcov}, now {_qcov}); reverting.")
@@ -2263,7 +2404,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 stall_n >= RETRO_DEEP_AT_STALL
                 and bool(file_failed_blocks.get(rel_path))
             )
-            if (stall_n >= 1) and fn_bodies.strip():
+            if (stall_n >= 1) and fn_bodies.strip() and not ctx.behaviour_pass:
                 if _fire_deep:
                     _log(f"  [{module_name}] {rel_path} stalled at {stall_n} with "
                          f"{len(file_failed_blocks[rel_path])} failed attempt(s) — "
@@ -2329,7 +2470,7 @@ project-specific import paths, type construction patterns, and hard constraints.
     # nothing actionable), there is nothing more the pipeline can do — stop immediately.
     if not _pass_had_work:
         _log(f"  [{module_name}] All files filtered (cfg/artifact) — no actionable uncovered lines. Stopping.")
-        return _PhaseCOutcome("break", at_ceiling=True)
+        return _PhaseCOutcome("break", at_ceiling=True, blocks_admitted=_blocks_admitted)
 
     # If every remaining uncovered file is now skipped, die with a report.
     remaining = set(uncovered_by_file.keys()) - skipped_files
@@ -2344,9 +2485,10 @@ project-specific import paths, type construction patterns, and hard constraints.
             retro_note = f"\n      retrospective: {retro[:300]}" if retro else ""
             _log(f"    {sf}: {n_uncov} uncovered lines. Last attempts:\n{history}{retro_note}")
         _log("  Action required: improve the generation prompt or add manual tests for these files.")
-        return _PhaseCOutcome("return", result=(coverage, covered_lines, False, ""))
+        return _PhaseCOutcome("return", result=(coverage, covered_lines, False, ""),
+                              blocks_admitted=_blocks_admitted)
 
-    return _PhaseCOutcome("continue")
+    return _PhaseCOutcome("continue", blocks_admitted=_blocks_admitted)
 
 
 def _diagnose_and_fix_regression(
@@ -2756,6 +2898,129 @@ def task0c_augment_module(
 
     _log(f"  [{module_name}/{_cluster_label}] Finished augmentation: {coverage:.1f}% coverage after {attempt} attempt(s).")
     return coverage, covered_lines, _at_ceiling, ""
+
+
+def _behaviour_target_of(deps: Task0cDeps) -> float:
+    """`deps.BEHAVIOUR_COVERAGE_TARGET` as a percent; anything unreadable as a
+    number (a stub in a fakes-built deps) is 0 = off."""
+    try:
+        return max(0.0, float(deps.BEHAVIOUR_COVERAGE_TARGET))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_behaviour_specs(
+    deps: Task0cDeps, project_dir: Path, cluster_name: str,
+    log: Callable[[str], None] | None = None,
+) -> tuple[Any, ...]:
+    """The cluster's harvested behaviour specs, () when there is no suite. The
+    suite is an additive oracle: a loader that fails must never break a run."""
+    loader = deps.load_behaviour_suite
+    if loader is None:
+        return ()
+    try:
+        suite = loader(project_dir, cluster_name)
+    except Exception as exc:
+        if log:
+            log(f"  [task0c] behaviour suite for {cluster_name} unreadable ({exc}) — none listed.")
+        return ()
+    specs = getattr(suite, "specs", None)
+    return tuple(specs) if isinstance(specs, (tuple, list)) else ()
+
+
+def task0c_behaviour_coverage(
+    project_dir: Path, module_name: str, module_dir: Path, deps: Task0cDeps,
+) -> tuple[int, int]:
+    """`(pinned, total)`: of the active cluster's pinnable harvested behaviours,
+    how many some `*.gen_tests_*.rs` of the module pins exactly."""
+    cluster = deps.get_current_cluster()
+    cluster_name = cluster.name if cluster else "stable"
+    specs = pinnable_specs(_load_behaviour_specs(deps, project_dir, cluster_name))
+    if not specs:
+        return 0, 0
+    pinned: set[str] = set()
+    for p in _iter_module_rs(module_dir):
+        if not deps.is_gen_tests_file(p.name):
+            continue
+        with suppress(OSError):
+            pinned |= behaviours_pinned_by(p.read_text(encoding="utf-8"), specs)
+    return len(pinned), len(specs)
+
+
+def task0c_behaviour_pass(
+    project_dir: Path, module_name: str, module_dir: Path, deps: Task0cDeps, *,
+    project_context: str = "", coverage_strategy: str = "",
+) -> bool:
+    """One generation pass over the module's files that still have unpinned
+    harvested behaviours, through the per-file Phase C entry with the
+    behaviours as the target: the "uncovered" lines are the signature lines of
+    the fns the behaviours exercise (every fn of the file when `exercises` is
+    empty), so fn_bodies shows the model the fns to drive and the admission
+    site holds each block to the pin contract. Returns True when at least one
+    block was admitted."""
+    _log = log
+    cluster = deps.get_current_cluster()
+    cluster_name = cluster.name if cluster else "stable"
+    target = _behaviour_target_of(deps)
+    specs = _load_behaviour_specs(deps, project_dir, cluster_name, log=_log)
+    if target <= 0 or not pinnable_specs(specs):
+        return False
+    augmentor = deps.test_augmentor_factory()
+    harness_ok, harness_err = augmentor.test_harness_compiles(project_dir, module_name)
+    if not harness_ok:
+        _log(f"  [{module_name}/{cluster_name}] behaviour pass skipped — the test harness does "
+             f"not compile: {harness_err[:300]}")
+        return False
+    gated = set(cluster.gated_files or ()) if cluster and cluster.gated_files else set()
+    files_data: list[PerFileCoverage] = []
+    for src in _iter_module_rs(module_dir):
+        if deps.is_test_file(src, project_dir) or deps.is_gen_tests_file(src.name) \
+                or src.name == "build.rs":
+            continue
+        rel = str(src.relative_to(project_dir))
+        if rel in gated:
+            continue
+        try:
+            raw = src.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        text = deps.strip_gen_tests_decls(raw).rstrip() + "\n"
+        items = declared_items(text)
+        fn_names = {it.name for it in items if it.kind == "fn"}
+        unpinned = select_behaviours_for_file(
+            specs, file_fn_names=fn_names, file_pub_items=public_item_names(items),
+            already_pinned=behaviours_pinned_by(deps.read_all_gen_tests(src), specs))
+        if not unpinned:
+            continue
+        spans = fn_line_spans(text)
+        exercised = {seg for s in unpinned for e in s.exercises for seg in e.split("::")} & fn_names
+        targets = {spans[n][0] for n in (exercised or fn_names) if n in spans}
+        if not targets:
+            continue
+        _log(f"  [{module_name}/{cluster_name}] behaviour pass: {rel} — {len(unpinned)} "
+             f"unpinned behaviour(s), {len(targets)} fn(s) targeted")
+        files_data.append(PerFileCoverage(
+            abs_path=str(src), path=list(src.parts),
+            traces=[{"line": n, "stats": {"Line": 0}} for n in sorted(targets)],
+            covered=0, coverable=len(targets)))
+    if not files_data:
+        _log(f"  [{module_name}/{cluster_name}] behaviour pass: every relevant behaviour is pinned.")
+        return False
+    allow_line, prelude_block = deps.derive_gentest_prelude(project_dir)
+    outcome = _run_phase_c(
+        project_dir=project_dir, module_name=module_name, module_dir=module_dir,
+        project_context=project_context, coverage_strategy=coverage_strategy,
+        attempt=1, coverage=0.0, covered_lines=0, files_data=files_data,
+        hist=Task0cFileHistory(),
+        ctx=_PhaseCCtx(
+            deps=deps, current_cluster=cluster, cluster_label=cluster_name, split_n=1,
+            allow_line=allow_line, prelude_block=prelude_block,
+            prelude_names=deps.prelude_import_names(prelude_block),
+            file_stall_limit=1, retro_deep_at_stall=1, stall_context=False,
+            behaviour_pass=True),
+    )
+    _log(f"  [{module_name}/{cluster_name}] behaviour pass: {outcome.blocks_admitted} block(s) admitted.")
+    return outcome.blocks_admitted > 0
 
 
 def select_relevant_siblings(
