@@ -2170,6 +2170,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _did_split = True
                 _queries = [_subset_prompt(_p) for _p in _partitions]
                 _responses = generate_in_parallel(_queries, model=_TASK0C_MODEL, think=None)
+                _pass_had_work = True  # LLM ran; empty extract is not "all files filtered"
                 _raw_subs: list[str] = []
                 for _resp in _responses:
                     _raw_sub = extract_test_mod(_resp)
@@ -2177,6 +2178,10 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _raw_sub = _strip_trailing_file_tag(_raw_sub)
                     if _raw_sub:
                         _raw_subs.append(_raw_sub)
+                if not _raw_subs:
+                    # Split spent the GPU and extracted nothing — do not skip
+                    # the single-shot path that would retry the same replies.
+                    _did_split = False
                 # Combine the subset blocks into ONE sibling per attempt when
                 # their top-level item names are disjoint; only a genuine
                 # cross-subset name clash falls back to one-sibling-per-subset.
@@ -2238,6 +2243,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             # of thinking, sometimes generates raw_len=0. think=False (via /no_think)
             # is consistently reliable for this model.
             response = ask(_query, model=_TASK0C_MODEL, think=None)
+            _pass_had_work = True  # LLM ran; empty extract is not "all files filtered"
 
             # Brace-counter extraction — no regex, handles any attribute/whitespace variation.
             block = extract_test_mod(response)

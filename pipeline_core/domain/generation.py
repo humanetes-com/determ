@@ -853,9 +853,38 @@ def gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
     return out
 
 
+def _largest_fenced_test_body(text: str) -> str:
+    """Largest ```…``` fence whose body contains a `#[test]`.
+
+    Muse wraps the asked-for `tests/{stem}_gen_N.rs` FILE body in a markdown
+    fence (run 2881435-34981ab0: every empty_generation raw prefix was
+    ```rust #![allow…] #[test] fn …, extract_test_mod returned ""). The
+    FILE-tag and cfg-mod paths miss that shape; this is the same class
+    `_engine_targeted_pragma` already closed with `extract_code_blocks`."""
+    best = ""
+    i = 0
+    n = len(text)
+    while True:
+        k = text.find("```", i)
+        if k == -1:
+            return best
+        nl = text.find("\n", k + 3)
+        if nl == -1:
+            return best
+        close = text.find("```", nl + 1)
+        if close == -1:
+            return best
+        body = text[nl + 1:close].strip()
+        if "#[test]" in body and len(body) > len(best):
+            best = body
+        i = close + 3
+        if i >= n:
+            return best
+
+
 def extract_test_mod(text: str) -> str:
-    """Brace-counter extraction of a gen_tests mod block, or the body of a
-    `tests/` integration-test FILE tag.
+    """Brace-counter extraction of a gen_tests mod block, a `tests/` FILE
+    tag, or a fenced integration-test file the model wrote instead of the tag.
 
     Finds the first #[cfg(test)] in text, scans forward past any attribute
     lines (#[allow(...)], etc.) to the opening brace of mod gen_*, then walks
@@ -865,7 +894,10 @@ def extract_test_mod(text: str) -> str:
 
     When that wrapper is absent, a `<FILE path="gen_tests_block">` or
     `<FILE path="tests/{stem}_gen_{N}.rs">` body is the integration-test
-    shape the generator now asks for."""
+    shape the generator now asks for. A FILE body that is itself fenced is
+    unwrapped (models wrap despite the tag). When no FILE tag is present,
+    the largest fenced rust body that contains a `#[test]` is the body —
+    that is the live Muse reply on t0c after the `tests/` switch."""
     cfg_pos = text.find('#[cfg(test)]')
     if cfg_pos != -1:
         mod_pos = text.find('mod gen_', cfg_pos)
@@ -888,19 +920,20 @@ def extract_test_mod(text: str) -> str:
     while True:
         start = text.find(open_tag, i)
         if start == -1:
-            return ""
+            return _largest_fenced_test_body(text)
         path_at = start + len(open_tag)
         q = text.find('"', path_at)
         if q == -1:
-            return ""
+            return _largest_fenced_test_body(text)
         path = text[path_at:q]
         gt = text.find(">", q)
         end = text.find(close_tag, gt if gt != -1 else q)
         if gt == -1 or end == -1:
-            return ""
+            return _largest_fenced_test_body(text)
         name = path.rsplit("/", 1)[-1]
         if (path == "gen_tests_block"
                 or parse_gen_tests_integration_filename(name) is not None
                 or (path.startswith("tests/") and name.endswith(".rs"))):
-            return text[gt + 1:end].strip()
+            body = text[gt + 1:end].strip()
+            return _largest_fenced_test_body(body) or body
         i = end + len(close_tag)

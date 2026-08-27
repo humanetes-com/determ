@@ -355,6 +355,36 @@ def test_extract_test_mod_absent_or_malformed() -> None:
     assert extract_test_mod("#[cfg(test)]\nmod gen_tests_1 { fn t() {") == ""
 
 
+def test_extract_test_mod_takes_recorded_fenced_muse_replies() -> None:
+    """Run 2881435-34981ab0: Muse wrote tests/{stem}_gen_1.rs as a ```rust
+    fence. extract_test_mod keyed only on `#[cfg(test)] mod gen_` / `<FILE>`,
+    so every block was dropped and t0c sat at the original-crate 83.9%.
+
+    The recorded replies contain neither marker — that is the negative
+    control (pre-fix extract returned "") — and must yield the tests the
+    model wrote. The fmt reply also has a backtick path preamble, the
+    other live miss shape."""
+    from pathlib import Path
+
+    root = Path(__file__).parent / "fixtures" / "task0c"
+    bt = (root / "muse_fenced_backtrace_gen1.txt").read_text(encoding="utf-8")
+    fmt = (root / "muse_fenced_fmt_gen1.txt").read_text(encoding="utf-8")
+    assert "<FILE " not in bt and "#[cfg(test)]" not in bt
+    assert "<FILE " not in fmt and "#[cfg(test)]" not in fmt
+    out_bt = extract_test_mod(bt)
+    assert "```" not in out_bt
+    assert "fn test_error_can_be_moved_across_threads" in out_bt
+    assert out_bt.count("#[test]") == 3
+    out_fmt = extract_test_mod(fmt)
+    assert "```" not in out_fmt
+    assert "fn test_display_alternate_chain_three" in out_fmt
+    assert out_fmt.count("#[test]") == 9
+    wrapped = '<FILE path="tests/backtrace_gen_1.rs">\n' + bt + "\n</FILE>\n"
+    out_w = extract_test_mod(wrapped)
+    assert "fn test_error_can_be_moved_across_threads" in out_w
+    assert "```" not in out_w
+
+
 def test_extract_gen_tests_body_unbalanced_falls_through() -> None:
     block = "mod gen_tests_1 {\n    fn t() {"
     assert extract_gen_tests_body(block) == block.strip() + "\n"

@@ -1,0 +1,40 @@
+```rust
+#![allow(clippy::all, dead_code, non_snake_case, unreachable_patterns, unsafe_op_in_unsafe_fn, unused, unused_imports, unused_mut)]
+use anyhow::*;
+use std::string::{String, ToString};
+use std::vec::Vec;
+use std::boxed::Box;
+use std::format;
+use std::error::Error as StdError;
+
+#[test]
+fn test_anyhow_error_creation_and_display() {
+    let err = anyhow!("failure");
+    let s = format!("{}", err);
+    assert_eq!(s, "failure");
+}
+
+#[test]
+fn test_error_can_be_moved_across_threads() {
+    // Moving Error across a thread requires Error::Send + Sync,
+    // which in turn requires the Backtrace type used internally to be
+    // Send + Sync – the property asserted by _assert_send_sync().
+    let err = anyhow!("send sync");
+    let handle = std::thread::spawn(move || {
+        format!("{}", err)
+    });
+    let s = handle.join().expect("thread panicked");
+    assert_eq!(s, "send sync");
+}
+
+#[test]
+fn test_error_downcast_preserves_source() {
+    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "io");
+    let err = Error::from(io_err);
+    assert!(err.is::<std::io::Error>());
+    let down = err.downcast_ref::<std::io::Error>();
+    assert!(down.is_some());
+    let msg = format!("{}", down.unwrap());
+    assert_eq!(msg, "io");
+}
+```

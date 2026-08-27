@@ -1,0 +1,84 @@
+`tests/fmt_gen_1.rs`
+```rust
+#![allow(clippy::all, dead_code, non_snake_case, unreachable_patterns, unsafe_op_in_unsafe_fn, unused, unused_imports, unused_mut)]
+use anyhow::*;
+use std::string::{String, ToString};
+use std::vec::Vec;
+use std::boxed::Box;
+use std::format;
+use std::error::Error as StdError;
+
+#[test]
+fn test_display_simple() {
+    let e = anyhow!("boom");
+    let s = format!("{}", e);
+    assert_eq!(s, "boom");
+}
+
+#[test]
+fn test_display_alternate_single() {
+    let e = anyhow!("single");
+    let s = format!("{:#}", e);
+    assert_eq!(s, "single");
+}
+
+#[test]
+fn test_display_alternate_chain_two() {
+    let inner = anyhow!("inner");
+    let outer = inner.context("outer").unwrap_err();
+    let s = format!("{:#}", outer);
+    assert_eq!(s, "outer: inner");
+}
+
+#[test]
+fn test_display_alternate_chain_three() {
+    let e1 = anyhow!("e1");
+    let e2 = e1.context("e2").unwrap_err();
+    let e3 = e2.context("e3").unwrap_err();
+    let s = format!("{:#}", e3);
+    assert_eq!(s, "e3: e2: e1");
+}
+
+#[test]
+fn test_debug_simple_no_cause() {
+    let e = anyhow!("ping");
+    let s = format!("{:?}", e);
+    assert_eq!(s, "ping");
+}
+
+#[test]
+fn test_debug_single_cause() {
+    let inner = anyhow!("inner");
+    let outer = inner.context("outer").unwrap_err();
+    let s = format!("{:?}", outer);
+    let expected = "outer\n\nCaused by:\n    inner";
+    assert_eq!(s, expected);
+}
+
+#[test]
+fn test_debug_multiple_causes_numbered() {
+    let e1 = anyhow!("e1");
+    let e2 = e1.context("e2").unwrap_err();
+    let e3 = e2.context("e3").unwrap_err();
+    let s = format!("{:?}", e3);
+    let expected = "e3\n\nCaused by:\n     0: e2\n     1: e1";
+    assert_eq!(s, expected);
+}
+
+#[test]
+fn test_debug_alternate_forwards_to_inner_debug() {
+    let e = anyhow!("x");
+    // alternate Debug on anyhow::Error delegates to the inner error's Debug
+    let s = format!("{:#?}", e);
+    // The output starts with the error message
+    assert!(s.starts_with("x"));
+}
+
+#[test]
+fn test_debug_with_source_chain_preserves_message() {
+    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "io");
+    let e = anyhow!(io_err);
+    let s = format!("{:?}", e);
+    assert!(s.starts_with("io"));
+}
+```

@@ -697,15 +697,18 @@ for a tool that already owns it.** It costs one command:
 `handover.md`, saw sessions 348, 347, 346, 343 and 325 stacked newest-first,
 inferred "prepend a new block", mapped the file's section structure to do it by
 hand, and took a manual backup. All of that was wrong. `tools/rotate_handover.sh`
-owns the operation and the convention is **archive-then-OVERWRITE**, not
-prepend: it moves the current `handover.md` into `previous_handovers.md`, is
-idempotent (it refuses to double-archive a session), strips `<!-- PINNED:BEGIN
-… -->` blocks out of the archived copy because standing reference has a
-different lifecycle from the session it sits in, and mirrors them to
-`handover_pinned.md` so the next session can paste them back verbatim. Doing it
-by hand would have buried the pinned block in an archive nobody loads. The five
-stacked sessions that made prepend *look* like the convention were not the
-convention — they were evidence the rotation had not been run in a while.
+owns the operation and the convention is **archive-then-FILL-the-stub**, not
+prepend: it moves the current `handover.md` into `previous_handovers.md`, writes
+the next session number/date/empty sections with the pins already in the file,
+is idempotent (it refuses to double-archive a session, and a second run on the
+unwritten stub is a no-op), strips `<!-- PINNED:BEGIN … -->` blocks out of the
+archived copy because standing reference has a different lifecycle from the
+session it sits in, and mirrors them to `handover_pinned.md`. The writer does
+not grep for `session N` and does not paste pins — both are how the old
+overwrite lost a number or a block. Doing it by hand would have buried the
+pinned block in an archive nobody loads. The five stacked sessions that made
+prepend *look* like the convention were not the convention — they were evidence
+the rotation had not been run in a while.
 
 **Why this is the same rule as the path-scoped negative above, not a new one.**
 Both are "establish the mechanism from the code that owns the artefact, never
@@ -801,27 +804,39 @@ A batch that touched only the untracked trackers (`technical_debt.md`,
 `handover.md`, the plan files — `.gitignore` is `*.md`) has nothing to commit:
 say that plainly and leave `last_commit_message.txt` alone.
 
-## Saving a handover is `rotate_handover.sh`, then OVERWRITE — never a hand-prepend
+## Saving a handover is `rotate_handover.sh`, then FILL the stub — never grep the number, never paste pins
 
-    bash tools/rotate_handover.sh   # archive current handover.md -> previous_handovers.md
-                                    # strips PINNED blocks, mirrors them to handover_pinned.md
-    # then WRITE handover.md fresh: the new session block + the pinned block(s) back
+    bash tools/rotate_handover.sh   # archives current handover.md -> previous_handovers.md
+                                    # writes handover.md as the NEXT session stub:
+                                    # number, date, empty sections, pinned blocks already in the file
+    # stdout names `next session N` and `pinned K` — that is the number; do not grep handover.md for it
+    # then FILL the bold title and the three sections in place
 
 `handover.md` holds ONE session plus its pinned blocks — not a stack. The
 rotation is what keeps it that way, so a `load handover` reads a few hundred
 lines instead of paging through superseded sessions (it had reached 274 KB and
 five stacked sessions before the 2026-08-17 rotation; it is 795 lines after).
-The script refuses to archive a session already in `previous_handovers.md`, so
-running it twice is safe and running it when unsure is the cheap move.
+The script refuses to re-archive a header already in `previous_handovers.md`,
+and a second run on the unwritten stub is a no-op, so running it twice is safe
+and running it when unsure is the cheap move.
 
-**The pinned blocks are the part a hand-edit loses.** Content between
-`<!-- PINNED:BEGIN name -->` and `<!-- PINNED:END name -->` is standing
-reference with its own lifecycle — the score history, the standing cautions —
-and archiving it with the session would bury it in a file nobody loads. The
-script strips it from the archived copy and mirrors it to `handover_pinned.md`;
-**carrying it into the new `handover.md` is the writer's job and the script
-prints a CARRY FORWARD reminder.** Verify with
-`grep -c 'PINNED:BEGIN' handover.md` before calling the save done.
+**Do not grep for the session number and do not paste pins.** Both used to be
+the writer's job and both were a read of an artefact the first line / the pin
+markers already carried — the number-grep is how a session opened on the wrong
+N, and the paste is how a PINNED block got dropped. The script parses `session
+N` off the first line, writes `session N+1`, and puts the stripped blocks back
+into the stub (or, if the current file had none, the last mirror in
+`handover_pinned.md`). The writer replaces `**UNWRITTEN — replace this title**`
+and fills `## ON RETURN` / `## State at handover` / `## Key facts`. A full
+overwrite of `handover.md` that forgets the pins is the old failure; edit the
+stub.
+
+Content between `<!-- PINNED:BEGIN name -->` and `<!-- PINNED:END name -->` is
+standing reference with its own lifecycle — the score history, the standing
+cautions — and archiving it with the session would bury it in a file nobody
+loads. The script strips it from the archived copy, mirrors it to
+`handover_pinned.md`, and leaves it in the stub. Drop the interactive-run
+block only when that loop has ended.
 
 A session block opens `# Handover — session N (date) — **<what the session
 established, in bold>**` — the script hard-fails on any other first line — and
@@ -974,6 +989,53 @@ upgrades it, so do not restart vLLM in the middle of a measurement you intend to
 compare against an earlier run — check `curl -s localhost:8000/version` and leave a
 healthy container alone.
 
+## A live-run ping is a crime scene — `monitor.py` already has the score
+
+When the user asks to monitor a run, the deliverable is not the number on the
+summary line. `monitor.py` already shows coverage, pass counts, iteration,
+stall. Restating `83.9%` or `iter N` is a report the user could produce
+themselves; it is not why the ping was asked for.
+
+Treat every wake as a crime scene. After a batch of pipeline changes the
+surface will usually look fine — the original crate still measures 83.9%,
+cargo still returns, the loop still prints an iteration summary. That is the
+expected disguise, not evidence the new code worked. Statistically there is
+an error. Do not stop at the sign that would look healthy on the dashboard.
+
+**The rule, checkable.** A ping is finished only when it names, from the
+artefacts the loop actually wrote this iteration:
+
+- what the LLM was sent (the builder, the output-format slot, a quoted slice
+  of the prompt);
+- what the LLM produced (the stream log / raw prefix, not the pipeline's
+  paraphrase of it);
+- what the pipeline did with that reply (extracted, dropped, spliced,
+  refused — the log line that establishes it).
+
+A matching score against last time, or against "what this phase always
+starts at", is not that check. If you cannot point at the reply body and the
+function that parsed it, you have not monitored.
+
+**What this rule is not.** It is not a standing list of the last defect
+(fenced replies, budget caps, a named extractor). The next miss will look
+like a different healthy number. The stance is the investigation, not a
+checklist of yesterday's hole.
+
+**The instance, 2026-08-27, run `2881435-34981ab0`.** t0c sat at 83.9%
+(677/807) — the original crate, measured before any generated test landed.
+Muse had written real `#[test]` files inside markdown fences;
+`extract_test_mod` keyed only on `#[cfg(test)] mod gen_` / `<FILE>` and
+returned empty; split-and-merge logged `kept 0/0`; the pass was accepted as
+a coverage ceiling. The score was already on `monitor.py`. The crime scene
+was `/tmp/stream_loop_*_gen*.log` (`Empty generation … Raw: ```rust
+#![allow…] #[test] fn …`). Reporting "still 83.9%" was the miss this rule
+exists to stop.
+
+**The tells.** A wake that opens with the coverage or pass count; "same as
+last time" / "on-theory, nothing to do" keyed only on the summary line; a
+glance at `iter N:` on a deadline re-arm that never opens a stream log or a
+prompt.
+
 ## Watch a live run at the iteration boundary, in-session
 
 The loop emits exactly one summary per iteration and it carries the whole state
@@ -982,11 +1044,12 @@ vector:
     iter N: cargo test rc=... pass=X fail=Y oracle=Z (improved=..., stall=a/b);
     frontier=F fn(s) (merged), E skipped as exhausted
 
-That is the same vector a walk fixture is distilled from, so what is asserted
-offline is what arrives online. Watch it with a persistent in-session monitor
-over `logs/pipeline_anyhow.log`, not a cold `claude -p`: a cold spawn re-derives
-the run from the log every wake and reports symptoms, having no memory of which
-fix is under test or what trajectory it predicted.
+That vector is what `monitor.py` already displays — do not spend a wake
+restating it. It is also the vector a walk fixture is distilled from, so what
+is asserted offline is what arrives online. Watch with a persistent in-session
+monitor over `logs/pipeline_anyhow.log`, not a cold `claude -p`: a cold spawn
+re-derives the run from the log every wake and reports symptoms, having no
+memory of which fix is under test or what trajectory it predicted.
 
 **Silence is not success.** A filter matching only the summary line cannot tell a
 crashloop from a slow iteration. It must also carry the terminal signatures —
@@ -994,11 +1057,15 @@ crashloop from a slow iteration. It must also carry the terminal signatures —
 `high-water re-based`, `NOT re-admitting`. Keep the alternation tight: a broad
 `Error` match over a half-megabyte log is a firehose.
 
-**On each wake**, compare the arriving vector against the trajectory the fix
-predicted. On-theory: say nothing. Off-theory — the gate the fix targeted did not
-fire by the iteration the walk said it would — stop, fix, validate; not
-"watching, N iterations left". A pathology no walk covers: distill it from the
-live log into a fixture, so the expensive path funds the cheap one.
+**On each wake**, do the crime-scene read (previous section). Then compare
+that read against the trajectory the fix predicted — not the score against
+last time. On-theory means you can point at the log line that shows the
+shipped mechanism fired (the block was extracted, the new argument sat in
+the builder, the gate charged). A number that matches last time is not
+on-theory. Off-theory — the gate the fix targeted did not fire, or the
+reply never entered the tree — stop, fix, validate; not "watching, N
+iterations left". A pathology no walk covers: distill it from the live log
+into a fixture, so the expensive path funds the cheap one.
 
 **Every monitor also watches the stall, and a stall is a finding, not weather.**
 Whatever a monitor was armed to check, it ALSO evaluates the `stall=a/b` field on
