@@ -26,9 +26,21 @@
 # HOW TO INTERPRET THE OUTPUT
 #   HEAD / last checkpoint      the newest commit the bundle would carry, and the
 #                               pipeline's last own checkpoint (`pipeline: …`).
-#   restore tags                task0c-augmented-* (post-t0c restore, exists),
-#                               task0a-clone-* (pre-t0c restore — absent until
-#                               the tag writer ships), passing-* (locks).
+#   restore tags                task0c-augmented-* (post-t0c restore) and
+#                               task0c-pre-* (PRE-t0c restore — what
+#                               `restart_from.sh task0c` resets to, and what it
+#                               refuses to launch without). An empty pre=[] is
+#                               a launch that cannot start: the orchestrator
+#                               writes that tag only on a run whose task0c has
+#                               not happened, so a workspace built before the
+#                               writer shipped needs it by hand
+#                               (`git -C <ws> tag task0c-pre-<module> <task0b sha>`).
+#                               passing-* are the score locks.
+#                               This line named `task0a-clone-*` until
+#                               2026-08-27 — a tag family the plan proposed and
+#                               the implementation did not ship, so the check
+#                               that gates the launch reported the real restore
+#                               point as absent while it sat in the repo.
 #   modified tracked (N)        files a bundle would carry at their COMMITTED
 #                               content, not the on-disk one. N>0 → COMMIT FIRST.
 #   untracked / ignored         what no commit holds at all (ignored = target/,
@@ -50,7 +62,11 @@ g() { git -C "$PROJECT_DIR" "$@"; }
 echo "workspace: $PROJECT_DIR"
 echo "HEAD: $(g log -1 --format='%h %s')"
 echo "last checkpoint: $(g log --format='%h %s' --grep='^pipeline:' -1)"
-echo "restore tags: augmented=[$(g tag -l 'task0c-augmented-*' | tr '\n' ' ')] clone=[$(g tag -l 'task0a-clone-*' | tr '\n' ' ')] locks=[$(g tag -l 'passing-*' | tr '\n' ' ')]"
+pre_tags="$(g tag -l 'task0c-pre-*' | tr '\n' ' ')"
+echo "restore tags: augmented=[$(g tag -l 'task0c-augmented-*' | tr '\n' ' ')] pre=[${pre_tags}] locks=[$(g tag -l 'passing-*' | tr '\n' ' ')]"
+if [[ -z "${pre_tags// /}" ]]; then
+  echo "  NOTE: no task0c-pre-* tag — 'bash restart_from.sh task0c' will refuse (exit 2)."
+fi
 mod=$(g status --short --untracked-files=no | grep -c '^ *[MADRC]' || true)
 unt=$(g status --short --untracked-files=all | grep -c '^??' || true)
 ign=$(g status --short --ignored | grep -c '^!!' || true)
