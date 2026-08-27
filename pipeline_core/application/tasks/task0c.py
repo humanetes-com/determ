@@ -28,6 +28,7 @@ from ...domain.behaviour_pinning import (
     render_behaviour_list,
     select_behaviours_for_file,
 )
+from ...domain.behaviour_select import drop_capture_owned
 from ...domain.coverage import PerFileCoverage
 from ...domain.generation import (
     as_integration_test,
@@ -136,6 +137,10 @@ class Task0cDeps:
     # (project_dir, cluster_name) -> BehaviourSuite — the baked
     # `.skeleton/_behaviours_<cluster>.json` reader; None = no suite listed.
     load_behaviour_suite: Any = None
+    # Capture/guess split (`BEHAVIOUR_CAPTURE_SPLIT`): drop the capture-owned
+    # behaviour classes from what this task lists and requires a pin on.
+    # Defaulted so a composition root that does not pass it still constructs.
+    BEHAVIOUR_CAPTURE_SPLIT: Any = True
 
 
 def _iter_module_rs(module_dir: Path) -> list[Path]:
@@ -627,7 +632,7 @@ _CONTRACT_FIX_HEAD = """The Rust test block you generated for `{rel_path}` COMPI
 # `format!("{:?}", x).contains("…")` where the crate's own tests pin the whole
 # rendering, and tests reading private fields (24 % of the private surface).
 _TEST_CONTRACT = """Test contract — each test is judged against it after it compiles and passes; a block that fails it is refused:
-- PIN a behaviour: each test must pin at least one listed harvested behaviour (the "Harvested behaviours" section above, when present) by asserting its EXACT observable — `assert_eq!` against the listed `then` (the whole string, byte for byte; a `const EXPECTED: &str = "…";` is fine for multi-line values), or for a type identity the `assert!(e.is::<T>())` / `e.downcast_ref::<T>().is_some()` form. Where no behaviour is listed, still assert exact values of the public API (the exact Display/Debug string, the exact return value).
+- PIN a behaviour: each test must pin at least one listed harvested behaviour (the "Harvested behaviours" section above, when present) by asserting its EXACT observable — `assert_eq!` against the listed `then` (the whole string, byte for byte; a `const EXPECTED: &str = "…";` is fine for multi-line values), or for a type identity the `assert!(e.is::<T>())` / `e.downcast_ref::<T>().is_some()` form. Where NO behaviour is listed, do not try to predict an exact rendering you have not been shown — reach the uncovered lines through the public API and assert what you can establish from the source you were given.
 - `contains(...)`, `.is_ok()`, `.is_some()`, `.is_err()`, `.unwrap()` or a bare call ALONE are not accepted as a test's assertion — they pin nothing an alternative implementation could violate.
 - PUBLIC API ONLY: use only `pub` fns, types and fields. No private fields, no private fns, no private types. These tests live in `tests/` as an integration-test crate (`use <crate>::*`); private items are not in scope, and a leftover inline block that names one is refused: a test of an internal freezes a layout the reconstruction is free to redesign.
 - Line coverage is secondary: also reach the uncovered lines shown in fn_bodies, through the public API.
@@ -1486,6 +1491,7 @@ def _run_phase_c(
     _current_cluster = ctx.current_cluster
     _cluster_label = ctx.cluster_label
     _behaviour_target = _behaviour_target_of(deps)
+    _capture_split = bool(deps.BEHAVIOUR_CAPTURE_SPLIT)
     _suite_specs = _load_behaviour_specs(deps, project_dir, _cluster_label, log=_log)
     _blocks_admitted = 0
     _file_pinned_now: dict[str, frozenset[str]] = {}
@@ -1703,6 +1709,23 @@ def _run_phase_c(
             file_fn_names={it.name for it in _file_items if it.kind == "fn"},
             file_pub_items=public_item_names(_file_items),
             already_pinned=behaviours_pinned_by(_old_block, _suite_specs))
+        # The capture route owns the classes whose exact value a model would
+        # have to predict, so they are neither listed here nor required of the
+        # block. Measured on the live 230-spec suite: 155 of 230 specs are
+        # pinnable and almost all of those are EXACT_FORMAT / IDENTITY /
+        # BOUNDED_RESOURCE, so this empties `_file_specs` for most files and
+        # `require_pin` (which already keys on `bool(_file_specs)`) turns
+        # itself off — leaving this task with the public-API refusal and the
+        # job it can do, reaching code paths. Nothing is lost by not guessing
+        # them: the crate's own tests already assert those values, and the
+        # captures add what harvest missed, as tests, without this prompt
+        # asking the model to predict a rendering.
+        _pre_split = _file_specs
+        _file_specs = drop_capture_owned(_file_specs, enabled=_capture_split)
+        if len(_file_specs) != len(_pre_split):
+            _log(f"  [{module_name}] {rel_path} — {len(_pre_split) - len(_file_specs)} "
+                 f"capture-owned behaviour(s) not listed (their exact value is captured, "
+                 f"not predicted)")
         _behaviours_section = render_behaviour_list(_file_specs, rel_path=rel_path)
         _policy = AdmissionPolicy(require_pin=_behaviour_target > 0 and bool(_file_specs),
                                   refuse_private=True)
@@ -3023,9 +3046,18 @@ def task0c_behaviour_pass(
         text = deps.strip_gen_tests_decls(raw).rstrip() + "\n"
         items = declared_items(text)
         fn_names = {it.name for it in items if it.kind == "fn"}
-        unpinned = select_behaviours_for_file(
-            specs, file_fn_names=fn_names, file_pub_items=public_item_names(items),
-            already_pinned=behaviours_pinned_by(deps.read_all_gen_tests(src), specs))
+        # Filtered the same way the per-file listing is. Without this the
+        # behaviour pass still SCHEDULES a whole generation round over files
+        # whose only unpinned specs are capture-owned — the inner listing is
+        # then empty and the round is a plain coverage pass bought at the price
+        # of a behaviour pass.
+        unpinned = drop_capture_owned(
+            select_behaviours_for_file(
+                specs, file_fn_names=fn_names,
+                file_pub_items=public_item_names(items),
+                already_pinned=behaviours_pinned_by(
+                    deps.read_all_gen_tests(src), specs)),
+            enabled=bool(deps.BEHAVIOUR_CAPTURE_SPLIT))
         if not unpinned:
             continue
         spans = fn_line_spans(text)

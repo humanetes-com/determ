@@ -123,6 +123,17 @@ class Settings:
     behaviour_coverage_target: float = 0.0
     task0d_probe_max: int = 12
     task0d_exercises: bool = True
+    # Blocks honoured per synthesis reply. The probe-target cap bounds how many
+    # units are ASKED about; without this a single reply's block count bounded
+    # the cargo runs, and each run costs a compile at up to the probe timeout.
+    task0d_blocks_per_reply: int = 8
+    # Behaviour classes requested per cluster, scarcest first.
+    task0d_classes_per_cluster: int = 4
+    # Capture/guess split: when on, task0c stops listing (and requiring a pin
+    # on) the behaviour classes whose exact value a model would have to
+    # predict; the capture route owns those. Off restores the pre-split
+    # listing, so the split can be turned off without a code edit.
+    behaviour_capture_split: bool = True
 
     @classmethod
     def from_env(cls, model: str = "") -> Settings:
@@ -159,4 +170,9 @@ class Settings:
             behaviour_coverage_target=float(os.getenv("BEHAVIOUR_COVERAGE_TARGET", "0")),
             task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
             task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",
+            task0d_blocks_per_reply=int(
+                os.getenv("TASK0D_BLOCKS_PER_REPLY", "8")),
+            task0d_classes_per_cluster=int(
+                os.getenv("TASK0D_CLASSES_PER_CLUSTER", "4")),
+            behaviour_capture_split=os.getenv("BEHAVIOUR_CAPTURE_SPLIT", "1").strip() == "1",
         )

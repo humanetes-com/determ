@@ -85,8 +85,12 @@ class _World:
         return Task0dDeps(**kw)  # type: ignore[arg-type]
 
 
-_REPLY = ('<BEHAVIOUR unit="unnamed_public">\nfn main() { println!("{}", '
-          'crate_x::unnamed_public()); }\n</BEHAVIOUR>')
+# The constrained shape the synthesis prompt now asks for: setup statements, a
+# single expression, and the render kind. The harness prints the expression to
+# capture and asserts it to replay, from these same three parts.
+_REPLY = ('<BEHAVIOUR name="unnamed_public">\n'
+          '<GIVEN>\n    let v = crate_x::unnamed_public();\n</GIVEN>\n'
+          '<WHEN>v</WHEN>\n<OBSERVE>display</OBSERVE>\n</BEHAVIOUR>')
 
 
 def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_path: Path) -> None:
@@ -107,13 +111,26 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     ev = dict(w.events)["task0d.harvest"]
     assert ev["defect_observables"] == {"identity": True, "alt-debug": True, "ensure-message": True}
     assert ev["probes_admitted"] == 1 and ev["exercises_filled"] == 1
-    assert ev["cargo_invocations"] == 1  # one probe; the fake exercises map is not cargo
+    # TWO runs per admitted probe, not one: the capture is re-run and the output
+    # must match. A single run cannot tell a deterministic observable from a
+    # lucky one, and a Then that does not reproduce becomes a flaky test in the
+    # oracle for the life of the project. (The fake exercises map is not cargo.)
+    assert ev["cargo_invocations"] == 2
     probe = next(s for s in suite.specs if s.behaviour_id.startswith("probe::stable::unnamed_public::"))
-    assert probe.then.kind is OutcomeKind.NORMALIZED_STDOUT and probe.then.value == "printed 42"
+    # The constrained capture stores a TYPED kind, not a stdout blob: that is
+    # what keeps `classified()` from returning OTHER, which t1.5's cap discards
+    # for ranking last and which no generated test can pin.
+    assert probe.then.kind is OutcomeKind.DISPLAY_STRING
+    assert probe.then.value == "printed 42"
     filled = next(s for s in suite.specs if s.behaviour_id == "testassert::tests/test_fmt.rs::test_altdebug::0")
     assert filled.exercises == frozenset({"src/fmt.rs::fmt"})
     # the probe targeted only the public fn no spec names (`anyhow` is named by the doc-test)
-    assert "unnamed_public" in w.prompts[0] and "exercise these units through PUBLIC API only: unnamed_public" in w.prompts[0]
+    # The request is now by CLASS — behaviours are transversal, so a unit-shaped
+    # ask cannot reach one — but the unit that no spec names is still offered as
+    # a callable name, because a class says what to observe, not what to call.
+    assert "unnamed_public" in w.prompts[0]
+    assert "Public units available to call" in w.prompts[0]
+    assert "write ONE behaviour for each of these classes" in w.prompts[0]
 
 
 def test_done_cluster_is_skipped(tmp_path: Path) -> None:

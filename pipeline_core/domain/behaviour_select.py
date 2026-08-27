@@ -212,3 +212,45 @@ def select_component_behaviours(
     if cap is None:
         return picked
     return picked[:cap]
+
+
+# --------------------------------------------------------------------------
+# Capture/guess split: which behaviour classes the t0d capture route owns.
+#
+# A class is capture-owned when pinning it means PREDICTING an exact value:
+# a byte-exact Display/Debug rendering, which concrete type a downcast finds,
+# which type a trait object's vtable answers with, a length/size boundary
+# string. A model asked for one of those from the source alone guesses, and
+# the guess is refused — so those observables never reach the oracle at all.
+# The capture route runs the program and records what it actually printed, so
+# it produces them without predicting them.
+#
+# The remaining classes (OPTION_SEMANTICS, LAYOUT_PIN, CFG_WORLD, OTHER) stay
+# with the guess route: `Some`/`None`, a compile-time layout fact and an
+# unclassified usage are all derivable from the source the prompt already
+# carries.
+# --------------------------------------------------------------------------
+CAPTURE_OWNED_CLASSES: frozenset[str] = frozenset({
+    "EXACT_FORMAT", "IDENTITY", "TRAIT_OBJECT_IDENTITY", "BOUNDED_RESOURCE",
+})
+
+
+def capture_owned(spec: BehaviourSpec) -> bool:
+    """True iff `spec`'s class is one the capture route owns — i.e. pinning it
+    would require the model to predict an exact value rather than reach a code
+    path. Classified by :func:`behaviour_class_name`, so a spec carrying no
+    ``klass`` of its own is grouped by its outcome kind first."""
+    return behaviour_class_name(spec) in CAPTURE_OWNED_CLASSES
+
+
+def drop_capture_owned(
+    specs: Sequence[BehaviourSpec], *, enabled: bool = True,
+) -> tuple[BehaviourSpec, ...]:
+    """`specs` without the capture-owned ones, harvest order preserved.
+
+    ``enabled=False`` is the off switch: the whole sequence comes back
+    unchanged, which is the pre-split behaviour (every pinnable spec listed to
+    the guess route and required of its block)."""
+    if not enabled:
+        return tuple(specs)
+    return tuple(s for s in specs if not capture_owned(s))

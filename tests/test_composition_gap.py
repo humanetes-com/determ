@@ -44,4 +44,10 @@ def test_synthesis_prompt_names_targets_and_forbids_internals():
         public_surface="pub fn context();", symbol_inventory="Box, Chain")
     assert "root_cause" in p and "downcast" in p
     assert "PUBLIC API ONLY" in p
-    assert "<BEHAVIOUR unit=" in p
+    # The CONSTRAINED shape: setup, ONE expression, a render kind — and the
+    # two rules measured 2026-08-27 to be what turns a capture from an
+    # unusable multi-println blob into something a test can assert.
+    assert "<BEHAVIOUR name=" in p
+    assert "<WHEN>" in p and "<GIVEN>" in p and "<OBSERVE>" in p
+    assert "RENDERED VALUE" in p           # no comparisons: a bool loses the value
+    assert "Do NOT state a class" in p     # the selector supplies it

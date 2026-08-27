@@ -15,7 +15,7 @@ example file and runs it.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from pipeline_core.domain.behaviour import (
     BehaviourSubKind,
     FenceDirective,
     ObservableOutcome,
+    OutcomeKind,
     classified,
 )
 from pipeline_core.domain.cfg import CfgSet
@@ -75,9 +76,9 @@ def _strip_code_fence(code: str) -> str:
     return body.strip()
 
 
-def _unit_attr(tag: str) -> str:
-    """The `unit="…"` (or single-quoted) value of an opening tag, or ""."""
-    at = tag.find("unit")
+def _attr(tag: str, key: str) -> str:
+    """The `key="…"` (or single-quoted) value of an opening tag, or ""."""
+    at = tag.find(key)
     if at < 0:
         return ""
     eq = tag.find("=", at)
@@ -91,6 +92,11 @@ def _unit_attr(tag: str) -> str:
     q = tag[i]
     end = tag.find(q, i + 1)
     return "" if end < 0 else tag[i + 1:end].strip()
+
+
+def _unit_attr(tag: str) -> str:
+    """Back-compat alias: the `unit=` attribute of an opening tag."""
+    return _attr(tag, "unit")
 
 
 def parse_behaviour_programs(reply: str) -> list[tuple[str, str]]:
@@ -114,6 +120,175 @@ def parse_behaviour_programs(reply: str) -> list[tuple[str, str]]:
             out.append((unit, program))
         i = close + len(_CLOSE_TAG)
     return out
+
+
+# --- the captured-behaviour shape (setup + ONE expression + a render kind) ---
+#
+# Measured 2026-08-27 on this model and this crate: the free-form `fn main()`
+# the old prompt asked for produced 0 of 6 mechanically-assertable observables
+# (3 recorded on disk, 3 re-run as the experiment's control), every one a
+# multi-`println!` blob stored as NORMALIZED_STDOUT and classified OTHER — so
+# `behaviours_pinned_by` (which joins on an exact `then.value`) could never
+# match one, and t1.5's cap discarded them for ranking last. The constrained
+# shape produced 7 of 7 across two variants. `when` is therefore ONE
+# expression, and the harness renders BOTH roles from it: `println!` to
+# capture, `assert_eq!` to replay.
+
+_OBSERVE_TO_KIND: Mapping[str, OutcomeKind] = {
+    "display": OutcomeKind.DISPLAY_STRING,
+    "debug": OutcomeKind.DEBUG_STRING,
+    "alt_debug": OutcomeKind.ALT_DEBUG_STRING,
+}
+_KIND_TO_FMT: Mapping[OutcomeKind, str] = {
+    OutcomeKind.DISPLAY_STRING: "{}",
+    OutcomeKind.DEBUG_STRING: "{:?}",
+    OutcomeKind.ALT_DEBUG_STRING: "{:#?}",
+}
+# A `when` that COMPARES discards the value it was supposed to specify:
+# variant B of the experiment produced `format!("{}", b) == "world"` whose
+# captured Then is `true`, carrying nothing. Identity predicates are the one
+# exception, and the same carve-out `weak_assertion_reason` already makes for
+# generated tests (`behaviour_pinning.py`, `_IDENTITY_METHODS`).
+_COMPARISON_TOKENS = ("==", "!=", "<=", ">=", ".contains(")
+_IDENTITY_CALLS = (".is::<", ".downcast_ref::<", ".downcast_mut::<", ".downcast::<")
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedProbe:
+    """One `<BEHAVIOUR>` block of a synthesis reply, in the constrained shape."""
+
+    name: str
+    given: str
+    when: str
+    observe: str
+
+
+def identity_type_of(when: str) -> str | None:
+    """The `T` of an identity predicate `x.is::<T>()` / `x.downcast_ref::<T>()`,
+    else None. `TYPE_IDENTITY` stores T as its value — `DOWNCAST_OK` carries a
+    bool and NOT which type, which is why it was retired on 2026-08-26."""
+    for call in _IDENTITY_CALLS:
+        at = when.find(call)
+        if at < 0:
+            continue
+        start = at + len(call)
+        depth = 1
+        i = start
+        while i < len(when):
+            if when[i] == "<":
+                depth += 1
+            elif when[i] == ">":
+                depth -= 1
+                if depth == 0:
+                    inner = when[start:i].strip()
+                    return inner or None
+            i += 1
+    return None
+
+
+def value_bearing_reason(when: str) -> str | None:
+    """Why this `when` may NOT be captured, or None when it may.
+
+    A comparison observes `true`/`false` and throws the value away — the same
+    weakness `weak_assertion_reason` refuses on the generation side, arriving
+    on the capture side. Identity predicates are exempt: for them the boolean
+    IS the observable, and the type is kept in the Then's value."""
+    w = (when or "").strip()
+    if not w:
+        return "empty when"
+    if "\n" in w:
+        return "when spans multiple lines — it must be ONE expression"
+    if "println!" in w or "print!" in w:
+        return "when prints; the harness prints it"
+    if "assert" in w:
+        return "when asserts; the harness records, it does not check"
+    if identity_type_of(w) is not None:
+        return None
+    for tok in _COMPARISON_TOKENS:
+        if tok in w:
+            return (f"when compares ({tok}) — a boolean discards the value; "
+                    "write the expression whose value is the observable")
+    return None
+
+
+def observe_kind(observe: str, when: str = "") -> OutcomeKind:
+    """The Then kind this capture stores. An identity `when` is TYPE_IDENTITY
+    whatever the model said it would observe — the shape of the expression is
+    the authority, not the label."""
+    if identity_type_of(when) is not None:
+        return OutcomeKind.TYPE_IDENTITY
+    return _OBSERVE_TO_KIND.get((observe or "").strip().lower(),
+                                OutcomeKind.DISPLAY_STRING)
+
+
+def render_probe_program(given: str, when: str, observe: str = "display") -> str:
+    """The CAPTURE role: a runnable `fn main()` that PRINTS the observable.
+
+    Also what `exercises_by_coverage` re-runs — before this existed it re-ran
+    `spec.given` directly, so a `given` that stopped being a whole program
+    would have made every probe's exercises run fail `rc != 0` and be dropped
+    with a log line."""
+    kind = observe_kind(observe, when)
+    body = (given or "").rstrip()
+    if kind is OutcomeKind.TYPE_IDENTITY:
+        expr = f'println!("{{}}", {when.strip()});'
+    else:
+        expr = f'println!("{_KIND_TO_FMT[kind]}", {when.strip()});'
+    return "fn main() {\n" + (body + "\n" if body else "") + "    " + expr + "\n}\n"
+
+
+def parse_behaviour_specs(reply: str) -> list[CapturedProbe]:
+    """Every `<BEHAVIOUR name="…"><GIVEN>…</GIVEN><WHEN>…</WHEN>
+    <OBSERVE>…</OBSERVE></BEHAVIOUR>` block, in order.
+
+    A block without a `<WHEN>` is dropped: the expression IS the behaviour.
+    The class is NOT read even when present — measured 0 of 3 correct when the
+    model chose it against 4 of 4 when it was supplied, and `classified()`
+    re-derives it from kind and text anyway."""
+    text = strip_think_blocks(reply)
+    out: list[CapturedProbe] = []
+    i = 0
+    while (at := text.find(_OPEN_TAG, i)) >= 0:
+        gt = text.find(">", at)
+        if gt < 0:
+            break
+        close = text.find(_CLOSE_TAG, gt + 1)
+        if close < 0:
+            break
+        block = text[gt + 1:close]
+        when = _tagged(block, "WHEN")
+        if when:
+            out.append(CapturedProbe(
+                name=_attr(text[at:gt], "name"),
+                given=_strip_code_fence(_tagged(block, "GIVEN")),
+                when=_strip_code_fence(when).strip(),
+                observe=_tagged(block, "OBSERVE").strip() or "display"))
+        i = close + len(_CLOSE_TAG)
+    return out
+
+
+def _tagged(block: str, tag: str) -> str:
+    """The body of `<TAG>…</TAG>` inside one behaviour block, or ""."""
+    o, c = f"<{tag}>", f"</{tag}>"
+    a = block.find(o)
+    if a < 0:
+        return ""
+    b = block.find(c, a + len(o))
+    return block[a + len(o):b] if b >= 0 else ""
+
+
+# The environment variables that change what a probe OBSERVES rather than how
+# it builds. `RUST_BACKTRACE` is the measured one: `err.backtrace()` renders
+# `<disabled>` without it and a captured backtrace with it, identically on
+# every run either way, so the run-twice guard cannot see the difference.
+OBSERVABLE_ENV_KEYS = ("RUST_BACKTRACE", "RUST_LIB_BACKTRACE")
+
+
+def capture_env_of(env: Mapping[str, str]) -> str:
+    """The observable-affecting slice of a capture environment, sorted and
+    joined — the value stored on the spec so a replay can tell whether it is
+    being judged under the conditions the Then was observed in."""
+    return ";".join(f"{k}={env[k]}" for k in OBSERVABLE_ENV_KEYS if k in env)
 
 
 def probe_unit_label(rec: FnRecord) -> str:
@@ -162,6 +337,64 @@ def _is_public_crate_fn(
         declared_in = (type_files or {}).get(self_ty)
         return declared_in is not None and declared_in in reachable_files
     return rec.file in reachable_files
+
+
+# --- class-driven target selection -------------------------------------------
+#
+# The classes a REPRESENTATION decides, with the phrasing the synthesis prompt
+# asks in. Behaviours are transversal: "an error built from a string downcasts
+# to `&str`" spans the constructor, the vtable, `object_downcast` and
+# `Error::downcast`. Selecting fns cannot reach one, which is why the previous
+# selector's alphabetical `[:max_targets]` produced probes for
+# `Error::backtrace` / `Error::into_boxed_dyn_error` / `Error::reallocate_…`
+# and nothing of any class. Per-unit reachability is unit tests' job.
+CLASS_PROMPTS: Mapping[str, str] = {
+    "IDENTITY":
+        "the concrete type a downcast finds on a value this crate constructed "
+        "— the TypeId round-trip, named by type",
+    "TRAIT_OBJECT_IDENTITY":
+        "the type observed THROUGH a trait object (`&dyn std::error::Error`), "
+        "which a wrapper representation can answer differently",
+    "EXACT_FORMAT":
+        "an exact rendering — Display, Debug, or the alternate `{:#?}` Debug, "
+        "which differ from each other",
+    "BOUNDED_RESOURCE":
+        "what happens at a size or capacity boundary, and just past it",
+    "OPTION_SEMANTICS":
+        "when an optional observable is present and when it is absent",
+}
+
+
+def class_targets(
+    specs: Iterable[BehaviourSpec],
+    class_of: Callable[[BehaviourSpec], str],
+    *,
+    max_targets: int,
+    classes: Sequence[str] = (),
+) -> tuple[tuple[str, str], ...]:
+    """`(class, what to write)` pairs for the classes this suite is THINNEST in,
+    scarcest first, capped at `max_targets`.
+
+    Scarcity, not absence, is the ordering: a class with zero specs and a class
+    with two are both under-specified, and an absence can be an artifact of the
+    classifier rather than a real hole — `CHAIN_SEQUENCE` and `DOWNCAST_OK` read
+    zero on the live suite while `tests/test_chain.rs` contributes 16 specs under
+    other kinds, and `DOWNCAST_OK` was deliberately retired on 2026-08-26 for
+    carrying a bool without saying WHICH type. Ranking by count asks for more of
+    what is thin without asserting that a zero is a gap.
+
+    `class_of` is injected so the domain does not import the selector that reads
+    a spec's class (`behaviour_select.behaviour_class_name`)."""
+    if max_targets <= 0:
+        return ()
+    wanted = [c for c in (classes or tuple(CLASS_PROMPTS)) if c in CLASS_PROMPTS]
+    counts = dict.fromkeys(wanted, 0)
+    for spec in specs:
+        name = class_of(spec)
+        if name in counts:
+            counts[name] += 1
+    order = sorted(wanted, key=lambda c: (counts[c], wanted.index(c)))
+    return tuple((c, CLASS_PROMPTS[c]) for c in order[:max_targets])
 
 
 def probe_targets(
@@ -236,9 +469,12 @@ def probe_spec(
     stdout: str,
     default_cluster: str | None = None,
 ) -> BehaviourSpec:
-    """An OUTCOME / NORMALIZED_STDOUT spec for a probe that ran clean against
-    the original: `given` = the program (what the exercise writer re-runs),
-    `when` = the unit it targets, Then = its normalised stdout."""
+    """LEGACY free-form capture: `given` = a whole program, Then = its stdout.
+
+    Kept for replies that still arrive in the old shape. The record it makes is
+    the one measured unusable — NORMALIZED_STDOUT is in no format or identity
+    set, so `classified()` returns OTHER, `behaviours_pinned_by` can never join
+    it, and t1.5's cap discards it. Prefer :func:`captured_spec`."""
     spec = BehaviourSpec(
         behaviour_id=probe_behaviour_id(cfg_cluster, unit, n),
         given=program, when=unit,
@@ -247,3 +483,95 @@ def probe_spec(
         subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
         cfg_cluster=cfg_cluster, source_ref=f"probe::{unit}")
     return classified(spec, default_cluster=default_cluster or cfg_cluster)
+
+
+def captured_spec(
+    *,
+    cfg_cluster: str,
+    probe: CapturedProbe,
+    n: int,
+    stdout: str,
+    default_cluster: str | None = None,
+    capture_env: str = "",
+) -> BehaviourSpec:
+    """A capture in the constrained shape: `given` = the SETUP statements,
+    `when` = the single expression, Then = the observed value under its typed
+    kind.
+
+    The program is not stored — :func:`render_probe_program` rebuilds it from
+    these three whenever a runnable form is needed (the capture run itself, and
+    `exercises_by_coverage`). An identity `when` stores the TYPE as the Then's
+    value with `ok` from the printed boolean, because that is what makes the pin
+    say WHICH TypeId the round-trip must preserve."""
+    unit = probe.name or "unnamed"
+    text = normalize_stdout(stdout)
+    kind = observe_kind(probe.observe, probe.when)
+    if kind is OutcomeKind.TYPE_IDENTITY:
+        then = ObservableOutcome.type_identity(
+            identity_type_of(probe.when) or "?", ok=text.strip() == "true")
+    elif kind is OutcomeKind.DEBUG_STRING:
+        then = ObservableOutcome.debug(text)
+    elif kind is OutcomeKind.ALT_DEBUG_STRING:
+        then = ObservableOutcome.alt_debug(text)
+    else:
+        then = ObservableOutcome.display(text)
+    spec = BehaviourSpec(
+        behaviour_id=probe_behaviour_id(cfg_cluster, unit, n),
+        given=probe.given.rstrip(), when=probe.when,
+        then=then,
+        provenance=BehaviourProvenance.SYNTHESIZED,
+        subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
+        cfg_cluster=cfg_cluster, source_ref=f"probe::{unit}",
+        capture_env=capture_env)
+    return classified(spec, default_cluster=default_cluster or cfg_cluster)
+
+
+def program_for(spec: BehaviourSpec) -> str:
+    """The runnable program for ANY probe spec — the stored one for a legacy
+    free-form capture, a rendered one for the constrained shape.
+
+    `exercises_by_coverage` re-runs this. Before it existed that caller passed
+    `spec.given` straight to `cargo run --example`, so a `given` that stopped
+    being a whole program would have failed every probe's exercises run with a
+    log line and no other trace."""
+    if spec.then is not None and spec.then.kind is OutcomeKind.NORMALIZED_STDOUT:
+        return spec.given
+    observe = {OutcomeKind.DEBUG_STRING: "debug",
+               OutcomeKind.ALT_DEBUG_STRING: "alt_debug"}.get(
+                   spec.then.kind if spec.then else OutcomeKind.DISPLAY_STRING,
+                   "display")
+    return render_probe_program(spec.given, spec.when, observe)
+
+
+def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
+    """The REPLAY role: the same capture as a `#[test]` asserting the value it
+    was observed to have. `""` when the spec cannot be replayed (a legacy
+    free-form blob, or no Then).
+
+    This is the half that makes a capture part of the cargo-test oracle. The
+    expected value is the OBSERVED one — never a model's guess — which is the
+    whole reason the capture route exists beside t0c's."""
+    then = spec.then
+    if then is None or then.kind is OutcomeKind.NORMALIZED_STDOUT:
+        return ""
+    body = spec.given.rstrip()
+    setup = (body + "\n") if body else ""
+    if then.kind is OutcomeKind.TYPE_IDENTITY:
+        check = (f"    assert!({spec.when});" if then.ok
+                 else f"    assert!(!({spec.when}));")
+    else:
+        fmt = _KIND_TO_FMT.get(then.kind, "{}")
+        lit = rust_string_literal(then.value)
+        check = f'    assert_eq!(format!("{fmt}", {spec.when}), {lit});'
+    return (f"#[test]\nfn {fn_name}() {{\n{setup}{check}\n}}\n")
+
+
+def rust_string_literal(text: str) -> str:
+    """`text` as a Rust literal. A raw string when it holds a backslash or a
+    quote and no `"#` sequence — the captured values are exact renderings and
+    escaping them by hand is how an expected value stops matching itself."""
+    if ("\\" in text or '"' in text) and '"#' not in text:
+        return 'r#"' + text + '"#'
+    out = text.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return '"' + out + '"' 

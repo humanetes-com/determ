@@ -37,7 +37,12 @@ from pipeline_core.application.tasks.task0c import (
     task0c_behaviour_coverage,
     task0c_behaviour_pass,
 )
-from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSubKind, ObservableOutcome
+from pipeline_core.domain.behaviour import (
+    BehaviourSpec,
+    BehaviourSubKind,
+    ObservableOutcome,
+    classified,
+)
 from pipeline_core.domain.coverage import PerFileCoverage
 from pipeline_core.domain.generation import is_pipeline_gen_test_name
 from pipeline_core.domain.rust_scan import count_test_attrs
@@ -89,8 +94,13 @@ def _display_spec(exercises: frozenset[str] = frozenset({"checked_div"})) -> Beh
 
 
 class _Harness:
+    # `capture_split` is the BEHAVIOUR_CAPTURE_SPLIT knob. It defaults OFF
+    # here so the contract tests below keep exercising the guess route on a
+    # spec that IS listed; the split's own effect (a capture-owned class is
+    # never listed and never required) is pinned by the two tests at the end.
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
-                 src_name: str, replies: list[str], target: float, specs: tuple[Any, ...]) -> None:
+                 src_name: str, replies: list[str], target: float, specs: tuple[Any, ...],
+                 capture_split: bool = False) -> None:
         self.ws = tmp_path / "ws"
         (self.ws / "src").mkdir(parents=True)
         shutil.copy(_MICROCRATE / src_name, self.ws / "src" / src_name)
@@ -103,6 +113,7 @@ class _Harness:
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.suite = SimpleNamespace(specs=specs)
         self.target = target
+        self.capture_split = capture_split
         monkeypatch.setattr(task0c_mod, "log", self.logs.append)
         monkeypatch.setattr(task0c_mod, "emit",
                             lambda event, **f: self.events.append((event, f)))
@@ -122,6 +133,7 @@ class _Harness:
         stub: dict[str, Any] = {f: (lambda *a, **k: None) for f in Task0cDeps.__dataclass_fields__}
         stub.update(
             BUILD_TIMEOUT=30, COVERAGE_TARGET=100.0, BEHAVIOUR_COVERAGE_TARGET=self.target,
+            BEHAVIOUR_CAPTURE_SPLIT=self.capture_split,
             TASK0C_PROMPT_CHAR_CAP=400_000, FIX_ERR_CAP=3000, SIBLING_CAP=3000,
             SRC_SNIP_CAP=3000, WORKING_CAP=3000, TASK0C_THINKING_DIRECTIVE="",
             TASK0C_FIX_THINKING_DIRECTIVE="", TASK0C_MODEL="m",
@@ -313,3 +325,58 @@ def test_behaviour_pass_is_off_at_target_zero_and_on_a_broken_harness(
                                    test_harness_compiles=lambda p, m: (False, "error[E0308]"))})
     assert task0c_behaviour_pass(broken.ws, "microcrate", broken.ws, broken.deps) is False
     assert broken.prompts == [] and any("harness does not compile" in m for m in broken.logs)
+
+
+def _option_spec() -> BehaviourSpec:
+    """A pinnable spec the split KEEPS: `Some(...)` at the observable is a
+    class the model can derive from the source, not a value it must predict.
+    Classified by the real classifier so the fixture's class is computed, not
+    asserted by hand."""
+    return classified(BehaviourSpec(
+        "option::downcast_ref", "",
+        'format!("{:?}", checked_div(1, 0).unwrap_err().downcast_ref::<MathError>())',
+        then=ObservableOutcome.display("Some(DivByZero)"),
+        exercises=frozenset({"checked_div"}), subkind=BehaviourSubKind.OUTCOME))
+
+
+def test_capture_owned_behaviours_are_not_listed_and_no_pin_is_required(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the split on, an EXACT_FORMAT spec — the class almost every
+    pinnable harvested spec falls in — leaves `_file_specs` empty, so the
+    prompt lists nothing, `require_pin` keys itself off, and the contains-only
+    block that the pin contract refuses is admitted instead of costing a
+    restatement pass and a revert. The negative control is the same spec with
+    the knob off."""
+    on = _Harness(tmp_path / "on", monkeypatch, src_name="lib.rs", replies=[CONTAINS_ONLY],
+                  target=60.0, specs=(_display_spec(),), capture_split=True)
+    assert on.phase_c().blocks_admitted == 1
+    assert len(on.prompts) == 1
+    assert "Harvested behaviours of `src/lib.rs`" not in on.prompts[0]
+    assert 'then: "division by zero"' not in on.prompts[0]
+    assert on.refusals() == [] and on.reverts == []
+    assert not any("harvested behaviour(s) not " in m for m in on.logs)
+    assert any("1 capture-owned behaviour(s) not listed" in m for m in on.logs)
+
+    off = _Harness(tmp_path / "off", monkeypatch, src_name="lib.rs",
+                   replies=[CONTAINS_ONLY, CONTAINS_ONLY], target=60.0,
+                   specs=(_display_spec(),), capture_split=False)
+    assert off.phase_c().blocks_admitted == 0
+    assert "Harvested behaviours of `src/lib.rs`" in off.prompts[0]
+    assert [r["stop"] for r in off.refusals()] == ["", "WEAK_ASSERTION"]
+    assert any("1 harvested behaviour(s) not yet pinned (pin required)" in m for m in off.logs)
+    assert not any("capture-owned behaviour(s) not listed" in m for m in off.logs)
+
+
+def test_a_non_capture_owned_behaviour_survives_the_split_and_is_still_required(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The split is by class, not a blanket off switch: the guess route keeps
+    the classes it can answer, so the spec is still listed and its block is
+    still held to the pin."""
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs",
+                 replies=[CONTAINS_ONLY, CONTAINS_ONLY], target=60.0,
+                 specs=(_option_spec(),), capture_split=True)
+    assert h.phase_c().blocks_admitted == 0
+    assert "Harvested behaviours of `src/lib.rs`" in h.prompts[0]
+    assert 'then: "Some(DivByZero)"' in h.prompts[0]
+    assert [r["stop"] for r in h.refusals()] == ["", "WEAK_ASSERTION"]
+    assert any("1 harvested behaviour(s) not yet pinned (pin required)" in m for m in h.logs)

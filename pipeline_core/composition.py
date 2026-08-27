@@ -63,7 +63,8 @@ from pipeline_core.adapters.auto_operator import (
     seed_auto_operator_default as _auto_op_seed_default,
 )
 from pipeline_core.adapters.behaviour_exercises import exercises_by_coverage
-from pipeline_core.adapters.behaviour_probe import run_probe
+from pipeline_core.adapters.behaviour_misses import save_behaviour_misses
+from pipeline_core.adapters.behaviour_probe import probe_env, run_probe
 from pipeline_core.adapters.behaviour_store import (
     load_behaviour_suite,
     save_behaviour_suite,
@@ -338,6 +339,7 @@ from pipeline_core.adapters.workspace_scan import (
 from pipeline_core.application import fix_loop as _fix_loop_mod
 from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.cluster_augment import ClusterAugmentor
+from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.fix_loop import GenerateFixLoopDeps
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
@@ -622,6 +624,7 @@ from pipeline_core.composition_layout import (
     build_retrigger_layout,
 )
 from pipeline_core.domain import graceful_stop as _graceful_stop
+from pipeline_core.domain.behaviour_probe import capture_env_of
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
@@ -1673,7 +1676,13 @@ def build_app(
         run_probe=run_probe,
         exercises_by_coverage=lambda pd, cl, specs, recs: exercises_by_coverage(
             pd, cl, specs, recs, log=ports.log),
+        record_misses=save_behaviour_misses,
+        capture_env=lambda c: capture_env_of(probe_env(c)),
+        emit_tests=functools.partial(
+            emit_behaviour_tests, balanced=_rust_delimiters_balanced),
         PROBE_MAX_PER_CLUSTER=settings.task0d_probe_max,
+        PROBE_BLOCKS_PER_REPLY=settings.task0d_blocks_per_reply,
+        PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,
         EXERCISES_ENABLED=settings.task0d_exercises,
     )
 
@@ -2565,6 +2574,7 @@ def build_app(
             BUILD_TIMEOUT=cfg.build_timeout,
             COVERAGE_TARGET=helpers.coverage_target,
             BEHAVIOUR_COVERAGE_TARGET=settings.behaviour_coverage_target,
+            BEHAVIOUR_CAPTURE_SPLIT=settings.behaviour_capture_split,
             load_behaviour_suite=load_behaviour_suite,
             coverage_ignore_pragma=cfg.ignore_pragma,
             TASK0C_PROMPT_CHAR_CAP=helpers.task0c_prompt_char_cap,

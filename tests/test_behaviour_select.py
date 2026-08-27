@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from types import SimpleNamespace
 
 from pipeline_core.application.author_layout import _dropped_in_class
@@ -12,12 +13,15 @@ from pipeline_core.domain.behaviour import (
     FenceDirective,
     ObservableOutcome,
     StaticAssertKind,
+    classified,
 )
 from pipeline_core.domain.behaviour_select import (
     COMPONENT_BEHAVIOUR_CAP,
     IDENTITY_CLASS,
     MUST_CLASS_ORDER,
     behaviour_class_name,
+    capture_owned,
+    drop_capture_owned,
     is_relevant,
     select_component_behaviours,
     select_usage_examples,
@@ -223,3 +227,51 @@ def test_identity_beyond_the_cap_is_reported_as_dropped() -> None:
         cap=COMPONENT_BEHAVIOUR_CAP)
     assert len(matched) == COMPONENT_BEHAVIOUR_CAP + 7
     assert _dropped_in_class(matched, kept, IDENTITY_CLASS) == 7
+
+
+# --------------------------------------------------------------------------
+# The capture/guess split: which classes task0c stops listing (and stops
+# requiring a pin on) because their exact value can only be captured, not
+# predicted from the source.
+# --------------------------------------------------------------------------
+
+def test_capture_owned_is_the_four_predict_the_value_classes():
+    for name in ("EXACT_FORMAT", "IDENTITY", "TRAIT_OBJECT_IDENTITY", "BOUNDED_RESOURCE"):
+        spec = _outcome(name, "e.to_string()", ObservableOutcome.display("x"))
+        assert capture_owned(replace(spec, klass=BehaviourClass[name])), name
+    for name in ("OPTION_SEMANTICS", "LAYOUT_PIN", "CFG_WORLD"):
+        spec = _outcome(name, "e.to_string()", ObservableOutcome.display("x"))
+        assert not capture_owned(replace(spec, klass=BehaviourClass[name])), name
+    # An assertion-only spec carries no class and no `then`: OTHER, and the
+    # guess route keeps it — its asserts already say what to check.
+    assert not capture_owned(_spec("assert-only", "opaque();"))
+
+
+def test_an_unclassified_display_spec_is_capture_owned_by_its_outcome_kind():
+    """The live harvest shape: `klass` still OTHER, the Then a Display string.
+    `behaviour_class_name` sharpens it to EXACT_FORMAT, so the split must see
+    it as capture-owned — otherwise the filter is a no-op on the whole suite."""
+    raw = _outcome("display", "e.to_string()", ObservableOutcome.display("division by zero"))
+    assert raw.klass is BehaviourClass.OTHER
+    assert behaviour_class_name(raw) == "EXACT_FORMAT"
+    assert capture_owned(raw)
+
+
+def test_drop_capture_owned_keeps_only_the_guess_route_classes_in_harvest_order():
+    exact = _outcome("exact", "e.to_string()", ObservableOutcome.display("division by zero"))
+    option = classified(_outcome("option", 'format!("{:?}", e.downcast_ref::<E>())',
+                                 ObservableOutcome.display("Some(DivByZero)")))
+    identity = _outcome("identity", "e.is::<E>()", ObservableOutcome.type_identity("E", True))
+    assert option.klass is BehaviourClass.OPTION_SEMANTICS
+    kept = drop_capture_owned((exact, option, identity))
+    assert [s.behaviour_id for s in kept] == ["option"]
+
+
+def test_drop_capture_owned_disabled_drops_nothing():
+    """The knob's off position — the pre-split listing, verbatim."""
+    specs = (
+        _outcome("exact", "e.to_string()", ObservableOutcome.display("division by zero")),
+        _outcome("identity", "e.is::<E>()", ObservableOutcome.type_identity("E", True)),
+    )
+    assert drop_capture_owned(specs, enabled=False) == specs
+    assert drop_capture_owned(specs) == ()

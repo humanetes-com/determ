@@ -275,6 +275,19 @@ class BehaviourSpec:
     cfg_cluster: str = "default"            # nightly backtrace behaviour ≠ stable
     source_ref: str = ""                    # where harvested (file:line / example name)
     klass: BehaviourClass = BehaviourClass.OTHER   # see classify_behaviour
+    # The environment the Then was OBSERVED under, as `KEY=value` pairs sorted
+    # and joined by `;` — "" when the capture did not record one (every
+    # harvested spec, whose Then came from a test the crate runs itself).
+    #
+    # Running a probe twice catches NON-DETERMINISM. It does not catch
+    # environment-dependence: measured 2026-08-27, `err.backtrace()` renders
+    # `<disabled>` and is perfectly stable across runs, but becomes a captured
+    # backtrace under `RUST_BACKTRACE=1`. `base_cargo_env` copies `os.environ`
+    # and deliberately does not set that variable, so the captured value is
+    # whatever the parent process happened to have. A replay under a different
+    # parent env would then fail on a behaviour that never changed — which is
+    # a false verdict in the oracle, the most expensive kind.
+    capture_env: str = ""
 
     def __post_init__(self) -> None:
         # An OUTCOME-behaviour compares a captured observable to a golden Then,
@@ -314,6 +327,7 @@ class BehaviourSpec:
             "cfg_cluster": self.cfg_cluster,
             "source_ref": self.source_ref,
             "klass": self.klass.name,
+            "capture_env": self.capture_env,
         }
 
     @classmethod
@@ -331,6 +345,7 @@ class BehaviourSpec:
             cfg_cluster=str(d.get("cfg_cluster", "default")),
             source_ref=str(d.get("source_ref", "")),
             klass=BehaviourClass[str(d.get("klass", "OTHER"))],
+            capture_env=str(d.get("capture_env", "")),
         )
 
 

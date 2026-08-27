@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from pipeline_core.domain.behaviour import BehaviourSuite
+from pipeline_core.log import emit, log
 
 _SKELETON_DIR = ".skeleton"
 
@@ -29,10 +30,38 @@ def save_behaviour_suite(project_dir: Path, suite: BehaviourSuite) -> Path:
 
 
 def load_behaviour_suite(project_dir: Path, cfg_cluster: str) -> BehaviourSuite:
-    """Read a cluster's baked behaviour suite. Missing/corrupt → empty suite
-    (behaviours are an ADDITIVE oracle; their absence must never break a run)."""
+    """Read a cluster's baked behaviour suite. Absent → empty suite, silently;
+    present-but-unusable → empty suite, LOUDLY.
+
+    Both cases return an empty suite, because behaviours are an ADDITIVE oracle
+    and their absence must never break a run. They are not the same fact, and
+    until this function separated them a corrupt
+    ``.skeleton/_behaviours_<cluster>.json`` was indistinguishable from a file
+    that had never been written: the whole behaviour channel simply read as "not
+    harvested yet", t0d would re-harvest over it, t1.5 would author reporting
+    ``0 behaviour(s) in the authoring prompt``, and nothing anywhere said the
+    file on disk could not be read. A missing file is the legitimate first-run
+    case and stays quiet; anything else — unreadable bytes, invalid JSON, or
+    JSON of the wrong shape — logs and emits before failing open.
+    """
     p = _suite_path(project_dir, cfg_cluster)
     try:
-        return BehaviourSuite.from_dict(json.loads(p.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        raw = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return BehaviourSuite(cfg_cluster=cfg_cluster)
+    except OSError as exc:
+        return _unreadable(p, cfg_cluster, exc)
+    try:
+        return BehaviourSuite.from_dict(json.loads(raw))
+    except Exception as exc:  # invalid JSON, or JSON that is not a suite
+        return _unreadable(p, cfg_cluster, exc)
+
+
+def _unreadable(path: Path, cfg_cluster: str, exc: BaseException) -> BehaviourSuite:
+    """Report a behaviour-suite file that exists and cannot be used, then fail open."""
+    detail = f"{type(exc).__name__}: {exc}"
+    log(f"  [behaviour] ‼ unreadable behaviour suite {path}: {detail} — "
+        f"continuing with 0 behaviour(s) for cfg-cluster {cfg_cluster}")
+    emit("behaviour.suite.unreadable",
+         data={"path": str(path), "cfg_cluster": cfg_cluster, "error": detail})
+    return BehaviourSuite(cfg_cluster=cfg_cluster)

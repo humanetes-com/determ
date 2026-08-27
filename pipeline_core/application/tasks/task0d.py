@@ -39,12 +39,16 @@ from pipeline_core.domain.behaviour_probe import (
     PROBE_BATCH_SIZE,
     ProbeResult,
     batches,
+    captured_spec,
+    class_targets,
     is_probe_spec,
     normalize_stdout,
-    parse_behaviour_programs,
-    probe_spec,
+    parse_behaviour_specs,
     probe_targets,
+    render_probe_program,
+    value_bearing_reason,
 )
+from pipeline_core.domain.behaviour_select import behaviour_class_name
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.models import BuildCluster, FnRecord, ModRecord, TypeRecord
 from pipeline_core.domain.module_reachability import externally_reachable_files
@@ -85,7 +89,26 @@ class Task0dDeps:
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     run_probe: Callable[[Path, BuildCluster | None, str, str], ProbeResult]
     exercises_by_coverage: Callable[..., object]
+    # The uncapturable record. A probe that fails to compile, fails to run,
+    # times out, prints nothing, is refused as not value-bearing, or does not
+    # reproduce used to leave a single log line and nothing else — the source
+    # file is unlinked in a `finally`, so the set of things we know we cannot
+    # observe was invisible. These are NOT admitted as specs: a `then=None`
+    # row is classified OTHER, ranked last and unpinnable, which is the same
+    # silent-hole class under another name.
+    record_misses: Callable[[Path, str, list[dict[str, str]]], object] = (
+        lambda _p, _c, _m: None)
+    # The observable-affecting env the probe ran under, recorded on each spec.
+    capture_env: Callable[[BuildCluster], str] = lambda _c: ""
+    # Writes the replayable captures as `tests/behaviour_gen_<N>.rs`.
+    emit_tests: Callable[..., object] = lambda *_a, **_k: None
     PROBE_MAX_PER_CLUSTER: int = 12
+    # Blocks honoured per reply. The target cap bounds how many units are
+    # ASKED about; without this a single reply could spend an unbounded number
+    # of cargo runs.
+    PROBE_BLOCKS_PER_REPLY: int = 8
+    # Behaviour classes requested per cluster, scarcest first.
+    PROBE_CLASSES_PER_CLUSTER: int = 4
     EXERCISES_ENABLED: bool = True
 
 
@@ -115,33 +138,81 @@ def _run_probes(
     surface = deps.public_surface(project_dir, cluster.name)
     inventory = deps.symbol_inventory(project_dir, cluster.name)
     example = _style_example(suite.specs)
+    # Ask by CLASS, not by unit. `probe_targets` above still supplies the unit
+    # names as the callable surface the model needs (its `<IN_SCOPE_SYMBOLS>`
+    # half), but the request itself is for a behaviour of a class the suite is
+    # thin in — behaviours are transversal, so a unit-shaped ask cannot reach
+    # one. Measured on the live 230-spec suite the two scarcest classes are
+    # TRAIT_OBJECT_IDENTITY and OPTION_SEMANTICS at zero, while EXACT_FORMAT
+    # holds 135 and is correctly last.
+    class_asks = class_targets(
+        suite.specs, behaviour_class_name,
+        max_targets=deps.PROBE_CLASSES_PER_CLUSTER)
     admitted: list[BehaviourSpec] = []
     proposed = 0
+    cargo_runs = 0
     per_unit: dict[str, int] = {}
+    misses: list[dict[str, str]] = []
     for batch in batches(targets, PROBE_BATCH_SIZE):
         prompt = build_behaviour_synthesis_prompt(
             module_name=module_name, cfg_cluster=cluster.name,
             target_units=batch, public_surface=surface,
-            symbol_inventory=inventory, example_usages=example)
+            symbol_inventory=inventory, example_usages=example,
+            target_classes=class_asks)
         reply = deps.ask(prompt)
-        for unit, program in parse_behaviour_programs(reply):
+        # Bound the WORK, not just the targets. `PROBE_MAX_PER_CLUSTER` caps how
+        # many units are asked about; the number of blocks a reply may contain
+        # was unbounded, and every block costs its own `cargo run` at up to the
+        # probe timeout. A reply that emits fifty blocks used to buy fifty
+        # compile-and-run cycles against a cap of twelve.
+        parsed = parse_behaviour_specs(reply)[:deps.PROBE_BLOCKS_PER_REPLY]
+        for probe in parsed:
             proposed += 1
-            unit = unit or batch[0]
+            unit = probe.name or batch[0]
             n = per_unit.get(unit, 0)
             per_unit[unit] = n + 1
+            # A `when` that compares observes `true`/`false` and throws away the
+            # value it was supposed to specify. Rejected BEFORE the cargo run:
+            # the run would succeed and store a Then carrying no information.
+            if (bad := value_bearing_reason(probe.when)) is not None:
+                misses.append({"unit": unit, "reason": f"not value-bearing: {bad}",
+                               "when": probe.when})
+                deps.log(f"  [task0d] cluster {cluster.name}: behaviour for "
+                         f"{unit} refused ({bad}).")
+                continue
+            program = render_probe_program(probe.given, probe.when, probe.observe)
             result = deps.run_probe(
                 project_dir, cluster, program, f"{cluster.name}_{proposed}")
+            cargo_runs += 1
             stdout = normalize_stdout(result.stdout)
+            # Run TWICE and require the same output. One run cannot tell a
+            # deterministic observable from a lucky one, and a captured Then
+            # that does not reproduce becomes a flaky test in the oracle for
+            # the life of the project.
+            confirm = deps.run_probe(
+                project_dir, cluster, program, f"{cluster.name}_{proposed}_r")
+            cargo_runs += 1
+            if result.ok and stdout and normalize_stdout(confirm.stdout) != stdout:
+                misses.append({"unit": unit, "reason": "not reproducible",
+                               "when": probe.when, "program": program})
+                deps.log(f"  [task0d] cluster {cluster.name}: behaviour for "
+                         f"{unit} dropped (output differed between two runs).")
+                continue
             if result.ok and stdout:
-                admitted.append(probe_spec(
-                    cfg_cluster=cluster.name, unit=unit, n=n, program=program,
-                    stdout=stdout, default_cluster=default_cluster))
+                admitted.append(captured_spec(
+                    cfg_cluster=cluster.name, probe=probe, n=n,
+                    stdout=stdout, default_cluster=default_cluster,
+                    capture_env=deps.capture_env(cluster)))
                 continue
             why = ("no stdout" if result.ok else
                    f"failed: {result.stderr[-300:].strip() or 'no stderr'}")
+            misses.append({"unit": unit, "reason": why, "when": probe.when,
+                           "program": program})
             deps.log(f"  [task0d] cluster {cluster.name}: probe for {unit} "
                      f"dropped ({why}).")
-    return admitted, len(admitted), proposed, proposed
+    if misses:
+        deps.record_misses(project_dir, cluster.name, misses)
+    return admitted, len(admitted), proposed, cargo_runs
 
 
 def _fill_exercises(
@@ -257,6 +328,17 @@ def run_task0d(
                 deps.log(f"  [task0d] cluster {cluster.name}: exercises failed "
                          f"(non-fatal, harvested suite kept): {e}")
         deps.save_suite(project_dir, suite)
+        # Captures become REAL tests here, or they stay notes about the crate.
+        # Emitted from the observed value, never re-asked of the model, and
+        # deliberately NOT put through t0c's admission contract: that contract
+        # exists to catch a guessed literal, and this value was printed by the
+        # crate itself.
+        try:
+            deps.emit_tests(project_dir, cluster.name, suite.specs,
+                            crate=module_name)
+        except Exception as e:
+            deps.log(f"  [task0d] cluster {cluster.name}: behaviour-test "
+                     f"emission failed (non-fatal, suite kept): {e}")
         line, payload = _reading_line(
             cluster.name, suite, filled, admitted, proposed,
             elapsed_s=time.monotonic() - t0, cargo_invocations=cargo_n)

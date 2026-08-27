@@ -44,7 +44,7 @@ from pipeline_core.domain.behaviour_coverage import (
     test_command,
     units_for_hit_lines,
 )
-from pipeline_core.domain.behaviour_probe import is_probe_spec
+from pipeline_core.domain.behaviour_probe import is_probe_spec, program_for
 from pipeline_core.domain.models import BuildCluster, FnRecord
 
 COVERAGE_SUBDIR = Path("target") / "coverage" / "behaviour_exercises"
@@ -168,7 +168,14 @@ def exercises_by_coverage(
         if cmd is not None:
             rc, _out, err = counted(cmd, project_dir, spec_env, timeout)
         else:
-            with materialized_probe(project_dir, spec.given, f"exercise_{i}") as target:
+            # `program_for`, not `spec.given`: a capture in the constrained
+            # shape stores SETUP statements, not a whole program, so passing
+            # `given` straight to `cargo run --example` would fail every probe
+            # here with `rc != 0` -> "not attributed" -> continue, and the only
+            # trace would be a log line. `program_for` returns the stored
+            # program for a legacy free-form capture and renders one from
+            # (given, when, kind) for the constrained shape.
+            with materialized_probe(project_dir, program_for(spec), f"exercise_{i}") as target:
                 rc, _out, err = counted(
                     ["cargo", "run", "--quiet", "--example", target],
                     project_dir, spec_env, timeout)
