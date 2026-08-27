@@ -34,12 +34,13 @@ decisions; the builders render what it returns.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, body_sha
 from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.test_report import parse_panic_location
 from pipeline_core.domain.type_production import constructs_type, is_ident_char
@@ -76,6 +77,23 @@ class Attribution(Enum):
     NAMED = auto()
 
 @dataclass(frozen=True, slots=True)
+class TryRecord:
+    """One prior try of this unit, as the ledger recorded it.
+
+    `same_body` is whether that try's stored body is the one the prompt is
+    showing now. It is computed, not rendered: a FLAT row is written from
+    the tree body that did not move, so at the first prompt after the audit
+    the comparison is tautological and cannot tell a verbatim reply from a
+    revert. Empty `run_id` rows are not tries (they cannot name a run); see
+    :func:`try_history`."""
+
+    run_id: str
+    iteration: int
+    state: str
+    same_body: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RefillEvidence:
     """One re-fill member and what the record says about it."""
 
@@ -89,6 +107,10 @@ class RefillEvidence:
     sibling_containers: tuple[str, ...]
     # (test, what it said) for the attributed tests that left a panic body.
     excerpts: tuple[tuple[str, str], ...]
+    # Prior FLAT tries of this unit that named a run. Empty when the ledger
+    # has none — today's pre-2a rows carry `run_id ""` and must not change
+    # the prompt (the plan's negative control).
+    history: tuple[TryRecord, ...] = ()
 
     @property
     def direct(self) -> bool:
@@ -142,6 +164,59 @@ def quote_panic_site(
             "(the observable this test pins):\n" + "\n".join(quoted))
 
 
+def try_history(
+    entries: Sequence[LedgerEntry],
+    *,
+    file: str,
+    fn_name: str,
+    current_sha: str,
+    oracle_fp: str = "",
+) -> tuple[TryRecord, ...]:
+    """Every FLAT row for this unit that named a run, in ledger order.
+
+    Not `latest_by_unit`: that collapse would name only the most recent try,
+    and the prompt line exists to name every measured-flat rewrite so the
+    model sees the class, not the last instance. The plan's fixture is three
+    audits (`263474` iter 2, `2932` iter 2, `82157` iter 1) → three FLAT
+    rows for `construct_from_adhoc` → the rendered line names three runs.
+    Rows with an empty `run_id` are dropped: they cannot name a run, and
+    today's ledger is exactly that shape (the negative control: empty
+    history, prompt byte-identical to the pre-history render).
+
+    `oracle_fp` is the fingerprint of the oracle scoring the tree this
+    prompt will be judged against. Same refuse-empty rule as
+    `reseed_allowed`: a row whose `oracle_fp` is empty (written before the
+    field) or a different fingerprint is skipped. Default `""` therefore
+    yields no rows — a caller that does not pass the live fingerprint
+    leaves the prompt byte-identical to the pre-history render."""
+    out: list[TryRecord] = []
+    for e in entries:
+        if e.key.file != file or e.key.fn_name != fn_name:
+            continue
+        if not e.run_id or e.state is not BodyState.FLAT:
+            continue
+        if not e.oracle_fp or e.oracle_fp != oracle_fp:
+            continue
+        out.append(TryRecord(
+            run_id=e.run_id, iteration=e.iteration,
+            state=str(e.state), same_body=e.body_sha == current_sha))
+    return tuple(out)
+
+
+def history_for_block(
+    block: ImplBlock, entries: Sequence[LedgerEntry],
+    *, oracle_fp: str = "",
+) -> dict[str, tuple[TryRecord, ...]]:
+    """`fn_name → tries` for each re-fill member, keyed the way
+    :func:`collect_refill_evidence` looks them up."""
+    return {
+        m.fn_name: try_history(
+            entries, file=block.file, fn_name=m.fn_name,
+            current_sha=body_sha((m.body_text,)), oracle_fp=oracle_fp)
+        for m in block.refill_members
+    }
+
+
 def collect_refill_evidence(
     block: ImplBlock,
     blocks: Iterable[ImplBlock],
@@ -150,6 +225,7 @@ def collect_refill_evidence(
     max_tests: int = 6,
     escalated: frozenset[FnLocator] = frozenset(),
     read_source: Callable[[str], str | None] | None = None,
+    history: Mapping[str, Sequence[TryRecord]] | None = None,
 ) -> tuple[RefillEvidence, ...]:
     """What the frontier supports for each of `block.refill_members`.
 
@@ -159,7 +235,9 @@ def collect_refill_evidence(
     candidate. With no frontier every member is INFERRED with no tests — the
     honest reading of a re-fill nobody can name a test for. With
     `read_source`, each excerpt carries the source line its panic names
-    (`quote_panic_site`); without it the excerpt is the message alone."""
+    (`quote_panic_site`); without it the excerpt is the message alone.
+    `history` is the unit's own prior tries (`try_history`); omitted or empty
+    leaves the rendered section byte-identical to the pre-history prompt."""
     out: list[RefillEvidence] = []
     for m in block.refill_members:
         key = FnLocator(block.file, m.fn_name)
@@ -185,10 +263,28 @@ def collect_refill_evidence(
                     text = quote_panic_site(text, read_source)
                 if text:
                     excerpts.append((t, text))
+        tries = tuple(history.get(m.fn_name, ()) if history else ())
         out.append(RefillEvidence(
             fn_name=m.fn_name, tests=tests, attribution=grade,
-            sibling_containers=siblings, excerpts=tuple(excerpts)))
+            sibling_containers=siblings, excerpts=tuple(excerpts),
+            history=tries))
     return tuple(out)
+
+
+def _render_try_history(tries: tuple[TryRecord, ...], *, n_tests: int) -> str:
+    """The one line under the unit: which runs rewrote it, and that the
+    attributed tests still fail.
+
+    A FLAT row stores "rewritten, no verdict moved". It does not store
+    whether the model returned the given body or a compile that was
+    reverted, so this line does not claim the body came back identical.
+    Several runs concatenate: `rewritten in 263474 iter 2, 2932 iter 2,
+    82157 iter 1 ×3; 2 still fail on it`."""
+    parts = [f"{t.run_id} iter {t.iteration}" for t in tries]
+    line = f"  rewritten in {', '.join(parts)} ×{len(tries)}"
+    if n_tests:
+        line += f"; {n_tests} still fail on it"
+    return line
 
 
 def inferred_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
@@ -272,6 +368,8 @@ def render_refill_evidence(
                         f"`{container_header(c)}`" for c in e.sibling_containers))
         if e.tests:
             lines.append("  attributed failing test(s): " + ", ".join(e.tests))
+        if e.history:
+            lines.append(_render_try_history(e.history, n_tests=len(e.tests)))
         for test, text in e.excerpts:
             lines.append(f"  {test} said:")
             lines.extend("    " + ln for ln in text.splitlines())

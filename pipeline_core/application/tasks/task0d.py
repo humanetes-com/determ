@@ -22,6 +22,7 @@ three defect-observable flags use the same patterns the census script does.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -83,7 +84,7 @@ class Task0dDeps:
     enumerate_mods: Callable[[Path], list[ModRecord] | None]
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     run_probe: Callable[[Path, BuildCluster | None, str, str], ProbeResult]
-    exercises_by_coverage: Callable[..., dict[str, frozenset[str]]]
+    exercises_by_coverage: Callable[..., object]
     PROBE_MAX_PER_CLUSTER: int = 12
     EXERCISES_ENABLED: bool = True
 
@@ -100,8 +101,8 @@ def _run_probes(
     deps: Task0dDeps, project_dir: Path, module_name: str, cluster: BuildCluster,
     suite: BehaviourSuite, records: list[FnRecord], mods: list[ModRecord],
     types: list[TypeRecord], default_cluster: str,
-) -> tuple[list[BehaviourSpec], int, int]:
-    """(admitted probe specs, admitted count, proposed count)."""
+) -> tuple[list[BehaviourSpec], int, int, int]:
+    """(admitted probe specs, admitted count, proposed count, cargo runs)."""
     files = frozenset(r.file for r in records) | frozenset(t.file for t in types)
     reachable = externally_reachable_files(mods, files)
     type_files = {t.name: t.file for t in types if t.is_pub and t.is_exactly_pub}
@@ -110,7 +111,7 @@ def _run_probes(
         reachable_files=reachable, type_files=type_files,
         cfg_set=CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false)))
     if not targets:
-        return [], 0, 0
+        return [], 0, 0, 0
     surface = deps.public_surface(project_dir, cluster.name)
     inventory = deps.symbol_inventory(project_dir, cluster.name)
     example = _style_example(suite.specs)
@@ -140,27 +141,37 @@ def _run_probes(
                    f"failed: {result.stderr[-300:].strip() or 'no stderr'}")
             deps.log(f"  [task0d] cluster {cluster.name}: probe for {unit} "
                      f"dropped ({why}).")
-    return admitted, len(admitted), proposed
+    return admitted, len(admitted), proposed, proposed
 
 
 def _fill_exercises(
     deps: Task0dDeps, project_dir: Path, cluster: BuildCluster,
     specs: tuple[BehaviourSpec, ...], records: list[FnRecord],
-) -> tuple[tuple[BehaviourSpec, ...], int]:
-    """Specs with `exercises` filled from coverage; (specs, filled count)."""
+) -> tuple[tuple[BehaviourSpec, ...], int, int]:
+    """Specs with `exercises` filled from coverage; (specs, filled count,
+    cargo invocations). A collaborator that still returns a bare dict
+    (the pre-count signature) is treated as zero invocations."""
     runnable = [s for s in specs if is_test_assertion_spec(s) or is_probe_spec(s)]
     if not runnable:
-        return specs, 0
-    by_id = deps.exercises_by_coverage(project_dir, cluster, runnable, records)
+        return specs, 0, 0
+    raw = deps.exercises_by_coverage(project_dir, cluster, runnable, records)
+    cargo_n = 0
+    by_id: dict[str, frozenset[str]]
+    if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], dict):
+        by_id, cargo_n = raw[0], int(raw[1])
+    else:
+        by_id = raw if isinstance(raw, dict) else {}
     if not by_id:
-        return specs, 0
+        return specs, 0, cargo_n
     out = tuple(replace(s, exercises=by_id[s.behaviour_id])
                 if s.behaviour_id in by_id else s for s in specs)
-    return out, sum(1 for s in out if s.exercises)
+    return out, sum(1 for s in out if s.exercises), cargo_n
 
 
 def _reading_line(cluster: str, suite: BehaviourSuite, filled: int,
-                  admitted: int, proposed: int) -> tuple[str, dict[str, object]]:
+                  admitted: int, proposed: int, *,
+                  elapsed_s: float, cargo_invocations: int,
+                  ) -> tuple[str, dict[str, object]]:
     n = len(suite.specs)
     runtime = runtime_then_counts(suite.specs)
     flags = defect_observable_flags(suite.specs)
@@ -168,11 +179,14 @@ def _reading_line(cluster: str, suite: BehaviourSuite, filled: int,
     line = (f"  [task0d] cluster {cluster}: {n} behaviours — runtime then: "
             f"{render_counts(runtime)}; exercises filled: {filled}/{n}; "
             f"probes admitted {admitted} / proposed {proposed}; "
+            f"elapsed {elapsed_s:.0f}s; {cargo_invocations} cargo invocation(s); "
             f"defect observables: {flag_text}")
     payload: dict[str, object] = {
         "cluster": cluster, "behaviours": n,
         "runtime_then": dict(runtime), "exercises_filled": filled,
         "probes_admitted": admitted, "probes_proposed": proposed,
+        "elapsed_s": round(elapsed_s, 3),
+        "cargo_invocations": cargo_invocations,
         "defect_observables": flags,
         "klass": dict(klass_histogram(suite.specs)),
     }
@@ -196,6 +210,7 @@ def run_task0d(
         if deps.phase_valid(project_dir, key):
             deps.log(f"  [task0d] cluster {cluster.name}: already harvested — skipping.")
             continue
+        t0 = time.monotonic()
         sources = deps.read_sources(src_dir)
         test_sources = deps.read_test_sources(project_dir)
         try:
@@ -219,10 +234,12 @@ def run_task0d(
             deps.log(f"  [task0d] cluster {cluster.name}: fn enumeration failed "
                      f"(probes and exercises skipped): {e}")
         admitted = proposed = 0
+        cargo_n = 0
         try:
-            probes, admitted, proposed = _run_probes(
+            probes, admitted, proposed, probe_cargo = _run_probes(
                 deps, project_dir, module_name, cluster, suite, records, mods,
                 types, default_cluster)
+            cargo_n += probe_cargo
             if probes:
                 suite = merge_suites(suite, BehaviourSuite(
                     cfg_cluster=cluster.name, specs=tuple(probes)))
@@ -232,14 +249,17 @@ def run_task0d(
         filled = 0
         if deps.EXERCISES_ENABLED:
             try:
-                specs, filled = _fill_exercises(
+                specs, filled, ex_cargo = _fill_exercises(
                     deps, project_dir, cluster, suite.specs, records)
+                cargo_n += ex_cargo
                 suite = BehaviourSuite(cfg_cluster=cluster.name, specs=specs)
             except Exception as e:
                 deps.log(f"  [task0d] cluster {cluster.name}: exercises failed "
                          f"(non-fatal, harvested suite kept): {e}")
         deps.save_suite(project_dir, suite)
-        line, payload = _reading_line(cluster.name, suite, filled, admitted, proposed)
+        line, payload = _reading_line(
+            cluster.name, suite, filled, admitted, proposed,
+            elapsed_s=time.monotonic() - t0, cargo_invocations=cargo_n)
         deps.log(line)
         deps.emit("task0d.harvest", **payload)
         deps.commit_and_mark(

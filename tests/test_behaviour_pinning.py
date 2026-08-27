@@ -22,7 +22,10 @@ from pipeline_core.domain.behaviour import (
     OutcomeKind,
 )
 from pipeline_core.domain.behaviour_pinning import (
+    _char_literal_end,
+    _literals_in,
     _read_string_literal,
+    _string_opener_at,
     behaviours_pinned_by,
     is_pinnable,
     render_behaviour_list,
@@ -171,3 +174,191 @@ def test_kind_names_are_read_not_identities() -> None:
     block = '#[test]\nfn t() { assert_eq!(format!("{:#?}", v), "Custom {\\n    a: 1,\\n}"); }'
     assert behaviours_pinned_by(block, [spec]) == {"alt"}
     assert OutcomeKind.DEBUG_STRING.name == "DEBUG_STRING"
+
+
+# --- lexer / binder / weak-shape edges the happy-path tests never open ----------
+
+def test_string_literal_raw_byte_escapes_and_unterminated() -> None:
+    """Every opener and escape `_read_string_literal` claims, plus the
+    refusals: an unclosed raw, a `\\` at EOF, a `b`/`r` that is not a
+    string, and a hash-raw that never sees its close."""
+    assert _read_string_literal('b"hi"', 0) == ("hi", 5)
+    assert _read_string_literal('r"raw \\n"', 0) == ("raw \\n", 9)
+    assert _read_string_literal('r#"a "quote""#', 0) == ('a "quote"', 14)
+    assert _read_string_literal('br#"byte"#', 0) == ("byte", 10)
+    assert _read_string_literal('r#"no close', 0) is None
+    assert _read_string_literal("rfoo", 0) is None
+    assert _read_string_literal("bx", 0) is None
+    assert _read_string_literal('"\\x41\\u{41}\\0\\r"', 0) == ("AA\0\r", 16)
+    # bad hex / unclosed / bad unicode fall through to the single-char map
+    assert _read_string_literal('"\\xGG"', 0)[0] == "xGG"
+    assert _read_string_literal('"\\u{zz}"', 0)[0] == "u{zz}"
+    assert _read_string_literal('"\\u{no"', 0)[0] == "u{no"
+    assert _read_string_literal('"\\q"', 0) == ("q", 4)
+    assert _read_string_literal('"trail\\', 0) is None
+    assert _read_string_literal('"no close', 0) is None
+    cr_cont = '"a\\\r\n    b"'
+    assert _read_string_literal(cr_cont, 0) == ("ab", len(cr_cont))
+    # a `b"` after an identifier is not a string opener
+    assert not _string_opener_at('xb"no"', 1)
+    assert _string_opener_at('b"yes"', 0)
+    assert _string_opener_at('r#"x"#', 0)
+
+
+def test_char_literal_end_skips_escapes_and_refuses_lifetimes() -> None:
+    assert _char_literal_end("'a'", 0) == 3
+    assert _char_literal_end("'\\n'", 0) == 4
+    assert _char_literal_end("'\\n", 0) is None          # unclosed escape
+    assert _char_literal_end("'", 0) is None
+    assert _char_literal_end("'static", 0) is None      # lifetime, not a char
+
+
+def test_comments_and_char_literals_do_not_invent_pins() -> None:
+    spec = _display("d", "e.to_string()", "division by zero")
+    commented = (
+        '#[test]\nfn t() {\n'
+        '    // assert_eq!(e.to_string(), "division by zero");\n'
+        '    /* assert_eq!(e.to_string(), "division by zero"); */\n'
+        "    let c = 'x';\n"
+        '    let _ = "not asserted";\n'
+        '}\n')
+    assert behaviours_pinned_by(commented, [spec]) == frozenset()
+    # `//` with no newline, and an unclosed `/*`, still parse
+    eof_comment = '#[test]\nfn t() { let x = 1; }// no newline'
+    assert behaviours_pinned_by(eof_comment, [spec]) == frozenset()
+    unclosed = '#[test]\nfn t() { let x = 1; /* never closes'
+    assert behaviours_pinned_by(unclosed, [spec]) == frozenset()
+
+
+def test_bound_let_mut_wrappers_and_static_const_pin() -> None:
+    spec = _display("d", "e.to_string()", "division by zero")
+    mut_let = ('#[test]\nfn t() {\n    let mut expected = "division by zero";\n'
+               '    assert_eq!(expected, e.to_string());\n}')
+    wrapped = ('#[test]\nfn t() {\n'
+               '    assert_eq!(e.to_string(), String::from("division by zero"));\n'
+               '    assert_eq!(format!("division by zero"), e.to_string());\n'
+               '    assert_eq!(("division by zero").as_str(), e.to_string());\n}')
+    st = ('static EXPECTED: &str = "division by zero";\n'
+          '#[test]\nfn t() { assert_eq!(e.to_string(), EXPECTED.to_owned()); }')
+    assert behaviours_pinned_by(mut_let, [spec]) == {"d"}
+    assert behaviours_pinned_by(wrapped, [spec]) == {"d"}
+    assert behaviours_pinned_by(st, [spec]) == {"d"}
+    # a `let` whose rhs is not a literal binds nothing; a name with no rhs
+    # does not pick up a sibling's literal
+    not_lit = '#[test]\nfn t() { let expected = e.to_string(); assert_eq!(expected, x); }'
+    no_eq = '#[test]\nfn t() { let expected; assert_eq!(expected, e.to_string()); }'
+    assert behaviours_pinned_by(not_lit, [spec]) == frozenset()
+    assert behaviours_pinned_by(no_eq, [spec]) == frozenset()
+
+
+def test_panic_message_pins_via_should_panic_expected() -> None:
+    spec = BehaviourSpec("p", "", "f()", then=ObservableOutcome.panic("boom boom"),
+                         subkind=BehaviourSubKind.OUTCOME)
+    pinned = '#[test]\n#[should_panic(expected = "boom boom")]\nfn t() { f(); }'
+    bare = '#[test]\n#[should_panic]\nfn t() { f(); }'
+    no_quote = '#[test]\n#[should_panic(expected = boom)]\nfn t() { f(); }'
+    assert is_pinnable(spec)
+    assert behaviours_pinned_by(pinned, [spec]) == {"p"}
+    assert behaviours_pinned_by(bare, [spec]) == frozenset()
+    assert behaviours_pinned_by(no_quote, [spec]) == frozenset()
+    assert weak_assertion_reason(pinned) is None
+    assert weak_assertion_reason(bare) is not None
+
+
+def test_identity_unclosed_turbofish_and_matches_none_are_not_silent() -> None:
+    pos = _identity("id_pos", "&str", True)
+    neg = _identity("id_neg", "&str", False)
+    unclosed = '#[test]\nfn t() { assert!(e.is::<&str); }'
+    assert behaviours_pinned_by(unclosed, [pos]) == frozenset()
+    none_pat = '#[test]\nfn t() { assert!(matches!(e.downcast_ref::<&str>(), None)); }'
+    err_pat = '#[test]\nfn t() { assert!(matches!(e.downcast::<&str>(), Err(_))); }'
+    assert behaviours_pinned_by(none_pat, [neg]) == {"id_neg"}
+    assert behaviours_pinned_by(err_pat, [neg]) == {"id_neg"}
+    # `None`/`Err` as a suffix of an identifier is not a negative pattern
+    ident = '#[test]\nfn t() { assert!(e.downcast_ref::<&str>().is_none_or(|_| false)); }'
+    assert behaviours_pinned_by(ident, [neg]) == frozenset()
+
+
+def test_empty_and_unmatched_blocks_pin_nothing() -> None:
+    spec = _display("d", "e.to_string()", "division by zero")
+    assert behaviours_pinned_by("", [spec]) == frozenset()
+    assert behaviours_pinned_by("   \n", [spec]) == frozenset()
+    assert behaviours_pinned_by("#[test]\nfn t() {", [spec]) == frozenset()
+    # `#[test]` then a comment then the fn — the item is still found
+    spaced = '#[test]\n// setup\nfn t() { assert_eq!(e.to_string(), "division by zero"); }'
+    assert behaviours_pinned_by(spaced, [spec]) == {"d"}
+
+
+def test_weak_reason_covers_identity_numeric_char_and_helper_without_literal() -> None:
+    assert weak_assertion_reason(
+        '#[test]\nfn t() { assert!(e.is::<&str>()); }') is None
+    assert weak_assertion_reason(
+        '#[test]\nfn t() { assert_eq!(n, 42); }') is None
+    assert weak_assertion_reason(
+        "#[test]\nfn t() { assert_eq!(c, 'x'); }") is None
+    assert weak_assertion_reason(
+        '#[test]\nfn t() { assert_eq!(n, -3); }') is None
+    # one-arg assert_eq, a helper with no literal, unmatched matches!(
+    one = weak_assertion_reason('#[test]\nfn t() { assert_eq!(x); }')
+    assert one is not None and "assert_eq!(…)" in one
+    helper = weak_assertion_reason('#[test]\nfn t() { assert_display(&e, x); }')
+    assert helper is not None and "assert_display(…)" in helper
+    unclosed = weak_assertion_reason('#[test]\nfn t() { assert!(matches!(e, Some(_)); }')
+    assert unclosed is not None
+    empty_file = weak_assertion_reason("fn helper() {}")
+    assert empty_file == "no #[test] item"
+
+
+def test_select_without_pub_items_needs_an_exercises_hit() -> None:
+    by_fn = _display("f", "x", "value one here", exercises=frozenset({"src/lib.rs::add"}))
+    by_word = _display("w", "MathError::DivByZero.to_string()", "division by zero")
+    chosen = select_behaviours_for_file(
+        [by_fn, by_word], file_fn_names={"add"}, file_pub_items=set(),
+        already_pinned=set())
+    assert [s.behaviour_id for s in chosen] == ["f"]
+    missed = select_behaviours_for_file(
+        [by_word], file_fn_names=set(), file_pub_items=set(), already_pinned=set())
+    assert missed == ()
+
+
+def test_identity_empty_value_is_not_pinnable_and_false_polarity_renders() -> None:
+    empty = SimpleNamespace(
+        behaviour_id="e", given="", when="e.is::<T>()",
+        then=SimpleNamespace(kind=SimpleNamespace(name="TYPE_IDENTITY"), value="  ", ok=True),
+        exercises=frozenset())
+    assert not is_pinnable(empty)
+    ident = _identity("i", "io::Error", False)
+    text = render_behaviour_list([ident])
+    assert "`.is::<io::Error>()` is false" in text
+    assert "is None" in text
+    assert "Harvested behaviours NOT yet pinned" in text   # no rel_path
+    assert render_behaviour_list([]) == ""
+
+
+def test_literals_in_walks_raw_char_and_unclosed() -> None:
+    """The token walk `_idents_in` shares: strings are collected, a char is
+    skipped, an unclosed raw does not hang."""
+    assert _literals_in('before "x" r#"y"# \'z\' r#"no') == ["x", "y"]
+    assert _literals_in("") == []
+
+
+def test_helper_literal_missing_test_item_and_exact_shapes_weak_reason_missed() -> None:
+    spec = _display("d", "e.to_string()", "division by zero")
+    helper = '#[test]\nfn t() { assert_display(&e, "division by zero"); }'
+    assert behaviours_pinned_by(helper, [spec]) == {"d"}
+    assert behaviours_pinned_by("fn helper() { let x = 1; }", [spec]) == frozenset()
+    assert weak_assertion_reason('#[test]\nfn t() { assert_eq!(42, true); }') is None
+    assert weak_assertion_reason("#[test]\nfn t() { assert!(a == b); }") is None
+    assert weak_assertion_reason("#[test]\nfn t() { assert; }") is not None
+    pos = _identity("id_pos", "&str", True)
+    none_ident = '#[test]\nfn t() { assert!(matches!(e.downcast_ref::<&str>(), NoneX)); }'
+    assert behaviours_pinned_by(none_ident, [pos]) == {"id_pos"}
+    assert behaviours_pinned_by(none_ident, [_identity("id_neg2", "&str", False)]) == frozenset()
+    assert weak_assertion_reason('#[test]\nfn t() { assert!(matches!(e); }') is not None
+    assert weak_assertion_reason('#[test]\nfn t() { assert!(matches!(e)); }') is not None
+    quoted = _display("q", 'MathError::from("x").to_string()', "division by zero")
+    chosen = select_behaviours_for_file(
+        [quoted], file_fn_names=set(), file_pub_items={"MathError"}, already_pinned=set())
+    assert [s.behaviour_id for s in chosen] == ["q"]
+    empty_name = '#[test]\nfn t() { let mut = "division by zero"; assert_eq!(x, y); }'
+    assert behaviours_pinned_by(empty_name, [spec]) == frozenset()

@@ -313,6 +313,10 @@ def test_the_standing_claim_is_the_latest_word_but_proven_outranks_unmeasured() 
     assert latest_by_unit([proven, refuted])[_KEY] is refuted, (
         "a later word about the SAME body wins — that is what append-only is "
         "for")
+    later_other = _entry(body_sha="cafef00d", bodies=("third",),
+                         state=BodyState.UNMEASURED)
+    assert latest_by_unit([other, later_other])[_KEY] is later_other, (
+        "two different unmeasured bodies: the later row is the standing claim")
 
 
 def test_the_plan_answers_only_about_the_units_it_was_asked_about() -> None:

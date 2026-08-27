@@ -48,6 +48,16 @@ def test_parse_programs_strips_think_and_fences_and_drops_empty():
     assert got[0][1].startswith("use anyhow::Error;") and "```" not in got[0][1]
     assert got[1][1].startswith("fn main()")
     assert parse_behaviour_programs("no blocks here") == []
+    assert parse_behaviour_programs('<BEHAVIOUR unit="x"') == []
+    assert parse_behaviour_programs('<BEHAVIOUR unit="x">fn main() {}') == []
+    assert parse_behaviour_programs('<BEHAVIOUR>fn main() { 1 }</BEHAVIOUR>') == [("", "fn main() { 1 }")]
+    assert parse_behaviour_programs('<BEHAVIOUR unit=x>fn main() {}</BEHAVIOUR>') == [("", "fn main() {}")]
+    assert parse_behaviour_programs('<BEHAVIOUR unit="x>fn main() {}</BEHAVIOUR>') == [("", "fn main() {}")]
+    assert parse_behaviour_programs('<BEHAVIOUR unit="x">```</BEHAVIOUR>') == []
+    assert parse_behaviour_programs('<BEHAVIOUR unit="x">```rust\nfn main() {}\n```</BEHAVIOUR>') == [("x", "fn main() {}")]
+    assert parse_behaviour_programs('<BEHAVIOUR unit>fn main() { 2 }</BEHAVIOUR>') == [("", "fn main() { 2 }")]
+    spaced = '<BEHAVIOUR unit= "z">fn main() { 3 }</BEHAVIOUR>'
+    assert parse_behaviour_programs(spaced) == [("z", "fn main() { 3 }")]
 
 
 def test_normalize_stdout_strips_trailing_ws_and_blank_tail():

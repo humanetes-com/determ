@@ -204,6 +204,9 @@ def test_a_landing_is_recorded_and_the_next_sweep_judges_it(
     assert judged[0].oracle_fp == oracle
     assert any("[phase-c/ledger]" in ln and f"oracle {oracle}" in ln
                for ln in logs), "the cluster-entry line names the oracle"
+    assert any("followup-think=off" in ln for ln in logs), (
+        "the cluster-entry line names the followup-think off switch "
+        "before any GPU is spent")
 
     # THE CONTROL: the identical run with the ledger unwired records nothing.
     control = tmp_path / "control"

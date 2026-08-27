@@ -234,6 +234,24 @@ mod gen_tests_1 {
     fake_sibling.unlink()
 
 
+def test_gen_tests_integration_write_does_not_declare_in_src() -> None:
+    """Generated tests now live in tests/{stem}_gen_N.rs; the source file is
+    not given a path-mod (that placement is what granted private access)."""
+    from pipeline_core.adapters.gen_tests_storage import write_gen_tests_integration
+    workspace = _setup_workspace("smoke-gen-tests-integ")
+    src = workspace / "src" / "lib.rs"
+    pristine = src.read_text()
+    dest = write_gen_tests_integration(
+        workspace, src,
+        "#[cfg(test)]\nmod gen_tests_1 {\n    use super::*;\n    #[test] fn t() {}\n}",
+        crate="smoke", pass_n=1)
+    assert dest == workspace / "tests" / "lib_gen_1.rs"
+    body = dest.read_text()
+    assert "use smoke::*;" in body and "use super::*;" not in body
+    assert src.read_text() == pristine
+    assert "mod gen_tests_1" not in src.read_text()
+
+
 def test_gen_tests_origin_cfgs() -> None:
     """A gen_tests decl's origin cluster cfg is recovered from the parent source,
     so post-strip propagation can gate it to the cluster that generated it (not

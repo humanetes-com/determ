@@ -39,6 +39,7 @@ from pipeline_core.application.tasks.task0c import (
 )
 from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSubKind, ObservableOutcome
 from pipeline_core.domain.coverage import PerFileCoverage
+from pipeline_core.domain.generation import is_pipeline_gen_test_name
 from pipeline_core.domain.rust_scan import count_test_attrs
 
 _MICROCRATE = Path(__file__).parent / "fixtures" / "microcrate" / "src"
@@ -152,9 +153,14 @@ class _Harness:
             describe_test_environment=lambda: "",
             load_file_constraints=lambda pd: {},
             next_gen_tests_n=lambda p: 1,
-            # as the real reader: the file's on-disk gen_tests siblings, concatenated
+            # as the real reader: leftover src siblings plus tests/{stem}_gen_N.rs
             read_all_gen_tests=lambda p: "\n".join(
-                f.read_text(encoding="utf-8") for f in sorted(p.parent.glob(f"{p.stem}.gen_tests_*.rs"))),
+                f.read_text(encoding="utf-8")
+                for f in sorted(
+                    list(p.parent.glob(f"{p.stem}.gen_tests_*.rs"))
+                    + list((p.parent.parent / "tests").glob(f"{p.stem}_gen_*.rs"))
+                    if (p.parent.parent / "tests").is_dir() else
+                    list(p.parent.glob(f"{p.stem}.gen_tests_*.rs")))),
             strip_gen_tests_decls=lambda t: t,
             extract_uncovered_functions=lambda text, lines, max_fns=8: "pub fn target() {}",
             extract_public_symbols=lambda t: "pub fn checked_div",
@@ -163,7 +169,7 @@ class _Harness:
             nightly_rules_for_cluster=lambda: "",
             is_test_file=lambda p, root: False,
             is_structural_line=lambda s: False,
-            is_gen_tests_file=lambda name: ".gen_tests_" in name,
+            is_gen_tests_file=lambda name: is_pipeline_gen_test_name(name),
             derive_gentest_prelude=lambda pd: ("", ""),
             prelude_import_names=lambda b: "",
             test_augmentor_factory=lambda: SimpleNamespace(
@@ -201,6 +207,10 @@ def test_generator_prompt_lists_the_behaviours_and_the_contract(
         assert "Harvested behaviours of `src/lib.rs`" in prompt
         assert 'then: "division by zero"' in prompt
         assert "Test contract" in prompt and "PUBLIC API ONLY" in prompt
+        assert "INTEGRATION TEST RULES" in prompt
+        assert "these tests live in `tests/`" in prompt
+        assert "INTERNAL MODULE RULES" not in prompt
+        assert "Do NOT write `use super::*;`" in prompt
         assert "simply exercising the code path is acceptable" not in prompt
     # the list sits after fn_bodies, before the public API section
     full = h.prompts[0]
@@ -235,7 +245,12 @@ def test_exact_equality_block_is_admitted_and_its_pins_emitted(
     assert h.pinned_events() == [["display::div_by_zero"]]
     assert any(e == "task0c.gen_tests_appended" for e, _ in h.events)
     assert outcome.blocks_admitted == 1
-    assert (h.ws / "src" / "lib.gen_tests_1.rs").read_text(encoding="utf-8") == EXACT
+    integ = (h.ws / "tests" / "lib_gen_1.rs").read_text(encoding="utf-8")
+    assert "fn test_construct_from_display" in integ
+    assert "use microcrate::*;" in integ
+    assert "use super::*;" not in integ
+    assert "mod gen_tests_1" not in integ
+    assert not (h.ws / "src" / "lib.gen_tests_1.rs").exists()
     assert any("pins display::div_by_zero" in m for m in h.logs)
 
 

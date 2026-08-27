@@ -61,16 +61,25 @@ GEN_PRELUDE_ITEMS: list[tuple[str, tuple[str, ...], str]] = [
 
 def inject_gen_prelude_imports(block: str) -> str:
     """Inject any missing std-prelude imports (GEN_PRELUDE_ITEMS) into a
-    generated test module. Inserts after `use super::*;` when present, else
-    just inside the gen mod opener. Returns `block` unchanged when nothing's
-    missing or no insertion point is found."""
+    generated test. Inserts after `use super::*;` / `use crate::*;` when
+    present, else after a crate-level `use <crate>::*;` (the integration-test
+    shape), else just inside the gen mod opener. Returns `block` unchanged
+    when nothing's missing or no insertion point is found."""
     missing = [stmt for stmt, prefixes, symbol in GEN_PRELUDE_ITEMS
                if not use_imports_symbol(block, prefixes, symbol)]
     if not missing:
         return block
     inject = "\n    ".join(missing)
-    if "use super::*;" in block:
-        return block.replace("use super::*;", f"use super::*;\n    {inject}", 1)
+    for marker in ("use super::*;", "use crate::*;"):
+        if marker in block:
+            return block.replace(marker, f"{marker}\n    {inject}", 1)
+    # Integration-test crate: `use anyhow::*;` (the crate name, not `crate`).
+    for ln in block.splitlines():
+        s = ln.strip()
+        if s.startswith("use ") and s.endswith("::*;"):
+            indent = ln[:len(ln) - len(ln.lstrip())]
+            joined = ("\n" + indent).join(stmt.strip() for stmt in missing)
+            return block.replace(ln, f"{ln}\n{indent}{joined}", 1)
     opener = find_mod_opener(block, gen_only=True)
     if opener is None:
         return block
@@ -267,6 +276,115 @@ def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
     if not sep or not stem or not n_str.isdigit():
         return None
     return stem, int(n_str)
+
+
+def parse_gen_tests_integration_filename(name: str) -> tuple[str, int] | None:
+    """Parse a `tests/{stem}_gen_{N}.rs` integration-test filename → (stem, N).
+
+    Filename occupancy only: `tests/proc_gen_2.rs` matches even when it is
+    an authored crate file. Claiming the file as pipeline-generated (so
+    harvest skips it, the harness may rewrite it, strip_all may delete it)
+    requires :func:`has_pipeline_gen_test_origin` on the body — the marker
+    :func:`as_integration_test` writes. Sibling names (`foo.gen_tests_1.rs`)
+    do not match: they contain `.gen_tests_`, not `_{stem}_gen_{N}`."""
+    rest = name[: -len(".broken")] if name.endswith(".broken") else name
+    if not rest.endswith(".rs"):
+        return None
+    stem, sep, n_str = rest[:-3].rpartition("_gen_")
+    if not sep or not stem or not n_str.isdigit():
+        return None
+    if ".gen_tests_" in rest:
+        return None
+    return stem, int(n_str)
+
+
+# First-line origin the writer puts in `tests/{stem}_gen_{N}.rs`. A crate
+# that already ships `tests/proc_gen_2.rs` collides on the filename parse
+# alone; the marker is what distinguishes a file this pipeline wrote.
+PIPELINE_GEN_TEST_ORIGIN = "determ-pipeline generated integration test"
+
+
+def has_pipeline_gen_test_origin(text: str) -> bool:
+    """True when `text` carries the marker :func:`as_integration_test` writes.
+
+    Scans the first 8 lines so a crate-level `#![allow(…)]` or a
+    mutation-harden preamble can sit above the marker."""
+    for i, line in enumerate(text.splitlines()):
+        if i >= 8:
+            break
+        if PIPELINE_GEN_TEST_ORIGIN in line:
+            return True
+    return False
+
+
+def is_claimed_pipeline_gen_test(name: str, text: str = "") -> bool:
+    """True when this file is one the pipeline wrote and may rewrite/delete.
+
+    Src siblings (`*.gen_tests_N.rs`) are uniquely named. Integration
+    files need the origin marker: an authored `tests/proc_gen_2.rs` parses
+    as `(proc, 2)` but is the crate's oracle, not ours."""
+    if parse_gen_tests_filename(name) is not None:
+        return True
+    if parse_gen_tests_integration_filename(name) is None:
+        return False
+    return has_pipeline_gen_test_origin(text)
+
+
+def is_claimed_pipeline_gen_test_path(path: Path) -> bool:
+    """:func:`is_claimed_pipeline_gen_test` reading `path`. Unreadable
+    integration files are not claimed (fail open: do not delete/unprotect)."""
+    name = path.name
+    if parse_gen_tests_filename(name) is not None:
+        return True
+    if parse_gen_tests_integration_filename(name) is None:
+        return False
+    try:
+        return has_pipeline_gen_test_origin(path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
+def gen_tests_integration_stem(src_stem: str, n: int) -> str:
+    """Cargo `--test` name / file stem for a generated integration test."""
+    return f"{src_stem}_gen_{n}"
+
+
+def gen_tests_integration_rel(src_stem: str, n: int) -> str:
+    return f"tests/{gen_tests_integration_stem(src_stem, n)}.rs"
+
+
+def is_pipeline_gen_test_name(name: str) -> bool:
+    """A pipeline-generated test: the old src sibling OR the tests/ file."""
+    return (parse_gen_tests_filename(name) is not None
+            or parse_gen_tests_integration_filename(name) is not None)
+
+
+def as_integration_test(block: str, *, crate: str, allow_line: str = "") -> str:
+    """Turn a model reply (inline `mod gen_tests_N` or a bare file) into a
+    `tests/` integration-test crate body: public-API `use {crate}::*;`, no
+    `use super::*;`, crate-level `#![allow(…)]` when given.
+
+    The old inline shape is still accepted as input so a leftover reply
+    that wrapped a `mod gen_tests_N` still lands as an integration test
+    rather than being dropped. The origin marker is written here so a
+    later reader can tell this file from an authored `tests/<x>_gen_N.rs`."""
+    body = extract_gen_tests_body(block).rstrip() + "\n"
+    body = body.replace("use super::*;", f"use {crate}::*;")
+    crate_use = f"use {crate}::"
+    if crate_use not in body and "use crate::" not in body:
+        body = f"use {crate}::*;\n\n{body}"
+    crate_allow = ""
+    a = allow_line.strip()
+    if a.startswith("#[allow(") and a.endswith(")]"):
+        crate_allow = "#![allow(" + a[len("#[allow("):]
+    elif a.startswith("#![allow("):
+        crate_allow = a
+    origin = f"// {PIPELINE_GEN_TEST_ORIGIN}\n"
+    if not has_pipeline_gen_test_origin(body):
+        body = origin + body
+    if crate_allow:
+        return crate_allow + "\n" + body
+    return body
 
 
 def coalesce_gen_tests_siblings(
@@ -736,31 +854,53 @@ def gen_tests_origin_cfgs(file_text: str) -> dict[int, str]:
 
 
 def extract_test_mod(text: str) -> str:
-    """Brace-counter extraction of a gen_tests mod block.
+    """Brace-counter extraction of a gen_tests mod block, or the body of a
+    `tests/` integration-test FILE tag.
 
     Finds the first #[cfg(test)] in text, scans forward past any attribute
     lines (#[allow(...)], etc.) to the opening brace of mod gen_*, then walks
     character-by-character counting brace depth until the block closes.
     Returns everything from #[cfg(test)] to the closing }, or "" if not found.
     No regex — works regardless of what the model puts between cfg and mod.
-    """
+
+    When that wrapper is absent, a `<FILE path="gen_tests_block">` or
+    `<FILE path="tests/{stem}_gen_{N}.rs">` body is the integration-test
+    shape the generator now asks for."""
     cfg_pos = text.find('#[cfg(test)]')
-    if cfg_pos == -1:
-        return ""
-    mod_pos = text.find('mod gen_', cfg_pos)
-    if mod_pos == -1:
-        mod_pos = text.find('mod gen_tests', cfg_pos)
-    if mod_pos == -1:
-        return ""
-    brace_start = text.find('{', mod_pos)
-    if brace_start == -1:
-        return ""
-    depth = 0
-    for i, ch in enumerate(text[brace_start:], brace_start):
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                return text[cfg_pos:i + 1].strip()
-    return ""
+    if cfg_pos != -1:
+        mod_pos = text.find('mod gen_', cfg_pos)
+        if mod_pos == -1:
+            mod_pos = text.find('mod gen_tests', cfg_pos)
+        if mod_pos != -1:
+            brace_start = text.find('{', mod_pos)
+            if brace_start != -1:
+                depth = 0
+                for i, ch in enumerate(text[brace_start:], brace_start):
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            return text[cfg_pos:i + 1].strip()
+    open_tag = '<FILE path="'
+    close_tag = "</FILE>"
+    i = 0
+    while True:
+        start = text.find(open_tag, i)
+        if start == -1:
+            return ""
+        path_at = start + len(open_tag)
+        q = text.find('"', path_at)
+        if q == -1:
+            return ""
+        path = text[path_at:q]
+        gt = text.find(">", q)
+        end = text.find(close_tag, gt if gt != -1 else q)
+        if gt == -1 or end == -1:
+            return ""
+        name = path.rsplit("/", 1)[-1]
+        if (path == "gen_tests_block"
+                or parse_gen_tests_integration_filename(name) is not None
+                or (path.startswith("tests/") and name.endswith(".rs"))):
+            return text[gt + 1:end].strip()
+        i = end + len(close_tag)

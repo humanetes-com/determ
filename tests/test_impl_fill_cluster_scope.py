@@ -18,6 +18,7 @@ from typing import Any
 from pipeline_core.application.reconstruct.impl_fill import (
     cluster_inactive_stub_names,
     cluster_scoped_splice,
+    file_first_guidance_keys,
 )
 from pipeline_core.domain.reconstruction import SpliceOutcome
 
@@ -126,3 +127,24 @@ def test_nothing_inactive_returns_the_splice_unwrapped():
     assert cluster_scoped_splice(
         base, inactive=frozenset(), target_src_dir=_SRC,
         log=lambda _m: None) is base
+
+
+def test_file_first_guidance_keys_include_the_per_fn_stamps() -> None:
+    """File-first looked up only `file::*impl*::container`. The live store
+    (2026-08-26) held 10 per-fn records the constructor route never asked
+    for. The lookup is the fill-plan unit keys the per-fn route already
+    stamps, plus the *impl* record so the 32 block records still honour."""
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+    from pipeline_core.prompts.fix_prompts import BlockFillPlan
+    rec = FnRecord(file="src/error.rs", fn_name="construct_from_std")
+    block = ImplBlock(file="src/error.rs", container="impl Error",
+                      refill_members=(rec,))
+    keys = file_first_guidance_keys("src/error.rs", [block])
+    assert ("src/error.rs", "*impl*", "impl Error") in keys
+    assert ("src/error.rs", "construct_from_std", "impl Error") in keys
+    extra = [BlockFillPlan("", (), ("object_drop",), installable=("object_drop",))]
+    with_free = file_first_guidance_keys(
+        "src/error.rs", [block], extra_plans=extra)
+    assert ("src/error.rs", "object_drop", "") in with_free
+    # NEGATIVE CONTROL: *impl* alone is the pre-fix lookup.
+    assert keys != (("src/error.rs", "*impl*", "impl Error"),)

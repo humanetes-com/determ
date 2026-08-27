@@ -1,9 +1,11 @@
 """Pins for the behaviour few-shot selector (F10 Use-B / M5)."""
 from __future__ import annotations
 
+from collections import Counter
 from types import SimpleNamespace
 
 from pipeline_core.domain.behaviour import (
+    BehaviourClass,
     BehaviourSpec,
     BehaviourSubKind,
     FenceDirective,
@@ -11,6 +13,7 @@ from pipeline_core.domain.behaviour import (
     StaticAssertKind,
 )
 from pipeline_core.domain.behaviour_select import (
+    COMPONENT_BEHAVIOUR_CAP,
     MUST_CLASS_ORDER,
     behaviour_class_name,
     is_relevant,
@@ -155,3 +158,37 @@ def test_behaviour_class_name_prefers_a_meaningful_klass_and_sharpens_other():
     new_kind = SimpleNamespace(klass=None, then=SimpleNamespace(kind=SimpleNamespace(name="TYPE_IDENTITY")))
     assert behaviour_class_name(new_kind) == "IDENTITY"
     assert MUST_CLASS_ORDER[0] == "IDENTITY"
+
+
+def test_cap_of_40_on_the_error_component_shape_drops_the_whole_bounded_resource_class():
+    """Uncapped 92 for the Error/vtable component is IDENTITY 24,
+    EXACT_FORMAT 51, BOUNDED_RESOURCE 4, OTHER 13. Cap 40 keeps all
+    identity plus 16 exact-format and drops the entire BOUNDED_RESOURCE
+    class (the 40-byte-buffer / whitespace-fallback family). Negative
+    control: the uncapped match still holds all four bounded-resource
+    specs."""
+    identity = [_outcome(f"id-{i}", "Error::msg(x).is::<&str>()",
+                         ObservableOutcome.downcast_ok(True))
+                for i in range(24)]
+    exact = [_outcome(f"fmt-{i}", 'format!("{}", Error::msg(x))',
+                      ObservableOutcome.display(str(i)))
+             for i in range(51)]
+    bounded = [BehaviourSpec(
+        behaviour_id=f"buf-{i}", given="", when="Error::msg(x).to_string()",
+        then=ObservableOutcome.display("x" * 40),
+        subkind=BehaviourSubKind.OUTCOME,
+        klass=BehaviourClass.BOUNDED_RESOURCE, source_ref=f"buf-{i}")
+               for i in range(4)]
+    other = [_spec(f"use-{i}", "let e = Error; e.ok()") for i in range(13)]
+    specs = identity + exact + bounded + other
+    matched = select_component_behaviours(
+        specs, component_names=["Error"], public_types=[], cap=None)
+    kept = select_component_behaviours(
+        specs, component_names=["Error"], public_types=[],
+        cap=COMPONENT_BEHAVIOUR_CAP)
+    assert len(matched) == 92
+    assert Counter(behaviour_class_name(s) for s in matched) == {
+        "IDENTITY": 24, "EXACT_FORMAT": 51, "BOUNDED_RESOURCE": 4, "OTHER": 13}
+    assert Counter(behaviour_class_name(s) for s in kept) == {
+        "IDENTITY": 24, "EXACT_FORMAT": 16}
+    assert "BOUNDED_RESOURCE" not in {behaviour_class_name(s) for s in kept}

@@ -27,6 +27,7 @@ from pipeline_core.domain.doctest import (
 from pipeline_core.domain.layout_pins import harvest_layout_pin_behaviours
 from pipeline_core.domain.test_assertions import (
     GIVEN_CAP,
+    asserting_helper_names,
     harvest_test_assertion_behaviours,
     outcome_kind_for,
     parse_string_literal,
@@ -78,6 +79,15 @@ def test_string_literal_escapes_and_continuation():
     assert parse_string_literal('r#"raw \\n "quoted""#', 0)[0] == 'raw \\n "quoted"'
     assert parse_string_literal('"\\u{1F600}\\x41"', 0)[0] == "\U0001F600A"
     assert parse_string_literal("not a literal", 0) is None
+    assert parse_string_literal('b"hi"', 0) == ("hi", 5)
+    assert parse_string_literal("rfoo", 0) is None
+    assert parse_string_literal('r#"no close', 0) is None
+    assert parse_string_literal('"\\0\\r\\q"', 0) == ("\0\rq", 8)
+    assert parse_string_literal('"\\u{no"', 0) is None
+    assert parse_string_literal('"trail\\', 0) is None
+    assert parse_string_literal('"no close', 0) is None
+    cr_cont = '"a\\\r\n    b"'
+    assert parse_string_literal(cr_cont, 0)[0] == "ab"
 
 
 def test_multiline_consts_of_test_fmt_evaluate_exactly():
@@ -96,6 +106,122 @@ def test_outcome_kind_from_expression_text():
     assert outcome_kind_for('format!("{}", e)') is OutcomeKind.DISPLAY_STRING
     assert outcome_kind_for('format!("{e}")') is OutcomeKind.DISPLAY_STRING
     assert outcome_kind_for("e.downcast::<&str>().unwrap()") is OutcomeKind.RETURN_RENDERED
+    assert outcome_kind_for('format!("{e}")') is OutcomeKind.DISPLAY_STRING
+    assert outcome_kind_for('format!("{e:?}")') is OutcomeKind.DEBUG_STRING
+    assert outcome_kind_for("{:#}") is OutcomeKind.DISPLAY_STRING
+
+
+# --- parser edges the live fixtures never open --------------------------------
+
+def test_string_consts_skip_opaque_non_str_and_nameless() -> None:
+    src = (
+        'let s = "const INSIDE: &str = \\"nope\\"";\n'
+        "const;\n"
+        "const FOO: i32 = 1;\n"
+        'xconst SHADOW: &str = "no";\n'
+        'const REAL: &\'static str = "yes";\n'
+        'static ALSO: &str = "stat";\n'
+        "const NOEQ: &str;\n"
+    )
+    consts = string_consts(src)
+    assert consts == {"REAL": "yes", "ALSO": "stat"}
+    assert "INSIDE" not in consts and "FOO" not in consts and "SHADOW" not in consts
+
+
+def test_comments_chars_and_unterminated_string_do_not_crash_harvest() -> None:
+    src = (
+        "#[test]\nfn t() {\n"
+        "    // assert_eq!(x, \"no\");\n"
+        "    /* assert_eq!(y, \"no\"); */\n"
+        "    let c = 'x';\n"
+        "    let d = '\\n';\n"
+        '    assert_eq!(e.to_string(), "ok value");\n'
+        "}\n"
+        "// eof comment with no newline"
+    )
+    specs = harvest_test_assertion_behaviours(src, source_file="tests/t.rs")
+    assert [(s.when, s.then.value) for s in specs] == [("e.to_string()", "ok value")]
+    unclosed = '#[test]\nfn t() { assert_eq!(x, "no close\n'
+    assert harvest_test_assertion_behaviours(unclosed, source_file="tests/t.rs") == []
+    unclosed_cmt = "#[test]\nfn t() { let x = 1; /* never"
+    assert harvest_test_assertion_behaviours(unclosed_cmt, source_file="tests/t.rs") == []
+    lifetime = "#[test]\nfn t() { let x: &'static str = \"a\"; }"
+    assert harvest_test_assertion_behaviours(lifetime, source_file="tests/t.rs") == []
+
+
+def test_assert_eq_unclosed_one_arg_and_ident_prefix_are_skipped() -> None:
+    src = (
+        "#[test]\nfn t() {\n"
+        "    assert_eq!(x);\n"
+        "    assert_eq!(x, ;\n"
+        "    myassert_eq!(x, \"nope\");\n"
+        '    assert_eq!(r#"raw value"#, e.to_string());\n'
+        "}\n"
+    )
+    specs = harvest_test_assertion_behaviours(src, source_file="tests/t.rs")
+    assert [(s.when, s.then.value) for s in specs] == [("e.to_string()", "raw value")]
+
+
+def test_identity_receiver_walks_macros_qmark_and_paths_and_skips_ensure() -> None:
+    src = (
+        "#[test]\nfn t() {\n"
+        '    assert!(anyhow!("x").is::<&str>());\n'
+        "    assert!(e?.is::<String>());\n"
+        "    assert!(crate::Error::msg(x).is::<io::Error>());\n"
+        "    assert!(inner.payload.is::<u8>());\n"
+        "    assert!(e.is::<  >());\n"
+        "    assert!(e.is::<T);\n"
+        "    assert!(e.is::<T>);\n"
+        "    let _ = ensure!(err.is::<&str>());\n"
+        "}\n"
+    )
+    specs = harvest_test_assertion_behaviours(src, source_file="tests/t.rs")
+    got = {(s.when, s.then.value, s.then.ok) for s in specs}
+    assert ("anyhow!(\"x\").is::<&str>()", "&str", True) in got
+    assert ("e?.is::<String>()", "String", True) in got
+    assert ("crate::Error::msg(x).is::<io::Error>()", "io::Error", True) in got
+    assert ("inner.payload.is::<u8>()", "u8", True) in got
+    src2 = (
+        "#[test]\nfn t() {\n"
+        "    assert!(foo::<T>().is::<U>());\n"
+        "    assert!(e.is::<T>  ());\n"
+        "}\n"
+    )
+    specs2 = harvest_test_assertion_behaviours(src2, source_file="tests/t.rs")
+    got2 = {(s.when, s.then.value) for s in specs2}
+    assert ("foo::<T>().is::<U>()", "U") in got2
+    assert ("e.is::<T> ()", "T") in got2
+
+    assert not any(s.then.value.strip() == "" for s in specs)
+    assert not any("ensure" in s.when for s in specs)
+
+
+def test_helper_calls_skip_paths_methods_and_need_two_args() -> None:
+    src = (
+        "fn assert_err(test: impl Fn(), msg: &str) { assert_eq!(msg, msg); }\n"
+        "fn check(test: impl Fn(), msg: &str) { assert!(true); assert_eq!(1, 1); }\n"
+        "#[test]\nfn t() {\n"
+        '    assert_err(test, "boom boom");\n'
+        '    check(test, "via helper");\n'
+        '    x.assert_err(test, "method");\n'
+        '    foo::assert_err(test, "path");\n'
+        "    assert_err(test);\n"
+        '    Some(test, "kw");\n'
+        "}\n"
+    )
+    assert asserting_helper_names(src) == {"assert_err", "check"}
+    specs = harvest_test_assertion_behaviours(src, source_file="tests/t.rs")
+    values = {s.then.value for s in specs}
+    assert "boom boom" in values and "via helper" in values
+    assert "method" not in values and "path" not in values and "kw" not in values
+
+
+def test_mismatched_closers_and_empty_asserting_helpers() -> None:
+    src = '#[test]\nfn t() { assert_eq!(e.to_string(), "ok value"); ) }'
+    specs = harvest_test_assertion_behaviours(src, source_file="tests/t.rs")
+    assert [(s.when, s.then.value) for s in specs] == [("e.to_string()", "ok value")]
+    assert asserting_helper_names("") == frozenset()
+    assert asserting_helper_names("fn helper() { let x = 1; }") == frozenset()
 
 
 # --- the plan's fixture: the three defect observables ---------------------------

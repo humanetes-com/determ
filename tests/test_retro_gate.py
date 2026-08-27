@@ -98,6 +98,11 @@ def test_fingerprint_tracks_layout_not_bodies() -> None:
     renamed = LAYOUT.replace("error: E", "_object: E")
     assert layout_fingerprint(renamed) != layout_fingerprint(LAYOUT)
     assert layout_fingerprint("") == ""
+    assert layout_fingerprint("struct Unit;") == layout_fingerprint("struct Unit;")
+    unit_fp = layout_fingerprint("struct Unit;")
+    braced_fp = layout_fingerprint("struct Unit { x: u8 }")
+    assert unit_fp != braced_fp
+    assert unit_fp != ""
 
 
 def _standing(record: object, prov: RetroProvenance,
@@ -573,6 +578,9 @@ def test_degenerate_prescription_without_test_evidence_is_left_alone() -> None:
     assert screen_guidance(
         rec, _CONTEXT_RS, evidence=ConvictionEvidence(frozenset({"test_iter"})),
     ).text == ""
+    assert not prescription_sacrifices_tests(None)
+    assert not ConvictionEvidence(frozenset({"t"})).still_supports(None)
+    assert not ConvictionEvidence(frozenset()).still_supports({"convicted_by": "not-a-list"})
 
 
 def test_corrective_guidance_without_a_degenerate_body_is_untouched() -> None:

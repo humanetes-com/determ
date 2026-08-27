@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline_core.domain.generation import is_pipeline_gen_test_name
 from pipeline_core.domain.oracle_immutability import TEST_DIR_NAMES
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
@@ -31,8 +32,9 @@ def match_gen_tests_sibling(name: str) -> tuple[str, int] | None:
 
 
 def is_gen_tests_file(name: str) -> bool:
-    """True if `name` is a pipeline-generated `*.gen_tests_<N>.rs` sibling."""
-    return match_gen_tests_sibling(name) is not None
+    """True if `name` is a pipeline-generated test: a `*.gen_tests_<N>.rs`
+    sibling OR a `tests/{stem}_gen_{N}.rs` integration file."""
+    return is_pipeline_gen_test_name(name)
 
 
 def is_test_file(path: Path, project_dir: Path) -> bool:
@@ -63,8 +65,9 @@ def is_test_file(path: Path, project_dir: Path) -> bool:
     if len(path.suffixes) >= 2 and path.suffixes[-2].lower() in (".test", ".spec"):
         return True
 
-    # Pipeline-generated gen_tests siblings: foo.gen_tests_3.rs
-    return match_gen_tests_sibling(path.name) is not None
+    # Pipeline-generated tests: leftover src siblings (`foo.gen_tests_3.rs`)
+    # or the integration-test placement (`foo_gen_3.rs`).
+    return is_pipeline_gen_test_name(path.name)
 
 
 def collect_test_files(

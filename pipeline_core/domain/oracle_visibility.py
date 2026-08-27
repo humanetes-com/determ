@@ -1,14 +1,16 @@
 """What a generated test block reads that is NOT `pub` — pure domain.
 
-Generated unit tests live in an inline `#[cfg(test)]` module with
-`use super::*;`, so every private fn, field and type of the file is in scope.
-A test that reads one freezes it: measured on the anyhow trees (2026-08), 24 %
-of the crate's private surface is pinned by generated tests, and one of them
-(`src/error.gen_tests_3.rs:29`, `err.inner.ptr.as_ptr()`) made an authored
-layout that satisfied every public pin uncompilable and took all 56 unit tests
-of both clusters with it. The test contract is therefore PUBLIC API ONLY, and
-this module is the check: it names what a block reads that the file does not
-export.
+Generated tests that pin public behaviour live in `tests/` as integration
+tests (`use crate::*;`), so private fns, fields and types of the file are
+not in scope and a test that names one will not compile. Older trees still
+carry inline `#[cfg(test)]` siblings with `use super::*;`; this module is
+the check that names what a block reads that the file does not export, so
+those leftovers are refused at admission rather than freezing the layout.
+
+The instance: `src/error.gen_tests_3.rs:29` reads `err.inner.ptr.as_ptr()`
+on an inline sibling and made an authored layout that satisfied every
+public pin uncompilable (anyhow, 2026-08). The test contract is PUBLIC API
+ONLY.
 
 `names_private_items` reports three classes, each as a readable name:
 

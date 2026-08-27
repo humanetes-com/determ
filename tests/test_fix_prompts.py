@@ -159,8 +159,33 @@ def test_file_fill_carries_the_crate_level_context_the_per_impl_prompt_has() -> 
     # bare `File:` a caller that names no cluster used to get.
     bare = _file_fill([BlockFillPlan("impl Error", (), ("chain",))])
     assert bare.splitlines()[3] == "File: src/error.rs"
-    for tag in ("CLUSTER_INVARIANTS", "RUST_GOTCHAS", "TYPES_IN_SCOPE"):
+    for tag in ("CLUSTER_INVARIANTS", "RUST_GOTCHAS", "TYPES_IN_SCOPE",
+                "RETROSPECTIVE_GUIDANCE"):
         assert tag not in bare
+
+
+def test_file_fill_omits_empty_retrospective_and_carries_a_honoured_one() -> None:
+    """File-first had no retro slot; a screened BothDebug record now reaches
+    the same builder the live constructor call uses. Empty (the default)
+    leaves the prompt byte-identical to a call that never named the kwarg."""
+    plan = [BlockFillPlan("impl Error", (), ("construct_from_adhoc",))]
+    without = build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="")
+    empty = build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="",
+        retrospective_guidance="  \n")
+    assert without == empty
+    assert "RETROSPECTIVE_GUIDANCE" not in without
+    guided = build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="",
+        retrospective_guidance=(
+            "Drop the fixed 40-byte SmallBuf and format into an allocating Write"))
+    assert "<RETROSPECTIVE_GUIDANCE>" in guided
+    assert "40-byte SmallBuf" in guided
+    assert without != guided
 
 
 def test_file_fill_plan_names_the_refill_members() -> None:

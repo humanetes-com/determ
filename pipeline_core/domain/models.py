@@ -693,6 +693,13 @@ class ClusterFillResult:
     # did not report dispatch — legacy callers and test stubs — and the
     # driver falls back to treating the whole frontier as dispatched.
     dispatched_fns: tuple[tuple[str, str], ...] | None = None
+    # Units this fill spliced then RESTORED to the pre-fill body — a peel of
+    # compiler-blamed bodies, or a whole-file compile / U2 / regression
+    # revert. The landed-change audit's FLAT arm must not treat these as
+    # "the model returned this body": the tree holds the snapshot. Empty
+    # (the default) is "the fill reported none" — tests, the per-fn-only
+    # path — so the arm behaves as before for those callers.
+    reverted_fns: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

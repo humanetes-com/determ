@@ -24,6 +24,7 @@ from typing import Any
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.domain.behaviour import BehaviourSuite, merge_suites
 from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.generation import is_claimed_pipeline_gen_test_path
 from pipeline_core.domain.inline_tests import find_inline_test_mods
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -40,7 +41,6 @@ from pipeline_core.domain.private_surface import (
     classify_private_surface,
 )
 from pipeline_core.domain.rust_name_scope import ModuleScopes
-from pipeline_core.domain.test_assertions import GEN_TESTS_MARKER
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
 
 
@@ -94,7 +94,7 @@ def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
     for rs in sorted(src_dir.rglob("*.rs")):
         if any(part in SKIP_DIR_NAMES for part in rs.parts):
             continue
-        if GEN_TESTS_MARKER in rs.name:
+        if is_claimed_pipeline_gen_test_path(rs):
             continue
         try:
             out.append((str(rs.relative_to(src_dir)),
@@ -130,7 +130,7 @@ def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
     for rs in sorted(tests_dir.rglob("*.rs")):
         if any(part in SKIP_DIR_NAMES for part in rs.parts):
             continue
-        if GEN_TESTS_MARKER in rs.name:
+        if is_claimed_pipeline_gen_test_path(rs):
             continue
         try:
             out.append((str(rs.relative_to(project_dir)),

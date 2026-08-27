@@ -26,6 +26,7 @@ from pipeline_core.application.reconstruct.body_reseed import (
     TreeWriter,
     reseed,
 )
+from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
     closure_withheld,
@@ -96,6 +97,7 @@ from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
     render_pass_audit,
+    split_reverted,
     unit_bodies,
 )
 from pipeline_core.domain.layout_retrigger import (
@@ -594,7 +596,8 @@ def run_phase_c_tdd(
             f"{_flat_window}" if _flat_enabled else "gpu-guard=off")
          + (f", no-frontier-stop after {_no_frontier_stop_after} "
             "undispatchable iteration(s)" if _no_frontier_stop_after > 0
-            else ", no-frontier-stop=off"))
+            else ", no-frontier-stop=off")
+         + f", followup-think={'on' if followup_think_env_on() else 'off'}")
 
     if deps.migrate_retro_evidence is not None:
         _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
@@ -4219,6 +4222,8 @@ def run_phase_c_tdd(
                         evidence=failure_evidence_by_test(output)),
                     escalated_keys=_batch_escalated,
                     escalated_measured=_measured_escalated,
+                    ledger_entries=_ledger_entries(),
+                    oracle_fp=_oracle_fp(iter_n),
                     tdd_test_cmd=test_cmd,     # scoped cluster test cmd
                     skip_end_pass_test=True,
                     crash_evidence=crash_texts or None,
@@ -4290,12 +4295,14 @@ def run_phase_c_tdd(
             # comparison cannot see WHY nothing landed; the grades can.
             _batch_unchanged = frontier_keys - _batch_landed
             _batch_esc_unchanged = _batch_unchanged & _batch_escalated
+            _batch_esc_flat, _batch_esc_reverted = split_reverted(
+                _batch_esc_unchanged, sub.reverted_fns)
             _batch_declined = frozenset(
                 k for k in _batch_unchanged
                 if not convicting.get(k) and k not in _batch_escalated)
             _batch_unchanged -= _batch_declined
             if deps.ledger_append is not None and (_batch_landed
-                                                   or _batch_esc_unchanged):
+                                                   or _batch_esc_flat):
                 _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
                 _new_rows = rows_for_units(
                     [(k.file, k.fn_name) for k in _batch_landed], _recs_after,
@@ -4312,16 +4319,20 @@ def run_phase_c_tdd(
                 # is a GRADED try with an empty verdict delta: the rewrite
                 # instruction was issued because its convicting tests ran
                 # and failed, and the body on the tree is the one the model
-                # returned. Before this arm the set was logged and dropped
-                # — run `82157-476ddc16` iter 1 left nine such constructors
-                # with no row, so the next process's re-buy detector, which
-                # joins on prior graded rows, had nothing to fire on. The
-                # row is already graded, so it is appended to the store and
-                # the cache but NOT to `_ledger_rows`: the promotion pass
-                # would otherwise re-judge it against a sweep that measures
-                # a body nothing changed.
+                # returned. A peel / compile / U2 / regression revert is
+                # NOT that fact — `_batch_esc_reverted` — and writing FLAT
+                # on it overclaimed the try (the 2026-08-19 crawl's peeled
+                # `src/context.rs::source`). Before this arm the identical-
+                # reply set was logged and dropped — run `82157-476ddc16`
+                # iter 1 left nine such constructors with no row, so the
+                # next process's re-buy detector, which joins on prior
+                # graded rows, had nothing to fire on. The row is already
+                # graded, so it is appended to the store and the cache but
+                # NOT to `_ledger_rows`: the promotion pass would otherwise
+                # re-judge it against a sweep that measures a body nothing
+                # changed.
                 _flat_rows = rows_for_units(
-                    [(k.file, k.fn_name) for k in _batch_esc_unchanged],
+                    [(k.file, k.fn_name) for k in _batch_esc_flat],
                     _recs_after, project=project_dir.name,
                     cluster=cluster.name, state=BodyState.FLAT, items=_items,
                     file_of=_file_of, file_fp=_fps, run_id=deps.run_id,
@@ -4353,8 +4364,13 @@ def run_phase_c_tdd(
                 + ("; ESCALATED, unchanged (a FAILED try — the instruction "
                    "was rewrite): " + ", ".join(sorted(
                        f"{k.file}::{k.fn_name}"
-                       for k in _batch_esc_unchanged)[:12])
-                   if _batch_esc_unchanged else "")
+                       for k in _batch_esc_flat)[:12])
+                   if _batch_esc_flat else "")
+                + ("; ESCALATED, reverted (tree body is the snapshot, not "
+                   "the reply): " + ", ".join(sorted(
+                       f"{k.file}::{k.fn_name}"
+                       for k in _batch_esc_reverted)[:12])
+                   if _batch_esc_reverted else "")
                 + (f"; {_capped_n} of {_capped_m} fill replies reasoning-capped"
                    + (f" ({_fu_cut} followup replies cut)" if _fu_cut else "")
                    if _capped_m else "")
@@ -4374,7 +4390,9 @@ def run_phase_c_tdd(
                 # unlabelled — a consumer of the event could not tell a
                 # failed rewrite from an unchanged re-fill.
                 "esc_unchanged": sorted(f"{k.file}::{k.fn_name}"
-                                        for k in _batch_esc_unchanged)})
+                                        for k in _batch_esc_flat),
+                "esc_reverted": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _batch_esc_reverted)})
             if _batch.completes_pass:
                 _unchanged_pass = _pass_units_at_close - _pass_landed
                 # The pass's own record FIRST, the current conviction map

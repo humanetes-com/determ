@@ -52,6 +52,15 @@
 #   separator and should stand. If max approaches --max-tokens, the
 #   distribution is truncated, not natural — raise --max-tokens and re-run.
 #
+#   The same p90 is the gate for PHASE_C_FOLLOWUP_THINK (default off). The
+#   escalated followup's thinking reserve is VLLM_THINKING_BUDGET +
+#   VLLM_CONTENT_BUDGET; live 8192+8192 sits below Muse@high's measured
+#   p90 of 73718 chars, so enabling the switch at that size is the
+#   starved-rung class that emptied the constructor main stream on
+#   82157-476ddc16. Place VLLM_THINKING_BUDGET above this cell's p90
+#   BEFORE setting PHASE_C_FOLLOWUP_THINK=1. Until that measurement
+#   runs, the switch stays off — it is not a lever to leave held as debt.
+#
 #   Judging the pin: compare the pinned cell against as-served. A materially
 #   lower med/p90 at similar content length says temperature 1.0 is what
 #   rambles; the sampling row in `domain/model_defaults.py` is justified

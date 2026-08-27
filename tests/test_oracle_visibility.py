@@ -132,3 +132,139 @@ def test_prose_and_strings_never_name_a_private_item() -> None:
     block = ('#[test]\nfn t() {\n    // helper() is what exported() calls; Kind is private\n'
              '    let s = "helper() and Kind";\n    assert_eq!(exported(), 1);\n}')
     assert names_private_items(block, _FIXTURE) == ()
+
+
+# --- scanner edges the fixture above never opens --------------------------------
+
+_EDGES = """\
+#![allow(dead_code)]
+
+trait SkipMe { fn skip(&self); }
+
+extern "C" fn abi_fn() {}
+
+use std::fmt;
+macro_rules! ignore_me { () => {}; }
+
+pub type Alias = u8;
+const N: u8 = 1;
+static S: u8 = 2;
+pub union U { pub a: u8, b: u8 }
+
+struct Nested(Foo<(u8, u8)>, pub Bar<[u8; 2]>);
+struct ArrayTuple([u8; 4]);
+struct Unit;
+
+pub struct Attrs {
+    #[allow(dead_code)]
+    pub(crate) vis: u8,
+    // a field comment
+    hidden: u8,
+}
+
+impl Display for Error {
+    fn fmt(&self) -> fmt::Result { Ok(()) }
+}
+
+impl Foo;
+
+impl Generic<T> {
+    fn method(&self) {}
+}
+
+mod declared;
+pub mod inner {
+    pub fn exported_inner() {}
+    fn secret_inner() {}
+}
+
+#[cfg(test)]
+mod tests {
+    fn only_in_tests() {}
+}
+
+{ let _grouped = 1; }
+
+fn helper2() {}
+pub fn empty_name_skip() {}
+"""
+
+
+def test_scanner_skips_extern_use_macros_trait_impls_and_cfg_test() -> None:
+    """`extern "C"`, `use`, `macro_rules!`, `impl Trait for`, `impl;`,
+    `#[cfg(test)] mod`, a bare `{…}` group and a `mod name;` declaration
+    are not items the visibility check can pin — and the items that DO
+    remain carry the nested-tuple / attributed-field / pub(crate) shape."""
+    items = {(it.kind, it.name): it for it in declared_items(_EDGES)}
+    assert ("fn", "abi_fn") in items and items[("fn", "abi_fn")].is_pub is False
+    assert ("fn", "fmt") not in items
+    assert ("fn", "only_in_tests") not in items
+    assert ("fn", "secret_inner") in items and not items[("fn", "secret_inner")].is_pub
+    assert items[("fn", "exported_inner")].is_pub
+    assert items[("fn", "method")].owner == "Generic"
+    assert ("mod", "declared") not in items          # `mod name;` is a path, not a body
+    assert ("mod", "inner") in items
+    assert items[("type", "Alias")].is_pub
+    assert items[("static", "S")].kind == "static"
+    assert ("const", "N") not in items, "bare `const N` is a qualifier, not an alias item"
+    assert items[("union", "U")].kind == "union"
+    assert items[("struct", "Nested")].tuple_fields == (False, True)
+    assert items[("struct", "ArrayTuple")].tuple_fields == (False,)
+    assert items[("struct", "Attrs")].fields == (("vis", True), ("hidden", False))
+    assert ("fn", "skip") not in items
+    assert ("trait", "SkipMe") in items
+    assert ("fn", "helper2") in items
+    src_mod = "mod foo"
+    assert declared_items(src_mod) == ()
+    src_impl = "impl AtEof"
+    assert declared_items(src_impl) == ()
+    src_mod2 = "mod unclosed {\nfn x() {}"
+    declared_items(src_mod2)
+    src_impl = "impl Unclosed {"
+    declared_items(src_impl)
+    nested_lit = '#[test]\nfn t() { let a = Attrs { vis: 1, hidden: f(g(1), 2) }; }'
+    assert "Attrs.hidden" in names_private_items(nested_lit, _EDGES)
+
+    assert public_item_names(declared_items(_EDGES)) >= {
+        "Alias", "U", "Attrs", "exported_inner", "empty_name_skip"}
+
+
+def test_unmatched_delimiters_and_empty_inputs_name_nothing() -> None:
+    assert names_private_items("", _FIXTURE) == ()
+    assert names_private_items("   ", _FIXTURE) == ()
+    assert names_private_items("let x = 1;", "") == ()
+    unmatched = "#[test]\nfn t() { let e = Error { inner: x;"
+    assert "Error.inner" not in names_private_items(unmatched, _FIXTURE)
+    eof = "#[test]\nfn t() { let e = Error"
+    assert names_private_items(eof, _FIXTURE) == ()
+    path = "#[test]\nfn t() { let _: super::Kind; let _ = x.Kind; }"
+    assert names_private_items(path, _FIXTURE) == ()
+
+
+def test_fn_without_a_name_and_unclosed_items_do_not_crash() -> None:
+    src = (
+        "fn () {}\n"
+        "struct { x: u8 }\n"
+        "struct Foo<T\n"
+        "impl Unclosed {\n"
+        "mod unclosed {\n"
+        "#[\n"
+        "pub(crate fn swallowed() {}\n"
+        "extern \n"
+        "fn after() {}\n"
+    )
+    items = declared_items(src)
+    assert isinstance(items, tuple)
+
+
+def test_private_tuple_construction_of_nested_structs() -> None:
+    src = (
+        "struct Nested(Foo<(u8, u8)>);\n"
+        "struct Unit;\n"
+        "pub struct PubTuple(pub u8);\n"
+    )
+    block = "#[test]\nfn t() { let n = Nested(Foo((1, 2))); let _ = Unit; let _ = PubTuple(1); }"
+    named = names_private_items(block, src)
+    assert "Nested(..)" in named
+    assert "PubTuple(..)" not in named
+    assert "struct Unit" in named

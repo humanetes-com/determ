@@ -65,6 +65,23 @@ def unit_bodies(
     return out
 
 
+def split_reverted(
+    unchanged: frozenset[FnLocator] | set[FnLocator],
+    reverted: Iterable[FnLocator] | Iterable[tuple[str, str]],
+) -> tuple[frozenset[FnLocator], frozenset[FnLocator]]:
+    """Split dispatched-unchanged into (identical-reply, reverted-to-snapshot).
+
+    The body comparison cannot see a peel or a regression revert: both leave
+    the pre-fill text on the tree, so they sit in `frontier - landed` next
+    to a byte-identical re-author. Writing FLAT on that union overclaimed
+    the try — "the body on the tree is the one the model returned" — which
+    was false for the 2026-08-19 crawl's peeled `src/context.rs::source`.
+    The fill result's `reverted_fns` is the set that distinguishes them."""
+    rev = frozenset(FnLocator(f, n) for f, n in reverted)
+    un = frozenset(unchanged)
+    return un - rev, un & rev
+
+
 def changed_units(
     before: Mapping[FnLocator, tuple[str, ...]],
     after: Mapping[FnLocator, tuple[str, ...]],

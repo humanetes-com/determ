@@ -78,7 +78,7 @@ def test_a_followup_cut_at_length_is_recorded_with_its_own_reasoning() -> None:
         [[Delta(reasoning="r" * 100)], [Delta(reasoning="s" * 50), Delta(content="partial")]],
         spec=_live_spec(), finish_reasons=["length", "length"])
 
-    _, events = _run(t)
+    out, events = _run(t)
 
     fu = events["llm.followup_meta"][0]
     assert fu["finish_reason"] == "length"
@@ -86,6 +86,9 @@ def test_a_followup_cut_at_length_is_recorded_with_its_own_reasoning() -> None:
     assert fu["reasoning_chars_refed"] == 100     # FakeTransport re-feeds the whole trace
     assert fu["content_chars"] == len("partial")
     assert fu["fn_blocks"] == 0
+    # A cut followup is recorded, not spliced: returning "partial" as the
+    # call's result would be a truncated body treated as complete.
+    assert out == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -232,3 +235,60 @@ def test_the_fill_window_folds_the_followup_cut_without_inflating_the_reply_tota
         _run(t)
         assert summarize_capped(rows) == (1, 1)     # one reply, capped — not (2, 2)
         assert summarize_followup_cut(rows) == 1
+
+
+def test_a_followup_network_failure_emits_meta_and_does_not_splice() -> None:
+    """A TransportTimeout on the followup used to return `_FollowupOutcome()`
+    with no `llm.followup_meta` row, so the fill window could not tell a
+    failed recovery from a call that never asked for one."""
+    from pipeline_core.llm.events import TransportTimeout
+    t = FakeTransport(
+        [[Delta(reasoning="r" * 100)], TransportTimeout("followup hung")],
+        spec=_live_spec(), finish_reasons=["length", None])
+    out, events = _run(t)
+    assert out == ""
+    fu = events["llm.followup_meta"][0]
+    assert fu["finish_reason"] == "error"
+    assert fu["content_chars"] == 0
+    assert summarize_followup_cut([
+        {**fu, "kind": "followup"}]) == 0, "error is not a length-cut"
+
+
+def test_a_followup_input_too_long_emits_meta_instead_of_escaping() -> None:
+    """The main stream retries InputTooLong; the followup used to let it
+    propagate unemitted."""
+    from pipeline_core.llm.events import InputTooLong
+    t = FakeTransport(
+        [[Delta(reasoning="r" * 100)], InputTooLong(real_tokens=None)],
+        spec=_live_spec(), finish_reasons=["length", None])
+    out, events = _run(t)
+    assert out == ""
+    assert events["llm.followup_meta"][0]["finish_reason"] == "error"
+
+
+# --------------------------------------------------------------------------- #
+# the fill-site off switch — a cold launch must not ship the starved rung
+# --------------------------------------------------------------------------- #
+def test_escalated_followup_think_is_off_unless_the_env_is_on(
+        monkeypatch: Any) -> None:
+    """The two fill sites used to pass `followup_think=bool(_grade_parts)`
+    with no env gate, so a cold launch stamped the starved-rung followup
+    into `code_id`. Default off reproduces the recorded low/8192
+    completion; `PHASE_C_FOLLOWUP_THINK=1` is how the reserve turns on
+    after measure_muse_reasoning.sh places it above Muse@high's p90. An
+    accessor/stub prompt (grade off) never asks for the reserve even when
+    the env is on."""
+    from pipeline_core.application.reconstruct.impl_fill import (
+        escalated_followup_think,
+        followup_think_env_on,
+    )
+    monkeypatch.delenv("PHASE_C_FOLLOWUP_THINK", raising=False)
+    assert followup_think_env_on() is False
+    assert escalated_followup_think(True) is False
+    assert escalated_followup_think(False) is False
+    monkeypatch.setenv("PHASE_C_FOLLOWUP_THINK", "1")
+    assert followup_think_env_on() is True
+    assert escalated_followup_think(["REWRITE"]) is True
+    assert escalated_followup_think([]) is False
+    monkeypatch.setenv("PHASE_C_FOLLOWUP_THINK", "0")
+    assert escalated_followup_think(True) is False

@@ -28,9 +28,37 @@ def test_is_test_file_conventions(tmp_path: Path) -> None:
     assert f("src/foo_test.go")       # snake suffix
     assert f("src/FooTest.java")      # camel
     assert f("src/foo.spec.ts")       # dot-separated
-    assert f("src/lib.gen_tests_2.rs")  # gen_tests sibling
+    assert f("src/lib.gen_tests_2.rs")  # leftover gen_tests sibling
+    assert f("tests/lib_gen_1.rs")      # integration-test placement
     assert not f("src/lib.rs")
     assert not f("src/helper.py")
+
+
+def test_pipeline_gen_tests_are_tests_but_not_the_authored_oracle(tmp_path: Path) -> None:
+    """TASK 2's write-protection set is `tests/` (including generated files).
+    TASK 0c's harness fix loop uses a tighter filter: original tests stay
+    untouchable, pipeline-generated files may be rewritten or deleted. The
+    predicate is `is_test_file and not is_gen_tests_file` — matching only
+    leftover siblings left `tests/{stem}_gen_N.rs` looking like the oracle."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    authored = tests / "test_downcast.rs"
+    authored.write_text("", encoding="utf-8")
+    integ = tests / "lib_gen_1.rs"
+    integ.write_text("", encoding="utf-8")
+    sib = tmp_path / "src" / "error.gen_tests_1.rs"
+    sib.parent.mkdir()
+    sib.write_text("", encoding="utf-8")
+    assert discovery.is_test_file(authored, tmp_path)
+    assert not discovery.is_gen_tests_file(authored.name)
+    assert discovery.is_test_file(integ, tmp_path)
+    assert discovery.is_gen_tests_file(integ.name)
+    assert discovery.is_test_file(sib, tmp_path)
+    assert discovery.is_gen_tests_file(sib.name)
+    protected = discovery.collect_protected_test_files(tmp_path)
+    assert "tests/test_downcast.rs" in protected
+    assert "tests/lib_gen_1.rs" in protected          # TASK 2 must not overwrite
+    assert "src/error.gen_tests_1.rs" in protected     # name convention, not src/
 
 
 def test_collect_examples(tmp_path: Path) -> None:

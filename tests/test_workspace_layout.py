@@ -127,3 +127,11 @@ def test_plan_refuses_a_workspace_whose_task0c_already_ran():
 def test_plan_is_per_module():
     plan = plan_pre_augment_tags(["a", "b"], existing_tags=["task0c-pre-a"], phases={})
     assert plan.to_write == ("task0c-pre-b",) and plan.present == ("task0c-pre-a",)
+
+
+def test_augmentation_has_started_on_bare_and_prefixed_task0c():
+    from pipeline_core.domain.workspace_layout import augmentation_has_started
+    assert augmentation_has_started(["task0c"]) is True
+    assert augmentation_has_started(["task0c/stable"]) is True
+    assert augmentation_has_started(["task0b", "strip/anyhow"]) is False
+    assert augmentation_has_started([]) is False

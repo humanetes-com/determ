@@ -29,7 +29,13 @@ from ...domain.behaviour_pinning import (
     select_behaviours_for_file,
 )
 from ...domain.coverage import PerFileCoverage
-from ...domain.generation import merge_gen_tests_blocks
+from ...domain.generation import (
+    as_integration_test,
+    gen_tests_integration_rel,
+    is_claimed_pipeline_gen_test_path,
+    merge_gen_tests_blocks,
+    parse_gen_tests_integration_filename,
+)
 from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.oracle_admission import (
     AdmissionPolicy,
@@ -146,9 +152,9 @@ def _iter_module_rs(module_dir: Path) -> list[Path]:
 
 
 def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_entries: int = 5) -> str:
-    """BL-002/BL-016: Return formatted prior-attempt history for rel_path, most recent first.
+    """Return formatted prior-attempt history for rel_path, most recent first.
 
-    BL-016: Shows the full compile error (no cap). Block preview is already compressed
+    Shows the full compile error (no cap). Block preview is already compressed
     to signatures by _log_task0c_attempt, so this doesn't re-truncate it.
     """
     _FIX_ERR_CAP = deps.FIX_ERR_CAP
@@ -188,16 +194,17 @@ def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_
             entry_lines.append(f"Compiler said:\n{err_capped}")
         if outcome == "success":
             entry_lines.append(
-                "→ These tests ARE ALREADY COMMITTED as a gen_tests_N module on disk. "
-                "Do NOT include them in your new block — they are already active as gen_tests_N modules."
+                "→ These tests ARE ALREADY COMMITTED as a `tests/{stem}_gen_N.rs` "
+                "integration file. Do NOT include them in your new block — they "
+                "are already active as their own cargo test binary."
             )
         else:
             entry_lines.append("→ This approach did not work. Do NOT repeat it.")
         parts.append("\n".join(entry_lines))
     if has_successes:
         parts.append(
-            "The committed tests above are already on disk as gen_tests_N modules. "
-            "Do NOT copy or repeat them. Write ONLY NEW test functions "
+            "The committed tests above are already on disk as `tests/{stem}_gen_N.rs` "
+            "files. Do NOT copy or repeat them. Write ONLY NEW test functions "
             "targeting the uncovered lines shown in fn_bodies below."
         )
     else:
@@ -263,19 +270,19 @@ def _engine_pragma_pass(
 
         annotated = _annotate_uncovered(source, uncov_lines)
         prompt = f"""The following Rust source file has lines that remain uncovered after multiple
-test-generation attempts. These lines may be genuinely unreachable from inline
-`#[cfg(test)]` unit tests — for example:
+test-generation attempts. These lines may be genuinely unreachable from the crate's public API (the generated tests live in `tests/`
+and can only call `pub` items) — for example:
 - Code behind `#[cfg(error_generic_member_access)]` or other non-default cfg flags
 - `unsafe` functions only called via vtable dispatch (never called directly in tests)
 - `unreachable!()` arms in exhaustive matches
 - Lines only reachable via OS-level error conditions
 
 Your task: add `{COVERAGE_IGNORE_PRAGMA}` to each line that is intrinsically
-unreachable from a `#[cfg(test)] mod gen_tests {{ use super::*; }}` block.
+unreachable from a `tests/` integration test of the public API.
 
 Rules:
 - ONLY add the pragma to lines marked `// !! UNCOVERED` that you can confirm are
-  unreachable from inline unit tests. Do NOT add it to lines that could be covered
+  unreachable from the public API. Do NOT add it to lines that could be covered
   by a test.
 - Do NOT modify any existing test code or logic.
 - If a line is coverable (just needs a better test), do NOT add the pragma — leave
@@ -607,7 +614,10 @@ _CONTRACT_FIX_HEAD = """The Rust test block you generated for `{rel_path}` COMPI
     The contract: every test pins at least one listed harvested behaviour by asserting its EXACT
     observable (`assert_eq!` against the whole listed `then`, or the `is::<T>()` identity form);
     `contains(...)` / `.is_ok()` / `.unwrap()` alone pin nothing; and the block uses the PUBLIC API
-    only — no private fields, fns or types, even though `use super::*` makes them visible.
+    only — no private fields, fns or types. Private items are not in scope
+    from `tests/` (`use crate::*`); a leftover inline `use super::*;` block
+    that names one is still refused: a test of an internal freezes a layout
+    the reconstruction is free to redesign.
 """
 
 # The generation contract, verbatim in the generator prompt, the medium
@@ -619,7 +629,7 @@ _CONTRACT_FIX_HEAD = """The Rust test block you generated for `{rel_path}` COMPI
 _TEST_CONTRACT = """Test contract — each test is judged against it after it compiles and passes; a block that fails it is refused:
 - PIN a behaviour: each test must pin at least one listed harvested behaviour (the "Harvested behaviours" section above, when present) by asserting its EXACT observable — `assert_eq!` against the listed `then` (the whole string, byte for byte; a `const EXPECTED: &str = "…";` is fine for multi-line values), or for a type identity the `assert!(e.is::<T>())` / `e.downcast_ref::<T>().is_some()` form. Where no behaviour is listed, still assert exact values of the public API (the exact Display/Debug string, the exact return value).
 - `contains(...)`, `.is_ok()`, `.is_some()`, `.is_err()`, `.unwrap()` or a bare call ALONE are not accepted as a test's assertion — they pin nothing an alternative implementation could violate.
-- PUBLIC API ONLY: use only `pub` fns, types and fields. No private fields, no private fns, no private types — `use super::*` makes them visible, but a block naming one is refused: a test of an internal freezes a layout the reconstruction is free to redesign.
+- PUBLIC API ONLY: use only `pub` fns, types and fields. No private fields, no private fns, no private types. These tests live in `tests/` as an integration-test crate (`use <crate>::*`); private items are not in scope, and a leftover inline block that names one is refused: a test of an internal freezes a layout the reconstruction is free to redesign.
 - Line coverage is secondary: also reach the uncovered lines shown in fn_bodies, through the public API.
 - Prefer edge cases and error conditions, not just happy paths.
 - When testing a function that returns `Result` or `Option`, test BOTH the Ok/Some path
@@ -627,11 +637,33 @@ _TEST_CONTRACT = """Test contract — each test is judged against it after it co
 """
 
 
+def _integration_test_rules(*, crate_name: str, prelude_names: str) -> str:
+    """The placement contract: generated tests live in `tests/`, not as an
+    inline `#[cfg(test)]` module with `use super::*`. That inline placement
+    is what granted private access and froze 24 % of anyhow's private
+    surface (2026-08); a visibility predicate against it fights the
+    generator's own contract."""
+    return f"""Rust rules:
+- Each `#[test]` fn must have ZERO arguments.
+- These tests live in `tests/` as an integration-test crate, not inside the source file.
+- Use `use {crate_name}::*;` (or a narrower `use {crate_name}::…`) for the public API. Do NOT write `use super::*;` — there is no parent module, and private items are not in scope.
+- Read field types from the struct definitions in the source file — match EXACTLY, and only `pub` fields.
+
+INTEGRATION TEST RULES — these tests live in `tests/`, an external test crate:
+- Do NOT write `use super::*;`.
+- The template prelude already imports: {prelude_names} — use them directly.
+- Do NOT use `#[macro_export]` macros that are not part of the public API.
+  Construct values through public API calls instead.
+- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
+  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+"""
+
+
 def _engine_runtime_gate(
     *,
     project_dir: Path,
     module_name: str,
-    pass_n: int,
+    test_bin: str,
     block: str,
     subprocess: Any,
     cargo_env: Callable[[], dict[str, str]],
@@ -645,13 +677,13 @@ def _engine_runtime_gate(
     oracle as an entry no fill can ever satisfy, and the fns it covers are
     re-attempted for the life of the project.
 
-    The run is filtered to the block's `gen_tests_<n>::` path segment, which is
-    what lets a missing verdict be read as "this block crashed the binary"
-    rather than as someone else's failure.
+    The run is filtered to this file's cargo `--test` binary (`{stem}_gen_{n}`),
+    which is what lets a missing verdict be read as "this block crashed the
+    binary" rather than as someone else's failure.
     """
     run = subprocess.run(
-        ["cargo", "test", "-p", module_name, "--",
-         "--test-threads=1", f"gen_tests_{pass_n}::"],
+        ["cargo", "test", "-p", module_name, "--test", test_bin, "--",
+         "--test-threads=1"],
         cwd=project_dir, capture_output=True, text=True,
         timeout=timeout, env=cargo_env(),
     )
@@ -668,11 +700,10 @@ def _engine_mutation_pass(
 ) -> int:
     """M4: behaviour-hardening pass over a cluster's source files. For each file
     with surviving mutants, generate black-box tests (M3) and persist the kept
-    ones as a gen_tests sibling so they survive strip and reattach per-cluster
-    (FR-038). Opt-in via TASK0C_MUTATION_HARDEN=1 (mutation-kill as the strength
+    ones as a `tests/{stem}_gen_N.rs` integration file so they survive strip
+    and reattach per-cluster. Opt-in via TASK0C_MUTATION_HARDEN=1 (mutation-kill as the strength
     metric on top of coverage). Returns the number of files hardened.
     """
-    _gen_tests_path = deps.gen_tests_path
     _gen_tests_siblings = deps.gen_tests_siblings
     _log = log
     _mutation_harden_file = deps.mutation_harden_file
@@ -690,16 +721,23 @@ def _engine_mutation_pass(
             continue
         if not code.strip():
             continue
-        # persist as the next gen_tests sibling of this file
+        # persist as the next tests/{stem}_gen_N.rs integration file
         existing = _gen_tests_siblings(src)
         n = (max((k for k, _ in existing), default=0)) + 1
-        sib = _gen_tests_path(src, n)
-        sib.write_text(
-            f"// mutation-hardening tests (M4) — behaviour, not coverage\n"
-            f"#[cfg(test)]\nmod gen_tests_{n} {{\n    use super::*;\n{code}\n}}\n",
+        tests_dir = project_dir / "tests"
+        if tests_dir.is_dir():
+            for f in tests_dir.iterdir():
+                parsed = parse_gen_tests_integration_filename(f.name)
+                if parsed and parsed[0] == src.stem:
+                    n = max(n, parsed[1] + 1)
+        dest = project_dir / gen_tests_integration_rel(src.stem, n)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(
+            "// mutation-hardening tests — behaviour, not coverage\n"
+            + as_integration_test(code, crate=module_name),
             encoding="utf-8")
         hardened += 1
-        _log(f"  [mut-harden] {rel}: persisted hardening tests as gen_tests_{n}")
+        _log(f"  [mut-harden] {rel}: persisted hardening tests as {dest.name}")
     return hardened
 
 
@@ -1082,12 +1120,15 @@ def _run_harness_preflight(
 
     def _is_protected_test_file(p: Path) -> bool:
         """Original test files we must never rewrite or strip — they are the
-        oracle (FR-018). Pipeline-generated gen_tests siblings are NOT
-        protected: the harness fix loop owns them and may rewrite or delete
-        them. (Filtering them with plain is_test_file made the loop a no-op
-        whenever the breakage was in a sibling — zero prompts sent, zero
-        strips — observed live on the nightly cluster.)"""
-        return is_test_file(p, project_dir) and _match_gen_tests_sibling(p.name) is None
+        oracle. Pipeline-generated tests (leftover `*.gen_tests_*.rs` siblings
+        and `tests/{stem}_gen_{N}.rs` files carrying the writer origin
+        marker) are NOT protected: the harness fix loop owns them and may
+        rewrite or delete them. An authored file whose name merely parses as
+        `{stem}_gen_{N}` stays protected. Filtering them with plain
+        is_test_file made the loop a no-op whenever the breakage was in a
+        generated file — zero prompts sent, zero strips — observed live on
+        the nightly cluster."""
+        return is_test_file(p, project_dir) and not is_claimed_pipeline_gen_test_path(p)
 
     harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
     if not harness_ok:
@@ -1220,9 +1261,9 @@ corrected content here
 
                 With the sibling-file design, each `foo.gen_tests_N.rs` IS one block.
                 If src_file is a sibling, delete it and remove its parent's decl.
-                If src_file is a real source file, strip all its gen_tests artifacts
-                (siblings + decls) — we can no longer target an individual block within
-                a source file because none live there anymore.
+                If src_file is a `tests/{stem}_gen_N.rs` integration file, unlink
+                it (there is no parent decl). If src_file is a real source file,
+                strip all its gen_tests artifacts.
                 """
                 sibling_match = _match_gen_tests_sibling(src_file.name)
                 if sibling_match:
@@ -1239,6 +1280,15 @@ corrected content here
                             parent.write_text(cleaned, encoding="utf-8")
                     _log(f"  [{module_name}] Deleted broken sibling "
                          f"{src_file.relative_to(project_dir)} (gen_tests_{pass_n}).")
+                    return True
+                integ = parse_gen_tests_integration_filename(src_file.name)
+                if integ is not None and is_claimed_pipeline_gen_test_path(src_file):
+                    try:
+                        src_file.unlink()
+                    except OSError:
+                        return False
+                    _log(f"  [{module_name}] Deleted broken generated test "
+                         f"{src_file.relative_to(project_dir)}.")
                     return True
                 # Real source file — strip all gen_tests artifacts.
                 n = _strip_all_gen_tests_artifacts(src_file)
@@ -1547,7 +1597,7 @@ def _run_phase_c(
         if rel not in skipped_files
     )
     _log(f"  [{module_name}] Queue: {len([r for r,_ in _ordered_files if r not in skipped_files])} file(s) — {_queue_summary} (raw=pre-filter grcov count)")
-    _emit("task0c.queue", data={"files": [  # debt#7
+    _emit("task0c.queue", data={"files": [
         [rel.split("/")[-1], len(unc)]
         for rel, (_, unc) in _ordered_files if rel not in skipped_files]})
 
@@ -1563,16 +1613,17 @@ def _run_phase_c(
 
         _file_idx = _active_files.index(rel_path) + 1 if rel_path in _active_files else attempt_n_within_outer
         _log(f"  [{module_name}] File {_file_idx}/{len(_active_files)}: {rel_path} ({len(uncov_lines)} raw uncovered lines)")
-        _emit("task0c.file", file=rel_path, data={"idx": _file_idx, "total": len(_active_files)})  # debt#7
+        _emit("task0c.file", file=rel_path, data={"idx": _file_idx, "total": len(_active_files)})
 
         abs_path = project_dir / rel_path
-        # _raw_text = current on-disk content (including existing gen_tests decls).
-        # This is the revert target: on a failed pass we restore _raw_text and delete
-        # the just-written sibling, so previously-committed passes survive intact.
+        # _raw_text = current on-disk content (including leftover gen_tests decls
+        # from a tree that still has src siblings). This is the revert target:
+        # on a failed pass we restore _raw_text and unlink the just-written
+        # tests/{stem}_gen_N.rs, so previously-committed passes survive intact.
         _raw_text = abs_path.read_text(encoding="utf-8") if abs_path.exists() else content
-        # gen_tests bodies live in sibling files. Read them all (concatenated as
-        # `mod gen_tests_N { ... }` blocks) so the LLM sees what it generated
-        # before and can extend rather than restart.
+        # Generated tests live in tests/{stem}_gen_N.rs (and leftover src
+        # siblings). Read them all so the LLM sees what it generated before
+        # and can extend rather than restart.
         _old_block = _read_all_gen_tests(abs_path)
         # The view shown to the LLM (and used for uncov_lines line counting) strips
         # the path-mod declaration lines so the line numbers match the original src.
@@ -1685,15 +1736,24 @@ def _run_phase_c(
         # is NOT a `secs[...]` section) so the budget reflects actual
         # overhead instead of a magic estimate.
         _pass_n = _next_gen_tests_n(abs_path)
-        mod_name = f"gen_tests_{_pass_n}"
+        _integ_rel = gen_tests_integration_rel(Path(rel_path).stem, _pass_n)
+        _allow_stripped = _allow_line.strip()
+        _crate_allow = (
+            "#![allow(" + _allow_stripped[len("#[allow("):] + "\n"
+            if _allow_stripped.startswith("#[allow(") and _allow_stripped.endswith(")]") else
+            (_allow_stripped + "\n" if _allow_stripped else ""))
+        _prelude_flat = "\n".join(
+            ln.strip() for ln in _prelude_block.splitlines() if ln.strip())
         output_format = (
-            f'<FILE path="gen_tests_block">\n'
-            f'#[cfg(test)]\n{_allow_line}\nmod {mod_name} {{{{\n'
-            f'    use super::*;\n'
-            f'    {_prelude_block}\n\n'
-            f'    #[test]\n    fn test_example() {{{{\n        // tests\n    }}}}\n}}}}\n'
+            f'<FILE path="{_integ_rel}">\n'
+            f'{_crate_allow}'
+            f'use {module_name}::*;\n'
+            f'{_prelude_flat}\n\n'
+            f'#[test]\nfn test_example() {{\n    // tests\n}}\n'
             f'</FILE>'
         )
+        _placement_rules = _integration_test_rules(
+            crate_name=module_name, prelude_names=_prelude_names)
         _coverage_status_probe = (
             f"\nCoverage status: {coverage:.1f}% covered. "
             f"The {len(uncov_lines)} line(s) in fn_bodies below are the ONLY remaining uncovered targets — "
@@ -1712,22 +1772,11 @@ def _run_phase_c(
 {_TASK0C_THINKING_DIRECTIVE}{_coverage_status_probe}
 Target file: {rel_path}
 {_env_section}
-Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
+Write a `tests/` integration-test file for `{rel_path}` at `{_integ_rel}`.
 Write a new test block covering the uncovered lines shown in fn_bodies above.
 
 {_TEST_CONTRACT}
-Rust rules:
-- Each `#[test]` fn must have ZERO arguments.
-- Use `use super::*;` to access module items.
-- Read field types from the struct definitions in the source file — match EXACTLY.
-
-INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
-- Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- The template prelude already imports: {_prelude_names} — use them directly.
-- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
-  Construct values through direct API calls instead.
-- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
-  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+{_placement_rules}
 {_nightly_rules_for_cluster()}
 See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
 project-specific import paths, type construction patterns, and hard constraints.
@@ -1784,30 +1833,20 @@ project-specific import paths, type construction patterns, and hard constraints.
         # only called within this iteration today; binding makes that
         # permanent instead of incidental). Same for the three below.
         def _render_prompt(_secs: dict[str, str], _cov_status: str, *,
-                           rel_path: str = rel_path, mod_name: str = mod_name,
+                           rel_path: str = rel_path, _integ_rel: str = _integ_rel,
                            _env_section: str = _env_section,
                            _file_constraints_section: str = _file_constraints_section,
+                           _placement_rules: str = _placement_rules,
                            output_format: str = output_format) -> str:
             return f"""You are writing Rust unit tests that specify the behavioral contract of source code.
 {_TASK0C_THINKING_DIRECTIVE}{_secs['strategy']}{_secs['history']}{_secs['what_worked']}{_secs['retrospective']}{_secs['context']}{_cov_status}
 Target file: {rel_path}
 {_env_section}{_secs['cargo']}{_secs['full_source']}{_secs['fn_bodies']}{_secs['behaviours']}{_secs['symbols']}{_secs['examples']}{_secs['integ_tests']}{_secs['siblings']}{_secs['old_block']}
-Write a `#[cfg(test)] mod {mod_name}` block for `{rel_path}`.
+Write a `tests/` integration-test file for `{rel_path}` at `{_integ_rel}`.
 {"Write ONLY new test functions for the uncovered lines in fn_bodies above. The existing test module(s) shown are already on disk — do NOT copy or repeat any test from them." if _secs['old_block'] else "Write a new test block covering the uncovered lines shown in fn_bodies above."}
 
 {_TEST_CONTRACT}
-Rust rules:
-- Each `#[test]` fn must have ZERO arguments.
-- Use `use super::*;` to access module items.
-- Read field types from the struct definitions in the source file — match EXACTLY.
-
-INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
-- Do NOT write `use <crate_name>::...` — you are already inside the crate.
-- The template prelude already imports: {_prelude_names} — use them directly.
-- Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
-  Construct values through direct API calls instead.
-- Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
-  Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+{_placement_rules}
 {_nightly_rules_for_cluster()}
 See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
 project-specific import paths, type construction patterns, and hard constraints.
@@ -1853,7 +1892,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             )
             return _render_prompt(_ssecs, _coverage_status_probe)
 
-        # FR-012: retry generation — qwen3 thinking mode sometimes returns empty output.
+        # Retry generation — thinking mode sometimes returns empty output.
         # On retry, send a short explicit follow-up instead of the full prompt again:
         # repeating the same large prompt produces the same empty result.
         def _save_stream_log(gen_attempt: int, query: str, resp: str, reason: str, *,
@@ -1882,13 +1921,15 @@ project-specific import paths, type construction patterns, and hard constraints.
                                  _file_specs: tuple[Any, ...] = _file_specs,
                                  _policy: AdmissionPolicy = _policy,
                                  _behaviours_section: str = _behaviours_section,
+                                 _placement_rules: str = _placement_rules,
                                  ) -> tuple[str, str]:
             """Inject allow-line + prelude into a raw gen_tests block, reject
-                blocks with no #[test] fns, then write it as sibling `pass_n` on
-                top of `base_text` and run the compile-fix loop. Returns
-                (status, final_block), status ∈ {"committed","no_tests","failed"}.
-                On failure reverts the file to base_text — so in split-and-merge
-                any subset blocks already merged before this one survive."""
+                blocks with no #[test] fns, then write `tests/{stem}_gen_{pass_n}.rs`
+                as an integration test (no path-mod in the source) and run the
+                compile-fix loop. Returns (status, final_block), status ∈
+                {"committed","no_tests","failed"}. On failure restores
+                `base_text` and unlinks the written test — so in split-and-merge
+                any subset files already committed before this one survive."""
             nonlocal _pass_had_work
             block = raw_block
             block = _inject_allow_before_gen_mod(block, _allow_line)
@@ -1898,12 +1939,11 @@ project-specific import paths, type construction patterns, and hard constraints.
                      f"skipping write (no productive content).")
                 _log_task0c_attempt(project_dir, rel_path, attempt, block, "", "no_tests_in_block")
                 return "no_tests", block
-            _sib = _gen_tests_path(abs_path, pass_n)
-            _decl = _build_gen_tests_decl(_sib.name, pass_n, _allow_line,
-                                          cluster_cfg_attr=_cluster_gate_for(
-                                              _current_cluster, existing_text, uncov_lines,
-                                              block, project_dir))
-            _src_with_decl = base_text.rstrip() + _decl
+            _sib = project_dir / gen_tests_integration_rel(abs_path.stem, pass_n)
+            _test_bin = _sib.stem
+            _gate = _cluster_gate_for(
+                _current_cluster, existing_text, uncov_lines,
+                block, project_dir)
             # P1 FixLoop port: verify→LLM-fix cycle on the shared driver.
             # The old hand-rolled loop terminated only on identical error
             # signatures — floor-stall + the backstop now also bound the
@@ -1947,18 +1987,7 @@ project-specific import paths, type construction patterns, and hard constraints.
 
     --- Full context below — same constraints apply as when you generated the block ---
     {_fix_ctx}
-    Rust rules:
-    - Each `#[test]` fn must have ZERO arguments.
-    - Use `use super::*;` to access module items.
-    - Read field types from the struct definitions in the source file — match EXACTLY.
-
-    INTERNAL MODULE RULES — these tests live inside the source file, not in an external test crate:
-    - Do NOT write `use <crate_name>::...` — you are already inside the crate.
-    - The template prelude already imports: {_prelude_names} — use them directly.
-    - Do NOT use `#[macro_export]` macros inside this module — they cannot be imported from within the crate.
-      Construct values through direct API calls instead.
-    - Do NOT use `assert_eq!` or `assert_ne!` on types that do not implement `PartialEq`.
-      Use `format!("{{}}",  val)`, boolean checks, or `matches!()` instead.
+    {_placement_rules}
     {_TEST_CONTRACT}
     {_nightly_rules_for_cluster()}
     See the IMPORTS, PITFALLS, and RULES sections of coverage_strategy.md (shown above) for
@@ -1982,8 +2011,12 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _revert_gen_tests_pass(abs_path, base_text, _sib)
                         _fc["reverted"] = True
                         return FixOutcome("stop")
-                abs_path.write_text(_src_with_decl, encoding="utf-8")
-                _sib.write_text(_extract_gen_tests_body(block), encoding="utf-8")
+                _sib.parent.mkdir(parents=True, exist_ok=True)
+                _integ = as_integration_test(
+                    block, crate=module_name, allow_line=_allow_line)
+                if _gate:
+                    _integ = f"#![cfg({_gate})]\n" + _integ
+                _sib.write_text(_integ, encoding="utf-8")
                 check = subprocess.run(
                     ["cargo", "test", "--no-run", "-p", module_name],
                     cwd=project_dir, capture_output=True, text=True,
@@ -1994,7 +2027,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                     # block's own tests against the implementation they specify, or a
                     # wrong assertion becomes an oracle entry no fill can ever satisfy.
                     _adm = _engine_runtime_gate(
-                        project_dir=project_dir, module_name=module_name, pass_n=pass_n,
+                        project_dir=project_dir, module_name=module_name,
+                        test_bin=_test_bin,
                         block=block, subprocess=subprocess, cargo_env=_cargo_env,
                         timeout=BUILD_TIMEOUT)
                     if not _adm.admitted:
@@ -2053,7 +2087,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _pins = (", pins " + ", ".join(sorted(_cv.pinned))) if _cv.pinned else ""
                     _log(f"  [{module_name}] Appended gen_tests_{pass_n} to {rel_path} "
                          f"({len(uncov_lines)} uncovered lines targeted{_pins})")
-                    _emit("task0c.gen_tests_appended", file=rel_path,  # debt#7
+                    _emit("task0c.gen_tests_appended", file=rel_path,
                           data={"pass_n": pass_n, "uncovered": len(uncov_lines)})
                     _emit("task0c.behaviours_pinned", file=rel_path,
                           data={"pass_n": pass_n, "ids": sorted(_cv.pinned)})
@@ -2101,7 +2135,7 @@ project-specific import paths, type construction patterns, and hard constraints.
         block = ""
         _block_committed = False
         _did_split = False
-        _sibling_path = _gen_tests_path(abs_path, _pass_n)
+        _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pass_n)
         # Split-and-merge: partition the file's uncovered functions into N
         # disjoint subsets, generate a test block for each CONCURRENTLY
         # (shared-prefix prompts batch on the GPU), then commit each through
@@ -2129,12 +2163,12 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _st, _ = _finalize_and_commit(_merged, _pn, _raw_text)
                     _block_committed = _st == "committed"
                     if _block_committed:
-                        _sibling_path = _gen_tests_path(abs_path, _pn)
+                        _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pn)
                     _log(f"  [{module_name}] split-and-merge {rel_path}: "
                          f"{len(_raw_subs)} subset block(s) → 1 sibling ({_st})")
                 # Per-subset fallback: name clash (no merge) OR the merged block
                 # failed compile-fix (file reverted → all subsets lost). Re-commit
-                # subsets individually so survivors accumulate (FR-018: never drop
+                # subsets individually so survivors accumulate (never drop
                 # a passing test). Skip subsets already absorbed by a committed merge.
                 if _merged is None or not _block_committed:
                     _reason = "name clash" if _merged is None else "merge failed"
@@ -2145,7 +2179,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _st, _ = _finalize_and_commit(_raw_sub, _pn, _base)
                         if _st == "committed":
                             _base = abs_path.read_text(encoding="utf-8")
-                            _sibling_path = _gen_tests_path(abs_path, _pn)
+                            _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pn)
                             _n_ok += 1
                     _block_committed = _n_ok > 0
                     _log(f"  [{module_name}] split-and-merge {rel_path}: {_reason} — "
@@ -2162,12 +2196,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                 # uncovered functions, symbols, and file constraints. Targets ~40-60K
                 # chars — well below the silent-failure threshold.
                 _medium_rules = (
-                    "RULES (mandatory):\n"
-                    "- Do NOT write `use <crate_name>::...` — you are already inside the crate.\n"
-                    "- Do NOT use `#[macro_export]` macros — unavailable inside the crate.\n"
+                    _placement_rules
                     + _nightly_rules_for_cluster() + "\n"
-                    + "- Do NOT use `assert_eq!`/`assert_ne!` on types without `PartialEq` — use `format!` or `matches!()`.\n"
-                    "- Each `#[test]` fn must have ZERO arguments.\n"
                     + _TEST_CONTRACT
                     + f"{_file_constraints_section}"
                 )
@@ -2177,7 +2207,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     f"{_describe_test_environment()}"
                     f"{secs['cargo']}{secs['full_source']}{secs['fn_bodies']}{secs['behaviours']}{secs['symbols']}"
                     f"{_medium_rules}"
-                    f"\nWrite a `#[cfg(test)] mod {mod_name}` block covering the uncovered lines shown above.\n"
+                    f"\nWrite a `tests/` integration-test file at `{_integ_rel}` covering the uncovered lines shown above.\n"
                     f"{output_format}\n"
                 )
             # Use think=None — lets MODEL_CAPS decide (think=False for qwen3.6:27b-q8).
@@ -2219,7 +2249,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 continue
             _block_committed = (_status == "committed")
             if _block_committed:
-                _sibling_path = _gen_tests_path(abs_path, _pass_n)
+                _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pass_n)
         elif not _did_split:
             _log_task0c_attempt(project_dir, rel_path, attempt, "", "", "no_block")
             _log(f"  [{module_name}] No test block extracted for {rel_path}.")
@@ -2233,7 +2263,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _qcov_after = _qcov
                 _qpct = (_qcov / _qcov_able * 100.0) if _qcov_able else 0.0
                 _log(f"  [{module_name}] {rel_path} quick-cov: {_qcov}/{_qcov_able} ({_qpct:.1f}%)")
-                _emit("task0c.quick_cov", file=rel_path,  # debt#7
+                _emit("task0c.quick_cov", file=rel_path,
                       data={"covered": _qcov, "coverable": _qcov_able, "pct": _qpct})
                 # Persist result so the monitor can merge it into the files overview.
                 _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
@@ -2293,24 +2323,26 @@ project-specific import paths, type construction patterns, and hard constraints.
             ) if _guard_hints else ""
 
             for _ir in range(_INNER_RETRY_LIMIT):
-                _emit("task0c.quick_retry", file=rel_path,  # debt#7
+                _emit("task0c.quick_retry", file=rel_path,
                       data={"retry": _ir + 1, "max": _INNER_RETRY_LIMIT})
                 _log(f"  [{module_name}] {rel_path} quick-retry {_ir + 1}/{_INNER_RETRY_LIMIT} "
                      f"— {len(uncov_lines)} line(s) still uncovered.")
-                _mod_name_retry = f"gen_tests_retry{attempt}_{_ir}"
+                _retry_pass_n = _next_gen_tests_n(abs_path)
+                _retry_rel = gen_tests_integration_rel(abs_path.stem, _retry_pass_n)
                 _retry_prompt = (
                     f"The test block you just wrote for `{rel_path}` compiled and ran "
                     f"but did NOT cover these specific lines: {sorted(uncov_lines)}\n\n"
                     f"{_guard_block}"
                     f"The function ran but took the OTHER branch. "
-                    f"Write a NEW `#[cfg(test)] mod {_mod_name_retry}` block containing "
+                    f"Write a NEW `tests/` integration-test file at `{_retry_rel}` containing "
                     f"ONLY tests that exercise the specific branch conditions above. "
-                    f"Do not repeat tests from the existing block.\n\n"
+                    f"Do not repeat tests from the existing block. Use `use {module_name}::*;`, "
+                    f"not `use super::*;`.\n\n"
                     f"Source (uncovered lines marked):\n```rust\n"
                     f"{_annotate_uncovered(existing_text, uncov_lines)[:_SRC_SNIP_CAP]}\n```\n\n"
                     f"Existing test block (already on disk — do NOT duplicate):\n```rust\n"
                     f"{_old_block[:_SRC_SNIP_CAP] if _old_block else '(none)'}\n```\n\n"
-                    f"Output ONLY the new mod block wrapped in <FILE path=\"{rel_path}\">...</FILE>."
+                    f"Output ONLY the new file wrapped in <FILE path=\"{_retry_rel}\">...</FILE>."
                 )
                 _retry_resp = ask(_retry_prompt, model=_TASK0C_MODEL,
                                   think=None)
@@ -2321,14 +2353,16 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _retry_block = _strip_trailing_file_tag(_retry_block)
                 _retry_block = _inject_allow_before_any_mod(_retry_block, _allow_line)
                 _current_text = abs_path.read_text(encoding="utf-8")
-                _retry_pass_n = _next_gen_tests_n(abs_path)
-                _retry_sibling = _gen_tests_path(abs_path, _retry_pass_n)
-                _retry_decl = _build_gen_tests_decl(_retry_sibling.name, _retry_pass_n, _allow_line,
-                                                    cluster_cfg_attr=_cluster_gate_for(
-                                                        _current_cluster, existing_text, uncov_lines,
-                                                        _retry_block, project_dir))
-                _retry_sibling.write_text(_extract_gen_tests_body(_retry_block), encoding="utf-8")
-                abs_path.write_text(_current_text.rstrip() + _retry_decl, encoding="utf-8")
+                _retry_sibling = project_dir / _retry_rel
+                _retry_sibling.parent.mkdir(parents=True, exist_ok=True)
+                _retry_gate = _cluster_gate_for(
+                    _current_cluster, existing_text, uncov_lines,
+                    _retry_block, project_dir)
+                _retry_body = as_integration_test(
+                    _retry_block, crate=module_name, allow_line=_allow_line)
+                if _retry_gate:
+                    _retry_body = f"#![cfg({_retry_gate})]\n" + _retry_body
+                _retry_sibling.write_text(_retry_body, encoding="utf-8")
                 _retry_check = subprocess.run(
                     ["cargo", "test", "--no-run", "-p", module_name],
                     cwd=project_dir, capture_output=True, text=True,
@@ -2361,7 +2395,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                         break
                 else:
                     break
-            _emit("task0c.quick_retry_done", file=rel_path)  # debt#7: clear retry counter
+            _emit("task0c.quick_retry_done", file=rel_path)  # clear the retry counter
 
         # Per-file stall detection: track whether uncovered line count improved.
         prev_best = file_best_uncov.get(rel_path, len(uncov_lines) + 1)
@@ -2541,9 +2575,10 @@ def task0c_augment_module(
     coverage_strategy: str = "",
 ) -> tuple[float, int, bool, str]:
     """
-    Generate unit tests (#[cfg(test)] blocks appended inline) for a module
+    Generate integration tests (`tests/{stem}_gen_{N}.rs`) for a module
     until tarpaulin reports 100% coverage or MAX_RETRIES is exhausted.
-    Returns final coverage percentage.
+    Returns final coverage percentage. New writes go under `tests/`; leftover
+    `*.gen_tests_*.rs` siblings from earlier runs stay readable.
     """
     # slice 5b: rebind injected collaborators as locals so the body below is verbatim.
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
@@ -2752,7 +2787,7 @@ def task0c_augment_module(
     while attempt < max_attempts:
         attempt += 1
         _log(f"  [{module_name}/{_cluster_label}] Attempt {attempt}/{max_attempts}")
-        _emit("task0c.attempt", data={"attempt": attempt, "max_attempt": max_attempts})  # debt#7
+        _emit("task0c.attempt", data={"attempt": attempt, "max_attempt": max_attempts})
 
         # --- Phase A: compile check + targeted fix ---
         # Use generate_fix_loop: run compile check, if it fails ask LLM to fix
@@ -2835,7 +2870,7 @@ def task0c_augment_module(
                     project_dir, module_name, module_dir, files_data, _TASK0C_MODEL
                 )
                 # Re-measure after pragma pass — if 100%, we're done; if not, outer
-                # loop will keep trying (or the main loop's FR-018 guard fires).
+                # loop will keep trying (or the outer no-improvement guard fires).
                 break
         else:
             no_improvement_count = 0
@@ -2880,7 +2915,7 @@ def task0c_augment_module(
         # loop first noticed it.
         deps.check_stop(f"{module_name} attempt {attempt}")
 
-    # M4 (FR-039): behaviour-hardening pass — mutation-kill as the strength
+    # Behaviour-hardening pass — mutation-kill as the strength
     # metric on top of line coverage. Opt-in via TASK0C_MUTATION_HARDEN; a
     # no-op (returns 0) otherwise, so the default flow is unchanged.
     try:
@@ -2932,7 +2967,8 @@ def task0c_behaviour_coverage(
     project_dir: Path, module_name: str, module_dir: Path, deps: Task0cDeps,
 ) -> tuple[int, int]:
     """`(pinned, total)`: of the active cluster's pinnable harvested behaviours,
-    how many some `*.gen_tests_*.rs` of the module pins exactly."""
+    how many a pipeline-generated test of the module pins exactly — leftover
+    `*.gen_tests_*.rs` siblings or `tests/{stem}_gen_{N}.rs` integration files."""
     cluster = deps.get_current_cluster()
     cluster_name = cluster.name if cluster else "stable"
     specs = pinnable_specs(_load_behaviour_specs(deps, project_dir, cluster_name))
@@ -3061,5 +3097,5 @@ def select_relevant_siblings(
     top = [(srel, score) for srel, _sc, score in scored if score > 0][:4]
     log(f"  [task0c planner] {target_rel}: ranked {len(all_siblings)} siblings by type overlap"
          f" (top: {top if top else 'none matched'})")
-    emit("task0c.planner", file=target_rel)  # debt#7: monitor file-progress source
+    emit("task0c.planner", file=target_rel)  # file-progress source for the monitor
     return [(srel, sc) for srel, sc, _score in scored]

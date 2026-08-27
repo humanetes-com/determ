@@ -11,7 +11,16 @@ the prompt (run `902902-daee577d`, 2026-08-20).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.body_ledger import (
+    BodyState,
+    LedgerEntry,
+    LedgerKey,
+    body_sha,
+    latest_by_unit,
+)
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     Attribution,
@@ -19,8 +28,11 @@ from pipeline_core.domain.refill_evidence import (
     attributed_test_leaves,
     collect_refill_evidence,
     container_header,
+    history_for_block,
     inferred_refill_names,
+    pinned_observables_from_tests,
     render_refill_evidence,
+    try_history,
     typeid_pin_consequence,
 )
 
@@ -407,6 +419,9 @@ def test_helper_asserted_literals_are_pinned_on_the_live_ensure_items() -> None:
     assert "test_trailer" not in assertion_helper_names(_LIVE_ENSURE_FILE)
     assert helper_asserted_literals("assert_eq!(a, b); check(x, 4);",
                                     frozenset({"check"})) == []
+    assert helper_asserted_literals('assert_eq!(a, "never closed',
+                                    frozenset()) == []
+    assert assertion_helper_names("") == frozenset()
 
 
 def test_pins_are_per_block_and_a_block_with_no_attributed_test_has_none() -> None:
@@ -464,4 +479,147 @@ def test_wrap_reading_on_the_live_constructor_and_ensure_bodies() -> None:
     assert not wraps_crate_tuple_struct("let pair = (MessageError(m), 1);", live)
     assert wraps_crate_tuple_struct(
         "Self::construct_from_std(DisplayError(message), backtrace)", live)
+    assert wraps_crate_tuple_struct("outer(inner(x), MessageError(m))", live)
     assert not wraps_crate_tuple_struct(_LIVE_ADHOC_BODY, frozenset())
+
+
+# --- 2b: the unit's own FLAT tries in the evidence line ---------------------
+#
+# Plan fixture: three recorded audits (263474 iter 2, 2932 iter 2, 82157
+# iter 1) → three FLAT rows for construct_from_adhoc → the rendered line
+# names three runs. `latest_by_unit` would collapse them to one; try_history
+# does not. Negative control: a row with run_id "" (today's pre-2a ledger)
+# contributes nothing, so the prompt is byte-identical to the pre-history
+# render.
+
+_ADHOC_BODY = (
+    "Self::construct_from_std(crate::wrapper::MessageError(message), backtrace)")
+_ADHOC_FILE = "src/error.rs"
+_ADHOC_FN = "construct_from_adhoc"
+
+
+def _adhoc_member() -> FnRecord:
+    return FnRecord(file=_ADHOC_FILE, fn_name=_ADHOC_FN,
+                    sig_text="fn construct_from_adhoc", body_text=_ADHOC_BODY,
+                    has_unimplemented_body=False)
+
+
+def _adhoc_block() -> ImplBlock:
+    m = _adhoc_member()
+    return ImplBlock(file=_ADHOC_FILE, container="impl Error {", members=(m,),
+                     refill_members=(m,))
+
+
+def _flat_row(run_id: str, iteration: int, *, body: str = _ADHOC_BODY,
+              oracle_fp: str = "") -> LedgerEntry:
+    return LedgerEntry(
+        key=LedgerKey(project="anyhow", cluster="stable",
+                      file=_ADHOC_FILE, fn_name=_ADHOC_FN),
+        body_sha=body_sha((body,)), bodies=(body,),
+        sig_sha="", layout_fp="",
+        state=BodyState.FLAT, run_id=run_id, iteration=iteration,
+        oracle_fp=oracle_fp)
+
+
+_ORACLE = "fp-stable-constructors"
+
+
+def test_try_history_names_the_three_recorded_flat_runs_not_the_latest() -> None:
+    """The plan's fixture: three FLAT rows from three runs, all the body
+    shown in the prompt, render as one line naming all three. `latest_by_unit`
+    would name only 82157 — that is the collapse this function exists to
+    refuse.
+
+    The identity clause is gone: a FLAT row cannot tell a verbatim reply
+    from a revert, so the line names the runs and that the tests still
+    fail, and stops there."""
+    rows = [
+        _flat_row("263474-b0e608d3", 2, oracle_fp=_ORACLE),
+        _flat_row("2932-cf516410", 2, oracle_fp=_ORACLE),
+        _flat_row("82157-476ddc16", 1, oracle_fp=_ORACLE),
+        _flat_row("", 9, oracle_fp=_ORACLE),            # cannot name a run
+    ]
+    sha = body_sha((_ADHOC_BODY,))
+    tries = try_history(rows, file=_ADHOC_FILE, fn_name=_ADHOC_FN,
+                        current_sha=sha, oracle_fp=_ORACLE)
+    assert [t.run_id for t in tries] == [
+        "263474-b0e608d3", "2932-cf516410", "82157-476ddc16"]
+    assert all(t.same_body for t in tries)
+    assert len(latest_by_unit(rows)) == 1
+    block = _adhoc_block()
+    hist = history_for_block(block, rows, oracle_fp=_ORACLE)
+    (ev,) = collect_refill_evidence(
+        block, [block],
+        FailureFrontier.build(
+            {FnLocator(_ADHOC_FILE, _ADHOC_FN): {"test_downcast", "test_boxed_str"}},
+            {}),
+        history=hist)
+    text = render_refill_evidence([ev])
+    assert "rewritten in 263474-b0e608d3 iter 2, 2932-cf516410 iter 2, 82157-476ddc16 iter 1 ×3" in text
+    assert "each time the body came back identical to the one shown here" not in text
+    assert "2 still fail on it" in text
+    # NEGATIVE CONTROL: empty history (today's ledger) leaves the render
+    # without a rewritten-in line.
+    (bare,) = collect_refill_evidence(block, [block], None)
+    assert bare.history == ()
+    assert "rewritten in" not in render_refill_evidence([bare])
+
+
+def test_try_history_refuses_rows_graded_under_another_oracle() -> None:
+    """Same refuse-empty rule as reseed_allowed: a row whose oracle_fp is
+    empty (written before the field) or a different fingerprint does not
+    enter the prompt. The three-run fixture with a matching stamp still
+    names three runs. A caller that omits oracle_fp (default "") gets
+    nothing, so the prompt stays byte-identical to the pre-history render."""
+    stamped = [
+        _flat_row("263474-b0e608d3", 2, oracle_fp=_ORACLE),
+        _flat_row("2932-cf516410", 2, oracle_fp=_ORACLE),
+        _flat_row("82157-476ddc16", 1, oracle_fp=_ORACLE),
+    ]
+    empty_fp = [_flat_row("263474-b0e608d3", 2)]          # pre-field row
+    other = [_flat_row("263474-b0e608d3", 2, oracle_fp="other-oracle")]
+    sha = body_sha((_ADHOC_BODY,))
+    assert [t.run_id for t in try_history(
+        stamped, file=_ADHOC_FILE, fn_name=_ADHOC_FN,
+        current_sha=sha, oracle_fp=_ORACLE)] == [
+        "263474-b0e608d3", "2932-cf516410", "82157-476ddc16"]
+    assert try_history(
+        empty_fp, file=_ADHOC_FILE, fn_name=_ADHOC_FN,
+        current_sha=sha, oracle_fp=_ORACLE) == ()
+    assert try_history(
+        other, file=_ADHOC_FILE, fn_name=_ADHOC_FN,
+        current_sha=sha, oracle_fp=_ORACLE) == ()
+    assert try_history(
+        stamped, file=_ADHOC_FILE, fn_name=_ADHOC_FN,
+        current_sha=sha) == ()                          # caller omitted fp
+    assert history_for_block(_adhoc_block(), stamped) == {_ADHOC_FN: ()}
+
+
+def test_three_leaf_file_first_pin_join_on_the_live_attributed_set() -> None:
+    """The 82157 file-first attributed set {test_boxed_str, test_downcast,
+    test_trailer} as pinned_observables_from_tests actually emits on the live
+    tests/. The join is the addendum's computed fixture, not a hand-made
+    five-name list. Trailer-only is the negative: no downcast::<, and the
+    eight Condition failed: literals."""
+    live = Path(__file__).resolve().parents[1] / "tmp" / "anyhow" / "tests"
+    files = [p.read_text(encoding="utf-8") for p in sorted(live.glob("test_*.rs"))]
+    assert files, "live anyhow tests/ missing — the fixture is computed there"
+    join = pinned_observables_from_tests(
+        ("test_boxed_str", "test_downcast", "test_trailer"), files)
+    assert join == (
+        "downcast::<Box<dyn StdError + Send + Sync>>, downcast::<&str>, "
+        "downcast::<String>, downcast::<io::Error>, is::<&str>, "
+        "is::<<str as ToOwned>::Owned>, "
+        '"Condition failed: `(|| 1)() == 2` (1 vs 2)", '
+        '"Condition failed: `b\\"hmm\\"[1] == b\'c\'` (109 vs 99)", '
+        '"Condition failed: `PhantomData::<u8> {} != PhantomData` '
+        '(PhantomData<u8> vs PhantomData<u8>)", '
+        '"Condition failed: `result? == 2` (1 vs 2)", '
+        '"Condition failed: `(2, 3).1 == 2` (3 vs 2)", '
+        '"Condition failed: `(2, (3, 4)).1.1 == 2` (4 vs 2)", '
+        '"Condition failed: `err.is::<&str>() == false` (true vs false)", '
+        '"Condition failed: `err.is::<<str as ToOwned>::Owned>() == true` '
+        '(false vs true)"')
+    trailer = pinned_observables_from_tests(("test_trailer",), files)
+    assert "downcast::<" not in trailer
+    assert trailer.count("Condition failed:") == 8

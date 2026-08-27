@@ -119,3 +119,11 @@ def test_merge_suites_existing_wins_and_sorts():
     assert [s.behaviour_id for s in merged.specs] == ["a::first", "probe::stable::f::0"]
     kept = merged.specs[1]
     assert kept.exercises == frozenset({"src/lib.rs::f"}) and kept.then.value == "golden"
+
+
+def test_outcome_without_then_and_assertion_with_then_are_rejected():
+    with pytest.raises(ValueError, match="OUTCOME behaviour requires"):
+        BehaviourSpec("b", "", "x", None, subkind=BehaviourSubKind.OUTCOME)
+    with pytest.raises(ValueError, match="ASSERTION behaviour"):
+        BehaviourSpec("b", "", "x", ObservableOutcome.display("v"),
+                      subkind=BehaviourSubKind.ASSERTION)

@@ -386,6 +386,72 @@ def test_inject_gen_prelude_imports_mod_opener_path() -> None:
     # No gen-mod opener and no `use super::*;` → unchanged.
     bare = "#[test]\nfn t() {}\n"
     assert inject_gen_prelude_imports(bare) == bare
+    # Integration-test crate: insert after `use anyhow::*;`.
+    integ = "use anyhow::*;\n\n#[test]\nfn t() {}\n"
+    out_i = inject_gen_prelude_imports(integ)
+    assert out_i.index("use anyhow::*;") < out_i.index("use std::string::{String, ToString};")
+    assert out_i.index("use std::string::{String, ToString};") < out_i.index("#[test]")
+
+
+def test_parse_gen_tests_integration_filename_and_as_integration_test() -> None:
+    from pipeline_core.domain.generation import (
+        as_integration_test,
+        extract_test_mod,
+        gen_tests_integration_rel,
+        parse_gen_tests_integration_filename,
+    )
+    assert parse_gen_tests_integration_filename("lib_gen_1.rs") == ("lib", 1)
+    assert parse_gen_tests_integration_filename("error_gen_7.rs") == ("error", 7)
+    assert parse_gen_tests_integration_filename("error.gen_tests_1.rs") is None
+    assert parse_gen_tests_integration_filename("test_lib.rs") is None
+    assert gen_tests_integration_rel("error", 3) == "tests/error_gen_3.rs"
+    block = (
+        "#[cfg(test)]\nmod gen_tests_1 {\n    use super::*;\n"
+        "    #[test]\n    fn t() { assert!(true); }\n}\n")
+    out = as_integration_test(block, crate="anyhow", allow_line="#[allow(clippy::all)]")
+    assert "use super::*;" not in out
+    assert "use anyhow::*;" in out
+    assert "mod gen_tests_1" not in out
+    assert out.startswith("#![allow(clippy::all)]")
+    from pipeline_core.domain.generation import PIPELINE_GEN_TEST_ORIGIN
+    assert PIPELINE_GEN_TEST_ORIGIN in out
+    assert "fn t()" in out
+    tagged = (
+        'preamble\n<FILE path="tests/lib_gen_1.rs">\n'
+        "use anyhow::*;\n#[test]\nfn t() {}\n</FILE>\n")
+    extracted = extract_test_mod(tagged)
+    assert extracted.startswith("use anyhow::*;")
+    assert "FILE" not in extracted and "preamble" not in extracted
+    assert extract_test_mod('<FILE path="src/error.rs">\nfn t() {}\n</FILE>') == ""
+
+
+def test_authored_stem_gen_n_is_not_claimed_without_the_writer_origin() -> None:
+    """`tests/proc_gen_2.rs` parses as `(proc, 2)` — occupancy, not origin.
+    Claiming it as pipeline-generated would unprotect / skip-harvest / delete
+    an authored crate file. The marker `as_integration_test` writes is the
+    claim."""
+    from pipeline_core.domain.generation import (
+        PIPELINE_GEN_TEST_ORIGIN,
+        as_integration_test,
+        is_claimed_pipeline_gen_test,
+        parse_gen_tests_integration_filename,
+    )
+    from pipeline_core.domain.test_assertions import harvest_test_assertion_behaviours
+    assert parse_gen_tests_integration_filename("proc_gen_2.rs") == ("proc", 2)
+    authored = (
+        "#[test]\nfn t() {\n"
+        "    let err = anyhow!(\"x\");\n"
+        "    assert!(err.is::<&str>());\n"
+        "}\n")
+    assert not is_claimed_pipeline_gen_test("proc_gen_2.rs", authored)
+    written = as_integration_test(authored, crate="anyhow")
+    assert PIPELINE_GEN_TEST_ORIGIN in written
+    assert is_claimed_pipeline_gen_test("lib_gen_1.rs", written)
+    # Harvest: authored name is the oracle; marked file is ours.
+    assert harvest_test_assertion_behaviours(
+        authored, source_file="tests/proc_gen_2.rs")
+    assert harvest_test_assertion_behaviours(
+        written, source_file="tests/lib_gen_1.rs") == []
 
 
 def test_parse_gen_tests_filename_edges() -> None:

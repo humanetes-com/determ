@@ -317,6 +317,7 @@ def build_file_fill_prompt(
     notes: str,
     prior_error: str = "",
     crash_evidence: str = "",
+    retrospective_guidance: str = "",
     module_name: str = "",
     cluster_name: str = "",
     gotchas: str = "",
@@ -360,6 +361,11 @@ def build_file_fill_prompt(
                if blueprint.strip() else "")
     notes_part = (f"\n<MODEL_NOTES>\n{notes}\n</MODEL_NOTES>\n"
                   if notes.strip() else "")
+    retro_part = (f"\n<RETROSPECTIVE_GUIDANCE>\nThe previous attempt at a unit "
+                  f"in this file did not pay. Apply this strategy differently "
+                  f"this time:\n{retrospective_guidance}\n"
+                  f"</RETROSPECTIVE_GUIDANCE>\n"
+                  if retrospective_guidance.strip() else "")
     tests_part = (f"\nTests that exercise this file (make them pass):\n"
                   f"{tests_block}\n" if tests_block.strip() else "")
     # What the record supports for each "rewrite"/"re-check" above — DIRECT
@@ -402,7 +408,7 @@ Functions to write (by impl block):
 ```rust
 {file_text}
 ```
-{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{evidence_part}{tests_part}{error_part}
+{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{retro_part}{evidence_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
 in `block` and NOWHERE else:

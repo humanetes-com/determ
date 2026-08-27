@@ -80,10 +80,28 @@ class _Captured:
 @dataclass(frozen=True, slots=True)
 class _FollowupOutcome:
     """What the forced followup produced: its cleaned reply and its OWN
-    reasoning (distinct from the main trace it was re-fed)."""
+    reasoning (distinct from the main trace it was re-fed).
+
+    `finish_reason` / `stop` are the followup stream's, never the main's.
+    A cut followup (`finish_reason == "length"` or `stop == "think_cap"`)
+    is recorded but not spliced: returning a truncated body as complete
+    is the same class as treating a length-hit main stream as a finished
+    reply. A network / input-too-long failure emits `finish_reason="error"`
+    so `summarize_followup_cut` (which keys on `"length"`) stays honest."""
 
     result: str = ""
     reasoning: str = ""
+    finish_reason: str | None = None
+    stop: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        """True iff the followup finished a body the caller may splice."""
+        return (
+            bool(self.result)
+            and self.finish_reason != "length"
+            and self.stop != "think_cap"
+        )
 
 
 def refed_reasoning_chars(reasoning_text: str, base_messages: list[dict[str, Any]],
@@ -244,7 +262,12 @@ class LLMController:
         if followup:
             fu = self._followup(transport, messages, reasoning_text, model, max_tokens,
                                 prompt_sha=prompt_sha, followup_think=followup_think)
-            result = fu.result or result
+            # A cut or failed followup must not replace the main result: the
+            # recorded constructor reply on `82157-476ddc16` was this
+            # followup's (`result_len=8192` at `finish_reason=length`), and
+            # `fu.result or result` spliced that truncation as complete.
+            if fu.complete:
+                result = fu.result
 
         # Both traces are keyed on the sha of the string this call RETURNS —
         # the one `llm.response` records — so `logs/thinking/<sha>.txt` and
@@ -368,33 +391,81 @@ class LLMController:
         self._h.sock_open(f"{transport.served_model}-followup think={followup_think}")
         self._h.sock_write("\n[FOLLOWUP — thinking budget exhausted, requesting code]\n")
         meta = StreamMeta()
-        try:
-            cap = self._consume(
-                transport.stream(fu_messages, model=model, max_tokens=fu_plan.request_max,
-                                 enable_thinking=followup_think, meta=meta),
-                spec.thinking_char_cap if followup_think else None, model,
-            )
-        except (TransportTimeout, TransportUnavailable) as exc:
-            self._h.guard("llm/followup_network", f"err={type(exc).__name__}: {exc}")
-            return _FollowupOutcome()
+        cap: _Captured | None = None
+        for attempt in range(_MAX_ATTEMPTS):
+            meta = StreamMeta()
+            try:
+                cap = self._consume(
+                    transport.stream(fu_messages, model=model, max_tokens=fu_plan.request_max,
+                                     enable_thinking=followup_think, meta=meta),
+                    spec.thinking_char_cap if followup_think else None, model,
+                )
+                break
+            except (TransportTimeout, TransportUnavailable) as exc:
+                self._h.guard("llm/followup_network", f"err={type(exc).__name__}: {exc}")
+                self._emit_followup_meta(
+                    prompt_sha=prompt_sha, model=model, finish_reason="error",
+                    result="", fu_reasoning="", reasoning_text=reasoning_text,
+                    messages=messages, fu_messages=fu_messages,
+                    request_max=fu_plan.request_max, followup_think=followup_think,
+                    stop=None)
+                return _FollowupOutcome(finish_reason="error")
+            except InputTooLong as exc:
+                # The main stream retries this (run() :181); the followup
+                # used to let it escape unemitted, so a followup 400 left
+                # no `llm.followup_meta` row at all.
+                if attempt >= _MAX_ATTEMPTS - 1 or exc.real_tokens is None:
+                    self._h.guard("llm/followup_input",
+                                  f"err=InputTooLong real_tokens={exc.real_tokens}")
+                    self._emit_followup_meta(
+                        prompt_sha=prompt_sha, model=model, finish_reason="error",
+                        result="", fu_reasoning="", reasoning_text=reasoning_text,
+                        messages=messages, fu_messages=fu_messages,
+                        request_max=fu_plan.request_max, followup_think=followup_think,
+                        stop=None)
+                    return _FollowupOutcome(finish_reason="error")
+                state.update(fu_chars, exc.real_tokens)
+                fu_plan = self._replan_with_input(
+                    spec, state, exc.real_tokens, max_tokens, followup_think, fu_plan)
+                self._h.guard("llm/followup_input_retry",
+                              f"attempt={attempt} real_input={exc.real_tokens}tok "
+                              f"new_req_max={fu_plan.request_max}")
+                continue
+        assert cap is not None
         result = transport.clean("".join(cap.content), model=model)
         fu_reasoning = "".join(cap.reasoning)
         self._h.guard("llm/followup", f"model={model} thinking_len={len(reasoning_text)} result_len={len(result)}")
+        self._emit_followup_meta(
+            prompt_sha=prompt_sha, model=model, finish_reason=meta.finish_reason,
+            result=result, fu_reasoning=fu_reasoning, reasoning_text=reasoning_text,
+            messages=messages, fu_messages=fu_messages,
+            request_max=fu_plan.request_max, followup_think=followup_think,
+            stop=cap.stop)
+        return _FollowupOutcome(
+            result=result, reasoning=fu_reasoning,
+            finish_reason=meta.finish_reason, stop=cap.stop)
+
+    def _emit_followup_meta(
+        self, *, prompt_sha: str, model: str, finish_reason: str | None,
+        result: str, fu_reasoning: str, reasoning_text: str,
+        messages: list[dict[str, Any]], fu_messages: list[dict[str, Any]],
+        request_max: int | None, followup_think: bool, stop: str | None,
+    ) -> None:
         fu_meta = {
             "prompt_sha": prompt_sha,
             "model": model,
-            "finish_reason": meta.finish_reason,
+            "finish_reason": finish_reason,
             "content_chars": len(result),
             "reasoning_chars": len(fu_reasoning),
-            "reasoning_chars_refed": refed_reasoning_chars(reasoning_text, messages, fu_messages),
-            "request_max": fu_plan.request_max,
+            "reasoning_chars_refed": refed_reasoning_chars(
+                reasoning_text, messages, fu_messages),
+            "request_max": request_max,
             "enable_thinking": followup_think,
-            "stop": cap.stop,
+            "stop": stop,
             "fn_blocks": result.count("<FN "),
         }
         self._h.emit("llm.followup_meta", fu_meta)
         record_followup_meta(fu_meta)
-        return _FollowupOutcome(result=result, reasoning=fu_reasoning)
 
     @staticmethod
     def _replan_with_input(spec: BudgetSpec, state: BudgetState, real_tokens: int,

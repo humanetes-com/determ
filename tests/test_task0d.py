@@ -102,10 +102,12 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     assert "defect observables: identity yes, alt-debug yes, ensure-message yes" in line
     assert "probes admitted 1 / proposed 1" in line
     assert "exercises filled: 1/" in line
+    assert "elapsed " in line and "cargo invocation(s)" in line
     assert "runtime then:" in line and "ALT_DEBUG_STRING" in line and "TYPE_IDENTITY" in line
     ev = dict(w.events)["task0d.harvest"]
     assert ev["defect_observables"] == {"identity": True, "alt-debug": True, "ensure-message": True}
     assert ev["probes_admitted"] == 1 and ev["exercises_filled"] == 1
+    assert ev["cargo_invocations"] == 1  # one probe; the fake exercises map is not cargo
     probe = next(s for s in suite.specs if s.behaviour_id.startswith("probe::stable::unnamed_public::"))
     assert probe.then.kind is OutcomeKind.NORMALIZED_STDOUT and probe.then.value == "printed 42"
     filled = next(s for s in suite.specs if s.behaviour_id == "testassert::tests/test_fmt.rs::test_altdebug::0")

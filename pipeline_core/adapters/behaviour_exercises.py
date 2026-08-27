@@ -109,11 +109,12 @@ def exercises_by_coverage(
     max_specs: int = 200,
     grcov_bin: Path | None = None,
     timeout: int = 600,
-) -> dict[str, frozenset[str]]:
-    """`behaviour_id → {"src/x.rs::fn", …}` for every runnable spec whose run
-    on the original produced coverage. A spec whose run fails, or whose
-    coverage reaches no recorded fn, is absent from the result (never an
-    empty set — "unknown" and "reaches nothing" must stay distinguishable).
+) -> tuple[dict[str, frozenset[str]], int]:
+    """`behaviour_id → {"src/x.rs::fn", …}` plus the number of cargo/grcov
+    invocations this call made (the instrumented build + per-spec run +
+    per-spec grcov). A spec whose run fails, or whose coverage reaches no
+    recorded fn, is absent from the map (never an empty set — "unknown"
+    and "reaches nothing" must stay distinguishable).
     `fn_records` are the extractor's records for the crate's `src/`; their
     `file` may be `src/x.rs` (enumerated from the crate root) or `x.rs`
     (from `src/`) — both are joined on the crate-root shape."""
@@ -123,7 +124,7 @@ def exercises_by_coverage(
     if grcov is None:
         log("  [behaviour-exercises] grcov not found — exercises not filled "
             "(`cargo install grcov`; `rustup component add llvm-tools-preview`).")
-        return {}
+        return {}, 0
     all_specs = list(specs)
     n_doc = sum(1 for s in all_specs if is_doctest_spec(s))
     runnable = [s for s in all_specs
@@ -132,18 +133,27 @@ def exercises_by_coverage(
         log(f"  [behaviour-exercises] {n_doc} doc-test spec(s) skipped: "
             "doc-test instrumentation needs the nightly RUSTDOCFLAGS path.")
     if not runnable:
-        return {}
+        return {}, 0
+    invocations = 0
+
+    def counted(
+        cmd: list[str], cwd: Path, env: dict[str, str], timeout: int,
+    ) -> tuple[int, str, str]:
+        nonlocal invocations
+        invocations += 1
+        return runner(cmd, cwd, env, timeout)
+
     env = instrumented_env(cluster)
     cov_root = project_dir / COVERAGE_SUBDIR
     cov_root.mkdir(parents=True, exist_ok=True)
     build_env = dict(env)
     build_env["LLVM_PROFILE_FILE"] = str(cov_root / "build-%p-%m.profraw")
-    rc, _out, err = runner(["cargo", "test", "--no-run", "--quiet"],
-                           project_dir, build_env, timeout)
+    rc, _out, err = counted(["cargo", "test", "--no-run", "--quiet"],
+                            project_dir, build_env, timeout)
     if rc != 0:
         log(f"  [behaviour-exercises] instrumented build failed (rc={rc}): "
             f"{err[-800:]}")
-        return {}
+        return {}, invocations
     recs = normalize_record_files(_record_dict(r) for r in fn_records)
     texts: dict[str, str] = {}
     out: dict[str, frozenset[str]] = {}
@@ -156,10 +166,10 @@ def exercises_by_coverage(
         spec_env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
         cmd = test_command(spec)
         if cmd is not None:
-            rc, _out, err = runner(cmd, project_dir, spec_env, timeout)
+            rc, _out, err = counted(cmd, project_dir, spec_env, timeout)
         else:
             with materialized_probe(project_dir, spec.given, f"exercise_{i}") as target:
-                rc, _out, err = runner(
+                rc, _out, err = counted(
                     ["cargo", "run", "--quiet", "--example", target],
                     project_dir, spec_env, timeout)
         if rc != 0:
@@ -170,8 +180,8 @@ def exercises_by_coverage(
             log(f"  [behaviour-exercises] {spec.behaviour_id}: no profraw written")
             continue
         out_json = profraw_dir / "coverage.json"
-        rc, _out, err = runner(grcov_command(grcov, profraw_dir, project_dir, out_json),
-                               project_dir, spec_env, 120)
+        rc, _out, err = counted(grcov_command(grcov, profraw_dir, project_dir, out_json),
+                                project_dir, spec_env, 120)
         if rc != 0 or not out_json.exists():
             log(f"  [behaviour-exercises] {spec.behaviour_id}: grcov failed "
                 f"(rc={rc}): {err[-300:].strip()}")
@@ -193,5 +203,6 @@ def exercises_by_coverage(
         if units:
             out[spec.behaviour_id] = units
     log(f"  [behaviour-exercises] attributed {len(out)} / {len(runnable)} "
-        f"runnable spec(s) to units by coverage.")
-    return out
+        f"runnable spec(s) to units by coverage ({invocations} cargo/grcov "
+        "invocation(s)).")
+    return out, invocations

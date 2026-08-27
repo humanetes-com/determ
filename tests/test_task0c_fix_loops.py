@@ -346,30 +346,32 @@ def test_engine_targeted_pragma_codeblock_fallback(tmp_path: Path) -> None:
 
 def test_engine_mutation_pass_persists_hardening(tmp_path: Path, monkeypatch) -> None:
     """P3.5: relocated `_engine_mutation_pass` is opt-in (env-gated) and, when on,
-    persists generated hardening tests as the next gen_tests sibling."""
+    persists generated hardening tests as `tests/{stem}_gen_N.rs`."""
     from pipeline_core.application.tasks.task0c import _engine_mutation_pass
 
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     f = src_dir / "x.rs"
     f.write_text("pub fn a() {}\n")
-    sib = src_dir / "x.gen_tests_1.rs"
+    dest = tmp_path / "tests" / "x_gen_1.rs"
 
     deps = SimpleNamespace(
         mutation_harden_file=lambda pd, mn, cl, rel: "    #[test]\n    fn k() {}\n",
         gen_tests_siblings=lambda src: [],
-        gen_tests_path=lambda src, n: sib,
+        gen_tests_path=lambda src, n: src.parent / f"{src.stem}.gen_tests_{n}.rs",
     )
 
     # Off by default → no work.
     monkeypatch.delenv("TASK0C_MUTATION_HARDEN", raising=False)
     assert _engine_mutation_pass(deps, tmp_path, "x", None, ["src/x.rs"]) == 0
-    assert not sib.exists()
+    assert not dest.exists()
 
-    # On → hardens and writes the sibling.
+    # On → hardens and writes the integration file, not a src sibling.
     monkeypatch.setenv("TASK0C_MUTATION_HARDEN", "1")
     assert _engine_mutation_pass(deps, tmp_path, "x", None, ["src/x.rs"]) == 1
-    assert sib.exists() and "fn k()" in sib.read_text()
+    assert dest.exists() and "fn k()" in dest.read_text()
+    assert "use x::*;" in dest.read_text()
+    assert not (src_dir / "x.gen_tests_1.rs").exists()
 
 
 def test_engine_log_attempt_writes_jsonl_and_type_signals(tmp_path: Path) -> None:

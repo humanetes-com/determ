@@ -256,6 +256,8 @@ class ImplFillPath(Protocol):
         tdd_frontier_keys: set[FnLocator] | None,
         escalated_keys: frozenset[FnLocator] = ...,
         escalated_measured: frozenset[FnLocator] = ...,
+        ledger_entries: Any = ...,
+        oracle_fp: str = ...,
         tdd_frontier_tests: FailureFrontier | None, tdd_test_cmd: str | None,
         parallelism: int = 1,
         crash_evidence: dict[FnLocator, str] | None = None,

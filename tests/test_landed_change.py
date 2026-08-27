@@ -24,6 +24,7 @@ from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.landed_change import (
     changed_units,
     render_pass_audit,
+    split_reverted,
     unit_bodies,
 )
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
@@ -67,6 +68,24 @@ def test_changed_units_is_whitespace_insensitive_and_total() -> None:
     assert changed_units(a, unit_bodies(recs_c, [_K])) == {_K}
     # missing on one side = changed
     assert changed_units(a, unit_bodies([], [_K])) == {_K}
+
+
+def test_split_reverted_keeps_identical_reply_flat_and_drops_the_peel() -> None:
+    """The body comparison cannot see a peel: the 2026-08-19 crawl's
+    `src/context.rs::source` sat in `frontier - landed` next to byte-identical
+    constructors. FLAT is the identical-reply subset; the fill result's
+    reverted set is what splits them."""
+    constructors = frozenset(
+        FnLocator("src/error.rs", n)
+        for n in ("construct", "construct_from_std"))
+    peeled = FnLocator("src/context.rs", "source")
+    flat, reverted = split_reverted(constructors | {peeled}, [peeled])
+    assert flat == constructors
+    assert reverted == frozenset({peeled})
+    # NEGATIVE CONTROL: no reverted set → the old union, every unchanged
+    # escalated unit would have been written FLAT.
+    all_flat, none = split_reverted(constructors | {peeled}, ())
+    assert all_flat == constructors | {peeled} and not none
 
 
 def test_render_pass_audit_names_the_unchanged_units() -> None:

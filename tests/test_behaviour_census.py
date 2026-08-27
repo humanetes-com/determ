@@ -4,6 +4,7 @@ patterns give 3/3 on the test-assertion harvest of the anyhow fixtures and
 uses the domain's patterns rather than a copy."""
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
@@ -36,6 +37,7 @@ def test_harvested_suite_has_all_three_observables_with_runtime_then():
     assert set(runtime_then_counts(suite.specs)) >= {
         "ALT_DEBUG_STRING", "TYPE_IDENTITY", "DISPLAY_STRING"}
     assert render_counts(runtime_then_counts(suite.specs)).startswith("ALT_DEBUG_STRING ")
+    assert render_counts(Counter()) == "none"
 
 
 def test_negative_control_doc_fence_text_is_present_but_uncheckable():

@@ -89,8 +89,11 @@ class BodyState(StrEnum):
     it: it says one BODY was wrong, not that a unit is hard."""
     FLAT = "flat"
     """The unit was dispatched under an escalated REWRITE grade, its
-    attributed convicting tests had run, and the body came back IDENTICAL to
-    the one on the tree — a graded try with an empty verdict delta.
+    attributed convicting tests had run, and the model returned a body
+    IDENTICAL to the one already on the tree — a graded try with an empty
+    verdict delta. A fill that spliced then RESTORED the snapshot (peel of
+    compiler-blamed bodies, compile / U2 / regression revert) is not this
+    state: the tree body is the pre-fill one, not the reply.
 
     Before this state existed the row was never written: the landed-change
     audit appended rows from the landed set only, and an escalated unit that

@@ -97,6 +97,14 @@ MUST_CLASS_ORDER: tuple[str, ...] = (
     "OPTION_SEMANTICS",
 )
 
+# Cap on runtime behaviours in a component's authoring prompt. Measured on
+# the live Error/vtable component (2026-08-27): uncapped 92 is IDENTITY 24,
+# EXACT_FORMAT 51, BOUNDED_RESOURCE 4, OTHER 13; 40 keeps all identity plus
+# 16 exact-format and drops the entire BOUNDED_RESOURCE class (the
+# 40-byte-buffer / whitespace-fallback family). The prompt already says
+# `(+N more)`; the [t1.5] log names the omitted classes.
+COMPONENT_BEHAVIOUR_CAP = 40
+
 # Fallback grouping from the outcome kind, for a spec that carries no
 # classification of its own (or an unclassified `OTHER`). Keyed by the kind's
 # NAME so a kind added beside these (`TYPE_IDENTITY`, `ALT_DEBUG_STRING`) is
@@ -157,10 +165,14 @@ def select_component_behaviours(
     *,
     component_names: Collection[str],
     public_types: Collection[str],
-    cap: int = 40,
+    cap: int | None = COMPONENT_BEHAVIOUR_CAP,
 ) -> list[BehaviourSpec]:
     """The runtime behaviours a component's representation must make
     expressible, MUST-classes first, at most ``cap``.
+
+    ``cap=None`` is the uncapped match (what the [t1.5] log compares
+    against so an omitted class is visible). Default is
+    :data:`COMPONENT_BEHAVIOUR_CAP`.
 
     Kept: a spec whose ``exercises`` name a component item (full id or any
     ``::`` segment), or whose setup/action text names a component item or one
@@ -191,4 +203,6 @@ def select_component_behaviours(
             continue
         picked.append(spec)
     picked.sort(key=lambda s: class_rank(behaviour_class_name(s)))
+    if cap is None:
+        return picked
     return picked[:cap]

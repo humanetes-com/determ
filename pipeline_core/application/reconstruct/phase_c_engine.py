@@ -18,7 +18,7 @@ import queue as _queue_mod
 import threading as _threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -194,6 +194,14 @@ class PhaseCFillEngine:
         # opinion about a measurement that already happened.
         escalated_keys: frozenset[FnLocator] = frozenset(),
         escalated_measured: frozenset[FnLocator] = frozenset(),
+        # Prior FLAT tries of dispatched units, from the proven-body ledger.
+        # Default empty: fn_walk and tests that do not pass it leave the
+        # refill-evidence section byte-identical to the pre-history render.
+        ledger_entries: Sequence[Any] = (),
+        # Oracle fingerprint for `try_history`. Default empty refuses every
+        # row (same rule as `reseed_allowed`); the live driver passes the
+        # iteration's fingerprint beside `ledger_entries`.
+        oracle_fp: str = "",
         tdd_test_cmd: str | None = None,
         crash_evidence: dict[FnLocator, str] | None = None,
         crash_blamed: frozenset[FnLocator] | None = None,
@@ -219,6 +227,7 @@ class PhaseCFillEngine:
         # the TDD driver, whose exhaustion charging must not outrun dispatch
         # (an undispatched frontier fn is refused, not judged).
         _dispatched: set[FnLocator] = set()
+        _reverted: set[FnLocator] = set()
         # One cfg policy across routes. The impl/file routes refuse a splice
         # at a fn whose every stub occurrence is cfg-gated out of this cluster
         # (`cluster_scoped_splice`), but the DISPATCH side never consulted
@@ -323,10 +332,12 @@ class PhaseCFillEngine:
                 cluster_env=cluster_env,
                 fr_path=fr_path,
                 tdd_frontier_keys=tdd_frontier_keys,
-                tdd_frontier_tests=tdd_frontier_tests,   # Plan 10 U2
+                tdd_frontier_tests=tdd_frontier_tests,
                 escalated_keys=escalated_keys,
                 escalated_measured=escalated_measured,
-                tdd_test_cmd=tdd_test_cmd,               # Plan 10 U2
+                ledger_entries=ledger_entries,
+                oracle_fp=oracle_fp,
+                tdd_test_cmd=tdd_test_cmd,
                 parallelism=self.config.parallelism,
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
@@ -335,6 +346,7 @@ class PhaseCFillEngine:
             if _impl_stats.dispatched_fns is not None:
                 _dispatched.update(
                     FnLocator(*t) for t in _impl_stats.dispatched_fns)
+            _reverted.update(FnLocator(*t) for t in _impl_stats.reverted_fns)
             # If there are still stub members the per-impl path didn't cover
             # (free fns or oversized blocks), fall through to the per-fn path.
             if _impl_stats.remaining == 0:
@@ -1033,4 +1045,5 @@ class PhaseCFillEngine:
             impls_filled=_carryover.get("impls_filled", 0),
             impls_failed=_carryover.get("impls_failed", 0),
             dispatched_fns=tuple(sorted(_dispatched)),
+            reverted_fns=tuple(sorted(_reverted)),
         )

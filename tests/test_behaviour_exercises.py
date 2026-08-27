@@ -54,6 +54,8 @@ def test_coveralls_hit_lines_reads_nonzero_counts():
         {"name": "src/other.rs", "coverage": [0, None]},
     ]}
     assert coveralls_hit_lines(data) == {"src/lib.rs": [1, 2, 7]}
+    assert coveralls_hit_lines({"source_files": [{"name": "", "coverage": [1]}]}) == {}
+    assert coveralls_hit_lines({}) == {}
 
 
 def test_units_for_hit_lines_matches_line_to_fn_record_contract():
@@ -67,6 +69,8 @@ def test_units_for_hit_lines_matches_line_to_fn_record_contract():
         assert f"src/lib.rs::{rec['fn_name']}" in got
     # a hit on the test fn is not a unit; a hit on a blank line maps nowhere
     assert units_for_hit_lines({"src/lib.rs": [4, 9]}, texts, _records()) == frozenset()
+    empty_span = [{"file": "src/lib.rs", "fn_name": "a", "sig_byte_start": 4, "body_byte_end": 4}]
+    assert units_for_hit_lines({"src/lib.rs": [2]}, texts, empty_span) == frozenset()
 
 
 def test_records_enumerated_from_src_are_rerooted_before_the_join():
@@ -89,6 +93,11 @@ def test_test_command_from_source_ref():
     assert command_for(s) == ["cargo", "test", "--quiet", "--test", "test_fmt",
                               "--", "--exact", "test_altdebug"]
     assert command_for(_ta("doctest::lib.rs::3", "lib.rs:3")) is None
+    no_name = _ta("testassert::tests/test_fmt.rs::", "tests/test_fmt.rs::")
+    assert target_of(no_name) is None
+    empty_stem = _ta("testassert::x", "tests/::t")
+    assert target_of(empty_stem) is None
+    assert target_of(_ta("testassert::x", "no-sep")) is None
 
 
 # --- adapter, cargo + grcov faked ------------------------------------------------------
@@ -138,12 +147,13 @@ def test_exercises_by_coverage_runs_each_spec_alone_and_maps_hits(tmp_path: Path
         BehaviourSpec("doctest::lib.rs::1", "", "let x = a();", None),
     ]
     logs: list[str] = []
-    got = exercises_by_coverage(tmp_path, _cluster(), specs, _records(prefix=""),
-                                run=fake_run, log=logs.append, grcov_bin=Path("/x/grcov"))
+    got, n = exercises_by_coverage(tmp_path, _cluster(), specs, _records(prefix=""),
+                                   run=fake_run, log=logs.append, grcov_bin=Path("/x/grcov"))
     assert got == {
         "testassert::tests/t.rs::test_a::0": frozenset({"src/lib.rs::a"}),
         "probe::stable::b::0": frozenset({"src/lib.rs::b"}),
     }, "a failing run is absent (never an empty set); the doc-test is skipped"
+    assert n == len(calls), "every cargo/grcov call is one invocation"
     assert calls[0] == ["cargo", "test", "--no-run", "--quiet"], "one instrumented build first"
     assert ["cargo", "test", "--quiet", "--test", "t", "--", "--exact", "test_a"] in calls
     assert any(c[:4] == ["cargo", "run", "--quiet", "--example"] for c in calls)
@@ -161,5 +171,5 @@ def test_exercises_without_grcov_returns_nothing(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(mod, "grcov_binary", lambda: None)
     logs: list[str] = []
     assert exercises_by_coverage(tmp_path, None, [_ta("testassert::tests/t.rs::x::0", "tests/t.rs::x")],
-                                 [], run=lambda *a: (0, "", ""), log=logs.append) == {}
+                                 [], run=lambda *a: (0, "", ""), log=logs.append) == ({}, 0)
     assert any("grcov not found" in ln for ln in logs)

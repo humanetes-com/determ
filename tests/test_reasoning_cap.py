@@ -66,11 +66,17 @@ def test_collect_stream_meta_is_windowed_and_silent_outside() -> None:
 # followup rows: a second kind in the same window, folded apart
 # --------------------------------------------------------------------------- #
 def test_followup_rows_fold_separately_and_never_inflate_the_reply_total() -> None:
-    """The `82157-476ddc16` shape: 8 file-first replies, all 8 forced
-    followups (`followup=True`, main `finish_reason=length`); of those
-    followups 5 were themselves cut at `length`. The audit line must keep
-    reading 8 of 8 replies capped — one row per CALL — and gain the count
-    that was unrecordable: 5 followups cut."""
+    """A synthetic mix: 8 stream_meta rows (followup=True, main finish_reason
+    length) plus 5 followup_meta rows that themselves ended at `length`.
+
+    That 5 is NOT the 82157 record. Computed on 82157's llm.stream_meta:
+    8 of 8 file-first replies were forced followups; only the constructor
+    followup was 8192 chars; the other seven were 194–6038; and no followup
+    finish_reason existed (why followup_meta ships). The fold under test is
+    that tagged followup rows do not inflate summarize_capped's denominator
+    — 8 of 8 calls, plus a separate cut count of 5. The 82157-shaped
+    control (8 followups, no followup_meta) is
+    `test_recorded_followups_without_followup_meta_count_as_zero_cuts`."""
     with collect_stream_meta() as rows:
         for _ in range(8):
             record_stream_meta({"finish_reason": "length", "stop": None, "followup": True})
@@ -80,6 +86,18 @@ def test_followup_rows_fold_separately_and_never_inflate_the_reply_total() -> No
         assert summarize_followup_cut(rows) == 5
         assert all(r["kind"] == "followup" for r in rows[8:])
         assert all("kind" not in r for r in rows[:8])
+
+
+def test_recorded_followups_without_followup_meta_count_as_zero_cuts() -> None:
+    """The 82157 shape that actually sat on disk: 8 of 8 stream_meta rows
+    followup=True, and no followup_meta event at all. summarize_followup_cut
+    is 0 — the cut count was unrecordable, which is why the event ships.
+    summarize_capped still reads 8 of 8 (one row per CALL)."""
+    with collect_stream_meta() as rows:
+        for _ in range(8):
+            record_stream_meta({"finish_reason": "length", "stop": None, "followup": True})
+        assert summarize_capped(rows) == (8, 8)
+        assert summarize_followup_cut(rows) == 0
 
 
 def test_an_untagged_followup_row_would_inflate_the_total() -> None:

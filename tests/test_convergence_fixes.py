@@ -174,7 +174,9 @@ def test_gen_tests_sibling_parsing_and_test_file_classification(tmp_path: Path) 
                 "x.gen_tests_1.txt", "x.gen_tests_a.rs"):
         assert pipeline._match_gen_tests_sibling(bad) is None, bad
     assert pipeline._is_gen_tests_file("error.gen_tests_12.rs")
+    assert pipeline._is_gen_tests_file("lib_gen_1.rs")
     assert not pipeline._is_gen_tests_file("error.rs")
+    assert not pipeline._is_gen_tests_file("test_downcast.rs")
     # is_test_file still classifies siblings as test files (write-protection
     # sets rely on it); task0c's harness loop uses its own protected-only filter.
     sib = tmp_path / "src" / "error.gen_tests_1.rs"

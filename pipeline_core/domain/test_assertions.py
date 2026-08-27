@@ -26,9 +26,10 @@ any of them. This one reads each `#[test]` item and records:
 
 Legality: every record is an OBSERVABLE the test already asserts — the same
 class as the assertion itself, never a body (Hard Rule 11). The pipeline's
-own generated tests (`*.gen_tests_*.rs`) are refused by name: they were
-written against the private layout and would pin the reconstruction to the
-original's internals.
+own generated tests (`*.gen_tests_*.rs` siblings and `tests/{stem}_gen_{N}.rs`
+integration files) are refused by name: they were written against a tree
+the reconstruction is free to redesign, and harvesting them would pin the
+suite to itself.
 
 Scanning is structural (bracket depth, string/char literals, comments), not
 regex: the arguments of `assert_eq!` span lines and carry nested calls,
@@ -48,11 +49,15 @@ from pipeline_core.domain.behaviour import (
     OutcomeKind,
     classified,
 )
+from pipeline_core.domain.generation import is_claimed_pipeline_gen_test
 from pipeline_core.domain.refill_evidence import test_item_source
 from pipeline_core.domain.rust_idents import fn_decl_names
 from pipeline_core.domain.rust_scan import attributed_test_fn_names
 
 GIVEN_CAP = 2000
+# Sibling-name marker kept for callers that skip `*.gen_tests_*.rs` by
+# substring. Integration files use `{stem}_gen_{N}.rs` — see
+# `is_pipeline_gen_test_name`.
 GEN_TESTS_MARKER = ".gen_tests_"
 
 _IDENT_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -604,11 +609,15 @@ def harvest_test_assertion_behaviours(
     `source_ref` = `<file>::<test>`, id = `testassert::<file>::<test>::<i>`,
     provenance HARVESTED, fence RUN, `klass` by `classify_behaviour`.
 
-    A `source_file` naming a pipeline-generated sibling (`*.gen_tests_*.rs`)
-    yields nothing: those tests were authored against the private layout.
+    A `source_file` naming a pipeline-generated test (`*.gen_tests_*.rs`, or
+    a `tests/{stem}_gen_{N}.rs` that carries the writer origin marker)
+    yields nothing: those tests were authored against a tree the
+    reconstruction is free to redesign. An authored file whose name merely
+    parses as `{stem}_gen_{N}` is harvested — it is the crate's oracle.
     `default_cluster` is the crate's default cluster name for the CFG_WORLD
     class; None means "this cluster" (nothing is classified CFG_WORLD)."""
-    if GEN_TESTS_MARKER in source_file:
+    name = source_file.rsplit("/", 1)[-1]
+    if is_claimed_pipeline_gen_test(name, test_src):
         return []
     consts = string_consts(test_src)
     helpers = asserting_helper_names(test_src)

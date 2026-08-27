@@ -30,7 +30,9 @@ from pipeline_core.domain.authored_layout import (
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import (
+    COMPONENT_BEHAVIOUR_CAP,
     behaviour_class_name,
+    class_rank,
     select_component_behaviours,
 )
 from pipeline_core.domain.failure_classification import first_diagnostic
@@ -370,13 +372,17 @@ def author_layout(
             continue
         anchors = _public_anchors(surface, comp)
         uids = component_uids(comp)
-        behaviours = select_component_behaviours(
+        matched = select_component_behaviours(
             behaviour_specs, component_names=names,
-            public_types=_pinned_public_types(surface, comp))
+            public_types=_pinned_public_types(surface, comp), cap=None)
+        behaviours = matched[:COMPONENT_BEHAVIOUR_CAP]
         if behaviour_specs:
+            omitted = _omitted_behaviour_classes(matched, behaviours)
+            extra = (f"; cap omitted {omitted} of {len(matched)}"
+                     if omitted else "")
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
                      f"{len(behaviours)} behaviour(s) in the authoring "
-                     f"prompt ({_behaviour_breakdown(behaviours)})")
+                     f"prompt ({_behaviour_breakdown(behaviours)}){extra}")
         # snapshot the pristine skeleton files this component touches, so a
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
@@ -757,6 +763,32 @@ def _behaviour_breakdown(behaviours: Sequence[BehaviourSpec]) -> str:
         k = behaviour_class_name(b).lower()
         counts[k] = counts.get(k, 0) + 1
     return ", ".join(f"{k} {n}" for k, n in counts.items()) or "none"
+
+
+def _omitted_behaviour_classes(
+    matched: Sequence[BehaviourSpec], kept: Sequence[BehaviourSpec],
+) -> str:
+    """`exact_format 35, bounded_resource 4, other 13` — classes present in
+    the uncapped match and absent from the capped prompt, in MUST order.
+
+    The [t1.5] line used to print only the kept breakdown, so a cap of 40
+    on the live Error/vtable component (IDENTITY 24, EXACT_FORMAT 51,
+    BOUNDED_RESOURCE 4, OTHER 13) logged `identity 24, exact_format 16`
+    and hid that the whole 40-byte-buffer / whitespace-fallback class
+    was cut. The prompt already says `(+N more)`; this is the operator
+    line that names WHICH classes those N were."""
+    m: dict[str, int] = {}
+    k: dict[str, int] = {}
+    for b in matched:
+        n = behaviour_class_name(b)
+        m[n] = m.get(n, 0) + 1
+    for b in kept:
+        n = behaviour_class_name(b)
+        k[n] = k.get(n, 0) + 1
+    parts = [f"{n.lower()} {m[n] - k.get(n, 0)}"
+             for n in sorted(m, key=class_rank)
+             if m[n] - k.get(n, 0) > 0]
+    return ", ".join(parts)
 
 
 def _calibrated_pin_probe(

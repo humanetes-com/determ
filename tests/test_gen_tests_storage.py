@@ -14,6 +14,7 @@ from pipeline_core.adapters.gen_tests_storage import (
     read_oracle_sibling_sources,
     revert_gen_tests_pass,
     strip_all_gen_tests_artifacts,
+    write_gen_tests_integration,
     write_gen_tests_pass,
 )
 from pipeline_core.domain.generation import (
@@ -165,6 +166,42 @@ def test_strip_all_gen_tests_artifacts(tmp_path: Path) -> None:
     assert strip_all_gen_tests_decls(clean) == clean
 
 
+def test_strip_all_gen_tests_artifacts_unlinks_this_stems_integration_files(
+        tmp_path: Path) -> None:
+    """Harness pre-clean / last-resort strip must own `tests/{stem}_gen_N.rs`
+    the pipeline wrote (origin marker), the same way it owns leftover siblings.
+    A different stem's file, an authored `tests/test_*.rs`, and an authored
+    file whose name merely parses as `{stem}_gen_{N}` stay — those are not
+    this src file's artefacts."""
+    from pipeline_core.domain.generation import as_integration_test
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "x"\nversion = "0.0.0"\nedition = "2021"\n',
+        encoding="utf-8")
+    src = tmp_path / "src" / "lib.rs"
+    src.parent.mkdir()
+    src.write_text(
+        'pub fn x() {}\n\n#[path = "lib.gen_tests_2.rs"]\nmod gen_tests_2;\n',
+        encoding="utf-8")
+    (src.parent / "lib.gen_tests_2.rs").write_text("// sibling\n", encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    ours = tests / "lib_gen_1.rs"
+    ours.write_text(as_integration_test("#[test] fn ours() {}\n", crate="x"),
+                    encoding="utf-8")
+    other_stem = tests / "error_gen_1.rs"
+    other_stem.write_text("#[test] fn other() {}\n", encoding="utf-8")
+    authored = tests / "test_downcast.rs"
+    authored.write_text("#[test] fn oracle() {}\n", encoding="utf-8")
+    name_collision = tests / "lib_gen_9.rs"
+    name_collision.write_text("#[test] fn authored_lookalike() {}\n", encoding="utf-8")
+    count = strip_all_gen_tests_artifacts(src)
+    assert count == 2
+    assert not ours.exists()
+    assert not (src.parent / "lib.gen_tests_2.rs").exists()
+    assert other_stem.exists() and authored.exists() and name_collision.exists()
+    assert "mod gen_tests_2" not in src.read_text(encoding="utf-8")
+
+
 # ── read_oracle_sibling_sources ──────────────────────────────────────────────
 # The layout phase reads these to learn which member paths the crate's own
 # write-protected tests take, so an authored private layout cannot rename a
@@ -197,6 +234,43 @@ def test_read_oracle_sibling_sources_skips_the_working_trees(tmp_path: Path) -> 
         (root / d).mkdir(parents=True)
         (root / d / "error.gen_tests_3.rs").write_text("copy\n", encoding="utf-8")
     assert list(read_oracle_sibling_sources(root)) == ["src/error.gen_tests_3.rs"]
+
+
+def test_write_gen_tests_integration_does_not_touch_src(tmp_path: Path) -> None:
+    src = tmp_path / "src" / "lib.rs"
+    src.parent.mkdir()
+    original = "pub fn x() {}\n"
+    src.write_text(original, encoding="utf-8")
+    dest = write_gen_tests_integration(
+        tmp_path, src,
+        "#[cfg(test)]\nmod gen_tests_1 {\n    use super::*;\n    #[test]\n    fn t() {}\n}",
+        crate="demo", allow_line="#[allow(unused)]", pass_n=1)
+    assert dest == tmp_path / "tests" / "lib_gen_1.rs"
+    body = dest.read_text(encoding="utf-8")
+    assert "use demo::*;" in body and "use super::*;" not in body
+    assert "mod gen_tests_1" not in body
+    assert "#![allow(unused)]" in body
+    from pipeline_core.domain.generation import PIPELINE_GEN_TEST_ORIGIN
+    assert PIPELINE_GEN_TEST_ORIGIN in body
+    assert src.read_text(encoding="utf-8") == original
+
+
+def test_next_n_counts_integration_files_and_read_all_concatenates_them(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.generation import as_integration_test
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "x"\nversion = "0.0.0"\nedition = "2021"\n',
+        encoding="utf-8")
+    src = tmp_path / "src" / "lib.rs"
+    src.parent.mkdir()
+    src.write_text("pub fn x() {}\n", encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "lib_gen_2.rs").write_text(
+        as_integration_test("#[test] fn integ() {}\n", crate="x"), encoding="utf-8")
+    assert next_gen_tests_n(src) == 3
+    out = read_all_gen_tests(src)
+    assert "tests/lib_gen_2.rs" in out and "fn integ" in out
 
 
 def test_read_oracle_sibling_sources_on_a_missing_project_is_empty(

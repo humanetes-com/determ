@@ -109,6 +109,7 @@ from pipeline_core.domain.refill_evidence import (
     collect_refill_evidence,
     container_header,
     escalated_refill_names,
+    history_for_block,
     inferred_refill_names,
     pinned_observables_from_tests,
     render_refill_evidence,
@@ -178,6 +179,32 @@ from pipeline_core.prompts.fix_prompts import (
 )
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
+
+# The escalated followup's thinking reserve. Default off: Muse@high finishes
+# at p90 73 718 reasoning chars against request_max = VLLM_THINKING_BUDGET +
+# VLLM_CONTENT_BUDGET (8192+8192 live). Turning this on at that size is the
+# starved-rung class that emptied the constructor main stream on run
+# `82157-476ddc16` (`finish_reason=length` at 71 584 chars, then
+# `fu.result or result` → EMPTY_RESPONSE). Hold until
+# `scripts/measure_muse_reasoning.sh` places the reserve above that p90.
+_FOLLOWUP_THINK_ENV = "PHASE_C_FOLLOWUP_THINK"
+
+
+def followup_think_env_on() -> bool:
+    """Whether `PHASE_C_FOLLOWUP_THINK` asks for the reserve. Unset / 0 / false
+    is off — a cold launch must not ship the starved rung."""
+    return os.getenv(_FOLLOWUP_THINK_ENV, "0").strip().lower() not in (
+        "", "0", "false", "off")
+
+
+def escalated_followup_think(grade_on: object) -> bool:
+    """Thinking reserve on the forced followup: only when this prompt carries
+    an escalated grade AND the env switch is on.
+
+    The two fill sites used to pass `followup_think=bool(_grade_parts)` with
+    no off switch, so a cold launch stamped that into `code_id`. Accessor
+    and stub calls stay on today's no-think followup either way."""
+    return bool(grade_on) and followup_think_env_on()
 
 
 def _panic_sites_of(raw: Sequence[str]) -> dict[str, tuple[str, int]]:
@@ -384,6 +411,47 @@ def cluster_scoped_splice(
     return _guarded
 
 
+def file_first_guidance_keys(
+    file_rel: str,
+    blocks: Sequence[ImplBlock],
+    extra_plans: Sequence[Any] = (),
+) -> tuple[tuple[str, str, str], ...]:
+    """Retro-store lookups file-first must screen: the `*impl*` record per
+    block AND each fill-plan unit (fn_name + container) the per-fn route
+    already stamps.
+
+    File-first used to look up only `file::*impl*::container`. The live
+    store (2026-08-26) held 42 records, 32 of them `*impl*` and 10 keyed
+    like the per-fn route (`construct_from_std` under `impl Error`, …).
+    Those 10 could neither honour nor poison the constructor prompt
+    because this route never asked for them. `extra_plans` are the free-fn
+    / installable BlockFillPlan lines of the same file."""
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(file: str, fn: str, container: str) -> None:
+        key = (file, fn, container)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+
+    for b in blocks:
+        add(b.file, "*impl*", b.container)
+        for m in (*b.stub_members, *b.refill_members):
+            add(b.file, m.fn_name, b.container)
+    for p in extra_plans:
+        header = getattr(p, "header", "") or ""
+        for n in (
+            *getattr(p, "stubs", ()),
+            *getattr(p, "refills", ()),
+            *getattr(p, "escalated", ()),
+            *getattr(p, "installable", ()),
+        ):
+            if n:
+                add(file_rel, n, header)
+    return tuple(out)
+
+
 def fill_impl_blocks(
     deps: ImplFillDeps,
     project_dir: Path,
@@ -406,6 +474,18 @@ def fill_impl_blocks(
     # `installable_fns` asks what the fire MEASURED; `escalated_keys` stays
     # batch-scoped for the prompt grade and the landed-change audit.
     escalated_measured: frozenset[FnLocator] = frozenset(),
+    # Prior FLAT tries of dispatched units, from the proven-body ledger.
+    # Threaded from `phase_c_tdd._ledger_entries` so `render_refill_evidence`
+    # can name the runs that rewrote a body identically. Default empty: a
+    # caller that does not pass it (fn_walk, tests) leaves the prompt
+    # byte-identical to the pre-history render.
+    ledger_entries: Sequence[Any] = (),
+    # Fingerprint of the oracle scoring this tree, same value the ledger
+    # stamps on every row this iteration. `try_history` refuses a row
+    # graded under another (including the empty fingerprint of a row
+    # written before the field). Default empty: no history line, prompt
+    # byte-identical to the pre-history render.
+    oracle_fp: str = "",
     tdd_test_cmd: str | None = None,
     parallelism: int = 1,
     crash_evidence: dict[FnLocator, str] | None = None,
@@ -568,6 +648,15 @@ def fill_impl_blocks(
     # charging keys on this, so a member skipped by a refusal gate is spared
     # the strike a member that was tried and failed earns.
     dispatched_keys: set[FnLocator] = set()
+    # Units spliced then restored to the pre-fill snapshot (peel / compile /
+    # U2 / regression). The TDD audit's FLAT arm subtracts this set so a
+    # reverted fill is not recorded as "the model returned this body".
+    reverted_keys: set[FnLocator] = set()
+
+    def _note_reverted(file_rel: str, names: Sequence[str]) -> None:
+        with _counters_lock:
+            reverted_keys.update(FnLocator(file_rel, n) for n in names if n)
+
     # One entry per block that LANDED, carrying the still-stubbed sites that
     # held its tests (empty when the block was judged on its own merits). Read
     # together at the end of the sweep: when one site blocked every landed
@@ -702,14 +791,16 @@ def fill_impl_blocks(
         """The shared ask seam: pull round-trips when enabled, plain ask
         otherwise. Deliverable-first — FN bodies short-circuit.
 
-        `followup_think` is the escalated grade's completion policy: on the
-        strength dialect the thinking-exhausted followup otherwise runs at
-        the lowest rung with no thinking reserve, and on run `82157-476ddc16`
-        (2026-08-26) every one of the 8 file-first replies — the constructor
-        rewrite included — was written by that followup (guard
+        `followup_think` is the escalated grade's completion policy, gated
+        by `PHASE_C_FOLLOWUP_THINK` (default off). On the strength dialect
+        the thinking-exhausted followup otherwise runs at the lowest rung
+        with no thinking reserve, and on run `82157-476ddc16` (2026-08-26)
+        every one of the 8 file-first replies — the constructor rewrite
+        included — was written by that followup (guard
         `thinking_len=71584 result_len=8192`). Accessor and stub calls keep
-        today's followup; only a prompt whose write list carries an
-        escalated grade asks for the reserve and the ON rung."""
+        today's followup; an escalated write list asks for the reserve only
+        when the env switch is on (after the reserve sits above Muse@high's
+        measured p90)."""
         if not _pulls_on:
             return str(ask(prompt, model=_TASK2_MODEL,
                            followup_think=followup_think))
@@ -889,7 +980,10 @@ def fill_impl_blocks(
             _impl_block_id(b.file, b.container):
                 collect_refill_evidence(b, fblocks, _frontier_tests,
                                         escalated=escalated_keys,
-                                        read_source=_read_source)
+                                        read_source=_read_source,
+                                        history=history_for_block(
+                                            b, ledger_entries,
+                                            oracle_fp=oracle_fp))
             for b in fblocks}
         # …capped by distinct FILES, not by leaf names (`attributed_test_blocks`
         # carries the measurement).
@@ -1177,6 +1271,34 @@ def fill_impl_blocks(
                 writable_fns=frozenset(
                     n for p in (*_free_plan, *_block_plans, *_extra_plans)
                     for n in (*p.stubs, *p.refills)))
+        # Screen every retro key this prompt's units can honour: the *impl*
+        # record per block AND each fill-plan unit the per-fn route stamps.
+        # Honour/retire lines keep the STORE key so a grep lands on the
+        # record that steered this prompt. Duplicate texts (the same lesson
+        # under two keys) join once.
+        _file_retro_parts: list[str] = []
+        _seen_retro: set[str] = set()
+        _by_container = {b.container: b for b in fblocks}
+        for _rf, _rfn, _rcont in file_first_guidance_keys(
+                file_rel, fblocks, extra_plans=(*_free_plan, *_extra_plans)):
+            _fk = _retro_key(_rf, _rfn, _rcont)
+            _frec = retros_cache.get(_fk, {})
+            _blk = _by_container.get(_rcont)
+            _fverdict = screen_guidance(
+                _frec, snapshot,
+                evidence=ConvictionEvidence(
+                    _answers_for_block(_blk) if _blk is not None else frozenset()),
+                anchor_types=anchor_types_for_container(_rcont),
+                cluster=cluster_name, cfg_dead=_cfg_dead_fns(_rf))
+            if (_hline := honoured_guidance_line(_fk, _frec, _fverdict.text)):
+                _log(f"  {_hline}")
+            if (_rline := retired_guidance_line(_fk, _frec, _fverdict)):
+                _log(f"  {_rline}")
+            _text = _fverdict.text.strip()
+            if _text and _text not in _seen_retro:
+                _seen_retro.add(_text)
+                _file_retro_parts.append(_fverdict.text)
+        _file_retro = "\n\n".join(_file_retro_parts)
         prior_error = ""
         _prev_prompt: str | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
@@ -1194,6 +1316,7 @@ def fill_impl_blocks(
                                 _bypass_evidence) if s),
                 blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
                 crash_evidence=_file_crash,
+                retrospective_guidance=_file_retro,
                 module_name=module_name, cluster_name=cluster_name,
                 gotchas=_gotchas_summary(), types_section=_file_types,
                 invariants_section=invariants_section)
@@ -1228,7 +1351,7 @@ def fill_impl_blocks(
             attempts_total += 1
             try:
                 _file_reply = _ask_fill(
-                    prompt, followup_think=bool(_grade_parts))
+                    prompt, followup_think=escalated_followup_think(_grade_parts))
                 parsed = extract_fn_bodies(_file_reply)
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
@@ -1437,6 +1560,7 @@ def fill_impl_blocks(
                     _log(f"  [phase-c/file] {glabel}: nothing spliced — "
                          "falling back to per-block fills.")
                     return
+                _attempted_names = [b.fn_name for b in _landed]
                 rc, cargo_out, _diags = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
                 if rc != 0:
@@ -1469,6 +1593,7 @@ def fill_impl_blocks(
                         cargo_out, _diags = _p_out, list(_p_diags)
                         _landed = list(_peel.kept)
                         spliced_now = len(_landed)
+                        _note_reverted(file_rel, _peel.reverted)
                         _log(f"  [phase-c/file] {glabel}: PEELED "
                              f"{len(_peel.reverted)} body(ies) the compiler "
                              f"blamed ({', '.join(sorted(_peel.reverted))}) — "
@@ -1663,6 +1788,7 @@ def fill_impl_blocks(
                         model_calls=_attempt, route="file")
                     return
                 file_path.write_text(snapshot, encoding="utf-8")
+                _note_reverted(file_rel, _attempted_names)
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
@@ -1927,7 +2053,10 @@ def fill_impl_blocks(
         # `test_iter`/`test_len`/`test_rev` (run `902902-daee577d`).
         _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests,
                                               escalated=escalated_keys,
-                                              read_source=_read_source)
+                                              read_source=_read_source,
+                                              history=history_for_block(
+                                                  block, ledger_entries,
+                                                  oracle_fp=oracle_fp))
         _inferred_refill = inferred_refill_names(_refill_evs)
         # Capped by distinct FILES, as on the file route.
         test_blocks = attributed_test_blocks(
@@ -2152,7 +2281,7 @@ def fill_impl_blocks(
             )
             try:
                 response = _ask_fill(
-                    prompt, followup_think=bool(_esc_targets))
+                    prompt, followup_think=escalated_followup_think(_esc_targets))
             except Exception as e:
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
                 return FixOutcome("stop")
@@ -2223,6 +2352,7 @@ def fill_impl_blocks(
                              f"raw_canon={_db.attr_canon!r} "
                              f"target_canon={target_canon!r}")
                 spliced_now = 0
+                _impl_spliced: list[str] = []
                 refusals: list[str] = []
                 # Refill members are already-filled (not `unimplemented!()`) —
                 # the splice must be told to overwrite a non-stub body for
@@ -2258,6 +2388,7 @@ def fill_impl_blocks(
                     )
                     if ok:
                         spliced_now += 1
+                        _impl_spliced.append(fn_data["fn_name"])
                         if reason == "ok_xml_unescaped":
                             _log(f"  [phase-c/impl] {block_id}: "
                                  f"`{fn_data['fn_name']}` landed only after "
@@ -2376,6 +2507,7 @@ def fill_impl_blocks(
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
                     file_path.write_text(snapshot, encoding="utf-8")
+                    _note_reverted(block.file, _impl_spliced)
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
                          f"fn(s) — regressed sibling test(s): "
                          f"{_cmp.summary} (attempt {fix_attempt}).")
@@ -2582,6 +2714,7 @@ def fill_impl_blocks(
                         file_path.read_text(encoding="utf-8", errors="replace"),
                         cur_metric)
                 file_path.write_text(snapshot, encoding="utf-8")
+                _note_reverted(block.file, _impl_spliced)
                 return FixOutcome("failed", err_sig=cur_err_sig,
                                    metric=cur_metric)
 
@@ -3175,4 +3308,5 @@ def fill_impl_blocks(
         impls_filled=impls_filled,
         impls_failed=impls_failed,
         dispatched_fns=tuple(sorted(dispatched_keys)),
+        reverted_fns=tuple(sorted(reverted_keys)),
     )

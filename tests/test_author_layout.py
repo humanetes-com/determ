@@ -16,6 +16,7 @@ from pipeline_core.application.author_layout import (
     component_outcome,
 )
 from pipeline_core.domain.behaviour import (
+    BehaviourClass,
     BehaviourSpec,
     BehaviourSubKind,
     ObservableOutcome,
@@ -1015,9 +1016,42 @@ def test_behaviour_suite_reaches_the_authoring_prompt_and_is_logged():
     assert "size_of::<Error>()" not in section
     assert any("('ErrorImpl',): 1 behaviour(s) in the authoring prompt (identity 1)" in m
                for m in d.logs), d.logs
+    assert not any("cap omitted" in m for m in d.logs)
     # control
     d2 = _Deps(_GOOD, [True])
     author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
                   select_pins=_has_pins, symbol_inventory="Box", deps=d2.deps())
     assert header not in d2.prompts[0]
     assert not any("behaviour(s) in the authoring prompt" in m for m in d2.logs)
+
+
+def test_authoring_log_names_classes_the_cap_omitted():
+    """Cap 40 on 40 exact-format + 4 bounded-resource matching ErrorImpl
+    keeps the exact-format slice and drops the entire BOUNDED_RESOURCE
+    class (the 40-byte-buffer / whitespace-fallback family). The prompt
+    already says `(+N more)`; the [t1.5] line must name the omitted
+    class so an operator reading the kept breakdown can see the cut.
+    Control: the existing one-identity suite still logs no omitted
+    clause (asserted in test_behaviour_suite_reaches_the_authoring_prompt)."""
+    exact = [
+        BehaviourSpec(
+            behaviour_id=f"fmt-{i}", given="",
+            when=f"let e = ErrorImpl; format!(\"{{e}}\") {i}",
+            then=ObservableOutcome.display(str(i)),
+            subkind=BehaviourSubKind.OUTCOME)
+        for i in range(40)]
+    bounded = [
+        BehaviourSpec(
+            behaviour_id=f"buf-{i}", given="",
+            when=f"let e = ErrorImpl; e.to_string().len() < {40 + i}",
+            then=ObservableOutcome.display("x"),
+            subkind=BehaviourSubKind.OUTCOME,
+            klass=BehaviourClass.BOUNDED_RESOURCE)
+        for i in range(4)]
+    d = _Deps(_GOOD, [True])
+    author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
+                  select_pins=_has_pins, symbol_inventory="Box", deps=d.deps(),
+                  behaviour_specs=exact + bounded)
+    line = next(m for m in d.logs if "behaviour(s) in the authoring prompt" in m)
+    assert "40 behaviour(s) in the authoring prompt (exact_format 40)" in line
+    assert "cap omitted bounded_resource 4 of 44" in line

@@ -135,10 +135,10 @@ def test_runtime_gate_runs_only_this_block_and_judges_it() -> None:
         return SimpleNamespace(returncode=1, stdout=FAILED_OUTPUT, stderr="")
 
     adm = _engine_runtime_gate(
-        project_dir=Path("."), module_name="crate_x", pass_n=2, block=BLOCK,
+        project_dir=Path("."), module_name="crate_x", test_bin="lib_gen_2",
+        block=BLOCK,
         subprocess=SimpleNamespace(run=_run), cargo_env=lambda: {}, timeout=60)
-    assert calls[0][:4] == ["cargo", "test", "-p", "crate_x"]
-    assert "gen_tests_2::" in calls[0]
+    assert calls[0][:6] == ["cargo", "test", "-p", "crate_x", "--test", "lib_gen_2"]
     assert not adm.admitted
 
 

@@ -94,6 +94,15 @@ def compile_skeleton_check(
     feed the model WHAT failed instead of a bare "did not compile" (feedback
     fidelity). rustc puts the primary diagnostics first — keep the head.
 
+    Static layout pins (repr, size, NPO, autotraits) are compile-gated by
+    installing a probe into ``lib.rs`` (`write_pin_probe` /
+    `domain.layout_probe`) BEFORE this check runs, so ``--lib`` is the
+    owner. They are not a test-target compile: the pins live in ``tests/``
+    as authored integration tests, and an absolute ``--all-targets`` gate
+    would reject every stub skeleton. A probe that fails calibration on the
+    frozen scaffold disables pin gating (fail-open); see
+    `author_layout._calibrate_pin_probe`.
+
     Takes the whole :class:`BuildCluster`, never a loose env mapping: a dict of
     env vars cannot express "this cluster needs the nightly toolchain", so a
     mapping-shaped parameter silently drops it. Compiling anyhow's nightly
