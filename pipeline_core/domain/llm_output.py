@@ -982,6 +982,39 @@ def extract_fn_bodies(text: str) -> list[dict[str, Any]]:
     return out
 
 
+def salvage_complete_blocks(text: str) -> str:
+    """The longest prefix of a TRUNCATED reply that still ends on a closed
+    element — everything up to and including the last `</FN>` / `</FILE>`.
+    `""` when the reply closed nothing.
+
+    Why this exists rather than dropping a cut reply whole. The forced
+    followup writes the reply for 1 595 of the 1 596 followups on record,
+    so a rule that discards a cut followup discards the fill. A truncation
+    loses the LAST element and nothing before it: a 25-unit write list cut
+    after the 21st `</FN>` is 21 usable bodies plus a fragment, and
+    :func:`extract_fn_bodies` already drops the fragment. Keeping the closed
+    prefix is what the main stream has always effectively done (its
+    `llm/length_truncated` guard logs and splices); this makes the followup
+    path agree instead of being the strict one.
+
+    Conservative on purpose: the cut is taken at a WELL-FORMED closer even
+    though :func:`_find_fn_blocks` tolerates malformed ones, because the
+    element a truncation damaged is exactly the one whose closer is likely
+    malformed. A reply that closed nothing yields `""` — a mid-body cut of
+    a single element has no complete answer in it, and splicing half a body
+    is the failure this salvage must not reintroduce.
+    """
+    t = text or ""
+    if not t:
+        return ""
+    ends = []
+    for closer in ("</FN>", "</FILE>"):
+        i = t.rfind(closer)
+        if i != -1:
+            ends.append(i + len(closer))
+    return t[:max(ends)] if ends else ""
+
+
 def fn_tag_occurrences(text: str) -> int:
     """How many `<FN` tags the reply CONTAINS, parseable or not.
 

@@ -31,6 +31,7 @@ from pipeline_core.domain.authored_layout import (
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import (
     COMPONENT_BEHAVIOUR_CAP,
+    IDENTITY_CLASS,
     behaviour_class_name,
     class_rank,
     select_component_behaviours,
@@ -383,6 +384,23 @@ def author_layout(
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
                      f"{len(behaviours)} behaviour(s) in the authoring "
                      f"prompt ({_behaviour_breakdown(behaviours)}){extra}")
+            # The cap ranks MUST-classes first, so it truncates the tail —
+            # and the tail is a design choice only while IDENTITY survives
+            # it. An identity behaviour dropped by the cap is the ONE loss
+            # this section cannot absorb: the wrap-the-payload-and-key-the-
+            # wrapper layout satisfies every pin and every format string and
+            # is refuted only by an identity Then. Computed on the live
+            # stable Error/vtable component (34 names, 92 matched, cap 40):
+            # identity 24 all kept. A component that ever exceeds the cap in
+            # identity alone needs COMPONENT_BEHAVIOUR_CAP raised, not a
+            # quieter log — so say so at the point it happens.
+            if (_dropped_ident := _dropped_in_class(
+                    matched, behaviours, IDENTITY_CLASS)) > 0:
+                deps.log(f"  [t1.5] ⚠️  {surface.cfg_cluster}/{names}: the "
+                         f"behaviour cap ({COMPONENT_BEHAVIOUR_CAP}) dropped "
+                         f"{_dropped_ident} IDENTITY behaviour(s) — the class "
+                         f"that refutes a payload-wrapping layout. Raise "
+                         f"COMPONENT_BEHAVIOUR_CAP for this component.")
         # snapshot the pristine skeleton files this component touches, so a
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
@@ -763,6 +781,17 @@ def _behaviour_breakdown(behaviours: Sequence[BehaviourSpec]) -> str:
         k = behaviour_class_name(b).lower()
         counts[k] = counts.get(k, 0) + 1
     return ", ".join(f"{k} {n}" for k, n in counts.items()) or "none"
+
+
+def _dropped_in_class(
+    matched: Sequence[BehaviourSpec], kept: Sequence[BehaviourSpec],
+    class_name: str,
+) -> int:
+    """How many specs of `class_name` the cap removed. 0 when the class
+    survived whole, which is the expected reading."""
+    n_m = sum(1 for b in matched if behaviour_class_name(b) == class_name)
+    n_k = sum(1 for b in kept if behaviour_class_name(b) == class_name)
+    return max(0, n_m - n_k)
 
 
 def _omitted_behaviour_classes(

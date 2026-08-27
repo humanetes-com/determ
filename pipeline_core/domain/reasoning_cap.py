@@ -60,14 +60,56 @@ def summarize_capped(rows: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     return sum(1 for r in stream if is_reasoning_capped(r)), len(stream)
 
 
+def is_truncated_followup(row: Mapping[str, Any]) -> bool:
+    """A followup row whose reply is INCOMPLETE, by either mechanism.
+
+    Two of them, and they are not the same event: the server ran out of
+    tokens (`finish_reason == "length"`) or this client stopped reading
+    mid-reasoning at the char cap (`stop == "think_cap"`, `_consume` breaks
+    the stream). :func:`summarize_followup_cut` counts the first alone and
+    keeps that name — a server budget is what sizing `request_max` answers,
+    and a client break is not. Salvage has no such distinction:
+    `LLMController._followup` salvages on BOTH, because both leave a reply
+    whose last element is unfinished, so the fold that reports salvage must
+    cover both or it undercounts every think-capped followup. Invisible while
+    `PHASE_C_FOLLOWUP_THINK` is off (nothing arms the cap on the followup),
+    wrong the moment it is switched on — which is when the reading matters.
+    `stop == "closed"` is the StopDetector ending a FINISHED structure and is
+    neither."""
+    return (_is_followup_row(row)
+            and (str(row.get("finish_reason") or "") == "length"
+                 or str(row.get("stop") or "") == "think_cap"))
+
+
 def summarize_followup_cut(rows: Sequence[Mapping[str, Any]]) -> int:
-    """How many forced followups in the window were themselves cut at
-    `finish_reason == "length"` — the completion that wrote the reply on
-    record ran out of tokens too, so the reply is a truncation of a
-    truncation. Stream rows are ignored: their `finish_reason` is the MAIN
-    stream's, which `summarize_capped` already counts."""
+    """How many forced followups in the window ran out of SERVER tokens
+    (`finish_reason == "length"`) — the completion that wrote the reply on
+    record was itself budget-bound, so the reply is a truncation of a
+    truncation. A client-side `think_cap` break is a different event and is
+    not counted here (see :func:`is_truncated_followup`). Stream rows are
+    ignored: their `finish_reason` is the MAIN stream's, which
+    `summarize_capped` already counts."""
     return sum(1 for r in rows
                if _is_followup_row(r) and str(r.get("finish_reason") or "") == "length")
+
+
+def summarize_followup_salvage(rows: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
+    """`(cut, salvaged)` over the followup rows in the window.
+
+    `cut` is every TRUNCATED followup (:func:`is_truncated_followup` — server
+    budget or client think-cap break), which is a wider population than
+    :func:`summarize_followup_cut`'s server-budget count, because the
+    controller salvages both. `salvaged` is how many of those
+    still yielded a structurally closed prefix that was spliced — a cut whose
+    damage was the LAST element only. The pair is the reading the discard
+    rule needs: `cut` alone cannot tell "the completion budget is too small
+    and we are losing whole replies" from "it is too small and we are losing
+    one body of twenty-five". A row without `salvaged_chars` (written before
+    the field) counts as not salvaged, which is what it was."""
+    truncated = sum(1 for r in rows if is_truncated_followup(r))
+    salvaged = sum(1 for r in rows
+                   if is_truncated_followup(r) and int(r.get("salvaged_chars") or 0) > 0)
+    return truncated, salvaged
 
 
 def _record(data: Mapping[str, Any]) -> None:

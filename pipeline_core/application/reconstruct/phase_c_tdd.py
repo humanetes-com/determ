@@ -138,7 +138,7 @@ from pipeline_core.domain.plateau import (
 from pipeline_core.domain.reasoning_cap import (
     collect_stream_meta,
     summarize_capped,
-    summarize_followup_cut,
+    summarize_followup_salvage,
 )
 from pipeline_core.domain.refine import (
     Attempt,
@@ -4244,7 +4244,9 @@ def run_phase_c_tdd(
         # count: run `82157-476ddc16` (2026-08-26) had 8 of 8 file-first
         # replies written by the followup and no record of whether any of them
         # was itself cut — `llm.stream_meta` carries the main finish reason.
-        _fu_cut = summarize_followup_cut(_fill_meta)
+        # `(truncated, salvaged)`: truncated covers a server budget AND a
+        # client think-cap break, because the controller salvages both.
+        _fu_cut, _fu_salv = summarize_followup_salvage(_fill_meta)
         total_filled += sub.fns_filled
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
@@ -4372,7 +4374,9 @@ def run_phase_c_tdd(
                        for k in _batch_esc_reverted)[:12])
                    if _batch_esc_reverted else "")
                 + (f"; {_capped_n} of {_capped_m} fill replies reasoning-capped"
-                   + (f" ({_fu_cut} followup replies cut)" if _fu_cut else "")
+                   + (f" ({_fu_cut} followup replies truncated"
+                      + (f", {_fu_salv} salvaged to their last closed block"
+                         if _fu_salv else "") + ")" if _fu_cut else "")
                    if _capped_m else "")
                 + ".")
             deps.emit("phase_c.tdd.landed_change", data={
@@ -4435,12 +4439,15 @@ def run_phase_c_tdd(
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: "
                 f"{_capped_n} of {_capped_m} fill replies reasoning-capped"
-                + (f" ({_fu_cut} followup replies cut)" if _fu_cut else ""))
+                + (f" ({_fu_cut} followup replies truncated"
+                      + (f", {_fu_salv} salvaged to their last closed block"
+                         if _fu_salv else "") + ")" if _fu_cut else ""))
         if _capped_m:
             deps.emit("phase_c.batch.reasoning_capped", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "capped": _capped_n, "replies": _capped_m,
-                "followups_cut": _fu_cut})
+                "followups_truncated": _fu_cut,
+                "followups_salvaged": _fu_salv})
         # The landed record's lifetime is the pass's, exactly like the
         # cursor: a closed pass releases both (the audit above has already
         # reported this one), and the next pass accumulates fresh.

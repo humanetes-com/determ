@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from types import SimpleNamespace
 
+from pipeline_core.application.author_layout import _dropped_in_class
 from pipeline_core.domain.behaviour import (
     BehaviourClass,
     BehaviourSpec,
@@ -14,6 +15,7 @@ from pipeline_core.domain.behaviour import (
 )
 from pipeline_core.domain.behaviour_select import (
     COMPONENT_BEHAVIOUR_CAP,
+    IDENTITY_CLASS,
     MUST_CLASS_ORDER,
     behaviour_class_name,
     is_relevant,
@@ -192,3 +194,32 @@ def test_cap_of_40_on_the_error_component_shape_drops_the_whole_bounded_resource
     assert Counter(behaviour_class_name(s) for s in kept) == {
         "IDENTITY": 24, "EXACT_FORMAT": 16}
     assert "BOUNDED_RESOURCE" not in {behaviour_class_name(s) for s in kept}
+    # The cap truncates the TAIL. That is a design choice only while IDENTITY
+    # survives it: a wrap-the-payload-and-key-the-wrapper representation
+    # satisfies every layout pin and every format string, and an identity Then
+    # is the only class that refutes it. Asserted on THIS fixture — the one
+    # that goes through `select_component_behaviours` on the live component
+    # shape — because a hand-sliced list sorted by `class_rank` passes by
+    # construction and would fail on nothing.
+    assert _dropped_in_class(matched, kept, IDENTITY_CLASS) == 0
+    assert _dropped_in_class(matched, kept, "EXACT_FORMAT") == 35
+    assert _dropped_in_class(matched, kept, "BOUNDED_RESOURCE") == 4
+
+
+def test_identity_beyond_the_cap_is_reported_as_dropped() -> None:
+    """The case the warning exists for: MORE identity behaviours than the cap.
+    Nothing on the live tree produces this shape (the Error/vtable component
+    is 24 of 40), so it is asserted here rather than discovered in a run — if
+    a component ever does, the operator must raise COMPONENT_BEHAVIOUR_CAP
+    instead of shipping a prompt whose refuting class was silently trimmed.
+    Driven through `select_component_behaviours`, not a hand slice."""
+    specs = [_outcome(f"id-{i}", f"Error::msg(x).is::<T{i}>()",
+                      ObservableOutcome.downcast_ok(True))
+             for i in range(COMPONENT_BEHAVIOUR_CAP + 7)]
+    matched = select_component_behaviours(
+        specs, component_names=["Error"], public_types=[], cap=None)
+    kept = select_component_behaviours(
+        specs, component_names=["Error"], public_types=[],
+        cap=COMPONENT_BEHAVIOUR_CAP)
+    assert len(matched) == COMPONENT_BEHAVIOUR_CAP + 7
+    assert _dropped_in_class(matched, kept, IDENTITY_CLASS) == 7

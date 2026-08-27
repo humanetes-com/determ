@@ -22,6 +22,7 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     StaticAssertKind,
 )
+from pipeline_core.domain.behaviour_select import COMPONENT_BEHAVIOUR_CAP
 from pipeline_core.domain.layout_probe import LayoutProbe, build_field_path_probe
 from pipeline_core.domain.models import FieldRecord, TypeRecord
 from pipeline_core.domain.oracle_field_paths import FieldPath
@@ -1055,3 +1056,42 @@ def test_authoring_log_names_classes_the_cap_omitted():
     line = next(m for m in d.logs if "behaviour(s) in the authoring prompt" in m)
     assert "40 behaviour(s) in the authoring prompt (exact_format 40)" in line
     assert "cap omitted bounded_resource 4 of 44" in line
+    # …and a dropped tail class is an ORDINARY line. The alarm below is for
+    # the one class whose loss changes what a layout may be, so it must stay
+    # silent here or it means nothing when it fires.
+    assert not any("IDENTITY behaviour(s)" in m for m in d.logs)
+
+
+def test_authoring_warns_loudly_when_the_cap_drops_identity_behaviours():
+    """The cap ranks MUST-classes first, so it truncates the tail — and the
+    tail is a design choice only while IDENTITY survives it. A representation
+    that wraps the payload and keys the wrapper's own TypeId satisfies every
+    layout pin and every format string; an identity Then is the only class
+    that refutes it. So an identity behaviour lost to the cap is not an
+    omitted-class note, it is a stop-and-raise-the-cap event, and the [t1.5]
+    line says so where the operator reads it.
+
+    Driven through the real `author_layout` — the function that builds the
+    authoring prompt — because the warning's whole purpose is to reach that
+    log. Control: `test_authoring_log_names_classes_the_cap_omitted` above
+    drops 4 BOUNDED_RESOURCE and asserts this line does NOT appear. Live
+    shape (Error/vtable, 92 matched, cap 40, identity 24) produces neither
+    warning nor identity omission.
+
+    Nothing on the live tree makes this shape today; if a component ever
+    does, the cap is the thing to raise, not the log to quieten."""
+    identity = [
+        BehaviourSpec(
+            behaviour_id=f"id-{i}", given="",
+            when=f"let e = ErrorImpl; e.downcast_ref::<T{i}>()",
+            then=ObservableOutcome.downcast_ok(True),
+            subkind=BehaviourSubKind.OUTCOME)
+        for i in range(COMPONENT_BEHAVIOUR_CAP + 7)]
+    d = _Deps(_GOOD, [True])
+    author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
+                  select_pins=_has_pins, symbol_inventory="Box", deps=d.deps(),
+                  behaviour_specs=identity)
+    warn = next(m for m in d.logs if "IDENTITY behaviour(s)" in m)
+    assert "dropped 7 IDENTITY behaviour(s)" in warn
+    assert "COMPONENT_BEHAVIOUR_CAP" in warn
+    assert str(COMPONENT_BEHAVIOUR_CAP) in warn

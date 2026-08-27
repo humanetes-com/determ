@@ -92,6 +92,12 @@ def select_usage_examples(
 # prompt lists them: identity (what a downcast finds) is the class the wrapping
 # defect violates; exact text next; resource/option semantics after. Any other
 # class (layout pins, cfg-world, unclassified usage) ranks after these.
+# The class an identity Then belongs to. Named rather than spelled inline at
+# every reader: it is the one class whose loss changes what a layout may be —
+# a wrap-the-payload-and-key-the-wrapper representation satisfies every layout
+# pin and every format string and is refuted only by an identity outcome.
+IDENTITY_CLASS = "IDENTITY"
+
 MUST_CLASS_ORDER: tuple[str, ...] = (
     "IDENTITY", "TRAIT_OBJECT_IDENTITY", "EXACT_FORMAT", "BOUNDED_RESOURCE",
     "OPTION_SEMANTICS",

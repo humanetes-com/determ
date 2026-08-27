@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipeline_core.domain.llm_output import salvage_complete_blocks
 from pipeline_core.domain.reasoning_cap import record_followup_meta, record_stream_meta
 from pipeline_core.domain.text import PromptDigest
 
@@ -83,25 +84,43 @@ class _FollowupOutcome:
     reasoning (distinct from the main trace it was re-fed).
 
     `finish_reason` / `stop` are the followup stream's, never the main's.
-    A cut followup (`finish_reason == "length"` or `stop == "think_cap"`)
-    is recorded but not spliced: returning a truncated body as complete
-    is the same class as treating a length-hit main stream as a finished
-    reply. A network / input-too-long failure emits `finish_reason="error"`
-    so `summarize_followup_cut` (which keys on `"length"`) stays honest."""
+    A network / input-too-long failure emits `finish_reason="error"` so
+    `summarize_followup_cut` (which keys on `"length"`) stays honest.
+
+    A CUT followup (`finish_reason == "length"` or `stop == "think_cap"`)
+    is never returned whole — a half-written body spliced as a finished one
+    is the same class as treating a length-hit main stream as complete. It
+    is not discarded whole either: `result` then holds
+    :func:`salvage_complete_blocks` of the raw reply, the prefix ending on
+    the last closed `</FN>` / `</FILE>`, and `salvaged_chars` records how
+    much of `raw_chars` survived. The followup writes the reply for 1 595 of
+    the 1 596 followups on record, so discarding a cut one discards the
+    fill; keeping its closed prefix loses only the element the cut damaged.
+    `salvaged_chars == 0` with a nonempty `raw_chars` is a reply that closed
+    nothing — no usable answer, and `result` is `""`."""
 
     result: str = ""
     reasoning: str = ""
     finish_reason: str | None = None
     stop: str | None = None
+    raw_chars: int = 0
+    salvaged_chars: int = 0
+
+    @property
+    def cut(self) -> bool:
+        """The followup stream stopped on a budget, not on an answer."""
+        return self.finish_reason == "length" or self.stop == "think_cap"
 
     @property
     def complete(self) -> bool:
-        """True iff the followup finished a body the caller may splice."""
-        return (
-            bool(self.result)
-            and self.finish_reason != "length"
-            and self.stop != "think_cap"
-        )
+        """True iff the followup finished a body of its own accord."""
+        return bool(self.result) and not self.cut
+
+    @property
+    def spliceable(self) -> bool:
+        """True iff `result` is structurally whole and may replace the main
+        reply — a clean finish, or the closed prefix salvaged from a cut."""
+        return bool(self.result)
 
 
 def refed_reasoning_chars(reasoning_text: str, base_messages: list[dict[str, Any]],
@@ -178,8 +197,14 @@ class LLMController:
         # live during this call (not just after a cpt update lands).
         self._h.emit("vllm.budget", {"request_max": plan.request_max})
 
-        meta = StreamMeta()
-        cap: _Captured | None = None
+        # `cap` alone needs a pre-loop value: it is assigned only when
+        # `_consume` RETURNS, so a loop exit that is not that break would read
+        # it unbound. Binding an empty `_Captured()` is what lets the read
+        # below drop `assert cap is not None` — an assert is removed under
+        # `python -O`, i.e. absent from exactly the runs this must hold in.
+        # `meta` needs no such bind: it is assigned at the top of every
+        # iteration, before the stream runs.
+        cap = _Captured()
         for attempt in range(_MAX_ATTEMPTS):
             self._h.sock_open(f"{transport.served_model} think={enable_thinking} attempt={attempt}")
             meta = StreamMeta()
@@ -218,7 +243,6 @@ class LLMController:
                 transport.wait_until_ready()
                 continue
 
-        assert cap is not None
         result = transport.clean("".join(cap.content), model=model)
         reasoning_text = "".join(cap.reasoning)
 
@@ -262,11 +286,13 @@ class LLMController:
         if followup:
             fu = self._followup(transport, messages, reasoning_text, model, max_tokens,
                                 prompt_sha=prompt_sha, followup_think=followup_think)
-            # A cut or failed followup must not replace the main result: the
-            # recorded constructor reply on `82157-476ddc16` was this
-            # followup's (`result_len=8192` at `finish_reason=length`), and
-            # `fu.result or result` spliced that truncation as complete.
-            if fu.complete:
+            # A failed followup, or one that closed no element, must not
+            # replace the main result — `fu.result or result` used to splice
+            # a half-written body as a finished one. A CUT followup still
+            # contributes its closed prefix (`salvage_complete_blocks`),
+            # because this completion writes the reply for 1 595 of the
+            # 1 596 followups on record and dropping it whole drops the fill.
+            if fu.spliceable:
                 result = fu.result
 
         # Both traces are keyed on the sha of the string this call RETURNS —
@@ -367,9 +393,12 @@ class LLMController:
         inside a `request_max` that is the content budget alone, with no cap
         on that reasoning. Measured on run `82157-476ddc16`: the escalated
         constructor call (`49385be5…`) ran its main stream to `length` at
-        71 584 reasoning chars, and the 8 192-char reply on record was this
-        followup's (`[llm/followup] thinking_len=71584 result_len=8192`);
-        record-wide, 1 595 of 1 596 followup replies. With it True the
+        71 584 reasoning chars, and the reply on record was this followup's
+        (`[llm/followup] thinking_len=71584 result_len=8192`); record-wide,
+        1 595 of 1 596 followup replies. That 8 192 is CHARACTERS and the
+        followup's budget was 8 192 TOKENS — the reply carried 21 `<FN ` and
+        21 `</FN>` and ended on a closer, so it finished of its own accord
+        inside about a third of its budget. It was not starved. With True the
         followup gets the same reserve, rung and mid-stream cap as the main
         stream — a second full attempt that has the first attempt's trace.
 
@@ -390,8 +419,10 @@ class LLMController:
                     f"fu_max={fu_plan.request_max} think={followup_think}")
         self._h.sock_open(f"{transport.served_model}-followup think={followup_think}")
         self._h.sock_write("\n[FOLLOWUP — thinking budget exhausted, requesting code]\n")
-        meta = StreamMeta()
-        cap: _Captured | None = None
+        # See `run`: `cap` is assigned only on `_consume`'s return, so the
+        # pre-loop bind is what makes the post-loop read total without an
+        # `assert` that `python -O` would remove.
+        cap = _Captured()
         for attempt in range(_MAX_ATTEMPTS):
             meta = StreamMeta()
             try:
@@ -431,31 +462,50 @@ class LLMController:
                               f"attempt={attempt} real_input={exc.real_tokens}tok "
                               f"new_req_max={fu_plan.request_max}")
                 continue
-        assert cap is not None
-        result = transport.clean("".join(cap.content), model=model)
+        raw = transport.clean("".join(cap.content), model=model)
         fu_reasoning = "".join(cap.reasoning)
-        self._h.guard("llm/followup", f"model={model} thinking_len={len(reasoning_text)} result_len={len(result)}")
+        # A cut reply keeps only what it closed. `salvage_complete_blocks`
+        # returns the whole string when the cut landed on a closer, and `""`
+        # when the reply closed nothing — a mid-body truncation of a single
+        # element carries no usable answer.
+        was_cut = meta.finish_reason == "length" or cap.stop == "think_cap"
+        usable = salvage_complete_blocks(raw) if was_cut else raw
+        if was_cut and raw:
+            self._h.guard(
+                "llm/followup_cut",
+                f"model={model} finish={meta.finish_reason} stop={cap.stop} "
+                f"raw_chars={len(raw)} salvaged_chars={len(usable)} "
+                f"fn_blocks={usable.count('<FN ')}")
+        self._h.guard("llm/followup", f"model={model} thinking_len={len(reasoning_text)} result_len={len(usable)}")
         self._emit_followup_meta(
             prompt_sha=prompt_sha, model=model, finish_reason=meta.finish_reason,
-            result=result, fu_reasoning=fu_reasoning, reasoning_text=reasoning_text,
+            result=raw, fu_reasoning=fu_reasoning, reasoning_text=reasoning_text,
             messages=messages, fu_messages=fu_messages,
             request_max=fu_plan.request_max, followup_think=followup_think,
-            stop=cap.stop)
+            stop=cap.stop, salvaged_chars=len(usable) if was_cut else 0)
         return _FollowupOutcome(
-            result=result, reasoning=fu_reasoning,
-            finish_reason=meta.finish_reason, stop=cap.stop)
+            result=usable, reasoning=fu_reasoning,
+            finish_reason=meta.finish_reason, stop=cap.stop,
+            raw_chars=len(raw), salvaged_chars=len(usable) if was_cut else 0)
 
     def _emit_followup_meta(
         self, *, prompt_sha: str, model: str, finish_reason: str | None,
         result: str, fu_reasoning: str, reasoning_text: str,
         messages: list[dict[str, Any]], fu_messages: list[dict[str, Any]],
         request_max: int | None, followup_think: bool, stop: str | None,
+        salvaged_chars: int = 0,
     ) -> None:
+        """`result` is the RAW reply, so `content_chars` measures what the
+        stream produced; `salvaged_chars` is how much of it survived the cut
+        (0 when the reply was not cut). A reader can therefore tell a clean
+        finish from a cut that kept everything from a cut that kept nothing,
+        which `content_chars` alone never could."""
         fu_meta = {
             "prompt_sha": prompt_sha,
             "model": model,
             "finish_reason": finish_reason,
             "content_chars": len(result),
+            "salvaged_chars": salvaged_chars,
             "reasoning_chars": len(fu_reasoning),
             "reasoning_chars_refed": refed_reasoning_chars(
                 reasoning_text, messages, fu_messages),
