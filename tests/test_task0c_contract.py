@@ -200,7 +200,8 @@ class _Harness:
         )
         return Task0cDeps(**stub)
 
-    def phase_c(self, *, uncovered_line: int = 46, covered: int = 3) -> Any:
+    def phase_c(self, *, uncovered_line: int = 46, covered: int = 3,
+                hist: Task0cFileHistory | None = None) -> Any:
         files_data = [PerFileCoverage(
             abs_path=str(self.abs), path=list(self.abs.parts),
             traces=[{"line": uncovered_line, "stats": {"Line": 0}}],
@@ -208,7 +209,8 @@ class _Harness:
         return _run_phase_c(
             project_dir=self.ws, module_name="microcrate", module_dir=self.ws,
             project_context="", coverage_strategy="", attempt=1, coverage=30.0,
-            covered_lines=covered, files_data=files_data, hist=Task0cFileHistory(),
+            covered_lines=covered, files_data=files_data,
+            hist=hist if hist is not None else Task0cFileHistory(),
             ctx=_PhaseCCtx(deps=self.deps, current_cluster=None, cluster_label="stable",
                            split_n=self.split_n, allow_line="", prelude_block="",
                            prelude_names="",
@@ -459,3 +461,34 @@ def test_the_coverage_denominator_excludes_what_the_split_forbids_pinning(
                    capture_split=False)
     assert task0c_behaviour_coverage(off.ws, "microcrate", off.ws, off.deps) == (0, 1)
     assert task0c_behaviour_pass(off.ws, "microcrate", off.ws, off.deps) is True
+
+
+def test_a_pass_that_makes_no_model_call_over_reachable_lines_is_not_a_ceiling(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ceiling is a claim about the crate; "no model call" is a claim about
+    the pipeline, and they used to be the same branch.
+
+    On 2026-08-27 run `2881435-34981ab0` the split path dropped every reply, so
+    no call was recorded, and both passes over anyhow's `stable` cluster printed
+    `All files filtered (cfg/artifact) — no actionable uncovered lines` while
+    their own queue lines listed 119 actionable lines across 8 files. Two such
+    reports are CEILING_CONFIRM, and the cluster was sealed at 83.9%.
+
+    Driven here through the reachable version of the same state: the file is
+    already stalled, so the pass spends no model call while its uncovered line
+    is reachable. Asserted: the pass does NOT claim the cfg ceiling, says what
+    actually happened, and falls through to the stalled-files report — which is
+    the branch the false ceiling used to jump over. Pre-fix this returned
+    at_ceiling=True and never reached that report."""
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[], target=0.0, specs=())
+    hist = Task0cFileHistory()
+    hist.skipped_files.add(h.rel)
+    outcome = h.phase_c(hist=hist)
+
+    assert outcome.at_ceiling is False
+    assert not any("All files filtered (cfg/artifact)" in ln for ln in h.logs)
+    # The stalled-files report — the branch the false ceiling jumped over.
+    assert any("HARD BLOCK: all uncovered files are stalled" in ln for ln in h.logs)
+    assert any(f"{h.rel}: 1 uncovered lines" in ln for ln in h.logs)
+    assert outcome.kind == "return"
+    assert h.prompts == [] and h.parallel_prompts == []

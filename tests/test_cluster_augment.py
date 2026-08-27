@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.cluster_augment import AugmentContext, ClusterAugmentor
-from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.models import AugmentVerdict, BuildCluster
 
 
 def _cluster(name: str, **kw: Any) -> BuildCluster:
@@ -35,7 +35,7 @@ class FakeAdapter:
         self._behaviour_pass_result = behaviour_pass_result
         self.behaviour_passes: list[tuple[str, str]] = []
         self.behaviour_reads: list[tuple[str, str]] = []
-        self.cluster_sentinels: dict[tuple[str, str], float] = {}
+        self.cluster_sentinels: dict[tuple[str, str], AugmentVerdict] = {}
         self.module_sentinels: dict[str, float] = {}
         self.active: list[str | None] = []
         self.commits: list[str] = []
@@ -57,11 +57,16 @@ class FakeAdapter:
     def is_cluster_augmented(self, pd: Path, c: str, m: str) -> bool:
         return (c, m) in self.cluster_sentinels
 
-    def mark_cluster_augmented(self, pd: Path, c: str, m: str, cov: float) -> None:
-        self.cluster_sentinels[(c, m)] = cov
+    def cluster_augmented_verdict(self, pd: Path, c: str, m: str) -> AugmentVerdict | None:
+        return self.cluster_sentinels.get((c, m))
+
+    def mark_cluster_augmented(self, pd: Path, c: str, m: str, cov: float, *,
+                               reason: str = "", source_hash: str = "") -> None:
+        self.cluster_sentinels[(c, m)] = AugmentVerdict(cov, reason, source_hash)
 
     def cluster_augmented_value(self, pd: Path, c: str, m: str) -> float:
-        return self.cluster_sentinels.get((c, m), 0.0)
+        v = self.cluster_sentinels.get((c, m))
+        return v.coverage if v else 0.0
 
     def is_module_augmented(self, pd: Path, m: str) -> bool:
         return m in self.module_sentinels
@@ -145,7 +150,7 @@ def test_single_cluster_module_reaches_target_marks_both_sentinels() -> None:
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(100.0, 10, False, "")]})
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     # last cluster → both cluster + main sentinel written at the target.
-    assert fake.cluster_sentinels[("stable", "anyhow")] == 100.0
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 100.0
     assert fake.module_sentinels["anyhow"] == 100.0
     assert fake.commits == ["pipeline: task0c/stable — anyhow:100.0%"]
     # active cluster is set then cleared on exit.
@@ -168,7 +173,7 @@ def test_retry_then_done_clears_then_marks() -> None:
     fake.module_sentinels["anyhow"] = 80.0  # pretend a stale sentinel exists
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     assert fake.module_sentinels["anyhow"] == 100.0  # final mark wins
-    assert fake.cluster_sentinels[("stable", "anyhow")] == 100.0
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 100.0
 
 
 def test_blocked_reason_accepts_without_target() -> None:
@@ -176,7 +181,7 @@ def test_blocked_reason_accepts_without_target() -> None:
     fake = FakeAdapter(augment_script={
         ("stable", "anyhow"): [(62.0, 6, False, "protected test broken")]})
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
-    assert fake.cluster_sentinels[("stable", "anyhow")] == 62.0
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 62.0
     assert fake.module_sentinels["anyhow"] == 62.0
 
 
@@ -185,14 +190,15 @@ def test_ceiling_after_confirmed_passes_accepts() -> None:
     fake = FakeAdapter(augment_script={
         ("stable", "anyhow"): [(90.0, 9, True, ""), (90.0, 9, True, "")]})
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
-    assert fake.cluster_sentinels[("stable", "anyhow")] == 90.0
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 90.0
     assert fake.module_sentinels["anyhow"] == 90.0
 
 
 def test_pre_check_failure_zeros_all_modules() -> None:
     fake = FakeAdapter(augment_script={}, pre_check=False)
     _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["a", "b"]))
-    assert fake.cluster_sentinels == {("nightly", "a"): 0.0, ("nightly", "b"): 0.0}
+    assert {k: v.coverage for k, v in fake.cluster_sentinels.items()} == {
+        ("nightly", "a"): 0.0, ("nightly", "b"): 0.0}
     assert fake.module_sentinels == {"a": 0.0, "b": 0.0}  # last cluster → main sentinels too
 
 
@@ -202,8 +208,8 @@ def test_non_last_cluster_skips_main_sentinel() -> None:
         ("nightly", "anyhow"): [(100.0, 10, False, "")]})
     _augmentor(fake).run(_ctx(fake, [_cluster("stable"), _cluster("nightly")], ["anyhow"]))
     # main sentinel only written by the LAST cluster (nightly).
-    assert fake.cluster_sentinels[("stable", "anyhow")] == 100.0
-    assert fake.cluster_sentinels[("nightly", "anyhow")] == 100.0
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 100.0
+    assert fake.cluster_sentinels[("nightly", "anyhow")].coverage == 100.0
     assert fake.module_sentinels["anyhow"] == 100.0
     assert fake.active == ["stable", "nightly", None]
 
@@ -211,7 +217,7 @@ def test_non_last_cluster_skips_main_sentinel() -> None:
 def test_resume_recovers_missing_main_sentinel_on_last_cluster() -> None:
     fake = FakeAdapter(augment_script={})
     # cluster already done from a prior run, but the crash left no main sentinel.
-    fake.cluster_sentinels[("stable", "anyhow")] = 95.0
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(95.0, "done", "src-hash")
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     assert fake.module_sentinels["anyhow"] == 95.0  # recovered from the cluster value
 
@@ -268,3 +274,75 @@ def test_behaviour_rounds_skip_a_suite_with_nothing_pinnable_and_a_dead_cluster(
     dead = FakeAdapter(augment_script={}, pre_check=False, behaviour_readings=[(0, 4)])
     _augmentor(dead).run(_ctx(dead, [_cluster("nightly")], ["a"], behaviour_target_pct=50.0))
     assert dead.behaviour_reads == [] and dead.behaviour_passes == []
+
+
+# --- a give-up verdict is a claim about the code, not about the tree -----------
+#
+# Run 2881435-34981ab0 (2026-08-27) sealed anyhow's `stable` cluster at 83.9%
+# on a ceiling its own queue line contradicted (119 actionable uncovered lines
+# across 8 files). The commit that fixed the cause could not re-open it: the
+# sentinel recorded a bare number, and the only remover of a cluster sentinel is
+# the full --clean workspace wipe. What is asserted here is the plan's sentence —
+# a give-up verdict from pipeline code that is no longer on disk does not skip
+# the work — with the pre-fix sentinel shape as the negative control.
+
+_LIVE_CEILING_COV = 83.9   # tmp/anyhow/.cluster_augmented/stable__anyhow, 2026-08-27
+
+
+def test_a_give_up_verdict_from_other_code_re_augments_instead_of_skipping() -> None:
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
+        _LIVE_CEILING_COV, "ceiling", "the-code-that-produced-the-false-ceiling")
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))  # src_hash="abc"
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 97.8
+    assert fake.cluster_sentinels[("stable", "anyhow")].source_hash == "abc"
+    assert any("re-augmenting instead of inheriting it" in m for m in fake.logs)
+    assert "cluster.sentinel.reopened" in fake.events
+
+
+def test_negative_control_the_same_verdict_under_its_own_code_still_skips() -> None:
+    # The pre-fix rule was `path.exists()`; the post-fix rule is provenance, so a
+    # verdict recorded under the CURRENT source hash must still skip the work —
+    # otherwise the change would re-augment every resumed cluster forever.
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
+        _LIVE_CEILING_COV, "ceiling", "abc")
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == _LIVE_CEILING_COV
+    assert any("already done — skipping" in m for m in fake.logs)
+    assert "cluster.sentinel.reopened" not in fake.events
+
+
+def test_an_unattributed_legacy_sentinel_does_not_bind() -> None:
+    # The shape actually on disk on 2026-08-27: a bare number, no reason, no
+    # hash. Unattributable, so it is re-measured rather than inherited.
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(_LIVE_CEILING_COV)
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 97.8
+
+
+def test_a_done_verdict_binds_across_a_code_change() -> None:
+    # A reached target is a claim about the TREE: the tests are on disk and a
+    # pipeline edit does not un-write them. Re-augmenting here would re-measure
+    # every finished cluster on every commit.
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [(100.0, 10, False, "")]})
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
+        100.0, "done", "some-older-pipeline")
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+    assert any("already done — skipping" in m for m in fake.logs)
+    assert "cluster.sentinel.reopened" not in fake.events
+
+
+def test_the_terminating_status_is_what_gets_recorded() -> None:
+    # ceiling / hard_block / done must be distinguishable on disk — the whole
+    # point of the field is that only 'done' is sticky.
+    fake = FakeAdapter(augment_script={
+        ("stable", "anyhow"): [(90.0, 9, True, ""), (90.0, 9, True, "")]})
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+    assert fake.cluster_sentinels[("stable", "anyhow")].reason == "ceiling"
+    assert fake.cluster_sentinels[("stable", "anyhow")].source_hash == "abc"
+
+    fake = FakeAdapter(augment_script={}, pre_check=False)
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["a"]))
+    assert fake.cluster_sentinels[("nightly", "a")].reason == "precheck_failed"

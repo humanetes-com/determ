@@ -114,7 +114,32 @@ class ClusterAugmentor:
             # Pre-load which modules are already done for this cluster (resume support).
             is_last_cluster = (cluster == clusters[-1])
             for m in modules:
-                if store.is_cluster_augmented(project_dir, cluster.name, m):
+                # A recorded verdict binds only while it still describes something
+                # true. "done" is a claim about the TREE and always binds; a give-up
+                # verdict ("ceiling", "hard_block", "precheck_failed") is a claim
+                # about the augmentation code, so it is dropped once that code
+                # changes — the rule pipeline_state.md already applies to every
+                # phase record, applied here to the sentinel that gates the work.
+                # Without it, run 2881435-34981ab0 (2026-08-27) sealed anyhow's
+                # `stable` cluster at 83.9% on a false ceiling and the commit that
+                # fixed the cause could not re-open it: the only remover of a
+                # cluster sentinel is the full --clean workspace wipe.
+                verdict = store.cluster_augmented_verdict(project_dir, cluster.name, m)
+                if verdict is not None and not verdict.still_binding(src_hash):
+                    tel.log(
+                        f"  cluster/{cluster.name}: '{m}' sentinel records "
+                        f"{verdict.coverage:.1f}% under a "
+                        f"'{verdict.reason or 'unattributed'}' verdict from pipeline "
+                        f"code that is no longer on disk "
+                        f"(recorded {verdict.source_hash or '-'}, now {src_hash}) — "
+                        f"re-augmenting instead of inheriting it."
+                    )
+                    tel.emit("cluster.sentinel.reopened", cluster=cluster.name,
+                             data={"module": m, "coverage": verdict.coverage,
+                                   "reason": verdict.reason,
+                                   "recorded_hash": verdict.source_hash,
+                                   "current_hash": src_hash})
+                elif verdict is not None:
                     cluster_done.add(m)
                     tel.log(f"  cluster/{cluster.name}: '{m}' already done — skipping.")
                     # Crash-recovery: if this is the last cluster and the main module sentinel
@@ -137,7 +162,9 @@ class ClusterAugmentor:
                                    detail="pre-check failed — cluster skipped", source_hash=src_hash)
                     for m in modules:
                         if m not in cluster_done:
-                            store.mark_cluster_augmented(project_dir, cluster.name, m, 0.0)
+                            store.mark_cluster_augmented(
+                                project_dir, cluster.name, m, 0.0,
+                                reason="precheck_failed", source_hash=src_hash)
                             if is_last_cluster:
                                 store.mark_module_augmented(project_dir, m, 0.0)
                             cluster_done.add(m)
@@ -215,7 +242,9 @@ class ClusterAugmentor:
                             f"at {cov:.1f}% (stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
                             f"total {state.total_passes}). Accepting and moving on."
                         )
-                    store.mark_cluster_augmented(project_dir, cluster.name, mod_name, cov)
+                    store.mark_cluster_augmented(
+                        project_dir, cluster.name, mod_name, cov,
+                        reason=status, source_hash=src_hash)
                     # Also write the main module sentinel when the last cluster finishes,
                     # so the strip/task1-4 loop sees it as done.
                     if cluster == clusters[-1]:

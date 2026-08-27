@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.models import AugmentVerdict, BuildCluster
 
 
 class TestAugmentor(ABC):
@@ -65,10 +65,25 @@ class AugmentStore(Protocol):
 
     def is_cluster_augmented(
         self, project_dir: Path, cluster_name: str, module_name: str,
-    ) -> bool: ...
+    ) -> bool:
+        """Whether a sentinel exists at all — NOT whether it still binds. The
+        cluster loop asks `cluster_augmented_verdict(...).still_binding(hash)`
+        before skipping work; this stays the question for "did we write one"."""
+        ...
+    def cluster_augmented_verdict(
+        self, project_dir: Path, cluster_name: str, module_name: str,
+    ) -> AugmentVerdict | None:
+        """The recorded verdict, or None when no sentinel exists."""
+        ...
     def mark_cluster_augmented(
         self, project_dir: Path, cluster_name: str, module_name: str, cov: float,
-    ) -> None: ...
+        *, reason: str = "", source_hash: str = "",
+    ) -> None:
+        """Record the coverage, the terminating status ("done" / "ceiling" /
+        "hard_block" / "precheck_failed") and the pipeline source hash it was
+        reached under. A give-up reason recorded without a hash can never bind
+        again — that is the intended reading of an unattributable verdict."""
+        ...
     def cluster_augmented_value(
         self, project_dir: Path, cluster_name: str, module_name: str,
     ) -> float:

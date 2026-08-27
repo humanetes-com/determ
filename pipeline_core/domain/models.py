@@ -533,6 +533,85 @@ class BuildCluster:
         return "nightly" if self.requires_nightly else None
 
 
+@dataclass(frozen=True, slots=True)
+class AugmentVerdict:
+    """Why a (cluster, module) stopped being augmented, and under which code.
+
+    The cluster sentinel used to hold a bare coverage number, which cannot
+    distinguish "the target was reached" from "this code gave up" — so a verdict
+    produced by a defect outlived the commit that fixed it. On 2026-08-27, run
+    `2881435-34981ab0`, the split generation path dropped every model reply, the
+    pass therefore recorded no model call, and the ceiling was inferred from that
+    absence: cluster `stable` on anyhow was sealed at 83.9% against its own
+    ~98.1% ceiling estimate, on a pass whose queue line listed 119 actionable
+    uncovered lines across 8 files. Nothing could re-open it — the only remover
+    of a cluster sentinel is the full `--clean` workspace wipe, and
+    `clear_module_sentinel` clears a different file.
+
+    `reason` is the terminating status: "done" when the coverage target was met,
+    or the crate is proc-macro and cannot be augmented; otherwise the give-up
+    verdict ("ceiling", "hard_block", "precheck_failed"). Only "done" is a claim
+    about the TREE. Every other value is a claim about the code that was
+    running, so it binds only while that code is still on disk — the rule
+    `pipeline_state.md` already applies to every phase record, applied here to
+    the sentinel that actually gates the work.
+
+    The canonical text form keeps the coverage on the first line, so a sentinel
+    written before this field existed still reads back as a number.
+    """
+
+    coverage: float
+    reason: str = ""
+    source_hash: str = ""
+
+    def is_final(self) -> bool:
+        """True when the verdict is a claim about the tree rather than about the
+        augmentation code — the target was reached, or the crate cannot be
+        augmented at all."""
+        return self.reason == "done"
+
+    def still_binding(self, source_hash: str) -> bool:
+        """True when this verdict still answers "skip this cluster".
+
+        A final verdict always binds. A give-up verdict binds only while the
+        augmentation code that produced it is the code on disk. A verdict with
+        no recorded provenance — a bare-number sentinel written before this
+        field existed — never binds, so the first run after the change
+        re-measures instead of inheriting an unattributable claim.
+        """
+        if self.is_final():
+            return True
+        if not self.source_hash:
+            return False
+        return self.source_hash == source_hash
+
+    def to_text(self) -> str:
+        """The sentinel's canonical text: coverage first (legacy-readable), then
+        the provenance this class exists to carry."""
+        return (f"{self.coverage:.1f}\n"
+                f"reason={self.reason}\n"
+                f"source_hash={self.source_hash}\n")
+
+    @classmethod
+    def from_text(cls, text: str) -> AugmentVerdict:
+        """Parse a sentinel. Tolerant by design: an unparseable or bare-number
+        file yields a verdict with no provenance, which `still_binding` refuses
+        rather than trusting."""
+        lines = text.strip().splitlines()
+        try:
+            coverage = float(lines[0].strip()) if lines else 0.0
+        except ValueError:
+            coverage = 0.0
+        fields = {}
+        for line in lines[1:]:
+            key, sep, value = line.partition("=")
+            if sep:
+                fields[key.strip()] = value.strip()
+        return cls(coverage=coverage,
+                   reason=fields.get("reason", ""),
+                   source_hash=fields.get("source_hash", ""))
+
+
 @dataclass
 class ModuleAugmentState:
     """Per-(module, cluster) augmentation lifecycle.

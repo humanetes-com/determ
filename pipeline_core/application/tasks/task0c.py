@@ -29,7 +29,7 @@ from ...domain.behaviour_pinning import (
     select_behaviours_for_file,
 )
 from ...domain.behaviour_select import drop_capture_owned
-from ...domain.coverage import PerFileCoverage
+from ...domain.coverage import PerFileCoverage, coverage_pass_outcome
 from ...domain.generation import (
     as_integration_test,
     gen_tests_integration_rel,
@@ -1610,11 +1610,18 @@ def _run_phase_c(
     _active_files = [r for r, _ in _ordered_files if r not in skipped_files]
     attempt_n_within_outer = 0
     _pass_had_work = False   # set True if any file makes a real LLM call this pass
+    # Uncovered lines this pass judged REACHABLE — the post-filter count for every
+    # file it looked at, plus the raw count of files it skipped as stalled (those
+    # lines are unaddressed, not filtered). This is what "at a ceiling" is a claim
+    # about, so it is counted rather than inferred; see the gate at the end of the
+    # pass.
+    _pass_actionable = 0
     for rel_path, (content, uncov_lines) in _ordered_files:
         attempt_n_within_outer += 1
 
         if rel_path in skipped_files:
             _log(f"  [{module_name}] Skipping {rel_path} — stalled for {FILE_STALL_LIMIT} consecutive attempts.")
+            _pass_actionable += len(uncov_lines)
             continue
 
         _file_idx = _active_files.index(rel_path) + 1 if rel_path in _active_files else attempt_n_within_outer
@@ -1695,6 +1702,7 @@ def _run_phase_c(
             continue
 
         _log(f"  [{module_name}] {rel_path} — {len(uncov_lines)} actionable uncovered lines (post-filter)")
+        _pass_actionable += len(uncov_lines)
         fn_bodies = _extract_uncovered_functions(existing_text, uncov_lines)
         pub_symbols = _extract_public_symbols(existing_text)
 
@@ -2542,12 +2550,23 @@ project-specific import paths, type construction patterns, and hard constraints.
         # Update snapshot for next attempt's line-coverage delta.
         file_prev_uncov_lines[rel_path] = set(uncov_lines)
 
-    # If this entire pass had no LLM calls (all files filtered by cfg/artifact with
-    # nothing actionable), there is nothing more the pipeline can do — stop immediately.
-    if not _pass_had_work:
+    # A ceiling is a MEASURED claim — every uncovered line that survives is inside
+    # an excluded cfg block or is an LLVM artifact, so no test could reach it — and
+    # the pass has just counted them. It used to be inferred from "no file made a
+    # model call this pass", which is a different statement about a different
+    # subject, and the log line asserted the cfg claim without ever checking it.
+    # On 2026-08-27 run `2881435-34981ab0` the split generation path dropped every
+    # reply (the fenced-reply extraction defect), so no call was recorded, and both
+    # passes over anyhow/stable reported a ceiling while their own queue lines
+    # listed 119 actionable uncovered lines across 8 files — 4 in backtrace.rs, 3
+    # ensure.rs, 4 lib.rs, 9 ptr.rs, 8 fmt.rs, 14 wrapper.rs, 23 context.rs, 54
+    # error.rs. Two such passes are CEILING_CONFIRM, so the cluster was accepted
+    # at 83.9% against its own ~98.1% ceiling estimate.
+    _pass_outcome = coverage_pass_outcome(
+        actionable_lines=_pass_actionable, had_model_call=_pass_had_work)
+    if _pass_outcome == "ceiling":
         _log(f"  [{module_name}] All files filtered (cfg/artifact) — no actionable uncovered lines. Stopping.")
         return _PhaseCOutcome("break", at_ceiling=True, blocks_admitted=_blocks_admitted)
-
     # If every remaining uncovered file is now skipped, die with a report.
     remaining = set(uncovered_by_file.keys()) - skipped_files
     if not remaining and skipped_files and coverage < _COVERAGE_TARGET:
@@ -2563,6 +2582,22 @@ project-specific import paths, type construction patterns, and hard constraints.
         _log("  Action required: improve the generation prompt or add manual tests for these files.")
         return _PhaseCOutcome("return", result=(coverage, covered_lines, False, ""),
                               blocks_admitted=_blocks_admitted)
+
+    # Reachable work and not one model call, with files still dispatchable: a
+    # generation or routing defect, never a ceiling. This sits BELOW the
+    # stalled-files report on purpose — "every file is stalled" is the specific,
+    # already-diagnosed shape of the same state and owns its own outcome, and
+    # the false ceiling used to jump over it. Breaking without `at_ceiling`
+    # leaves the module on the stall clock, so a transient (a dead endpoint)
+    # recovers on the next pass and a permanent one hard-blocks with that
+    # report — neither marks the module augmented at a number nothing measured.
+    if _pass_outcome == "no_model_call":
+        _log(f"  [{module_name}] PASS MADE NO MODEL CALL against {_pass_actionable} "
+             f"actionable uncovered line(s) in {len(_active_files)} file(s) — a "
+             f"generation/routing defect, not a coverage ceiling. Not accepting a ceiling.")
+        _emit("task0c.pass_no_work", data={"actionable": _pass_actionable,
+                                           "files": len(_active_files)})
+        return _PhaseCOutcome("break", at_ceiling=False, blocks_admitted=_blocks_admitted)
 
     return _PhaseCOutcome("continue", blocks_admitted=_blocks_admitted)
 
