@@ -11,6 +11,7 @@ on the code text so the channel works from day one.
 Budget-gated: whole specs are dropped when the char budget would overflow — a
 spec is never truncated mid-body (a half example teaches the wrong shape).
 """
+
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
@@ -21,9 +22,13 @@ from pipeline_core.domain.rust_scan import contains_word
 
 # compile_fail is a NEGATIVE behaviour; ignore is skipped — neither is a RIGHT
 # usage example. Everything else demonstrates real API usage.
-_EXAMPLE_FENCES = frozenset({
-    FenceDirective.RUN, FenceDirective.NO_RUN, FenceDirective.SHOULD_PANIC,
-})
+_EXAMPLE_FENCES = frozenset(
+    {
+        FenceDirective.RUN,
+        FenceDirective.NO_RUN,
+        FenceDirective.SHOULD_PANIC,
+    }
+)
 
 
 def _spec_code(spec: BehaviourSpec) -> str:
@@ -99,7 +104,10 @@ def select_usage_examples(
 IDENTITY_CLASS = "IDENTITY"
 
 MUST_CLASS_ORDER: tuple[str, ...] = (
-    "IDENTITY", "TRAIT_OBJECT_IDENTITY", "EXACT_FORMAT", "BOUNDED_RESOURCE",
+    "IDENTITY",
+    "TRAIT_OBJECT_IDENTITY",
+    "EXACT_FORMAT",
+    "BOUNDED_RESOURCE",
     "OPTION_SEMANTICS",
 )
 
@@ -215,46 +223,39 @@ def select_component_behaviours(
 
 
 # --------------------------------------------------------------------------
-# Capture/guess split: which behaviour classes the t0d capture route owns.
+# Capture/guess split: the guess route is an allowlist.
 #
-# A class is capture-owned when pinning it means PREDICTING an exact value:
-# a byte-exact Display/Debug rendering, which concrete type a downcast finds,
-# which type a trait object's vtable answers with, a length/size boundary
-# string. A model asked for one of those from the source alone guesses, and
-# the guess is refused — so those observables never reach the oracle at all.
-# The capture route runs the program and records what it actually printed, so
-# it produces them without predicting them.
+# Pinning a behaviour whose Then is an exact value means PREDICTING that
+# value from the source. The model guesses, the guess is refused, and the
+# observable never reaches the oracle. The capture route runs the program
+# and records what it printed, so it produces those without predicting them.
 #
-# What stays with the guess route: OPTION_SEMANTICS (`Some`/`None` is a shape,
-# not a rendering), LAYOUT_PIN (a compile-time `size_of`/autotrait fact the
-# source states), CFG_WORLD, and an assertion-only spec whose asserts ARE the
-# contract. Note that "OTHER" is NOT a licence: OTHER is the bucket for
-# anything the classifier could not name, so the kind is consulted too (see
-# CAPTURE_OWNED_KINDS below).
+# What the guess route can still answer (and is therefore listed to t0c and
+# required of its block):
+#
+#   OPTION_SEMANTICS  `Some`/`None` is a shape, not a rendering
+#   LAYOUT_PIN        a compile-time `size_of`/autotrait fact the source states
+#   CFG_WORLD         a promise that only holds in one cfg cluster
+#   assertion-only    `then is None` — the asserts ARE the contract
+#
+# Everything else with a Then is capture-owned. OTHER is the classifier's
+# junk drawer, not a licence: a kind `behaviour_class_name` cannot name
+# (RETURN_RENDERED, NORMALIZED_STDOUT, and any kind added beside them) is
+# still an exact value a model would have to predict. Taking the four
+# named classes as the predicate made the split a near no-op. Computed on
+# the live 230-spec suite (2026-08-27): of 155 pinnable specs the class
+# allowlist left 6 — three free-form probe blobs and three RETURN_RENDERED
+# values out of `test_downcast_mut` — and those 6 matched 7 of the crate's
+# 8 source files, so `require_pin` stayed ON everywhere, demanding a pin on
+# a multi-`println!` blob that `behaviours_pinned_by` can never match.
 # --------------------------------------------------------------------------
-CAPTURE_OWNED_CLASSES: frozenset[str] = frozenset({
-    "EXACT_FORMAT", "IDENTITY", "TRAIT_OBJECT_IDENTITY", "BOUNDED_RESOURCE",
-})
-
-# The classes above are not the whole predicate, and taking them for it made
-# the split a near no-op. `behaviour_class_name` reads a kind it does not know
-# as OTHER, and `_KIND_TO_CLASS` above knows neither `RETURN_RENDERED` nor
-# `NORMALIZED_STDOUT` — so the two kinds whose Then is MOST obviously an exact
-# value the model would have to predict were the two that survived the filter.
-# Computed on the live 230-spec suite (2026-08-27): of the 155 pinnable specs,
-# the class filter alone left 6 — three free-form probe blobs and three
-# `RETURN_RENDERED` values harvested out of `test_downcast_mut` — and those 6
-# matched 7 of the crate's 8 source files, so `require_pin` stayed ON
-# everywhere, now demanding a pin on a multi-`println!` blob that
-# `behaviours_pinned_by` (an exact `then.value` join) can never match. The
-# split's whole point is "the guess route is not asked for values it must
-# predict"; the predicate is therefore over the KIND as well as the class.
-CAPTURE_OWNED_KINDS: frozenset[str] = frozenset({
-    "RETURN_RENDERED",      # a rendered return value — an exact string
-    "NORMALIZED_STDOUT",    # a captured stdout blob — exact, and multi-observable
-    "CHAIN_SEQUENCE",       # the exact chain render, element by element
-    "PANIC_MESSAGE",        # the exact payload
-})
+GUESS_ROUTE_CLASSES: frozenset[str] = frozenset(
+    {
+        "OPTION_SEMANTICS",
+        "LAYOUT_PIN",
+        "CFG_WORLD",
+    }
+)
 
 
 def capture_owned(spec: BehaviourSpec) -> bool:
@@ -262,20 +263,20 @@ def capture_owned(spec: BehaviourSpec) -> bool:
     value rather than reach a code path — the capture route's half of the
     split.
 
-    Two independent reasons, either sufficient: the class is one of
-    :data:`CAPTURE_OWNED_CLASSES` (classified by :func:`behaviour_class_name`,
-    so a spec carrying no ``klass`` of its own is grouped by its outcome kind
-    first), or the Then's kind is one of :data:`CAPTURE_OWNED_KINDS` — the
-    kinds `behaviour_class_name` cannot classify and therefore reports as
-    OTHER, which is where an unpredictable value hides from a class-only
-    filter."""
-    if behaviour_class_name(spec) in CAPTURE_OWNED_CLASSES:
-        return True
-    return spec.then is not None and spec.then.kind.name in CAPTURE_OWNED_KINDS
+    The guess route is the allowlist (:data:`GUESS_ROUTE_CLASSES`, plus an
+    assertion-only spec whose asserts ARE the contract). Every other spec
+    that carries a Then is capture-owned, including one whose class is
+    OTHER: OTHER is what the classifier could not name, which is where an
+    unpredictable value hides from a class-only filter."""
+    if spec.then is None:
+        return False
+    return behaviour_class_name(spec) not in GUESS_ROUTE_CLASSES
 
 
 def drop_capture_owned(
-    specs: Sequence[BehaviourSpec], *, enabled: bool = True,
+    specs: Sequence[BehaviourSpec],
+    *,
+    enabled: bool = True,
 ) -> tuple[BehaviourSpec, ...]:
     """`specs` without the capture-owned ones, harvest order preserved.
 

@@ -627,7 +627,7 @@ from pipeline_core.composition_layout import (
     build_retrigger_layout,
 )
 from pipeline_core.domain import graceful_stop as _graceful_stop
-from pipeline_core.domain.behaviour_probe import capture_env_of, perturbed_env
+from pipeline_core.domain.behaviour_probe import perturbed_env
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
@@ -1700,7 +1700,6 @@ def build_app(
         exercises_by_coverage=lambda pd, cl, specs, recs: exercises_by_coverage(
             pd, cl, specs, recs, log=ports.log),
         record_misses=save_behaviour_misses,
-        capture_env=lambda c: capture_env_of(probe_env(c)),
         emit_tests=functools.partial(
             emit_behaviour_tests, balanced=_rust_delimiters_balanced),
         verify_tests=_verify_behaviour_tests,

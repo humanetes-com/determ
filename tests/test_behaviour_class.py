@@ -1,7 +1,11 @@
 """Pins for the behaviour vocabulary added 2026-08-26: TYPE_IDENTITY /
 ALT_DEBUG_STRING outcomes, BehaviourClass + classify_behaviour, the MAY note,
 and merge_suites (existing wins)."""
+
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
@@ -21,10 +25,10 @@ from pipeline_core.domain.behaviour import (
 )
 
 
-def _outcome_spec(then: ObservableOutcome, *, when: str = "x", given: str = "",
-                  cfg_cluster: str = "stable") -> BehaviourSpec:
-    return BehaviourSpec("b", given, when, then, subkind=BehaviourSubKind.OUTCOME,
-                         cfg_cluster=cfg_cluster)
+def _outcome_spec(
+    then: ObservableOutcome, *, when: str = "x", given: str = "", cfg_cluster: str = "stable"
+) -> BehaviourSpec:
+    return BehaviourSpec("b", given, when, then, subkind=BehaviourSubKind.OUTCOME, cfg_cluster=cfg_cluster)
 
 
 def test_new_kinds_are_runtime_and_roundtrip():
@@ -47,8 +51,8 @@ def test_type_identity_requires_a_type_name():
 
 def test_may_note_wording_is_stable():
     assert MAY_REPRESENTATION_NOTE == (
-        "The layout, allocation strategy and private names are yours (MAY); "
-        "every behaviour listed is a MUST.")
+        "The layout, allocation strategy and private names are yours (MAY); every behaviour listed is a MUST."
+    )
 
 
 def test_klass_serialises_by_name_and_defaults_other_on_old_records():
@@ -56,7 +60,7 @@ def test_klass_serialises_by_name_and_defaults_other_on_old_records():
     d = spec.to_dict()
     assert d["klass"] == "IDENTITY"
     assert BehaviourSpec.from_dict(d) == spec
-    d.pop("klass")                      # a record written before the field
+    d.pop("klass")  # a record written before the field
     assert BehaviourSpec.from_dict(d).klass is BehaviourClass.OTHER
 
 
@@ -64,40 +68,63 @@ def test_classify_precedence_table():
     static = ObservableOutcome.static_assertion(StaticAssertKind.SIZE, "size_of::<E>()")
     assert classify_behaviour(_outcome_spec(static)) is BehaviourClass.LAYOUT_PIN
     ident = ObservableOutcome.type_identity("&str", True)
-    assert classify_behaviour(_outcome_spec(ident, when="e.downcast::<&str>()")) \
-        is BehaviourClass.IDENTITY
-    assert classify_behaviour(_outcome_spec(ident, when="(&*e as &dyn Any).type_id()")) \
+    assert classify_behaviour(_outcome_spec(ident, when="e.downcast::<&str>()")) is BehaviourClass.IDENTITY
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="(&*e as &dyn Any).type_id()"))
         is BehaviourClass.TRAIT_OBJECT_IDENTITY
-    assert classify_behaviour(_outcome_spec(ObservableOutcome.display("boom"))) \
-        is BehaviourClass.EXACT_FORMAT
-    assert classify_behaviour(_outcome_spec(ObservableOutcome.alt_debug("X {\n}"))) \
-        is BehaviourClass.EXACT_FORMAT
-    bounded = _outcome_spec(ObservableOutcome.display("aaa"),
-                            given='let s = "a".repeat(3);\nassert_eq!(s.len(), 3);')
+    )
+    # The wrapping defect is the cast, not the substring `type_id()`. A capture
+    # of `(&*err as &dyn Error).is::<&str>()` never writes `type_id()`, and
+    # keying on that substring made TRAIT_OBJECT_IDENTITY unstorable.
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="(&*err as &dyn Error).is::<&str>()"))
+        is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    )
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="(&*err as &mut dyn Error).is::<&str>()"))
+        is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    )
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="x as &'static dyn Error")) is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    )
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="x as &(dyn Error + Send)"))
+        is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    )
+    # NEGATIVE CONTROL: `dyn` inside a turbofish type argument is IDENTITY —
+    # this is the live harvested `when` of test_boxed_str::2.
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="error.downcast_ref::<Box<dyn StdError + Send + Sync>>()"))
+        is BehaviourClass.IDENTITY
+    )
+    # NEGATIVE CONTROL: the old marker, without a trait-object cast.
+    assert classify_behaviour(_outcome_spec(ident, when="e.type_id()")) is BehaviourClass.IDENTITY
+    assert classify_behaviour(_outcome_spec(ObservableOutcome.display("boom"))) is BehaviourClass.EXACT_FORMAT
+    assert classify_behaviour(_outcome_spec(ObservableOutcome.alt_debug("X {\n}"))) is BehaviourClass.EXACT_FORMAT
+    bounded = _outcome_spec(ObservableOutcome.display("aaa"), given='let s = "a".repeat(3);\nassert_eq!(s.len(), 3);')
     assert classify_behaviour(bounded) is BehaviourClass.BOUNDED_RESOURCE
-    commented = _outcome_spec(ObservableOutcome.display("x"),
-                              given="// the message is capped at the limit\nlet s = f();")
+    commented = _outcome_spec(
+        ObservableOutcome.display("x"), given="// the message is capped at the limit\nlet s = f();"
+    )
     assert classify_behaviour(commented) is BehaviourClass.BOUNDED_RESOURCE
-    assert classify_behaviour(_outcome_spec(ObservableOutcome.rendered("x"),
-                                            when="e.source().is_none()")) \
+    assert (
+        classify_behaviour(_outcome_spec(ObservableOutcome.rendered("x"), when="e.source().is_none()"))
         is BehaviourClass.OPTION_SEMANTICS
-    assert classify_behaviour(_outcome_spec(ObservableOutcome.rendered("Some(1)"))) \
-        is BehaviourClass.OPTION_SEMANTICS
+    )
+    assert classify_behaviour(_outcome_spec(ObservableOutcome.rendered("Some(1)"))) is BehaviourClass.OPTION_SEMANTICS
     # option beats exact-format: a Display of `None` is an option promise
-    assert classify_behaviour(_outcome_spec(ObservableOutcome.debug("None"))) \
-        is BehaviourClass.OPTION_SEMANTICS
+    assert classify_behaviour(_outcome_spec(ObservableOutcome.debug("None"))) is BehaviourClass.OPTION_SEMANTICS
 
 
 def test_cfg_world_needs_a_non_default_cluster_and_a_gate():
-    gated = _outcome_spec(ObservableOutcome.rendered("x"),
-                          given="#[cfg(error_generic_member_access)]\nfn t() {}",
-                          cfg_cluster="nightly")
+    gated = _outcome_spec(
+        ObservableOutcome.rendered("x"), given="#[cfg(error_generic_member_access)]\nfn t() {}", cfg_cluster="nightly"
+    )
     assert classify_behaviour(gated, default_cluster="stable") is BehaviourClass.CFG_WORLD
     # same text on the default cluster: not another world
     assert classify_behaviour(gated, default_cluster="nightly") is BehaviourClass.OTHER
     # non-default cluster but nothing gated in the text: undetectable → OTHER
-    plain = _outcome_spec(ObservableOutcome.rendered("x"), given="fn t() {}",
-                          cfg_cluster="nightly")
+    plain = _outcome_spec(ObservableOutcome.rendered("x"), given="fn t() {}", cfg_cluster="nightly")
     assert classify_behaviour(plain, default_cluster="stable") is BehaviourClass.OTHER
 
 
@@ -108,14 +135,25 @@ def test_assertion_spec_without_then_is_other():
 
 def test_merge_suites_existing_wins_and_sorts():
     old = _outcome_spec(ObservableOutcome.stdout("golden"))
-    old = BehaviourSpec.from_dict({**old.to_dict(), "behaviour_id": "probe::stable::f::0",
-                                   "exercises": ["src/lib.rs::f"]})
-    new_same = BehaviourSpec.from_dict({**old.to_dict(), "exercises": [], "then": {
-        "kind": "NORMALIZED_STDOUT", "value": "other", "chain": [], "ok": False,
-        "static_kind": None, "static_expr": ""}})
+    old = BehaviourSpec.from_dict(
+        {**old.to_dict(), "behaviour_id": "probe::stable::f::0", "exercises": ["src/lib.rs::f"]}
+    )
+    new_same = BehaviourSpec.from_dict(
+        {
+            **old.to_dict(),
+            "exercises": [],
+            "then": {
+                "kind": "NORMALIZED_STDOUT",
+                "value": "other",
+                "chain": [],
+                "ok": False,
+                "static_kind": None,
+                "static_expr": "",
+            },
+        }
+    )
     new_other = BehaviourSpec.from_dict({**old.to_dict(), "behaviour_id": "a::first"})
-    merged = merge_suites(BehaviourSuite("stable", (old,)),
-                          BehaviourSuite("stable", (new_same, new_other)))
+    merged = merge_suites(BehaviourSuite("stable", (old,)), BehaviourSuite("stable", (new_same, new_other)))
     assert [s.behaviour_id for s in merged.specs] == ["a::first", "probe::stable::f::0"]
     kept = merged.specs[1]
     assert kept.exercises == frozenset({"src/lib.rs::f"}) and kept.then.value == "golden"
@@ -125,5 +163,24 @@ def test_outcome_without_then_and_assertion_with_then_are_rejected():
     with pytest.raises(ValueError, match="OUTCOME behaviour requires"):
         BehaviourSpec("b", "", "x", None, subkind=BehaviourSubKind.OUTCOME)
     with pytest.raises(ValueError, match="ASSERTION behaviour"):
-        BehaviourSpec("b", "", "x", ObservableOutcome.display("v"),
-                      subkind=BehaviourSubKind.ASSERTION)
+        BehaviourSpec("b", "", "x", ObservableOutcome.display("v"), subkind=BehaviourSubKind.ASSERTION)
+
+
+_LIVE_STABLE = Path(__file__).resolve().parents[1] / "tmp" / "anyhow" / ".skeleton" / "_behaviours_stable.json"
+
+
+def test_the_live_suite_has_no_trait_object_identity_and_the_box_dyn_stays_identity():
+    """Computed on `_behaviours_stable.json` (2026-08-27): 230 specs, 35
+    TYPE_IDENTITY, 0 TRAIT_OBJECT_IDENTITY. The one TYPE_IDENTITY whose `when`
+    contains `dyn` is `test_boxed_str::2` — a Box<dyn> *type argument*, not a
+    trait-object observation. A classifier that keyed on the letters `dyn`
+    would flip it; this one must not. Histogram does not move; new captures
+    of `(&*err as &dyn Error).is::<&str>()` would store as TRAIT_OBJECT."""
+    suite = BehaviourSuite.from_dict(json.loads(_LIVE_STABLE.read_text(encoding="utf-8")))
+    assert len(suite.specs) == 230
+    assert sum(1 for s in suite.specs if s.klass is BehaviourClass.TRAIT_OBJECT_IDENTITY) == 0
+    assert sum(1 for s in suite.specs if classify_behaviour(s) is BehaviourClass.TRAIT_OBJECT_IDENTITY) == 0
+    boxed = next(s for s in suite.specs if s.behaviour_id.endswith("test_boxed_str::2"))
+    assert boxed.when == "error.downcast_ref::<Box<dyn StdError + Send + Sync>>()"
+    assert boxed.klass is BehaviourClass.IDENTITY
+    assert classify_behaviour(boxed) is BehaviourClass.IDENTITY

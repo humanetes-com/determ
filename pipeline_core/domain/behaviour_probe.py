@@ -13,6 +13,7 @@ normalisation, the target selection (public fns no harvested spec names) and
 the spec constructor. The adapter (`adapters/behaviour_probe.py`) writes the
 example file and runs it.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -88,7 +89,7 @@ def _strip_code_fence(code: str) -> str:
     nl = s.find("\n")
     if nl < 0:
         return ""
-    body = s[nl + 1:]
+    body = s[nl + 1 :]
     end = body.rfind(_FENCE)
     if end >= 0:
         body = body[:end]
@@ -110,7 +111,7 @@ def _attr(tag: str, key: str) -> str:
         return ""
     q = tag[i]
     end = tag.find(q, i + 1)
-    return "" if end < 0 else tag[i + 1:end].strip()
+    return "" if end < 0 else tag[i + 1 : end].strip()
 
 
 def _unit_attr(tag: str) -> str:
@@ -134,7 +135,7 @@ def parse_behaviour_programs(reply: str) -> list[tuple[str, str]]:
         if close < 0:
             break
         unit = _unit_attr(text[at:gt])
-        program = _strip_code_fence(text[gt + 1:close])
+        program = _strip_code_fence(text[gt + 1 : close])
         if program:
             out.append((unit, program))
         i = close + len(_CLOSE_TAG)
@@ -233,7 +234,7 @@ def without_turbofish(when: str) -> str:
                     if depth == 0:
                         break
                 j += 1
-            if j >= len(when):        # unbalanced: keep the tail verbatim
+            if j >= len(when):  # unbalanced: keep the tail verbatim
                 out.append(when[i:])
                 break
             i = j + 1
@@ -262,14 +263,18 @@ def value_bearing_reason(when: str) -> str | None:
     bare = without_turbofish(w)
     for tok in _LOGIC_TOKENS:
         if tok in bare:
-            return (f"when combines two observables ({tok}) — one printed "
-                    "boolean cannot say which half held; write them separately")
+            return (
+                f"when combines two observables ({tok}) — one printed "
+                "boolean cannot say which half held; write them separately"
+            )
     if identity_type_of(w) is not None:
         return None
     for tok in (*_COMPARISON_TOKENS, "<", ">"):
         if tok in bare:
-            return (f"when compares ({tok}) — a boolean discards the value; "
-                    "write the expression whose value is the observable")
+            return (
+                f"when compares ({tok}) — a boolean discards the value; "
+                "write the expression whose value is the observable"
+            )
     return None
 
 
@@ -279,12 +284,15 @@ def observe_kind(observe: str, when: str = "") -> OutcomeKind:
     the authority, not the label."""
     if identity_type_of(when) is not None:
         return OutcomeKind.TYPE_IDENTITY
-    return _OBSERVE_TO_KIND.get((observe or "").strip().lower(),
-                                OutcomeKind.DISPLAY_STRING)
+    return _OBSERVE_TO_KIND.get((observe or "").strip().lower(), OutcomeKind.DISPLAY_STRING)
 
 
 def render_probe_program(
-    given: str, when: str, observe: str = "display", *, crate: str = "",
+    given: str,
+    when: str,
+    observe: str = "display",
+    *,
+    crate: str = "",
 ) -> str:
     """The CAPTURE role: a runnable `fn main()` that PRINTS the observable.
 
@@ -311,8 +319,7 @@ def render_probe_program(
     else:
         expr = f'println!("{_KIND_TO_FMT[kind]}", {when.strip()});'
     head = f"#[allow(unused_imports)]\nuse {crate}::*;\n\n" if crate else ""
-    return (head + "fn main() {\n" + (body + "\n" if body else "")
-            + "    " + expr + "\n}\n")
+    return head + "fn main() {\n" + (body + "\n" if body else "") + "    " + expr + "\n}\n"
 
 
 def parse_behaviour_specs(reply: str) -> list[CapturedProbe]:
@@ -333,14 +340,17 @@ def parse_behaviour_specs(reply: str) -> list[CapturedProbe]:
         close = text.find(_CLOSE_TAG, gt + 1)
         if close < 0:
             break
-        block = text[gt + 1:close]
+        block = text[gt + 1 : close]
         when = _tagged(block, "WHEN")
         if when:
-            out.append(CapturedProbe(
-                name=_attr(text[at:gt], "name"),
-                given=_strip_code_fence(_tagged(block, "GIVEN")),
-                when=_strip_code_fence(when).strip(),
-                observe=_tagged(block, "OBSERVE").strip() or "display"))
+            out.append(
+                CapturedProbe(
+                    name=_attr(text[at:gt], "name"),
+                    given=_strip_code_fence(_tagged(block, "GIVEN")),
+                    when=_strip_code_fence(when).strip(),
+                    observe=_tagged(block, "OBSERVE").strip() or "display",
+                )
+            )
         i = close + len(_CLOSE_TAG)
     return out
 
@@ -352,7 +362,7 @@ def _tagged(block: str, tag: str) -> str:
     if a < 0:
         return ""
     b = block.find(c, a + len(o))
-    return block[a + len(o):b] if b >= 0 else ""
+    return block[a + len(o) : b] if b >= 0 else ""
 
 
 # The environment variables that change what a probe OBSERVES rather than how
@@ -365,26 +375,17 @@ OBSERVABLE_ENV_KEYS = ("RUST_BACKTRACE", "RUST_LIB_BACKTRACE")
 def perturbed_env(env: Mapping[str, str]) -> dict[str, str]:
     """The env flip that EXPOSES an environment-dependent observable.
 
-    Recording the capture environment says what the value was seen under; it
-    does not say whether the value depends on it, and nothing downstream reads
-    the record. Running the emitted replay a second time under this flip does
-    say: measured 2026-08-27 against a pristine copy, `err.backtrace()` renders
-    `"disabled backtrace"` on every run at a fixed env — so the run-twice guard
-    is blind to it — and renders a captured backtrace under `RUST_BACKTRACE=1`.
-    A capture that changes verdict across this flip is not a specification of
-    the crate and must not enter the oracle."""
+    Run-twice cannot see this axis: measured 2026-08-27 against a pristine
+    copy, `err.backtrace()` renders `"disabled backtrace"` on every run at a
+    fixed env and a captured backtrace under `RUST_BACKTRACE=1`. A capture
+    that changes verdict across this flip is not a specification of the crate
+    and must not enter the oracle. The flip is the guard; storing the capture
+    environment on the spec was write-only and caught nothing."""
     out: dict[str, str] = {}
     for key in OBSERVABLE_ENV_KEYS:
         current = (env.get(key) or "").strip().lower()
         out[key] = "0" if current in ("1", "full") else "1"
     return out
-
-
-def capture_env_of(env: Mapping[str, str]) -> str:
-    """The observable-affecting slice of a capture environment, sorted and
-    joined — the value stored on the spec so a replay can tell whether it is
-    being judged under the conditions the Then was observed in."""
-    return ";".join(f"{k}={env[k]}" for k in OBSERVABLE_ENV_KEYS if k in env)
 
 
 def probe_unit_label(rec: FnRecord) -> str:
@@ -445,19 +446,13 @@ def _is_public_crate_fn(
 # `Error::backtrace` / `Error::into_boxed_dyn_error` / `Error::reallocate_…`
 # and nothing of any class. Per-unit reachability is unit tests' job.
 CLASS_PROMPTS: Mapping[str, str] = {
-    "IDENTITY":
-        "the concrete type a downcast finds on a value this crate constructed "
-        "— the TypeId round-trip, named by type",
-    "TRAIT_OBJECT_IDENTITY":
-        "the type observed THROUGH a trait object (`&dyn std::error::Error`), "
-        "which a wrapper representation can answer differently",
-    "EXACT_FORMAT":
-        "an exact rendering — Display, Debug, or the alternate `{:#?}` Debug, "
-        "which differ from each other",
-    "BOUNDED_RESOURCE":
-        "what happens at a size or capacity boundary, and just past it",
-    "OPTION_SEMANTICS":
-        "when an optional observable is present and when it is absent",
+    "IDENTITY": "the concrete type a downcast finds on a value this crate constructed "
+    "— the TypeId round-trip, named by type",
+    "TRAIT_OBJECT_IDENTITY": "the type observed THROUGH a trait object (`&dyn std::error::Error`), "
+    "which a wrapper representation can answer differently",
+    "EXACT_FORMAT": "an exact rendering — Display, Debug, or the alternate `{:#?}` Debug, which differ from each other",
+    "BOUNDED_RESOURCE": "what happens at a size or capacity boundary, and just past it",
+    "OPTION_SEMANTICS": "when an optional observable is present and when it is absent",
 }
 
 
@@ -545,7 +540,7 @@ def probe_targets(
 def batches(items: Sequence[str], size: int = PROBE_BATCH_SIZE) -> list[tuple[str, ...]]:
     """`items` in consecutive batches of at most `size` (one prompt each)."""
     size = max(1, size)
-    return [tuple(items[i:i + size]) for i in range(0, len(items), size)]
+    return [tuple(items[i : i + size]) for i in range(0, len(items), size)]
 
 
 def probe_behaviour_id(cfg_cluster: str, unit: str, n: int) -> str:
@@ -573,11 +568,15 @@ def probe_spec(
     it, and t1.5's cap discards it. Prefer :func:`captured_spec`."""
     spec = BehaviourSpec(
         behaviour_id=probe_behaviour_id(cfg_cluster, unit, n),
-        given=program, when=unit,
+        given=program,
+        when=unit,
         then=ObservableOutcome.stdout(normalize_stdout(stdout)),
         provenance=BehaviourProvenance.SYNTHESIZED,
-        subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
-        cfg_cluster=cfg_cluster, source_ref=f"probe::{unit}")
+        subkind=BehaviourSubKind.OUTCOME,
+        fence=FenceDirective.RUN,
+        cfg_cluster=cfg_cluster,
+        source_ref=f"probe::{unit}",
+    )
     return classified(spec, default_cluster=default_cluster or cfg_cluster)
 
 
@@ -588,7 +587,6 @@ def captured_spec(
     n: int,
     stdout: str,
     default_cluster: str | None = None,
-    capture_env: str = "",
 ) -> BehaviourSpec:
     """A capture in the constrained shape: `given` = the SETUP statements,
     `when` = the single expression, Then = the observed value under its typed
@@ -605,8 +603,7 @@ def captured_spec(
     text = printed_value(stdout)
     kind = observe_kind(probe.observe, probe.when)
     if kind is OutcomeKind.TYPE_IDENTITY:
-        then = ObservableOutcome.type_identity(
-            identity_type_of(probe.when) or "?", ok=text.strip() == "true")
+        then = ObservableOutcome.type_identity(identity_type_of(probe.when) or "?", ok=text.strip() == "true")
     elif kind is OutcomeKind.DEBUG_STRING:
         then = ObservableOutcome.debug(text)
     elif kind is OutcomeKind.ALT_DEBUG_STRING:
@@ -615,12 +612,15 @@ def captured_spec(
         then = ObservableOutcome.display(text)
     spec = BehaviourSpec(
         behaviour_id=probe_behaviour_id(cfg_cluster, unit, n),
-        given=probe.given.rstrip(), when=probe.when,
+        given=probe.given.rstrip(),
+        when=probe.when,
         then=then,
         provenance=BehaviourProvenance.SYNTHESIZED,
-        subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
-        cfg_cluster=cfg_cluster, source_ref=f"probe::{unit}",
-        capture_env=capture_env)
+        subkind=BehaviourSubKind.OUTCOME,
+        fence=FenceDirective.RUN,
+        cfg_cluster=cfg_cluster,
+        source_ref=f"probe::{unit}",
+    )
     return classified(spec, default_cluster=default_cluster or cfg_cluster)
 
 
@@ -634,10 +634,9 @@ def program_for(spec: BehaviourSpec, *, crate: str = "") -> str:
     log line and no other trace."""
     if spec.then is not None and spec.then.kind is OutcomeKind.NORMALIZED_STDOUT:
         return spec.given
-    observe = {OutcomeKind.DEBUG_STRING: "debug",
-               OutcomeKind.ALT_DEBUG_STRING: "alt_debug"}.get(
-                   spec.then.kind if spec.then else OutcomeKind.DISPLAY_STRING,
-                   "display")
+    observe = {OutcomeKind.DEBUG_STRING: "debug", OutcomeKind.ALT_DEBUG_STRING: "alt_debug"}.get(
+        spec.then.kind if spec.then else OutcomeKind.DISPLAY_STRING, "display"
+    )
     return render_probe_program(spec.given, spec.when, observe, crate=crate)
 
 
@@ -655,13 +654,12 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
     body = spec.given.rstrip()
     setup = (body + "\n") if body else ""
     if then.kind is OutcomeKind.TYPE_IDENTITY:
-        check = (f"    assert!({spec.when});" if then.ok
-                 else f"    assert!(!({spec.when}));")
+        check = f"    assert!({spec.when});" if then.ok else f"    assert!(!({spec.when}));"
     else:
         fmt = _KIND_TO_FMT.get(then.kind, "{}")
         lit = rust_string_literal(then.value)
         check = f'    assert_eq!(format!("{fmt}", {spec.when}), {lit});'
-    return (f"#[test]\nfn {fn_name}() {{\n{setup}{check}\n}}\n")
+    return f"#[test]\nfn {fn_name}() {{\n{setup}{check}\n}}\n"
 
 
 def rust_string_literal(text: str) -> str:
@@ -672,4 +670,4 @@ def rust_string_literal(text: str) -> str:
         return 'r#"' + text + '"#'
     out = text.replace("\\", "\\\\").replace('"', '\\"')
     out = out.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
-    return '"' + out + '"' 
+    return '"' + out + '"'

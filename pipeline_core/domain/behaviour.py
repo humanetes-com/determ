@@ -17,6 +17,7 @@ stripped body.
 Pure VOs + enums, no dict payloads, no IO — the adapters do the parsing and the
 capturing; this module only names the language and enforces its invariants.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -37,50 +38,58 @@ class OutcomeKind(Enum):
     Debug render (`EXPECTED_ALTDEBUG_*` in tests/test_fmt.rs, a different
     string from `{:?}`)."""
 
-    DISPLAY_STRING = auto()      # `x.to_string()` / `format!("{x}")`
-    DEBUG_STRING = auto()        # `format!("{x:?}")`
-    CHAIN_SEQUENCE = auto()      # the `.chain()` / iterator render, element by element
-    DOWNCAST_OK = auto()         # `x.downcast_ref::<T>().is_some()` → bool
-    PANIC_MESSAGE = auto()       # a `should_panic` payload (message only, no location)
-    RETURN_RENDERED = auto()     # a returned value rendered deterministically
-    NORMALIZED_STDOUT = auto()   # fallback: captured stdout, normalized
-    STATIC_ASSERTION = auto()    # compile-time: size/align/autotraits/niche
-    TYPE_IDENTITY = auto()       # `x.is::<T>()` / `x.downcast::<T>()` holds (value = T)
-    ALT_DEBUG_STRING = auto()    # `format!("{x:#?}")` — the alternate Debug render
+    DISPLAY_STRING = auto()  # `x.to_string()` / `format!("{x}")`
+    DEBUG_STRING = auto()  # `format!("{x:?}")`
+    CHAIN_SEQUENCE = auto()  # the `.chain()` / iterator render, element by element
+    DOWNCAST_OK = auto()  # `x.downcast_ref::<T>().is_some()` → bool
+    PANIC_MESSAGE = auto()  # a `should_panic` payload (message only, no location)
+    RETURN_RENDERED = auto()  # a returned value rendered deterministically
+    NORMALIZED_STDOUT = auto()  # fallback: captured stdout, normalized
+    STATIC_ASSERTION = auto()  # compile-time: size/align/autotraits/niche
+    TYPE_IDENTITY = auto()  # `x.is::<T>()` / `x.downcast::<T>()` holds (value = T)
+    ALT_DEBUG_STRING = auto()  # `format!("{x:#?}")` — the alternate Debug render
 
 
 class StaticAssertKind(Enum):
     """Which layout property a ``STATIC_ASSERTION`` pins. These are the pins
     F11's t1.5 MUST satisfy while it is free to author the private layout."""
 
-    SIZE = auto()        # `size_of::<T>() == …`
-    ALIGN = auto()       # `align_of::<T>() == …`
+    SIZE = auto()  # `size_of::<T>() == …`
+    ALIGN = auto()  # `align_of::<T>() == …`
     AUTOTRAITS = auto()  # `assert_impl_all!(T: Send + Sync + Unpin + 'static)`
-    NICHE = auto()       # `size_of::<Option<T>>() == size_of::<T>()` (null-ptr-opt)
+    NICHE = auto()  # `size_of::<Option<T>>() == size_of::<T>()` (null-ptr-opt)
 
 
 # Runtime observables that require a compiling, runnable tree to check.
-RUNTIME_OUTCOME_KINDS = frozenset({
-    OutcomeKind.DISPLAY_STRING, OutcomeKind.DEBUG_STRING,
-    OutcomeKind.CHAIN_SEQUENCE, OutcomeKind.DOWNCAST_OK,
-    OutcomeKind.PANIC_MESSAGE, OutcomeKind.RETURN_RENDERED,
-    OutcomeKind.NORMALIZED_STDOUT, OutcomeKind.TYPE_IDENTITY,
-    OutcomeKind.ALT_DEBUG_STRING,
-})
+RUNTIME_OUTCOME_KINDS = frozenset(
+    {
+        OutcomeKind.DISPLAY_STRING,
+        OutcomeKind.DEBUG_STRING,
+        OutcomeKind.CHAIN_SEQUENCE,
+        OutcomeKind.DOWNCAST_OK,
+        OutcomeKind.PANIC_MESSAGE,
+        OutcomeKind.RETURN_RENDERED,
+        OutcomeKind.NORMALIZED_STDOUT,
+        OutcomeKind.TYPE_IDENTITY,
+        OutcomeKind.ALT_DEBUG_STRING,
+    }
+)
 
 # The kinds whose Then is a rendered string the reconstruction must reproduce
 # byte-for-byte (Display / Debug / alternate Debug).
-FORMAT_OUTCOME_KINDS = frozenset({
-    OutcomeKind.DISPLAY_STRING, OutcomeKind.DEBUG_STRING,
-    OutcomeKind.ALT_DEBUG_STRING,
-})
+FORMAT_OUTCOME_KINDS = frozenset(
+    {
+        OutcomeKind.DISPLAY_STRING,
+        OutcomeKind.DEBUG_STRING,
+        OutcomeKind.ALT_DEBUG_STRING,
+    }
+)
 
 # The sentence every behaviour-rendering prompt carries: the model owns the
 # representation, the behaviours own the observable. Other prompt renderers
 # import it by this name — keep the name and the wording stable.
 MAY_REPRESENTATION_NOTE = (
-    "The layout, allocation strategy and private names are yours (MAY); "
-    "every behaviour listed is a MUST."
+    "The layout, allocation strategy and private names are yours (MAY); every behaviour listed is a MUST."
 )
 
 
@@ -92,11 +101,11 @@ class ObservableOutcome:
     observable result."""
 
     kind: OutcomeKind
-    value: str = ""                       # DISPLAY/DEBUG/PANIC/RETURN/STDOUT text; TYPE_IDENTITY type
-    chain: tuple[str, ...] = ()           # CHAIN_SEQUENCE elements, in order
-    ok: bool = False                      # DOWNCAST_OK / TYPE_IDENTITY
-    static_kind: StaticAssertKind | None = None   # STATIC_ASSERTION only
-    static_expr: str = ""                 # the asserted expression, verbatim
+    value: str = ""  # DISPLAY/DEBUG/PANIC/RETURN/STDOUT text; TYPE_IDENTITY type
+    chain: tuple[str, ...] = ()  # CHAIN_SEQUENCE elements, in order
+    ok: bool = False  # DOWNCAST_OK / TYPE_IDENTITY
+    static_kind: StaticAssertKind | None = None  # STATIC_ASSERTION only
+    static_expr: str = ""  # the asserted expression, verbatim
 
     def __post_init__(self) -> None:
         k = self.kind
@@ -156,10 +165,11 @@ class ObservableOutcome:
 
     @classmethod
     def static_assertion(
-        cls, static_kind: StaticAssertKind, expr: str,
+        cls,
+        static_kind: StaticAssertKind,
+        expr: str,
     ) -> ObservableOutcome:
-        return cls(OutcomeKind.STATIC_ASSERTION,
-                   static_kind=static_kind, static_expr=expr)
+        return cls(OutcomeKind.STATIC_ASSERTION, static_kind=static_kind, static_expr=expr)
 
     @property
     def is_runtime(self) -> bool:
@@ -214,9 +224,9 @@ class FenceDirective(Enum):
     guessed. Mishandling silently corrupts the oracle (e.g. treating a
     ``compile_fail`` NEGATIVE behaviour as a positive assertion)."""
 
-    RUN = auto()           # plain ``` — compile + run
-    NO_RUN = auto()        # `no_run` — compile only, don't execute
-    IGNORE = auto()        # `ignore` — skip entirely
+    RUN = auto()  # plain ``` — compile + run
+    NO_RUN = auto()  # `no_run` — compile only, don't execute
+    IGNORE = auto()  # `ignore` — skip entirely
     SHOULD_PANIC = auto()  # `should_panic` — the Then IS a panic, not a value
     COMPILE_FAIL = auto()  # `compile_fail` — asserts NON-compilation (negative)
 
@@ -224,9 +234,12 @@ class FenceDirective(Enum):
 # Fences whose behaviour is usable as a POSITIVE runtime oracle. `ignore` is
 # skipped; `no_run` compiles but yields no runtime observable; `compile_fail`
 # is a negative behaviour (using it as a positive oracle is backwards).
-POSITIVE_RUNNABLE_FENCES = frozenset({
-    FenceDirective.RUN, FenceDirective.SHOULD_PANIC,
-})
+POSITIVE_RUNNABLE_FENCES = frozenset(
+    {
+        FenceDirective.RUN,
+        FenceDirective.SHOULD_PANIC,
+    }
+)
 
 
 class BehaviourClass(Enum):
@@ -237,8 +250,8 @@ class BehaviourClass(Enum):
 
     IDENTITY               a TypeId round-trip: what went in comes back out
                            through `is::<T>()` / `downcast::<T>()`.
-    TRAIT_OBJECT_IDENTITY  the same, through `type_id()` on a trait object —
-                           the vtable, not the payload, answers.
+    TRAIT_OBJECT_IDENTITY  the same, observed THROUGH a trait object
+                           (`as &dyn …`) — the vtable, not the payload, answers.
     EXACT_FORMAT           a Display/Debug/alternate-Debug string, byte-exact.
     BOUNDED_RESOURCE       a length/size/capacity boundary (a heuristic — see
                            :func:`classify_behaviour`).
@@ -267,29 +280,16 @@ class BehaviourSpec:
     whole crate."""
 
     behaviour_id: str
-    given: str                              # PublicApiSetup — setup code
-    when: str                               # PublicApiAction — the exercised call
-    then: ObservableOutcome | None = None   # None for ASSERTION (the assert IS the Then)
+    given: str  # PublicApiSetup — setup code
+    when: str  # PublicApiAction — the exercised call
+    then: ObservableOutcome | None = None  # None for ASSERTION (the assert IS the Then)
     exercises: frozenset[str] = frozenset()
     provenance: BehaviourProvenance = BehaviourProvenance.HARVESTED
     subkind: BehaviourSubKind = BehaviourSubKind.ASSERTION
     fence: FenceDirective = FenceDirective.RUN
-    cfg_cluster: str = "default"            # nightly backtrace behaviour ≠ stable
-    source_ref: str = ""                    # where harvested (file:line / example name)
-    klass: BehaviourClass = BehaviourClass.OTHER   # see classify_behaviour
-    # The environment the Then was OBSERVED under, as `KEY=value` pairs sorted
-    # and joined by `;` — "" when the capture did not record one (every
-    # harvested spec, whose Then came from a test the crate runs itself).
-    #
-    # Running a probe twice catches NON-DETERMINISM. It does not catch
-    # environment-dependence: measured 2026-08-27, `err.backtrace()` renders
-    # `<disabled>` and is perfectly stable across runs, but becomes a captured
-    # backtrace under `RUST_BACKTRACE=1`. `base_cargo_env` copies `os.environ`
-    # and deliberately does not set that variable, so the captured value is
-    # whatever the parent process happened to have. A replay under a different
-    # parent env would then fail on a behaviour that never changed — which is
-    # a false verdict in the oracle, the most expensive kind.
-    capture_env: str = ""
+    cfg_cluster: str = "default"  # nightly backtrace behaviour ≠ stable
+    source_ref: str = ""  # where harvested (file:line / example name)
+    klass: BehaviourClass = BehaviourClass.OTHER  # see classify_behaviour
 
     def __post_init__(self) -> None:
         # An OUTCOME-behaviour compares a captured observable to a golden Then,
@@ -329,7 +329,6 @@ class BehaviourSpec:
             "cfg_cluster": self.cfg_cluster,
             "source_ref": self.source_ref,
             "klass": self.klass.name,
-            "capture_env": self.capture_env,
         }
 
     @classmethod
@@ -338,8 +337,7 @@ class BehaviourSpec:
             behaviour_id=str(d["behaviour_id"]),
             given=str(d.get("given", "")),
             when=str(d.get("when", "")),
-            then=(ObservableOutcome.from_dict(d["then"])
-                  if d.get("then") is not None else None),
+            then=(ObservableOutcome.from_dict(d["then"]) if d.get("then") is not None else None),
             exercises=frozenset(str(x) for x in (d.get("exercises") or [])),
             provenance=BehaviourProvenance[str(d.get("provenance", "HARVESTED"))],
             subkind=BehaviourSubKind[str(d.get("subkind", "ASSERTION"))],
@@ -347,7 +345,6 @@ class BehaviourSpec:
             cfg_cluster=str(d.get("cfg_cluster", "default")),
             source_ref=str(d.get("source_ref", "")),
             klass=BehaviourClass[str(d.get("klass", "OTHER"))],
-            capture_env=str(d.get("capture_env", "")),
         )
 
 
@@ -357,10 +354,60 @@ class BehaviourSpec:
 # (`s.len() == 3`, `"x".repeat(1024)`, `&buf[..16]`, `Vec::with_capacity(8)`).
 _RESOURCE_TOKENS = ("len(", "repeat(", "[..", "capacity")
 # ... or a COMMENT that names a limit.
-_LIMIT_WORDS = ("limit", "maximum", "max ", "bound", "capacity", "overflow",
-                "truncat", "at most", "no more than")
+_LIMIT_WORDS = ("limit", "maximum", "max ", "bound", "capacity", "overflow", "truncat", "at most", "no more than")
 _OPTION_WHEN_MARKERS = (".is_none()", ".is_some()")
 _CFG_GATE_MARKERS = ("#[cfg(", "cfg!(", "#[rustversion", "rustversion::cfg!")
+
+
+def _ident_char(c: str) -> bool:
+    return c.isalnum() or c == "_"
+
+
+def observes_through_trait_object(when: str) -> bool:
+    """True when `when` casts the value to a trait object (`as &dyn …`).
+
+    The letters `dyn` anywhere are not enough: a TYPE_IDENTITY whose type
+    argument is `Box<dyn StdError + Send + Sync>` is a concrete downcast of
+    that Box, not an observation through a vtable. Measured on the live
+    230-spec suite (2026-08-27): 35 TYPE_IDENTITY, 0 with a trait-object
+    cast, 1 with `dyn` inside a turbofish — that one must stay IDENTITY.
+
+    `type_id()` is also not enough. A capture of `(&*err as &dyn Error).is::<&str>()`
+    never writes `type_id()`; keying on that substring made TRAIT_OBJECT_IDENTITY
+    unstorable for every sensible capture while still asking for it.
+    """
+    i = 0
+    n = len(when)
+    while True:
+        j = when.find(" as ", i)
+        if j < 0:
+            return False
+        k = j + 4
+        while k < n and when[k].isspace():
+            k += 1
+        if k >= n or when[k] != "&":
+            i = j + 4
+            continue
+        k += 1
+        while k < n and when[k].isspace():
+            k += 1
+        if when.startswith("mut", k) and (k + 3 >= n or not _ident_char(when[k + 3])):
+            k += 3
+            while k < n and when[k].isspace():
+                k += 1
+        if k < n and when[k] == "'":
+            k += 1
+            while k < n and _ident_char(when[k]):
+                k += 1
+            while k < n and when[k].isspace():
+                k += 1
+        if k < n and when[k] == "(":
+            k += 1
+            while k < n and when[k].isspace():
+                k += 1
+        if when.startswith("dyn", k) and (k + 3 >= n or not _ident_char(when[k + 3])):
+            return True
+        i = j + 4
 
 
 def _line_has_numeric_literal(line: str) -> bool:
@@ -392,7 +439,7 @@ def has_resource_boundary(text: str) -> bool:
             continue
         comment_at = line.find("//")
         code = line if comment_at < 0 else line[:comment_at]
-        comment = "" if comment_at < 0 else line[comment_at + 2:].lower()
+        comment = "" if comment_at < 0 else line[comment_at + 2 :].lower()
         if comment and any(w in comment for w in _LIMIT_WORDS):
             return True
         if any(t in code for t in _RESOURCE_TOKENS) and _line_has_numeric_literal(code):
@@ -401,14 +448,16 @@ def has_resource_boundary(text: str) -> bool:
 
 
 def classify_behaviour(
-    spec: BehaviourSpec, *, default_cluster: str = "default",
+    spec: BehaviourSpec,
+    *,
+    default_cluster: str = "default",
 ) -> BehaviourClass:
     """The :class:`BehaviourClass` of `spec`, from its kind and its text. Pure;
     never raises; OTHER when nothing matches. Precedence, first hit wins:
 
     1. STATIC_ASSERTION                       → LAYOUT_PIN
     2. TYPE_IDENTITY                          → TRAIT_OBJECT_IDENTITY when the
-       `when` mentions `type_id()`, else IDENTITY
+       `when` casts through a trait object (`as &dyn …`), else IDENTITY
     3. `when` has `.is_none()`/`.is_some()`, or the Then value is `None` /
        starts with `Some(`                    → OPTION_SEMANTICS
     4. DISPLAY / DEBUG / ALT_DEBUG            → BOUNDED_RESOURCE when the test
@@ -425,12 +474,13 @@ def classify_behaviour(
     if then is not None and then.kind is OutcomeKind.STATIC_ASSERTION:
         return BehaviourClass.LAYOUT_PIN
     if then is not None and then.kind is OutcomeKind.TYPE_IDENTITY:
-        if "type_id()" in spec.when:
+        if observes_through_trait_object(spec.when):
             return BehaviourClass.TRAIT_OBJECT_IDENTITY
         return BehaviourClass.IDENTITY
     then_value = then.value.strip() if then is not None else ""
     if any(m in spec.when for m in _OPTION_WHEN_MARKERS) or (
-            then is not None and (then_value == "None" or then_value.startswith("Some("))):
+        then is not None and (then_value == "None" or then_value.startswith("Some("))
+    ):
         return BehaviourClass.OPTION_SEMANTICS
     if then is not None and then.kind in FORMAT_OUTCOME_KINDS:
         if has_resource_boundary(spec.given):
@@ -460,15 +510,13 @@ class BehaviourSuite:
         return tuple(s for s in self.specs if s.is_positive_oracle)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"cfg_cluster": self.cfg_cluster,
-                "specs": [s.to_dict() for s in self.specs]}
+        return {"cfg_cluster": self.cfg_cluster, "specs": [s.to_dict() for s in self.specs]}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BehaviourSuite:
         return cls(
             cfg_cluster=str(d.get("cfg_cluster", "default")),
-            specs=tuple(BehaviourSpec.from_dict(x)
-                        for x in (d.get("specs") or [])),
+            specs=tuple(BehaviourSpec.from_dict(x) for x in (d.get("specs") or [])),
         )
 
 
@@ -482,8 +530,9 @@ def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> Behaviou
     by_id: dict[str, BehaviourSpec] = {s.behaviour_id: s for s in existing.specs}
     for s in incoming.specs:
         by_id.setdefault(s.behaviour_id, s)
-    return BehaviourSuite(cfg_cluster=incoming.cfg_cluster or existing.cfg_cluster,
-                          specs=tuple(by_id[k] for k in sorted(by_id)))
+    return BehaviourSuite(
+        cfg_cluster=incoming.cfg_cluster or existing.cfg_cluster, specs=tuple(by_id[k] for k in sorted(by_id))
+    )
 
 
 class BehaviourVerdict(Enum):

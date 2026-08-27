@@ -8,6 +8,7 @@ does not compile+run against the REAL lib is discarded (self-filtering), so a
 hallucinated composition can never become oracle. The prompt forbids transcribing
 any internal call-sequence — synthesis is black-box usage, not implementation.
 """
+
 from __future__ import annotations
 
 from pipeline_core.domain.behaviour import MAY_REPRESENTATION_NOTE
@@ -46,15 +47,18 @@ def build_behaviour_synthesis_prompt(
     targets = ", ".join(target_units) or "(the crate's public API)"
     class_lines = "".join(f"- {k}: {d}\n" for k, d in target_classes)
     # Asked by CLASS, the model still needs CALLABLE NAMES: a class names what
-    # to observe, not what to call, and `<IN_SCOPE_SYMBOLS>` is empty on every
-    # live run (`symbol_inventory` is a constant ""). The unit list stops being
-    # the request and becomes the inventory — the same names, a different job.
-    goal = (f"Goal: write ONE behaviour for each of these classes, choosing "
-            f"whatever public API exercises it:\n{class_lines}"
-            f"\nPublic units available to call (nothing here is required; use "
-            f"whatever the behaviour needs): {targets}\n"
-            if target_classes else
-            f"Goal: exercise these units through PUBLIC API only: {targets}\n")
+    # to observe, not what to call. `symbol_inventory` is a constant "" on
+    # every live run (the same empty collaborator t1.5 receives), and
+    # `tag_block` omits an empty tag. Filling it from PUBLIC_API_SURFACE would
+    # dump that block twice. The leftover unit names below are the inventory.
+    goal = (
+        f"Goal: write ONE behaviour for each of these classes, choosing "
+        f"whatever public API exercises it:\n{class_lines}"
+        f"\nPublic units available to call (nothing here is required; use "
+        f"whatever the behaviour needs): {targets}\n"
+        if target_classes
+        else f"Goal: exercise these units through PUBLIC API only: {targets}\n"
+    )
     surface_block = tag_block("PUBLIC_API_SURFACE", public_surface)
     symbols_block = tag_block("IN_SCOPE_SYMBOLS", symbol_inventory)
     # NOT "imitate the STYLE of". The only worked example this prompt carries
@@ -65,10 +69,13 @@ def build_behaviour_synthesis_prompt(
     # which is the same defect as the free-form `fn main()` this prompt was
     # rewritten to stop asking for, one level down. It is here for the CALLS.
     examples_block = tag_block(
-        "EXAMPLE_USAGES", example_usages,
+        "EXAMPLE_USAGES",
+        example_usages,
         prefix="How this crate's public API is CALLED. Take the calls, never the "
-               "shape: these are the crate's own tests, so they assert — your "
-               "<GIVEN> and <WHEN> must not.\n```rust\n", suffix="\n```")
+        "shape: these are the crate's own tests, so they assert — your "
+        "<GIVEN> and <WHEN> must not.\n```rust\n",
+        suffix="\n```",
+    )
     return f"""Specify this crate's observable behaviour through its PUBLIC API.
 
 Crate: {module_name} | Cluster: {cfg_cluster}

@@ -10,6 +10,7 @@ ranks OTHER last so t1.5's cap discarded them. The constrained shape produced
 7 of 7 across two variants. Each test below pins one link of the chain that
 turns that into a real check, and the blob shape is the negative control.
 """
+
 from __future__ import annotations
 
 from pipeline_core.application.emit_behaviour_tests import (
@@ -20,7 +21,6 @@ from pipeline_core.application.emit_behaviour_tests import (
 from pipeline_core.domain.behaviour import BehaviourClass, OutcomeKind
 from pipeline_core.domain.behaviour_probe import (
     CapturedProbe,
-    capture_env_of,
     captured_spec,
     class_targets,
     identity_type_of,
@@ -38,13 +38,13 @@ from pipeline_core.domain.behaviour_select import behaviour_class_name
 
 
 def _probe(**kw: str) -> CapturedProbe:
-    base = {"name": "b", "given": "    let e = anyhow!(\"x\");",
-            "when": "e.to_string()", "observe": "display"}
+    base = {"name": "b", "given": '    let e = anyhow!("x");', "when": "e.to_string()", "observe": "display"}
     base.update(kw)
     return CapturedProbe(**base)  # type: ignore[arg-type]
 
 
 # --- the value-bearing rule -------------------------------------------------
+
 
 def test_a_comparison_when_is_refused_because_it_discards_the_value() -> None:
     """Experiment variant B produced `format!("{}", b) == "world"`, whose
@@ -75,6 +75,7 @@ def test_a_when_that_prints_or_asserts_or_spans_lines_is_refused() -> None:
 
 
 # --- one source, two roles --------------------------------------------------
+
 
 def test_capture_and_replay_render_from_the_same_three_parts() -> None:
     spec = captured_spec(cfg_cluster="stable", probe=_probe(), n=0, stdout="x")
@@ -121,9 +122,13 @@ def test_a_legacy_blob_capture_still_runs_but_can_never_replay() -> None:
     """NEGATIVE CONTROL — the shape on disk today. `program_for` returns the
     stored program so the exercises pass keeps working, and `render_replay_test`
     returns "" because there is no single expression to assert on."""
-    blob = probe_spec(cfg_cluster="s", unit="Error::backtrace", n=0,
-                      program="fn main() { println!(\"a\"); println!(\"b\"); }",
-                      stdout="a\nb")
+    blob = probe_spec(
+        cfg_cluster="s",
+        unit="Error::backtrace",
+        n=0,
+        program='fn main() { println!("a"); println!("b"); }',
+        stdout="a\nb",
+    )
     assert blob.klass is BehaviourClass.OTHER
     assert program_for(blob) == blob.given
     assert render_replay_test(blob, fn_name="t") == ""
@@ -149,7 +154,7 @@ _REPLY = """
 def test_the_parser_takes_the_three_parts_and_drops_a_block_with_no_when() -> None:
     got = parse_behaviour_specs(_REPLY)
     assert [p.name for p in got] == ["chain_order"]
-    assert got[0].when == 'e.to_string()' and got[0].observe == "display"
+    assert got[0].when == "e.to_string()" and got[0].observe == "display"
     assert 'let e = anyhow!("inner");' in got[0].given
 
 
@@ -157,47 +162,48 @@ def test_the_models_class_is_not_read_back() -> None:
     """Measured 0 of 3 self-assigned classes correct when the model chose them
     against 4 of 4 when supplied; `classified()` re-derives the class anyway."""
     assert not hasattr(parse_behaviour_specs(_REPLY)[0], "klass")
-    spec = captured_spec(cfg_cluster="s", probe=parse_behaviour_specs(_REPLY)[0],
-                         n=0, stdout="inner")
-    assert spec.klass is BehaviourClass.EXACT_FORMAT   # derived, not the tag
+    spec = captured_spec(cfg_cluster="s", probe=parse_behaviour_specs(_REPLY)[0], n=0, stdout="inner")
+    assert spec.klass is BehaviourClass.EXACT_FORMAT  # derived, not the tag
 
 
 # --- the class-driven selector ----------------------------------------------
 
+
 def test_the_selector_asks_for_the_scarcest_classes_first() -> None:
-    specs = [captured_spec(cfg_cluster="s", probe=_probe(), n=i, stdout="v")
-             for i in range(5)]          # 5 EXACT_FORMAT, nothing else
+    specs = [
+        captured_spec(cfg_cluster="s", probe=_probe(), n=i, stdout="v") for i in range(5)
+    ]  # 5 EXACT_FORMAT, nothing else
     asks = class_targets(specs, behaviour_class_name, max_targets=3)
     names = [c for c, _ in asks]
-    assert "EXACT_FORMAT" not in names          # the one class that is well covered
-    assert names[0] in {"IDENTITY", "TRAIT_OBJECT_IDENTITY", "OPTION_SEMANTICS",
-                        "BOUNDED_RESOURCE"}
-    assert all(d for _c, d in asks)             # every ask carries its phrasing
+    assert "EXACT_FORMAT" not in names  # the one class that is well covered
+    assert names[0] in {"IDENTITY", "TRAIT_OBJECT_IDENTITY", "OPTION_SEMANTICS", "BOUNDED_RESOURCE"}
+    assert all(d for _c, d in asks)  # every ask carries its phrasing
     assert class_targets(specs, behaviour_class_name, max_targets=0) == ()
 
 
 # --- the env guard ----------------------------------------------------------
 
-def test_capture_env_records_only_what_changes_an_observable() -> None:
-    """Run-twice catches non-determinism; it cannot catch env-dependence.
-    `err.backtrace()` renders `<disabled>` stably and differently under
-    `RUST_BACKTRACE=1`."""
-    assert capture_env_of({"PATH": "/x", "CARGO": "y"}) == ""
-    assert capture_env_of({"RUST_BACKTRACE": "1"}) == "RUST_BACKTRACE=1"
-    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="v",
-                         capture_env="RUST_BACKTRACE=0")
-    assert spec.capture_env == "RUST_BACKTRACE=0"
+
+def test_a_legacy_capture_env_key_is_ignored_on_load() -> None:
+    """The field was write-only: nothing downstream read it, and the
+    perturbation run is the guard. A record written while it existed must
+    still load; the key must not come back out."""
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="v")
+    d = spec.to_dict()
+    assert "capture_env" not in d
+    d["capture_env"] = "RUST_BACKTRACE=0"
     from pipeline_core.domain.behaviour import BehaviourSpec
-    assert BehaviourSpec.from_dict(spec.to_dict()).capture_env == "RUST_BACKTRACE=0"
-    legacy = {k: v for k, v in spec.to_dict().items() if k != "capture_env"}
-    assert BehaviourSpec.from_dict(legacy).capture_env == ""
+
+    loaded = BehaviourSpec.from_dict(d)
+    assert loaded.to_dict() == spec.to_dict()
+    assert "capture_env" not in loaded.to_dict()
 
 
 # --- the emitter ------------------------------------------------------------
 
+
 def test_the_emitted_file_carries_the_origin_marker_and_stable_fn_names() -> None:
-    specs = [captured_spec(cfg_cluster="stable", probe=_probe(name="a"), n=0,
-                           stdout="x")]
+    specs = [captured_spec(cfg_cluster="stable", probe=_probe(name="a"), n=0, stdout="x")]
     body = render_behaviour_test_file(specs, crate="anyhow")
     assert "determ-pipeline generated integration test" in body
     assert "use anyhow::*;" in body
@@ -209,6 +215,7 @@ def test_the_emitted_file_carries_the_origin_marker_and_stable_fn_names() -> Non
 
 # --- the value the replay has to match --------------------------------------
 
+
 def test_a_capture_stores_exactly_what_format_would_produce() -> None:
     """`normalize_stdout` strips per-line trailing whitespace and drops trailing
     blank lines. That is right for a free-form program's blob and wrong for a
@@ -217,27 +224,27 @@ def test_a_capture_stores_exactly_what_format_would_produce() -> None:
     test fail against the ORIGINAL crate. Measured 2026-08-27 on a pristine
     copy: a value of `"a \nb"` printed as `'a \nb\n'`, was stored as `'a\nb'`,
     and the emitted `#[test]` failed on the tree it was captured from."""
-    raw = "a \nb\n"                       # exactly what `println!("{}", s)` writes
+    raw = "a \nb\n"  # exactly what `println!("{}", s)` writes
     assert printed_value(raw) == "a \nb"
-    assert normalize_stdout(raw) == "a\nb"        # NEGATIVE CONTROL: the old store
+    assert normalize_stdout(raw) == "a\nb"  # NEGATIVE CONTROL: the old store
     assert printed_value(raw) != normalize_stdout(raw)
 
     spec = captured_spec(cfg_cluster="s", probe=_probe(when="s.clone()"), n=0, stdout=raw)
     assert spec.then is not None and spec.then.value == "a \nb"
     # The replay asserts the value the capture printed, character for character
     # — the trailing space on the first line included.
-    assert r'assert_eq!(format!("{}", s.clone()), "a \nb");' in render_replay_test(
-        spec, fn_name="t")
+    assert r'assert_eq!(format!("{}", s.clone()), "a \nb");' in render_replay_test(spec, fn_name="t")
 
 
 def test_a_value_that_ends_in_its_own_newline_survives_the_round_trip() -> None:
     """`println!` appends exactly one newline, so removing exactly one is the
     inverse. A Display that itself ends in a newline used to lose it."""
     assert printed_value("x\n\n") == "x\n"
-    assert normalize_stdout("x\n\n") == "x"     # NEGATIVE CONTROL
+    assert normalize_stdout("x\n\n") == "x"  # NEGATIVE CONTROL
 
 
 # --- the capture program's imports ------------------------------------------
+
 
 def test_the_capture_program_imports_the_crate_like_the_replay_does() -> None:
     """The three probes this shape replaced each opened with
@@ -256,6 +263,7 @@ def test_the_capture_program_imports_the_crate_like_the_replay_does() -> None:
 
 # --- the comparison check, with the turbofish carved out --------------------
 
+
 def test_a_bare_comparison_is_refused_and_a_turbofish_is_not() -> None:
     """`<` and `>` were omitted from the token list to protect the turbofish,
     which admitted `v.len() < 3` and `n > 0` — the exact shape the rule exists
@@ -263,8 +271,7 @@ def test_a_bare_comparison_is_refused_and_a_turbofish_is_not() -> None:
     for expr in ("v.len() < 3", "n > 0", "a.len() > b.len()"):
         why = value_bearing_reason(expr)
         assert why is not None and "compares" in why, expr
-    for expr in ("s.parse::<i32>().unwrap()", "e.is::<Vec<u8>>()",
-                 "e.downcast_ref::<HashMap<String, u8>>().is_some()"):
+    for expr in ("s.parse::<i32>().unwrap()", "e.is::<Vec<u8>>()", "e.downcast_ref::<HashMap<String, u8>>().is_some()"):
         assert value_bearing_reason(expr) is None, expr
 
 
@@ -278,9 +285,10 @@ def test_a_conjunction_of_two_observables_is_refused() -> None:
 
 # --- the environment axis ---------------------------------------------------
 
+
 def test_the_perturbation_flips_the_observable_env_keys() -> None:
-    """Recording the capture env says what the value was seen under; it does
-    not say whether the value depends on it. The flip is what asks."""
+    """The flip is the guard. Storing the capture env on the spec said what
+    the value was seen under and never asked whether it depends on it."""
     assert perturbed_env({}) == {"RUST_BACKTRACE": "1", "RUST_LIB_BACKTRACE": "1"}
     assert perturbed_env({"RUST_BACKTRACE": "1"})["RUST_BACKTRACE"] == "0"
     assert perturbed_env({"RUST_BACKTRACE": "full"})["RUST_BACKTRACE"] == "0"

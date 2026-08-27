@@ -98,8 +98,6 @@ class Task0dDeps:
     # silent-hole class under another name.
     record_misses: Callable[[Path, str, list[dict[str, str]]], object] = (
         lambda _p, _c, _m: None)
-    # The observable-affecting env the probe ran under, recorded on each spec.
-    capture_env: Callable[[BuildCluster], str] = lambda _c: ""
     # Writes the replayable captures as `tests/behaviour_<cluster>_gen_1.rs`,
     # after compiling and running them against the original.
     emit_tests: Callable[
@@ -260,8 +258,7 @@ def _run_probes(
                 continue
             admitted.append(captured_spec(
                 cfg_cluster=cluster.name, probe=probe, n=n,
-                stdout=result.stdout, default_cluster=default_cluster,
-                capture_env=deps.capture_env(cluster)))
+                stdout=result.stdout, default_cluster=default_cluster))
     return admitted, len(admitted), proposed, cargo_runs, misses
 
 
