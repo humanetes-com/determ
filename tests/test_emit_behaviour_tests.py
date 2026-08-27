@@ -27,6 +27,8 @@ import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.application.emit_behaviour_tests import (
     behaviour_test_stem,
     emit_behaviour_tests,
@@ -219,10 +221,21 @@ def test_a_red_verdict_that_names_no_capture_withdraws_rather_than_retries(tmp_p
     assert list((tmp_path / "tests").iterdir()) == []
 
 
-def test_a_completed_run_of_zero_tests_is_a_verdict_not_a_compile_failure(tmp_path: Path) -> None:
-    """`#![cfg(false)]` on an integration test compiles as `running 0 tests`.
-    Reading `passed or failed` treats that as 'did not build' and withdrew
-    every capture. The trailer is the verdict."""
+def test_a_completed_run_that_never_ran_the_emitted_tests_is_not_a_pass(tmp_path: Path) -> None:
+    """An integration test whose `#![cfg]` excludes it compiles as `running 0
+    tests` and prints a green trailer. The trailer says the binary ran; it does
+    not say it ran OUR tests, and a predicate that stops at the trailer admits
+    every capture in a file that executed none of them, under a log line
+    claiming it was verified against the original.
+
+    Live trigger: `_verify_behaviour_tests` runs `cargo test -p <crate> --test
+    <stem>` and passes no `--features`, while a `feature/<pred>` cluster
+    contributes no RUSTFLAGS and `cluster_cfg_attr` gates the file on
+    `any(<pred>, feature = "<pred>")`.
+
+    The trailer is still what distinguishes this from a build failure, and the
+    two must not be reported as the same thing: this file compiled, so the fix
+    is a cfg/env one, not a broken render."""
     zero = (
         f"     Running tests/{_STEM}_gen_1.rs "
         f"(target/debug/deps/{_STEM}_gen_1-ab)\n"
@@ -230,8 +243,36 @@ def test_a_completed_run_of_zero_tests_is_a_verdict_not_a_compile_failure(tmp_pa
         "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; "
         "0 filtered out; finished in 0.00s\n"
     )
-    dest, dropped, misses = _emit(tmp_path, [_spec("a")], lambda _s, _e: (True, zero))
-    assert dest is not None and dropped == () and misses == []
+    specs = [_spec("a")]
+    dest, dropped, misses = _emit(tmp_path, specs, lambda _s, _e: (True, zero))
+    assert dest is None and set(dropped) == {specs[0].behaviour_id}
+    assert list((tmp_path / "tests").iterdir()) == []
+    assert misses[-1]["reason"] == "replay completed but did not run the emitted test — not verified"
+
+    # NEGATIVE CONTROL, the class this must not swallow: the same green trailer
+    # with the emitted test actually reported. Nothing is withdrawn — a
+    # coverage check that fired here would refuse every healthy capture.
+    green = tmp_path / "green"
+    dest2, dropped2, misses2 = _emit(green, specs, _verifier(green))
+    assert dest2 is not None and dropped2 == () and misses2 == []
+
+
+def test_a_perturbed_run_that_never_ran_the_emitted_tests_is_not_a_pass(tmp_path: Path) -> None:
+    """Same rule on the second run: a green trailer over zero of our tests
+    rules nothing out about environment-dependence, so it may not stand in for
+    the perturbed evidence."""
+    names = [replay_fn_name(_spec("a"))]
+
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        if extra:
+            return True, _libtest([], [])  # completed, ran nothing of ours
+        return True, _libtest(names, [])
+
+    specs = [_spec("a")]
+    dest, dropped, misses = _emit(tmp_path, specs, verify, perturb_env={"RUST_BACKTRACE": "1"})
+    assert dest is None and set(dropped) == {specs[0].behaviour_id}
+    assert list((tmp_path / "tests").iterdir()) == []
+    assert misses[-1]["reason"].startswith("environment-perturbed replay completed but did not run")
 
 
 def test_a_perturbed_run_with_no_verdict_withdraws(tmp_path: Path) -> None:
@@ -321,3 +362,26 @@ def test_a_harvested_spec_and_a_foreign_file_are_both_left_alone(tmp_path: Path)
     assert body.count("#[test]") == 1  # the harvested one is not ours
     assert (tmp_path / "tests" / "error_gen_1.rs").exists()
     assert (tmp_path / "tests" / "not_a_gen_test.rs").exists()
+
+
+def test_a_verify_that_raises_leaves_no_file_behind(tmp_path: Path) -> None:
+    """The file is on disk from `write_text` onwards. Every ordinary exit
+    removes it; an exception did not, and `run_task0d` catches whatever this
+    raises, logs `non-fatal, suite kept` and saves the suite — so the crate was
+    left holding a `tests/` file no verification run ever saw green, with every
+    capture in it still listed to t1.5 as a MUST.
+
+    NEGATIVE CONTROL: the same specs under a verify that returns instead of
+    raising still emit the file, so the guard cannot be a blanket unlink."""
+
+    def boom(_stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
+        raise RuntimeError("cargo runner blew up")
+
+    specs = [_spec("a")]
+    with pytest.raises(RuntimeError, match="blew up"):
+        _emit(tmp_path, specs, boom)
+    assert list((tmp_path / "tests").iterdir()) == []
+
+    green = tmp_path / "green"
+    dest, dropped, _m = _emit(green, specs, _verifier(green))
+    assert dest is not None and dest.exists() and dropped == ()

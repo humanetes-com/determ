@@ -195,24 +195,50 @@ def _withdraw(
     return survivors, went
 
 
-def _failed_names(output: str) -> tuple[frozenset[str], bool]:
-    """(`names libtest reported as failed`, `any verdict was reported at all`).
+def _verdict_of(output: str) -> tuple[frozenset[str], frozenset[str], bool]:
+    """(`names libtest reported as failed`, `names it EXECUTED`, `a verdict was
+    reported at all`).
 
     Read through `parse_binary_results`, the same reader the sweep's oracle
     uses, so "which test failed" is answered by one parser rather than by a
-    second hand-rolled scan of cargo's output."""
+    second hand-rolled scan of cargo's output.
+
+    The trailer is what says a verdict happened, including `running 0 tests` /
+    `0 passed; 0 failed`: `passed or failed` reads a completed empty run as
+    "did not build", which is what an integration test whose `#![cfg]` excludes
+    it compiles as. The executed set is the other half, and the two are only
+    useful together — see :func:`_unexecuted`."""
     binaries = parse_binary_results(output)
     failed: set[str] = set()
+    executed: set[str] = set()
     saw = False
     for b in binaries:
         failed |= set(b.failed)
-        # The trailer is the verdict, including `running 0 tests` /
-        # `0 passed; 0 failed`. `passed or failed` reads a completed empty
-        # run as "did not build" — which is what `#![cfg(false)]` on an
-        # integration test compiles as — and withdrew every capture.
+        executed |= set(b.passed) | set(b.failed)
         if b.completed:
             saw = True
-    return frozenset(failed), saw
+    return frozenset(failed), frozenset(executed), saw
+
+
+def _unexecuted(keep: Sequence[BehaviourSpec], executed: frozenset[str]) -> list[BehaviourSpec]:
+    """The captures in `keep` whose replay test the run did not report.
+
+    A completed trailer says the binary ran; it does not say it ran OUR tests,
+    and treating it as if it did turns a cfg/env mismatch from a loud failure
+    into a silent pass. The live shape: `_verify_behaviour_tests` runs
+    `cargo test -p <crate> --test <stem>` and passes no `--features`, while a
+    `feature/<pred>` cluster contributes no RUSTFLAGS of its own and
+    `cluster_cfg_attr` gates the emitted file on
+    `any(<pred>, feature = "<pred>")`. That file compiles to `running 0 tests`
+    under its own verification, and every capture in it would be admitted with
+    the log line claiming it was verified against the original. anyhow does not
+    hit it only because its non-default cluster is the custom-cfg one, which
+    does set `RUSTFLAGS=--cfg <pred>`.
+
+    libtest names every test in the binary and the verification run passes no
+    filter, so on a healthy run this is empty and a non-empty answer means the
+    file did not run — never that some subset was skipped."""
+    return [s for s in keep if replay_fn_name(s) not in executed]
 
 
 def emit_behaviour_tests(
@@ -253,119 +279,162 @@ def emit_behaviour_tests(
 
     (Path(project_dir) / "tests").mkdir(parents=True, exist_ok=True)
     dest = _free_dest(project_dir, stem)
-    for _round in range(MAX_VERIFY_ROUNDS):
-        body = render_behaviour_test_file(keep, crate=crate, cfg_attr=cfg_attr)
-        if not balanced(body):
-            log(
-                f"  [task0d] cluster {cfg_cluster}: behaviour test file REFUSED "
-                f"(delimiters unbalanced) — {len(keep)} capture(s) not emitted."
-            )
-            emit("task0d.behaviour_tests_refused", data={"cluster": cfg_cluster, "captures": len(keep)})
-            with suppress(OSError):
-                dest.unlink()
-            for s in keep:
-                _drop(s, "replay refused: delimiters unbalanced")
-            return None, tuple(dropped), misses
-        dest.write_text(body, encoding="utf-8")
 
-        ok, out = verify(dest.stem, {})
-        failed, saw_verdict = _failed_names(out)
-        if not saw_verdict:
-            # No verdict at all: the file did not compile, or the binary died
-            # before libtest reported anything. Nothing can be attributed to a
-            # single capture, so none of them may stay — a tests/ file that does
-            # not build takes the whole crate's oracle with it.
-            log(
-                f"  [task0d] cluster {cfg_cluster}: emitted behaviour tests produced no "
-                f"verdict (rc ok={ok}) — {len(keep)} capture(s) withdrawn. "
-                f"{out.strip()[-400:]}"
-            )
-            emit("task0d.behaviour_tests_unverifiable", data={"cluster": cfg_cluster, "captures": len(keep)})
-            with suppress(OSError):
-                dest.unlink()
-            for s in keep:
-                _drop(s, "replay did not build or reported no verdict")
-            return None, tuple(dropped), misses
-        if failed:
-            keep, went = _withdraw(keep, failed, _drop, "replay disagreed with the capture")
-            log(
-                f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) did not "
-                f"reproduce as a test against the original and were withdrawn."
-            )
-            if keep and went:
-                continue
-            # Nothing left, or a red verdict that names no capture in this file
-            # — which cannot be made green by dropping anything. Either way the
-            # file does not stay.
-            if keep:
-                for s in keep:
-                    _drop(s, "replay red on a verdict naming no capture in the file")
-            with suppress(OSError):
-                dest.unlink()
-            return None, tuple(dropped), misses
+    def _withdraw_unrun(missing: list[BehaviourSpec], *, perturbed: bool) -> None:
+        """Fail closed on a completed run that did not execute the emitted
+        tests. Nothing was verified, so nothing may be admitted — and it is
+        withdrawn under its own reason rather than the build failure's, because
+        the file compiled fine and the fix is a cfg/env one."""
+        which = "environment-perturbed replay" if perturbed else "replay"
+        log(
+            f"  [task0d] cluster {cfg_cluster}: the {which} completed without running "
+            f"{len(missing)} of {len(keep)} emitted test(s) — the file's cfg does not hold "
+            f"under the verification env; {len(keep)} capture(s) withdrawn."
+        )
+        emit(
+            "task0d.behaviour_tests_not_executed",
+            data={
+                "cluster": cfg_cluster,
+                "captures": len(keep),
+                "not_executed": len(missing),
+                "perturbed": perturbed,
+            },
+        )
+        with suppress(OSError):
+            dest.unlink()
+        for s in keep:
+            _drop(s, f"{which} completed but did not run the emitted test — not verified")
 
-        # Green under the capture env. Now the axis run-twice cannot see: the
-        # same binary under a different environment. A capture whose value
-        # moves with `RUST_BACKTRACE` is stable on every run and still not a
-        # specification of the CRATE.
-        if perturb_env:
-            _ok2, out2 = verify(dest.stem, perturb_env)
-            failed2, saw2 = _failed_names(out2)
-            if not saw2:
-                # Same fail-closed rule as the capture-env run: no trailer
-                # cannot rule env-dependence out, and keeping the file would
-                # admit a capture whose value may move with the environment
-                # as a specification of the crate.
+    # The file is on disk from `write_text` onwards, and it is only correct to
+    # leave one there that a verification run has been seen green. Every
+    # ordinary exit below already removes it; an EXCEPTION did not, and
+    # `run_task0d` catches whatever this raises, logs `non-fatal, suite kept`
+    # and then saves the suite — so a raise here used to leave an unverified
+    # `tests/` file in the crate AND every capture still listed as a MUST.
+    try:
+        for _round in range(MAX_VERIFY_ROUNDS):
+            body = render_behaviour_test_file(keep, crate=crate, cfg_attr=cfg_attr)
+            if not balanced(body):
                 log(
-                    f"  [task0d] cluster {cfg_cluster}: the environment-perturbed "
-                    f"replay reported no verdict — {len(keep)} capture(s) withdrawn."
+                    f"  [task0d] cluster {cfg_cluster}: behaviour test file REFUSED "
+                    f"(delimiters unbalanced) — {len(keep)} capture(s) not emitted."
                 )
-                emit(
-                    "task0d.behaviour_tests_unverifiable",
-                    data={"cluster": cfg_cluster, "captures": len(keep), "perturbed": True},
-                )
+                emit("task0d.behaviour_tests_refused", data={"cluster": cfg_cluster, "captures": len(keep)})
                 with suppress(OSError):
                     dest.unlink()
                 for s in keep:
-                    _drop(s, "perturbed replay reported no verdict — environment-dependence not ruled out")
+                    _drop(s, "replay refused: delimiters unbalanced")
                 return None, tuple(dropped), misses
-            if failed2:
-                keep, went = _withdraw(
-                    keep, failed2, _drop, f"environment-dependent: the observed value moves under {dict(perturb_env)}"
-                )
+            dest.write_text(body, encoding="utf-8")
+
+            ok, out = verify(dest.stem, {})
+            failed, executed, saw_verdict = _verdict_of(out)
+            if not saw_verdict:
+                # No verdict at all: the file did not compile, or the binary died
+                # before libtest reported anything. Nothing can be attributed to a
+                # single capture, so none of them may stay — a tests/ file that does
+                # not build takes the whole crate's oracle with it.
                 log(
-                    f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) are "
-                    "environment-dependent and were withdrawn."
+                    f"  [task0d] cluster {cfg_cluster}: emitted behaviour tests produced no "
+                    f"verdict (rc ok={ok}) — {len(keep)} capture(s) withdrawn. "
+                    f"{out.strip()[-400:]}"
+                )
+                emit("task0d.behaviour_tests_unverifiable", data={"cluster": cfg_cluster, "captures": len(keep)})
+                with suppress(OSError):
+                    dest.unlink()
+                for s in keep:
+                    _drop(s, "replay did not build or reported no verdict")
+                return None, tuple(dropped), misses
+            if failed:
+                keep, went = _withdraw(keep, failed, _drop, "replay disagreed with the capture")
+                log(
+                    f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) did not "
+                    f"reproduce as a test against the original and were withdrawn."
                 )
                 if keep and went:
                     continue
+                # Nothing left, or a red verdict that names no capture in this file
+                # — which cannot be made green by dropping anything. Either way the
+                # file does not stay.
                 if keep:
                     for s in keep:
-                        _drop(s, "perturbed replay red on a verdict naming no capture in the file")
+                        _drop(s, "replay red on a verdict naming no capture in the file")
                 with suppress(OSError):
                     dest.unlink()
                 return None, tuple(dropped), misses
+            if unrun := _unexecuted(keep, executed):
+                _withdraw_unrun(unrun, perturbed=False)
+                return None, tuple(dropped), misses
 
+            # Green under the capture env. Now the axis run-twice cannot see: the
+            # same binary under a different environment. A capture whose value
+            # moves with `RUST_BACKTRACE` is stable on every run and still not a
+            # specification of the CRATE.
+            if perturb_env:
+                _ok2, out2 = verify(dest.stem, perturb_env)
+                failed2, executed2, saw2 = _verdict_of(out2)
+                if not saw2:
+                    # Same fail-closed rule as the capture-env run: no trailer
+                    # cannot rule env-dependence out, and keeping the file would
+                    # admit a capture whose value may move with the environment
+                    # as a specification of the crate.
+                    log(
+                        f"  [task0d] cluster {cfg_cluster}: the environment-perturbed "
+                        f"replay reported no verdict — {len(keep)} capture(s) withdrawn."
+                    )
+                    emit(
+                        "task0d.behaviour_tests_unverifiable",
+                        data={"cluster": cfg_cluster, "captures": len(keep), "perturbed": True},
+                    )
+                    with suppress(OSError):
+                        dest.unlink()
+                    for s in keep:
+                        _drop(s, "perturbed replay reported no verdict — environment-dependence not ruled out")
+                    return None, tuple(dropped), misses
+                if failed2:
+                    keep, went = _withdraw(
+                        keep, failed2, _drop, f"environment-dependent: the observed value moves under {dict(perturb_env)}"
+                    )
+                    log(
+                        f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) are "
+                        "environment-dependent and were withdrawn."
+                    )
+                    if keep and went:
+                        continue
+                    if keep:
+                        for s in keep:
+                            _drop(s, "perturbed replay red on a verdict naming no capture in the file")
+                    with suppress(OSError):
+                        dest.unlink()
+                    return None, tuple(dropped), misses
+                if unrun := _unexecuted(keep, executed2):
+                    _withdraw_unrun(unrun, perturbed=True)
+                    return None, tuple(dropped), misses
+
+            log(
+                f"  [task0d] cluster {cfg_cluster}: {len(keep)} captured behaviour(s) "
+                f"emitted as {dest.name}, verified against the original"
+                f"{' and under a perturbed environment' if perturb_env else ''} — "
+                f"observed values, not guessed ones."
+            )
+            emit(
+                "task0d.behaviour_tests_emitted",
+                data={"cluster": cfg_cluster, "captures": len(keep), "file": dest.name, "withdrawn": len(dropped)},
+            )
+            return dest, tuple(dropped), misses
+
+        # Every round dropped something and the budget ran out with the file still
+        # red: withdraw the rest rather than leave a failing test in the oracle.
         log(
-            f"  [task0d] cluster {cfg_cluster}: {len(keep)} captured behaviour(s) "
-            f"emitted as {dest.name}, verified against the original"
-            f"{' and under a perturbed environment' if perturb_env else ''} — "
-            f"observed values, not guessed ones."
+            f"  [task0d] cluster {cfg_cluster}: behaviour tests still red after "
+            f"{MAX_VERIFY_ROUNDS} round(s) — {len(keep)} capture(s) withdrawn."
         )
-        emit(
-            "task0d.behaviour_tests_emitted",
-            data={"cluster": cfg_cluster, "captures": len(keep), "file": dest.name, "withdrawn": len(dropped)},
-        )
-        return dest, tuple(dropped), misses
-
-    # Every round dropped something and the budget ran out with the file still
-    # red: withdraw the rest rather than leave a failing test in the oracle.
-    log(
-        f"  [task0d] cluster {cfg_cluster}: behaviour tests still red after "
-        f"{MAX_VERIFY_ROUNDS} round(s) — {len(keep)} capture(s) withdrawn."
-    )
-    with suppress(OSError):
-        dest.unlink()
-    for s in keep:
-        _drop(s, "replay still red after the verification budget")
-    return None, tuple(dropped), misses
+        with suppress(OSError):
+            dest.unlink()
+        for s in keep:
+            _drop(s, "replay still red after the verification budget")
+        return None, tuple(dropped), misses
+    except BaseException:
+        with suppress(OSError):
+            dest.unlink()
+        raise

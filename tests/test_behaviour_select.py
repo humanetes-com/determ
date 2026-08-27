@@ -336,7 +336,16 @@ def test_the_guess_route_still_keeps_what_the_source_states() -> None:
     assert drop_capture_owned((layout, option)) == (layout, option)
 
 
-_LIVE_STABLE = Path(__file__).resolve().parents[1] / "tmp" / "anyhow" / ".skeleton" / "_behaviours_stable.json"
+# The bytes t0d wrote to `tmp/anyhow/.skeleton/_behaviours_stable.json` on
+# 2026-08-27, copied here verbatim. Reading the live path instead couples this
+# gate to an artefact the pipeline REWRITES: `save_behaviour_suite` rewrites it
+# on every t0d pass (which is why `oracle_fingerprint` keys on it), `tmp` is
+# gitignored so a fresh clone has no file at all, and `redo.sh` removes it. Any
+# of the three turns a green check.sh red, and a red check.sh means pre_run.sh
+# writes no stamp and continue.sh exits 3 — a launch blocked by a test about
+# records from a previous run. Frozen here, the counts below stay a claim about
+# a measurement instead of a claim about the current workspace.
+_RECORDED_STABLE = Path(__file__).resolve().parent / "fixtures" / "behaviours" / "behaviours_stable_2026-08-27.json"
 _CLASS_ONLY = frozenset(
     {
         "EXACT_FORMAT",
@@ -347,13 +356,13 @@ _CLASS_ONLY = frozenset(
 )
 
 
-def test_the_live_suite_leaves_no_pinnable_spec_on_the_guess_route() -> None:
-    """The plan's fixture, computed on `_behaviours_stable.json` (2026-08-27):
+def test_the_recorded_suite_leaves_no_pinnable_spec_on_the_guess_route() -> None:
+    """The plan's fixture, computed on the recorded `_behaviours_stable.json` (2026-08-27):
     230 specs, 155 pinnable; the class-only filter left 6; the inverted
     allowlist leaves 0. Negative control is the class-only predicate on the
     same records — a hand-made list of those six ids would pass by
     construction and fail on nothing."""
-    suite = BehaviourSuite.from_dict(json.loads(_LIVE_STABLE.read_text(encoding="utf-8")))
+    suite = BehaviourSuite.from_dict(json.loads(_RECORDED_STABLE.read_text(encoding="utf-8")))
     assert len(suite.specs) == 230
     pinnable = pinnable_specs(suite.specs)
     assert len(pinnable) == 155

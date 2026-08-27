@@ -363,6 +363,32 @@ def _ident_char(c: str) -> bool:
     return c.isalnum() or c == "_"
 
 
+def _skip_space(text: str, i: int) -> int:
+    n = len(text)
+    while i < n and text[i].isspace():
+        i += 1
+    return i
+
+
+def _skip_word(text: str, i: int, word: str) -> int:
+    """Past `word` at `i` (and the space after it) when it is there as a whole
+    token, else `i` unchanged."""
+    end = i + len(word)
+    if text.startswith(word, i) and (end >= len(text) or not _ident_char(text[end])):
+        return _skip_space(text, end)
+    return i
+
+
+def _skip_lifetime(text: str, i: int) -> int:
+    """Past a `'a` / `'static` lifetime at `i`, else `i` unchanged."""
+    if i >= len(text) or text[i] != "'":
+        return i
+    i += 1
+    while i < len(text) and _ident_char(text[i]):
+        i += 1
+    return _skip_space(text, i)
+
+
 def observes_through_trait_object(when: str) -> bool:
     """True when `when` casts the value to a trait object (`as &dyn …`).
 
@@ -375,39 +401,37 @@ def observes_through_trait_object(when: str) -> bool:
     `type_id()` is also not enough. A capture of `(&*err as &dyn Error).is::<&str>()`
     never writes `type_id()`; keying on that substring made TRAIT_OBJECT_IDENTITY
     unstorable for every sensible capture while still asking for it.
-    """
+
+    The reference forms accepted are the ones Rust accepts, in Rust's order:
+    `&dyn`, `&mut dyn`, `&\'a dyn`, `&\'a mut dyn`. Reading `mut` before the
+    lifetime accepted `&mut \'a dyn`, which does not parse, and rejected
+    `&\'a mut dyn`, which is the only legal spelling when both appear.
+    `*const dyn` / `*mut dyn` are the same observation through a vtable with a
+    raw pointer instead of a reference, so they count too."""
     i = 0
     n = len(when)
     while True:
         j = when.find(" as ", i)
         if j < 0:
             return False
-        k = j + 4
-        while k < n and when[k].isspace():
-            k += 1
-        if k >= n or when[k] != "&":
-            i = j + 4
-            continue
-        k += 1
-        while k < n and when[k].isspace():
-            k += 1
-        if when.startswith("mut", k) and (k + 3 >= n or not _ident_char(when[k + 3])):
-            k += 3
-            while k < n and when[k].isspace():
-                k += 1
-        if k < n and when[k] == "'":
-            k += 1
-            while k < n and _ident_char(when[k]):
-                k += 1
-            while k < n and when[k].isspace():
-                k += 1
-        if k < n and when[k] == "(":
-            k += 1
-            while k < n and when[k].isspace():
-                k += 1
-        if when.startswith("dyn", k) and (k + 3 >= n or not _ident_char(when[k + 3])):
-            return True
         i = j + 4
+        k = _skip_space(when, i)
+        if k < n and when[k] == "&":
+            k = _skip_space(when, k + 1)
+            k = _skip_word(when, _skip_lifetime(when, k), "mut")
+        elif k < n and when[k] == "*":
+            k = _skip_space(when, k + 1)
+            before = k
+            k = _skip_word(when, _skip_word(when, k, "const"), "mut")
+            if k == before:  # `*` that is not a raw-pointer type
+                continue
+        else:
+            continue
+        # `&(dyn Error + Send)`: the parenthesised form of the same cast.
+        if k < n and when[k] == "(":
+            k = _skip_space(when, k + 1)
+        if _skip_word(when, k, "dyn") != k:
+            return True
 
 
 def _line_has_numeric_literal(line: str) -> bool:

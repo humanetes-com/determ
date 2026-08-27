@@ -91,6 +91,24 @@ def test_classify_precedence_table():
         classify_behaviour(_outcome_spec(ident, when="x as &(dyn Error + Send)"))
         is BehaviourClass.TRAIT_OBJECT_IDENTITY
     )
+    # Rust writes the lifetime BEFORE `mut`, and `&'a mut dyn` is the only
+    # legal spelling when both appear. Reading `mut` first accepted the
+    # unparseable `&mut 'a dyn` and rejected this one.
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="x as &'a mut dyn Error"))
+        is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    )
+    # A raw pointer to a trait object answers through the same vtable.
+    assert (
+        classify_behaviour(_outcome_spec(ident, when="e as *const dyn Error")) is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    )
+    assert classify_behaviour(_outcome_spec(ident, when="e as *mut dyn Error")) is BehaviourClass.TRAIT_OBJECT_IDENTITY
+    # NEGATIVE CONTROL: `&mut 'a dyn` does not parse as Rust, so accepting it
+    # would only ever match text no compiler produced.
+    assert classify_behaviour(_outcome_spec(ident, when="x as &mut 'a dyn Error")) is BehaviourClass.IDENTITY
+    # NEGATIVE CONTROL: an ordinary numeric cast, and a `dyn`-prefixed ident.
+    assert classify_behaviour(_outcome_spec(ident, when="len as usize")) is BehaviourClass.IDENTITY
+    assert classify_behaviour(_outcome_spec(ident, when="x as &dynamic")) is BehaviourClass.IDENTITY
     # NEGATIVE CONTROL: `dyn` inside a turbofish type argument is IDENTITY —
     # this is the live harvested `when` of test_boxed_str::2.
     assert (
@@ -166,17 +184,26 @@ def test_outcome_without_then_and_assertion_with_then_are_rejected():
         BehaviourSpec("b", "", "x", ObservableOutcome.display("v"), subkind=BehaviourSubKind.ASSERTION)
 
 
-_LIVE_STABLE = Path(__file__).resolve().parents[1] / "tmp" / "anyhow" / ".skeleton" / "_behaviours_stable.json"
+# The bytes t0d wrote to `tmp/anyhow/.skeleton/_behaviours_stable.json` on
+# 2026-08-27, copied here verbatim. Reading the live path instead couples this
+# gate to an artefact the pipeline REWRITES: `save_behaviour_suite` rewrites it
+# on every t0d pass (which is why `oracle_fingerprint` keys on it), `tmp` is
+# gitignored so a fresh clone has no file at all, and `redo.sh` removes it. Any
+# of the three turns a green check.sh red, and a red check.sh means pre_run.sh
+# writes no stamp and continue.sh exits 3 — a launch blocked by a test about
+# records from a previous run. Frozen here, the counts below stay a claim about
+# a measurement instead of a claim about the current workspace.
+_RECORDED_STABLE = Path(__file__).resolve().parent / "fixtures" / "behaviours" / "behaviours_stable_2026-08-27.json"
 
 
-def test_the_live_suite_has_no_trait_object_identity_and_the_box_dyn_stays_identity():
-    """Computed on `_behaviours_stable.json` (2026-08-27): 230 specs, 35
+def test_the_recorded_suite_has_no_trait_object_identity_and_the_box_dyn_stays_identity():
+    """Computed on the recorded `_behaviours_stable.json` (2026-08-27): 230 specs, 35
     TYPE_IDENTITY, 0 TRAIT_OBJECT_IDENTITY. The one TYPE_IDENTITY whose `when`
     contains `dyn` is `test_boxed_str::2` — a Box<dyn> *type argument*, not a
     trait-object observation. A classifier that keyed on the letters `dyn`
     would flip it; this one must not. Histogram does not move; new captures
     of `(&*err as &dyn Error).is::<&str>()` would store as TRAIT_OBJECT."""
-    suite = BehaviourSuite.from_dict(json.loads(_LIVE_STABLE.read_text(encoding="utf-8")))
+    suite = BehaviourSuite.from_dict(json.loads(_RECORDED_STABLE.read_text(encoding="utf-8")))
     assert len(suite.specs) == 230
     assert sum(1 for s in suite.specs if s.klass is BehaviourClass.TRAIT_OBJECT_IDENTITY) == 0
     assert sum(1 for s in suite.specs if classify_behaviour(s) is BehaviourClass.TRAIT_OBJECT_IDENTITY) == 0
