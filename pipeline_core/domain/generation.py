@@ -25,6 +25,7 @@ from pipeline_core.domain.rust_scan import (
     strip_line_block_comments,
     use_imports_symbol,
 )
+from pipeline_core.domain.text import strip_markdown_fences
 
 
 def derive_gentest_prelude(lib_source: str) -> tuple[str, str]:
@@ -448,7 +449,13 @@ def merge_gen_tests_blocks(blocks: list[str]) -> str | None:
     shell (the downstream `_finalize_and_commit` re-injects allow/prelude and
     strips this shell exactly as for a single LLM block). Exact-duplicate `use`
     lines collapse to one (the per-subset `use super::*;` + identical prelude
-    imports).
+    imports). INNER attributes are dropped: every subset reply opens with the
+    prompt template's `#![allow(clippy::all, dead_code, …)]`, and concatenating
+    them puts the 2nd onwards after an item, which rustc rejects outright
+    (`error: an inner attribute is not permitted in this context`). The
+    crate-level allow is re-injected downstream by `as_integration_test`, so
+    dropping them here loses nothing — and a `#![cfg(…)]` gate is the caller's
+    (`_cluster_gate_for`) decision to make, not a subset reply's.
 
     Returns None when any declared top-level item name occurs in more than one
     subset — flattening into one module would then be an E0428/E0252 clash, so
@@ -471,8 +478,15 @@ def merge_gen_tests_blocks(blocks: list[str]) -> str | None:
     out_lines: list[str] = []
     seen_use: set[str] = set()
     for body in bodies:
+        attr_depth = 0
         for ln in body.splitlines():
             stripped = ln.strip()
+            if attr_depth:                       # continuation of a multi-line #![…]
+                attr_depth += attr_bracket_delta(ln)
+                continue
+            if stripped.startswith("#!["):
+                attr_depth = attr_bracket_delta(ln)
+                continue
             if stripped.startswith("use ") and stripped.endswith(";"):
                 if stripped in seen_use:
                     continue
@@ -860,10 +874,18 @@ def _largest_fenced_test_body(text: str) -> str:
     fence (run 2881435-34981ab0: every empty_generation raw prefix was
     ```rust #![allow…] #[test] fn …, extract_test_mod returned ""). The
     FILE-tag and cfg-mod paths miss that shape; this is the same class
-    `_engine_targeted_pragma` already closed with `extract_code_blocks`."""
+    `_engine_targeted_pragma` already closed with `extract_code_blocks`.
+
+    An UNTERMINATED final fence closes at end-of-text rather than being
+    dropped: a reply cut off at the token cap has no closing ``` and is
+    otherwise a complete file, and returning "" for it re-runs the whole
+    generation instead of letting the compile-fix loop finish the tail.
+    Starting the body after the opener's newline is also what discards a
+    non-code preamble (the live fmt reply opens with a bare
+    `tests/fmt_gen_1.rs` line before the fence)."""
     best = ""
-    i = 0
     n = len(text)
+    i = 0
     while True:
         k = text.find("```", i)
         if k == -1:
@@ -872,14 +894,13 @@ def _largest_fenced_test_body(text: str) -> str:
         if nl == -1:
             return best
         close = text.find("```", nl + 1)
-        if close == -1:
-            return best
-        body = text[nl + 1:close].strip()
+        truncated = close == -1
+        body = text[nl + 1:n if truncated else close].strip()
         if "#[test]" in body and len(body) > len(best):
             best = body
-        i = close + 3
-        if i >= n:
+        if truncated:
             return best
+        i = close + 3
 
 
 def extract_test_mod(text: str) -> str:
@@ -895,9 +916,14 @@ def extract_test_mod(text: str) -> str:
     When that wrapper is absent, a `<FILE path="gen_tests_block">` or
     `<FILE path="tests/{stem}_gen_{N}.rs">` body is the integration-test
     shape the generator now asks for. A FILE body that is itself fenced is
-    unwrapped (models wrap despite the tag). When no FILE tag is present,
-    the largest fenced rust body that contains a `#[test]` is the body —
-    that is the live Muse reply on t0c after the `tests/` switch."""
+    unwrapped by `strip_markdown_fences` — the same helper `extract_files`
+    already uses on a FILE body, and the reason this is not the
+    largest-fence scan below: inside a tag the WHOLE body is the file, so
+    picking one fence out of it silently drops every test written outside
+    that fence — one doc-comment example inside a `///` block is enough.
+    When no FILE tag is present there is no such envelope, and the largest
+    fenced body containing a `#[test]` is the file — that is the live Muse
+    reply on t0c after the `tests/` switch."""
     cfg_pos = text.find('#[cfg(test)]')
     if cfg_pos != -1:
         mod_pos = text.find('mod gen_', cfg_pos)
@@ -934,6 +960,5 @@ def extract_test_mod(text: str) -> str:
         if (path == "gen_tests_block"
                 or parse_gen_tests_integration_filename(name) is not None
                 or (path.startswith("tests/") and name.endswith(".rs"))):
-            body = text[gt + 1:end].strip()
-            return _largest_fenced_test_body(body) or body
+            return strip_markdown_fences(text[gt + 1:end])
         i = end + len(close_tag)

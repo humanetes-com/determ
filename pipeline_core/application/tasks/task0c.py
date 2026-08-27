@@ -1918,7 +1918,7 @@ project-specific import paths, type construction patterns, and hard constraints.
         # Retry generation — thinking mode sometimes returns empty output.
         # On retry, send a short explicit follow-up instead of the full prompt again:
         # repeating the same large prompt produces the same empty result.
-        def _save_stream_log(gen_attempt: int, query: str, resp: str, reason: str, *,
+        def _save_stream_log(gen_attempt: int | str, query: str, resp: str, reason: str, *,
                              rel_path: str = rel_path, attempt: int = attempt) -> None:
             _fname = rel_path.replace("/", "_").replace(".", "_")
             _path = Path(f"/tmp/stream_loop_{attempt}_{_fname}_gen{gen_attempt}.log")
@@ -2172,16 +2172,29 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _responses = generate_in_parallel(_queries, model=_TASK0C_MODEL, think=None)
                 _pass_had_work = True  # LLM ran; empty extract is not "all files filtered"
                 _raw_subs: list[str] = []
-                for _resp in _responses:
+                for _i, _resp in enumerate(_responses):
                     _raw_sub = extract_test_mod(_resp)
                     if _raw_sub:
                         _raw_sub = _strip_trailing_file_tag(_raw_sub)
                     if _raw_sub:
                         _raw_subs.append(_raw_sub)
+                        continue
+                    # A dropped subset reply is the crime scene for a routing
+                    # defect: without the raw prefix and the stream log, an
+                    # extractor that silently returns "" is indistinguishable
+                    # from a model that answered nothing.
+                    _snippet = _resp[:300].replace("\n", " ") if _resp else "(no output)"
+                    _log(f"  [{module_name}] Empty generation for {rel_path} "
+                         f"(split subset {_i + 1}/{len(_responses)}). Raw: {_snippet}")
+                    _save_stream_log(f"sub{_i}", _queries[_i], _resp or "",
+                                     "empty_generation_split")
                 if not _raw_subs:
                     # Split spent the GPU and extracted nothing — do not skip
                     # the single-shot path that would retry the same replies.
                     _did_split = False
+                    _log(f"  [{module_name}] split-and-merge {rel_path}: no block "
+                         f"extracted from {len(_responses)} subset reply(ies) — "
+                         f"falling back to single-shot.")
                 # Combine the subset blocks into ONE sibling per attempt when
                 # their top-level item names are disjoint; only a genuine
                 # cross-subset name clash falls back to one-sibling-per-subset.
@@ -2198,7 +2211,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 # failed compile-fix (file reverted → all subsets lost). Re-commit
                 # subsets individually so survivors accumulate (never drop
                 # a passing test). Skip subsets already absorbed by a committed merge.
-                if _merged is None or not _block_committed:
+                if _raw_subs and (_merged is None or not _block_committed):
                     _reason = "name clash" if _merged is None else "merge failed"
                     _base = abs_path.read_text(encoding="utf-8")
                     _n_ok = 0

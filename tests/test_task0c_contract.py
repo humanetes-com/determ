@@ -100,7 +100,8 @@ class _Harness:
     # never listed and never required) is pinned by the two tests at the end.
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
                  src_name: str, replies: list[str], target: float, specs: tuple[Any, ...],
-                 capture_split: bool = False) -> None:
+                 capture_split: bool = False, split_n: int = 1,
+                 parallel_replies: list[str] | None = None) -> None:
         self.ws = tmp_path / "ws"
         (self.ws / "src").mkdir(parents=True)
         shutil.copy(_MICROCRATE / src_name, self.ws / "src" / src_name)
@@ -114,6 +115,9 @@ class _Harness:
         self.suite = SimpleNamespace(specs=specs)
         self.target = target
         self.capture_split = capture_split
+        self.split_n = split_n
+        self.parallel_replies = list(parallel_replies or [])
+        self.parallel_prompts: list[str] = []
         monkeypatch.setattr(task0c_mod, "log", self.logs.append)
         monkeypatch.setattr(task0c_mod, "emit",
                             lambda event, **f: self.events.append((event, f)))
@@ -122,6 +126,11 @@ class _Harness:
     def ask(self, prompt: str, **_kw: Any) -> str:
         self.prompts.append(prompt)
         return self.replies.pop(0) if self.replies else ""
+
+    def generate_in_parallel(self, queries: list[str], **_kw: Any) -> list[str]:
+        self.parallel_prompts.extend(queries)
+        return [self.parallel_replies[i] if i < len(self.parallel_replies) else ""
+                for i in range(len(queries))]
 
     def revert(self, abs_path: Path, base_text: str, sib: Path) -> None:
         self.reverts.append((abs_path, sib))
@@ -142,6 +151,8 @@ class _Harness:
             get_current_cluster=lambda: None,
             cargo_env=lambda: {},
             ask=self.ask,
+            generate_in_parallel=self.generate_in_parallel,
+            partition_uncovered_lines=lambda text, lines, n: [set(lines) for _ in range(n)],
             extract_test_mod=lambda r: r if "#[test]" in (r or "") else "",
             block_is_prose=lambda b: False,
             has_nonempty_test_body=lambda b: True,
@@ -199,7 +210,8 @@ class _Harness:
             project_context="", coverage_strategy="", attempt=1, coverage=30.0,
             covered_lines=covered, files_data=files_data, hist=Task0cFileHistory(),
             ctx=_PhaseCCtx(deps=self.deps, current_cluster=None, cluster_label="stable",
-                           split_n=1, allow_line="", prelude_block="", prelude_names="",
+                           split_n=self.split_n, allow_line="", prelude_block="",
+                           prelude_names="",
                            file_stall_limit=5, retro_deep_at_stall=1, stall_context=False))
 
     def refusals(self) -> list[dict[str, Any]]:
@@ -207,6 +219,48 @@ class _Harness:
 
     def pinned_events(self) -> list[list[str]]:
         return [f["data"]["ids"] for e, f in self.events if e == "task0c.behaviours_pinned"]
+
+
+def test_a_dropped_split_subset_reply_leaves_a_raw_prefix_and_a_stream_log(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The split path used to drop a reply with no artefact and no raw prefix.
+
+    On 2026-08-27 the five biggest files went split (`src/error.rs` at 61 raw
+    uncovered lines) and left NOTHING; the extraction defect was diagnosable
+    only because backtrace/ensure/fmt happened to take the single-shot path,
+    which does log a raw prefix and save the stream. The one line the split did
+    emit named the wrong defect: `_merged is None` conflates a cross-subset
+    name clash with nothing to merge, so an empty extract printed
+    `name clash — kept 0/0`.
+
+    Asserted here: each dropped subset logs its own raw prefix and saves its own
+    stream log, the summary line says nothing was extracted, `name clash` is
+    NOT printed (the pre-fix behaviour), and the pass falls through to the
+    single-shot path instead of counting as a completed split."""
+    reply = "Sure! Here is the file you asked for, wrapped for readability."
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[], target=0.0,
+                 specs=(), split_n=2, parallel_replies=[reply, reply])
+    h.phase_c()
+
+    subsets = [ln for ln in h.logs if "split subset" in ln]
+    assert len(subsets) == 2
+    assert "(split subset 1/2)" in subsets[0] and reply[:40] in subsets[0]
+    assert "(split subset 2/2)" in subsets[1]
+
+    saved = [ln.split("→ ", 1)[1].strip() for ln in h.logs if "Stream saved" in ln]
+    assert sorted(Path(p).name for p in saved[:2]) == [
+        "stream_loop_1_src_lib_rs_gensub0.log", "stream_loop_1_src_lib_rs_gensub1.log"]
+    for path in saved[:2]:
+        text = Path(path).read_text(encoding="utf-8")
+        assert "# reason: empty_generation_split" in text and reply in text
+        Path(path).unlink()
+
+    assert any("no block extracted from 2 subset reply(ies)" in ln for ln in h.logs)
+    assert not any("name clash" in ln for ln in h.logs)      # the pre-fix label
+    assert not any("kept 0/0" in ln for ln in h.logs)
+    # _did_split cleared → the single-shot path still runs rather than the pass
+    # ending on a split that produced nothing.
+    assert len(h.prompts) == 2
 
 
 def test_generator_prompt_lists_the_behaviours_and_the_contract(

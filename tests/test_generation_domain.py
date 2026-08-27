@@ -318,6 +318,7 @@ def test_tests_output_number_matches_regex() -> None:
 # --- only through e2e flows (coverage floor pipeline_core.domain) ---------- #
 from pipeline_core.domain.generation import (  # noqa: E402
     _attr_path_value,
+    _largest_fenced_test_body,
     extract_gen_tests_body,
     extract_test_mod,
     gen_tests_origin_cfgs,
@@ -383,6 +384,89 @@ def test_extract_test_mod_takes_recorded_fenced_muse_replies() -> None:
     out_w = extract_test_mod(wrapped)
     assert "fn test_error_can_be_moved_across_threads" in out_w
     assert "```" not in out_w
+
+
+def test_extract_test_mod_file_tag_keeps_tests_written_outside_a_fence() -> None:
+    """Inside a `<FILE>` tag the WHOLE body is the file, so the body may not be
+    narrowed to one fence found within it.
+
+    Negative control: the largest-fence rule, applied to this body, returns the
+    doc-comment example and drops both real tests — asserted directly on
+    `_largest_fenced_test_body` so the test fails if the FILE branch is ever
+    routed back through it."""
+    body = (
+        "#![allow(unused)]\n"
+        "use anyhow::*;\n"
+        "/// Example:\n"
+        "/// ```\n"
+        "/// #[test] fn doc_example() {}\n"
+        "/// ```\n"
+        "#[test]\n"
+        "fn real_one() { assert_eq!(1, 1); }\n"
+        "#[test]\n"
+        "fn real_two() { assert_eq!(2, 2); }\n"
+    )
+    assert _largest_fenced_test_body(body).count("#[test]") == 1        # the control
+    assert "real_one" not in _largest_fenced_test_body(body)
+    out = extract_test_mod(f'<FILE path="tests/x_gen_1.rs">\n{body}</FILE>')
+    assert out.count("#[test]") == 3
+    assert "fn real_one" in out and "fn real_two" in out
+
+
+def test_extract_test_mod_recovers_a_fence_the_token_cap_truncated() -> None:
+    """A reply cut off at the token cap has an opening fence and no closing one.
+
+    Dropping it re-runs the whole generation; the tail is the compile-fix
+    loop's job. The negative control is the same text with the opener removed —
+    no fence at all is still not a file, and must stay "" so prose that merely
+    mentions `#[test]` cannot be spliced."""
+    truncated = (
+        "```rust\n"
+        "#![allow(unused)]\n"
+        "use anyhow::*;\n"
+        "#[test]\n"
+        "fn t() { assert_eq!(1, 1); }\n"
+    )
+    out = extract_test_mod(truncated)
+    assert out.count("#[test]") == 1
+    assert "```" not in out
+    assert extract_test_mod(truncated.split("\n", 1)[1]) == ""
+
+
+def test_merge_gen_tests_blocks_drops_subset_inner_attributes() -> None:
+    """Every subset reply opens with the prompt template's
+    `#![allow(clippy::all, …)]`. Concatenating them puts the 2nd onwards after
+    an item, which rustc refuses outright (`an inner attribute is not permitted
+    in this context`) — measured on these two recorded replies merged, where it
+    landed at line 41 of the sibling the pipeline would have written.
+
+    The crate-level allow is re-injected by `as_integration_test`, so none may
+    survive the merge, and every test of both subsets must."""
+    from pathlib import Path
+
+    root = Path(__file__).parent / "fixtures" / "task0c"
+    subs = [extract_test_mod((root / f).read_text(encoding="utf-8"))
+            for f in ("muse_fenced_backtrace_gen1.txt", "muse_fenced_fmt_gen1.txt")]
+    assert all(b.count("#![allow(") == 1 for b in subs)   # the fixture still bites
+    merged = merge_gen_tests_blocks(subs)
+    assert merged is not None
+    assert "#![" not in merged
+    assert merged.count("#[test]") == 12                  # 3 + 9, none lost
+    assert "fn test_error_can_be_moved_across_threads" in merged
+    assert "fn test_display_alternate_chain_three" in merged
+
+
+def test_merge_gen_tests_blocks_drops_a_multiline_inner_attribute() -> None:
+    """The attribute may wrap; a line-wise drop would leave its tail behind as
+    orphan tokens, which is a worse failure than the duplicate it replaces."""
+    a = ("#![allow(\n    clippy::all,\n    dead_code,\n)]\n"
+         "use anyhow::*;\n#[test]\nfn a() { assert_eq!(1, 1); }\n")
+    b = "#![allow(unused)]\nuse anyhow::*;\n#[test]\nfn b() { assert_eq!(2, 2); }\n"
+    merged = merge_gen_tests_blocks([a, b])
+    assert merged is not None
+    assert "#![" not in merged and "clippy::all" not in merged and ")]" not in merged
+    assert merged.count("#[test]") == 2
+    assert merged.count("use anyhow::*;") == 1
 
 
 def test_extract_gen_tests_body_unbalanced_falls_through() -> None:
