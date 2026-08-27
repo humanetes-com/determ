@@ -16,7 +16,7 @@ import os as _os
 import subprocess as _subprocess_mod
 import sys
 import time as _time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -65,6 +65,9 @@ from pipeline_core.adapters.auto_operator import (
 from pipeline_core.adapters.behaviour_exercises import exercises_by_coverage
 from pipeline_core.adapters.behaviour_misses import save_behaviour_misses
 from pipeline_core.adapters.behaviour_probe import probe_env, run_probe
+from pipeline_core.adapters.behaviour_probe import (
+    subprocess_runner as _probe_subprocess_runner,
+)
 from pipeline_core.adapters.behaviour_store import (
     load_behaviour_suite,
     save_behaviour_suite,
@@ -624,7 +627,7 @@ from pipeline_core.composition_layout import (
     build_retrigger_layout,
 )
 from pipeline_core.domain import graceful_stop as _graceful_stop
-from pipeline_core.domain.behaviour_probe import capture_env_of
+from pipeline_core.domain.behaviour_probe import capture_env_of, perturbed_env
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
@@ -1658,6 +1661,26 @@ def build_app(
     # layout pins from the original, probes executed on it, exercises by
     # coverage. Harvested 2026-08-26 over anyhow's tests/: 203 specs, 197
     # with a runtime then, against 0 in the doc-fence-only suite on disk.
+    def _verify_behaviour_tests(
+        pd: Path, cl: Any, crate: str, stem: str, extra: Mapping[str, str],
+    ) -> tuple[bool, str]:
+        """Compile and run ONE emitted behaviour-test binary against the crate
+        at `pd`, under `cl`'s env plus `extra`.
+
+        Same shape as task0c's `_engine_runtime_gate`: scoped to this file's
+        cargo `--test` binary and `--test-threads=1`, so a missing verdict reads
+        as "this binary died" rather than as someone else's failure. It runs in
+        the pre-strip window, where `pd` still holds the ORIGINAL crate — the
+        tree the captured values came from — which is what makes a red verdict
+        here a statement about the capture and not about a reconstruction."""
+        env = probe_env(cl)
+        env.update(extra)
+        cmd = ["cargo", "test", "--test", stem, "--", "--test-threads=1"]
+        if crate:
+            cmd[2:2] = ["-p", crate]
+        rc, out, err = _probe_subprocess_runner(cmd, Path(pd), env, cfg.test_timeout)
+        return rc == 0, (out or "") + "\n" + (err or "")
+
     task0d_deps = Task0dDeps(
         log=ports.log, emit=ports.emit,
         mark_phase=mark_phase, phase_valid=phase_valid,
@@ -1680,6 +1703,9 @@ def build_app(
         capture_env=lambda c: capture_env_of(probe_env(c)),
         emit_tests=functools.partial(
             emit_behaviour_tests, balanced=_rust_delimiters_balanced),
+        verify_tests=_verify_behaviour_tests,
+        perturb_env=lambda c: perturbed_env(probe_env(c)),
+        cluster_cfg_attr=cluster_cfg_attr,
         PROBE_MAX_PER_CLUSTER=settings.task0d_probe_max,
         PROBE_BLOCKS_PER_REPLY=settings.task0d_blocks_per_reply,
         PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,

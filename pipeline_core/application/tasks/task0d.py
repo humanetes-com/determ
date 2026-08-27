@@ -42,7 +42,7 @@ from pipeline_core.domain.behaviour_probe import (
     captured_spec,
     class_targets,
     is_probe_spec,
-    normalize_stdout,
+    parse_behaviour_programs,
     parse_behaviour_specs,
     probe_targets,
     render_probe_program,
@@ -100,8 +100,25 @@ class Task0dDeps:
         lambda _p, _c, _m: None)
     # The observable-affecting env the probe ran under, recorded on each spec.
     capture_env: Callable[[BuildCluster], str] = lambda _c: ""
-    # Writes the replayable captures as `tests/behaviour_gen_<N>.rs`.
-    emit_tests: Callable[..., object] = lambda *_a, **_k: None
+    # Writes the replayable captures as `tests/behaviour_<cluster>_gen_1.rs`,
+    # after compiling and running them against the original.
+    emit_tests: Callable[
+        ..., tuple[object, tuple[str, ...], list[dict[str, str]]]
+    ] = lambda *_a, **_k: (None, (), [])
+    # Compiles and runs ONE emitted test binary under this cluster's env plus
+    # any extra: (project_dir, cluster, stem, extra_env) -> (ok, output). The
+    # emitted file is part of the reconstruction oracle, so it is held to the
+    # same rule every other pipeline-authored test is — it must have been seen
+    # to pass against the original before it can fail against a fill.
+    verify_tests: Callable[..., tuple[bool, str]] = lambda *_a, **_k: (True, "")
+    # The environment flip that exposes an env-dependent observable, e.g.
+    # `RUST_BACKTRACE`. Run-twice cannot see this axis: the value is stable at
+    # any fixed environment and still not a property of the crate.
+    perturb_env: Callable[[BuildCluster], dict[str, str]] = lambda _c: {}
+    # `#[cfg(...)]` predicate gating a cluster's emitted tests. `tests/` is
+    # shared across every cluster's filled tree by a symlink, so an ungated
+    # file is ACTIVE in clusters it was never captured under.
+    cluster_cfg_attr: Callable[[BuildCluster], str] = lambda _c: ""
     PROBE_MAX_PER_CLUSTER: int = 12
     # Blocks honoured per reply. The target cap bounds how many units are
     # ASKED about; without this a single reply could spend an unbounded number
@@ -124,8 +141,11 @@ def _run_probes(
     deps: Task0dDeps, project_dir: Path, module_name: str, cluster: BuildCluster,
     suite: BehaviourSuite, records: list[FnRecord], mods: list[ModRecord],
     types: list[TypeRecord], default_cluster: str,
-) -> tuple[list[BehaviourSpec], int, int, int]:
-    """(admitted probe specs, admitted count, proposed count, cargo runs)."""
+) -> tuple[list[BehaviourSpec], int, int, int, list[dict[str, str]]]:
+    """(admitted probe specs, admitted count, proposed count, cargo runs, misses)."""
+    misses: list[dict[str, str]] = []
+    if deps.PROBE_MAX_PER_CLUSTER <= 0:
+        return [], 0, 0, 0, misses
     files = frozenset(r.file for r in records) | frozenset(t.file for t in types)
     reachable = externally_reachable_files(mods, files)
     type_files = {t.name: t.file for t in types if t.is_pub and t.is_exactly_pub}
@@ -133,42 +153,72 @@ def _run_probes(
         records, suite.specs, max_targets=deps.PROBE_MAX_PER_CLUSTER,
         reachable_files=reachable, type_files=type_files,
         cfg_set=CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false)))
-    if not targets:
-        return [], 0, 0, 0
-    surface = deps.public_surface(project_dir, cluster.name)
-    inventory = deps.symbol_inventory(project_dir, cluster.name)
-    example = _style_example(suite.specs)
-    # Ask by CLASS, not by unit. `probe_targets` above still supplies the unit
-    # names as the callable surface the model needs (its `<IN_SCOPE_SYMBOLS>`
-    # half), but the request itself is for a behaviour of a class the suite is
-    # thin in — behaviours are transversal, so a unit-shaped ask cannot reach
-    # one. Measured on the live 230-spec suite the two scarcest classes are
-    # TRAIT_OBJECT_IDENTITY and OPTION_SEMANTICS at zero, while EXACT_FORMAT
-    # holds 135 and is correctly last.
+    # Ask by CLASS, not by unit — and ask even when there is no leftover unit.
+    # Behaviours are transversal ("an error built from a string downcasts to
+    # `&str`" spans the constructor, the vtable, `object_downcast` and
+    # `Error::downcast`), so a unit-shaped ask cannot reach one. Gating the
+    # whole phase on `probe_targets` being non-empty left the unit axis as the
+    # ON-SWITCH of the mechanism built to leave it: a crate whose harvest
+    # already names every public fn — harvest SUCCEEDING — would never ask by
+    # class at all. `PROBE_MAX_PER_CLUSTER` stays the kill switch, checked
+    # above, so the documented `0` still turns probes off entirely.
     class_asks = class_targets(
         suite.specs, behaviour_class_name,
         max_targets=deps.PROBE_CLASSES_PER_CLUSTER)
+    if not targets and not class_asks:
+        return [], 0, 0, 0, misses
+    surface = deps.public_surface(project_dir, cluster.name)
+    inventory = deps.symbol_inventory(project_dir, cluster.name)
+    example = _style_example(suite.specs)
+    # One prompt carrying every class ask, with the leftover unit names as the
+    # callable inventory beside it — NOT the same class asks repeated once per
+    # unit batch, which is what `for batch in batches(targets)` did: with a cap
+    # of 12 and a batch of 6 that was two identical class requests and twice
+    # the GPU for one cohort. Without class asks the old per-unit batching is
+    # still what there is to do.
+    rounds: list[tuple[tuple[tuple[str, str], ...], tuple[str, ...]]] = (
+        [(class_asks, tuple(targets))] if class_asks
+        else [((), tuple(b)) for b in batches(targets, PROBE_BATCH_SIZE)])
     admitted: list[BehaviourSpec] = []
     proposed = 0
     cargo_runs = 0
     per_unit: dict[str, int] = {}
-    misses: list[dict[str, str]] = []
-    for batch in batches(targets, PROBE_BATCH_SIZE):
+    for asks, batch in rounds:
         prompt = build_behaviour_synthesis_prompt(
             module_name=module_name, cfg_cluster=cluster.name,
             target_units=batch, public_surface=surface,
             symbol_inventory=inventory, example_usages=example,
-            target_classes=class_asks)
+            target_classes=asks)
         reply = deps.ask(prompt)
         # Bound the WORK, not just the targets. `PROBE_MAX_PER_CLUSTER` caps how
         # many units are asked about; the number of blocks a reply may contain
         # was unbounded, and every block costs its own `cargo run` at up to the
         # probe timeout. A reply that emits fifty blocks used to buy fifty
         # compile-and-run cycles against a cap of twelve.
-        parsed = parse_behaviour_specs(reply)[:deps.PROBE_BLOCKS_PER_REPLY]
+        all_parsed = parse_behaviour_specs(reply)
+        parsed = all_parsed[:deps.PROBE_BLOCKS_PER_REPLY]
+        if len(all_parsed) > len(parsed):
+            over = len(all_parsed) - len(parsed)
+            misses.append({"unit": batch[0] if batch else "reply",
+                           "reason": f"over the blocks-per-reply cap: {over} block(s) "
+                                     f"past {deps.PROBE_BLOCKS_PER_REPLY} not run"})
+            deps.log(f"  [task0d] cluster {cluster.name}: {over} behaviour block(s) "
+                     f"past the per-reply cap were not run.")
+        if not all_parsed:
+            # A reply that parses to nothing used to leave no log, no miss and
+            # no event — `proposed` simply stayed 0. That is the answer-dropped
+            # class: the model may well have answered. Name which way it failed,
+            # because a legacy-shaped reply says the prompt did not land while
+            # an unparseable one says the reply did not.
+            legacy = parse_behaviour_programs(reply)
+            why = ("reply arrived in the legacy free-form shape (no <WHEN>)"
+                   if legacy else "reply carried no parseable <BEHAVIOUR> block")
+            misses.append({"unit": batch[0] if batch else "reply", "reason": why})
+            deps.log(f"  [task0d] cluster {cluster.name}: {why}.")
+            continue
         for probe in parsed:
             proposed += 1
-            unit = probe.name or batch[0]
+            unit = probe.name or (batch[0] if batch else "behaviour")
             n = per_unit.get(unit, 0)
             per_unit[unit] = n + 1
             # A `when` that compares observes `true`/`false` and throws away the
@@ -180,39 +230,39 @@ def _run_probes(
                 deps.log(f"  [task0d] cluster {cluster.name}: behaviour for "
                          f"{unit} refused ({bad}).")
                 continue
-            program = render_probe_program(probe.given, probe.when, probe.observe)
+            program = render_probe_program(probe.given, probe.when, probe.observe,
+                                           crate=module_name)
             result = deps.run_probe(
                 project_dir, cluster, program, f"{cluster.name}_{proposed}")
             cargo_runs += 1
-            stdout = normalize_stdout(result.stdout)
+            if not (result.ok and result.stdout.strip()):
+                why = ("no stdout" if result.ok else
+                       f"failed: {result.stderr[-300:].strip() or 'no stderr'}")
+                misses.append({"unit": unit, "reason": why, "when": probe.when,
+                               "program": program})
+                deps.log(f"  [task0d] cluster {cluster.name}: probe for {unit} "
+                         f"dropped ({why}).")
+                continue
             # Run TWICE and require the same output. One run cannot tell a
             # deterministic observable from a lucky one, and a captured Then
             # that does not reproduce becomes a flaky test in the oracle for
-            # the life of the project.
+            # the life of the project. Only for a probe that produced something
+            # to compare: re-running one that failed to COMPILE pays the most
+            # expensive cargo call there is for an answer already known.
             confirm = deps.run_probe(
                 project_dir, cluster, program, f"{cluster.name}_{proposed}_r")
             cargo_runs += 1
-            if result.ok and stdout and normalize_stdout(confirm.stdout) != stdout:
+            if confirm.stdout != result.stdout:
                 misses.append({"unit": unit, "reason": "not reproducible",
                                "when": probe.when, "program": program})
                 deps.log(f"  [task0d] cluster {cluster.name}: behaviour for "
                          f"{unit} dropped (output differed between two runs).")
                 continue
-            if result.ok and stdout:
-                admitted.append(captured_spec(
-                    cfg_cluster=cluster.name, probe=probe, n=n,
-                    stdout=stdout, default_cluster=default_cluster,
-                    capture_env=deps.capture_env(cluster)))
-                continue
-            why = ("no stdout" if result.ok else
-                   f"failed: {result.stderr[-300:].strip() or 'no stderr'}")
-            misses.append({"unit": unit, "reason": why, "when": probe.when,
-                           "program": program})
-            deps.log(f"  [task0d] cluster {cluster.name}: probe for {unit} "
-                     f"dropped ({why}).")
-    if misses:
-        deps.record_misses(project_dir, cluster.name, misses)
-    return admitted, len(admitted), proposed, cargo_runs
+            admitted.append(captured_spec(
+                cfg_cluster=cluster.name, probe=probe, n=n,
+                stdout=result.stdout, default_cluster=default_cluster,
+                capture_env=deps.capture_env(cluster)))
+    return admitted, len(admitted), proposed, cargo_runs, misses
 
 
 def _fill_exercises(
@@ -306,11 +356,14 @@ def run_task0d(
                      f"(probes and exercises skipped): {e}")
         admitted = proposed = 0
         cargo_n = 0
+        misses: list[dict[str, str]] = []
+        admitted_ids: set[str] = set()
         try:
-            probes, admitted, proposed, probe_cargo = _run_probes(
+            probes, admitted, proposed, probe_cargo, misses = _run_probes(
                 deps, project_dir, module_name, cluster, suite, records, mods,
                 types, default_cluster)
             cargo_n += probe_cargo
+            admitted_ids = {p.behaviour_id for p in probes}
             if probes:
                 suite = merge_suites(suite, BehaviourSuite(
                     cfg_cluster=cluster.name, specs=tuple(probes)))
@@ -327,18 +380,42 @@ def run_task0d(
             except Exception as e:
                 deps.log(f"  [task0d] cluster {cluster.name}: exercises failed "
                          f"(non-fatal, harvested suite kept): {e}")
-        deps.save_suite(project_dir, suite)
         # Captures become REAL tests here, or they stay notes about the crate.
         # Emitted from the observed value, never re-asked of the model, and
         # deliberately NOT put through t0c's admission contract: that contract
         # exists to catch a guessed literal, and this value was printed by the
-        # crate itself.
+        # crate itself. It IS compiled and run against the original first —
+        # emission without execution puts an entry no fill can ever satisfy
+        # into the oracle, which is the class t0c's runtime gate exists for.
+        # A capture that fails that gate is withdrawn from the SUITE too: a
+        # value that cannot be replayed is not a specification, and leaving it
+        # listed would hand t1.5 a MUST no tree can meet.
         try:
-            deps.emit_tests(project_dir, cluster.name, suite.specs,
-                            crate=module_name)
+            _dest, withdrawn, emit_misses = deps.emit_tests(
+                project_dir, cluster.name, suite.specs, crate=module_name,
+                verify=lambda stem, extra, _cl=cluster: deps.verify_tests(
+                    project_dir, _cl, module_name, stem, extra),
+                perturb_env=deps.perturb_env(cluster),
+                cfg_attr=deps.cluster_cfg_attr(cluster))
+            misses.extend(emit_misses)
+            if withdrawn:
+                dropped = set(withdrawn)
+                suite = BehaviourSuite(
+                    cfg_cluster=cluster.name,
+                    specs=tuple(s for s in suite.specs
+                                if s.behaviour_id not in dropped))
+                # Only THIS pass's captures count against this pass's
+                # reading; the emitter also withdraws specs merged in from a
+                # previous pass's suite.
+                admitted = len(admitted_ids - dropped)
         except Exception as e:
             deps.log(f"  [task0d] cluster {cluster.name}: behaviour-test "
                      f"emission failed (non-fatal, suite kept): {e}")
+        deps.save_suite(project_dir, suite)
+        # Written on every pass, empty list included: the file states what THIS
+        # pass could not capture, so leaving the previous pass's file in place
+        # when nothing was missed would report a stale set as current.
+        deps.record_misses(project_dir, cluster.name, misses)
         line, payload = _reading_line(
             cluster.name, suite, filled, admitted, proposed,
             elapsed_s=time.monotonic() - t0, cargo_invocations=cargo_n)

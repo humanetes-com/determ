@@ -2989,12 +2989,28 @@ def _load_behaviour_specs(
 def task0c_behaviour_coverage(
     project_dir: Path, module_name: str, module_dir: Path, deps: Task0cDeps,
 ) -> tuple[int, int]:
-    """`(pinned, total)`: of the active cluster's pinnable harvested behaviours,
-    how many a pipeline-generated test of the module pins exactly — leftover
-    `*.gen_tests_*.rs` siblings or `tests/{stem}_gen_{N}.rs` integration files."""
+    """`(pinned, total)`: of the behaviours THIS TASK is asked to pin, how many
+    a pipeline-generated test of the module pins exactly — leftover
+    `*.gen_tests_*.rs` siblings or `tests/{stem}_gen_{N}.rs` integration files.
+
+    The denominator is the pinnable specs MINUS the capture-owned ones, for the
+    same reason the per-file listing drops them: with the split on, this task is
+    neither shown those specs nor held to them, so counting them would make the
+    ratio unreachable by construction and `_behaviour_rounds` would spend a
+    round (and a `test_harness_compiles` build) per module per cluster
+    discovering that, then log `stopping below target` — a permanent red
+    reading describing a deliberate design choice. A measurement whose meaning
+    changes has to be told; the exclusion is logged rather than silently
+    folded in."""
     cluster = deps.get_current_cluster()
     cluster_name = cluster.name if cluster else "stable"
-    specs = pinnable_specs(_load_behaviour_specs(deps, project_dir, cluster_name))
+    all_pinnable = pinnable_specs(_load_behaviour_specs(deps, project_dir, cluster_name))
+    specs = drop_capture_owned(all_pinnable, enabled=bool(deps.BEHAVIOUR_CAPTURE_SPLIT))
+    if len(specs) != len(all_pinnable):
+        log(f"  [{module_name}/{cluster_name}] behaviour coverage denominator: "
+            f"{len(specs)} of {len(all_pinnable)} pinnable spec(s) — "
+            f"{len(all_pinnable) - len(specs)} are capture-owned and this task "
+            f"is not asked to pin them.")
     if not specs:
         return 0, 0
     pinned: set[str] = set()
@@ -3022,7 +3038,12 @@ def task0c_behaviour_pass(
     cluster_name = cluster.name if cluster else "stable"
     target = _behaviour_target_of(deps)
     specs = _load_behaviour_specs(deps, project_dir, cluster_name, log=_log)
-    if target <= 0 or not pinnable_specs(specs):
+    # The same filter the listing and the coverage denominator use: without it
+    # a suite whose every pinnable spec is capture-owned still bought a
+    # `test_harness_compiles` cargo build before the per-file loop discovered
+    # there was nothing to ask for.
+    if target <= 0 or not drop_capture_owned(
+            pinnable_specs(specs), enabled=bool(deps.BEHAVIOUR_CAPTURE_SPLIT)):
         return False
     augmentor = deps.test_augmentor_factory()
     harness_ok, harness_err = augmentor.test_harness_compiles(project_dir, module_name)
@@ -3072,7 +3093,9 @@ def task0c_behaviour_pass(
             traces=[{"line": n, "stats": {"Line": 0}} for n in sorted(targets)],
             covered=0, coverable=len(targets)))
     if not files_data:
-        _log(f"  [{module_name}/{cluster_name}] behaviour pass: every relevant behaviour is pinned.")
+        _log(f"  [{module_name}/{cluster_name}] behaviour pass: no file has an unpinned "
+             f"behaviour this task is asked to pin"
+             f"{' (capture-owned classes excluded)' if deps.BEHAVIOUR_CAPTURE_SPLIT else ''}.")
         return False
     allow_line, prelude_block = deps.derive_gentest_prelude(project_dir)
     outcome = _run_phase_c(

@@ -24,9 +24,13 @@ from pipeline_core.domain.behaviour_probe import (
     captured_spec,
     class_targets,
     identity_type_of,
+    normalize_stdout,
     parse_behaviour_specs,
+    perturbed_env,
+    printed_value,
     probe_spec,
     program_for,
+    render_probe_program,
     render_replay_test,
     value_bearing_reason,
 )
@@ -201,3 +205,82 @@ def test_the_emitted_file_carries_the_origin_marker_and_stable_fn_names() -> Non
     # Stable across renders: a churning emitter makes verdict vectors
     # incomparable between sweeps.
     assert render_behaviour_test_file(specs, crate="anyhow") == body
+
+
+# --- the value the replay has to match --------------------------------------
+
+def test_a_capture_stores_exactly_what_format_would_produce() -> None:
+    """`normalize_stdout` strips per-line trailing whitespace and drops trailing
+    blank lines. That is right for a free-form program's blob and wrong for a
+    single rendering: the replay asserts `format!(…) == <stored value>`, so a
+    character the store drops and `format!` still produces makes the emitted
+    test fail against the ORIGINAL crate. Measured 2026-08-27 on a pristine
+    copy: a value of `"a \nb"` printed as `'a \nb\n'`, was stored as `'a\nb'`,
+    and the emitted `#[test]` failed on the tree it was captured from."""
+    raw = "a \nb\n"                       # exactly what `println!("{}", s)` writes
+    assert printed_value(raw) == "a \nb"
+    assert normalize_stdout(raw) == "a\nb"        # NEGATIVE CONTROL: the old store
+    assert printed_value(raw) != normalize_stdout(raw)
+
+    spec = captured_spec(cfg_cluster="s", probe=_probe(when="s.clone()"), n=0, stdout=raw)
+    assert spec.then is not None and spec.then.value == "a \nb"
+    # The replay asserts the value the capture printed, character for character
+    # — the trailing space on the first line included.
+    assert r'assert_eq!(format!("{}", s.clone()), "a \nb");' in render_replay_test(
+        spec, fn_name="t")
+
+
+def test_a_value_that_ends_in_its_own_newline_survives_the_round_trip() -> None:
+    """`println!` appends exactly one newline, so removing exactly one is the
+    inverse. A Display that itself ends in a newline used to lose it."""
+    assert printed_value("x\n\n") == "x\n"
+    assert normalize_stdout("x\n\n") == "x"     # NEGATIVE CONTROL
+
+
+# --- the capture program's imports ------------------------------------------
+
+def test_the_capture_program_imports_the_crate_like_the_replay_does() -> None:
+    """The three probes this shape replaced each opened with
+    `use anyhow::{anyhow, Error};` OUTSIDE `fn main()` — the one line a
+    setup-statements `given` has nowhere to put. Measured against a pristine
+    copy, a `given` of `let err = anyhow!("boom");` with no import fails with
+    `cannot find macro `anyhow` in this scope`; the replay half has had this
+    line since it was written (`as_integration_test`)."""
+    prog = render_probe_program('let e = anyhow!("x");', "e.to_string()", crate="anyhow")
+    assert "use anyhow::*;" in prog.split("fn main()")[0]
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="x")
+    assert "use anyhow::*;" in program_for(spec, crate="anyhow")
+    # NEGATIVE CONTROL: no crate named, no import — the shipped behaviour.
+    assert "use " not in render_probe_program("let e = 1;", "e", crate="")
+
+
+# --- the comparison check, with the turbofish carved out --------------------
+
+def test_a_bare_comparison_is_refused_and_a_turbofish_is_not() -> None:
+    """`<` and `>` were omitted from the token list to protect the turbofish,
+    which admitted `v.len() < 3` and `n > 0` — the exact shape the rule exists
+    to refuse. Deleting `::<…>` spans first makes the brackets unambiguous."""
+    for expr in ("v.len() < 3", "n > 0", "a.len() > b.len()"):
+        why = value_bearing_reason(expr)
+        assert why is not None and "compares" in why, expr
+    for expr in ("s.parse::<i32>().unwrap()", "e.is::<Vec<u8>>()",
+                 "e.downcast_ref::<HashMap<String, u8>>().is_some()"):
+        assert value_bearing_reason(expr) is None, expr
+
+
+def test_a_conjunction_of_two_observables_is_refused() -> None:
+    """One printed boolean cannot say which half held, and the capture would
+    store it as the identity of the FIRST type alone."""
+    why = value_bearing_reason("a.is::<X>() && b.is::<Y>()")
+    assert why is not None and "&&" in why
+    assert value_bearing_reason("a.is::<X>() || b.is::<Y>()") is not None
+
+
+# --- the environment axis ---------------------------------------------------
+
+def test_the_perturbation_flips_the_observable_env_keys() -> None:
+    """Recording the capture env says what the value was seen under; it does
+    not say whether the value depends on it. The flip is what asks."""
+    assert perturbed_env({}) == {"RUST_BACKTRACE": "1", "RUST_LIB_BACKTRACE": "1"}
+    assert perturbed_env({"RUST_BACKTRACE": "1"})["RUST_BACKTRACE"] == "0"
+    assert perturbed_env({"RUST_BACKTRACE": "full"})["RUST_BACKTRACE"] == "0"

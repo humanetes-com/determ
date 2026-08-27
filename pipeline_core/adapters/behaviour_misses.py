@@ -19,10 +19,12 @@ another name. The misses live in their own file, keyed the same way the suite is
 list for a differential harness without ever being mistaken for a specification.
 
 STORAGE. `.skeleton/_behaviour_misses_<cluster>.json`, a sibling of
-`_behaviours_<cluster>.json`, rewritten whole on each capture pass (a miss is a
-statement about THIS pass's attempt, not an accumulating log). Missing file
-means no pass has run; unreadable is reported rather than read as empty, for the
-same reason `load_behaviour_suite` distinguishes them.
+`_behaviours_<cluster>.json`, rewritten whole on each capture pass INCLUDING a
+pass that missed nothing (a miss is a statement about THIS pass's attempt, not
+an accumulating log — writing only when the list is non-empty would leave the
+previous pass's file standing as if it were current). Missing file means no
+pass has run; unreadable is reported rather than read as empty, for the same
+reason `load_behaviour_suite` distinguishes them.
 """
 from __future__ import annotations
 
@@ -37,6 +39,13 @@ MISS_REASONS = (
     "not reproducible",    # two runs of the same program printed different text
     "no stdout",           # ran clean and observed nothing
     "failed",              # did not compile, panicked, or timed out
+    # …and the reply-level and replay-level ones, which are about the ROUTE
+    # rather than about one program:
+    "reply arrived in the legacy free-form shape",   # the prompt did not land
+    "reply carried no parseable <BEHAVIOUR> block",  # the answer was dropped
+    "over the blocks-per-reply cap",                 # proposed, never run
+    "replay disagreed with the capture",             # emitted test failed
+    "environment-dependent",                         # the value moves with the env
 )
 
 
@@ -62,7 +71,10 @@ def save_behaviour_misses(
         by_reason[head] = by_reason.get(head, 0) + 1
     summary = ", ".join(f"{k} {v}" for k, v in sorted(by_reason.items())) or "none"
     log(f"  [task0d] cluster {cfg_cluster}: {len(misses)} behaviour(s) not "
-        f"captured ({summary}) -> {p.name}")
+        f"captured ({summary}) -> {p.name}"
+        if misses else
+        f"  [task0d] cluster {cfg_cluster}: every attempted behaviour was "
+        f"captured; empty miss record written -> {p.name}")
     emit("task0d.behaviour_misses",
          data={"cluster": cfg_cluster, "count": len(misses),
                "by_reason": by_reason})

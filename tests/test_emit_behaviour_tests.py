@@ -1,0 +1,295 @@
+"""The emitter's runtime gate: a capture becomes part of the oracle only after
+it has been COMPILED AND RUN against the original, twice.
+
+WHY THESE EXIST. The first version of this writer checked delimiter balance and
+wrote the file. Measured 2026-08-27 against a pristine copy of the original,
+that admits two kinds of permanently-red test with nothing anywhere to catch
+them — the reference floor is taken on a pristine worktree of `master`, so an
+emitted file has no floor entry to absolve it, and the deterministic
+cluster-leak guard only inspects diagnostics whose path contains
+`.gen_tests_`, which an integration test's does not:
+
+  * a replay that disagrees with its own capture (a value the store mangled, a
+    setup that compiles as an example and not as a test);
+  * a value that is perfectly stable at any fixed environment and moves with
+    `RUST_BACKTRACE` — invisible to the run-twice guard by construction.
+
+Either one enters the reconstruction oracle "as an entry no fill can ever
+satisfy, and the fns it covers are re-attempted for the life of the project"
+(task0c's `_engine_runtime_gate`, on the class it exists to prevent). The
+negative control in each test below is the same specs under a `verify` that
+reports green: everything is emitted, and nothing is withdrawn.
+"""
+from __future__ import annotations
+
+import re
+from collections.abc import Callable, Mapping
+from pathlib import Path
+
+from pipeline_core.application.emit_behaviour_tests import (
+    behaviour_test_stem,
+    emit_behaviour_tests,
+    replay_fn_name,
+)
+from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.behaviour_probe import (
+    CapturedProbe,
+    captured_spec,
+    probe_spec,
+)
+
+_STEM = behaviour_test_stem("stable")
+Verify = Callable[[str, Mapping[str, str]], tuple[bool, str]]
+
+
+def _spec(name: str, when: str = "e.to_string()", stdout: str = "boom") -> BehaviourSpec:
+    return captured_spec(
+        cfg_cluster="stable",
+        probe=CapturedProbe(name=name, given='let e = anyhow!("boom");',
+                            when=when, observe="display"),
+        n=0, stdout=stdout, default_cluster="stable")
+
+
+def _libtest(passed: list[str], failed: list[str]) -> str:
+    lines = [f"     Running tests/{_STEM}_gen_1.rs (target/debug/deps/{_STEM}_gen_1-ab)",
+             "", f"running {len(passed) + len(failed)} tests"]
+    lines += [f"test {n} ... ok" for n in passed]
+    lines += [f"test {n} ... FAILED" for n in failed]
+    verdict = "FAILED" if failed else "ok"
+    lines.append(f"test result: {verdict}. {len(passed)} passed; {len(failed)} failed; "
+                 "0 ignored; 0 measured; 0 filtered out; finished in 0.00s")
+    return "\n".join(lines) + "\n"
+
+
+def _verifier(tmp: Path, red: frozenset[str] = frozenset(),
+              red_under_env: frozenset[str] = frozenset()) -> Verify:
+    """A `verify` that READS the file the emitter just wrote and reports a
+    verdict for exactly the tests it contains.
+
+    Realism is the point: a fake that keeps reporting a test the emitter has
+    already removed is not a run of the emitted binary, and a loop pinned
+    against one would be pinned against output no cargo call can produce."""
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (tmp / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = re.findall(r"fn (behaviour_\w+)\(\)", body)
+        bad = set(red) | (set(red_under_env) if extra else set())
+        failed = [n for n in present if n in bad]
+        passed = [n for n in present if n not in bad]
+        return not failed, _libtest(passed, failed)
+    return verify
+
+
+def _emit(tmp: Path, specs: list[BehaviourSpec], verify: Verify,
+          **kw: object) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]]]:
+    (tmp / "tests").mkdir(parents=True, exist_ok=True)
+    return emit_behaviour_tests(tmp, "stable", specs, crate="anyhow",
+                                verify=verify, **kw)  # type: ignore[arg-type]
+
+
+def test_a_capture_whose_replay_disagrees_with_it_is_withdrawn(tmp_path: Path) -> None:
+    keep, liar = _spec("keeper"), _spec("liar", stdout="a \nb")
+    red = frozenset({replay_fn_name(liar)})
+
+    dest, dropped, misses = _emit(tmp_path, [keep, liar], _verifier(tmp_path, red=red))
+    assert dropped == (liar.behaviour_id,)
+    assert [m["reason"] for m in misses] == ["replay disagreed with the capture"]
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert replay_fn_name(keep) in body and replay_fn_name(liar) not in body
+
+    # NEGATIVE CONTROL: nothing red — both are emitted and nothing is withdrawn.
+    green = tmp_path / "green"
+    dest2, dropped2, misses2 = _emit(green, [keep, liar], _verifier(green))
+    assert dropped2 == () and misses2 == []
+    assert dest2 is not None
+    body2 = dest2.read_text(encoding="utf-8")
+    assert replay_fn_name(keep) in body2 and replay_fn_name(liar) in body2
+
+
+def test_an_environment_dependent_capture_is_withdrawn(tmp_path: Path) -> None:
+    """Green under the capture env, red under the flip. Run-twice cannot see
+    this: `err.backtrace()` renders the same string on every run at a fixed
+    env and a different one under `RUST_BACKTRACE=1`."""
+    fixed, moving = _spec("stable_value"), _spec("backtrace", when="e.backtrace()")
+    env_red = frozenset({replay_fn_name(moving)})
+
+    dest, dropped, misses = _emit(
+        tmp_path, [fixed, moving], _verifier(tmp_path, red_under_env=env_red),
+        perturb_env={"RUST_BACKTRACE": "1"})
+    assert dropped == (moving.behaviour_id,)
+    assert misses[0]["reason"].startswith("environment-dependent")
+    assert dest is not None
+    assert replay_fn_name(moving) not in dest.read_text(encoding="utf-8")
+
+    # NEGATIVE CONTROL: no perturbation asked for — the second run never
+    # happens and the env-dependent capture survives, which is what shipped.
+    plain = tmp_path / "unperturbed"
+    dest2, dropped2, _m = _emit(plain, [fixed, moving],
+                                _verifier(plain, red_under_env=env_red))
+    assert dropped2 == ()
+    assert dest2 is not None
+    assert replay_fn_name(moving) in dest2.read_text(encoding="utf-8")
+
+
+def test_a_file_that_does_not_build_withdraws_everything_and_leaves_no_file(
+        tmp_path: Path) -> None:
+    """No verdict at all cannot be attributed to one capture, and a `tests/`
+    file that does not compile does not fail one test — it stops the crate
+    compiling and takes every verdict with it."""
+    specs = [_spec("a"), _spec("b")]
+    compile_error = ('error[E0425]: cannot find value `nope` in this scope\n'
+                     'error: could not compile `anyhow` (test "x")\n')
+    dest, dropped, misses = _emit(tmp_path, specs, lambda _s, _e: (False, compile_error))
+    assert dest is None
+    assert set(dropped) == {s.behaviour_id for s in specs}
+    assert {m["reason"] for m in misses} == {
+        "replay did not build or reported no verdict"}
+    assert list((tmp_path / "tests").iterdir()) == []
+
+
+def test_the_file_is_cluster_gated_and_a_re_entry_rewrites_it(tmp_path: Path) -> None:
+    """`tests/` is symlinked into every cluster's filled tree, so an ungated
+    file is ACTIVE in clusters it was never captured under. And a second t0d
+    entry must rewrite one file, not stack a second copy of the same tests."""
+    specs = [_spec("a")]
+    dest, _d, _m = _emit(tmp_path, specs, _verifier(tmp_path),
+                         cfg_attr="not(any(nightly))")
+    assert dest is not None and dest.name == f"{_STEM}_gen_1.rs"
+    assert dest.read_text(encoding="utf-8").startswith("#![cfg(not(any(nightly)))]")
+    dest2, _d2, _m2 = _emit(tmp_path, specs, _verifier(tmp_path),
+                            cfg_attr="not(any(nightly))")
+    assert dest2 == dest
+    assert [p.name for p in sorted((tmp_path / "tests").iterdir())] == [f"{_STEM}_gen_1.rs"]
+
+
+def test_an_authored_file_of_the_same_name_is_never_deleted_or_overwritten(
+        tmp_path: Path) -> None:
+    """A `tests/<stem>_gen_<N>.rs` without the writer's origin marker is the
+    crate's own oracle. `_clear_previous` leaves it, so the destination has to
+    step over it rather than write through it."""
+    (tmp_path / "tests").mkdir(parents=True)
+    authored = tmp_path / "tests" / f"{_STEM}_gen_1.rs"
+    authored.write_text("#[test]\nfn authored() {}\n", encoding="utf-8")
+    dest, _d, _m = _emit(tmp_path, [_spec("a")], _verifier(tmp_path))
+    assert authored.read_text(encoding="utf-8") == "#[test]\nfn authored() {}\n"
+    assert dest is not None and dest.name == f"{_STEM}_gen_2.rs"
+
+
+def test_a_suite_of_legacy_blobs_emits_nothing_and_withdraws_nothing(
+        tmp_path: Path) -> None:
+    """The state on disk today: `render_replay_test` returns "" for a
+    free-form capture, so there is nothing to verify and nothing to drop."""
+    blob = probe_spec(cfg_cluster="stable", unit="Error::backtrace", n=0,
+                      program='fn main() { println!("a"); println!("b"); }',
+                      stdout="a\nb")
+    (tmp_path / "tests").mkdir(parents=True)
+    assert _emit(tmp_path, [blob], _verifier(tmp_path)) == (None, (), [])
+
+
+def test_an_unbalanced_render_is_refused_and_nothing_is_written(tmp_path: Path) -> None:
+    """A broken file in `tests/` does not fail one test — it stops the whole
+    crate compiling and takes every verdict with it, so the check that already
+    guards t0c's writer guards this one."""
+    specs = [_spec("a")]
+    dest, dropped, misses = _emit(tmp_path, specs, _verifier(tmp_path),
+                                  balanced=lambda _b: False)
+    assert dest is None and set(dropped) == {specs[0].behaviour_id}
+    assert misses[0]["reason"] == "replay refused: delimiters unbalanced"
+    assert list((tmp_path / "tests").iterdir()) == []
+
+
+def test_a_red_verdict_that_names_no_capture_withdraws_rather_than_retries(
+        tmp_path: Path) -> None:
+    """Dropping cannot make this file green — the failure belongs to nothing
+    the emitter can remove. Retrying it would spend the whole round budget
+    re-rendering the same thing and end in the same place."""
+    def verify(stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
+        return False, _libtest(["behaviour_probe_stable_a_0"], ["someone_elses_test"])
+
+    specs = [_spec("a")]
+    dest, dropped, misses = _emit(tmp_path, specs, verify)
+    assert dest is None and set(dropped) == {specs[0].behaviour_id}
+    assert misses[-1]["reason"] == "replay red on a verdict naming no capture in the file"
+    assert list((tmp_path / "tests").iterdir()) == []
+
+
+def test_a_perturbed_run_with_no_verdict_says_env_dependence_is_not_ruled_out(
+        tmp_path: Path, capsys: object) -> None:
+    """The perturbed run is evidence, and its absence must not read as
+    evidence of absence."""
+    specs = [_spec("a")]
+    names = [replay_fn_name(specs[0])]
+
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        if extra:
+            return False, "error: could not run\n"
+        return True, _libtest(names, [])
+
+    dest, dropped, _m = _emit(tmp_path, specs, verify,
+                              perturb_env={"RUST_BACKTRACE": "1"})
+    assert dest is not None and dropped == ()
+    out = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "env-dependence not ruled out" in out
+
+
+def test_a_file_that_stays_red_past_the_budget_leaves_nothing_behind(
+        tmp_path: Path) -> None:
+    """Each round drops at least one capture, so the loop normally ends green
+    or empty. The bound is a backstop for a file that keeps failing somewhere
+    NEW every round, and on it the rest is withdrawn rather than left failing
+    in the oracle for the life of the project."""
+    specs = [_spec(f"s{i}") for i in range(6)]
+    order = [replay_fn_name(s) for s in specs]
+    rounds = iter(range(99))
+
+    def verify(stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (tmp_path / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = [n for n in order if f"fn {n}()" in body]
+        next(rounds)
+        return False, _libtest(present[1:], present[:1])   # a new one each round
+
+    dest, dropped, misses = _emit(tmp_path, specs, verify)
+    assert dest is None and set(dropped) == {s.behaviour_id for s in specs}
+    assert [m["reason"] for m in misses].count(
+        "replay still red after the verification budget") == 3
+    assert list((tmp_path / "tests").iterdir()) == []
+
+
+def test_a_perturbed_verdict_naming_no_capture_withdraws_the_file(
+        tmp_path: Path) -> None:
+    """Same reasoning as the capture-env branch: a red run the emitter cannot
+    attribute to one of its own tests cannot be fixed by dropping one."""
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (tmp_path / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = re.findall(r"fn (behaviour_\w+)\(\)", body)
+        if extra:
+            return False, _libtest(present, ["someone_elses_test"])
+        return True, _libtest(present, [])
+
+    specs = [_spec("a")]
+    dest, dropped, misses = _emit(tmp_path, specs, verify,
+                                  perturb_env={"RUST_BACKTRACE": "1"})
+    assert dest is None and set(dropped) == {specs[0].behaviour_id}
+    assert misses[-1]["reason"].startswith("perturbed replay red on a verdict")
+    assert list((tmp_path / "tests").iterdir()) == []
+
+
+def test_a_harvested_spec_and_a_foreign_file_are_both_left_alone(
+        tmp_path: Path) -> None:
+    """`replayable` takes probe specs only — a harvested test assertion is
+    already a `#[test]` in the crate. And `_clear_previous` walks `tests/`, so
+    it must ignore names that are not this cluster's and files it cannot read."""
+    from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSubKind, ObservableOutcome
+    harvested = BehaviourSpec("testassert::tests/x.rs::t::0", "", "e.to_string()",
+                              then=ObservableOutcome.display("boom"),
+                              subkind=BehaviourSubKind.OUTCOME)
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / "tests" / "error_gen_1.rs").write_text("// someone else\n", encoding="utf-8")
+    (tmp_path / "tests" / "not_a_gen_test.rs").write_text("// authored\n", encoding="utf-8")
+    specs = [harvested, _spec("a")]
+    dest, _d, _m = _emit(tmp_path, specs, _verifier(tmp_path))
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert body.count("#[test]") == 1                    # the harvested one is not ours
+    assert (tmp_path / "tests" / "error_gen_1.rs").exists()
+    assert (tmp_path / "tests" / "not_a_gen_test.rs").exists()

@@ -45,6 +45,7 @@ from pipeline_core.domain.behaviour_coverage import (
     units_for_hit_lines,
 )
 from pipeline_core.domain.behaviour_probe import is_probe_spec, program_for
+from pipeline_core.domain.cargo_toml import cargo_package_name
 from pipeline_core.domain.models import BuildCluster, FnRecord
 
 COVERAGE_SUBDIR = Path("target") / "coverage" / "behaviour_exercises"
@@ -98,6 +99,15 @@ def _record_dict(r: FnRecord | Mapping[str, Any]) -> dict[str, Any]:
             "is_test": r.is_test}
 
 
+def _crate_name(project_dir: Path) -> str:
+    """The package name from the crate's `Cargo.toml`, or "" when unreadable."""
+    try:
+        return cargo_package_name(
+            (Path(project_dir) / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+
+
 def exercises_by_coverage(
     project_dir: Path,
     cluster: BuildCluster | None,
@@ -143,6 +153,11 @@ def exercises_by_coverage(
         invocations += 1
         return runner(cmd, cwd, env, timeout)
 
+    # The crate name for the rendered probe program's `use <crate>::*;`. A
+    # capture in the constrained shape stores SETUP statements, and the setup
+    # the model wrote compiled under that import — re-running it without one
+    # fails to build and the spec is silently "not attributed".
+    crate = _crate_name(project_dir)
     env = instrumented_env(cluster)
     cov_root = project_dir / COVERAGE_SUBDIR
     cov_root.mkdir(parents=True, exist_ok=True)
@@ -175,7 +190,8 @@ def exercises_by_coverage(
             # trace would be a log line. `program_for` returns the stored
             # program for a legacy free-form capture and renders one from
             # (given, when, kind) for the constrained shape.
-            with materialized_probe(project_dir, program_for(spec), f"exercise_{i}") as target:
+            with materialized_probe(project_dir, program_for(spec, crate=crate),
+                                    f"exercise_{i}") as target:
                 rc, _out, err = counted(
                     ["cargo", "run", "--quiet", "--example", target],
                     project_dir, spec_env, timeout)

@@ -57,10 +57,18 @@ def build_behaviour_synthesis_prompt(
             f"Goal: exercise these units through PUBLIC API only: {targets}\n")
     surface_block = tag_block("PUBLIC_API_SURFACE", public_surface)
     symbols_block = tag_block("IN_SCOPE_SYMBOLS", symbol_inventory)
+    # NOT "imitate the STYLE of". The only worked example this prompt carries
+    # is a harvested `given`, which is a whole `#[test]` item INCLUDING its
+    # `assert_eq!` — computed on the live suite, the first one is
+    # `fn test_boxed_anyhow() { … assert_eq!("oh no!", …); }`. Labelled as the
+    # style to imitate it instructs the exact shape the two rules below refuse,
+    # which is the same defect as the free-form `fn main()` this prompt was
+    # rewritten to stop asking for, one level down. It is here for the CALLS.
     examples_block = tag_block(
         "EXAMPLE_USAGES", example_usages,
-        prefix="Existing usages to imitate the STYLE of (do not copy verbatim):\n"
-               "```rust\n", suffix="\n```")
+        prefix="How this crate's public API is CALLED. Take the calls, never the "
+               "shape: these are the crate's own tests, so they assert — your "
+               "<GIVEN> and <WHEN> must not.\n```rust\n", suffix="\n```")
     return f"""Specify this crate's observable behaviour through its PUBLIC API.
 
 Crate: {module_name} | Cluster: {cfg_cluster}
@@ -89,6 +97,11 @@ Rules:
   `println!`, never an `assert`.
 - <GIVEN> may not print and may not assert. The pair (<GIVEN>, <WHEN>) must
   compile on its own inside `fn main()`.
+- `{module_name}`'s public items are ALREADY imported for you (`use
+  {module_name}::*;` sits above the `fn main()` your <GIVEN> goes into, so the
+  macros and types are in scope). Any OTHER import your setup needs — a `std`
+  trait such as `std::error::Error`, an alias — goes at the top of <GIVEN> as a
+  normal `use` line.
 - You do NOT know the value. Never write it down; the harness prints it.
 - Observe OUTPUTS, never internal call-order. The observable IS the behaviour.
 - Do NOT state a class. It is already known.

@@ -60,6 +60,25 @@ def normalize_stdout(text: str) -> str:
     return "\n".join(lines)
 
 
+def printed_value(stdout: str) -> str:
+    """What a `println!`-of-one-expression capture OBSERVED, exactly.
+
+    NOT :func:`normalize_stdout`. That one strips trailing whitespace PER LINE
+    and drops trailing blank lines, which is right for a free-form program's
+    multi-line blob and wrong for a single rendering: the replay test asserts
+    `format!(…) == <stored value>`, so any character the store drops that
+    `format!` still produces makes the emitted test fail against the ORIGINAL
+    crate. Measured 2026-08-27 on a pristine copy: a value of `"a \nb"` printed
+    as `'a \nb\n'`, stored by `normalize_stdout` as `'a\nb'`, and the emitted
+    `#[test]` failed on the very tree the value was captured from. `println!`
+    appends exactly one newline, so removing exactly one is the inverse."""
+    if stdout.endswith("\r\n"):
+        return stdout[:-2]
+    if stdout.endswith("\n"):
+        return stdout[:-1]
+    return stdout
+
+
 def _strip_code_fence(code: str) -> str:
     """The body of a ```rust … ``` fence when the block is wrapped in one,
     else the text unchanged. Models fence the program despite the tag."""
@@ -150,6 +169,11 @@ _KIND_TO_FMT: Mapping[OutcomeKind, str] = {
 # exception, and the same carve-out `weak_assertion_reason` already makes for
 # generated tests (`behaviour_pinning.py`, `_IDENTITY_METHODS`).
 _COMPARISON_TOKENS = ("==", "!=", "<=", ">=", ".contains(")
+# `&&` / `||` are refused for the same reason a comparison is, one step further
+# on: `a.is::<X>() && b.is::<Y>()` prints one boolean, and the capture would
+# store it as the identity of X alone — a pin that says something the run never
+# measured. A conjunction is two behaviours; ask for them separately.
+_LOGIC_TOKENS = ("&&", "||")
 _IDENTITY_CALLS = (".is::<", ".downcast_ref::<", ".downcast_mut::<", ".downcast::<")
 
 
@@ -186,6 +210,39 @@ def identity_type_of(when: str) -> str | None:
     return None
 
 
+def without_turbofish(when: str) -> str:
+    """`when` with every `::<…>` span removed, angle brackets included.
+
+    The bare `<` and `>` of a comparison and the `<` and `>` of a turbofish are
+    the same character, which is why the first version of this check omitted
+    them and admitted `v.len() < 3` and `n > 0` — both of which observe a
+    boolean and discard the value, exactly what the check exists to refuse.
+    Deleting the turbofish spans first makes the remaining angle brackets
+    unambiguous."""
+    out: list[str] = []
+    i = 0
+    while i < len(when):
+        if when.startswith("::<", i):
+            depth = 0
+            j = i + 2
+            while j < len(when):
+                if when[j] == "<":
+                    depth += 1
+                elif when[j] == ">":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j >= len(when):        # unbalanced: keep the tail verbatim
+                out.append(when[i:])
+                break
+            i = j + 1
+            continue
+        out.append(when[i])
+        i += 1
+    return "".join(out)
+
+
 def value_bearing_reason(when: str) -> str | None:
     """Why this `when` may NOT be captured, or None when it may.
 
@@ -202,10 +259,15 @@ def value_bearing_reason(when: str) -> str | None:
         return "when prints; the harness prints it"
     if "assert" in w:
         return "when asserts; the harness records, it does not check"
+    bare = without_turbofish(w)
+    for tok in _LOGIC_TOKENS:
+        if tok in bare:
+            return (f"when combines two observables ({tok}) — one printed "
+                    "boolean cannot say which half held; write them separately")
     if identity_type_of(w) is not None:
         return None
-    for tok in _COMPARISON_TOKENS:
-        if tok in w:
+    for tok in (*_COMPARISON_TOKENS, "<", ">"):
+        if tok in bare:
             return (f"when compares ({tok}) — a boolean discards the value; "
                     "write the expression whose value is the observable")
     return None
@@ -221,8 +283,22 @@ def observe_kind(observe: str, when: str = "") -> OutcomeKind:
                                 OutcomeKind.DISPLAY_STRING)
 
 
-def render_probe_program(given: str, when: str, observe: str = "display") -> str:
+def render_probe_program(
+    given: str, when: str, observe: str = "display", *, crate: str = "",
+) -> str:
     """The CAPTURE role: a runnable `fn main()` that PRINTS the observable.
+
+    `crate` puts `use <crate>::*;` above `fn main()`, and omitting it is not a
+    detail. The three probes this shape replaced each opened with
+    `use anyhow::{anyhow, Error};` OUTSIDE `fn main()` — the one line the
+    constrained shape has nowhere to put, since `given` is spliced INSIDE the
+    body. Measured 2026-08-27 against a pristine copy of the original: a
+    `given` of `let err = anyhow!("boom");` with no import fails to build with
+    `error: cannot find macro `anyhow` in this scope`, so the capture is lost
+    and only a miss records it. The replay half has had this since it was
+    written (`as_integration_test` inserts the same line); this makes the two
+    roles symmetric. A `use` the model puts in `given` anyway still shadows the
+    glob and still compiles.
 
     Also what `exercises_by_coverage` re-runs — before this existed it re-ran
     `spec.given` directly, so a `given` that stopped being a whole program
@@ -234,7 +310,9 @@ def render_probe_program(given: str, when: str, observe: str = "display") -> str
         expr = f'println!("{{}}", {when.strip()});'
     else:
         expr = f'println!("{_KIND_TO_FMT[kind]}", {when.strip()});'
-    return "fn main() {\n" + (body + "\n" if body else "") + "    " + expr + "\n}\n"
+    head = f"#[allow(unused_imports)]\nuse {crate}::*;\n\n" if crate else ""
+    return (head + "fn main() {\n" + (body + "\n" if body else "")
+            + "    " + expr + "\n}\n")
 
 
 def parse_behaviour_specs(reply: str) -> list[CapturedProbe]:
@@ -282,6 +360,24 @@ def _tagged(block: str, tag: str) -> str:
 # `<disabled>` without it and a captured backtrace with it, identically on
 # every run either way, so the run-twice guard cannot see the difference.
 OBSERVABLE_ENV_KEYS = ("RUST_BACKTRACE", "RUST_LIB_BACKTRACE")
+
+
+def perturbed_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The env flip that EXPOSES an environment-dependent observable.
+
+    Recording the capture environment says what the value was seen under; it
+    does not say whether the value depends on it, and nothing downstream reads
+    the record. Running the emitted replay a second time under this flip does
+    say: measured 2026-08-27 against a pristine copy, `err.backtrace()` renders
+    `"disabled backtrace"` on every run at a fixed env — so the run-twice guard
+    is blind to it — and renders a captured backtrace under `RUST_BACKTRACE=1`.
+    A capture that changes verdict across this flip is not a specification of
+    the crate and must not enter the oracle."""
+    out: dict[str, str] = {}
+    for key in OBSERVABLE_ENV_KEYS:
+        current = (env.get(key) or "").strip().lower()
+        out[key] = "0" if current in ("1", "full") else "1"
+    return out
 
 
 def capture_env_of(env: Mapping[str, str]) -> str:
@@ -496,7 +592,9 @@ def captured_spec(
 ) -> BehaviourSpec:
     """A capture in the constrained shape: `given` = the SETUP statements,
     `when` = the single expression, Then = the observed value under its typed
-    kind.
+    kind. `stdout` is the RAW capture; :func:`printed_value` removes the one
+    newline `println!` added and nothing else, because the replay asserts this
+    value against what `format!` produces.
 
     The program is not stored — :func:`render_probe_program` rebuilds it from
     these three whenever a runnable form is needed (the capture run itself, and
@@ -504,7 +602,7 @@ def captured_spec(
     value with `ok` from the printed boolean, because that is what makes the pin
     say WHICH TypeId the round-trip must preserve."""
     unit = probe.name or "unnamed"
-    text = normalize_stdout(stdout)
+    text = printed_value(stdout)
     kind = observe_kind(probe.observe, probe.when)
     if kind is OutcomeKind.TYPE_IDENTITY:
         then = ObservableOutcome.type_identity(
@@ -526,7 +624,7 @@ def captured_spec(
     return classified(spec, default_cluster=default_cluster or cfg_cluster)
 
 
-def program_for(spec: BehaviourSpec) -> str:
+def program_for(spec: BehaviourSpec, *, crate: str = "") -> str:
     """The runnable program for ANY probe spec — the stored one for a legacy
     free-form capture, a rendered one for the constrained shape.
 
@@ -540,7 +638,7 @@ def program_for(spec: BehaviourSpec) -> str:
                OutcomeKind.ALT_DEBUG_STRING: "alt_debug"}.get(
                    spec.then.kind if spec.then else OutcomeKind.DISPLAY_STRING,
                    "display")
-    return render_probe_program(spec.given, spec.when, observe)
+    return render_probe_program(spec.given, spec.when, observe, crate=crate)
 
 
 def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:

@@ -380,3 +380,28 @@ def test_a_non_capture_owned_behaviour_survives_the_split_and_is_still_required(
     assert 'then: "Some(DivByZero)"' in h.prompts[0]
     assert [r["stop"] for r in h.refusals()] == ["", "WEAK_ASSERTION"]
     assert any("1 harvested behaviour(s) not yet pinned (pin required)" in m for m in h.logs)
+
+
+def test_the_coverage_denominator_excludes_what_the_split_forbids_pinning(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A measurement whose meaning changes has to be told. With the split on,
+    this task is neither shown a capture-owned spec nor held to it, so counting
+    it in the denominator makes the ratio unreachable BY CONSTRUCTION — and
+    `_behaviour_rounds` then spends a round (and a `test_harness_compiles`
+    cargo build) per module per cluster discovering that, before logging
+    `stopping below target` as if something had gone wrong."""
+    on = _Harness(tmp_path / "on", monkeypatch, src_name="lib.rs", replies=[],
+                  target=60.0, specs=(_display_spec(),), capture_split=True)
+    assert task0c_behaviour_coverage(on.ws, "microcrate", on.ws, on.deps) == (0, 0)
+    assert task0c_behaviour_pass(on.ws, "microcrate", on.ws, on.deps) is False
+    assert on.prompts == []
+    assert any("capture-owned and this task is not asked to pin them" in m
+               for m in on.logs)
+
+    # NEGATIVE CONTROL: the same spec with the split off is counted, and the
+    # pass runs — the pre-split reading, unchanged.
+    off = _Harness(tmp_path / "off", monkeypatch, src_name="lib.rs",
+                   replies=[EXACT], target=60.0, specs=(_display_spec(),),
+                   capture_split=False)
+    assert task0c_behaviour_coverage(off.ws, "microcrate", off.ws, off.deps) == (0, 1)
+    assert task0c_behaviour_pass(off.ws, "microcrate", off.ws, off.deps) is True

@@ -225,22 +225,53 @@ def select_component_behaviours(
 # The capture route runs the program and records what it actually printed, so
 # it produces them without predicting them.
 #
-# The remaining classes (OPTION_SEMANTICS, LAYOUT_PIN, CFG_WORLD, OTHER) stay
-# with the guess route: `Some`/`None`, a compile-time layout fact and an
-# unclassified usage are all derivable from the source the prompt already
-# carries.
+# What stays with the guess route: OPTION_SEMANTICS (`Some`/`None` is a shape,
+# not a rendering), LAYOUT_PIN (a compile-time `size_of`/autotrait fact the
+# source states), CFG_WORLD, and an assertion-only spec whose asserts ARE the
+# contract. Note that "OTHER" is NOT a licence: OTHER is the bucket for
+# anything the classifier could not name, so the kind is consulted too (see
+# CAPTURE_OWNED_KINDS below).
 # --------------------------------------------------------------------------
 CAPTURE_OWNED_CLASSES: frozenset[str] = frozenset({
     "EXACT_FORMAT", "IDENTITY", "TRAIT_OBJECT_IDENTITY", "BOUNDED_RESOURCE",
 })
 
+# The classes above are not the whole predicate, and taking them for it made
+# the split a near no-op. `behaviour_class_name` reads a kind it does not know
+# as OTHER, and `_KIND_TO_CLASS` above knows neither `RETURN_RENDERED` nor
+# `NORMALIZED_STDOUT` — so the two kinds whose Then is MOST obviously an exact
+# value the model would have to predict were the two that survived the filter.
+# Computed on the live 230-spec suite (2026-08-27): of the 155 pinnable specs,
+# the class filter alone left 6 — three free-form probe blobs and three
+# `RETURN_RENDERED` values harvested out of `test_downcast_mut` — and those 6
+# matched 7 of the crate's 8 source files, so `require_pin` stayed ON
+# everywhere, now demanding a pin on a multi-`println!` blob that
+# `behaviours_pinned_by` (an exact `then.value` join) can never match. The
+# split's whole point is "the guess route is not asked for values it must
+# predict"; the predicate is therefore over the KIND as well as the class.
+CAPTURE_OWNED_KINDS: frozenset[str] = frozenset({
+    "RETURN_RENDERED",      # a rendered return value — an exact string
+    "NORMALIZED_STDOUT",    # a captured stdout blob — exact, and multi-observable
+    "CHAIN_SEQUENCE",       # the exact chain render, element by element
+    "PANIC_MESSAGE",        # the exact payload
+})
+
 
 def capture_owned(spec: BehaviourSpec) -> bool:
-    """True iff `spec`'s class is one the capture route owns — i.e. pinning it
-    would require the model to predict an exact value rather than reach a code
-    path. Classified by :func:`behaviour_class_name`, so a spec carrying no
-    ``klass`` of its own is grouped by its outcome kind first."""
-    return behaviour_class_name(spec) in CAPTURE_OWNED_CLASSES
+    """True iff pinning `spec` would require the model to PREDICT an exact
+    value rather than reach a code path — the capture route's half of the
+    split.
+
+    Two independent reasons, either sufficient: the class is one of
+    :data:`CAPTURE_OWNED_CLASSES` (classified by :func:`behaviour_class_name`,
+    so a spec carrying no ``klass`` of its own is grouped by its outcome kind
+    first), or the Then's kind is one of :data:`CAPTURE_OWNED_KINDS` — the
+    kinds `behaviour_class_name` cannot classify and therefore reports as
+    OTHER, which is where an unpredictable value hides from a class-only
+    filter."""
+    if behaviour_class_name(spec) in CAPTURE_OWNED_CLASSES:
+        return True
+    return spec.then is not None and spec.then.kind.name in CAPTURE_OWNED_KINDS
 
 
 def drop_capture_owned(

@@ -8,11 +8,11 @@ an executable oracle BEYOND unit tests (does the reconstruction reproduce the
 observable outcome?) and a concrete RIGHT usage example injected into fill
 prompts.
 
-This is BEHAVIOUR extraction, never IMPLEMENTATION extraction (Hard Rule 11 /
-FR-022): a behaviour records an OBSERVABLE outcome — the same legality class as
-a test assertion — never a body or a private call-sequence. The ``then`` is the
-RESULT of the implementation, so a behaviour can be authored/checked without
-ever reading a stripped body.
+This is BEHAVIOUR extraction, never IMPLEMENTATION extraction: a behaviour
+records an OBSERVABLE outcome — the same legality class as a test assertion —
+never a body or a private call-sequence. The ``then`` is the RESULT of the
+implementation, so a behaviour can be authored/checked without ever reading a
+stripped body.
 
 Pure VOs + enums, no dict payloads, no IO — the adapters do the parsing and the
 capturing; this module only names the language and enforces its invariants.
@@ -262,7 +262,9 @@ class BehaviourClass(Enum):
 class BehaviourSpec:
     """One frozen Given/When/Then over the public API. ``exercises`` (the set of
     unit ids the behaviour touches, from return-type + construction token-scan)
-    is the localizer a mismatch escalates through (#82 attribution machinery)."""
+    is the localizer a mismatch escalates through: a diverging behaviour names
+    the fns that produced it, so the escalation targets bodies rather than the
+    whole crate."""
 
     behaviour_id: str
     given: str                              # PublicApiSetup — setup code

@@ -275,3 +275,40 @@ def test_drop_capture_owned_disabled_drops_nothing():
     )
     assert drop_capture_owned(specs, enabled=False) == specs
     assert drop_capture_owned(specs) == ()
+
+
+def test_a_kind_the_classifier_cannot_name_is_still_capture_owned() -> None:
+    """The class allowlist alone made the split a near no-op.
+    `behaviour_class_name` reads a kind it does not know as OTHER, and it knows
+    neither RETURN_RENDERED nor NORMALIZED_STDOUT — the two kinds whose Then is
+    most obviously an exact value a model would have to predict. Computed on
+    the live 230-spec suite (2026-08-27): of 155 pinnable specs the class-only
+    filter left 6 — three free-form probe blobs and three RETURN_RENDERED
+    values out of `test_downcast_mut` — and those 6 matched 7 of the crate's 8
+    source files, so `require_pin` stayed ON everywhere, demanding a pin on a
+    multi-`println!` blob that `behaviours_pinned_by` can never match."""
+    blob = _outcome("blob", "Error::backtrace",
+                    ObservableOutcome.stdout("backtrace debug:\n<disabled>"))
+    ret = _outcome("ret", "err.downcast_ref::<HighLevel>().unwrap().message",
+                   ObservableOutcome.rendered("high context"))
+    for spec in (blob, ret):
+        # NEGATIVE CONTROL: the class-only predicate keeps both — they are
+        # OTHER, which is the classifier's junk drawer, not a licence.
+        assert behaviour_class_name(spec) == "OTHER"
+        assert spec.klass is BehaviourClass.OTHER
+        assert capture_owned(spec), spec.behaviour_id
+    assert drop_capture_owned((blob, ret)) == ()
+
+
+def test_the_guess_route_still_keeps_what_the_source_states() -> None:
+    """The split is by what must be PREDICTED, not a blanket off switch: a
+    layout pin and an option shape are both derivable from the source the
+    prompt already carries."""
+    layout = _outcome("layout", "size_of::<Error>()",
+                      ObservableOutcome.static_assertion(
+                          StaticAssertKind.SIZE, "size_of::<Error>() == 8"))
+    option = classified(_outcome("option", "e.source().is_none()",
+                                 ObservableOutcome.display("true")))
+    assert option.klass is BehaviourClass.OPTION_SEMANTICS
+    assert not capture_owned(layout) and not capture_owned(option)
+    assert drop_capture_owned((layout, option)) == (layout, option)
