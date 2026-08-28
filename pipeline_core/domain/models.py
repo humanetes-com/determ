@@ -16,7 +16,10 @@ Pure domain: stdlib only, no I/O. Parsing happens in the adapter, which is the s
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+if TYPE_CHECKING:
+    from pipeline_core.domain.pass_payoff import PassPayoff
 
 from pipeline_core.domain.cfg import CfgAtom
 from pipeline_core.domain.import_repair import ImportFix
@@ -110,18 +113,28 @@ class MethodRecord:
     # this is a separate field, not a redefinition of `is_pub`.
     is_exactly_pub: bool = True
     cfg_predicates: tuple[str, ...] = ()
+    # Declaring file and the `mod` path that contains the method. A nonempty
+    # `mod_path` in another file is a private-mod wall: the method is not
+    # nameable from the fill's file, however `is_pub` the enclosing trait is.
+    # Trait methods are recorded `is_pub=false` (syn has no vis on trait
+    # items), so filtering on `is_pub` alone cannot drop them.
+    file: str = ""
+    mod_path: str = ""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MethodRecord:
         return cls(name=d.get("name", ""), sig=d.get("sig", ""),
                    is_pub=bool(d.get("is_pub", False)),
                    is_exactly_pub=bool(d.get("is_exactly_pub", True)),
-                   cfg_predicates=_strs(d.get("cfg_predicates")))
+                   cfg_predicates=_strs(d.get("cfg_predicates")),
+                   file=d.get("file", ""),
+                   mod_path=d.get("mod_path", ""))
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "sig": self.sig, "is_pub": self.is_pub,
                 "is_exactly_pub": self.is_exactly_pub,
-                "cfg_predicates": list(self.cfg_predicates)}
+                "cfg_predicates": list(self.cfg_predicates),
+                "file": self.file, "mod_path": self.mod_path}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +155,13 @@ class TypeRecord:
     # fixtures/tests that only set `is_pub` keep their prior meaning; the
     # extractor always emits both fields explicitly.
     is_exactly_pub: bool = True
+    # Nested `mod` path from the file root (`"ext"` for `mod ext { pub trait
+    # StdError }`). Empty is file scope. A nonempty path is a private-mod
+    # wall: Rust will not resolve the name from another file, however
+    # `is_pub` the type itself is. `is_pub` ORs across declarations, so a
+    # `pub trait` behind `mod ext` still reads `is_pub=True` — filtering on
+    # `is_pub` alone cannot drop it from another file's TYPES_IN_SCOPE.
+    mod_path: str = ""
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TypeRecord:
@@ -156,6 +176,7 @@ class TypeRecord:
             methods=tuple(MethodRecord.from_dict(m) for m in (d.get("methods") or [])),
             is_pub=bool(d.get("is_pub", False)),
             is_exactly_pub=bool(d.get("is_exactly_pub", True)),
+            mod_path=d.get("mod_path", ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -170,6 +191,7 @@ class TypeRecord:
             "methods": [m.to_dict() for m in self.methods],
             "is_pub": self.is_pub,
             "is_exactly_pub": self.is_exactly_pub,
+            "mod_path": self.mod_path,
         }
 
 
@@ -786,6 +808,12 @@ class ClusterFillResult:
     # (the default) is "the fill reported none" — tests, the per-fn-only
     # path — so the arm behaves as before for those callers.
     reverted_fns: tuple[tuple[str, str], ...] = ()
+    # What this fill pass could have moved, and which still-stubbed sites
+    # held the landed bodies. Default None: callers and tests that do not
+    # populate it behave as before. The TDD driver reads it to rank the
+    # next batch by blocker frequency — the field the two fill routes used
+    # to leave on a log line that nothing outer consumed.
+    payoff: PassPayoff | None = None
 
 
 @dataclass(frozen=True, slots=True)

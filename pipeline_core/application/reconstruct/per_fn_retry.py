@@ -762,7 +762,8 @@ def generate_one_body(
                     ctx.tests_dir_files, name)),
             type_def=lambda name: ("\n\n".join(
                 format_type_for_prompt(r) for r in
-                types_referenced_in_text(name, ctx.type_recs)[:3])
+                types_referenced_in_text(
+                    name, ctx.type_recs, visible_from=rel_f)[:3])
                 # Crate-local records win; well-known unstable std APIs
                 # (std::error::Request et al.) answer as a last fallback so
                 # the pull never starves on a std type the manifest can't have.

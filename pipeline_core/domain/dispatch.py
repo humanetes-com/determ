@@ -51,6 +51,23 @@ def defer_blocked_consumers(
     return active, deferred
 
 
+def blocker_histogram(
+    deferred: dict[FnLocator, frozenset[FnLocator]],
+) -> dict[FnLocator, int]:
+    """How many deferred consumers name each still-stubbed producer.
+
+    The pre-dispatch counterpart of `PassPayoff.locator_counts`. Run
+    `155810-cbb3b9fc` iter 2 (2026-08-28): `error.rs::construct` held 27 of
+    30 deferred consumers, available from `phase_c.dispatch.deferred` with
+    no escalation fire. First-fill already admits those producers into the
+    batch; this count is what ranks them to the head."""
+    counts: dict[FnLocator, int] = {}
+    for blockers in deferred.values():
+        for b in blockers:
+            counts[b] = counts.get(b, 0) + 1
+    return counts
+
+
 def sibling_blocked_u2_failures(
     failing_tests: frozenset[str], unit: FnLocator,
     dispatch: Frontier, still_stubbed: frozenset[FnLocator],

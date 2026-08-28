@@ -2577,8 +2577,10 @@ def test_slice6_models() -> None:
         "fields": [{"name": "inner", "ty": "Own<ErrorImpl>", "is_pub": False}],
         "variants": [], "methods": [{"name": "new", "sig": "fn new() -> Self", "is_pub": True,
                                      "is_exactly_pub": True,
-                                     "cfg_predicates": ["feature = \"std\""]}], "is_pub": True,
+                                     "cfg_predicates": ["feature = \"std\""],
+                                     "file": "", "mod_path": ""}], "is_pub": True,
         "is_exactly_pub": True,
+        "mod_path": "",
     }
     tr = TypeRecord.from_dict(ty_wire)
     assert isinstance(tr.fields[0], FieldRecord) and tr.fields[0].ty == "Own<ErrorImpl>"

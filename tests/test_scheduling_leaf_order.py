@@ -56,6 +56,32 @@ def test_unsorted_refill_tail_shatters_levels_and_the_reorder_restores_them() ->
         ["a", "b"], ["c", "d", "e"], ["f", "g"]]
 
 
+def test_unit_ranks_group_high_blocker_count_in_the_first_level() -> None:
+    """The engine's leaf-first grouping is the gap C as written would miss:
+    `take_batch` can put construct in the 12, then `group_priority_levels`
+    on name-frequency dispatches fmt first. unit_ranks is the same histogram
+    the TDD driver used, so the first barriered level is the high-count
+    units."""
+    from pipeline_core.application.reconstruct.scheduling import (
+        group_priority_levels,
+        rank_stubs_by_blocker_counts,
+    )
+    from pipeline_core.domain.models import FnLocator, Stub
+
+    fmt = Stub(file="src/wrapper.rs", fn_name="fmt")
+    adhoc = Stub(file="src/error.rs", fn_name="construct_from_adhoc")
+    ptr_new = Stub(file="src/ptr.rs", fn_name="new")
+    ranks = {
+        FnLocator("src/error.rs", "construct_from_adhoc"): 15,
+        FnLocator("src/ptr.rs", "new"): 15,
+        FnLocator("src/wrapper.rs", "fmt"): 14,
+    }
+    ordered = rank_stubs_by_blocker_counts([fmt, adhoc, ptr_new], ranks)
+    levels = group_priority_levels(ordered, None, unit_ranks=ranks)
+    assert [[s.fn_name for _i, s in lvl] for lvl in levels] == [
+        ["construct_from_adhoc", "new"], ["fmt"]]
+
+
 def test_match_records_to_order_keeps_same_key_records_in_relative_order() -> None:
     from pipeline_core.application.reconstruct.scheduling import (
         match_records_to_order,

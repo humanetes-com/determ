@@ -228,6 +228,50 @@ def promote_product_ahead[K: Hashable, V](
     return head + tail
 
 
+def promote_by_blocker_counts[K: Hashable, V](
+    ordered: Sequence[tuple[K, V]], counts: Mapping[K, int],
+) -> list[tuple[K, V]]:
+    """`ordered` re-sorted by descending blocker count, original index for ties.
+
+    Unlike `promote_producers`, this reorders the WHOLE list: `take_batch`
+    takes a prefix, so a producer that is in the frontier but ranked last
+    never makes a cap=12 slice. The live instance is run `155810-cbb3b9fc`
+    iter 2: `error.rs::construct` held 27 of 30 deferred consumers and sat
+    outside the first batch because `order_frontier` ranked it on leaf-name
+    frequency. An empty `counts` is a no-op. Crash-evidence promotion that
+    runs after this still wins."""
+    if not counts:
+        return list(ordered)
+    return [
+        item for _, item in sorted(
+            enumerate(ordered),
+            key=lambda idx_item: (
+                -counts.get(idx_item[1][0], 0), idx_item[0]),
+        )
+    ]
+
+
+def overlay_crash_on_ranks[K: Hashable](
+    ranks: Mapping[K, int], grades: Mapping[K, int],
+) -> dict[K, int]:
+    """Crash-evidence units outrank every histogram count; grade 0 is highest.
+
+    `dispatch_ranks` is what the engine re-sorts on after `take_batch`. Passing
+    the histogram alone undoes `promote_crash_evidence` the same way leaf-first
+    undid constructor ranking (run `155810-cbb3b9fc` iter 1). Offset is
+    `max(histogram)+1+(max(grade)-grade)` so the best observed grade sits
+    above weaker inferences above any blocker count. Empty `grades` returns a
+    copy of `ranks`. Units absent from `grades` keep their histogram value."""
+    out = dict(ranks)
+    if not grades:
+        return out
+    ceiling = max(out.values(), default=0)
+    span = max(grades.values())
+    for k, g in grades.items():
+        out[k] = ceiling + 1 + (span - g)
+    return out
+
+
 def promote_producers[K: Hashable, V](
     ordered: Sequence[tuple[K, V]], escalated: frozenset[K],
     builders: frozenset[K], callees: frozenset[K],

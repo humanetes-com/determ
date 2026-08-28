@@ -4,8 +4,12 @@ The module was previously exercised only incidentally through e2e fill-loop
 flows; these pin the pure contract directly (coverage ratchet)."""
 from __future__ import annotations
 
-from pipeline_core.domain.models import FieldRecord, TypeRecord
-from pipeline_core.domain.type_refs import types_referenced_in_text
+from pipeline_core.domain.models import FieldRecord, MethodRecord, TypeRecord
+from pipeline_core.domain.type_refs import (
+    hidden_symbols_from_types,
+    type_nameable_from,
+    types_referenced_in_text,
+)
 
 
 def _rec(name: str, *fields: tuple[str, str]) -> TypeRecord:
@@ -76,3 +80,39 @@ def test_hop_does_not_duplicate_direct_match() -> None:
     # Own matches directly AND appears in Error's field — listed once.
     out = types_referenced_in_text("fn f(e: Error, o: Own<u8>)", [ERROR, OWN])
     assert [r.name for r in out] == ["Error", "Own"]
+
+
+def test_stderror_behind_private_mod_is_not_nameable_from_another_file() -> None:
+    """The live TYPES_IN_SCOPE defect: `pub trait StdError` in `mod ext` of
+    context.rs reached an error.rs prompt because `is_pub` is True and the
+    renderer has no module wall. `visible_from` drops it for error.rs and
+    keeps it for context.rs."""
+    stderror = TypeRecord(
+        name="StdError", kind="trait", file="src/context.rs",
+        is_pub=True, mod_path="ext",
+        methods=(MethodRecord(
+            name="ext_context", sig="fn ext_context<C>(self, context: C) -> Error",
+            is_pub=False, file="src/context.rs", mod_path="ext"),),
+    )
+    assert not type_nameable_from(stderror, "src/error.rs")
+    assert type_nameable_from(stderror, "src/context.rs")
+    from_error = types_referenced_in_text(
+        "fn f(e: StdError)", [stderror, ERROR], visible_from="src/error.rs")
+    assert [r.name for r in from_error] == []
+    from_ctx = types_referenced_in_text(
+        "fn f(e: StdError)", [stderror, ERROR], visible_from="src/context.rs")
+    assert [r.name for r in from_ctx] == ["StdError"]
+    assert from_ctx[0].methods[0].name == "ext_context"
+
+
+def test_hidden_symbols_are_walled_methods_in_another_file() -> None:
+    stderror = TypeRecord(
+        name="StdError", kind="trait", file="src/context.rs",
+        is_pub=True, mod_path="ext",
+        methods=(MethodRecord(
+            name="ext_context", sig="fn ext_context()",
+            file="src/context.rs", mod_path="ext"),),
+    )
+    hidden = hidden_symbols_from_types([stderror], "src/error.rs")
+    assert hidden == frozenset({"ext_context"})
+    assert hidden_symbols_from_types([stderror], "src/context.rs") == frozenset()

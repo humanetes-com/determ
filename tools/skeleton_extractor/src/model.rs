@@ -69,6 +69,10 @@ pub struct TypeRecord {
     // true (Rust visibility can never be widened past the defining crate by a
     // restricted `pub(...)`, whatever `is_pub` says).
     pub is_exactly_pub: bool,
+    // Nested `mod` path from the file root (`"ext"` for `mod ext { pub trait
+    // StdError }`). Empty is file scope. A nonempty path is a private-mod
+    // wall: the name is not resolvable from another file.
+    pub mod_path: String,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -90,6 +94,11 @@ pub struct MethodRecord {
     // with the method's own. Lets the pipeline drop methods that don't compile
     // in a given cluster's cfg-set (cluster-aware TYPES_IN_SCOPE).
     pub cfg_predicates: Vec<String>,
+    // Declaring file and the `mod` path that contains the method. A nonempty
+    // `mod_path` in another file is a private-mod wall; trait methods are
+    // recorded `is_pub=false`, so filtering on `is_pub` alone cannot drop them.
+    pub file: String,
+    pub mod_path: String,
 }
 
 /// One module declaration in a crate root file (lib.rs or main.rs).

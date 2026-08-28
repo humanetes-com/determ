@@ -1,0 +1,690 @@
+{
+  "run_id": "155810-cbb3b9fc",
+  "cluster": "stable",
+  "source": "logs/events.jsonl event=phase_c.dispatch.deferred and phase_c.fn.fill.start",
+  "deferred": [
+    {
+      "iter": 1,
+      "ts": "2026-08-28T09:52:58.804+00:00",
+      "deferred": {
+        "src/context.rs::write_str": [
+          "src/context.rs::fmt",
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_std",
+          "src/fmt.rs::write_str",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt"
+        ],
+        "src/error.rs::error": [
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::as_ref",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::drop",
+          "src/error.rs::from",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/fmt.rs::write_str",
+          "src/kind.rs::anyhow_kind",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::is": [
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::render",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::from",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::not",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/chain.rs::new": [
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::render",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::new": [
+          "src/context.rs::ext_context",
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::render",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::context",
+          "src/error.rs::drop",
+          "src/error.rs::from",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/kind.rs::anyhow_kind",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/kind.rs::new": [
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::fmt": [
+          "src/context.rs::ext_context",
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::from",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::debug",
+          "src/fmt.rs::write_str",
+          "src/kind.rs::anyhow_kind",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/nightly.rs::fmt": [
+          "src/context.rs::ext_context",
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::from",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::debug",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::downcast_ref": [
+          "src/context.rs::fmt",
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::from",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/fmt.rs::write_str",
+          "src/kind.rs::anyhow_kind",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt"
+        ],
+        "src/chain.rs::next": [
+          "src/context.rs::ext_context",
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::context",
+          "src/error.rs::from",
+          "src/error.rs::source",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/context.rs::with_context": [
+          "src/context.rs::ext_context",
+          "src/context.rs::fmt",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::from",
+          "src/wrapper.rs::fmt"
+        ],
+        "src/error.rs::chain": [
+          "src/context.rs::ext_context",
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::context",
+          "src/error.rs::from",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/context.rs::context": [
+          "src/context.rs::ext_context",
+          "src/context.rs::source",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::from",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/wrapper.rs::source"
+        ],
+        "src/lib.rs::Ok": [
+          "src/ensure.rs::render",
+          "src/error.rs::construct_from_adhoc",
+          "src/lib.rs::not",
+          "src/ptr.rs::new",
+          "src/ptr.rs::read"
+        ],
+        "src/error.rs::msg": [
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::render",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::from",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/fmt.rs::debug",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::error_mut": [
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::from",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/error.rs::backtrace": [
+          "src/context.rs::source",
+          "src/error.rs::construct_from_adhoc",
+          "src/error.rs::construct_from_std",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::from_boxed": [
+          "src/context.rs::fmt",
+          "src/context.rs::source",
+          "src/ensure.rs::new",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::source",
+          "src/lib.rs::source",
+          "src/ptr.rs::boxed",
+          "src/ptr.rs::new",
+          "src/wrapper.rs::fmt",
+          "src/wrapper.rs::source"
+        ],
+        "src/chain.rs::next_back": [
+          "src/error.rs::construct_from_adhoc"
+        ],
+        "src/chain.rs::size_hint": [
+          "src/error.rs::construct_from_adhoc"
+        ],
+        "src/chain.rs::len": [
+          "src/ensure.rs::render",
+          "src/error.rs::construct_from_adhoc",
+          "src/ptr.rs::read"
+        ],
+        "src/error.rs::root_cause": [
+          "src/context.rs::ext_context",
+          "src/ensure.rs::render",
+          "src/ptr.rs::new"
+        ],
+        "src/chain.rs::default": [
+          "src/ensure.rs::render",
+          "src/lib.rs::not"
+        ]
+      }
+    },
+    {
+      "iter": 2,
+      "ts": "2026-08-28T11:59:07.397+00:00",
+      "deferred": {
+        "src/context.rs::write_str": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/fmt.rs::write_str"
+        ],
+        "src/error.rs::error": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::as_ref",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::drop",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::is": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::not",
+          "src/lib.rs::source",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut",
+          "src/wrapper.rs::source"
+        ],
+        "src/chain.rs::new": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::new": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::context",
+          "src/error.rs::drop",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/kind.rs::new": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/ptr.rs::new": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/context.rs::fmt": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::fmt": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/nightly.rs::fmt": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/wrapper.rs::fmt": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::source",
+          "src/fmt.rs::write_str",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::downcast_ref": [
+          "src/ensure.rs::new",
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/fmt.rs::write_str"
+        ],
+        "src/ptr.rs::boxed": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::into_boxed_dyn_error",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/chain.rs::next": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::context",
+          "src/error.rs::source",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/context.rs::with_context": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::construct_from_display"
+        ],
+        "src/error.rs::chain": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/context.rs::context": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::from": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_context",
+          "src/error.rs::context",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::drop",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/lib.rs::Ok": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/lib.rs::not",
+          "src/ptr.rs::read"
+        ],
+        "src/error.rs::msg": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::error_mut": [
+          "src/error.rs::construct",
+          "src/error.rs::deref_mut",
+          "src/error.rs::downcast",
+          "src/error.rs::downcast_mut",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/error.rs::backtrace": [
+          "src/error.rs::construct",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/context.rs::source": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+          "src/error.rs::source",
+          "src/error.rs::vtable",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/error.rs::from_boxed": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::source",
+          "src/lib.rs::source",
+          "src/wrapper.rs::source"
+        ],
+        "src/fmt.rs::debug": [
+          "src/error.rs::construct",
+          "src/error.rs::context"
+        ],
+        "src/chain.rs::next_back": [
+          "src/error.rs::construct"
+        ],
+        "src/chain.rs::size_hint": [
+          "src/error.rs::construct"
+        ],
+        "src/chain.rs::len": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct",
+          "src/ptr.rs::read"
+        ],
+        "src/error.rs::root_cause": [
+          "src/ensure.rs::new",
+          "src/error.rs::construct_from_context"
+        ],
+        "src/chain.rs::default": [
+          "src/ensure.rs::new",
+          "src/lib.rs::not"
+        ]
+      }
+    }
+  ],
+  "iter1_fill_start_first_occurrence": [
+    {
+      "ts": "2026-08-28T09:52:59.421+00:00",
+      "unit": "src/context.rs::fmt"
+    },
+    {
+      "ts": "2026-08-28T09:52:59.499+00:00",
+      "unit": "src/wrapper.rs::fmt"
+    },
+    {
+      "ts": "2026-08-28T10:01:52.374+00:00",
+      "unit": "src/error.rs::from"
+    },
+    {
+      "ts": "2026-08-28T10:06:08.225+00:00",
+      "unit": "src/ptr.rs::new"
+    },
+    {
+      "ts": "2026-08-28T10:09:23.052+00:00",
+      "unit": "src/context.rs::source"
+    },
+    {
+      "ts": "2026-08-28T10:24:24.467+00:00",
+      "unit": "src/ptr.rs::boxed"
+    },
+    {
+      "ts": "2026-08-28T10:25:49.758+00:00",
+      "unit": "src/kind.rs::anyhow_kind"
+    },
+    {
+      "ts": "2026-08-28T10:27:18.295+00:00",
+      "unit": "src/context.rs::ext_context"
+    },
+    {
+      "ts": "2026-08-28T10:38:13.356+00:00",
+      "unit": "src/fmt.rs::debug"
+    },
+    {
+      "ts": "2026-08-28T10:38:13.430+00:00",
+      "unit": "src/ensure.rs::render"
+    },
+    {
+      "ts": "2026-08-28T11:45:47.150+00:00",
+      "unit": "src/error.rs::construct_from_adhoc"
+    },
+    {
+      "ts": "2026-08-28T11:45:47.202+00:00",
+      "unit": "src/error.rs::construct_from_std"
+    },
+    {
+      "ts": "2026-08-28T14:10:29.310+00:00",
+      "unit": "src/error.rs::context"
+    }
+  ]
+}

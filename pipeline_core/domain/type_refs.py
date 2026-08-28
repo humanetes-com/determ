@@ -5,17 +5,80 @@ the types named directly in the text (signature/container) plus one level of
 field-transitive expansion (so a field `inner: Own<ErrorImpl>` pulls in `Own`
 and `ErrorImpl` even when only `Error` matched directly). Relocated verbatim
 from pipeline.py. Pure: stdlib + domain only.
+
+`visible_from` is the fill's file. Without it the selection is crate-wide, which
+is how `trait StdError` inside `mod ext` in `context.rs` reached an `error.rs`
+TYPES_IN_SCOPE table with `fn ext_context` and `call with .name(args)` — a body
+there then failed `error[E0603]: module ext is private` (run `155810-cbb3b9fc`,
+2026-08-28). `is_pub` cannot drop it: the trait is `pub`, and trait methods are
+recorded `is_pub=false`. The wall is `mod_path`.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.rust_idents import identifier_tokens
 from pipeline_core.domain.rust_scan import contains_word
 
 
+def type_nameable_from(rec: TypeRecord, target_file: str) -> bool:
+    """Can this type be named from `target_file`?
+
+    Same file (or an unlocated record) is always nameable — the prompt is
+    answering that file. A nonempty `mod_path` is a private-mod wall: Rust
+    will not resolve the name from another file, however `is_pub` the type
+    itself is. File-scope types in another file follow `is_pub`.
+    """
+    if not target_file or not rec.file or rec.file == target_file:
+        return True
+    if rec.mod_path:
+        return False
+    return rec.is_pub
+
+
+def methods_nameable_from(rec: TypeRecord, target_file: str) -> TypeRecord:
+    """Drop methods declared behind a private-mod wall in another file.
+
+    Does not use method `is_pub`: trait methods are recorded false. A method
+    with empty `file` (pre-field artifact) is kept."""
+    if not target_file:
+        return rec
+    kept = tuple(
+        m for m in rec.methods
+        if not (m.file and m.file != target_file and m.mod_path)
+    )
+    if kept == rec.methods:
+        return rec
+    return replace(rec, methods=kept)
+
+
+def hidden_symbols_from_types(
+    type_records: list[TypeRecord], target_file: str,
+) -> frozenset[str]:
+    """Method names whose only declaration is behind a private-mod wall in
+    another file — not callable from `target_file`. A note naming one of
+    these as a word is advertising an unreachable symbol."""
+    if not target_file:
+        return frozenset()
+    other_walled: set[str] = set()
+    visible: set[str] = set()
+    for rec in type_records:
+        for m in rec.methods:
+            if not m.name:
+                continue
+            other = bool(m.file) and m.file != target_file
+            if other and m.mod_path:
+                other_walled.add(m.name)
+            else:
+                visible.add(m.name)
+    return frozenset(other_walled - visible)
+
+
 def types_referenced_in_text(
     text: str, all_types: list[TypeRecord],
+    visible_from: str = "",
 ) -> list[TypeRecord]:
     """Return type records that the fn's prompt should expose, with one
     level of transitive expansion through fields.
@@ -34,13 +97,21 @@ def types_referenced_in_text(
     Word boundaries guard against `Boxed` matching when searching for
     `Box`. Field expansion is one level only — going deeper would bloat
     the prompt.
+
+    `visible_from` nonempty filters to types (and methods) nameable from
+    that file. Empty keeps the crate-wide selection, which is every
+    existing call site that has not yet been given a file.
     """
     if not text or not all_types:
         return []
-    by_name = {rec.name: rec for rec in all_types if rec.name}
+    candidates = (
+        [r for r in all_types if type_nameable_from(r, visible_from)]
+        if visible_from else all_types
+    )
+    by_name = {rec.name: rec for rec in candidates if rec.name}
     out: list[TypeRecord] = []
     seen_names: set[str] = set()
-    for rec in all_types:
+    for rec in candidates:
         name = rec.name
         if not name or name in seen_names:
             continue
@@ -69,4 +140,6 @@ def types_referenced_in_text(
                 field_hop.append(hop_rec)
                 seen_names.add(tok)
     out.extend(field_hop)
+    if visible_from:
+        out = [methods_nameable_from(r, visible_from) for r in out]
     return out

@@ -167,6 +167,7 @@ from pipeline_core.domain.test_results import (
     TestStateReading,
     strip_ansi,
 )
+from pipeline_core.domain.type_refs import hidden_symbols_from_types
 from pipeline_core.domain.verdict import (
     Disposition,
     GateOutcome,
@@ -504,6 +505,7 @@ def fill_impl_blocks(
     # (fn_walk, tests) leave those prompts byte-identical to the pre-instruction
     # render.
     behaviour_specs: Sequence[BehaviourSpec] = (),
+    dispatch_ranks: dict[FnLocator, int] | None = None,
 ) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -785,6 +787,12 @@ def fill_impl_blocks(
     _pulls_on = os.getenv("CONTEXT_PULLS", "1") != "0"
     _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
     _last_full_out: list[str] = [""]  # set by _splice_and_verify per check
+    # Fill file for the type_def pull: workers run different files
+    # concurrently, so a shared holder would leak another file's visibility
+    # into this one. `visible_from` is how a `pub trait` behind `mod ext`
+    # in context.rs is dropped from an error.rs pull (same wall as
+    # TYPES_IN_SCOPE; run `155810-cbb3b9fc`).
+    _pull_file = threading.local()
     # One reader for both crate trees (the reconstruction's `src/`, the
     # oracle's `tests/`): the pull route and the evidence block's panic-site
     # quote read the same files under the same containment.
@@ -795,7 +803,8 @@ def fill_impl_blocks(
             f"// {p}\n{t}" for p, t in _find_tests_referencing_fn(
                 tests_dir_files, name, max_blocks=4)),
         type_def=lambda name: (_types_section_for_fix(
-            name, "", "", "", "", _crate_type_records)
+            name, "", "", "", "", _crate_type_records,
+            file_rel=getattr(_pull_file, "file", "") or "")
             # Crate records win; well-known unstable std APIs answer as a
             # last fallback so the pull never starves on a std type.
             or std_api_def(name)),
@@ -982,6 +991,7 @@ def fill_impl_blocks(
         wanted = [*stub_names, *refill_names]
         if not wanted:
             return
+        _pull_file.file = file_rel
         with _counters_lock:
             dispatched_keys.update(FnLocator(file_rel, n) for n in wanted)
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
@@ -1262,9 +1272,15 @@ def fill_impl_blocks(
         # gets its own entry — the splice's joint-overwrite widening already
         # lands any declared member the reply answers once a re-fill target
         # answers, so this is a PLAN entry, not a dispatch change.
+        def _order_stubs(file_rel: str, names: tuple[str, ...]) -> tuple[str, ...]:
+            if not dispatch_ranks:
+                return names
+            return tuple(sorted(names, key=lambda n: (
+                -dispatch_ranks.get(FnLocator(file_rel, n), 0), n)))
+
         _block_plans = [BlockFillPlan(
             b.container,
-            tuple(m.fn_name for m in b.stub_members),
+            _order_stubs(b.file, tuple(m.fn_name for m in b.stub_members)),
             tuple(dict.fromkeys((*(m.fn_name for m in b.refill_members),
                                  *(x.fn_name
                                    for x in _bypass_for(b.container))))),
@@ -1317,7 +1333,9 @@ def fill_impl_blocks(
                 escalated_grade=" + ".join(_grade_parts),
                 writable_fns=frozenset(
                     n for p in (*_free_plan, *_block_plans, *_extra_plans)
-                    for n in (*p.stubs, *p.refills)))
+                    for n in (*p.stubs, *p.refills)),
+                hidden_symbols=hidden_symbols_from_types(
+                    _crate_type_records, file_rel))
         # Screen every retro key this prompt's units can honour: the *impl*
         # record per block AND each fill-plan unit the per-fn route stamps.
         # Honour/retire lines keep the STORE key so a grep lands on the
@@ -1353,7 +1371,8 @@ def fill_impl_blocks(
             # route's unit — the per-impl path searches one block's member
             # signatures because that is all it may write.
             _file_types = _types_section_for_fix(
-                "", snapshot, prior_error, "", "", _crate_type_records)
+                "", snapshot, prior_error, "", "", _crate_type_records,
+                file_rel=file_rel)
             prompt = build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
                 fill_plan=[*_free_plan, *_block_plans, *_extra_plans],
@@ -1898,6 +1917,7 @@ def fill_impl_blocks(
         while loop), and exhausted-block bookkeeping (retro + fail emit)."""
         nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
         block_id = _impl_block_id(block.file, block.container)
+        _pull_file.file = block.file
         # Per-file converge keying: only the converge module keeps full budget.
         block_max_stalls = _effective_stalls(_impl_full_stalls, _module_of(block.file))
         file_path = target_src_dir / block.file
@@ -2211,6 +2231,8 @@ def fill_impl_blocks(
                     k.fn_name for k in escalated_keys if k.file == block.file),
                 escalated_grade="ESCALATED REWRITE" if _esc_targets else "",
                 writable_fns=frozenset(_block_target_names),
+                hidden_symbols=hidden_symbols_from_types(
+                    _crate_type_records, block.file),
             )
         last_error_excerpt = ""
         # The last failed attempt's REAL two-tier metric. Re-deriving it from
@@ -2277,7 +2299,8 @@ def fill_impl_blocks(
             # the impl block's signatures don't mention).
             _types_section_eff = _types_section_for_fix(
                 _member_sigs_text, "", last_error_excerpt or "",
-                _block_container, _block_where, _crate_type_records)
+                _block_container, _block_where, _crate_type_records,
+                file_rel=block.file)
             # Attempt 2+: does the sibling reference carry the expression the
             # previous attempt was rejected on? Then the two sections
             # contradict each other and the prefix must say so — run
@@ -2320,7 +2343,7 @@ def fill_impl_blocks(
                     # attempts, identical error, whole fix loop spent).
                     last_error=last_error_excerpt or "",
                     bound_methods=_bound_methods_section_for(
-                        _block_where, _crate_type_records),
+                        _block_where, _crate_type_records, file_rel=block.file),
                     refill_evidence=_refill_evidence_text,
                     inferred_refill_names=_inferred_refill,
                     sibling_rejected=_steer.shared,
@@ -3335,15 +3358,17 @@ def fill_impl_blocks(
     # event is the counter-part of the 50 `u2.external_only` events that went
     # out unread in run `2879-66905005`.
     _payoff = assess_pass_payoff(block_outcomes)
-    if _payoff.is_zero:
-        _log(f"  [phase-c/impl] cluster {cluster_name}: PAYOFF ZERO — "
-             f"{_payoff.summary}.")
-        _emit("phase_c.pass.payoff_zero", data={
-            "cluster": cluster_name, "route": "impl",
-            "landed": _payoff.landed,
-            "blocking_fns": sorted(
-                f"{s.file}::{s.fn_name}" for s in _payoff.blockers),
-        })
+    if _payoff.unjudgeable_rate == 1.0:
+        _pay_data = {"cluster": cluster_name, "route": "impl",
+                     **_payoff.event_data()}
+        if _payoff.is_zero:
+            _log(f"  [phase-c/impl] cluster {cluster_name}: PAYOFF ZERO — "
+                 f"{_payoff.summary}.")
+            _emit("phase_c.pass.payoff_zero", data=_pay_data)
+        else:
+            _log(f"  [phase-c/impl] cluster {cluster_name}: UNJUDGEABLE — "
+                 f"{_payoff.rate_summary}.")
+            _emit("phase_c.pass.unjudgeable", data=_pay_data)
     bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
     # None = extractor absent → text-scan fallback; 0 here would make the
@@ -3360,4 +3385,5 @@ def fill_impl_blocks(
         impls_failed=impls_failed,
         dispatched_fns=tuple(sorted(dispatched_keys)),
         reverted_fns=tuple(sorted(reverted_keys)),
+        payoff=_payoff,
     )

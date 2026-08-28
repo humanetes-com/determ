@@ -290,3 +290,25 @@ def test_n2_fires_on_the_per_block_fallback_grade_and_logs_it(tmp_path) -> None:
     assert "[E0425]" not in out
     assert any("ESCALATED REWRITE" in ln and "kept out" in ln for ln in logs)
     assert not any("REWRITE WITH THE PRODUCER" in ln for ln in logs)
+
+
+def test_hidden_symbols_drop_notes_that_name_an_unreachable_method(
+        tmp_path) -> None:
+    """A lesson earned on context.rs (`use e.ext_context`) is served to every
+    file unless the filter knows the symbol is behind a private-mod wall in
+    another file. Same-file-only scoping is wrong: the E0603 note can be
+    earned ON error.rs with provenance.unit in error.rs."""
+    note = ("[E0277] I tried Error::new(e).context(context) because the "
+            "method seemed right; use e.ext_context(context) not "
+            "Error::new(e).context(context)")
+    other = "generic recency note about ownership and cloning a Widget"
+    fr = _fr(tmp_path, [note, other])
+    out = _store().filter_for_prompt(
+        fr, "src/error.rs", "construct",
+        hidden_symbols=frozenset({"ext_context"}))
+    assert "ext_context" not in out
+    assert "Widget" in out
+    kept = _store().filter_for_prompt(
+        fr, "src/context.rs", "ext_context",
+        hidden_symbols=frozenset())
+    assert "ext_context" in kept

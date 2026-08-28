@@ -376,6 +376,7 @@ fn raise_visibility(entry: &mut TypeRecord, is_pub: bool, is_exactly_pub: bool) 
 pub(crate) fn collect_types_and_methods(
     items: &[Item],
     file_rel: &str,
+    mod_path: &str,
     out_types: &mut std::collections::BTreeMap<String, TypeRecord>,
 ) {
     use syn::Fields;
@@ -426,12 +427,16 @@ pub(crate) fn collect_types_and_methods(
                     methods: Vec::new(),
                     is_pub: false,
                     is_exactly_pub: false,
+                    mod_path: mod_path.to_string(),
                 });
                 entry.kind = "struct".to_string();
                 entry.file = file_rel.to_string();
                 entry.generics = generics;
                 entry.definition = definition;
                 entry.fields = fields;
+                if entry.mod_path.is_empty() && !mod_path.is_empty() {
+                    entry.mod_path = mod_path.to_string();
+                }
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
             Item::Enum(e) => {
@@ -458,6 +463,7 @@ pub(crate) fn collect_types_and_methods(
                     methods: Vec::new(),
                     is_pub,
                     is_exactly_pub,
+                    mod_path: mod_path.to_string(),
                 });
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
@@ -481,6 +487,7 @@ pub(crate) fn collect_types_and_methods(
                     methods: Vec::new(),
                     is_pub,
                     is_exactly_pub,
+                    mod_path: mod_path.to_string(),
                 });
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
@@ -505,6 +512,8 @@ pub(crate) fn collect_types_and_methods(
                             is_pub: false,
                             is_exactly_pub: false,
                             cfg_predicates: cfgs,
+                            file: file_rel.to_string(),
+                            mod_path: mod_path.to_string(),
                         });
                     }
                 }
@@ -519,6 +528,7 @@ pub(crate) fn collect_types_and_methods(
                     methods,
                     is_pub,
                     is_exactly_pub,
+                    mod_path: mod_path.to_string(),
                 });
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
@@ -542,6 +552,7 @@ pub(crate) fn collect_types_and_methods(
                     methods: Vec::new(),
                     is_pub: false,
                     is_exactly_pub: false,
+                    mod_path: mod_path.to_string(),
                 });
                 let impl_cfgs = extract_cfg_predicates(&ii.attrs);
                 for impl_item in &ii.items {
@@ -557,13 +568,20 @@ pub(crate) fn collect_types_and_methods(
                             ),
                             is_exactly_pub: matches!(item_fn.vis, syn::Visibility::Public(_)),
                             cfg_predicates: cfgs,
+                            file: file_rel.to_string(),
+                            mod_path: mod_path.to_string(),
                         });
                     }
                 }
             }
             Item::Mod(item_mod) => {
                 if let Some((_, items)) = &item_mod.content {
-                    collect_types_and_methods(items, file_rel, out_types);
+                    let child = if mod_path.is_empty() {
+                        item_mod.ident.to_string()
+                    } else {
+                        format!("{}::{}", mod_path, item_mod.ident)
+                    };
+                    collect_types_and_methods(items, file_rel, &child, out_types);
                 }
             }
             _ => {}
@@ -612,7 +630,7 @@ pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
             Err(_) => continue,
         };
         let rel_str = rel.to_string_lossy().to_string();
-        collect_types_and_methods(&ast.items, &rel_str, &mut types);
+        collect_types_and_methods(&ast.items, &rel_str, "", &mut types);
     }
     Ok(types.into_values().collect())
 }

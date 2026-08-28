@@ -70,11 +70,14 @@ from pipeline_core.domain.destruction_epoch import (
     readmission_boundary,
 )
 from pipeline_core.domain.dispatch import (
+    blocker_histogram,
     defer_blocked_consumers,
     restrict_to_compile_blockers,
 )
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    overlay_crash_on_ranks,
+    promote_by_blocker_counts,
     promote_crash_evidence,
     promote_producers,
     promote_product_ahead,
@@ -858,6 +861,7 @@ def run_phase_c_tdd(
     total_attempts = 0
     total_bytes = 0
     errors: list[str] = []
+    _prev_payoff = None
 
     # Improvement-driven loop. Track passing-test count across iters;
     # exit only after `max_stalls` consecutive non-improving iters. The 10k
@@ -3691,6 +3695,28 @@ def run_phase_c_tdd(
             **dict.fromkeys(_chain_keys, 1),
             **dict.fromkeys(crash_blamed, 0),
         }
+        # BLOCKER-HISTOGRAM ORDERING. First-fill already admits the live-stub
+        # producers into the batch; constructor-first ranking used to wait on
+        # `_esc_keys`, which is empty on the first pass because census P15
+        # defers escalation until those units have been dispatched (run
+        # `155810-cbb3b9fc`). The histogram does not need a fire: post-fill
+        # counts from the previous iter's payoff when bodies landed blocked,
+        # else the pre-dispatch deferral map. Crash still outranks this.
+        _ranks: dict[FnLocator, int] = {}
+        if _prev_payoff is not None and _prev_payoff.landed_blocked:
+            _ranks = _prev_payoff.locator_counts()
+        if not _ranks:
+            _ranks = blocker_histogram(_deferred)
+        if _ranks:
+            _before_blk = [k for k, _ in ordered]
+            ordered = promote_by_blocker_counts(ordered, _ranks)
+            if [k for k, _ in ordered] != _before_blk:
+                _top = sorted(_ranks.items(), key=lambda kn: (-kn[1], kn[0]))[:4]
+                deps.log(
+                    f"  {tag} [phase-c/dispatch] blocker histogram: "
+                    + ", ".join(f"{k.file}::{k.fn_name} ({n})"
+                                for k, n in _top)
+                    + " rank first (crash evidence still outranks)")
         # ESCALATED-PRODUCER ORDERING. Two steps, then crash still wins.
         # (1) The product as a block ranks ahead of attributed accessors —
         # `promote_producers` only shuffles the product's own slots, so a
@@ -4229,6 +4255,9 @@ def run_phase_c_tdd(
                     crash_evidence=crash_texts or None,
                     crash_blamed=crash_blamed or None,
                     crash_blocked=crash_blocked_units,
+                    dispatch_ranks=(
+                        overlay_crash_on_ranks(_ranks, _crash_grades)
+                        or None),
                 )
         except BaseException:
             _restore_abandoned_bet("stopped during the fill pass")
@@ -4251,6 +4280,7 @@ def run_phase_c_tdd(
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
         errors.extend(sub.errors)
+        _prev_payoff = sub.payoff
         _score_grace(iter_n, pass_count)
 
         # Update recently_filled ring buffer with this iter's actual fills.

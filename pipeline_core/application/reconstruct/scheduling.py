@@ -9,25 +9,49 @@ from pipeline_core.domain.models import FnLocator, Frontier, Stub
 
 def group_priority_levels(
     stubs: list[Stub], leaf_name_counts: dict[str, int] | None,
+    unit_ranks: dict[FnLocator, int] | None = None,
 ) -> list[list[tuple[int, Stub]]]:
-    """Group leaf-first-sorted `stubs` into contiguous equal-ref-count LEVELS.
+    """Group sorted `stubs` into contiguous equal-priority LEVELS.
 
     Each level is a list of `(1-based index, stub)`. `stubs` is already sorted
-    descending by ref-count, so equal-priority stubs are contiguous; a key change
-    starts a new level. The dispatch loop runs each level with a barrier between
-    them, so a more-referenced (callee) level always completes before the level
-    that depends on it — every fill sees real sibling bodies in a scheduling-
-    independent order (R11.3 determinism). Pure: no engine/closure state.
+    descending by the same key this function groups on, so equal-priority stubs
+    are contiguous; a key change starts a new level. The dispatch loop runs
+    each level with a barrier between them.
+
+    Default key is leaf-name ref-count (callees before callers, R11.3).
+    `unit_ranks` overrides that with a per-unit score — the blocker histogram
+    the TDD driver computed. Without the override the engine re-sorts
+    leaf-first after `take_batch`, which undoes constructor-first ranking:
+    run `155810-cbb3b9fc` iter 1 dispatched `fmt` first and
+    `construct_from_adhoc` last even though both were in the batch, because
+    `fmt` is a high-frequency name. Pure: no engine/closure state.
     """
     levels: list[list[tuple[int, Stub]]] = []
     prev_key: object = object()
     for i, r in enumerate(stubs, 1):
-        key = leaf_name_counts.get(r.fn_name, 0) if leaf_name_counts else 0
+        if unit_ranks is not None:
+            key = unit_ranks.get(r.key, 0)
+        else:
+            key = leaf_name_counts.get(r.fn_name, 0) if leaf_name_counts else 0
         if key != prev_key:
             levels.append([])
             prev_key = key
         levels[-1].append((i, r))
     return levels
+
+
+def rank_stubs_by_blocker_counts(
+    stubs: list[Stub], ranks: dict[FnLocator, int],
+) -> list[Stub]:
+    """`stubs` descending by blocker count, then file/fn/container for ties.
+
+    The input to `group_priority_levels` when `unit_ranks` is set: the grouper
+    opens a new level at every key change, so the records must already be
+    contiguous on that key."""
+    return sorted(
+        stubs,
+        key=lambda s: (-ranks.get(s.key, 0), s.file, s.fn_name, s.container),
+    )
 
 
 def match_records_to_order(

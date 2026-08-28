@@ -266,4 +266,5 @@ class ImplFillPath(Protocol):
         crash_blamed: frozenset[FnLocator] | None = None,
         crash_blocked: dict[str, str] | None = None,
         behaviour_specs: Sequence[BehaviourSpec] = ...,
+        dispatch_ranks: dict[FnLocator, int] | None = ...,
     ) -> ClusterFillResult: ...

@@ -158,15 +158,15 @@ mod tests {
         let mut types = std::collections::BTreeMap::new();
         let a: syn::File = parse_file("pub(crate) struct Chain<'a> { x: u8 }").unwrap();
         let b: syn::File = parse_file("pub struct Chain<'a> { x: u8 }").unwrap();
-        collect_types_and_methods(&a.items, "chain.rs", &mut types);
-        collect_types_and_methods(&b.items, "lib.rs", &mut types);
+        collect_types_and_methods(&a.items, "chain.rs", "", &mut types);
+        collect_types_and_methods(&b.items, "lib.rs", "", &mut types);
         let rec = types.get("Chain").unwrap();
         assert!(rec.is_exactly_pub, "a pub declaration must not be hidden");
 
         // …and the other order must give the same answer.
         let mut types2 = std::collections::BTreeMap::new();
-        collect_types_and_methods(&b.items, "lib.rs", &mut types2);
-        collect_types_and_methods(&a.items, "chain.rs", &mut types2);
+        collect_types_and_methods(&b.items, "lib.rs", "", &mut types2);
+        collect_types_and_methods(&a.items, "chain.rs", "", &mut types2);
         assert!(
             types2.get("Chain").unwrap().is_exactly_pub,
             "walk order decided"
@@ -181,8 +181,8 @@ mod tests {
         let priv_t: syn::File = parse_file("trait StdError { }").unwrap();
         let pub_t: syn::File = parse_file("pub trait StdError { }").unwrap();
         let mut types = std::collections::BTreeMap::new();
-        collect_types_and_methods(&priv_t.items, "lib.rs", &mut types);
-        collect_types_and_methods(&pub_t.items, "context.rs", &mut types);
+        collect_types_and_methods(&priv_t.items, "lib.rs", "", &mut types);
+        collect_types_and_methods(&pub_t.items, "context.rs", "", &mut types);
         assert!(types.get("StdError").unwrap().is_exactly_pub);
     }
 
@@ -202,7 +202,7 @@ mod tests {
         let ast: syn::File = parse_file(src).unwrap();
         let rendered = prettyplease::unparse(&ast); // what skeletonise writes
         let mut out = std::collections::BTreeMap::new();
-        collect_types_and_methods(&ast.items, "lib.rs", &mut out);
+        collect_types_and_methods(&ast.items, "lib.rs", "", &mut out);
         let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         for name in ["Counter", "Reason"] {
             let def = &out[name].definition;
@@ -216,6 +216,26 @@ mod tests {
                 "{name}: definition not locatable in skeleton rendering:\n{def}\n---\n{rendered}"
             );
         }
+        assert_eq!(out["Counter"].mod_path, "");
+        assert_eq!(out["Reason"].mod_path, "inner");
+    }
+
+    #[test]
+    fn type_in_private_mod_records_mod_path_and_method_file() {
+        // The TYPES_IN_SCOPE renderer used to advertise `ext_context` to an
+        // error.rs fill because TypeRecord is keyed by name, the trait is
+        // `pub`, and trait methods carry `is_pub=false`. The wall is the
+        // enclosing `mod`, which this field names.
+        let src = "mod ext { pub trait StdError { fn ext_context(&self); } }";
+        let ast: syn::File = parse_file(src).unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        collect_types_and_methods(&ast.items, "context.rs", "", &mut out);
+        let rec = out.get("StdError").expect("StdError recorded");
+        assert_eq!(rec.mod_path, "ext");
+        assert_eq!(rec.file, "context.rs");
+        assert_eq!(rec.methods[0].name, "ext_context");
+        assert_eq!(rec.methods[0].mod_path, "ext");
+        assert_eq!(rec.methods[0].file, "context.rs");
     }
 
     #[test]
@@ -223,7 +243,7 @@ mod tests {
         let src = "pub struct Fully; pub(crate) struct CrateOnly; struct Private;";
         let ast: syn::File = parse_file(src).unwrap();
         let mut out = std::collections::BTreeMap::new();
-        collect_types_and_methods(&ast.items, "lib.rs", &mut out);
+        collect_types_and_methods(&ast.items, "lib.rs", "", &mut out);
         assert!(out["Fully"].is_pub && out["Fully"].is_exactly_pub);
         assert!(out["CrateOnly"].is_pub && !out["CrateOnly"].is_exactly_pub);
         assert!(!out["Private"].is_pub && !out["Private"].is_exactly_pub);
@@ -255,7 +275,7 @@ mod tests {
         let src = "struct S; impl S { pub fn fully(&self) {} pub(crate) fn crate_only(&self) {} fn private(&self) {} }";
         let ast: syn::File = parse_file(src).unwrap();
         let mut out = std::collections::BTreeMap::new();
-        collect_types_and_methods(&ast.items, "lib.rs", &mut out);
+        collect_types_and_methods(&ast.items, "lib.rs", "", &mut out);
         let methods = &out["S"].methods;
         let by_name: std::collections::BTreeMap<_, _> =
             methods.iter().map(|m| (m.name.as_str(), m)).collect();

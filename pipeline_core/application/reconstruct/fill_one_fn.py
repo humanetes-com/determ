@@ -478,7 +478,8 @@ class FillOneFn:
                         ctx.tests_dir_files, name)),
                 type_def=lambda name: ("\n\n".join(
                     format_type_for_prompt(r) for r in
-                    types_referenced_in_text(name, ctx.crate_type_records)[:3])
+                    types_referenced_in_text(
+                        name, ctx.crate_type_records, visible_from=rel_file)[:3])
                     # Crate-local records win; well-known unstable std APIs
                     # (std::error::Request et al.) answer as a last fallback so
                     # the pull never starves on a std type the manifest can't have.
@@ -870,9 +871,20 @@ class FillOneFn:
                     if _v.no_verdict:
                         _why.append(f"{len(_v.no_verdict)} unjudged (aborted "
                                     "test process)")
+                    _blk_names = ", ".join(
+                        f"{s.file}::{s.fn_name}" for s in _blocked_by)
                     self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
                                  f"{rel_file}::{fn_name}{_ctx2} (compiles; "
-                                 f"{'; '.join(_why)} — deferred to outer loop).")
+                                 f"{'; '.join(_why)}"
+                                 + (f": {_blk_names}" if _blk_names else "")
+                                 + " — deferred to outer loop).")
+                    self.tel.emit("phase_c.u2.external_only", data={
+                        "cluster": ctx.cluster_name,
+                        "file": rel_file, "fn": fn_name,
+                        "blocking_fns": [f"{s.file}::{s.fn_name}"
+                                         for s in _blocked_by],
+                        "unjudged": sorted(_v.no_verdict),
+                    })
             # Global monotone ratchet: this fn compiles and its own tests pass,
             # but reject it if it reddened any previously-passing cluster test
             # (or dropped the pass count). Routed through the SAME failure path
@@ -948,7 +960,10 @@ class FillOneFn:
                         outcome=(GateOutcome.POSITIVE
                                  if _u2_passed and not _blocked_by
                                  else GateOutcome.UNMEASURABLE),
-                        evidence_keys=tuple(sorted(_u2_passed)),
+                        evidence_keys=(
+                            tuple(f"{s.file}::{s.fn_name}" for s in _blocked_by)
+                            if _blocked_by
+                            else tuple(sorted(_u2_passed))),
                         validity=ValidityVector(binary_completed=True),
                         model_calls=fix_attempt).to_json_dict(),
                     "cluster": ctx.cluster_name,

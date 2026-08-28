@@ -36,6 +36,7 @@ from pipeline_core.application.reconstruct.impl_fill import (
 from pipeline_core.application.reconstruct.scheduling import (
     group_priority_levels,
     match_records_to_order,
+    rank_stubs_by_blocker_counts,
 )
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
@@ -54,7 +55,7 @@ from pipeline_core.domain.models import (
     FnLocator,
     Stub,
 )
-from pipeline_core.domain.pass_payoff import assess_fill_results
+from pipeline_core.domain.pass_payoff import assess_fill_results, combine_payoffs
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_results import parse_failed_tests
 from pipeline_core.ports.fill_engine import (
@@ -208,6 +209,14 @@ class PhaseCFillEngine:
         crash_evidence: dict[FnLocator, str] | None = None,
         crash_blamed: frozenset[FnLocator] | None = None,
         crash_blocked: dict[str, str] | None = None,
+        # Per-unit blocker counts from the TDD driver (post-fill histogram
+        # or the pre-dispatch deferral map). When set, stubs are ordered and
+        # grouped by these ranks instead of leaf-name frequency, so a
+        # constructor that `take_batch` placed in the slice actually OPENS
+        # the pass — leaf-first otherwise puts `fmt`/`new` in an earlier
+        # barriered level (run `155810-cbb3b9fc` iter 1: constructors in
+        # the batch, dispatched last).
+        dispatch_ranks: dict[FnLocator, int] | None = None,
     ) -> ClusterFillResult:
         """Phase C — Flavour B with full validation loops."""
         if cluster_env is None:
@@ -266,6 +275,7 @@ class PhaseCFillEngine:
                     _blocks_now, max_stubs=self.config.per_impl_max_stubs,
                 ) & tdd_frontier_keys)
                 if not _is_cfg_dead(k))
+        _impl_payoff = None
         if impl_route_deferral_applies(
                 _impl_deferred_stubs, _has_refill_targets,
                 file_primary=self.config.route_order is RouteOrder.FILE_PRIMARY):
@@ -349,7 +359,9 @@ class PhaseCFillEngine:
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
                 behaviour_specs=behaviour_specs,
+                dispatch_ranks=dispatch_ranks,
             )
+            _impl_payoff = _impl_stats.payoff
             if _impl_stats.dispatched_fns is not None:
                 _dispatched.update(
                     FnLocator(*t) for t in _impl_stats.dispatched_fns)
@@ -406,6 +418,7 @@ class PhaseCFillEngine:
         # is only re-measured per multi-hour sweep, so this lets monitoring
         # distinguish a frozen tree from mid-sweep splicing.
         _fills_landed_total = 0
+        _last_payoff = None
 
         for pass_n in range(1, max_passes + 1):
             self.tel.check_stop(f"per-fn pass {pass_n}")
@@ -498,8 +511,17 @@ class PhaseCFillEngine:
             # (mean concurrency 1.09 over a 5.0 h per-fn phase, 91 % of it
             # strictly serial — run 1159463-b1e352e5 iter 3, 2026-08-09,
             # whose 33-unit batch was all re-fills).
-            stubs = (self._leaf_first_records(stubs, leaf_name_counts)
-                     + self._leaf_first_records(_refill_recs, leaf_name_counts))
+            # When the TDD driver passed a blocker histogram, that rank
+            # replaces leaf-first: otherwise the engine re-sorts the batch
+            # and a constructor `take_batch` placed at the head is dispatched
+            # last because `fmt`/`new` are high-frequency names (run
+            # `155810-cbb3b9fc` iter 1).
+            if dispatch_ranks:
+                stubs = rank_stubs_by_blocker_counts(
+                    stubs + _refill_recs, dispatch_ranks)
+            else:
+                stubs = (self._leaf_first_records(stubs, leaf_name_counts)
+                         + self._leaf_first_records(_refill_recs, leaf_name_counts))
             if _refill_recs:
                 self.tel.log(f"  [phase-c/per-fn] {len(_refill_recs)} behavioral "
                              "re-fill target(s) (filled bodies with failing tests).")
@@ -561,10 +583,11 @@ class PhaseCFillEngine:
             results_this_pass: list[FillResult] = []
             pass_fail_floor = 0  # P7.6: this pass's failing-test floor
 
-            # P8: priority-level batching — `stubs` is leaf-first sorted, so
-            # equal-priority stubs are contiguous. Each level runs in parallel
-            # with a barrier between levels.
-            _levels = group_priority_levels(stubs, leaf_name_counts)
+            # P8: priority-level batching. Equal-priority stubs are contiguous
+            # because the sort above used the same key. Each level runs in
+            # parallel with a barrier between levels.
+            _levels = group_priority_levels(
+                stubs, leaf_name_counts, unit_ranks=dispatch_ranks)
 
             # cross-iter exhausted skip: load the retrospectives map once.
             _retros_cache = self.retros.load(project_dir)
@@ -1012,24 +1035,31 @@ class PhaseCFillEngine:
             if progress_this_pass == 0:
                 self.tel.log(f"  [phase-c/per-fn] pass {pass_n} made no progress; stopping.")
                 break
-            # Bodies landed, but could any of them be JUDGED? When one
-            # still-stubbed site blocked every one, no further pass over this
-            # frontier can move a verdict either — the next pass would re-fill
-            # the same units against the same wall (measured: 40 fills, 2.7 h
-            # and the bulk of 3.3 M prompt tokens, all behind
-            # `error.rs::construct`). Stop and hand the blocker to the outer
-            # loop, which can reach it: it is a stub, so it is in the frontier.
+            # Bodies landed, but could any of them be JUDGED? `is_zero` is the
+            # proof (one site blocked every landed body). `unjudgeable_rate`
+            # is the rate that does not need a universal blocker: run
+            # `155810-cbb3b9fc` iter 1 landed 23 bodies, all keep_deferred,
+            # spanning 7 files — intersection empty, rate 1.0, and printed
+            # nothing. Stop FURTHER passes; do not abort the pass that just
+            # finished (first-fill put the blockers in this batch on purpose).
             _payoff = assess_fill_results(results_this_pass)
-            if _payoff.is_zero:
-                self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: PAYOFF ZERO — "
-                             f"{_payoff.summary}. Stopping the per-fn route; "
-                             "the blocker is the only work that can score.")
-                self.tel.emit("phase_c.pass.payoff_zero", data={
-                    "pass_n": pass_n, "cluster": cluster_name,
-                    "landed": _payoff.landed,
-                    "blocking_fns": sorted(
-                        f"{s.file}::{s.fn_name}" for s in _payoff.blockers),
-                })
+            _last_payoff = _payoff
+            if _payoff.unjudgeable_rate == 1.0:
+                _pay_data = {
+                    "pass_n": pass_n, "cluster": cluster_name, "route": "per-fn",
+                    **_payoff.event_data(),
+                }
+                if _payoff.is_zero:
+                    self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: PAYOFF ZERO — "
+                                 f"{_payoff.summary}. Stopping further passes; "
+                                 "the blocker is the only work that can score.")
+                    self.tel.emit("phase_c.pass.payoff_zero", data=_pay_data)
+                else:
+                    self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: UNJUDGEABLE — "
+                                 f"{_payoff.rate_summary}. Stopping further "
+                                 "passes; the histogram names what the next "
+                                 "dispatch must reach.")
+                    self.tel.emit("phase_c.pass.unjudgeable", data=_pay_data)
                 break
             if _pass_gauge.stalled(_pass_max_stalls):
                 self.tel.log(f"  [phase-c/per-fn] cluster {cluster_name}: pass-level floor "
@@ -1057,4 +1087,5 @@ class PhaseCFillEngine:
             impls_failed=_carryover.get("impls_failed", 0),
             dispatched_fns=tuple(sorted(_dispatched)),
             reverted_fns=tuple(sorted(_reverted)),
+            payoff=combine_payoffs(_impl_payoff, _last_payoff),
         )

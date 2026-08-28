@@ -263,6 +263,35 @@ def test_promote_producers_noop_without_escalation():
         ordered, frozenset(), frozenset(), frozenset()) == ordered
 
 
+def test_promote_by_blocker_counts_puts_the_hottest_blocker_first():
+    """Whole-list reorder, not an escalated-subsequence shuffle: take_batch
+    takes a prefix, so a producer ranked last never makes the cap=12 slice."""
+    from pipeline_core.domain.dispatch_batch import promote_by_blocker_counts
+    fmt = _k("src/wrapper.rs", "fmt")
+    construct = _k("src/error.rs", "construct")
+    from_fn = _k("src/error.rs", "from")
+    ordered = [(fmt, {"t"}), (from_fn, {"t"}), (construct, {"t"})]
+    counts = {construct: 27, from_fn: 3, fmt: 1}
+    out = [k for k, _ in promote_by_blocker_counts(ordered, counts)]
+    assert out[0] == construct
+    assert promote_by_blocker_counts(ordered, {}) == ordered
+
+
+def test_overlay_crash_on_ranks_puts_blamed_frames_above_the_histogram():
+    """The engine re-sorts on dispatch_ranks. Histogram-only ranks would
+    undo crash-first the same way leaf-first undid constructor-first."""
+    from pipeline_core.domain.dispatch_batch import overlay_crash_on_ranks
+    construct = _k("src/error.rs", "construct")
+    fmt = _k("src/wrapper.rs", "fmt")
+    blamed = _k("src/error.rs", "object_drop")
+    ranks = {construct: 27, fmt: 14}
+    out = overlay_crash_on_ranks(ranks, {blamed: 0, fmt: 2})
+    assert out[blamed] > out[construct]
+    assert out[fmt] > out[construct]
+    assert out[construct] == 27
+    assert overlay_crash_on_ranks(ranks, {}) == ranks
+
+
 def test_promote_product_ahead_lifts_producers_over_new_accessors():
     """The attribution-shift re-buy: order_frontier ranks the new accessor
     first; persist keeps the producer in the cohort; without this lift

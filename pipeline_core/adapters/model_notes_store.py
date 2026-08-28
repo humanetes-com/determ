@@ -25,7 +25,7 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 )
 from pipeline_core.domain import model_notes as mn
 from pipeline_core.domain.llm_output import parse_self_note
-from pipeline_core.domain.rust_scan import item_names
+from pipeline_core.domain.rust_scan import contains_word, item_names
 
 _NOTE_EXTRACTION_PROMPT = """A model attempted to implement a Rust function and
 the first attempt did not compile. The second (or later) attempt did compile.
@@ -219,6 +219,7 @@ class FileModelNotesStore:
         escalated_fns: frozenset[str] = frozenset(),
         escalated_grade: str = "",
         writable_fns: frozenset[str] = frozenset(),
+        hidden_symbols: frozenset[str] = frozenset(),
     ) -> str:
         """Relevance-ranked ``<MODEL_NOTES>`` block for the current (file, fn).
 
@@ -306,6 +307,18 @@ class FileModelNotesStore:
                     self._layout_retired_logged.add(h)
                     self._log("  [notes] layout-contradicted note kept out of "
                               f"prompt (field not in current layout): {note[:100]}…")
+        if hidden_symbols:
+            dropped_hidden = [
+                n for n in notes
+                if any(contains_word(n, s) for s in hidden_symbols)]
+            if dropped_hidden:
+                dead = set(dropped_hidden)
+                notes = [n for n in notes if n not in dead]
+                self._log(
+                    f"  [notes] {len(dropped_hidden)} note(s) kept out of the "
+                    "prompt — they name a symbol that is not resolvable from "
+                    f"this file ({', '.join(sorted(hidden_symbols)[:6])}): "
+                    + "; ".join(n[:60] for n in dropped_hidden[:3]))
         err_codes = ecodes_in_text(current_error) if current_error else set()
         return mn.rank_notes(
             notes,

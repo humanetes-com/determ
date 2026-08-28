@@ -38,17 +38,29 @@ def test_a_judgeable_fill_disproves_payoff_zero() -> None:
     ])
     assert not payoff.is_zero
     assert payoff.blockers == frozenset()
+    assert payoff.landed_blocked == 1
+    assert payoff.unjudgeable_rate == 0.5
 
 
 def test_disjoint_blockers_are_not_payoff_zero() -> None:
     """Units blocked by DIFFERENT siblings can still each be unblocked by
     separate work; nothing here proves the pass could not score. The rule is
-    an intersection precisely so this case is excluded."""
+    an intersection precisely so this case is excluded.
+
+    The RATE still names the finding: every landed body was unjudgeable.
+    Run `155810-cbb3b9fc` iter 1 (2026-08-28) is this shape — 23 keep_deferred
+    across 7 files, empty intersection, silent PAYOFF ZERO line."""
     payoff = assess_pass_payoff([
         UnitOutcome(landed=True, blocked_by=(CONSTRUCT,)),
         UnitOutcome(landed=True, blocked_by=(SOURCE,)),
     ])
     assert not payoff.is_zero
+    assert payoff.landed == 2
+    assert payoff.landed_blocked == 2
+    assert payoff.unjudgeable_rate == 1.0
+    counts = dict(payoff.blocker_counts)
+    assert counts[CONSTRUCT] == 1 and counts[SOURCE] == 1
+    assert "no universal blocker" in payoff.rate_summary
 
 
 def test_a_pass_that_landed_nothing_is_not_payoff_zero() -> None:
@@ -59,6 +71,7 @@ def test_a_pass_that_landed_nothing_is_not_payoff_zero() -> None:
     payoff = assess_pass_payoff([UnitOutcome(landed=False, blocked_by=(CONSTRUCT,))])
     assert not payoff.is_zero
     assert payoff.landed == 0
+    assert payoff.unjudgeable_rate == 0.0
 
 
 def test_a_single_blocked_unit_is_enough_when_it_is_the_whole_pass() -> None:
@@ -87,3 +100,15 @@ def test_fill_result_defaults_to_unblocked() -> None:
     assert FillResult(file="a.rs", fn_name="f", filled=True).blocked_by == ()
     assert not assess_fill_results(
         [FillResult(file="a.rs", fn_name="f", filled=True)]).is_zero
+
+
+def test_old_is_zero_on_disjoint_units_is_the_negative_control() -> None:
+    """Under the pre-rate code the 23-unit disjoint pass printed nothing,
+    because `is_zero` is False. The rate is what names it now."""
+    outcomes = [
+        UnitOutcome(landed=True, blocked_by=(CONSTRUCT,)),
+        UnitOutcome(landed=True, blocked_by=(SOURCE,)),
+    ]
+    payoff = assess_pass_payoff(outcomes)
+    assert not payoff.is_zero
+    assert payoff.unjudgeable_rate == 1.0

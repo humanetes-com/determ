@@ -1042,3 +1042,32 @@ def test_a_fill_that_turned_a_test_green_is_positive_and_names_it(
     assert rows and rows[0]["outcome"] == "positive"
     assert rows[0]["evidence_keys"] == ["test_alpha"]
     assert "1 attributed test(s) observed passing" in rows[0]["reason"]
+
+
+def test_external_only_keep_names_the_blockers_in_log_event_and_verdict(
+        tmp_path: Path) -> None:
+    """Per-fn ACCEPT_EXTERNAL_ONLY used to log a count, emit no event, and
+    write evidence_keys=[]. Run `155810-cbb3b9fc` had 23 keep_deferred fills
+    and the only `phase_c.u2.external_only` event was from the impl route."""
+    from pipeline_core.domain.models import FnSite
+    from pipeline_core.domain.test_report import (
+        FailureKind,
+        TestFailure,
+        U2Verdict,
+    )
+    ws = _mk_ws(tmp_path)
+    blocker = FnSite("src/error.rs", "construct", "impl Error")
+    ext = ((TestFailure("test_downcast", FailureKind.STUB_PANIC,
+                        "src/error.rs", 1, 1, "not implemented"),
+            blocker),)
+    fake = FakeFill(run=(0, ""), regr=None,
+                    u2=U2Verdict.accept_external_only(ext))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert res.filled
+    assert blocker in res.blocked_by
+    assert any("src/error.rs::construct" in m for m in fake.logs)
+    evs = [d for e, d in fake.event_data if e == "phase_c.u2.external_only"]
+    assert evs and "src/error.rs::construct" in evs[0]["blocking_fns"]
+    rows = _verdicts(fake)
+    assert rows and "src/error.rs::construct" in rows[0]["evidence_keys"]
