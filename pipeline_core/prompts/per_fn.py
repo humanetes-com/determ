@@ -78,9 +78,9 @@ def build_per_fn_prompt(
     # instead of self.ptr.as_ref()); listing each type's actual fields and
     # methods makes this unambiguous.
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
-    # Corrected R2/R3 (debt #28): methods the fn's frozen where-bounds make
-    # callable — steer the body to a bound-provided trait method instead of a
-    # mis-bound free constructor (the E0277 thrash root).
+    # Methods the fn's frozen where-bounds make callable — steer the body to
+    # a bound-provided trait method instead of a mis-bound free constructor
+    # (the E0277 thrash root).
     bound_methods_block = tag_block("BOUND_METHODS", sections.bound_methods)
     blueprint_block = tag_block(
         "DESIGN_BLUEPRINT", sections.blueprint,
@@ -91,7 +91,7 @@ def build_per_fn_prompt(
     # cases that can't occur (e.g. `unwrap_or(&default)` when the active
     # macro always returns Some).
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
-    # FR-024 sibling reference (initial-prompt variant).
+    # Sibling reference (initial-prompt variant).
     siblings_block = tag_block(
         "SIBLING_REFERENCE", siblings_section,
         prefix=f"Fns with the same name `{fn_name}` in OTHER impl blocks of "
@@ -120,13 +120,15 @@ def build_per_fn_prompt(
                "requirements, build rules, API ground truth). When your plan "
                "conflicts with them, follow the spec.\n")
     container_line = f"In: {container}\n" if container else ""
+    identity_part = (
+        f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     return f"""Implement ONE Rust function so its tests pass.
 
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
 {container_line}Signature (verbatim, do not change):
 {sig_text}
 
-<RUST_GOTCHAS>
+{identity_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
@@ -220,24 +222,26 @@ def build_per_fn_fix_prompt(
     # P3.2: full detail block for gotchas matching the current error.
     gotchas_block = tag_block("RUST_GOTCHAS_DETAIL", gotchas_for_error(error_excerpt))
     container_line = f"In: {container}\n" if container else ""
+    identity_part = (
+        f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
-    # Corrected R2/R3 (debt #28): bound-provided method inventory (see initial
-    # builder) — surfaced on the fix path where the E0277 thrash happens.
+    # Bound-provided method inventory (see initial builder) — surfaced on
+    # the fix path where the E0277 thrash happens.
     bound_methods_block = tag_block("BOUND_METHODS", sections.bound_methods)
     blueprint_block = tag_block(
         "DESIGN_BLUEPRINT", sections.blueprint,
         prefix="YOUR crate design, written by you before filling began — this\n"
                "body must agree with it:\n")
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
-    # FR-024 retrospective guidance: surfaced FIRST in the prompt when
-    # available — the prior diagnosis is the highest-signal hint.
+    # Retrospective guidance: surfaced FIRST in the prompt when available —
+    # the prior diagnosis is the highest-signal hint.
     retro_block = tag_block(
         "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
         prefix="Prior diagnosis of this fn's compile failures (act on this "
                "— do NOT repeat the previous approach):\n")
-    # FR-024 sibling reference: when the same fn name has a sibling impl
-    # already filled correctly in this file, hoist it to the top of the
-    # prompt. Best source-of-truth for "what does a body for this fn look
+    # Sibling reference: when the same fn name has a sibling impl already
+    # filled correctly in this file, hoist it to the top of the prompt. Best
+    # source-of-truth for "what does a body for this fn look
     # like" — pattern-matching beats reasoning from scratch.
     siblings_block = tag_block(
         "SIBLING_REFERENCE", siblings_section,
@@ -309,7 +313,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {container_line}Signature (verbatim, do not change):
 {sig_text}
 
-<RUST_GOTCHAS>
+{identity_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}

@@ -176,6 +176,13 @@ class BlockFillPlan:
     # on `impl<A, B> BothDebug for (A, B)` -> `__dispatch_ensure`, which
     # builds a `SmallBuf` and wraps nothing.
     wraps_pinned_type: bool = False
+    # Identity Then from the behaviour suite (`identity_must_instruction` /
+    # `_fmt_outcome`), for first-pass `write:` as well as rewrite. Empty when
+    # no IDENTITY spec names this block's units. `typeid_pin_consequence`
+    # above fires only on escalated + wraps, which a stub cannot satisfy —
+    # there is no body yet. Run `2932-cf516410` had the pin in the quoted
+    # test and still wrapped because this slot was empty on `write:`.
+    identity_must: str = ""
 
 
 def _plan_line(p: BlockFillPlan) -> str:
@@ -304,7 +311,10 @@ def _plan_line(p: BlockFillPlan) -> str:
         parts.append("re-check (a body exists; implicated by NAME only — "
                      "rewrite ONLY if it is wrong for its bounds, else leave it "
                      "unchanged): " + ", ".join(inferred))
-    return f"  {where} -> " + "; ".join(parts)
+    line = f"  {where} -> " + "; ".join(parts)
+    if p.identity_must:
+        return line + " — " + p.identity_must
+    return line
 
 
 def build_file_fill_prompt(

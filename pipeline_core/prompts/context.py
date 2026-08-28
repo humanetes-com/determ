@@ -37,6 +37,10 @@ class PerFnSections:
     # Harvested behaviours that demonstrate this fn's public usage (F10 Use-B /
     # M5) — concrete RIGHT examples. "" when none matched / no suite baked.
     usage_examples: str = ""
+    # Identity Then from the behaviour suite (`identity_must_instruction`),
+    # rendered as an instruction after the signature — not as USAGE_EXAMPLES.
+    # "" when no IDENTITY spec names this fn.
+    identity_must: str = ""
     # Localized crash backtrace implicating this fn (faulting + origin
     # frames). "" when no binary crash points here.
     crash_evidence: str = ""
@@ -98,3 +102,7 @@ class PerImplSections:
     # whenever the two sections agree. Run `902902-daee577d` (2026-08-20),
     # prompt `11899c17478d`: both sections present, the sibling won, E0277 x2.
     sibling_rejected: tuple[str, ...] = ()
+    # Identity Then from the behaviour suite (`identity_must_instruction`),
+    # rendered as an instruction after the stub list — not as USAGE_EXAMPLES.
+    # "" when no IDENTITY spec names this block's units.
+    identity_must: str = ""

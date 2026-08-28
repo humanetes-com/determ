@@ -29,6 +29,7 @@ from pipeline_core.domain.behaviour_select import (
     drop_capture_owned,
     is_relevant,
     select_component_behaviours,
+    select_identity_must,
     select_usage_examples,
 )
 
@@ -372,3 +373,93 @@ def test_the_recorded_suite_leaves_no_pinnable_spec_on_the_guess_route() -> None
     kinds = {s.then.kind.name for s in class_only_left if s.then is not None}
     assert kinds == {"NORMALIZED_STDOUT", "RETURN_RENDERED"}
     assert drop_capture_owned(pinnable) == ()
+
+
+# Constructor names a file-first `impl Error` write: list actually carries.
+# The plan's fixture: on this recorded suite the first three unique identity
+# Thens for that batch are `&str` / `String` / `io::Error` — harvest order
+# on the same batch starts at `Box<dyn …>` / `HighLevel` and never reaches
+# `test_downcast`.
+_CONSTRUCTOR_BATCH = (
+    "construct", "msg", "new",
+    "construct_from_adhoc", "construct_from_std",
+    "construct_from_display", "construct_from_boxed",
+    "construct_from_context", "context",
+)
+
+
+def test_identity_must_on_recorded_constructor_batch_is_str_string_ioerror() -> None:
+    """Plan sentence: on the recorded 230-spec suite, the first three unique
+    identity Thens for the `impl Error` constructor batch are `&str`,
+    `String`, `io::Error`. Negative control is `select_usage_examples` for
+    `construct` in `impl Error` on the same records — that blob starts at
+    `doctest::error.rs::311` with `unimplemented!()` and contains neither
+    `is::<` nor 'never a wrapper'."""
+    suite = BehaviourSuite.from_dict(json.loads(_RECORDED_STABLE.read_text(encoding="utf-8")))
+    picked = select_identity_must(suite.specs, fn_names=_CONSTRUCTOR_BATCH)
+    assert [s.then.value for s in picked if s.then is not None] == [
+        "&str", "String", "io::Error"]
+    assert all(s.then.ok for s in picked if s.then is not None)
+    adhoc = select_identity_must(suite.specs, fn_names=("construct_from_adhoc",))
+    assert [s.then.value for s in adhoc if s.then is not None] == [
+        "&str", "String", "io::Error"]
+    assert select_identity_must(suite.specs, fn_names=("chain",)) == []
+    ue = select_usage_examples(
+        tuple(suite.specs), fn_name="construct", container="impl Error",
+        char_budget=1200)
+    assert "unimplemented!" in ue
+    assert "is::<" not in ue
+    assert "never a wrapper" not in ue
+    assert "doctest::error.rs::311" in ue or "error.rs:311" in ue
+
+
+def test_identity_must_does_not_match_container_or_display_or_given_fmt() -> None:
+    """A DISPLAY spec that names the constructor, an OTHER doctest whose
+    text names `Error`, and a TYPE_IDENTITY whose `given` contains `fn fmt`
+    must not steal the cap from the spec whose leaf exercise is the unit."""
+    pin = _outcome(
+        "pin", "error.downcast::<&str>()",
+        ObservableOutcome.type_identity("&str", True),
+        exercises=frozenset({"src/error.rs::construct_from_adhoc"}),
+    )
+    display = _outcome(
+        "disp", 'error.to_string()',
+        ObservableOutcome.display("x"),
+        exercises=frozenset({"construct_from_adhoc"}),
+    )
+    doctest = _spec("doc", 'let e = Error::msg("x"); unimplemented!()')
+    fmt_given = _outcome(
+        "fmt-given", "err.is::<MyErr>()",
+        ObservableOutcome.type_identity("MyErr", True),
+        given="use std::fmt::{self, Display}; impl Display for MyErr { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, \"e\") } }",
+        exercises=frozenset({"src/error.rs::new"}),
+    )
+    picked = select_identity_must(
+        (pin, display, doctest, fmt_given),
+        fn_names=("construct_from_adhoc",))
+    assert [s.behaviour_id for s in picked] == ["pin"]
+    assert select_identity_must((pin, fmt_given), fn_names=("fmt",)) == []
+
+
+def test_identity_must_ranks_non_flood_hits_ahead_of_the_construct_dump() -> None:
+    """Five TYPE_IDENTITY specs that only name `construct` plus one that
+    names `msg` — `construct` floods, so a batch of `{construct, msg}`
+    must lead with the `msg` spec's Then, not harvest-order `A`."""
+    dump = tuple(
+        _outcome(
+            f"dump{i}", "opaque()",
+            ObservableOutcome.type_identity(f"T{i}", True),
+            exercises=frozenset({"src/error.rs::construct"}),
+        )
+        for i in range(5)
+    )
+    pin = _outcome(
+        "msg-pin", "error.downcast::<&str>()",
+        ObservableOutcome.type_identity("&str", True),
+        exercises=frozenset({"src/error.rs::msg", "src/error.rs::construct"}),
+    )
+    picked = select_identity_must(
+        (*dump, pin), fn_names=("construct", "msg"))
+    assert picked[0].behaviour_id == "msg-pin"
+    assert picked[0].then is not None and picked[0].then.value == "&str"
+

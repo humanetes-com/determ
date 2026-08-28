@@ -16,10 +16,12 @@ import directly. Only I/O, the LLM call, the extractor, the retro store, and
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -263,4 +265,5 @@ class ImplFillPath(Protocol):
         crash_evidence: dict[FnLocator, str] | None = None,
         crash_blamed: frozenset[FnLocator] | None = None,
         crash_blocked: dict[str, str] | None = None,
+        behaviour_specs: Sequence[BehaviourSpec] = ...,
     ) -> ClusterFillResult: ...

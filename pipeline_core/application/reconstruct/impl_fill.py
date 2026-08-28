@@ -54,6 +54,7 @@ from pipeline_core.domain.attempt_loss import (
     may_escalate_to_last_resort,
 )
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
@@ -177,6 +178,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_file_fill_prompt,
     build_maximal_impl_prompt,
 )
+from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
 
@@ -496,6 +498,11 @@ def fill_impl_blocks(
     # Shared crash-block map (unit key -> blamed-file fingerprint), mutated
     # here and read across iterations — see PerFnPassCtx.crash_blocked.
     crash_blocked: dict[str, str] | None = None,
+    # Cluster behaviour suite — identity Then on first-pass write: and
+    # per-impl instructions. Default empty: callers that do not pass it
+    # (fn_walk, tests) leave those prompts byte-identical to the pre-instruction
+    # render.
+    behaviour_specs: Sequence[BehaviourSpec] = (),
 ) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -583,6 +590,10 @@ def fill_impl_blocks(
     # Absent frontier (fn_walk driver) = nothing dispatched by test, nothing
     # convicted by test; the compile gate and the regression ratchet still run.
     _frontier_tests = tdd_frontier_tests or FailureFrontier.of_dispatch({})
+
+    def _identity_must(*names: str) -> str:
+        """Identity Then for these units, or "" when the suite names none."""
+        return identity_must_instruction(behaviour_specs, fn_names=names)
 
     def _convicting_for_block(b: ImplBlock) -> frozenset[str]:
         """Tests with DIRECT evidence at one of this block's members — the only
@@ -1121,7 +1132,10 @@ def fill_impl_blocks(
             tuple(dict.fromkeys((*(i.fn_name for i in _installable),
                                  *(x.fn_name for x in _free_bypass)))),
             installable=tuple(i.fn_name for i in _installable),
-            bypass=_free_bypass, pins=_union_pins)]
+            bypass=_free_bypass, pins=_union_pins,
+            identity_must=_identity_must(
+                *(i.fn_name for i in _installable),
+                *(x.fn_name for x in _free_bypass)))]
             if _installable or _free_bypass else [])
         # The evidence section's entry for them: the relation, stated per fn,
         # so the model can see WHICH table field each one answers to. The
@@ -1233,13 +1247,18 @@ def fill_impl_blocks(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             bypass=_bypass_for(b.container),
             pins=_block_pins[_impl_block_id(b.file, b.container)],
-            wraps_pinned_type=_block_wraps[_impl_block_id(b.file, b.container)])
+            wraps_pinned_type=_block_wraps[_impl_block_id(b.file, b.container)],
+            identity_must=_identity_must(
+                *(m.fn_name for m in b.stub_members),
+                *(m.fn_name for m in b.refill_members),
+                *(x.fn_name for x in _bypass_for(b.container))))
             for b in fblocks]
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
         _extra_plans = [BlockFillPlan(
             _c, (), tuple(x.fn_name for x in _entries),
-            bypass=tuple(_entries), pins=_pins_for_bypass(_entries))
+            bypass=tuple(_entries), pins=_pins_for_bypass(_entries),
+            identity_must=_identity_must(*(x.fn_name for x in _entries)))
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
         # The grade label naming what this prompt's write list actually
@@ -2276,7 +2295,10 @@ def fill_impl_blocks(
                         _block_where, _crate_type_records),
                     refill_evidence=_refill_evidence_text,
                     inferred_refill_names=_inferred_refill,
-                    sibling_rejected=_steer.shared),
+                    sibling_rejected=_steer.shared,
+                    identity_must=_identity_must(
+                        *(m.fn_name for m in (*block.stub_members,
+                                              *block.refill_members)))),
                 fr_path=fr_path,
             )
             try:

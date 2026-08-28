@@ -228,6 +228,8 @@ def build_per_impl_prompt(
                           + "\n" + FN_LITERAL_RULE)
 
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
+    identity_part = (
+        f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     return f"""Implement the marked [STUB] fns in this Rust impl block so the
 tests pass. The unit of work is the IMPL BLOCK — design every member
 together; each fn must respect the impl header's generic parameters,
@@ -238,7 +240,7 @@ when the impl block declares `T: ?Sized`).
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
 Stubs to fill in this response: {stub_names}
 
-<RUST_GOTCHAS>
+{identity_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}

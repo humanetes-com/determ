@@ -103,6 +103,7 @@ from pipeline_core.ports.fill_engine import (
     TestLinker,
 )
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
+from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt,
     build_per_fn_prompt,
@@ -544,7 +545,9 @@ class FillOneFn:
                         crash_evidence=_crash_evidence,
                         usage_examples=select_usage_examples(
                             ctx.behaviour_specs, fn_name=fn_name,
-                            container=container, char_budget=1200)),
+                            container=container, char_budget=1200),
+                        identity_must=identity_must_instruction(
+                            ctx.behaviour_specs, fn_names=(fn_name,))),
                     fr_path=ctx.fr_path,
                 )
             else:
@@ -591,7 +594,9 @@ class FillOneFn:
                         crate_idioms=crate_idioms_section,
                         bound_methods=_fn_ctx.bound_methods_section,
                         blueprint=_fn_ctx.blueprint_section,
-                        crash_evidence=_crash_evidence),
+                        crash_evidence=_crash_evidence,
+                        identity_must=identity_must_instruction(
+                            ctx.behaviour_specs, fn_names=(fn_name,))),
                     # P3.1: open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.

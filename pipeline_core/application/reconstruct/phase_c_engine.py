@@ -68,6 +68,7 @@ from pipeline_core.ports.fill_engine import (
     WorkspaceModel,
 )
 from pipeline_core.prompts.context import PerFnFixSections
+from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 
 
@@ -342,6 +343,7 @@ class PhaseCFillEngine:
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
+                behaviour_specs=self.behaviour_loader(project_dir, cluster_name),
             )
             if _impl_stats.dispatched_fns is not None:
                 _dispatched.update(
@@ -861,7 +863,11 @@ class PhaseCFillEngine:
                                         container=_ctx.container, types=_ctx.types_section,
                                         invariants=invariants_section,
                                         retrospective_guidance="", siblings="", crate_idioms="",
-                                        bound_methods=_ctx.bound_methods_section),
+                                        bound_methods=_ctx.bound_methods_section,
+                                        identity_must=identity_must_instruction(
+                                            self.behaviour_loader(
+                                                project_dir, cluster_name),
+                                            fn_names=(fn,))),
                                     fr_path=fr_path,  # P6.4 note recall
                                     attempt_history=test_fix_history.get((rel_f, fn), []),  # P2
                                 )

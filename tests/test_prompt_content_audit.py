@@ -223,3 +223,55 @@ def test_per_impl_sibling_reference_names_the_contradiction_with_last_error() ->
                                   PerImplSections(**base), fr_path=None)
     assert "follow the same structural pattern" in plain
     assert "CAUTION" not in plain
+
+
+def test_per_impl_and_per_fn_prompts_carry_identity_must_as_instruction() -> None:
+    """Identity Then sits after the stub list / signature, not in a
+    USAGE_EXAMPLES tag. Empty keeps the prompt byte-identical at that slot."""
+    from pipeline_core.domain.models import FnRecord, ImplBlock
+    from pipeline_core.prompts.context import PerFnSections, PerImplSections
+    from pipeline_core.prompts.per_fn import build_per_fn_prompt
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
+
+    must = (
+        "MUST: `is::<&str>()` / `downcast::<&str>()` on that value is true "
+        "— the TypeId a user downcasts to is the payload's type, never a "
+        "wrapper's"
+    )
+    stub = FnRecord(file="src/error.rs", fn_name="msg", container="impl Error",
+                    sig_text="fn msg<M>(message: M) -> Self", has_unimplemented_body=True)
+    block = ImplBlock(file="src/error.rs", container="impl Error",
+                      members=(stub,), stub_members=(stub,))
+    empty = {"types": "", "invariants": "", "notes": "", "crate_idioms": "",
+             "dispatch_family": "", "macros": "", "siblings": "",
+             "retrospective_guidance": "", "bound_methods": ""}
+    with_must = build_per_impl_prompt(
+        block, [], [], "anyhow", "stable",
+        PerImplSections(**empty, identity_must=must), fr_path=None)
+    without = build_per_impl_prompt(
+        block, [], [], "anyhow", "stable",
+        PerImplSections(**empty), fr_path=None)
+    assert "Stubs to fill in this response: msg" in with_must
+    stub_at = with_must.index("Stubs to fill in this response: msg")
+    gotchas_at = with_must.index("<RUST_GOTCHAS>")
+    assert must in with_must[stub_at:gotchas_at]
+    assert "<USAGE_EXAMPLES>" not in with_must
+    assert must not in without
+    assert without.count("<RUST_GOTCHAS>") == with_must.count("<RUST_GOTCHAS>")
+
+    fn_empty = {"macros": "", "notes": "", "container": "impl Error",
+                "types": "", "invariants": "", "siblings": "",
+                "crate_idioms": "", "bound_methods": ""}
+    fn_common = {
+        "file_text": "fn msg() { unimplemented!() }", "fn_name": "msg",
+        "sig_text": "fn msg<M>(message: M) -> Self", "test_blocks": [],
+        "module_name": "anyhow", "cluster_name": "stable",
+        "file_rel": "src/error.rs", "fr_path": None}
+    fn_with = build_per_fn_prompt(
+        **fn_common, sections=PerFnSections(**fn_empty, identity_must=must))
+    fn_without = build_per_fn_prompt(
+        **fn_common, sections=PerFnSections(**fn_empty))
+    sig_at = fn_with.index("fn msg<M>(message: M) -> Self")
+    fn_gotchas = fn_with.index("<RUST_GOTCHAS>")
+    assert must in fn_with[sig_at:fn_gotchas]
+    assert must not in fn_without

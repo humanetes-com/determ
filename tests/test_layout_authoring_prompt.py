@@ -23,6 +23,7 @@ from pipeline_core.prompts.layout_authoring import (
     _fmt_outcome,
     _may_note,
     build_layout_authoring_prompt,
+    identity_must_instruction,
 )
 
 
@@ -330,3 +331,40 @@ def test_doc_contract_rule_is_always_rendered_and_names_the_behaviours_section()
 def test_doc_contract_rule_uses_placeholder_names_only():
     for leaked in ("anyhow", "ErrorImpl", "Own<", "MessageError"):
         assert leaked not in _DOC_CONTRACT_RULE
+
+
+def test_identity_must_instruction_on_recorded_constructors_is_the_typeid_sentence():
+    """Plan sentence: the fill instruction rendered from the recorded suite
+    for the `impl Error` constructor batch contains `is::<&str>()` and
+    'never a wrapper's', and does not contain `unimplemented!()`. The same
+    records through `select_usage_examples` are the negative control."""
+    import json
+    from pathlib import Path
+
+    from pipeline_core.domain.behaviour import BehaviourSuite
+    from pipeline_core.domain.behaviour_select import select_usage_examples
+
+    recorded = (
+        Path(__file__).resolve().parent / "fixtures" / "behaviours"
+        / "behaviours_stable_2026-08-27.json")
+    suite = BehaviourSuite.from_dict(json.loads(recorded.read_text(encoding="utf-8")))
+    names = (
+        "construct", "msg", "new",
+        "construct_from_adhoc", "construct_from_std",
+        "construct_from_display", "construct_from_boxed",
+        "construct_from_context", "context",
+    )
+    text = identity_must_instruction(suite.specs, fn_names=names)
+    assert text.startswith("MUST:")
+    assert "`is::<&str>()`" in text
+    assert "`is::<String>()`" in text
+    assert "`is::<io::Error>()`" in text
+    assert "the TypeId a user downcasts to is the payload's type, never a wrapper's" in text
+    assert "unimplemented!" not in text
+    ue = select_usage_examples(
+        tuple(suite.specs), fn_name="construct", container="impl Error",
+        char_budget=1200)
+    assert "unimplemented!" in ue
+    assert "is::<" not in ue
+    assert "never a wrapper" not in ue
+    assert identity_must_instruction(suite.specs, fn_names=("chain",)) == ""

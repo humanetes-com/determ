@@ -14,6 +14,7 @@ spec is never truncated mid-body (a half example teaches the wrong shape).
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Collection, Sequence
 
 from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective
@@ -220,6 +221,138 @@ def select_component_behaviours(
     if cap is None:
         return picked
     return picked[:cap]
+
+
+# --------------------------------------------------------------------------
+# Fill-prompt identity instruction: the wrapping MUST t1.5 already renders
+# via `_fmt_outcome`, which fill builders never called.
+#
+# `select_usage_examples` is the wrong payload for that slot — harvest order
+# plus a container-type match spends the cap on doctest OTHER (the live
+# `construct`/`msg`/`fmt`/`new` blob starts at `doctest::error.rs::311` and
+# contains `unimplemented!()`, no `is::<`, no "never a wrapper"). File-first
+# already quotes the attributed tests; the 2026-08-26 constructor fills had
+# `test_downcast` in the prompt and still wrapped because `_plan_line` had
+# no TypeId sentence on first-pass `write:` (`typeid_pin_consequence` fires
+# only on escalated + wraps).
+# --------------------------------------------------------------------------
+
+# IDENTITY plus the trait-object sibling — the classes whose Then a wrap
+# cannot satisfy. Same names `MUST_CLASS_ORDER` leads with.
+IDENTITY_MUST_CLASSES: frozenset[str] = frozenset(
+    {IDENTITY_CLASS, "TRAIT_OBJECT_IDENTITY"}
+)
+
+# Unique Then strings on the instruction, not a dump of every identity spec.
+# Three is enough for the wrapping constructors' `&str` / `String` /
+# `io::Error` once ranking prefers non-flood hits; raising it re-opens the
+# HighLevel / MidLevel / LargeAlignedError parade harvest order produces.
+IDENTITY_MUST_CAP = 3
+
+# Last-segment `exercises` names on this fraction of IDENTITY specs are the
+# construction-graph dump, not a localizer. Recorded 2026-08-27 stable suite
+# (35 TYPE_IDENTITY): `construct` and `new` sit on 35/35, `object_drop` on
+# 29/35. A harvest-order cap of 3 then starts at `Box<dyn …>` / `HighLevel`
+# and never reaches `test_downcast`'s `&str`. Computed per suite, not a
+# denylist of anyhow names.
+_IDENTITY_FLOOD_FRACTION = 0.8
+
+
+def _exercise_leaf_names(spec: BehaviourSpec) -> set[str]:
+    """The last `::` segment of each `exercises` id — `construct` from
+    `src/error.rs::construct`, not the path prefix and not a mid-path type
+    (`Error` from `src/error.rs::new::Error` is a leaf only when it is the
+    last segment)."""
+    return {ex.split("::")[-1] for ex in spec.exercises if ex}
+
+
+def _identity_suite(specs: Sequence[BehaviourSpec]) -> list[BehaviourSpec]:
+    return [
+        s for s in specs
+        if s.fence in _EXAMPLE_FENCES
+        and s.then is not None
+        and behaviour_class_name(s) in IDENTITY_MUST_CLASSES
+    ]
+
+
+def identity_exercise_flood(specs: Sequence[BehaviourSpec]) -> frozenset[str]:
+    """Last-segment `exercises` names that appear on most IDENTITY specs.
+
+    Those names are the construction-graph dump (see
+    `_IDENTITY_FLOOD_FRACTION`). Ranking a constructor *batch* by how many
+    non-flood requested names a spec hits puts `test_downcast`'s `&str` /
+    `String` / `io::Error` first; harvest order on the same batch does not.
+    """
+    ident = _identity_suite(specs)
+    if not ident:
+        return frozenset()
+    counts: Counter[str] = Counter()
+    for spec in ident:
+        counts.update(_exercise_leaf_names(spec))
+    thresh = _IDENTITY_FLOOD_FRACTION * len(ident)
+    return frozenset(n for n, k in counts.items() if k >= thresh)
+
+
+def _identity_hits(spec: BehaviourSpec, names: Collection[str]) -> set[str]:
+    """Requested fn names this spec actually localizes to.
+
+    Leaf `exercises` or a whole word in `when`. `given` is deliberately
+    omitted: it is the whole test (helper `fn fmt`, `use std::fmt`) and is
+    what made Display::fmt match identity probes whose `when` is
+    `err.is::<MyErr>()`."""
+    wanted = {n for n in names if n}
+    hits = _exercise_leaf_names(spec) & wanted
+    hits |= {n for n in wanted if contains_word(spec.when, n)}
+    return hits
+
+
+def select_identity_must(
+    specs: Sequence[BehaviourSpec],
+    *,
+    fn_names: Collection[str],
+    cap: int = IDENTITY_MUST_CAP,
+) -> list[BehaviourSpec]:
+    """IDENTITY / TRAIT_OBJECT_IDENTITY specs a fill of `fn_names` must
+    satisfy, unique Then, at most `cap`.
+
+    A spec matches when `_identity_hits` is non-empty. Container-type match
+    is omitted: that is what made every fn in `impl Error` share the same
+    harvest-order doctest blob.
+
+    Order: more non-flood leaf-exercise hits first, `ok=True` before
+    `ok=False`, harvest order within that. Dedupes by `(kind, value, ok)`
+    so three `MyErr` probes do not spend the cap. Empty when none match.
+    """
+    names = {n for n in fn_names if n}
+    if not names or cap <= 0:
+        return []
+    ident = _identity_suite(specs)
+    flood = identity_exercise_flood(ident)
+    matched = [s for s in ident if _identity_hits(s, names)]
+
+    def _rank(spec: BehaviourSpec) -> tuple[int, int]:
+        specific = _identity_hits(spec, names) - flood
+        # then.ok is the wrap-violating MUST; the trait-object probe's
+        # `is::<MyErr>() == false` is a different observable.
+        then = spec.then
+        ok_rank = 0 if (then is not None and then.ok) else 1
+        return (-len(specific), ok_rank)
+
+    matched.sort(key=_rank)
+    seen: set[tuple[str, str, bool]] = set()
+    out: list[BehaviourSpec] = []
+    for spec in matched:
+        then = spec.then
+        if then is None:
+            continue
+        key = (then.kind.name, then.value, then.ok)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(spec)
+        if len(out) >= cap:
+            break
+    return out
 
 
 # --------------------------------------------------------------------------

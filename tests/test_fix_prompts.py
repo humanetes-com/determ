@@ -501,3 +501,34 @@ def test_typeid_sentence_is_withheld_from_a_block_whose_body_wraps_nothing() -> 
                         if ln.startswith("  in `impl<A, B> BothDebug"))
     assert "stores a different TypeId" in flipped_line
     assert flipped_line.startswith(_LIVE_97E9_PLAN_LINE.split("): __dispatch")[0])
+
+
+def test_file_fill_first_pass_write_carries_identity_must() -> None:
+    """Run `2932-cf516410`: first-pass `write:` had the pin in the quoted
+    test and no TypeId sentence on the plan line (`typeid_pin_consequence`
+    fires only on escalated + wraps). The identity Then belongs on `write:`
+    before any body exists."""
+    must = (
+        "MUST: `is::<&str>()` / `downcast::<&str>()` on that value is true "
+        "— the TypeId a user downcasts to is the payload's type, never a "
+        "wrapper's"
+    )
+    out = _file_fill([BlockFillPlan(
+        "impl Error", ("construct_from_adhoc", "msg"), (),
+        identity_must=must)])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert line.startswith(
+        "  in `impl Error` -> write: construct_from_adhoc, msg")
+    assert "never a wrapper's" in line
+    assert "`is::<&str>()`" in line
+    # NEGATIVE CONTROL: today's `_plan_line` (no identity_must field) is a
+    # write: list and nothing else — the instruction the first-pass fill
+    # actually read.
+    bare = _file_fill([BlockFillPlan(
+        "impl Error", ("construct_from_adhoc", "msg"), ())])
+    bare_line = next(ln for ln in bare.splitlines()
+                     if ln.startswith("  in `impl Error`"))
+    assert bare_line == "  in `impl Error` -> write: construct_from_adhoc, msg"
+    assert "never a wrapper" not in bare_line
+    assert "MUST:" not in bare_line
