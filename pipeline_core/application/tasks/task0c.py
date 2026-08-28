@@ -2552,16 +2552,15 @@ project-specific import paths, type construction patterns, and hard constraints.
 
     # A ceiling is a MEASURED claim — every uncovered line that survives is inside
     # an excluded cfg block or is an LLVM artifact, so no test could reach it — and
-    # the pass has just counted them. It used to be inferred from "no file made a
-    # model call this pass", which is a different statement about a different
-    # subject, and the log line asserted the cfg claim without ever checking it.
-    # On 2026-08-27 run `2881435-34981ab0` the split generation path dropped every
-    # reply (the fenced-reply extraction defect), so no call was recorded, and both
-    # passes over anyhow/stable reported a ceiling while their own queue lines
-    # listed 119 actionable uncovered lines across 8 files — 4 in backtrace.rs, 3
-    # ensure.rs, 4 lib.rs, 9 ptr.rs, 8 fmt.rs, 14 wrapper.rs, 23 context.rs, 54
-    # error.rs. Two such passes are CEILING_CONFIRM, so the cluster was accepted
-    # at 83.9% against its own ~98.1% ceiling estimate.
+    # the pass has just counted them. It used to be inferred from "no file set
+    # `_pass_had_work`", which was set only on a committed block, and the log line
+    # asserted the cfg claim without ever checking it. On 2026-08-27 run
+    # `2881435-34981ab0` logged 63 `llm.request` events and extracted nothing (fenced replies),
+    # so both passes over anyhow/stable reported a ceiling while their own
+    # post-filter counts listed 119 actionable uncovered lines across 8 files —
+    # 4 in backtrace.rs, 3 ensure.rs, 4 lib.rs, 9 ptr.rs, 8 fmt.rs, 14 wrapper.rs,
+    # 23 context.rs, 54 error.rs. Two such passes are CEILING_CONFIRM, so the
+    # cluster was accepted at 83.9% against its own ~98.1% ceiling estimate.
     _pass_outcome = coverage_pass_outcome(
         actionable_lines=_pass_actionable, had_model_call=_pass_had_work)
     if _pass_outcome == "ceiling":

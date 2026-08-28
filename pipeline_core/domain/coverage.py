@@ -73,16 +73,16 @@ def coverage_pass_outcome(*, actionable_lines: int, had_model_call: bool) -> str
       call at all. A generation or routing defect; never a ceiling.
     - ``"progressed"`` — reachable lines remain and the pass worked on them.
 
-    The distinction is the point. The ceiling used to be inferred from the
-    absence of a model call, which is a statement about the pipeline rather than
-    about the crate, and the log line asserted the cfg claim without checking
-    it. On 2026-08-27, run `2881435-34981ab0`, the split generation path dropped
-    every reply, so no call was recorded and both passes over anyhow's `stable`
-    cluster reported a ceiling — against their own queue lines, which listed 119
-    actionable uncovered lines across 8 files (4 backtrace.rs, 3 ensure.rs, 4
-    lib.rs, 9 ptr.rs, 8 fmt.rs, 14 wrapper.rs, 23 context.rs, 54 error.rs). Two
-    such passes are `ModuleAugmentState.CEILING_CONFIRM`, so the cluster was
-    accepted at 83.9% against a ~98.1% ceiling estimate for that same cluster.
+    The distinction is the point. The ceiling used to be inferred from
+    ``not _pass_had_work``, which was set only on a committed block. On
+    2026-08-27, run `2881435-34981ab0` logged 63 `llm.request` events and
+    extracted nothing (fenced ``#[test]`` replies), so the flag stayed false and both
+    passes over anyhow's `stable` cluster reported a ceiling — against their
+    own post-filter counts, 119 actionable uncovered lines across 8 files
+    (4 backtrace.rs, 3 ensure.rs, 4 lib.rs, 9 ptr.rs, 8 fmt.rs, 14 wrapper.rs,
+    23 context.rs, 54 error.rs). Two such passes are
+    `ModuleAugmentState.CEILING_CONFIRM`, so the cluster was accepted at 83.9%
+    against a ~98.1% ceiling estimate for that same cluster.
     """
     if actionable_lines <= 0:
         return "ceiling"

@@ -61,8 +61,8 @@ class FakeAdapter:
         return self.cluster_sentinels.get((c, m))
 
     def mark_cluster_augmented(self, pd: Path, c: str, m: str, cov: float, *,
-                               reason: str = "", source_hash: str = "") -> None:
-        self.cluster_sentinels[(c, m)] = AugmentVerdict(cov, reason, source_hash)
+                               reason: str = "", code_id: str = "") -> None:
+        self.cluster_sentinels[(c, m)] = AugmentVerdict(cov, reason, code_id)
 
     def cluster_augmented_value(self, pd: Path, c: str, m: str) -> float:
         v = self.cluster_sentinels.get((c, m))
@@ -124,7 +124,10 @@ class _TruthyPath:
 
 def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
          module_coverage: dict[str, float] | None = None,
-         behaviour_target_pct: float = 0.0) -> AugmentContext:
+         behaviour_target_pct: float = 0.0,
+         target_pct: float = 100.0,
+         src_hash: str = "crate-hash",
+         code_id: str = "abc") -> AugmentContext:
     return AugmentContext(
         project_dir=Path("/proj"),
         clusters=clusters,
@@ -132,10 +135,11 @@ def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
         module_coverage=module_coverage or dict.fromkeys(modules, 0.0),
         module_dirs={m: Path("/proj") for m in modules},
         module_types=dict.fromkeys(modules, "lib"),
-        src_hash="abc",
+        src_hash=src_hash,
+        code_id=code_id,
         project_context="",
         coverage_strategy="",
-        target_pct=100.0,
+        target_pct=target_pct,
         tarpaulin_bin=_TruthyPath(),  # type: ignore[arg-type]
         behaviour_target_pct=behaviour_target_pct,
     )
@@ -150,7 +154,8 @@ def test_single_cluster_module_reaches_target_marks_both_sentinels() -> None:
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(100.0, 10, False, "")]})
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     # last cluster → both cluster + main sentinel written at the target.
-    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 100.0
+    v = fake.cluster_sentinels[("stable", "anyhow")]
+    assert v.coverage == 100.0 and v.reason == "done" and v.code_id == "abc"
     assert fake.module_sentinels["anyhow"] == 100.0
     assert fake.commits == ["pipeline: task0c/stable — anyhow:100.0%"]
     # active cluster is set then cleared on exit.
@@ -276,38 +281,57 @@ def test_behaviour_rounds_skip_a_suite_with_nothing_pinnable_and_a_dead_cluster(
     assert dead.behaviour_reads == [] and dead.behaviour_passes == []
 
 
-# --- a give-up verdict is a claim about the code, not about the tree -----------
+# --- a give-up verdict is a claim about the pipeline, not about the tree ------
 #
-# Run 2881435-34981ab0 (2026-08-27) sealed anyhow's `stable` cluster at 83.9%
-# on a ceiling its own queue line contradicted (119 actionable uncovered lines
-# across 8 files). The commit that fixed the cause could not re-open it: the
-# sentinel recorded a bare number, and the only remover of a cluster sentinel is
-# the full --clean workspace wipe. What is asserted here is the plan's sentence —
-# a give-up verdict from pipeline code that is no longer on disk does not skip
-# the work — with the pre-fix sentinel shape as the negative control.
+# Run 2881435-34981ab0 (2026-08-27, code=3264439950bf) sealed anyhow's `stable`
+# cluster at 83.9% on a ceiling its own post-filter counts contradicted (119
+# actionable uncovered lines across 8 files). 1566274-2e1d805c (code=4a6d8d3f3e95)
+# then skipped it: the sentinel was a bare number, and the only remover is the
+# full --clean workspace wipe. What is asserted here is the plan's sentence — a
+# give-up from a pipeline that is no longer on disk does not skip the work —
+# keyed on `code_identity`, not the crate source_hash. The pre-fix sentinel
+# shape is the negative control.
 
 _LIVE_CEILING_COV = 83.9   # tmp/anyhow/.cluster_augmented/stable__anyhow, 2026-08-27
+_LIVE_CODE_ID = "3264439950bf"     # 2881435-34981ab0
+_LATER_CODE_ID = "4a6d8d3f3e95"    # 1566274-2e1d805c
 
 
 def test_a_give_up_verdict_from_other_code_re_augments_instead_of_skipping() -> None:
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
     fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
-        _LIVE_CEILING_COV, "ceiling", "the-code-that-produced-the-false-ceiling")
-    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))  # src_hash="abc"
+        _LIVE_CEILING_COV, "ceiling", _LIVE_CODE_ID)
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"],
+                             code_id=_LATER_CODE_ID))
     assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 97.8
-    assert fake.cluster_sentinels[("stable", "anyhow")].source_hash == "abc"
+    assert fake.cluster_sentinels[("stable", "anyhow")].code_id == _LATER_CODE_ID
     assert any("re-augmenting instead of inheriting it" in m for m in fake.logs)
     assert "cluster.sentinel.reopened" in fake.events
 
 
-def test_negative_control_the_same_verdict_under_its_own_code_still_skips() -> None:
-    # The pre-fix rule was `path.exists()`; the post-fix rule is provenance, so a
-    # verdict recorded under the CURRENT source hash must still skip the work —
-    # otherwise the change would re-augment every resumed cluster forever.
+def test_a_give_up_does_not_bind_when_only_the_crate_hash_matches() -> None:
+    # The identity the first draft recorded was the crate source_hash. A
+    # pipeline-only extractor fix leaves that hash identical, so a give-up
+    # keyed on it cannot reopen the cluster. Same crate, new pipeline: re-augment.
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
     fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
-        _LIVE_CEILING_COV, "ceiling", "abc")
-    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+        _LIVE_CEILING_COV, "ceiling", _LIVE_CODE_ID)
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"],
+                             src_hash="unchanged-crate", code_id=_LATER_CODE_ID))
+    assert fake.cluster_sentinels[("stable", "anyhow")].coverage == 97.8
+    assert "cluster.sentinel.reopened" in fake.events
+
+
+def test_negative_control_the_same_verdict_under_its_own_code_still_skips() -> None:
+    # The pre-fix rule was `path.exists()`; the post-fix rule is pipeline
+    # provenance, so a verdict recorded under the CURRENT code_id must still
+    # skip — otherwise every resumed cluster would re-augment forever. A
+    # different crate hash must not reopen it.
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
+        _LIVE_CEILING_COV, "ceiling", _LIVE_CODE_ID)
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"],
+                             src_hash="a-different-crate", code_id=_LIVE_CODE_ID))
     assert fake.cluster_sentinels[("stable", "anyhow")].coverage == _LIVE_CEILING_COV
     assert any("already done — skipping" in m for m in fake.logs)
     assert "cluster.sentinel.reopened" not in fake.events
@@ -315,7 +339,7 @@ def test_negative_control_the_same_verdict_under_its_own_code_still_skips() -> N
 
 def test_an_unattributed_legacy_sentinel_does_not_bind() -> None:
     # The shape actually on disk on 2026-08-27: a bare number, no reason, no
-    # hash. Unattributable, so it is re-measured rather than inherited.
+    # code_id. Unattributable, so it is re-measured rather than inherited.
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.8, 780, False, "")]})
     fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(_LIVE_CEILING_COV)
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
@@ -328,10 +352,19 @@ def test_a_done_verdict_binds_across_a_code_change() -> None:
     # every finished cluster on every commit.
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(100.0, 10, False, "")]})
     fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
-        100.0, "done", "some-older-pipeline")
-    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
+        100.0, "done", _LIVE_CODE_ID)
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"],
+                             code_id=_LATER_CODE_ID))
     assert any("already done — skipping" in m for m in fake.logs)
     assert "cluster.sentinel.reopened" not in fake.events
+
+
+def test_reaching_the_target_below_a_hundred_records_done() -> None:
+    # Live nightly 1566274-2e1d805c: 95.2% against COVERAGE_AUGMENTATION_TARGET=90.
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [(95.2, 793, False, "")]})
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
+    v = fake.cluster_sentinels[("nightly", "anyhow")]
+    assert v.coverage == 95.2 and v.reason == "done" and v.code_id == "abc"
 
 
 def test_the_terminating_status_is_what_gets_recorded() -> None:
@@ -341,7 +374,7 @@ def test_the_terminating_status_is_what_gets_recorded() -> None:
         ("stable", "anyhow"): [(90.0, 9, True, ""), (90.0, 9, True, "")]})
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     assert fake.cluster_sentinels[("stable", "anyhow")].reason == "ceiling"
-    assert fake.cluster_sentinels[("stable", "anyhow")].source_hash == "abc"
+    assert fake.cluster_sentinels[("stable", "anyhow")].code_id == "abc"
 
     fake = FakeAdapter(augment_script={}, pre_check=False)
     _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["a"]))

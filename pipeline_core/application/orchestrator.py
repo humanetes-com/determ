@@ -24,6 +24,7 @@ from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
 from pipeline_core.domain.generation import GenerationRequest
+from pipeline_core.domain.measurement import code_identity
 from pipeline_core.domain.models import BuildCluster, FnLocator
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
@@ -933,7 +934,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # This is the "big picture" document injected into every task — especially TASK 0c
         # which currently receives no project-level context. Works even without README.
         context_path = project_dir / deps.PROJECT_CONTEXT_NAME
-        deps.emit("task.start", task="task0a")  # debt#7: structured stage event
+        deps.emit("task.start", task="task0a")
         project_context = deps.task0_project_context(context_path, test_files, readme_text, project_profile)
 
         # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
@@ -941,7 +942,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # Skip if either pipeline_state marks task0b done, or the artifact already
         # exists from a prior run that predates state tracking (auto-backfill).
         strategy_path = project_dir / deps.COVERAGE_STRATEGY_NAME
-        deps.emit("task.start", task="task0b")  # debt#7: structured stage event
+        deps.emit("task.start", task="task0b")
         if deps.phase_valid(project_dir, "task0b"):
             coverage_strategy = strategy_path.read_text().strip() if strategy_path.exists() else ""
             deps.log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
@@ -1065,6 +1066,12 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         project_dir=project_dir, clusters=_clusters, modules=modules,
         module_coverage=module_coverage, module_dirs=_module_dirs,
         module_types=_module_types, src_hash=_src_hash,
+        # `root`, not `Path.cwd()`: run_pipeline already receives the repo root
+        # (`Path(__file__).parent` in pipeline.py) and code_identity returns the
+        # empty-string digest e3b0c44298fc for a root holding neither pipeline.py
+        # nor pipeline_core — indistinguishable from a real identity, and it would
+        # bind every give-up verdict forever.
+        code_id=code_identity(root),
         project_context=project_context, coverage_strategy=coverage_strategy,
         target_pct=deps.COVERAGE_AUGMENTATION_TARGET, tarpaulin_bin=deps.TARPAULIN_BIN,
         # Percent of the cluster's harvested behaviours the generated tests

@@ -535,34 +535,40 @@ class BuildCluster:
 
 @dataclass(frozen=True, slots=True)
 class AugmentVerdict:
-    """Why a (cluster, module) stopped being augmented, and under which code.
+    """Why a (cluster, module) stopped being augmented, and under which pipeline.
 
     The cluster sentinel used to hold a bare coverage number, which cannot
     distinguish "the target was reached" from "this code gave up" — so a verdict
     produced by a defect outlived the commit that fixed it. On 2026-08-27, run
-    `2881435-34981ab0`, the split generation path dropped every model reply, the
-    pass therefore recorded no model call, and the ceiling was inferred from that
-    absence: cluster `stable` on anyhow was sealed at 83.9% against its own
-    ~98.1% ceiling estimate, on a pass whose queue line listed 119 actionable
-    uncovered lines across 8 files. Nothing could re-open it — the only remover
-    of a cluster sentinel is the full `--clean` workspace wipe, and
-    `clear_module_sentinel` clears a different file.
+    `2881435-34981ab0` (`code=3264439950bf`) dropped every fenced reply; the run
+    logged 63 `llm.request` events and `_pass_had_work` was set only on a
+    committed block,
+    so both passes over anyhow's `stable` cluster reported a cfg ceiling against
+    119 actionable uncovered lines. The cluster was sealed at 83.9% against a
+    ~98.1% estimate. The next launch (`1566274-2e1d805c`, `code=4a6d8d3f3e95`)
+    skipped it: the only remover of a cluster sentinel is the full `--clean`
+    workspace wipe, and `clear_module_sentinel` clears a different file.
 
     `reason` is the terminating status: "done" when the coverage target was met,
     or the crate is proc-macro and cannot be augmented; otherwise the give-up
-    verdict ("ceiling", "hard_block", "precheck_failed"). Only "done" is a claim
-    about the TREE. Every other value is a claim about the code that was
-    running, so it binds only while that code is still on disk — the rule
-    `pipeline_state.md` already applies to every phase record, applied here to
-    the sentinel that actually gates the work.
+    ("ceiling", "hard_block", "precheck_failed"). Only "done" is a claim about
+    the TREE. Every other value is a claim about the pipeline that was running,
+    so it binds only while `code_id` still matches `code_identity` — the 12-hex
+    digest of `pipeline.py` plus `pipeline_core/**/*.py`. That is a different
+    identity from the crate `source_hash` (`Cargo.toml` + `src/` + test heads)
+    that `pipeline_state.md` records on phase lines; `phase_valid` does not even
+    compare those hashes, and a pipeline-only extractor fix leaves the crate
+    hash unchanged. Keying a give-up on the crate hash cannot reopen the
+    cluster the commit that fixed the cause is supposed to re-enter.
 
     The canonical text form keeps the coverage on the first line, so a sentinel
-    written before this field existed still reads back as a number.
+    written before this field existed still reads back as a number. `from_text`
+    also accepts a legacy `source_hash=` line as the code identity.
     """
 
     coverage: float
     reason: str = ""
-    source_hash: str = ""
+    code_id: str = ""
 
     def is_final(self) -> bool:
         """True when the verdict is a claim about the tree rather than about the
@@ -570,33 +576,34 @@ class AugmentVerdict:
         augmented at all."""
         return self.reason == "done"
 
-    def still_binding(self, source_hash: str) -> bool:
+    def still_binding(self, code_id: str) -> bool:
         """True when this verdict still answers "skip this cluster".
 
         A final verdict always binds. A give-up verdict binds only while the
-        augmentation code that produced it is the code on disk. A verdict with
-        no recorded provenance — a bare-number sentinel written before this
-        field existed — never binds, so the first run after the change
-        re-measures instead of inheriting an unattributable claim.
+        pipeline that produced it is the pipeline on disk (`code_identity`).
+        A verdict with no recorded provenance — a bare-number sentinel written
+        before this field existed — never binds, so the first run after the
+        change re-measures instead of inheriting an unattributable claim.
         """
         if self.is_final():
             return True
-        if not self.source_hash:
+        if not self.code_id:
             return False
-        return self.source_hash == source_hash
+        return self.code_id == code_id
 
     def to_text(self) -> str:
         """The sentinel's canonical text: coverage first (legacy-readable), then
         the provenance this class exists to carry."""
         return (f"{self.coverage:.1f}\n"
                 f"reason={self.reason}\n"
-                f"source_hash={self.source_hash}\n")
+                f"code_id={self.code_id}\n")
 
     @classmethod
     def from_text(cls, text: str) -> AugmentVerdict:
         """Parse a sentinel. Tolerant by design: an unparseable or bare-number
         file yields a verdict with no provenance, which `still_binding` refuses
-        rather than trusting."""
+        rather than trusting. A `source_hash=` line is the previous name for
+        the same field and is read as `code_id`."""
         lines = text.strip().splitlines()
         try:
             coverage = float(lines[0].strip()) if lines else 0.0
@@ -609,7 +616,7 @@ class AugmentVerdict:
                 fields[key.strip()] = value.strip()
         return cls(coverage=coverage,
                    reason=fields.get("reason", ""),
-                   source_hash=fields.get("source_hash", ""))
+                   code_id=fields.get("code_id") or fields.get("source_hash", ""))
 
 
 @dataclass

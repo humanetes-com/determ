@@ -38,7 +38,8 @@ class AugmentContext:
     module_coverage: Mapping[str, float]
     module_dirs: Mapping[str, Path]   # crate_dir per module (project_dir if single)
     module_types: Mapping[str, str]   # crate_type per module ("lib" if single)
-    src_hash: str
+    src_hash: str                     # crate identity for pipeline_state.md phase records
+    code_id: str                      # pipeline identity (`code_identity`) for give-up sentinels
     project_context: str
     coverage_strategy: str
     target_pct: float
@@ -78,6 +79,7 @@ class ClusterAugmentor:
             self._tel, self._scope, self._store, self._engine, self._gate)
         project_dir = ctx.project_dir
         src_hash = ctx.src_hash
+        code_id = ctx.code_id
         modules = list(ctx.modules)
         clusters = list(ctx.clusters)
 
@@ -86,7 +88,7 @@ class ClusterAugmentor:
             cluster_t0 = time.monotonic()
             tel.log(f"\n{'━' * 60}")
             tel.log(f"  Starting compiler cluster: {cluster.name}")
-            tel.emit("compiler.cluster.start", cluster=cluster.name)  # debt#7
+            tel.emit("compiler.cluster.start", cluster=cluster.name)
             ceiling_pct, ceiling_excl, ceiling_total = engine.estimate_ceiling(
                 project_dir, cluster)
             tel.emit("cluster.start", cluster=cluster.name,
@@ -116,29 +118,30 @@ class ClusterAugmentor:
             for m in modules:
                 # A recorded verdict binds only while it still describes something
                 # true. "done" is a claim about the TREE and always binds; a give-up
-                # verdict ("ceiling", "hard_block", "precheck_failed") is a claim
-                # about the augmentation code, so it is dropped once that code
-                # changes — the rule pipeline_state.md already applies to every
-                # phase record, applied here to the sentinel that gates the work.
-                # Without it, run 2881435-34981ab0 (2026-08-27) sealed anyhow's
-                # `stable` cluster at 83.9% on a false ceiling and the commit that
-                # fixed the cause could not re-open it: the only remover of a
-                # cluster sentinel is the full --clean workspace wipe.
+                # ("ceiling", "hard_block", "precheck_failed") is a claim about the
+                # pipeline, so it is dropped once `code_identity` moves. That is
+                # not the crate `source_hash` pipeline_state.md records on phase
+                # lines — `phase_valid` does not compare hashes at all, and a
+                # pipeline-only extractor fix leaves the crate hash unchanged.
+                # Without this, run 2881435-34981ab0 (2026-08-27) sealed anyhow's
+                # `stable` cluster at 83.9% on a false ceiling and 1566274-2e1d805c
+                # skipped it: the only remover of a cluster sentinel is the full
+                # --clean workspace wipe.
                 verdict = store.cluster_augmented_verdict(project_dir, cluster.name, m)
-                if verdict is not None and not verdict.still_binding(src_hash):
+                if verdict is not None and not verdict.still_binding(code_id):
                     tel.log(
                         f"  cluster/{cluster.name}: '{m}' sentinel records "
                         f"{verdict.coverage:.1f}% under a "
                         f"'{verdict.reason or 'unattributed'}' verdict from pipeline "
                         f"code that is no longer on disk "
-                        f"(recorded {verdict.source_hash or '-'}, now {src_hash}) — "
+                        f"(recorded {verdict.code_id or '-'}, now {code_id}) — "
                         f"re-augmenting instead of inheriting it."
                     )
                     tel.emit("cluster.sentinel.reopened", cluster=cluster.name,
                              data={"module": m, "coverage": verdict.coverage,
                                    "reason": verdict.reason,
-                                   "recorded_hash": verdict.source_hash,
-                                   "current_hash": src_hash})
+                                   "recorded_code_id": verdict.code_id,
+                                   "current_code_id": code_id})
                 elif verdict is not None:
                     cluster_done.add(m)
                     tel.log(f"  cluster/{cluster.name}: '{m}' already done — skipping.")
@@ -164,7 +167,7 @@ class ClusterAugmentor:
                         if m not in cluster_done:
                             store.mark_cluster_augmented(
                                 project_dir, cluster.name, m, 0.0,
-                                reason="precheck_failed", source_hash=src_hash)
+                                reason="precheck_failed", code_id=code_id)
                             if is_last_cluster:
                                 store.mark_module_augmented(project_dir, m, 0.0)
                             cluster_done.add(m)
@@ -223,7 +226,7 @@ class ClusterAugmentor:
                 # STALL_LIMIT identical retries (observed live: nightly ×10 no-ops).
                 if blocked_reason and status not in ('done', 'ceiling'):
                     tel.log(
-                        f"  HARD BLOCK (FR-018): '{mod_name}' [{cluster.name}] augmentation "
+                        f"  HARD BLOCK: '{mod_name}' [{cluster.name}] augmentation "
                         f"blocked — {blocked_reason}. Retry would be a deterministic no-op; "
                         f"accepting and moving on."
                     )
@@ -238,13 +241,13 @@ class ClusterAugmentor:
                         )
                     elif status == 'hard_block':
                         tel.log(
-                            f"  HARD BLOCK (FR-018): '{mod_name}' [{cluster.name}] coverage stuck "
+                            f"  HARD BLOCK: '{mod_name}' [{cluster.name}] coverage stuck "
                             f"at {cov:.1f}% (stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
                             f"total {state.total_passes}). Accepting and moving on."
                         )
                     store.mark_cluster_augmented(
                         project_dir, cluster.name, mod_name, cov,
-                        reason=status, source_hash=src_hash)
+                        reason=status, code_id=code_id)
                     # Also write the main module sentinel when the last cluster finishes,
                     # so the strip/task1-4 loop sees it as done.
                     if cluster == clusters[-1]:
@@ -252,7 +255,7 @@ class ClusterAugmentor:
                     cluster_done.add(mod_name)
                 else:
                     tel.log(
-                        f"  HARD RULE (FR-018): '{mod_name}' [{cluster.name}] coverage {cov:.1f}% < {ctx.target_pct:.0f}% "
+                        f"  HARD RULE: '{mod_name}' [{cluster.name}] coverage {cov:.1f}% < {ctx.target_pct:.0f}% "
                         f"(stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
                         f"total {state.total_passes}, best covered {state.best_covered_lines} lines). "
                         f"Retrying."

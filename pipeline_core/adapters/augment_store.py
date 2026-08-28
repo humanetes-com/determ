@@ -3,11 +3,11 @@
 Satisfies :class:`pipeline_core.ports.augment.AugmentStore`. Each (cluster,
 module) and each module records in a sentinel file under the workspace the
 coverage it reached, so a resumed run skips already-augmented work. A CLUSTER
-sentinel also records WHY augmentation stopped and the pipeline source hash it
-stopped under (`AugmentVerdict`), because a give-up verdict is a claim about the
-code rather than about the tree and must not outlive it; a module sentinel stays
-a bare number, since it answers "has task0c ever run here" — a fact about
-history that the task0d harvest gate depends on staying sticky.
+sentinel also records WHY augmentation stopped and the pipeline `code_identity`
+it stopped under (`AugmentVerdict`), because a give-up verdict is a claim about
+the pipeline rather than about the tree and must not outlive it; a module
+sentinel stays a bare number, since it answers "has task0c ever run here" — a
+fact about history that the task0d harvest gate depends on staying sticky.
 Pure file I/O — the only state is the workspace path passed per call. Relocated
 verbatim from the pipeline.py free functions + the `_AugmentAdapter` binding so
 the use-case is injected with the real concrete (no composition-root shim)."""
@@ -24,7 +24,7 @@ def _read_cov(path: Path) -> float:
     """The numeric coverage in a sentinel file, or 0.0 if missing/unparseable.
 
     Reads the FIRST line only: a cluster sentinel now carries `reason=` and
-    `source_hash=` lines after the number (see `AugmentVerdict`), and a module
+    `code_id=` lines after the number (see `AugmentVerdict`), and a module
     sentinel is still a bare number."""
     try:
         return float(path.read_text().strip().splitlines()[0].strip())
@@ -60,10 +60,10 @@ class FileAugmentStore:
 
     def mark_cluster_augmented(self, project_dir: Path, cluster_name: str,
                                module_name: str, cov: float, *,
-                               reason: str = "", source_hash: str = "") -> None:
+                               reason: str = "", code_id: str = "") -> None:
         p = self.cluster_path(project_dir, cluster_name, module_name)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(AugmentVerdict(cov, reason, source_hash).to_text())
+        p.write_text(AugmentVerdict(cov, reason, code_id).to_text())
 
     def cluster_augmented_value(self, project_dir: Path, cluster_name: str,
                                 module_name: str) -> float:

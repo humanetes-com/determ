@@ -469,12 +469,13 @@ def test_a_pass_that_makes_no_model_call_over_reachable_lines_is_not_a_ceiling(
     the pipeline, and they used to be the same branch.
 
     On 2026-08-27 run `2881435-34981ab0` the split path dropped every reply, so
-    no call was recorded, and both passes over anyhow's `stable` cluster printed
+    `_pass_had_work` stayed false (it was set only on a committed block), and
+    both passes over anyhow's `stable` cluster printed
     `All files filtered (cfg/artifact) — no actionable uncovered lines` while
-    their own queue lines listed 119 actionable lines across 8 files. Two such
-    reports are CEILING_CONFIRM, and the cluster was sealed at 83.9%.
+    their own post-filter counts listed 119 actionable lines across 8 files. Two
+    such reports are CEILING_CONFIRM, and the cluster was sealed at 83.9%.
 
-    Driven here through the reachable version of the same state: the file is
+    Driven here through the stalled-queue sibling of that state: the file is
     already stalled, so the pass spends no model call while its uncovered line
     is reachable. Asserted: the pass does NOT claim the cfg ceiling, says what
     actually happened, and falls through to the stalled-files report — which is
@@ -492,3 +493,32 @@ def test_a_pass_that_makes_no_model_call_over_reachable_lines_is_not_a_ceiling(
     assert any(f"{h.rel}: 1 uncovered lines" in ln for ln in h.logs)
     assert outcome.kind == "return"
     assert h.prompts == [] and h.parallel_prompts == []
+
+
+def test_empty_extract_over_reachable_lines_is_not_a_ceiling(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live fill of run 2881435-34981ab0: the file is dispatchable, the
+    model is called, extract_test_mod returns empty (fenced ``#[test]`` that
+    the extractor did not recognise). `_pass_had_work` is now set at ask, so
+    the outcome is progressed → continue, never a cfg ceiling.
+
+    This is a REGRESSION GUARD, not a negative control: `_pass_had_work` has
+    been set at `ask` since the fenced-reply batch, so restoring the old
+    `not _pass_had_work` rule leaves this test green. It fails only against the
+    wiring that actually shipped the defect (`code=3264439950bf`), where the
+    flag was set on a committed block alone. What it pins is the combination —
+    the flag is set where the call is made AND the ceiling reads the count. The
+    discriminating control for the ceiling rule is the stalled-file test
+    above, which does fail when that rule is restored."""
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[], target=0.0, specs=())
+    outcome = h.phase_c()
+
+    assert outcome.at_ceiling is False
+    assert outcome.kind == "continue"
+    assert not any("All files filtered (cfg/artifact)" in ln for ln in h.logs)
+    assert not any(e == "task0c.pass_no_work" for e, _ in h.events)
+    assert h.prompts  # the model was called; extract returned empty
+    for ln in h.logs:
+        if "Stream saved → " in ln:
+            Path(ln.split("→ ", 1)[1].strip()).unlink(missing_ok=True)
+

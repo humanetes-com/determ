@@ -13,12 +13,12 @@ def test_cluster_sentinel_roundtrip(tmp_path: Path) -> None:
     assert s.is_cluster_augmented(tmp_path, "stable", "anyhow") is False
     assert s.cluster_augmented_value(tmp_path, "stable", "anyhow") == 0.0
     s.mark_cluster_augmented(tmp_path, "stable", "anyhow", 98.5,
-                             reason="done", source_hash="abc")
+                             reason="done", code_id="abc")
     assert s.is_cluster_augmented(tmp_path, "stable", "anyhow") is True
     assert s.cluster_augmented_value(tmp_path, "stable", "anyhow") == 98.5
     # coverage on the FIRST line (one decimal, no '%'), provenance under it.
     assert (tmp_path / CLUSTER_AUGMENTED_DIR / "stable__anyhow").read_text() == (
-        "98.5\nreason=done\nsource_hash=abc\n")
+        "98.5\nreason=done\ncode_id=abc\n")
 
 
 def test_module_sentinel_roundtrip_and_clear(tmp_path: Path) -> None:
@@ -48,9 +48,12 @@ def test_value_is_zero_on_unparseable(tmp_path: Path) -> None:
 # its cause. `LIVE_LEGACY_SENTINEL` is the exact bytes of
 # tmp/anyhow/.cluster_augmented/stable__anyhow on 2026-08-27, written by run
 # 2881435-34981ab0 after a false ceiling sealed the cluster at 83.9%.
+# `LIVE_CODE_ID` is that run's `code=` field (`code_identity`), not the crate
+# `Source hash:` line (`b5450483778bbacd` belonged to the later resume
+# 1566274-2e1d805c).
 
 LIVE_LEGACY_SENTINEL = "83.9\n"
-LIVE_SOURCE_HASH = "b5450483778bbacd"   # source hash at that run's cluster entry
+LIVE_CODE_ID = "3264439950bf"
 
 
 def test_the_live_legacy_sentinel_parses_but_does_not_bind(tmp_path: Path) -> None:
@@ -64,13 +67,13 @@ def test_the_live_legacy_sentinel_parses_but_does_not_bind(tmp_path: Path) -> No
     # Negative control: the pre-fix predicate — still True, which is exactly why
     # the cluster was skipped for every run after the false ceiling.
     assert s.is_cluster_augmented(tmp_path, "stable", "anyhow") is True
-    assert verdict.still_binding(LIVE_SOURCE_HASH) is False
+    assert verdict.still_binding(LIVE_CODE_ID) is False
 
 
 def test_a_give_up_verdict_binds_only_under_its_own_code() -> None:
-    ceiling = AugmentVerdict(83.9, "ceiling", LIVE_SOURCE_HASH)
-    assert ceiling.still_binding(LIVE_SOURCE_HASH) is True
-    assert ceiling.still_binding("some-later-pipeline") is False
+    ceiling = AugmentVerdict(83.9, "ceiling", LIVE_CODE_ID)
+    assert ceiling.still_binding(LIVE_CODE_ID) is True
+    assert ceiling.still_binding("4a6d8d3f3e95") is False
     assert AugmentVerdict(0.0, "precheck_failed", "x").still_binding("y") is False
     assert AugmentVerdict(62.0, "hard_block", "x").still_binding("y") is False
 
@@ -82,7 +85,17 @@ def test_a_done_verdict_binds_under_any_code() -> None:
 
 
 def test_verdict_text_roundtrips_and_missing_sentinel_is_none(tmp_path: Path) -> None:
-    v = AugmentVerdict(83.9, "ceiling", LIVE_SOURCE_HASH)
+    v = AugmentVerdict(83.9, "ceiling", LIVE_CODE_ID)
     assert AugmentVerdict.from_text(v.to_text()) == v
     assert AugmentVerdict.from_text("not-a-float\nreason=ceiling\n").coverage == 0.0
     assert FileAugmentStore().cluster_augmented_verdict(tmp_path, "stable", "anyhow") is None
+
+
+def test_from_text_reads_a_source_hash_line_as_code_id() -> None:
+    # The first draft of this field was named source_hash and stored the crate
+    # hash. Parsing still accepts that key so a sentinel written under the old
+    # name is not silently unattributable.
+    v = AugmentVerdict.from_text("83.9\nreason=ceiling\nsource_hash=3264439950bf\n")
+    assert v.code_id == "3264439950bf"
+    assert v.still_binding("3264439950bf") is True
+    assert v.still_binding("4a6d8d3f3e95") is False

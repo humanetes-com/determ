@@ -67,7 +67,7 @@ class AugmentStore(Protocol):
         self, project_dir: Path, cluster_name: str, module_name: str,
     ) -> bool:
         """Whether a sentinel exists at all — NOT whether it still binds. The
-        cluster loop asks `cluster_augmented_verdict(...).still_binding(hash)`
+        cluster loop asks `cluster_augmented_verdict(...).still_binding(code_id)`
         before skipping work; this stays the question for "did we write one"."""
         ...
     def cluster_augmented_verdict(
@@ -77,12 +77,13 @@ class AugmentStore(Protocol):
         ...
     def mark_cluster_augmented(
         self, project_dir: Path, cluster_name: str, module_name: str, cov: float,
-        *, reason: str = "", source_hash: str = "",
+        *, reason: str = "", code_id: str = "",
     ) -> None:
         """Record the coverage, the terminating status ("done" / "ceiling" /
-        "hard_block" / "precheck_failed") and the pipeline source hash it was
-        reached under. A give-up reason recorded without a hash can never bind
-        again — that is the intended reading of an unattributable verdict."""
+        "hard_block" / "precheck_failed") and the pipeline `code_identity` it
+        was reached under. A give-up reason recorded without a code_id can
+        never bind again — that is the intended reading of an unattributable
+        verdict."""
         ...
     def cluster_augmented_value(
         self, project_dir: Path, cluster_name: str, module_name: str,
