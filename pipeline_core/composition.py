@@ -2726,6 +2726,7 @@ def build_app(
             is_compiler_output_line=_is_compiler_output_line,
             run_generate_fix=_run_generate_fix,
             write=_io_write,
+            load_behaviour_suite=load_behaviour_suite,
         ),
         attribution_deps=_attr_deps,
         task1_deps=Task1Deps(

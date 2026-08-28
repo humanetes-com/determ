@@ -16,9 +16,16 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 
 from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective
-from pipeline_core.domain.rust_idents import camelcase_type_names
+from pipeline_core.domain.installable_fns import fn_decl_shape
+from pipeline_core.domain.models import FnRecord
+from pipeline_core.domain.rust_idents import (
+    camelcase_type_names,
+    impl_self_type,
+    impl_trait_name,
+)
 from pipeline_core.domain.rust_scan import contains_word
 
 # compile_fail is a NEGATIVE behaviour; ignore is skipped — neither is a RIGHT
@@ -306,32 +313,190 @@ def _identity_hits(spec: BehaviourSpec, names: Collection[str]) -> set[str]:
     return hits
 
 
+# ---------------------------------------------------------------------------
+# Stub-time aiming. `exercises` is line coverage of the original crate
+# (`exercises_by_coverage`), so matching on it alone hands the instruction to
+# every unit that ran while an identity test ran — Display::fmt for
+# MessageError, Drop/Deref, ptr.rs accessors. Computed on the live stable
+# frontier 2026-08-28: 55/85 stubbed units and all six wrapper.rs fmt bodies
+# received a MUST. Frequency (identity_exercise_flood as a match filter)
+# cannot separate "ran during" from "decides TypeId": flood-strict still
+# keeps those six fmts and drops `construct`'s solo instruction.
+#
+# `constructs_type` reads the body, which at first-pass is
+# `unimplemented!()`, so the discriminator has to be the signature and the
+# container — both on the record at every fill site. Formatting is refused
+# as a class (`Display`/`Debug`/`fmt::Result`). Admitted: a name containing
+# `downcast`; a TypeId parameter whose return is Option (the downcast
+# vtable slot, not the drop slot that shares `target: TypeId`); a fn that
+# constructs the identity-subject type (`Error` on this crate — inherent
+# `impl Error` returning Self, `From<…> for Error`, or a named `-> Error`
+# such as `ext_context` / `render`). Bare `returns Self` is not that class:
+# it admits Own::new / Ref::new / Buf::new.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityMustUnit:
+    """One fill target as the aiming predicate sees it at stub time."""
+
+    name: str
+    container: str = ""
+    sig: str = ""
+
+
+# Production members are ``FnRecord`` (``fn_name``/``sig_text``). The VO
+# uses ``name``/``sig``. A bare str is neither — it used to coerce to a
+# name-only unit and fail closed silently.
+IdentityMustInput = IdentityMustUnit | FnRecord
+
+
+_FORMAT_TRAITS = frozenset({"Display", "Debug"})
+
+# The type identity `when` texts name (`Error::msg`, `err.is::<&str>()`).
+# Not "any Self return" — that is Own/Ref/Buf.
+_IDENTITY_SUBJECT = "Error"
+
+
+def _return_type(sig: str) -> str:
+    shape = fn_decl_shape(sig)
+    return shape[2] if shape is not None else ""
+
+
+def _is_formatting(container: str, sig: str) -> bool:
+    """True iff this unit is a formatting impl — Display/Debug, or a
+    `fmt::Result` return (inherent `ErrorImpl::display`/`debug`, Write)."""
+    trait = impl_trait_name(container) or ""
+    if trait in _FORMAT_TRAITS:
+        return True
+    return "fmt::Result" in _return_type(sig)
+
+
+def constructs_identity_subject(name: str, container: str, sig: str) -> bool:
+    """True iff this unit constructs the type identity tests are about.
+
+    Not a downcast reader and not a formatting impl. `-> Error` covers
+    `ext_context` and free `render`; `-> Self` on inherent/`From` Error
+    covers `construct*` / `context` / `From<E> for Error`. `From<Error>
+    for Box<dyn …>` has self-type Box and is refused."""
+    if "downcast" in name or _is_formatting(container, sig):
+        return False
+    ret = _return_type(sig)
+    if ret == _IDENTITY_SUBJECT:
+        return True
+    self_ty = impl_self_type(container) or ""
+    return ret == "Self" and self_ty == _IDENTITY_SUBJECT
+
+
+def identity_must_admits(name: str, container: str, sig: str) -> bool:
+    """True iff this unit at stub time decides or reads a TypeId.
+
+    Formatting is refused. A `downcast` name is the vtable/method half that
+    consumes TypeId. A `TypeId` parameter with an Option return is a
+    downcast slot; the same parameter on a unit return is the drop-rest
+    sibling and is refused. Constructors of the identity-subject type
+    (see :func:`constructs_identity_subject`) are admitted.
+    """
+    if _is_formatting(container, sig):
+        return False
+    if "downcast" in name:
+        return True
+    ret = _return_type(sig)
+    if "TypeId" in sig and ret.startswith("Option"):
+        return True
+    return constructs_identity_subject(name, container, sig)
+
+
+def _coerce_unit(item: IdentityMustInput) -> IdentityMustUnit:
+    """``IdentityMustUnit`` as-is; ``FnRecord`` via ``fn_name``/``sig_text``.
+
+    A bare name used to become ``IdentityMustUnit(name=str(item))`` with
+    empty container/sig and was silently refused by
+    :func:`identity_must_admits` (fail-closed, but the checker could not
+    see it). Callers that bypass the checker get TypeError, not an empty
+    instruction.
+    """
+    if isinstance(item, IdentityMustUnit):
+        return item
+    if isinstance(item, FnRecord):
+        return IdentityMustUnit(
+            name=item.fn_name,
+            container=item.container or "",
+            sig=item.sig_text or "",
+        )
+    raise TypeError(
+        "identity-must unit needs IdentityMustUnit or FnRecord; "
+        f"got {type(item).__name__}")
+
+
+def _constructor_sibling_leaves(
+    ident: Sequence[BehaviourSpec], flood: Collection[str],
+) -> set[str]:
+    """Non-flood identity leaf names — the localizers a constructor with
+    zero `exercises` (live `construct_from_display`) can borrow.
+
+    Flood names are the construction-graph dump (`construct`/`new` on every
+    identity spec); matching those spends the cap on harvest-order
+    `Box<dyn …>` / `HighLevel`. Non-flood leaves on the recorded and live
+    suites rank `&str` / `String` / `io::Error` first.
+    """
+    leaves: set[str] = set()
+    for spec in ident:
+        leaves |= _exercise_leaf_names(spec)
+    return {n for n in leaves if n and n not in flood}
+
+
 def select_identity_must(
     specs: Sequence[BehaviourSpec],
     *,
-    fn_names: Collection[str],
+    fn_names: Collection[str] = (),
+    units: Sequence[IdentityMustInput] = (),
     cap: int = IDENTITY_MUST_CAP,
 ) -> list[BehaviourSpec]:
-    """IDENTITY / TRAIT_OBJECT_IDENTITY specs a fill of `fn_names` must
+    """IDENTITY / TRAIT_OBJECT_IDENTITY specs a fill of these units must
     satisfy, unique Then, at most `cap`.
 
-    A spec matches when `_identity_hits` is non-empty. Container-type match
-    is omitted: that is what made every fn in `impl Error` share the same
-    harvest-order doctest blob.
+    `units` is the aimed path: only units :func:`identity_must_admits`
+    keeps contribute names. A constructor admitted with no spec hits
+    falls back to non-flood identity leaves so a solo
+    `construct_from_display` still gets `&str` — admission is not a Then;
+    the 229-spec suite names that fn in zero `exercises`. A bare str is
+    not a unit (`IdentityMustInput` is `IdentityMustUnit | FnRecord`).
+
+    `fn_names` without `units` is the pre-aiming match (leaf exercises /
+    `when` only, no container-type, no stub-time filter). Ranking tests
+    and the names-only negative control use it. Production call sites pass
+    `units`.
 
     Order: more non-flood leaf-exercise hits first, `ok=True` before
     `ok=False`, harvest order within that. Dedupes by `(kind, value, ok)`
     so three `MyErr` probes do not spend the cap. Empty when none match.
     """
-    names = {n for n in fn_names if n}
-    if not names or cap <= 0:
+    unit_list = [_coerce_unit(u) for u in units]
+    constructor_miss = False
+    if unit_list:
+        admitted = [u for u in unit_list
+                    if identity_must_admits(u.name, u.container, u.sig)]
+        names = {u.name for u in admitted if u.name}
+        constructor_miss = any(
+            constructs_identity_subject(u.name, u.container, u.sig)
+            for u in admitted)
+    else:
+        names = {n for n in fn_names if n}
+    if cap <= 0:
         return []
     ident = _identity_suite(specs)
     flood = identity_exercise_flood(ident)
-    matched = [s for s in ident if _identity_hits(s, names)]
+    rank_names = names
+    matched = [s for s in ident if _identity_hits(s, names)] if names else []
+    if not matched and constructor_miss:
+        rank_names = _constructor_sibling_leaves(ident, flood)
+        matched = [s for s in ident if _identity_hits(s, rank_names)]
+    if not matched or not rank_names:
+        return []
 
     def _rank(spec: BehaviourSpec) -> tuple[int, int]:
-        specific = _identity_hits(spec, names) - flood
+        specific = _identity_hits(spec, rank_names) - flood
         # then.ok is the wrap-violating MUST; the trait-object probe's
         # `is::<MyErr>() == false` is a different observable.
         then = spec.then

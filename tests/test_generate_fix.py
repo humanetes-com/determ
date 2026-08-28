@@ -215,6 +215,79 @@ def test_one_shot_fill_lands_a_body_when_the_file_holds_two_fns_of_that_name(
     assert "second()" in out, "the same-named sibling was overwritten"
 
 
+def test_one_shot_behavior_prompt_carries_aimed_identity_must(tmp_path: Path) -> None:
+    """The compiles-but-wrong builder had no slot. A constructor of Error
+    with an identity Then puts MUST on the prompt; Display::fmt with the
+    same suite (coverage would have matched the leaf `fmt`) does not.
+    Empty identity_must is the byte-identical control in
+    test_behavior_fix_prompt_exact."""
+    from pipeline_core.domain.behaviour import (
+        BehaviourSpec,
+        BehaviourSubKind,
+        FenceDirective,
+        ObservableOutcome,
+    )
+
+    pin = BehaviourSpec(
+        behaviour_id="pin",
+        given="",
+        when='err.is::<&str>()',
+        then=ObservableOutcome.type_identity("&str", True),
+        subkind=BehaviourSubKind.OUTCOME,
+        fence=FenceDirective.RUN,
+        exercises=frozenset({
+            "src/error.rs::construct_from_adhoc",
+            "src/wrapper.rs::fmt",
+        }),
+        source_ref="pin",
+    )
+
+    class _LocSplicer:
+        def locate_fn(self, text: str, name: str):
+            hits = locate_all_fns(text, name)
+            return hits[0] if hits else None
+
+        def splice_body_scoped(self, *a, **k):
+            return SpliceOutcome(True, "ok", 1)
+
+    def _run(rel: str, src: str, fn: str, container: str, sig: str) -> str:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(src)
+        model = _Model(f'<FN name="{fn}" block="any">\nok()\n</FN>')
+        recs = [{"file": rel, "fn_name": fn, "container": container,
+                 "sig_text": sig}]
+        one_shot_fill(
+            {(rel, fn): {"t"}}, kind="behavior", behavior_srcs={},
+            session=_session(tmp_path), model=model, splicer=_LocSplicer(),
+            log=lambda _m: None, thinking_directive="T",
+            err_cap=500, src_snip_cap=4000, output="t FAILED",
+            behaviour_specs=(pin,), fn_records=recs)
+        assert model.prompts, fn
+        return model.prompts[0]
+
+    ctor = _run(
+        "src/error.rs",
+        "impl Error {\n"
+        "    fn construct_from_adhoc<M>(error: M) -> Self { wrap() }\n"
+        "}\n",
+        "construct_from_adhoc", "impl Error",
+        "fn construct_from_adhoc<M>(error: M) -> Self")
+    assert "MUST:" in ctor
+    assert "`is::<&str>()`" in ctor
+    assert "never a wrapper's" in ctor
+
+    fmt = _run(
+        "src/wrapper.rs",
+        "impl Display for MessageError<M> {\n"
+        "    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { wrap() }\n"
+        "}\n",
+        "fmt", "impl Display for MessageError < M >",
+        "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result")
+    assert "MUST:" not in fmt
+    assert "is::<" not in fmt
+
+
 # --- splice-unit escalation on identical-error stall (s117 #3) ---------------
 
 

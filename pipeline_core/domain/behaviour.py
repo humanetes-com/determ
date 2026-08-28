@@ -20,6 +20,7 @@ capturing; this module only names the language and enforces its invariants.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import Any
@@ -557,6 +558,37 @@ def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> Behaviou
     return BehaviourSuite(
         cfg_cluster=incoming.cfg_cluster or existing.cfg_cluster, specs=tuple(by_id[k] for k in sorted(by_id))
     )
+
+
+def union_cluster_suites(
+    suites: Sequence[BehaviourSuite],
+) -> tuple[BehaviourSpec, ...]:
+    """Concatenate per-cluster suites for a caller that has no single cluster.
+
+    A shared ``behaviour_id`` whose Then differs is two observables — both
+    stay. Identical Then is a duplicate and is dropped. Insertion order does
+    not decide a Then: the on-disk glob is lexical (``_behaviours_nightly.json``
+    before ``_behaviours_stable.json``), and first-wins on id alone would
+    silently take nightly's value. Computed on anyhow 2026-08-28: 37 stable /
+    36 nightly IDENTITY specs, 35 shared ids, zero whose Then differs — this
+    crate would not have noticed first-wins. ``merge_suites`` (existing wins,
+    bake) is a different collision rule and is not this helper.
+    """
+    seen: set[tuple[str, tuple[str, str, bool] | None]] = set()
+    out: list[BehaviourSpec] = []
+    for suite in suites:
+        for spec in suite.specs:
+            then = spec.then
+            tkey = (
+                None if then is None
+                else (then.kind.name, then.value, then.ok))
+            key = (spec.behaviour_id, tkey)
+            if spec.behaviour_id and key in seen:
+                continue
+            if spec.behaviour_id:
+                seen.add(key)
+            out.append(spec)
+    return tuple(out)
 
 
 class BehaviourVerdict(Enum):

@@ -39,6 +39,7 @@ from pipeline_core.application.reconstruct.scheduling import (
 )
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.dispatch import (
     impl_route_deferral_applies,
@@ -211,6 +212,10 @@ class PhaseCFillEngine:
         """Phase C — Flavour B with full validation loops."""
         if cluster_env is None:
             cluster_env = self.cargo.env()
+        # One load for the pass. The test-fix loop used to re-read the 493 KB
+        # suite per prompt (3.3 ms measured); the impl and per-fn routes
+        # already loaded it once each. Same bytes, one parse.
+        behaviour_specs = self.behaviour_loader(project_dir, cluster_name)
         # P5 — per-impl-block path. New default unit of work: fill all stubs of
         # one impl block in one LLM call. The per-impl path delegates free fns and
         # oversized blocks back to the per-fn path below — but only AFTER it has
@@ -343,7 +348,7 @@ class PhaseCFillEngine:
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
-                behaviour_specs=self.behaviour_loader(project_dir, cluster_name),
+                behaviour_specs=behaviour_specs,
             )
             if _impl_stats.dispatched_fns is not None:
                 _dispatched.update(
@@ -580,7 +585,7 @@ class PhaseCFillEngine:
                     CfgSet.of(cluster.cfg_true, cluster.cfg_false)
                     if cluster is not None else None
                 ),
-                behaviour_specs=self.behaviour_loader(project_dir, cluster_name),
+                behaviour_specs=behaviour_specs,
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
@@ -865,9 +870,9 @@ class PhaseCFillEngine:
                                         retrospective_guidance="", siblings="", crate_idioms="",
                                         bound_methods=_ctx.bound_methods_section,
                                         identity_must=identity_must_instruction(
-                                            self.behaviour_loader(
-                                                project_dir, cluster_name),
-                                            fn_names=(fn,))),
+                                            behaviour_specs,
+                                            units=(IdentityMustUnit(
+                                                fn, container_for_fn, sig_t),))),
                                     fr_path=fr_path,  # P6.4 note recall
                                     attempt_history=test_fix_history.get((rel_f, fn), []),  # P2
                                 )

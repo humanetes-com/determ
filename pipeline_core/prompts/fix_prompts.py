@@ -442,24 +442,31 @@ def build_maximal_impl_prompt(
     tests_block: str,
     errs: str,
     notes: str,
+    identity_must: str = "",
 ) -> str:
     """Last resort — budgets OFF. After the budgeted per-impl loop
     exhausts, the model gets ONE attempt with the WHOLE current file, every
     referencing test verbatim, and the full focused error (a defect outside
-    the block's window is invisible to the budgeted prompt)."""
+    the block's window is invisible to the budgeted prompt).
+
+    `identity_must` is the same TypeId instruction the budgeted per-impl
+    prompt carries after the stub list. Empty (the default) leaves the
+    prompt byte-identical to a call that never named the kwarg.
+    """
     header = container.splitlines()[0] if container else "impl"
     names = ", ".join(stub_names)
     tests_part = (f"\nTests that exercise these functions (make them pass):\n"
                   f"{tests_block}\n" if tests_block.strip() else "")
     notes_part = (f"\nNotes from earlier attempts:\n{notes}\n"
                   if notes.strip() else "")
+    must_part = (f"{identity_must}\n" if identity_must.strip() else "")
     return f"""Previous attempts to implement functions in this Rust file failed.
 You now see the ENTIRE current file. Implement or CORRECT the function(s)
 {names} of `{header}` so the file compiles and the tests pass — some may
 already have a body that compiles but whose test still fails; rewrite its
 behavior. Keep every signature EXACTLY as written; change bodies only.
 File: {file_rel}
-```rust
+{must_part}```rust
 {file_text}
 ```
 {tests_part}Compiler errors from the last attempt:
@@ -483,14 +490,25 @@ def build_behavior_fix_prompt(
     cur_body: str,
     tests_block: str,
     errs: str,
+    identity_must: str = "",
 ) -> str:
-    """Correct a fn that compiles but FAILS its tests (behaviour wrong)."""
+    """Correct a fn that compiles but FAILS its tests (behaviour wrong).
+
+    `identity_must` is the TypeId instruction the first-pass builders carry.
+    A wrap that first-pass missed is exactly this path — the failing test
+    source is already in the prompt; without this sentence the TypeId rule
+    is evidence the 2026-08-26 constructor fills had and still wrapped.
+    Empty (the default) leaves the prompt byte-identical to a call that
+    never named the kwarg.
+    """
+    must_part = (f"{identity_must}\n\n" if identity_must.strip() else "")
     return (
         f"ONE Rust function compiles but FAILS its tests — "
         f"its behaviour is wrong. Correct the body.\n"
         f"{thinking_directive}"
         f"File: {file_rel} | Fn: {fn_name}\n"
         f"Signature (do NOT change it):\n{sig_text}\n\n"
+        f"{must_part}"
         f"Current body (wrong — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
         f"Failing test source (the behaviour the body must satisfy):\n"
         f"```\n{tests_block}```\n"

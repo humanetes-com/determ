@@ -19,6 +19,7 @@ from pipeline_core.domain.authored_layout import component_uids
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import (
     IDENTITY_MUST_CAP,
+    IdentityMustInput,
     behaviour_class_name,
     class_rank,
     select_identity_must,
@@ -304,18 +305,20 @@ def _fmt_outcome(then: _behaviour.ObservableOutcome | None) -> str:
 def identity_must_instruction(
     specs: Sequence[BehaviourSpec],
     *,
-    fn_names: Collection[str],
+    fn_names: Collection[str] = (),
+    units: Sequence[IdentityMustInput] = (),
     cap: int = IDENTITY_MUST_CAP,
 ) -> str:
     """The identity Then as a fill-prompt instruction, via `_fmt_outcome`.
 
-    Empty when no IDENTITY spec names one of `fn_names`. This is the wrapping
-    MUST t1.5 already renders; fill prompts never called it. Does not dump
-    `given`/`when` as usage examples — that is `select_usage_examples`, and
-    on the live suite it spends the cap on doctest OTHER with
-    `unimplemented!()`.
+    Empty when no IDENTITY spec names an admitted unit. `units` is the
+    aimed path (signature + container at stub time); `fn_names` without
+    `units` is the pre-aiming match. Does not dump `given`/`when` as usage
+    examples — that is `select_usage_examples`, and on the live suite it
+    spends the cap on doctest OTHER with `unimplemented!()`.
     """
-    picked = select_identity_must(specs, fn_names=fn_names, cap=cap)
+    picked = select_identity_must(
+        specs, fn_names=fn_names, units=units, cap=cap)
     if not picked:
         return ""
     thens = [_fmt_outcome(s.then) for s in picked]

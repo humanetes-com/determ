@@ -70,6 +70,9 @@ class GenerateFixDeps:
     # returns None when it has nothing to do, so the strategies below are
     # unchanged for every error it does not own.
     structural_repair: Callable[[], FixReport | None] | None = None
+    # Identity Then for the compiles-but-wrong path. Empty (the default) leaves
+    # `build_behavior_fix_prompt` byte-identical to a call that never named it.
+    behaviour_specs: tuple[Any, ...] = ()
 
 
 class CompileFixStrategy(Protocol):
@@ -228,7 +231,9 @@ class PerImplFix:
             tdd, kind=kind, behavior_srcs=behavior_srcs, session=self.session,
             model=d.unit.model, splicer=d.unit.splicer, log=d.unit.log,
             thinking_directive=d.unit.thinking_directive, err_cap=d.unit.err_cap,
-            src_snip_cap=d.src_snip_cap, output=output)
+            src_snip_cap=d.src_snip_cap, output=output,
+            behaviour_specs=d.behaviour_specs,
+            fn_records=d.enumerate_fns() or [])
         err = _err_preview(output, d.unit.err_cap)
         kind_tag = "tdd_stub" if kind == "tdd-stub" else "behavior"
         return FixReport.changed(

@@ -13,6 +13,7 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     OutcomeKind,
     StaticAssertKind,
+    union_cluster_suites,
 )
 
 
@@ -92,3 +93,49 @@ def test_suite_filters_positive_oracle_specs_and_roundtrips():
 
 def test_verdict_enum_present():
     assert {BehaviourVerdict.HOLD, BehaviourVerdict.MISMATCH}
+
+
+def test_union_cluster_suites_keeps_divergent_thens_regardless_of_glob_order():
+    """First-wins on behaviour_id would take nightly's Then: sorted glob
+    is `_behaviours_nightly.json` then `_behaviours_stable.json`. A shared
+    id whose Then differs is two observables — both stay. Same Then is a
+    duplicate. Negative control is first-wins-on-id on the same pair."""
+    nightly = BehaviourSuite("nightly", (
+        BehaviourSpec(
+            "id1", "", "err.is::<&str>()",
+            ObservableOutcome.type_identity("&str", True),
+            subkind=BehaviourSubKind.OUTCOME),
+    ))
+    stable = BehaviourSuite("stable", (
+        BehaviourSpec(
+            "id1", "", "err.is::<String>()",
+            ObservableOutcome.type_identity("String", True),
+            subkind=BehaviourSubKind.OUTCOME),
+    ))
+
+    def _first_wins_on_id(suites):
+        seen: set[str] = set()
+        out = []
+        for suite in suites:
+            for spec in suite.specs:
+                if spec.behaviour_id in seen:
+                    continue
+                seen.add(spec.behaviour_id)
+                out.append(spec)
+        return out
+
+    night_first = (nightly, stable)
+    assert [s.then.value for s in _first_wins_on_id(night_first)
+            if s.then is not None] == ["&str"]
+    assert {s.then.value for s in union_cluster_suites(night_first)
+            if s.then is not None} == {"&str", "String"}
+    assert {s.then.value for s in union_cluster_suites((stable, nightly))
+            if s.then is not None} == {"&str", "String"}
+
+    dup = BehaviourSuite("stable", (
+        BehaviourSpec(
+            "id1", "", "err.is::<&str>()",
+            ObservableOutcome.type_identity("&str", True),
+            subkind=BehaviourSubKind.OUTCOME),
+    ))
+    assert len(union_cluster_suites((nightly, dup))) == 1

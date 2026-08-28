@@ -55,6 +55,7 @@ from pipeline_core.domain.attempt_loss import (
 )
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
@@ -591,9 +592,14 @@ def fill_impl_blocks(
     # convicted by test; the compile gate and the regression ratchet still run.
     _frontier_tests = tdd_frontier_tests or FailureFrontier.of_dispatch({})
 
-    def _identity_must(*names: str) -> str:
-        """Identity Then for these units, or "" when the suite names none."""
-        return identity_must_instruction(behaviour_specs, fn_names=names)
+    def _identity_must(*items: IdentityMustInput) -> str:
+        """Identity Then for these units, or "" when the suite names none.
+
+        Items are :class:`IdentityMustUnit` or :class:`FnRecord`.
+        Names-only is the un-aimed path and is not used here —
+        Display::fmt would get a MUST it cannot satisfy.
+        """
+        return identity_must_instruction(behaviour_specs, units=items)
 
     def _convicting_for_block(b: ImplBlock) -> frozenset[str]:
         """Tests with DIRECT evidence at one of this block's members — the only
@@ -1053,6 +1059,27 @@ def fill_impl_blocks(
         # attempts below see is the same snapshot (a failed attempt reverts),
         # and the extractor run is not free.
         _all_fn_records = _enumerate_fns_via_extractor(target_src_dir) or []
+
+        def _unit_for(name: str, container: str = "") -> IdentityMustUnit:
+            """Stub-time (name, container, sig) for a writable name of this
+            file. Installable/bypass records carry no signature; the
+            extractor row does, and aiming reads the return type."""
+            hit: dict[str, Any] | None = None
+            for r in _all_fn_records:
+                if r.get("file") != file_rel or r.get("fn_name") != name:
+                    continue
+                rec_c = str(r.get("container") or "")
+                if not container or rec_c == container:
+                    hit = r
+                    break
+                if hit is None:
+                    hit = r
+            if hit is None:
+                return IdentityMustUnit(name=name, container=container)
+            return IdentityMustUnit(
+                name=name,
+                container=str(hit.get("container") or container),
+                sig=str(hit.get("sig_text") or ""))
         # Whether an ESCALATED member of each block WRAPS — constructs a
         # crate tuple struct inside another call's argument list
         # (`wraps_crate_tuple_struct`) — read off the extractor's body of that
@@ -1134,8 +1161,8 @@ def fill_impl_blocks(
             installable=tuple(i.fn_name for i in _installable),
             bypass=_free_bypass, pins=_union_pins,
             identity_must=_identity_must(
-                *(i.fn_name for i in _installable),
-                *(x.fn_name for x in _free_bypass)))]
+                *(_unit_for(i.fn_name) for i in _installable),
+                *(_unit_for(x.fn_name, x.container) for x in _free_bypass)))]
             if _installable or _free_bypass else [])
         # The evidence section's entry for them: the relation, stated per fn,
         # so the model can see WHICH table field each one answers to. The
@@ -1249,16 +1276,17 @@ def fill_impl_blocks(
             pins=_block_pins[_impl_block_id(b.file, b.container)],
             wraps_pinned_type=_block_wraps[_impl_block_id(b.file, b.container)],
             identity_must=_identity_must(
-                *(m.fn_name for m in b.stub_members),
-                *(m.fn_name for m in b.refill_members),
-                *(x.fn_name for x in _bypass_for(b.container))))
+                *b.stub_members, *b.refill_members,
+                *(_unit_for(x.fn_name, x.container)
+                  for x in _bypass_for(b.container))))
             for b in fblocks]
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
         _extra_plans = [BlockFillPlan(
             _c, (), tuple(x.fn_name for x in _entries),
             bypass=tuple(_entries), pins=_pins_for_bypass(_entries),
-            identity_must=_identity_must(*(x.fn_name for x in _entries)))
+            identity_must=_identity_must(
+                *(_unit_for(x.fn_name, x.container) for x in _entries)))
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
         # The grade label naming what this prompt's write list actually
@@ -2297,8 +2325,7 @@ def fill_impl_blocks(
                     inferred_refill_names=_inferred_refill,
                     sibling_rejected=_steer.shared,
                     identity_must=_identity_must(
-                        *(m.fn_name for m in (*block.stub_members,
-                                              *block.refill_members)))),
+                        *block.stub_members, *block.refill_members)),
                 fr_path=fr_path,
             )
             try:
@@ -2904,7 +2931,9 @@ def fill_impl_blocks(
                     file_rel=block.file, container=block.container,
                     stub_names=_max_target_names,
                     file_text=_cur_text, tests_block=_tests_text,
-                    errs=last_error_excerpt, notes=notes_section)
+                    errs=last_error_excerpt, notes=notes_section,
+                    identity_must=_identity_must(
+                        *block.stub_members, *block.refill_members))
                 if len(_max_prompt) > _max_cap:
                     _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
                          f"skipped ({len(_max_prompt)} chars > cap {_max_cap}).")

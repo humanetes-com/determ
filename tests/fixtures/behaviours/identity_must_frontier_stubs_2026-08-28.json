@@ -1,0 +1,512 @@
+[
+  {
+    "file": "src/backtrace.rs",
+    "fn_name": "_assert_send_sync",
+    "container": "",
+    "sig_text": "fn _assert_send_sync()"
+  },
+  {
+    "file": "src/context.rs",
+    "fn_name": "ext_context",
+    "container": "impl StdError for E",
+    "sig_text": "fn ext_context<C>(self, context: C) -> Error\n        where\n            C: Display + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/context.rs",
+    "fn_name": "ext_context",
+    "container": "impl StdError for Error",
+    "sig_text": "fn ext_context<C>(self, context: C) -> Error\n        where\n            C: Display + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/context.rs",
+    "fn_name": "provide",
+    "container": "impl StdError for ContextError < C , E >",
+    "sig_text": "fn provide<'a>(&'a self, request: &mut Request<'a>)"
+  },
+  {
+    "file": "src/context.rs",
+    "fn_name": "source",
+    "container": "impl StdError for ContextError < C , Error >",
+    "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>"
+  },
+  {
+    "file": "src/context.rs",
+    "fn_name": "provide",
+    "container": "impl StdError for ContextError < C , Error >",
+    "sig_text": "fn provide<'a>(&'a self, request: &mut Request<'a>)"
+  },
+  {
+    "file": "src/context.rs",
+    "fn_name": "fmt",
+    "container": "impl Debug for Quoted < C >",
+    "sig_text": "fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/ensure.rs",
+    "fn_name": "new",
+    "container": "impl Buf",
+    "sig_text": "fn new() -> Self"
+  },
+  {
+    "file": "src/ensure.rs",
+    "fn_name": "as_str",
+    "container": "impl Buf",
+    "sig_text": "fn as_str(&self) -> &str"
+  },
+  {
+    "file": "src/ensure.rs",
+    "fn_name": "write_str",
+    "container": "impl Write for Buf",
+    "sig_text": "fn write_str(&mut self, s: &str) -> fmt::Result"
+  },
+  {
+    "file": "src/ensure.rs",
+    "fn_name": "render",
+    "container": "",
+    "sig_text": "fn render(msg: &'static str, lhs: &dyn Debug, rhs: &dyn Debug) -> Error"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "construct_from_std",
+    "container": "impl Error",
+    "sig_text": "fn construct_from_std<E>(error: E, backtrace: Option<Backtrace>) -> Self\n    where\n        E: StdError + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "construct_from_adhoc",
+    "container": "impl Error",
+    "sig_text": "fn construct_from_adhoc<M>(\n        message: M,\n        backtrace: Option<Backtrace>,\n    ) -> Self\n    where\n        M: Display + Debug + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "construct_from_display",
+    "container": "impl Error",
+    "sig_text": "fn construct_from_display<M>(\n        message: M,\n        backtrace: Option<Backtrace>,\n    ) -> Self\n    where\n        M: Display + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "construct_from_context",
+    "container": "impl Error",
+    "sig_text": "fn construct_from_context<C, E>(\n        context: C,\n        error: E,\n        backtrace: Option<Backtrace>,\n    ) -> Self\n    where\n        C: Display + Send + Sync + 'static,\n        E: StdError + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "construct_from_boxed",
+    "container": "impl Error",
+    "sig_text": "fn construct_from_boxed(\n        error: Box<dyn StdError + Send + Sync>,\n        backtrace: Option<Backtrace>,\n    ) -> Self"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "construct",
+    "container": "impl Error",
+    "sig_text": "fn construct<E>(\n        error: E,\n        vtable: &'static ErrorVTable,\n        backtrace: Option<Backtrace>,\n    ) -> Self\n    where\n        E: StdError + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "context",
+    "container": "impl Error",
+    "sig_text": "fn context<C>(self, context: C) -> Self\n    where\n        C: Display + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "downcast",
+    "container": "impl Error",
+    "sig_text": "fn downcast<E>(mut self) -> Result<E, Self>\n    where\n        E: Display + Debug + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "downcast_mut",
+    "container": "impl Error",
+    "sig_text": "fn downcast_mut<E>(&mut self) -> Option<&mut E>\n    where\n        E: Display + Debug + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "into_boxed_dyn_error",
+    "container": "impl Error",
+    "sig_text": "fn into_boxed_dyn_error(self) -> Box<dyn StdError + Send + Sync + 'static>"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "reallocate_into_boxed_dyn_error_without_backtrace",
+    "container": "impl Error",
+    "sig_text": "fn reallocate_into_boxed_dyn_error_without_backtrace(\n        self,\n    ) -> Box<dyn StdError + Send + Sync + 'static>"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "provide",
+    "container": "impl Error",
+    "sig_text": "fn provide<'a>(&'a self, request: &mut Request<'a>)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "thiserror_provide",
+    "container": "impl Error",
+    "sig_text": "fn thiserror_provide<'a>(&'a self, request: &mut Request<'a>)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "from",
+    "container": "impl From < E > for Error",
+    "sig_text": "fn from(error: E) -> Self"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "deref",
+    "container": "impl Deref for Error",
+    "sig_text": "fn deref(&self) -> &Self::Target"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "deref_mut",
+    "container": "impl DerefMut for Error",
+    "sig_text": "fn deref_mut(&mut self) -> &mut Self::Target"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "drop",
+    "container": "impl Drop for Error",
+    "sig_text": "fn drop(&mut self)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "object_drop",
+    "container": "",
+    "sig_text": "fn object_drop<E>(e: Own<ErrorImpl>)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "object_drop_front",
+    "container": "",
+    "sig_text": "fn object_drop_front<E>(e: Own<ErrorImpl>, target: TypeId)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "object_ref",
+    "container": "",
+    "sig_text": "fn object_ref<E>(e: Ref<ErrorImpl>) -> Ref<dyn StdError + Send + Sync + 'static>\nwhere\n    E: StdError + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "object_boxed",
+    "container": "",
+    "sig_text": "fn object_boxed<E>(e: Own<ErrorImpl>) -> Box<dyn StdError + Send + Sync + 'static>\nwhere\n    E: StdError + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "object_reallocate_boxed",
+    "container": "",
+    "sig_text": "fn object_reallocate_boxed<E>(\n    e: Own<ErrorImpl>,\n) -> Box<dyn StdError + Send + Sync + 'static>\nwhere\n    E: StdError + Send + Sync + 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "object_downcast",
+    "container": "",
+    "sig_text": "fn object_downcast<E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>\nwhere\n    E: 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "no_backtrace",
+    "container": "",
+    "sig_text": "fn no_backtrace(e: Ref<ErrorImpl>) -> Option<&Backtrace>"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "context_downcast",
+    "container": "",
+    "sig_text": "fn context_downcast<C, E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>\nwhere\n    C: 'static,\n    E: 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "context_drop_rest",
+    "container": "",
+    "sig_text": "fn context_drop_rest<C, E>(e: Own<ErrorImpl>, target: TypeId)\nwhere\n    C: 'static,\n    E: 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "context_chain_downcast",
+    "container": "",
+    "sig_text": "fn context_chain_downcast<C>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>\nwhere\n    C: 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "context_chain_drop_rest",
+    "container": "",
+    "sig_text": "fn context_chain_drop_rest<C>(e: Own<ErrorImpl>, target: TypeId)\nwhere\n    C: 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "context_backtrace",
+    "container": "",
+    "sig_text": "fn context_backtrace<C>(e: Ref<ErrorImpl>) -> Option<&Backtrace>\nwhere\n    C: 'static,"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "vtable",
+    "container": "",
+    "sig_text": "fn vtable(p: NonNull<ErrorImpl>) -> &'static ErrorVTable"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "erase",
+    "container": "impl ErrorImpl < E >",
+    "sig_text": "fn erase(&self) -> Ref<ErrorImpl>"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "provide",
+    "container": "impl ErrorImpl",
+    "sig_text": "fn provide<'a>(this: Ref<'a, Self>, request: &mut Request<'a>)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "source",
+    "container": "impl StdError for ErrorImpl < E >",
+    "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "provide",
+    "container": "impl StdError for ErrorImpl < E >",
+    "sig_text": "fn provide<'a>(&'a self, request: &mut Request<'a>)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "from",
+    "container": "impl From < Error > for Box < dyn StdError + Send + Sync + 'static >",
+    "sig_text": "fn from(error: Error) -> Self"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "from",
+    "container": "impl From < Error > for Box < dyn StdError + Send + 'static >",
+    "sig_text": "fn from(error: Error) -> Self"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "from",
+    "container": "impl From < Error > for Box < dyn StdError + 'static >",
+    "sig_text": "fn from(error: Error) -> Self"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "as_ref",
+    "container": "impl AsRef < dyn StdError + Send + Sync > for Error",
+    "sig_text": "fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static)"
+  },
+  {
+    "file": "src/error.rs",
+    "fn_name": "as_ref",
+    "container": "impl AsRef < dyn StdError > for Error",
+    "sig_text": "fn as_ref(&self) -> &(dyn StdError + 'static)"
+  },
+  {
+    "file": "src/fmt.rs",
+    "fn_name": "display",
+    "container": "impl ErrorImpl",
+    "sig_text": "fn display(\n        this: Ref<Self>,\n        f: &mut fmt::Formatter,\n    ) -> fmt::Result"
+  },
+  {
+    "file": "src/fmt.rs",
+    "fn_name": "debug",
+    "container": "impl ErrorImpl",
+    "sig_text": "fn debug(this: Ref<Self>, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/fmt.rs",
+    "fn_name": "write_str",
+    "container": "impl Write for Indented < '_ , T >",
+    "sig_text": "fn write_str(&mut self, s: &str) -> fmt::Result"
+  },
+  {
+    "file": "src/kind.rs",
+    "fn_name": "anyhow_kind",
+    "container": "trait TraitKind",
+    "sig_text": "fn anyhow_kind(&self) -> Trait"
+  },
+  {
+    "file": "src/kind.rs",
+    "fn_name": "anyhow_kind",
+    "container": "trait BoxedKind",
+    "sig_text": "fn anyhow_kind(&self) -> Boxed"
+  },
+  {
+    "file": "src/lib.rs",
+    "fn_name": "source",
+    "container": "trait StdError",
+    "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>"
+  },
+  {
+    "file": "src/lib.rs",
+    "fn_name": "not",
+    "container": "impl Bool for bool",
+    "sig_text": "fn not(self) -> bool"
+  },
+  {
+    "file": "src/lib.rs",
+    "fn_name": "not",
+    "container": "impl Bool for & bool",
+    "sig_text": "fn not(self) -> bool"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "clone",
+    "container": "impl Clone for Own < T >",
+    "sig_text": "fn clone(&self) -> Self"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "new",
+    "container": "impl Own < T >",
+    "sig_text": "fn new(ptr: Box<T>) -> Self"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "cast",
+    "container": "impl Own < T >",
+    "sig_text": "fn cast<U: CastTo>(self) -> Own<U::Target>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "boxed",
+    "container": "impl Own < T >",
+    "sig_text": "fn boxed(self) -> Box<T>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "by_ref",
+    "container": "impl Own < T >",
+    "sig_text": "fn by_ref(&self) -> Ref<T>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "by_mut",
+    "container": "impl Own < T >",
+    "sig_text": "fn by_mut(&mut self) -> Mut<T>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "clone",
+    "container": "impl Clone for Ref < 'a , T >",
+    "sig_text": "fn clone(&self) -> Self"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "new",
+    "container": "impl Ref < 'a , T >",
+    "sig_text": "fn new(ptr: &'a T) -> Self"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "from_raw",
+    "container": "impl Ref < 'a , T >",
+    "sig_text": "fn from_raw(ptr: NonNull<T>) -> Self"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "cast",
+    "container": "impl Ref < 'a , T >",
+    "sig_text": "fn cast<U: CastTo>(self) -> Ref<'a, U::Target>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "by_mut",
+    "container": "impl Ref < 'a , T >",
+    "sig_text": "fn by_mut(self) -> Mut<'a, T>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "as_ptr",
+    "container": "impl Ref < 'a , T >",
+    "sig_text": "fn as_ptr(self) -> *const T"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "deref",
+    "container": "impl Ref < 'a , T >",
+    "sig_text": "fn deref(self) -> &'a T"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "clone",
+    "container": "impl Clone for Mut < 'a , T >",
+    "sig_text": "fn clone(&self) -> Self"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "cast",
+    "container": "impl Mut < 'a , T >",
+    "sig_text": "fn cast<U: CastTo>(self) -> Mut<'a, U::Target>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "by_ref",
+    "container": "impl Mut < 'a , T >",
+    "sig_text": "fn by_ref(self) -> Ref<'a, T>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "extend",
+    "container": "impl Mut < 'a , T >",
+    "sig_text": "fn extend<'b>(self) -> Mut<'b, T>"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "deref_mut",
+    "container": "impl Mut < 'a , T >",
+    "sig_text": "fn deref_mut(self) -> &'a mut T"
+  },
+  {
+    "file": "src/ptr.rs",
+    "fn_name": "read",
+    "container": "impl Mut < 'a , T >",
+    "sig_text": "fn read(self) -> T"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "fmt",
+    "container": "impl Debug for MessageError < M >",
+    "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "fmt",
+    "container": "impl Display for MessageError < M >",
+    "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "fmt",
+    "container": "impl Debug for DisplayError < M >",
+    "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "fmt",
+    "container": "impl Display for DisplayError < M >",
+    "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "fmt",
+    "container": "impl Debug for BoxedError",
+    "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "fmt",
+    "container": "impl Display for BoxedError",
+    "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "source",
+    "container": "impl StdError for BoxedError",
+    "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>"
+  },
+  {
+    "file": "src/wrapper.rs",
+    "fn_name": "provide",
+    "container": "impl StdError for BoxedError",
+    "sig_text": "fn provide<'a>(&'a self, request: &mut Request<'a>)"
+  }
+]

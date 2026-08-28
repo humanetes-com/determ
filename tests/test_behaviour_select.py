@@ -8,6 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from pipeline_core.application.author_layout import _dropped_in_class
 from pipeline_core.domain.behaviour import (
     BehaviourClass,
@@ -24,14 +26,17 @@ from pipeline_core.domain.behaviour_select import (
     COMPONENT_BEHAVIOUR_CAP,
     IDENTITY_CLASS,
     MUST_CLASS_ORDER,
+    IdentityMustUnit,
     behaviour_class_name,
     capture_owned,
     drop_capture_owned,
+    identity_must_admits,
     is_relevant,
     select_component_behaviours,
     select_identity_must,
     select_usage_examples,
 )
+from pipeline_core.domain.models import FnRecord
 
 
 def _spec(bid, when, *, exercises=frozenset(), fence=FenceDirective.RUN):
@@ -462,4 +467,146 @@ def test_identity_must_ranks_non_flood_hits_ahead_of_the_construct_dump() -> Non
         (*dump, pin), fn_names=("construct", "msg"))
     assert picked[0].behaviour_id == "msg-pin"
     assert picked[0].then is not None and picked[0].then.value == "&str"
+
+
+def test_identity_must_admits_is_stub_time_role_not_bare_self() -> None:
+    """Formatting and pointer `new` do not decide TypeId; constructors of
+    Error and downcast slots do. TypeId on a unit-return is the drop-rest
+    vtable sibling, not a downcast."""
+    assert not identity_must_admits(
+        "fmt", "impl Display for MessageError < M >",
+        "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result")
+    assert not identity_must_admits(
+        "new", "impl Own < T >", "fn new(ptr: NonNull<T>) -> Self")
+    assert not identity_must_admits(
+        "new", "impl Buf", "fn new() -> Self")
+    assert identity_must_admits(
+        "construct_from_display", "impl Error",
+        "fn construct_from_display<M>(error: M, backtrace: Backtrace) -> Self")
+    assert identity_must_admits(
+        "from", "impl From < E > for Error", "fn from(error: E) -> Self")
+    assert not identity_must_admits(
+        "from",
+        "impl From < Error > for Box < dyn StdError + Send + Sync + 'static >",
+        "fn from(error: Error) -> Self")
+    assert not identity_must_admits(
+        "object_drop_front", "",
+        "fn object_drop_front<E>(e: Own<ErrorImpl>, target: TypeId)")
+    assert identity_must_admits(
+        "object_downcast", "",
+        "fn object_downcast<E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>")
+
+
+_FRONTIER_STUBS = (
+    Path(__file__).resolve().parent / "fixtures" / "behaviours"
+    / "identity_must_frontier_stubs_2026-08-28.json"
+)
+
+
+def test_identity_must_aiming_on_recorded_frontier_drops_wrapper_fmt() -> None:
+    """Plan sentence, computed on the frozen 85-stub frontier and the
+    recorded 230-spec suite: names-only still hands a MUST to 53/85 units
+    including all six wrapper.rs fmt bodies (the negative control); aimed
+    is 16/85 with those six empty; every construct_from_* keeps a MUST
+    (adhoc/display Then `&str`, including solo construct_from_display via
+    sibling leaves); Own/Buf/Ref `new` are not admitted. A hand-made list
+    of constructor names would pass by construction — the fixture is the
+    live stub records.
+    """
+    from pipeline_core.prompts.layout_authoring import identity_must_instruction
+
+    stubs = json.loads(_FRONTIER_STUBS.read_text(encoding="utf-8"))
+    assert len(stubs) == 85
+    suite = BehaviourSuite.from_dict(
+        json.loads(_RECORDED_STABLE.read_text(encoding="utf-8")))
+
+    names_only = [
+        s for s in stubs
+        if identity_must_instruction(suite.specs, fn_names=(s["fn_name"],))]
+    assert len(names_only) == 53
+    wrapper_fmt = [
+        s for s in stubs
+        if s["file"].endswith("wrapper.rs") and s["fn_name"] == "fmt"]
+    assert len(wrapper_fmt) == 6
+    assert sum(
+        1 for s in names_only
+        if s["file"].endswith("wrapper.rs") and s["fn_name"] == "fmt") == 6
+
+    def _unit(s: dict) -> IdentityMustUnit:
+        return IdentityMustUnit(s["fn_name"], s["container"], s["sig_text"])
+
+    aimed = [
+        s for s in stubs
+        if identity_must_instruction(suite.specs, units=(_unit(s),))]
+    assert len(aimed) == 16
+    assert not any(
+        s["file"].endswith("wrapper.rs") and s["fn_name"] == "fmt"
+        for s in aimed)
+    assert not any("ptr.rs" in s["file"] for s in aimed)
+
+    for s in wrapper_fmt:
+        assert not identity_must_admits(s["fn_name"], s["container"], s["sig_text"])
+        assert identity_must_instruction(suite.specs, units=(_unit(s),)) == ""
+
+    construct_from = [
+        s for s in stubs if s["fn_name"].startswith("construct_from_")]
+    assert {s["fn_name"] for s in construct_from} == {
+        "construct_from_adhoc", "construct_from_std", "construct_from_display",
+        "construct_from_boxed", "construct_from_context"}
+    for s in construct_from:
+        text = identity_must_instruction(suite.specs, units=(_unit(s),))
+        assert text.startswith("MUST:"), s["fn_name"]
+        assert "never a wrapper's" in text
+    # The wrap the 2026-08-26 fills missed is `&str`. construct_from_context
+    # / construct_from_boxed have their own identity Thens (HighLevel /
+    # Box<dyn>); the plan's sentence is that they KEEP an instruction, not
+    # that every constructor's solo Then is `&str`.
+    for s in construct_from:
+        if s["fn_name"] not in (
+                "construct_from_adhoc", "construct_from_display"):
+            continue
+        text = identity_must_instruction(suite.specs, units=(_unit(s),))
+        assert "`is::<&str>()`" in text, s["fn_name"]
+
+    display = next(s for s in construct_from
+                   if s["fn_name"] == "construct_from_display")
+    assert select_identity_must(
+        suite.specs, fn_names=("construct_from_display",)) == []
+    picked = select_identity_must(suite.specs, units=(_unit(display),))
+    assert [s.then.value for s in picked if s.then is not None] == [
+        "&str", "String", "io::Error"]
+
+    error_ctors = [
+        s for s in stubs
+        if s["container"] == "impl Error"
+        and identity_must_admits(s["fn_name"], s["container"], s["sig_text"])]
+    block = identity_must_instruction(
+        suite.specs, units=tuple(_unit(s) for s in error_ctors))
+    assert "`is::<&str>()`" in block
+    assert "never a wrapper's" in block
+
+    for s in stubs:
+        if s["fn_name"] != "new":
+            continue
+        assert not identity_must_admits(
+            s["fn_name"], s["container"], s["sig_text"]), s["container"]
+
+
+def test_select_identity_must_units_accept_fn_record_and_reject_a_bare_name() -> None:
+    """Production passes FnRecord; a bare str used to coerce to a name-only
+    unit and fail closed silently. The argument is IdentityMustInput now."""
+    from pipeline_core.prompts.layout_authoring import identity_must_instruction
+
+    suite = BehaviourSuite.from_dict(
+        json.loads(_RECORDED_STABLE.read_text(encoding="utf-8")))
+    rec = FnRecord(
+        fn_name="construct_from_adhoc",
+        container="impl Error",
+        sig_text="fn construct_from_adhoc<M>(error: M) -> Self")
+    text = identity_must_instruction(suite.specs, units=(rec,))
+    assert text.startswith("MUST:")
+    assert "`is::<&str>()`" in text
+    with pytest.raises(TypeError, match="IdentityMustUnit or FnRecord"):
+        select_identity_must(suite.specs, units=("fmt",))  # type: ignore[arg-type]
+
 

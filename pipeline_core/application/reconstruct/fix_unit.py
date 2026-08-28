@@ -21,7 +21,7 @@ ISP role ports (`ports.fix_engine`) — the unit is constructible with fakes.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -31,6 +31,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     ask_with_pulls,
 )
 from pipeline_core.application.refine_loop import run_callback_loop
+from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.fix_report import FixReport, UnitRunOutcome
 from pipeline_core.domain.fix_session import FixSession
@@ -53,6 +54,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_impl_fix_prompt,
     build_tdd_stub_fill_prompt,
 )
+from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
 
 # The per-fn body-fix sig_rule (E0277 unsized-T relaxation) and the per-impl
@@ -387,18 +389,47 @@ def make_fix_unit(session: FixSession, deps: FixUnitDeps,
     return FnFixUnit(session, deps, target)
 
 
+def _container_for(fn: str, sig_text: str, recs: Sequence[Any]) -> str:
+    """Container of the definition `locate_fn` showed — first sig match, else
+    first same-name row. Empty when the extractor has no row (tests)."""
+    fallback = ""
+    for r in recs:
+        if isinstance(r, dict):
+            name = str(r.get("fn_name") or "")
+            cont = str(r.get("container") or "")
+            sig = str(r.get("sig_text") or "")
+        else:
+            name = str(getattr(r, "fn_name", "") or "")
+            cont = str(getattr(r, "container", "") or "")
+            sig = str(getattr(r, "sig_text", "") or "")
+        if name != fn:
+            continue
+        if sig == sig_text:
+            return cont
+        if not fallback:
+            fallback = cont
+    return fallback
+
+
 def one_shot_fill(
     targets: Frontier, *, kind: str,
     behavior_srcs: dict[str, tuple[str, str]],
     session: FixSession, model: FixModel, splicer: FixSplicer,
     log: Callable[[str], None], thinking_directive: str,
     err_cap: int, src_snip_cap: int, output: str,
+    behaviour_specs: Sequence[Any] = (),
+    fn_records: Sequence[Any] = (),
 ) -> list[str]:
     """Fill fns that COMPILE but fail tests — one body per fn, no inner compile
     loop (the iterative :class:`FixUnit` is wrong here: a stub has no compile
     error so its loop would exit immediately). `kind` is ``"behavior"`` (the
     failing tests' sources guide the body) or ``"tdd-stub"`` (an unimplemented
-    stub the tests reach). The whole-file rewrite stays the LAST resort."""
+    stub the tests reach). The whole-file rewrite stays the LAST resort.
+
+    `behaviour_specs` / `fn_records` feed the identity instruction on the
+    compiles-but-wrong path. Empty (the defaults) leave that prompt
+    byte-identical to a call that never named them.
+    """
     changed: list[str] = []
     for (rel, fn) in sorted(targets):
         if not session.is_writable(rel):
@@ -419,10 +450,14 @@ def one_shot_fill(
                 trel, tsrc = behavior_srcs.get(tn, ("", ""))
                 if tsrc and len(tests_block) + len(tsrc) <= src_snip_cap:
                     tests_block += f"// {trel} :: {tn}\n{tsrc}\n\n"
+            must = identity_must_instruction(
+                behaviour_specs,
+                units=(IdentityMustUnit(
+                    fn, _container_for(fn, sig_text, fn_records), sig_text),))
             prompt = build_behavior_fix_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,
                 sig_text=sig_text, cur_body=cur_body, tests_block=tests_block,
-                errs=errs)
+                errs=errs, identity_must=must)
         else:
             prompt = build_tdd_stub_fill_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,

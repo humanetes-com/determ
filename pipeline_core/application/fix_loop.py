@@ -62,6 +62,7 @@ from pipeline_core.application.reconstruct.write_gate import (
     WriteGateDeps,
     guarded_write,
 )
+from pipeline_core.domain.behaviour import union_cluster_suites
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.refine import FixProgress, FloorStall
@@ -284,6 +285,9 @@ class GenerateFixLoopDeps:
     # 'current:' line truthful during the loop's long-running iterations.
     set_current: Any = None
     check_stop: Callable[[str], None] = _no_stop
+    # Cluster behaviour suites — identity Then on the "compiles but wrong"
+    # path. Default None: tests that construct this record stay byte-identical.
+    load_behaviour_suite: Any = None
 
 
 def generate_fix_loop(
@@ -616,6 +620,23 @@ def generate_fix_loop(
         pull_sources=_pull_sources, emit=deps.emit,
         max_pulls=int(os.getenv("CONTEXT_PULLS_MAX", "2")))
 
+    _behaviour_specs: tuple[Any, ...] = ()
+    _load_suite = deps.load_behaviour_suite
+    if _load_suite is not None:
+        _sk = project_dir / ".skeleton"
+        if _sk.is_dir():
+            # Lexical glob puts nightly before stable. First-wins on
+            # behaviour_id alone would silently take nightly's Then; the
+            # helper keeps a shared id whose Then differs. See
+            # union_cluster_suites.
+            _behaviour_specs = union_cluster_suites([
+                _load_suite(
+                    project_dir,
+                    _path.name[len("_behaviours_"):-len(".json")],
+                )
+                for _path in sorted(_sk.glob("_behaviours_*.json"))
+            ])
+
     _gen_fix_deps = GenerateFixDeps(
         unit=_fix_unit_deps,
         frontiers=_frontiers,
@@ -630,7 +651,8 @@ def generate_fix_loop(
                 probe=lambda: deps.run_cargo_check_diag(
                     _check_only_cmd, project_dir, env, timeout),
                 enumerate_fns=lambda d: deps.enumerate_fns_via_extractor(d),
-                log=deps.log, emit=deps.emit)))
+                log=deps.log, emit=deps.emit)),
+        behaviour_specs=_behaviour_specs)
 
     _set_cur = deps.set_current
     _on_iter = None

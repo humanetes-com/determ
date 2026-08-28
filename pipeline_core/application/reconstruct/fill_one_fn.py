@@ -45,7 +45,7 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     make_request_answerer,
     reconstruction_file_reader,
 )
-from pipeline_core.domain.behaviour_select import select_usage_examples
+from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
@@ -547,7 +547,9 @@ class FillOneFn:
                             ctx.behaviour_specs, fn_name=fn_name,
                             container=container, char_budget=1200),
                         identity_must=identity_must_instruction(
-                            ctx.behaviour_specs, fn_names=(fn_name,))),
+                            ctx.behaviour_specs,
+                            units=(IdentityMustUnit(
+                                fn_name, container, sig_text),))),
                     fr_path=ctx.fr_path,
                 )
             else:
@@ -596,7 +598,9 @@ class FillOneFn:
                         blueprint=_fn_ctx.blueprint_section,
                         crash_evidence=_crash_evidence,
                         identity_must=identity_must_instruction(
-                            ctx.behaviour_specs, fn_names=(fn_name,))),
+                            ctx.behaviour_specs,
+                            units=(IdentityMustUnit(
+                                fn_name, container, sig_text),))),
                     # P3.1: open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.
