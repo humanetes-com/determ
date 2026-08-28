@@ -1,0 +1,284 @@
+{
+  "run_id": "346231-54bc1489",
+  "cluster": "stable",
+  "source": "logs/events.jsonl event=phase_c.dispatch.deferred (iter 1) and phase_c.fn.fill.start first occurrence; pre-fix grouping opened a new barriered level at every distinct blocker count",
+  "deferred": [
+    {
+      "iter": 1,
+      "ts": "2026-08-28T15:17:10.610+00:00",
+      "deferred": {
+        "src/context.rs::write_str": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/fmt.rs::write_str"
+        ],
+        "src/chain.rs::new": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/ensure.rs::new": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/error.rs::new": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/fmt.rs::write_str"
+        ],
+        "src/kind.rs::new": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/ptr.rs::new": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/error.rs::is": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/error.rs::error": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::as_ref",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable",
+          "src/fmt.rs::write_str"
+        ],
+        "src/context.rs::fmt": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/error.rs::fmt": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/nightly.rs::fmt": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/wrapper.rs::fmt": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/ptr.rs::boxed": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/error.rs::downcast_ref": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/fmt.rs::write_str"
+        ],
+        "src/error.rs::into_boxed_dyn_error": [
+          "src/error.rs::construct"
+        ],
+        "src/error.rs::chain": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/context.rs::with_context": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_display"
+        ],
+        "src/chain.rs::next": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context"
+        ],
+        "src/context.rs::context": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_display",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/error.rs::from": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::deref_mut",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/lib.rs::Ok": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/ptr.rs::read"
+        ],
+        "src/error.rs::error_mut": [
+          "src/error.rs::construct",
+          "src/error.rs::deref_mut",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/error.rs::msg": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/error.rs::context",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/error.rs::downcast": [
+          "src/error.rs::construct"
+        ],
+        "src/error.rs::downcast_mut": [
+          "src/error.rs::construct",
+          "src/error.rs::deref",
+          "src/error.rs::deref_mut",
+          "src/error.rs::vtable",
+          "src/ptr.rs::by_mut",
+          "src/ptr.rs::deref_mut"
+        ],
+        "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace": [
+          "src/error.rs::construct",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/error.rs::backtrace": [
+          "src/error.rs::construct",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed"
+        ],
+        "src/context.rs::source": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/error.rs::source": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/lib.rs::source": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/wrapper.rs::source": [
+          "src/error.rs::construct",
+          "src/error.rs::construct_from_boxed",
+          "src/error.rs::context",
+          "src/error.rs::object_reallocate_boxed",
+          "src/error.rs::vtable"
+        ],
+        "src/error.rs::from_boxed": [
+          "src/error.rs::construct_from_boxed"
+        ],
+        "src/fmt.rs::debug": [
+          "src/error.rs::construct",
+          "src/error.rs::context"
+        ],
+        "src/chain.rs::next_back": [
+          "src/error.rs::construct"
+        ],
+        "src/chain.rs::size_hint": [
+          "src/error.rs::construct"
+        ],
+        "src/chain.rs::len": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct",
+          "src/ptr.rs::read"
+        ],
+        "src/error.rs::drop": [
+          "src/error.rs::construct"
+        ],
+        "src/error.rs::root_cause": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct"
+        ],
+        "src/chain.rs::default": [
+          "src/ensure.rs::write_str",
+          "src/error.rs::construct"
+        ]
+      }
+    }
+  ],
+  "pre_fix_fill_start_first_occurrence": [
+    {
+      "ts": "2026-08-28T16:02:42.557+00:00",
+      "unit": "src/error.rs::construct",
+      "refill": false
+    },
+    {
+      "ts": "2026-08-28T16:47:12.968+00:00",
+      "unit": "src/error.rs::construct_from_boxed",
+      "refill": false
+    },
+    {
+      "ts": "2026-08-28T17:48:59.042+00:00",
+      "unit": "src/ensure.rs::write_str",
+      "refill": true
+    },
+    {
+      "ts": "2026-08-28T18:02:15.646+00:00",
+      "unit": "src/error.rs::context",
+      "refill": false
+    },
+    {
+      "ts": "2026-08-28T18:51:59.936+00:00",
+      "unit": "src/error.rs::vtable",
+      "refill": false
+    },
+    {
+      "ts": "2026-08-28T18:53:53.472+00:00",
+      "unit": "src/fmt.rs::write_str",
+      "refill": true
+    },
+    {
+      "ts": "2026-08-28T18:53:53.484+00:00",
+      "unit": "src/error.rs::object_reallocate_boxed",
+      "refill": false
+    }
+  ]
+}
