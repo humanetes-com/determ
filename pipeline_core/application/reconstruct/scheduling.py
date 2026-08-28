@@ -11,28 +11,48 @@ def group_priority_levels(
     stubs: list[Stub], leaf_name_counts: dict[str, int] | None,
     unit_ranks: dict[FnLocator, int] | None = None,
 ) -> list[list[tuple[int, Stub]]]:
-    """Group sorted `stubs` into contiguous equal-priority LEVELS.
+    """Group sorted `stubs` into barriered LEVELS for the per-fn worker pool.
 
-    Each level is a list of `(1-based index, stub)`. `stubs` is already sorted
-    descending by the same key this function groups on, so equal-priority stubs
-    are contiguous; a key change starts a new level. The dispatch loop runs
-    each level with a barrier between them.
+    Each level is a list of `(1-based index, stub)`. The dispatch loop runs
+    `min(parallelism, len(level))` workers and joins before the next level.
 
-    Default key is leaf-name ref-count (callees before callers, R11.3).
-    `unit_ranks` overrides that with a per-unit score — the blocker histogram
-    the TDD driver computed. Without the override the engine re-sorts
-    leaf-first after `take_batch`, which undoes constructor-first ranking:
-    run `155810-cbb3b9fc` iter 1 dispatched `fmt` first and
-    `construct_from_adhoc` last even though both were in the batch, because
-    `fmt` is a high-frequency name. Pure: no engine/closure state.
+    Two keys, two contracts.
+
+    Leaf-name ref-count (`unit_ranks is None`): callees before callers. Equal
+    counts share a level; a count change starts a new barrier. That is the
+    compile-order proxy (R11.3). An unsorted input shatters into singletons
+    — run `1159463-b1e352e5` iter 3 ran 5.0 h at mean concurrency 1.09
+    against PIPELINE_PARALLELISM=4 because the refill tail arrived in
+    source-scan order. `match_records_to_order` exists so that does not recur.
+
+    Blocker histogram (`unit_ranks` set): the TDD driver's per-unit score,
+    already applied by `rank_stubs_by_blocker_counts` before this call.
+    Those integers are "how many deferred consumers this unit holds", not a
+    compile-order proxy, and they almost never tie. Splitting on every
+    distinct count was the leaf-first rule applied to the wrong key: run
+    `346231-54bc1489` iter 1's 12-unit batch became 8 levels, the first
+    five singletons, and after file-first the per-fn phase ran at mean LLM
+    concurrency 0.99 for 3 h (`construct` 44 min, then `construct_from_boxed`
+    61 min, then `ensure.rs::write_str` 13 min in another file, then
+    `context` 49 min). One level: the engine's pool drains a ranked queue,
+    so the first `parallelism` starts are the highest-count units and a
+    free worker takes the next without waiting for the slowest peer.
+    Ranking still decides start ORDER; it does not decide who waits.
+
+    Without `unit_ranks` the engine re-sorts leaf-first after `take_batch`,
+    which undoes constructor-first ranking: run `155810-cbb3b9fc` iter 1
+    dispatched `fmt` first and `construct_from_adhoc` last even though both
+    were in the batch, because `fmt` is a high-frequency name. Pure: no
+    engine/closure state.
     """
+    if not stubs:
+        return []
+    if unit_ranks is not None:
+        return [[(i, r) for i, r in enumerate(stubs, 1)]]
     levels: list[list[tuple[int, Stub]]] = []
     prev_key: object = object()
     for i, r in enumerate(stubs, 1):
-        if unit_ranks is not None:
-            key = unit_ranks.get(r.key, 0)
-        else:
-            key = leaf_name_counts.get(r.fn_name, 0) if leaf_name_counts else 0
+        key = leaf_name_counts.get(r.fn_name, 0) if leaf_name_counts else 0
         if key != prev_key:
             levels.append([])
             prev_key = key
@@ -45,9 +65,9 @@ def rank_stubs_by_blocker_counts(
 ) -> list[Stub]:
     """`stubs` descending by blocker count, then file/fn/container for ties.
 
-    The input to `group_priority_levels` when `unit_ranks` is set: the grouper
-    opens a new level at every key change, so the records must already be
-    contiguous on that key."""
+    The input to `group_priority_levels` when `unit_ranks` is set. Ranking
+    is the queue order of the single pool that path returns — not a
+    partition into count-change barriers."""
     return sorted(
         stubs,
         key=lambda s: (-ranks.get(s.key, 0), s.file, s.fn_name, s.container),

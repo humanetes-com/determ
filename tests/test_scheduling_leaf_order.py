@@ -56,12 +56,15 @@ def test_unsorted_refill_tail_shatters_levels_and_the_reorder_restores_them() ->
         ["a", "b"], ["c", "d", "e"], ["f", "g"]]
 
 
-def test_unit_ranks_group_high_blocker_count_in_the_first_level() -> None:
-    """The engine's leaf-first grouping is the gap C as written would miss:
-    `take_batch` can put construct in the 12, then `group_priority_levels`
-    on name-frequency dispatches fmt first. unit_ranks is the same histogram
-    the TDD driver used, so the first barriered level is the high-count
-    units."""
+def test_unit_ranks_are_queue_order_of_one_pool_not_count_change_barriers() -> None:
+    """Blocker ranks decide who starts first, not who waits.
+
+    Plan C's claim: `take_batch` can put construct in the 12, then a
+    leaf-first grouper dispatches `fmt` first. `unit_ranks` is the same
+    histogram, so the first units dequeued are the high-count ones. A
+    count-change barrier on those ranks is the wrong contract: 15 vs 14
+    would idle a worker until both 15s finish, and unique counts (the live
+    shape) make every unit its own level."""
     from pipeline_core.application.reconstruct.scheduling import (
         group_priority_levels,
         rank_stubs_by_blocker_counts,
@@ -78,8 +81,12 @@ def test_unit_ranks_group_high_blocker_count_in_the_first_level() -> None:
     }
     ordered = rank_stubs_by_blocker_counts([fmt, adhoc, ptr_new], ranks)
     levels = group_priority_levels(ordered, None, unit_ranks=ranks)
-    assert [[s.fn_name for _i, s in lvl] for lvl in levels] == [
-        ["construct_from_adhoc", "new"], ["fmt"]]
+    assert len(levels) == 1
+    assert [s.fn_name for _i, s in levels[0]] == [
+        "construct_from_adhoc", "new", "fmt"]
+    # Four workers dequeue the first min(4, 3) = 3 together; fmt is third,
+    # not blocked behind a 15-vs-14 join.
+    assert min(4, len(levels[0])) == 3
 
 
 def test_match_records_to_order_keeps_same_key_records_in_relative_order() -> None:

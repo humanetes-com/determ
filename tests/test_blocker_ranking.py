@@ -87,10 +87,10 @@ def test_iter1_recorded_start_order_is_the_negative_control() -> None:
     assert starts.index(adhoc) > starts.index("src/context.rs::fmt")
 
 
-def test_iter1_ranking_plus_level_grouping_puts_high_count_before_fmt() -> None:
+def test_iter1_ranking_puts_high_count_ahead_of_fmt_in_the_pool() -> None:
     """The engine gap: leaf-first grouping undoes TDD order. With unit_ranks
-    from the iter-1 histogram, `construct_from_adhoc` / `ptr.rs::new` (count 15)
-    occupy the first barriered level; `fmt` (14) does not."""
+    from the iter-1 histogram, `construct_from_adhoc` / `ptr.rs::new` dequeue
+    before `fmt`. They share one pool — a 15-vs-14 barrier is not the claim."""
     data = _load()
     iter1 = next(d for d in data["deferred"] if d["iter"] == 1)
     hist = _hist(iter1["deferred"])
@@ -98,11 +98,18 @@ def test_iter1_ranking_plus_level_grouping_puts_high_count_before_fmt() -> None:
     stubs = [Stub(file=_loc(u).file, fn_name=_loc(u).fn_name) for u in starts]
     ranked = rank_stubs_by_blocker_counts(stubs, hist)
     levels = group_priority_levels(ranked, None, unit_ranks=hist)
-    first = [(s.file, s.fn_name) for _i, s in levels[0]]
-    assert ("src/context.rs", "fmt") not in first
-    assert ("src/wrapper.rs", "fmt") not in first
-    assert (("src/error.rs", "construct_from_adhoc") in first
-            or ("src/ptr.rs", "new") in first)
+    assert len(levels) == 1
+    order = [(s.file, s.fn_name) for _i, s in levels[0]]
+    adhoc = ("src/error.rs", "construct_from_adhoc")
+    ptr_new = ("src/ptr.rs", "new")
+    assert adhoc in order or ptr_new in order
+    fmt_slots = [
+        order.index(p) for p in (
+            ("src/context.rs", "fmt"), ("src/wrapper.rs", "fmt"))
+        if p in order]
+    assert fmt_slots, order
+    high = min(i for i, p in enumerate(order) if p in (adhoc, ptr_new))
+    assert high < min(fmt_slots)
     # Negative control: grouping the recorded start order on leaf-name
     # frequency (the pre-fix engine) puts fmt in an early level.
     leaf = {"fmt": 9, "new": 9, "from": 5, "construct_from_adhoc": 1}
@@ -113,10 +120,10 @@ def test_iter1_ranking_plus_level_grouping_puts_high_count_before_fmt() -> None:
     assert "construct_from_adhoc" not in old_first
 
 
-def test_crash_overlay_keeps_blamed_frames_in_the_first_engine_level() -> None:
+def test_crash_overlay_keeps_blamed_frames_at_the_head_of_the_pool() -> None:
     """Histogram ranks alone would put construct (27) ahead of a crash-blamed
-    unit that held fewer consumers. Overlay restores crash-outranks inside
-    the engine's level grouping."""
+    unit that held fewer consumers. Overlay restores crash-outranks as queue
+    order of the single pool, not as a separate barriered level."""
     construct = Stub(file="src/error.rs", fn_name="construct")
     blamed = Stub(file="src/error.rs", fn_name="object_drop")
     fmt = Stub(file="src/wrapper.rs", fn_name="fmt")
@@ -129,5 +136,7 @@ def test_crash_overlay_keeps_blamed_frames_in_the_first_engine_level() -> None:
     ranks = overlay_crash_on_ranks(hist, {blamed.key: 0})
     ordered = rank_stubs_by_blocker_counts([fmt, construct, blamed], ranks)
     levels = group_priority_levels(ordered, None, unit_ranks=ranks)
-    assert levels[0][0][1].fn_name == "object_drop"
-    assert "construct" in [s.fn_name for _i, s in levels[1]]
+    assert len(levels) == 1
+    names = [s.fn_name for _i, s in levels[0]]
+    assert names[0] == "object_drop"
+    assert names.index("construct") < names.index("fmt")

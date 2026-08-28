@@ -515,7 +515,9 @@ class PhaseCFillEngine:
             # replaces leaf-first: otherwise the engine re-sorts the batch
             # and a constructor `take_batch` placed at the head is dispatched
             # last because `fmt`/`new` are high-frequency names (run
-            # `155810-cbb3b9fc` iter 1).
+            # `155810-cbb3b9fc` iter 1). The histogram does not re-open
+            # count-change barriers — unique blocker counts serialised the
+            # pool (run `346231-54bc1489` iter 1).
             if dispatch_ranks:
                 stubs = rank_stubs_by_blocker_counts(
                     stubs + _refill_recs, dispatch_ranks)
@@ -583,11 +585,21 @@ class PhaseCFillEngine:
             results_this_pass: list[FillResult] = []
             pass_fail_floor = 0  # P7.6: this pass's failing-test floor
 
-            # P8: priority-level batching. Equal-priority stubs are contiguous
-            # because the sort above used the same key. Each level runs in
-            # parallel with a barrier between levels.
+            # P8: priority-level batching. Leaf-first: equal ref-counts share
+            # a level, a count change barriers (callees before callers).
+            # Blocker ranks: one ranked pool — those counts are not a
+            # compile-order proxy and almost never tie, so a count-change
+            # barrier serialised the pass (run `346231-54bc1489`).
             _levels = group_priority_levels(
                 stubs, leaf_name_counts, unit_ranks=dispatch_ranks)
+            if _levels:
+                _head = len(_levels[0])
+                _rank_note = (
+                    "; blocker ranks do not barrier" if dispatch_ranks else "")
+                self.tel.log(
+                    f"  [phase-c/per-fn] pass {pass_n}: {len(stubs)} unit(s) in "
+                    f"{len(_levels)} level(s), first holds {_head} "
+                    f"(pool width {min(_parallelism, _head)}){_rank_note}.")
 
             # cross-iter exhausted skip: load the retrospectives map once.
             _retros_cache = self.retros.load(project_dir)
