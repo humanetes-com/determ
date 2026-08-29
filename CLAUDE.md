@@ -928,6 +928,13 @@ Every launch goes through `continue.sh`, so **`bash pre_run.sh` comes first, alw
 stamp and exits 3 when it moved. Answer this before choosing: which phase executes
 the code I changed, and does validating it need a tree that has not seen it?
 
+**Every launch is detached (`--no-tail`).** `continue.sh` already `nohup`s the
+pipeline; `--no-tail` makes the launcher exit instead of `tail -f`. A Cursor
+terminal (or a `&` without `--no-tail`, or a `timeout` wrap) that dies SIGTERMs
+the process group — run `929966-abe13d11`, 2026-08-29, 54m, exit 143. `&` is not
+the lever; `--no-tail` is. Stop without relaunch: `touch /tmp/pipeline_graceful_stop`.
+Stop-and-relaunch: `bash continue.sh --y --no-tail`. Never wrap in `timeout`.
+
 **The phases, and what each lever re-enters.** `task0a/0c` clone + augment,
 `strip` removes the bodies, `task1` synthesises FRs, `t1.5` re-authors the layout,
 `task2a` fills per cluster (the TDD loop, `run_phase_c_tdd`), `task2b` merges,
@@ -940,14 +947,16 @@ to in `.skeleton/<cluster>/src`.
   the merge phase in under two minutes and zero model calls. It validates only what
   runs AFTER the resume point: a run that died in t3 resumes in t3, and a t2a-phase
   fix is never executed. Flags: `--y` (stop a running pipeline first), `--force`
-  (SIGTERM+SIGKILL), `--no-tail` (exit after launch), `--no-pre-run` (bypass the
+  (SIGTERM+SIGKILL), `--no-tail` (**required** — exit after launch; omit it and
+  aborting the terminal kills the run), `--no-pre-run` (bypass the
   gate, prints as the escape hatch it is). `--wipe` is gone and refuses loudly.
   Never wrap it in `timeout` — coreutils signals the whole process group and
-  SIGTERMs the pipeline it just started.
+  SIGTERMs the pipeline it just started. `continue.sh --y` stops then
+  relaunches; a stop the user asked for and nothing else is the sentinel.
 - **`bash restart_from.sh <stage>`** (anyhow; `<stage>` ∈ task1|task2|task2a|task2b|
   task2c|task3|task4, `--force` to skip the graceful stop) — clears the matching
   `[<key>]` lines from `pipeline_state.md` plus the `passing-*` lock tags, then
-  execs `continue.sh --y`. **It preserves every fill on disk**: the cluster seed is
+  execs `continue.sh --y --no-tail`. **It preserves every fill on disk**: the cluster seed is
   `if not dst.exists()`, so re-entering task2a resumes the TDD loop ON the existing
   bodies rather than re-stubbing them. This is the lever for a driver-half fix
   (charging, taint, epochs, re-admission, the red-build budget) that only executes
@@ -963,7 +972,7 @@ to in `.skeleton/<cluster>/src`.
   `restart_from.sh` does. Requires vLLM already up on :8000.
 - **`bash redo.sh [--force] [--full]`** — the only lever that DESTROYS the
   reconstruction: it wipes `.skeleton-filled`, and with `--full` also `.skeleton`
-  (forcing the bake to re-run), then relaunches `continue.sh --y --keep-augmented`,
+  (forcing the bake to re-run), then relaunches `continue.sh --y --keep-augmented --no-tail`,
   i.e. `pipeline.py --restart-from-augmented`, whose `git reset --hard` to the
   task0c tag removed 5,137 tracked files on 2026-08-08.
 

@@ -128,9 +128,11 @@ if pipeline_running; then
     else
         echo "Pipeline already running (PID $_running_pids)."
         echo "  continue.sh alone will NOT kill it. Choose one:"
-        echo "    bash continue.sh --y      # graceful stop, then relaunch"
-        echo "    bash continue.sh --force  # SIGTERM+SIGKILL, then relaunch"
-        echo "    bash redo.sh              # kill + wipe .skeleton-filled + relaunch"
+        echo "    bash continue.sh --y --no-tail      # graceful stop, then relaunch (detached)"
+        echo "    bash continue.sh --force --no-tail  # SIGTERM+SIGKILL, then relaunch"
+        echo "    bash redo.sh                        # kill + wipe .skeleton-filled + relaunch"
+        echo "  Stop without relaunch:"
+        echo "    touch /tmp/pipeline_graceful_stop"
         echo "  Or attach a monitor:"
         echo "    tail -f $LOG_DIR/pipeline_anyhow.log"
         exit 0

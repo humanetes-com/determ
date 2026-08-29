@@ -2,7 +2,7 @@
 # Kill any running pipeline, wipe the working .skeleton-filled tree, and
 # relaunch from the task0c-augmented tag. This is the "clean baseline"
 # operation we keep doing manually: equivalent to
-#   pkill pipeline.py && rm -rf .skeleton-filled && continue.sh --y --keep-augmented
+#   pkill pipeline.py && rm -rf .skeleton-filled && continue.sh --y --keep-augmented --no-tail
 #
 # Flags:
 #   --force  SIGKILL the running pipeline immediately (default is graceful)
@@ -54,5 +54,5 @@ fi
 # the stop above; continue.sh would otherwise refuse to launch (running
 # guard) or bail (no-running guard). --keep-augmented restores the
 # workspace to the task0c checkpoint and re-runs strip + task1 + task2.
-echo "[redo] relaunching continue.sh --y --keep-augmented"
-exec "$SCRIPT_DIR/continue.sh" --y --keep-augmented
+echo "[redo] relaunching continue.sh --y --keep-augmented --no-tail"
+exec "$SCRIPT_DIR/continue.sh" --y --keep-augmented --no-tail

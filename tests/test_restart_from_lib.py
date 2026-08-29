@@ -80,3 +80,16 @@ def test_restart_from_clear_task0c_on_the_live_state_shape(tmp_path):
         "[cfg_scan]", "[test_cmd]", "[task0a-context]", "[task0a]", "[task0b]"]
     assert "current: \n" in (ws / "pipeline_state.md").read_text(encoding="utf-8") + "\n"
     assert "removed 6 phase line(s)" in r.stdout
+
+
+def test_restart_from_and_redo_pass_no_tail_to_continue():
+    """A Cursor terminal abort SIGTERMs a tailed continue.sh process group
+    (2026-08-29, run 929966-abe13d11, exit 143). Both launchers that exec
+    continue.sh must pass --no-tail so that class cannot recur from the
+    script."""
+    root = Path(__file__).resolve().parents[1]
+    restart = (root / "restart_from.sh").read_text(encoding="utf-8")
+    redo = (root / "redo.sh").read_text(encoding="utf-8")
+    assert "_LAUNCH_ARGS=(--y --no-tail)" in restart
+    assert "continue.sh --y --keep-augmented --no-tail" in redo
+    assert "exec \"$SCRIPT_DIR/continue.sh\" --y --keep-augmented --no-tail" in redo

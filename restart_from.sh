@@ -21,7 +21,10 @@
 #
 # Mechanics: deletes the chosen `[<key>...]` lines from pipeline_state.md so the
 # phase is no longer "done", deletes passing-* tags (so task3 isn't seen locked),
-# and relaunches via continue.sh --y (resumes at the first unfinished phase).
+# and relaunches via continue.sh --y --no-tail (resumes at the first unfinished
+# phase). --no-tail is load-bearing: without it the launcher's epilogue is
+# `tail -f`, and aborting that Cursor terminal SIGTERMs the process group
+# (2026-08-29, run 929966-abe13d11, exit 143 after 54m).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,7 +54,7 @@ echo "[restart-from] stage=$STAGE → clearing phase entries: ${_KEYS[*]}"
 # pipeline or clearing any state: a refusal must cost nothing, and a launch that
 # aborts inside pipeline.py would leave the state keys cleared with nothing
 # restored.
-_LAUNCH_ARGS=(--y)
+_LAUNCH_ARGS=(--y --no-tail)
 if [[ "$STAGE" == "task0c" || "$STAGE" == "t0c" ]]; then
     if [[ -z "$(git -C "$PROJECT_DIR" tag -l 'task0c-pre-*' 2>/dev/null)" ]]; then
         echo "[restart-from] ERROR: no task0c-pre-* tag in $PROJECT_DIR." >&2
