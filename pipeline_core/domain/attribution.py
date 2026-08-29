@@ -84,11 +84,19 @@ class FailureFrontier:
     # frontier rather than threaded as one more engine parameter because the
     # frontier already travels every seam the evidence must reach.
     evidence: Mapping[str, str] = field(default_factory=dict)
+    # The failing tests' OWN source — signature + body as
+    # `behavior_frontier_from_texts` extracts it. Homonym scoring
+    # (`format_traits_used`) reads this channel, not `evidence`: libtest
+    # failure text never carries `{:?}` (5706 evidence blocks, 0 trait
+    # tokens on run `463713-b7c666c8`), so scoring evidence uniquely owned
+    # nobody and dropped Debug asserts from every `fmt` homonym.
+    sources: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def build(
         cls, dispatch: Frontier, convicting: Frontier,
         evidence: Mapping[str, str] | None = None,
+        sources: Mapping[str, str] | None = None,
     ) -> FailureFrontier:
         narrowed = {
             key: (convicting.get(key, set()) & tests)
@@ -96,7 +104,7 @@ class FailureFrontier:
             if convicting.get(key)
         }
         return cls(dict(dispatch), {k: v for k, v in narrowed.items() if v},
-                   dict(evidence or {}))
+                   dict(evidence or {}), dict(sources or {}))
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:
@@ -117,18 +125,25 @@ class FailureFrontier:
     def convicting_for(self, key: FnLocator) -> set[str]:
         return self.convicting.get(key, set())
 
-    def evidence_for(self, test: str) -> str:
-        """The failing test's own words, or "". Exact name first; a bare name
-        (the escalation's `test_rev`) matches a printed `chain::test_rev` on
-        the last `::` segment, the same rule `oracle_ledger.bare_test_name`
-        applies when reconciling the two name forms."""
-        if test in self.evidence:
-            return self.evidence[test]
+    def _named(self, mapping: Mapping[str, str], test: str) -> str:
+        """Exact name first; a bare name (the escalation's `test_rev`) matches
+        a printed `chain::test_rev` on the last `::` segment, the same rule
+        `oracle_ledger.bare_test_name` applies when reconciling the two forms."""
+        if test in mapping:
+            return mapping[test]
         leaf = test.rsplit("::", 1)[-1]
-        for name, text in self.evidence.items():
+        for name, text in mapping.items():
             if name.rsplit("::", 1)[-1] == leaf:
                 return text
         return ""
+
+    def evidence_for(self, test: str) -> str:
+        """The failing test's own words (libtest panic / assertion), or ""."""
+        return self._named(self.evidence, test)
+
+    def source_for(self, test: str) -> str:
+        """The failing test's own source (signature + body), or ""."""
+        return self._named(self.sources, test)
 
     def __bool__(self) -> bool:
         return bool(self.dispatch)
@@ -143,6 +158,10 @@ class AttributionResult(NamedTuple):
     frontier: Frontier
     kind: FailureKind
     convicting: Frontier
+    # Test-own source keyed as attribution named the test. Empty when the
+    # behavior path did not run (no `test_texts`). Default `{}` so existing
+    # three-argument constructors stay valid.
+    sources: Mapping[str, str] = {}
 
 
 def container_key(container: str) -> str:

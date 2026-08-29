@@ -25,6 +25,7 @@ from pipeline_core.application.reconstruct.stub_scan import (
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
+from pipeline_core.domain.dispatch import impl_route_covers
 from pipeline_core.domain.models import (
     FnLocator,
     ImplBlock,
@@ -32,6 +33,10 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.oracle_immutability import is_oracle_path
+from pipeline_core.domain.refill_stamp import (
+    convicting_tests_for_member,
+    homonym_containers,
+)
 from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.rust_scan import (
     contains_decl_keyword,
@@ -201,26 +206,47 @@ def collect_impl_refill_targets(
     blocks: list[ImplBlock],
     tdd_frontier_keys: set[FnLocator] | None,
     tdd_frontier_tests: FailureFrontier | None,
+    *,
+    max_stubs: int = 12,
 ) -> list[ImplBlock]:
     """Block-level analog of
     `PhaseCFillEngine._collect_refill_targets`: for each block, find members
     that are already FILLED (not in `stub_members`) but have a failing
-    attributed test, and stamp them onto `refill_members` so the per-impl fill
-    path re-attacks the whole co-designed block in ONE call instead of leaving
-    wrong bodies to a per-fn refill that can only touch one member at a time.
-    Empty unless the TDD outer loop supplied both the frontier keys and the
-    failing-test map (mirrors the per-fn version's same guard)."""
+    attributed test, and stamp them onto `refill_members`.
+
+    For a block the per-impl route will attempt, the stamp reads
+    ``convicting_for`` plus the container-homonym filter
+    (``domain.refill_stamp``): dispatch over-includes, and a compiling
+    ``from`` that inherited Debug asserts is a GPU re-buy (run
+    ``463713-b7c666c8``). For a block that route will never attempt
+    (free-fn / oversized), the stamp reads ``tests_for`` — file-first is
+    the only planner those units have, and an inferred-only free fn
+    (``vtable`` via escalation) is stranded if the stamp demands direct
+    evidence. Empty unless the TDD outer loop supplied both the frontier
+    keys and the failing-test map (mirrors the per-fn version's same
+    guard)."""
     if not (tdd_frontier_keys and tdd_frontier_tests):
         return blocks
+    homs = homonym_containers(blocks)
     out: list[ImplBlock] = []
     for b in blocks:
         stub_keys = {FnLocator(b.file, m.fn_name) for m in b.stub_members}
-        refill = tuple(
+        dispatched = tuple(
             m for m in b.members
             if FnLocator(b.file, m.fn_name) in tdd_frontier_keys
             and FnLocator(b.file, m.fn_name) not in stub_keys
             and tdd_frontier_tests.tests_for(FnLocator(b.file, m.fn_name))
         )
+        probe = dataclasses.replace(b, refill_members=dispatched)
+        if impl_route_covers(probe, max_stubs=max_stubs):
+            refill = tuple(
+                m for m in dispatched
+                if convicting_tests_for_member(
+                    tdd_frontier_tests, b.file, m.fn_name, b.container,
+                    homs.get((b.file, m.fn_name), (b.container,)))
+            )
+        else:
+            refill = dispatched
         out.append(dataclasses.replace(b, refill_members=refill) if refill else b)
     return out
 

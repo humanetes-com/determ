@@ -35,6 +35,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
+from pipeline_core.domain import fill_phase_clock
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureFrontier,
@@ -523,6 +524,12 @@ def run_phase_c_tdd(
     # that budget is spent. `0` disables it and restores the spin.
     _no_frontier_stop_after = int(os.getenv("TDD_NO_FRONTIER_STOP", "2"))
     _reset_cap = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
+    # Wall-clock bound on one TDD fill phase (file-first + impl + per-fn).
+    # `stall` is written only when cargo test finishes an iteration, so a
+    # mid-pass fill that runs all night prints stall=0. `0` disables.
+    # Do not set below a healthy fill that must return a sweep (~2.5 h on
+    # `463713-b7c666c8` after dropping same-iteration refill-only blocks).
+    _fill_phase_max = fill_phase_clock.configured_minutes()
 
     # The GPU protector (domain/flat_score.py). The plateau budget above charges
     # only on a COMPLETED frontier traversal, which under the dispatch cap is
@@ -600,6 +607,8 @@ def run_phase_c_tdd(
          + (f", no-frontier-stop after {_no_frontier_stop_after} "
             "undispatchable iteration(s)" if _no_frontier_stop_after > 0
             else ", no-frontier-stop=off")
+         + (f", fill-phase-stop={_fill_phase_max} min"
+            if _fill_phase_max > 0 else ", fill-phase-stop=off")
          + f", followup-think={'on' if followup_think_env_on() else 'off'}")
 
     if deps.migrate_retro_evidence is not None:
@@ -4216,6 +4225,13 @@ def run_phase_c_tdd(
         # own graceful-stop checks (worker pools included), so this is where a
         # stop lands in practice — it owns the hours of the iter — and it exits by
         # raising past every `break` below.
+        # Arm the fill-phase clock for THIS iteration's fill only, with the
+        # minutes read once at cluster entry. `0` is a no-op. Disarmed when
+        # the fill returns so the subsequent cargo test is not charged.
+        fill_phase_clock.arm(
+            _fill_phase_max,
+            log=deps.log, emit=deps.emit,
+            cluster=cluster.name, iter_n=iter_n)
         _fill_meta: list[dict[str, Any]] = []
         try:
             with collect_stream_meta() as _fill_meta:
@@ -4245,7 +4261,10 @@ def run_phase_c_tdd(
                         # The sweep's own words per failing test (panic site +
                         # assertion), so a re-fill prompt can show WHY the test
                         # failed instead of asserting that it did.
-                        evidence=failure_evidence_by_test(output)),
+                        evidence=failure_evidence_by_test(output),
+                        # Test-own source: homonym scoring reads `{:?}` here,
+                        # never from libtest evidence (run `463713-b7c666c8`).
+                        sources=_attr.sources),
                     escalated_keys=_batch_escalated,
                     escalated_measured=_measured_escalated,
                     ledger_entries=_ledger_entries(),
@@ -4263,6 +4282,8 @@ def run_phase_c_tdd(
             _restore_abandoned_bet("stopped during the fill pass")
             _final_sweep("stopped during the fill pass")
             raise
+        finally:
+            fill_phase_clock.disarm()
         # Fill returned — this batch was served. A kill that never returned
         # is not service (the dispatch persist above left these keys off
         # `_served_at` on purpose).

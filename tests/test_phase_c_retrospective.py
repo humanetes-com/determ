@@ -67,6 +67,21 @@ def test_downstream_only_short_circuits():
     assert out["category"] == "DOWNSTREAM"
 
 
+def test_same_file_other_impl_is_not_downstream_only():
+    """A windowed LAST_ERROR that moved a same-file diagnostic out of the
+    target bucket must not skip the retro — that is other impls, not other
+    files (run-shaped e2e: diag on line 1, impl starts on line 3)."""
+    exc = (
+        "# Errors elsewhere in this file "
+        "(other impls / items, not this block):\n"
+        "error[E0308]: mismatched types\n --> src/lib.rs:1"
+    )
+    out = _call(_deps(answer="CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: x"),
+                error_excerpt=exc)
+    assert out["signal"] != "downstream_only"
+    assert out["category"] == "WRONG_TYPE_CHOICE"
+
+
 def test_llm_error_signal():
     assert _call(_deps(raises=True))["signal"] == "llm_error"
 

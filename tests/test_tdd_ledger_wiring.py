@@ -207,6 +207,9 @@ def test_a_landing_is_recorded_and_the_next_sweep_judges_it(
     assert any("followup-think=off" in ln for ln in logs), (
         "the cluster-entry line names the followup-think off switch "
         "before any GPU is spent")
+    assert any("fill-phase-stop=off" in ln for ln in logs), (
+        "the cluster-entry line names the fill-phase clock off switch "
+        "before any GPU is spent")
 
     # THE CONTROL: the identical run with the ledger unwired records nothing.
     control = tmp_path / "control"

@@ -88,3 +88,16 @@ def test_evidence_travels_on_the_frontier_and_matches_bare_names() -> None:
     assert bare.evidence == {} and bare.evidence_for("test_rev") == ""
     assert bare.tests_for(A) == {"test_rev", "t_direct"}
     assert FailureFrontier.of_dispatch(dispatch).evidence == {}
+    assert FailureFrontier.of_dispatch(dispatch).sources == {}
+
+
+def test_sources_travel_on_the_frontier_and_match_bare_names() -> None:
+    """Test-own source rides beside evidence; homonym scoring reads this."""
+    dispatch = {A: {"test_rev"}}
+    convicting = {A: {"test_rev"}}
+    fr = FailureFrontier.build(dispatch, convicting, sources={
+        "chain::test_rev": 'fn test_rev() { format!("{:?}", err); }',
+    })
+    assert "{:?}" in fr.source_for("test_rev")
+    assert fr.source_for("chain::test_rev") == fr.source_for("test_rev")
+    assert FailureFrontier.build(dispatch, convicting).source_for("test_rev") == ""

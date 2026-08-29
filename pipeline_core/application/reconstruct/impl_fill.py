@@ -118,6 +118,12 @@ from pipeline_core.domain.refill_evidence import (
     tuple_struct_names,
     wraps_crate_tuple_struct,
 )
+from pipeline_core.domain.refill_stamp import (
+    blocks_after_file_first,
+    container_line_window,
+    convicting_tests_for_member,
+    homonym_containers,
+)
 from pipeline_core.domain.refine import (
     CompilingSalvage,
     FixProgress,
@@ -593,6 +599,9 @@ def fill_impl_blocks(
     # Absent frontier (fn_walk driver) = nothing dispatched by test, nothing
     # convicted by test; the compile gate and the regression ratchet still run.
     _frontier_tests = tdd_frontier_tests or FailureFrontier.of_dispatch({})
+    # Populated after `all_blocks` is known — same-named members in other
+    # containers of the file, so conviction is container-qualified.
+    _homonym_map: dict[tuple[str, str], tuple[str, ...]] = {}
 
     def _identity_must(*items: IdentityMustInput) -> str:
         """Identity Then for these units, or "" when the suite names none.
@@ -604,10 +613,14 @@ def fill_impl_blocks(
         return identity_must_instruction(behaviour_specs, units=items)
 
     def _convicting_for_block(b: ImplBlock) -> frozenset[str]:
-        """Tests with DIRECT evidence at one of this block's members — the only
-        ones that may revert it, and the only ones an exhaustion verdict about
-        it may rest on. One definition for both, or the acceptance gate and the
-        skip gate drift apart on what this block answers for."""
+        """Tests with DIRECT evidence at this block's members — U2's
+        revert set. The frontier key is ``(file, fn_name)``; U2 already
+        splits homonyms on ``FnSite(file, name, container)`` via
+        ``partition_blame``. Filtering here with the homonym scorer
+        emptied the set when every container scored 0 (``impl Debug for
+        Error`` on run ``463713-b7c666c8``) and ``u2_test_gate`` accepts
+        on no tests. The stamp/skip still uses
+        ``convicting_tests_for_member``; this gate must not."""
         out: set[str] = set()
         for _m in (*b.stub_members, *b.refill_members):
             out |= _frontier_tests.convicting_for(FnLocator(b.file, _m.fn_name))
@@ -715,12 +728,15 @@ def fill_impl_blocks(
     # already-filled, compiling member with a failing attributed test, so the
     # co-designed block is re-attacked WHOLE in one call instead of leaving
     # wrong bodies to a per-fn refill that can only touch one member at a time.
-    blocks = collect_impl_refill_targets(blocks, tdd_frontier_keys, tdd_frontier_tests)
+    blocks = collect_impl_refill_targets(
+        blocks, tdd_frontier_keys, tdd_frontier_tests,
+        max_stubs=_PER_IMPL_MAX_STUBS)
 
     # Every impl in the cluster, kept whole. Narrowing below answers "what do we
     # fill?"; routing a file-wide model reply asks the different question "what
     # impls EXIST in this file?", and must not be answered with the fill set.
     all_blocks = blocks
+    _homonym_map.update(homonym_containers(all_blocks))
 
     # If a TDD frontier is provided, narrow to blocks whose stub_members OR
     # refill_members intersect the frontier. Otherwise process all blocks with
@@ -2002,6 +2018,29 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: skipped (prior retro "
                  "marked exhausted).")
             return
+        # Refill-only: no stub to write, and no test uniquely convicts THIS
+        # container. The four `from` impls share `src/error.rs::from` on the
+        # frontier key; Debug asserts and a panic inside
+        # `construct_from_boxed` are not this coercion's to fix (run
+        # `463713-b7c666c8`, 2026-08-28/29). Skip before the GPU call.
+        if not block.stub_members and block.refill_members:
+            _owned = tuple(
+                m for m in block.refill_members
+                if convicting_tests_for_member(
+                    _frontier_tests, block.file, m.fn_name, block.container,
+                    _homonym_map.get((block.file, m.fn_name),
+                                     (block.container,))))
+            if not _owned:
+                _log(f"  [phase-c/impl] {block_id}: skipped (refill-only; "
+                     "no test uniquely convicts this container — "
+                     "mis-targeted re-buy).")
+                _emit("phase_c.impl.refill_skipped", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "members": [m.fn_name for m in block.refill_members]})
+                return
+            if len(_owned) < len(block.refill_members):
+                block = replace(block, refill_members=_owned)
         # Crash-blocked: a previous attempt of THIS block was reverted for a
         # crash-only regression blamed wholly outside it. While the blamed
         # file is unchanged, re-attempting buys the identical crash
@@ -2104,6 +2143,11 @@ def fill_impl_blocks(
                 _route_candidates.append(b2)
                 _route_seen.add(_bid2)
         snapshot = file_path.read_text(encoding="utf-8")
+        # LAST_ERROR window is recomputed from the tree cargo just compiled
+        # (inside each attempt), not snapshotted here: a splice that grows a
+        # body shifts siblings past a frozen `line_hi`, and a header /
+        # non-target member of this block is already outside a fill-target
+        # byte window on attempt 1 (run `463713-b7c666c8`).
         # Per-block context.
         stub_fn_names = [m.fn_name for m in block.stub_members]
         # Refill members need their OWN failing test(s) and
@@ -2768,8 +2812,19 @@ def fill_impl_blocks(
                 last_metric = cur_metric
                 # Whole rustc diagnostics (count-capped) when the JSON
                 # path yielded them; the char-budgeted text focus is fallback.
+                # Window from the file cargo compiled this attempt — header
+                # through close of THIS container, not a pre-splice snapshot
+                # of fill-target offsets.
+                try:
+                    _cur_err = file_path.read_text(encoding="utf-8")
+                except OSError:
+                    _cur_err = ""
+                _err_lo, _err_hi = container_line_window(
+                    _cur_err, block.container)
                 last_error_excerpt = (
-                    focus_diagnostics(diagnostics, block.file)
+                    focus_diagnostics(
+                        diagnostics, block.file,
+                        line_lo=_err_lo, line_hi=_err_hi)
                     or _focus_cargo_errors(cargo_out, block.file))
                 _record_error_codes_seen(cargo_out)
                 if deps.retire_contradicted_notes is not None and fr_path:
@@ -3296,6 +3351,27 @@ def fill_impl_blocks(
             describe=lambda u: u[0], log=_log,
             check_stop=_check_graceful_stop,
         )
+        # File-first already designed every served file this call. A
+        # refill-only block of those files is a same-iteration re-buy —
+        # the next TDD sweep is the first moment it can be judged. Stub-
+        # bearing blocks of a served file stay (file-first may have
+        # peeled them). Run `463713-b7c666c8` otherwise walked nine
+        # compiling refill-only impls after file-first had served their
+        # files, then serialised on `error.rs` overnight.
+        _served_files = {u[0] for u in _ff_units}
+        if _served_files:
+            viable_blocks, _dropped_ff = blocks_after_file_first(
+                viable_blocks, _served_files)
+            if _dropped_ff:
+                _dropped_ids = [f"{b.file}::{b.container}" for b in _dropped_ff]
+                _log(f"  [phase-c/impl] dropped {len(_dropped_ff)} "
+                     f"refill-only block(s) after file-first served their "
+                     f"file this call (next sweep judges them): "
+                     + ", ".join(_dropped_ids))
+                _emit("phase_c.impl.refill_deferred_after_file_first", data={
+                    "cluster": cluster_name,
+                    "dropped": _dropped_ids,
+                    "kept": len(viable_blocks)})
     # Independent FILES dispatch to a thread pool — the LLM call inside
     # each block's fix loop is the slow part; `_splice_check_lock` +
     # `_counters_lock` (above) already serialize everything that touches

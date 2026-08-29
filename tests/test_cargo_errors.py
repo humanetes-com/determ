@@ -195,9 +195,10 @@ def test_error_type_signals_requires_capitalized_ident() -> None:
 
 # --- diagnostics-first focusing + ANSI-hardened text path ----------------
 
-def _diag(code: str, file: str, rendered: str):
+def _diag(code: str, file: str, rendered: str, line: int = 0):
     from pipeline_core.domain.models import Diagnostic
-    return Diagnostic(code=code, file=file, message=rendered.splitlines()[0],
+    return Diagnostic(code=code, file=file, line=line,
+                      message=rendered.splitlines()[0],
                       rendered=rendered)
 
 
@@ -233,6 +234,33 @@ def test_focus_diagnostics_count_cap_and_empty() -> None:
     out = focus_diagnostics(diags, "src/a.rs", max_target=3)
     assert out.count("error[E0308]") == 3
     assert focus_diagnostics([], "src/a.rs") == ""
+
+
+def test_focus_diagnostics_line_window_moves_out_of_span_to_elsewhere() -> None:
+    """Plan D4: a From block at lines 982–988 must not be told that
+    impl Error's E0277 at line 145 is its own LAST_ERROR. Same-file
+    diagnostics outside the window sit under a THIS-FILE header, not the
+    crate-wide one (that header is ``downstream_only`` to retro).
+    Line 985 stays in the target bucket."""
+    from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+    other = "error[E0277]: the size for values of type `dyn StdError` cannot be known\n --> src/error.rs:145:5"
+    mine = "error[E0308]: mismatched types\n --> src/error.rs:985:9"
+    out = focus_diagnostics(
+        [_diag("E0277", "src/error.rs", other, line=145),
+         _diag("E0308", "src/error.rs", mine, line=985)],
+        "src/error.rs", line_lo=982, line_hi=988)
+    assert "Errors in target file:" in out
+    assert "Errors elsewhere in this file" in out
+    assert "Errors elsewhere in the crate" not in out
+    tgt, _, rest = out.partition("# Errors elsewhere in this file")
+    assert "E0308" in tgt and "E0277" not in tgt
+    assert "E0277" in rest
+    # Unset window is file-scoped (byte-identical to today): both stay target.
+    whole = focus_diagnostics(
+        [_diag("E0277", "src/error.rs", other, line=145),
+         _diag("E0308", "src/error.rs", mine, line=985)],
+        "src/error.rs")
+    assert "E0277" in whole.split("# Errors elsewhere")[0]
 
 
 def test_focus_cargo_errors_parses_ansi_colored_headers() -> None:

@@ -17,7 +17,7 @@ from __future__ import annotations
 import queue as _queue_mod
 import threading as _threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -43,6 +43,7 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.dispatch import (
+    impl_route_covers,
     impl_route_deferral_applies,
     stubs_deferred_by_impl_route,
 )
@@ -53,9 +54,12 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     FillResult,
     FnLocator,
+    FnRecord,
+    ImplBlock,
     Stub,
 )
 from pipeline_core.domain.pass_payoff import assess_fill_results, combine_payoffs
+from pipeline_core.domain.refill_stamp import convicting_tests_for_member
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_results import parse_failed_tests
 from pipeline_core.ports.fill_engine import (
@@ -144,6 +148,14 @@ class PhaseCFillEngine:
         failing-test map (i.e. `driver=tdd`); the legacy `fn_walk` driver has its
         own internal test-fix loop and passes neither.
 
+        For a member the impl route will attempt, the stamp reads
+        ``convicting_for`` plus the container-homonym filter: dispatch
+        over-includes. For a member that route never covers (free-fn /
+        oversized), the stamp reads ``tests_for`` — per-fn is those units'
+        only rewrite planner, and an inferred-only free fn (``vtable`` via
+        escalation, 2026-08-04) is stranded if the stamp demands direct
+        evidence. Same predicate as ``collect_impl_refill_targets``.
+
         A frontier key that is neither a stub nor an enumerated fn resolves to
         nothing and would drop out here without a trace — the failure mode that
         let a crash-blamed fn sit unfixed for entire runs while its blame line
@@ -151,22 +163,58 @@ class PhaseCFillEngine:
         if not (tdd_frontier_keys and tdd_frontier_tests):
             return []
         _stub_keys = {s.key for s in stubs}
-        _refill_keys = {
-            k for k in tdd_frontier_keys
-            if k not in _stub_keys and tdd_frontier_tests.tests_for(k)
-        }
-        if not _refill_keys:
-            return []
         _records = [Stub.from_dict(r)
                     for r in self.ws.enumerate_fns(target_src_dir) or []]
-        out: list[Stub] = []
-        _seen: set[FnLocator] = set()
+        containers_by_key: dict[FnLocator, list[str]] = {}
+        by_block: dict[tuple[str, str], list[Stub]] = defaultdict(list)
         for rec in _records:
-            if rec.key in _refill_keys and rec.key not in _seen:
-                out.append(replace(rec, refill=True))
-                _seen.add(rec.key)
+            containers_by_key.setdefault(rec.key, []).append(rec.container)
+            by_block[(rec.file, rec.container)].append(rec)
+        max_stubs = self.config.per_impl_max_stubs
+        covers: dict[tuple[str, str], bool] = {}
+        for (file, container), recs in by_block.items():
+            members = tuple(
+                FnRecord(file=r.file, fn_name=r.fn_name,
+                         container=r.container, sig_text=r.sig_text)
+                for r in recs)
+            stub_m = tuple(
+                m for m in members
+                if FnLocator(m.file, m.fn_name) in _stub_keys)
+            dispatched = tuple(
+                m for m in members
+                if FnLocator(m.file, m.fn_name) not in _stub_keys
+                and FnLocator(m.file, m.fn_name) in tdd_frontier_keys
+                and tdd_frontier_tests.tests_for(FnLocator(m.file, m.fn_name)))
+            probe = ImplBlock(
+                file=file, container=container, members=members,
+                stub_members=stub_m, refill_members=dispatched)
+            covers[(file, container)] = impl_route_covers(
+                probe, max_stubs=max_stubs)
+        out: list[Stub] = []
+        _seen: set[tuple[str, str, str]] = set()
+        for rec in _records:
+            ident = (rec.file, rec.container, rec.fn_name)
+            if ident in _seen or rec.key in _stub_keys:
+                continue
+            if rec.key not in tdd_frontier_keys:
+                continue
+            if covers.get((rec.file, rec.container), False):
+                tests = set(convicting_tests_for_member(
+                    tdd_frontier_tests, rec.file, rec.fn_name, rec.container,
+                    containers_by_key.get(rec.key, [rec.container])))
+            else:
+                tests = set(tdd_frontier_tests.tests_for(rec.key))
+            if not tests:
+                continue
+            out.append(replace(rec, refill=True))
+            _seen.add(ident)
+        _wanted = {
+            k for k in tdd_frontier_keys
+            if k not in _stub_keys and tdd_frontier_tests.convicting_for(k)
+        }
+        _matched = {rec.key for rec in _records}
         _dangling = sorted(
-            f"{k.file}::{k.fn_name}" for k in _refill_keys - _seen)
+            f"{k.file}::{k.fn_name}" for k in _wanted - _matched)
         if _dangling:
             self.tel.log(
                 f"  [phase-c/per-fn] {len(_dangling)} frontier key(s) match no "
@@ -268,7 +316,8 @@ class PhaseCFillEngine:
             # is still coverable once this iter's re-fill targets are on it.
             _blocks_now = collect_impl_refill_targets(
                 self.ws.collect_impl_blocks_for_cluster(target_src_dir, cluster) or [],
-                tdd_frontier_keys, tdd_frontier_tests)
+                tdd_frontier_keys, tdd_frontier_tests,
+                max_stubs=self.config.per_impl_max_stubs)
             _has_refill_targets = any(b.refill_members for b in _blocks_now)
             _impl_deferred_stubs = frozenset(
                 k for k in (stubs_deferred_by_impl_route(

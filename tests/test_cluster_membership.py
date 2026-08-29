@@ -120,6 +120,66 @@ def test_collect_impl_refill_targets_stamps_nonstub_frontier_member():
     assert [m.fn_name for m in out[0].refill_members] == ["kind"]
 
 
+def test_collect_impl_refill_targets_dispatch_projection_does_not_stamp():
+    """The plan's negative control: of_dispatch names the test on the unit
+    but carries no direct evidence — that is not a refill stamp."""
+    block = ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(_member("kind", False),),
+                      stub_members=())
+    out = cm.collect_impl_refill_targets(
+        [block],
+        tdd_frontier_keys={FnLocator("lib.rs", "kind")},
+        tdd_frontier_tests=FailureFrontier.of_dispatch(
+            {FnLocator("lib.rs", "kind"): {"kind_is_wrong"}}))
+    assert out[0].refill_members == ()
+
+
+def test_collect_impl_refill_targets_debug_assert_does_not_stamp_from_homonym():
+    """Two `from` impls share the frontier key. A `{:?}` assert uniquely
+    owns neither From coercion — the live `From<Error> for Box<dyn …>`
+    re-buy (run 463713-b7c666c8) is not stamped."""
+    from_box = "impl From<Error> for Box<dyn StdError + Send + 'static>"
+    from_e = "impl < E > From < E > for Error"
+    debug_src = (
+        '#[test] fn message_error_debug_with_string() { '
+        'assert_eq!(format!("{:?}", err), "msg"); }'
+    )
+
+    def _from_member(container: str) -> FnRecord:
+        return FnRecord(file="src/error.rs", fn_name="from", container=container,
+                        sig_text="fn from()", has_unimplemented_body=False)
+
+    b1 = ImplBlock(file="src/error.rs", container=from_box,
+                   members=(_from_member(from_box),), stub_members=())
+    b2 = ImplBlock(file="src/error.rs", container=from_e,
+                   members=(_from_member(from_e),), stub_members=())
+    key = FnLocator("src/error.rs", "from")
+    fr = FailureFrontier.build(
+        {key: {"message_error_debug_with_string"}},
+        {key: {"message_error_debug_with_string"}},
+        sources={"message_error_debug_with_string": debug_src},
+    )
+    out = cm.collect_impl_refill_targets(
+        [b1, b2], tdd_frontier_keys={key}, tdd_frontier_tests=fr)
+    assert out[0].refill_members == ()
+    assert out[1].refill_members == ()
+
+
+def test_collect_impl_refill_targets_dispatch_stamps_free_fn_only_route():
+    """A free-fn block is unreachable to the impl route. File-first is the
+    only planner; dispatch-only attribution (escalation) must still stamp
+    refill_members or the unit is stranded (`vtable`, 2026-08-04)."""
+    rec = FnRecord(file="lib.rs", fn_name="vtable", container="",
+                   sig_text="fn vtable()", has_unimplemented_body=False)
+    block = ImplBlock(file="lib.rs", container="", members=(rec,), stub_members=())
+    out = cm.collect_impl_refill_targets(
+        [block],
+        {FnLocator("lib.rs", "vtable")},
+        FailureFrontier.of_dispatch(
+            {FnLocator("lib.rs", "vtable"): {"test_downcast"}}))
+    assert [m.fn_name for m in out[0].refill_members] == ["vtable"]
+
+
 def test_collect_impl_refill_targets_excludes_actual_stubs():
     # A member still IN stub_members is a normal stub fill, never a refill target
     # (even if it happens to be named in the frontier).

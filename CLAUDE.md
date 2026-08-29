@@ -476,7 +476,11 @@ GPU guard (`TDD_FLAT_SCORE_REPEATS` / `_WINDOW`, `GPU_GUARD_STOP`), the
 plateau exit (`TDD_MAX_STALLS`) and its post-merge twin
 (`POST_MERGE_MAX_STALLS`) — plus one empty-frontier stop
 (`TDD_NO_FRONTIER_STOP`, `NO_FRONTIER_STOP`) that is not a flat-score stop
-at all and is listed below because it shares the rule. Each one exists to stop a run that is spending
+at all and is listed below because it shares the rule, and one fill-phase
+wall clock (`TDD_FILL_PHASE_MAX_MINUTES`, `FILL_PHASE_STOP`) that is also
+not a flat-score stop: `stall` is written only when `cargo test` finishes
+an iteration, so a mid-pass fill that runs all night prints `stall=0`.
+Each one exists to stop a run that is spending
 
 GPU on fills that change no verdict, and each one is a MEASUREMENT
 BOUNDARY: the reading the run was launched to take arrives at a specific
@@ -551,6 +555,19 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   the cluster is NOT marked done). Nothing dispatchable means no verdict
   can move, so it prevents no reading; `0` disables it and restores the
   spin to the backstop.
+- `TDD_FILL_PHASE_MAX_MINUTES` (default 0) — wall-clock bound on one TDD
+  fill phase (file-first + impl + per-fn). Fires mid-fill, at the next
+  `check_graceful_stop`, logs `FILL_PHASE_STOP`, emits
+  `phase_c.tdd.fill_phase_stop`, and takes the process-wide graceful-stop
+  event (no leftover sentinel file). Can prevent a pass-complete sweep if
+  the bound is shorter than a healthy fill that must return; run
+  `463713-b7c666c8` (2026-08-28/29) spent eight hours inside iter 2 at
+  `stall=0/0` because stall cannot see a mid-pass fill. After dropping
+  same-iteration refill-only blocks the remaining fill was ~2.5 h
+  (`impl Error` alone). Do not set below that until a post-fix fill phase
+  is measured. `0` disables. Minutes are read once at cluster entry
+  (same as the other five) and passed to `fill_phase_clock.arm` each
+  fill — not re-read from the env per iteration.
 - `POST_MERGE_MAX_STALLS` — the same clock for the post-merge wave (task2c),
   whose traversal is `ceil(frontier / POST_MERGE_MAX_DISPATCH)` iterations;
   same arithmetic, same `0`. Its empty-frontier branch
@@ -559,7 +576,7 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
 - `PHASE_C_TDD_BACKSTOP` (10000) is the only bound that should remain when
   the others are disabled; leave it.
 
-All five are read ONCE, at cluster entry (`phase_c_tdd.py`, the
+All six are read ONCE, at cluster entry (`phase_c_tdd.py`, the
 
 `os.getenv` block near `UnmovedVerdicts(` / `FlatScoreGuard(`), so a change
 takes effect at the next launch — and the cluster-entry line

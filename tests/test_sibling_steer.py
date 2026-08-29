@@ -59,6 +59,40 @@ def test_a_sibling_on_a_different_path_is_still_endorsed() -> None:
     assert not sibling_steer(other, LAST_ERROR_E0277).contradicts
 
 
+# Live LAST_ERROR slice (run `463713-b7c666c8`, prompt `3fa90c51…`): rustc
+# quoted the where-predicate, the `new<E>` sibling carries the same bound,
+# and the flipped prefix told the model not to follow the constructor.
+LAST_ERROR_WHERE_PREDICATE = """# Errors in target file:
+error[E0277]: the trait bound `E: StdError` is not satisfied
+   --> src/error.rs:186:9
+    |
+273 |         Self::construct_from_context(context, self, bt)
+273 | pub struct Error {
+179 |     pub(crate) fn construct_from_context<C, E>(
+186 |         E: StdError + Send + Sync + 'static,
+"""
+
+SIBLING_NEW_E = """pub fn new<E>(error: E) -> Self
+    where E: StdError + Send + Sync + 'static, {
+let bt = backtrace_if_absent!(&error);
+        Self::construct_from_std(error, bt)
+}
+"""
+
+
+def test_a_where_predicate_line_is_not_an_expression_the_error_is_about() -> None:
+    """The predicate is structure every generic sibling shares — not steering.
+
+    Negative control: the same LAST_ERROR still names `Some(&self.error)` as
+    a rejected body expression (the instance this module was written for).
+    """
+    kept = rejected_expressions(LAST_ERROR_WHERE_PREDICATE)
+    assert "E: StdError + Send + Sync + 'static," not in kept
+    assert "Self::construct_from_context(context, self, bt)" in kept
+    assert not sibling_steer(SIBLING_NEW_E, LAST_ERROR_WHERE_PREDICATE).contradicts
+    assert rejected_expressions(LAST_ERROR_E0277) == ("Some(&self.error)",)
+
+
 def test_a_shared_signature_is_not_a_shared_pattern() -> None:
     # An error that points at the fn HEADER (E0053-style) quotes a line every
     # same-named sibling shares by construction. That is not steering.

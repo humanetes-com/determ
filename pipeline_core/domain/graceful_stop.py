@@ -23,6 +23,8 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
+from pipeline_core.domain import fill_phase_clock
+
 SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
 
 _STOP_EVENT = threading.Event()
@@ -36,8 +38,17 @@ def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
         with suppress(OSError):
             SENTINEL_PATH.unlink()
         _STOP_EVENT.set()
+    # Wall-clock bound on one TDD fill phase. Armed from the TDD driver;
+    # ``0`` leaves the clock idle so this is a no-op. First expiry logs
+    # ``FILL_PHASE_STOP`` (inside poll) then takes the same process-wide
+    # event a sentinel stop takes — no leftover file for the next launch.
+    if fill_phase_clock.poll():
+        _STOP_EVENT.set()
     if _STOP_EVENT.is_set():
-        log(f"  [graceful] stop sentinel detected at {context} — exiting cleanly.")
+        if fill_phase_clock.was_tripped():
+            log(f"  [graceful] fill-phase bound at {context} — exiting cleanly.")
+        else:
+            log(f"  [graceful] stop sentinel detected at {context} — exiting cleanly.")
         sys.exit(0)
 
 
@@ -60,3 +71,4 @@ def request_graceful_stop() -> None:
 def reset_for_tests() -> None:
     """Test-only: the event is process-wide state: clear it between cases."""
     _STOP_EVENT.clear()
+    fill_phase_clock.disarm()

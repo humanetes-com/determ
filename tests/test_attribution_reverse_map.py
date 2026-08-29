@@ -190,6 +190,33 @@ def test_merges_runtime_and_behavioral_paths(
     assert frontier[a] == {"t_panic"} and frontier[b] == {"t_assert"}
 
 
+def test_behavior_does_not_convict_a_test_runtime_located_elsewhere(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    """RUNTIME located test_boxed_str at construct_from_boxed. BEHAVIOR also
+    names it on `from` (Error token overlap). Dispatch still lists `from`;
+    convicting_for(`from`) does not contain the test — T1a, run
+    463713-b7c666c8's live mix."""
+    import pipeline_core.application.reconstruct.attribution as attr
+    boxed = FnLocator("src/error.rs", "construct_from_boxed")
+    from_fn = FnLocator("src/error.rs", "from")
+    monkeypatch.setattr(
+        attr, "extract_tdd_frontier",
+        lambda *_a, **_k: {boxed: {"test_boxed_str"}})
+    monkeypatch.setattr(attr, "extract_tdd_compile_frontier", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        attr, "behavior_frontier_from_texts",
+        lambda *_a, **_k: ({from_fn: {
+            "test_boxed_str", "message_error_debug_with_string"}}, {}))
+    _res = attribute_failures(
+        _deps([]), "out", tmp_path, recently_filled=[], test_reverse_map={},
+        cluster_name="stable", test_texts={"tests/x.rs": "…"})
+    assert "test_boxed_str" in _res.frontier[from_fn]
+    assert "test_boxed_str" not in _res.convicting.get(from_fn, set())
+    assert "test_boxed_str" in _res.convicting[boxed]
+    assert "message_error_debug_with_string" in _res.convicting[from_fn]
+
+
 def test_single_deterministic_path_keeps_its_kind(
     tmp_path: Path, monkeypatch: Any,
 ) -> None:

@@ -3236,7 +3236,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 fr_path=fr_path,
                 tdd_frontier_keys=_batch_keys,
                 tdd_frontier_tests=FailureFrontier.build(
-                    _batch_eligible, _attr.convicting),
+                    _batch_eligible, _attr.convicting,
+                    sources=_attr.sources),
                 tdd_test_cmd=test_cmd,         # Plan 10 U2
                 skip_end_pass_test=True,
             )

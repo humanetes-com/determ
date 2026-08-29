@@ -865,14 +865,31 @@ def attribute_failures(
 
     merged: Frontier = {}
     convicting: Frontier = {}
+    # A test RUNTIME/COMPILE already located AT a unit. BEHAVIOR may also
+    # name that test on a different unit (the four `from` impls share
+    # `Error` with Debug asserts). Dispatch still unions both; conviction
+    # does not — the locate() unit owns the revert. Run `463713-b7c666c8`
+    # (2026-08-28/29) otherwise convicted `From<Error> for Box<dyn …>` of
+    # `test_boxed_str`, which panicked inside still-stubbed
+    # `construct_from_boxed`.
+    observed_at: dict[str, FnLocator] = {}
+    _src_map: dict[str, str] = {}
 
     def _merge(add: Frontier, kind: FailureKind) -> None:
         if add:
             contributors.append(kind)
             for k, v in add.items():
                 merged.setdefault(k, set()).update(v)
-                if kind.convicts:
-                    convicting.setdefault(k, set()).update(v)
+                if not kind.convicts:
+                    continue
+                if kind is FailureKind.BEHAVIOR:
+                    kept = {t for t in v if observed_at.get(t, k) == k}
+                    if kept:
+                        convicting.setdefault(k, set()).update(kept)
+                    continue
+                convicting.setdefault(k, set()).update(v)
+                for t in v:
+                    observed_at.setdefault(t, k)
 
     _merge(_strip(extract_tdd_frontier(deps, test_output, src_dir)),
            FailureKind.RUNTIME)
@@ -881,6 +898,7 @@ def attribute_failures(
     if test_texts:
         _bf, _srcs = behavior_frontier_from_texts(
             deps, test_output, test_texts, src_dir, unrepairable_tests)
+        _src_map = {name: src for name, (_rel, src) in _srcs.items()}
         _merge(_strip(_bf), FailureKind.BEHAVIOR)
     # Vanished tests (`extra_failed` — expected but absent from the output:
     # their binary segfaulted or stopped compiling) leave NO panic line, no
@@ -901,7 +919,7 @@ def attribute_failures(
         # One contributor → keep its kind (preserves per-path stats); several →
         # MERGED so the union is visible in logs/events.
         kind = contributors[0] if len(contributors) == 1 else FailureKind.MERGED
-        return AttributionResult(merged, kind, convicting)
+        return AttributionResult(merged, kind, convicting, _src_map)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = _failing()

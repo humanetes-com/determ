@@ -138,20 +138,33 @@ def strip_cargo_warnings(output: str) -> str:
 
 
 def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
-                      max_target: int = 8, max_cross: int = 4) -> str:
+                      max_target: int = 8, max_cross: int = 4,
+                      line_lo: int = 0, line_hi: int = 0) -> str:
     """Diagnostics-first error focusing (P7): render rustc's OWN complete
     blocks, capped by diagnostic COUNT — never by characters — so the model
     always sees a diagnostic whole (an E0308 cut before its expected/found
     lines is unactionable; starvation-miner evidence, runs 6390/187469).
 
-    Target-file diagnostics first, then cross-file ones under a separate
-    header. ANSI stripped, duplicates and `aborting due to …` summaries
+    Target-file diagnostics first, then — when a line window is set —
+    same-file diagnostics outside that window under a THIS-FILE header,
+    then other files under the crate-wide header. Same-file-other-impl
+    must not share the crate-wide header: retro treats an excerpt that
+    is only ``Errors elsewhere in the crate`` (no target section) as
+    ``downstream_only`` and skips the informed retry. Run-shaped e2e
+    fixtures with a diagnostic on line 1 of a file whose impl starts on
+    line 3 then parked after round 1. ``line_*`` of 0 means no window
+    (byte-identical to file-only focusing). A diagnostic with no line
+    stays in the target bucket when the file matches.
+
+    ANSI stripped, duplicates and `aborting due to …` summaries
     dropped. Returns "" when nothing renders — callers fall back to the
     text path (:func:`focus_cargo_errors`)."""
     base = file_rel.rsplit("/", 1)[-1]
     target: list[str] = []
+    samefile: list[str] = []
     cross: list[str] = []
     seen: set[str] = set()
+    windowed = line_lo > 0 and line_hi > 0
     for d in diagnostics:
         text = strip_ansi(d.rendered or d.message).strip()
         if not text or "aborting due to" in text:
@@ -159,14 +172,23 @@ def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
         if text in seen:
             continue
         seen.add(text)
-        if d.file and d.file.rsplit("/", 1)[-1] == base:
+        same_file = bool(d.file) and d.file.rsplit("/", 1)[-1] == base
+        in_span = (not windowed or d.line <= 0
+                   or line_lo <= d.line <= line_hi)
+        if same_file and in_span:
             target.append(text)
+        elif same_file:
+            samefile.append(text)
         else:
             cross.append(text)
     parts: list[str] = []
     if target:
         parts.append("# Errors in target file:")
         parts.extend(target[:max_target])
+    if samefile:
+        parts.append("# Errors elsewhere in this file "
+                     "(other impls / items, not this block):")
+        parts.extend(samefile[:max_cross])
     if cross:
         parts.append("# Errors elsewhere in the crate "
                      "(likely downstream of the target):")

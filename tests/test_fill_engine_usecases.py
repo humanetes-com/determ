@@ -481,6 +481,55 @@ def test_collect_refill_targets_only_filled_frontier_fns(tmp_path: Path) -> None
     assert eng._collect_refill_targets(tmp_path, stubs, keys, None) == []
 
 
+def test_collect_refill_targets_dispatch_projection_does_not_stamp(
+        tmp_path: Path) -> None:
+    """of_dispatch is the plan's negative control: the test is on the unit
+    for dispatch, not for rewriting a compiling body."""
+    from pipeline_core.domain.models import FnLocator
+    fns = [
+        {"file": "src/a.rs", "fn_name": "wrongfn", "container": "impl A",
+         "sig_text": "fn wrongfn()"},
+    ]
+    eng = _engine(FakeFill(fns=fns), FillUnit.FN)
+    keys = {FnLocator("src/a.rs", "wrongfn")}
+    tests = FailureFrontier.of_dispatch(
+        {FnLocator("src/a.rs", "wrongfn"): {"t1"}})
+    assert eng._collect_refill_targets(tmp_path, [], keys, tests) == []
+
+
+def test_collect_refill_targets_dispatch_stamps_free_fn(tmp_path: Path) -> None:
+    """Per-fn is the route that fills free fns. of_dispatch must still stamp
+    them or an escalated filled free fn is stranded (`vtable`, 2026-08-04)."""
+    from pipeline_core.domain.models import FnLocator
+    fns = [
+        {"file": "src/error.rs", "fn_name": "vtable", "container": "",
+         "sig_text": "fn vtable()"},
+    ]
+    eng = _engine(FakeFill(fns=fns), FillUnit.FN)
+    keys = {FnLocator("src/error.rs", "vtable")}
+    tests = FailureFrontier.of_dispatch(
+        {FnLocator("src/error.rs", "vtable"): {"test_downcast"}})
+    out = eng._collect_refill_targets(tmp_path, [], keys, tests)
+    assert [(s.fn_name, s.refill) for s in out] == [("vtable", True)]
+
+
+def test_collect_refill_targets_dispatch_stamps_oversized_block(
+        tmp_path: Path) -> None:
+    """A block whose stub+refill count exceeds the per-impl cap is never
+    attempted by the impl route; per-fn is its rewrite planner."""
+    from pipeline_core.domain.models import FnLocator
+    fns = [
+        {"file": "src/a.rs", "fn_name": f"m{i}", "container": "impl Big",
+         "sig_text": f"fn m{i}()"}
+        for i in range(13)
+    ]
+    eng = _engine(FakeFill(fns=fns), FillUnit.FN)
+    keys = {FnLocator("src/a.rs", f"m{i}") for i in range(13)}
+    tests = FailureFrontier.of_dispatch({k: {"t"} for k in keys})
+    out = eng._collect_refill_targets(tmp_path, [], keys, tests)
+    assert len(out) == 13 and all(s.refill for s in out)
+
+
 def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
     """A frontier key that resolves to no enumerated fn must be announced. It
     used to vanish here, which is how a crash-blamed fn stayed unfilled for whole

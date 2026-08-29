@@ -44,14 +44,50 @@ from dataclasses import dataclass
 _QUOTED_SOURCE = re.compile(r"^\s*\d+\s*\|(.*)$")
 
 # Quoted lines that are structure, not an expression: a signature, an impl
-# header, a where clause, a lone brace. A sibling SHARES these with every
-# same-named fn by construction, so matching them would flip the prefix on any
-# error that merely points at the fn's header (E0053, E0046).
+# header, a where clause, a where-predicate (`E: StdError + …,` — rustc
+# points E0277 at the bound, not the `where` keyword), a lone brace. A
+# sibling SHARES these with every same-named fn by construction, so matching
+# them would flip the prefix on any error that merely points at the fn's
+# header (E0053, E0046) or at a generic bound every sibling carries
+# (run `463713-b7c666c8`, nine flips on `impl Error`).
 _STRUCTURAL = re.compile(
     r"^(pub(\([^)]*\))?\s+)?"
     r"(((unsafe|const|async|extern(\s+\"[^\"]*\")?)\s+)*fn\s"
     r"|(struct|enum|union|trait|type|mod|use)\s)"
     r"|^impl\b|^where\b|^[{}()\[\];,]*$")
+
+
+def _is_where_predicate(expr: str) -> bool:
+    """A bound line rustc quotes from a where-clause, not an expression.
+
+    rustc points E0277 at the PREDICATE (`E: StdError + Send + Sync + 'static,`),
+    not the `where` keyword. Every same-named generic sibling carries that bound
+    by construction; matching it flipped SIBLING_REFERENCE on `impl Error` nine
+    times (run `463713-b7c666c8`, prompt `3fa90c51…`) and told the model not to
+    follow `new<E>` — the constructor pattern the block needed.
+    """
+    s = expr.strip().rstrip(",")
+    if not s or "=" in s or "(" in s or ";" in s or "{" in s:
+        return False
+    colon = -1
+    i = 0
+    while i < len(s):
+        if s[i] == ":" and i + 1 < len(s) and s[i + 1] == ":":
+            i += 2
+            continue
+        if s[i] == ":":
+            if colon >= 0:
+                return False
+            colon = i
+        i += 1
+    if colon <= 0:
+        return False
+    left = s[:colon].strip()
+    right = s[colon + 1:].strip()
+    if not left or not right:
+        return False
+    name = left[1:] if left.startswith("'") else left
+    return bool(name) and name.replace("_", "a").isalnum() and not name[0].isdigit()
 
 
 def _canon(text: str) -> str:
@@ -84,7 +120,8 @@ def rejected_expressions(last_error: str, *, min_chars: int = 6) -> tuple[str, .
         if not m:
             continue
         expr = _canon(m.group(1))
-        if len(expr) < min_chars or _STRUCTURAL.match(expr):
+        if (len(expr) < min_chars or _STRUCTURAL.match(expr)
+                or _is_where_predicate(expr)):
             continue
         if expr not in out:
             out.append(expr)
