@@ -20,14 +20,16 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
     PhaseCTddDeps,
     run_phase_c_tdd,
 )
-from pipeline_core.domain.attribution import AttributionResult, FailureKind
+from pipeline_core.domain.attribution import AttributionResult, FailureKind, key_as_site
 from pipeline_core.domain.landed_change import (
     changed_units,
+    declined_unchanged,
+    locator_has_convicting,
     render_pass_audit,
     split_reverted,
     unit_bodies,
 )
-from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator, FnSite
 
 # ---------------------------------------------------------------------------
 # Domain
@@ -86,6 +88,28 @@ def test_split_reverted_keeps_identical_reply_flat_and_drops_the_peel() -> None:
     # escalated unit would have been written FLAT.
     all_flat, none = split_reverted(constructors | {peeled}, ())
     assert all_flat == constructors | {peeled} and not none
+
+
+def test_declined_unchanged_unions_sites_not_locator_get() -> None:
+    """Live conviction is FnSite-keyed. ``dict.get(FnLocator)`` on that map
+    is None, which is how 59a314c filed every unchanged non-escalated unit
+    declined. A site that convicts its locator must NOT be declined; a
+    locator with no site must be."""
+    loc = FnLocator("src/error.rs", "from")
+    site = FnSite("src/error.rs", "from", "impl From<E>for Error")
+    other = FnLocator("src/error.rs", "drop")
+    sites = {site: {"test_from"}}
+    unchanged = frozenset({loc, other})
+    # NEGATIVE CONTROL: the miss this helper exists to close.
+    assert sites.get(loc) is None  # type: ignore[arg-type]
+    assert not locator_has_convicting(sites, other)
+    assert locator_has_convicting(sites, loc)
+    declined = declined_unchanged(
+        unchanged, convicting=sites, escalated=frozenset())
+    assert declined == frozenset({other})
+    # An escalated unconvicted unit is a failed rewrite, not a decline.
+    assert declined_unchanged(
+        unchanged, convicting=sites, escalated=frozenset({other})) == frozenset()
 
 
 def test_render_pass_audit_names_the_unchanged_units() -> None:
@@ -148,7 +172,7 @@ def _run_audited(tmp_path: Path, monkeypatch, *, cap: str,
     deps = PhaseCTddDeps(
         attribute_failures=lambda *a, **k: AttributionResult(
             {f: {"t2"} for f in _FRONTIER}, FailureKind.RUNTIME,
-            {f: {"t2"} for f in _FRONTIER}),
+            {key_as_site(f): {"t2"} for f in _FRONTIER}),
         build_test_reverse_map=lambda *a, **k: {},
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=lambda *a, **k: None,
@@ -221,7 +245,7 @@ def test_audit_is_skipped_never_guessed_without_the_extractor(
     deps = PhaseCTddDeps(
         attribute_failures=lambda *a, **k: AttributionResult(
             {f: {"t2"} for f in _FRONTIER}, FailureKind.RUNTIME,
-            {f: {"t2"} for f in _FRONTIER}),
+            {key_as_site(f): {"t2"} for f in _FRONTIER}),
         build_test_reverse_map=lambda *a, **k: {},
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=lambda *a, **k: None,

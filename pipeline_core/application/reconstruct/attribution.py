@@ -88,7 +88,13 @@ def _make_record_locator(
     text. `panic_file` is a path as libtest prints it (crate-root-relative,
     e.g. ``src/error.rs``, or absolute); it is normalised to `src_dir`-relative
     exactly as :func:`extract_tdd_frontier` does. The two public locators below
-    project the resolved record onto their own identity type."""
+    project the resolved record onto their own identity type.
+
+    The cache is per closure. A splice that moves which container owns a
+    line requires a NEW locator — ``fill_impl_blocks`` builds one at each
+    post-splice ``focus_diagnostics`` call. Reusing one closure across
+    splices overrode ``container_line_window`` with a pre-splice hit.
+    """
     recs_by_file: dict[str, list[dict[str, Any]]] = {}
     text_by_file: dict[str, str] = {}
     all_recs: list[dict[str, Any]] | None = None

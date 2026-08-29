@@ -430,7 +430,6 @@ class PhaseCFillEngine:
                 "impls_filled": _impl_stats.impls_filled,
                 "impls_failed": _impl_stats.impls_failed,
                 "fns_filled_via_impl": _impl_stats.fns_filled,
-                "fill_classes": _fill_hist,
             }
         else:
             _carryover = {}

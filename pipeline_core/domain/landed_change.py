@@ -34,6 +34,7 @@ non-change, not a change).
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 from pipeline_core.domain.models import FnLocator
 
@@ -63,6 +64,42 @@ def unit_bodies(
         if key in wanted:
             out[key] = (*out[key], _canon_body(str(rec.get("body_text") or "")))
     return out
+
+
+def locator_has_convicting(
+    convicting: Mapping[Any, set[str]], key: FnLocator,
+) -> bool:
+    """True when any site (or locator-lifted row) with this file+name convicts.
+
+    Conviction after site-at-write is keyed by ``FnSite``. ``dict.get`` with
+    an ``FnLocator`` on that map is unconditionally empty — commit ``59a314c``
+    (2026-08-29) left two reads that way, so every unchanged non-escalated
+    unit was filed declined and ``cursor_carry`` carried it instead of
+    releasing it. Index 0/1 are file/name on both 2-tuples and 3-tuples.
+    An empty test set is not a conviction.
+    """
+    return any(
+        k[0] == key.file and k[1] == key.fn_name and tests
+        for k, tests in convicting.items())
+
+
+def declined_unchanged(
+    unchanged: frozenset[FnLocator] | set[FnLocator],
+    *,
+    convicting: Mapping[Any, set[str]],
+    escalated: frozenset[FnLocator] | set[FnLocator],
+    already_declined: frozenset[FnLocator] | set[FnLocator] = frozenset(),
+) -> frozenset[FnLocator]:
+    """Unchanged units whose 'return it unchanged' was the instruction.
+
+    Escalated units are never declined: their instruction was rewrite.
+    ``already_declined`` is the pass cursor's record from earlier batches
+    of the same traversal (the pass-close fallback).
+    """
+    return frozenset(
+        k for k in unchanged
+        if k not in escalated
+        and (k in already_declined or not locator_has_convicting(convicting, k)))
 
 
 def split_reverted(

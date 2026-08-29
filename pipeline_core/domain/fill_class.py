@@ -10,7 +10,7 @@ rather than a guessed threshold.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -20,8 +20,10 @@ class FillOutcomeClass(StrEnum):
     terminated as."""
 
     CASHED = "cashed"
-    """U2 ACCEPT — attributed tests were observed passing, or a banked
-    joint improvement kept the body on positive evidence."""
+    """Attributed tests were observed passing, or a banked joint
+    improvement kept the body on that positive evidence. A compiling
+    accept with an empty passing set is :attr:`UNREACHABLE_VERDICT` —
+    not this."""
 
     WRONG_BODY = "wrong"
     """The right unit, a compiling (or peeled) answer that did not cash:
@@ -33,7 +35,8 @@ class FillOutcomeClass(StrEnum):
 
     UNREACHABLE_VERDICT = "unreachable"
     """Body kept, attributed tests cannot run (ACCEPT_EXTERNAL_ONLY /
-    still-stubbed sibling)."""
+    still-stubbed sibling / B3 keep while the crate is red / compiling
+    accept with no test observed passing)."""
 
     ANSWER_DROPPED = "dropped"
     """The model answered and a route/parser/splicer lost it
@@ -52,6 +55,21 @@ _FIELD = {
     FillOutcomeClass.ANSWER_DROPPED: "dropped",
     FillOutcomeClass.COMPILE_FAIL: "compile",
 }
+
+
+def class_for_kept(*, passed: Collection[str], unreachable: bool) -> FillOutcomeClass:
+    """CASHED only when attributed tests were observed passing.
+
+    The three fill routes used to assign CASHED in the else of a U2
+    decision chain, ten lines before they computed ``_passed_f`` /
+    ``_passed_i`` / ``_u2_passed``. That is the fabricated-win class
+    priced at run ``1064759-0f23fb68`` (2026-08-15/16): 50 successes
+    against a byte-identical verdict vector. ``unreachable=True`` is
+    ACCEPT_EXTERNAL_ONLY, still-stubbed sibling, crash-keep, B3-while-red.
+    """
+    if unreachable or not passed:
+        return FillOutcomeClass.UNREACHABLE_VERDICT
+    return FillOutcomeClass.CASHED
 
 
 @dataclass(frozen=True, slots=True)

@@ -1205,7 +1205,7 @@ def detect_p16(run: Run, iters: list[dict]) -> list[dict]:
 
 
 RE_FILL_CLASSES = re.compile(
-    r"classes: cashed=(?P<cashed>\d+) wrong=(?P<wrong>\d+) "
+    r"iter \d+: cargo test .*classes: cashed=(?P<cashed>\d+) wrong=(?P<wrong>\d+) "
     r"mis=(?P<mis>\d+) unreachable=(?P<unr>\d+) "
     r"dropped=(?P<drop>\d+) compile=(?P<comp>\d+)")
 

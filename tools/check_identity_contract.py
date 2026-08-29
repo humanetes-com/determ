@@ -3,10 +3,14 @@
 
 WHY. FnLocator is the dispatch key and may be ambiguous (six ``from`` in
 ``error.rs``). Conviction, reversion, exhaustion and error focusing take a
-FnSite. After the write-path change, a ``convicting.setdefault(FnLocator(``
-is the collapse that stamped every From coercion with a panic inside
-``construct_from_boxed`` (run ``463713-b7c666c8``). This gate reads the AST
-so the next such write is a check.sh failure, not a live 8-hour refill.
+FnSite. After the write-path change, a locator-keyed conviction map is the
+collapse that stamped every From coercion with a panic inside
+``construct_from_boxed`` (run ``463713-b7c666c8``). The pre-fix write
+(``59a314c^`` ``attribution.py``) was ``convicting: Frontier = {}`` plus
+``setdefault(k, …)`` — a loop variable, not a literal ``FnLocator(`` in
+the AST — so a visitor that only matched the literal returned zero hits
+on the tree it exists to prevent. Flag the annotation (``Frontier`` /
+``Mapping[FnLocator, …]``) and the literal write.
 
 USAGE. ``python tools/check_identity_contract.py`` from the repo root.
 Walks ``pipeline_core/**/*.py``. Tests live under tests/ and are not
@@ -14,7 +18,8 @@ walked (they construct locator-keyed maps that ``FailureFrontier.build``
 lifts).
 
 HOW TO INTERPRET. Each hit is ``path:lineno: <snippet>``. Zero hits is
-clean. A planted dummy in tests/ is the negative control.
+clean. A planted ``convicting: Frontier = {}`` in tests/ is the
+negative control of the annotation the live tree carried.
 """
 from __future__ import annotations
 
@@ -33,6 +38,33 @@ def _is_fnlocator(node: ast.AST) -> bool:
     if isinstance(func, ast.Name) and func.id == "FnLocator":
         return True
     return isinstance(func, ast.Attribute) and func.attr == "FnLocator"
+
+
+def _is_fnlocator_type(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name) and node.id == "FnLocator":
+        return True
+    return isinstance(node, ast.Attribute) and node.attr == "FnLocator"
+
+
+def _is_frontier_ann(node: ast.AST | None) -> bool:
+    """``Frontier`` or ``Mapping[FnLocator, …]`` / ``dict[FnLocator, …]``.
+
+    The pre-fix write (``59a314c^`` ``attribution.py``) was
+    ``convicting: Frontier = {}``. A literal ``FnLocator(`` in a
+    subscript is one shape; an annotated locator-keyed map is the one
+    the visitor missed.
+    """
+    if node is None:
+        return False
+    if isinstance(node, ast.Name) and node.id == "Frontier":
+        return True
+    if isinstance(node, ast.Attribute) and node.attr == "Frontier":
+        return True
+    if isinstance(node, ast.Subscript):
+        sl = node.slice
+        first = sl.elts[0] if isinstance(sl, ast.Tuple) and sl.elts else sl
+        return _is_fnlocator_type(first)
+    return False
 
 
 def _target_name(node: ast.AST) -> str:
@@ -73,6 +105,10 @@ def hits_in_tree(tree: ast.AST, *, filename: str = "") -> list[tuple[int, str]]:
                     and _is_fnlocator(t.slice)
                     and "convicting" in _target_name(t.value).lower()):
                 found.append((node.lineno, "convicting[FnLocator…] ="))
+            if (isinstance(t, ast.Name)
+                    and "convicting" in t.id.lower()
+                    and _is_frontier_ann(node.annotation)):
+                found.append((node.lineno, "convicting: Frontier"))
             self.generic_visit(node)
 
     V().visit(tree)

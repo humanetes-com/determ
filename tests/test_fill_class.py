@@ -5,6 +5,7 @@ from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillClassHistogram,
     FillOutcomeClass,
+    class_for_kept,
     note_fill_class,
 )
 
@@ -21,6 +22,17 @@ def test_rendered_matches_iter_line_token() -> None:
 def test_empty_histogram_is_falsey() -> None:
     assert not FillClassHistogram()
     assert FillClassHistogram().rendered().startswith("classes: cashed=0")
+
+
+def test_class_for_kept_is_cashed_only_with_observed_passes() -> None:
+    """Negative control: empty passing set was the else-of-U2 CASHED
+    assignment (run 1064759-0f23fb68)."""
+    assert class_for_kept(passed=frozenset(), unreachable=False) is (
+        FillOutcomeClass.UNREACHABLE_VERDICT)
+    assert class_for_kept(passed={"t"}, unreachable=False) is (
+        FillOutcomeClass.CASHED)
+    assert class_for_kept(passed={"t"}, unreachable=True) is (
+        FillOutcomeClass.UNREACHABLE_VERDICT)
 
 
 def test_counter_and_note_emit() -> None:

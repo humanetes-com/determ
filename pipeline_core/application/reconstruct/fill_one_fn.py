@@ -49,7 +49,7 @@ from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
-from pipeline_core.domain.fill_class import FillOutcomeClass
+from pipeline_core.domain.fill_class import FillOutcomeClass, class_for_kept
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
@@ -206,6 +206,10 @@ class FillOneFn:
         # A list so the nested attempt closure can record without `nonlocal`,
         # matching the other cross-attempt holders in this method.
         _blocked_by: list[FnSite] = []
+        # Positive evidence the latest accepted U2 saw. A list so the nested
+        # attempt closure can write without ``nonlocal``. CASHED at the
+        # return site must read this, not the else of ``not _blocked_by``.
+        _observed_passed: list[frozenset[str]] = [frozenset()]
         # Non-empty iff the latest revert was a crash-only regression blamed
         # wholly outside this unit — holds the crash-block mark to persist.
         _crash_blocked_mark: list[str] = []
@@ -782,6 +786,7 @@ class FillOneFn:
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
                     _attempt_baseline_test)
                 _u2_passed = _v.self_passed
+                _observed_passed[0] = _v.self_passed
                 if _v.decision is U2Decision.REJECT:
                     # A real self-failure (assertion/behavior). Route through the
                     # normal fix path: revert + re-prompt with the failing tests
@@ -1475,24 +1480,31 @@ class FillOneFn:
                              f"{rel_file}::{fn_name}: "
                              f"reverted after {fix_attempt} attempt(s) "
                              f"({_retro_round} retro round(s)).")
+            if last_metric is None or (
+                    last_metric.compiles is False and not _salvaged):
+                _ex_cls = (FillOutcomeClass.ANSWER_DROPPED
+                           if last_metric is None
+                           else FillOutcomeClass.COMPILE_FAIL)
+            else:
+                _ex_cls = FillOutcomeClass.WRONG_BODY
             self.tel.emit("phase_c.fill.class", data={
                 "cluster": ctx.cluster_name,
                 "unit": f"{rel_file}::{fn_name}",
                 "route": "per-fn",
-                "class": FillOutcomeClass.COMPILE_FAIL.value,
+                "class": _ex_cls.value,
             })
             return FillResult(file=rel_file, fn_name=fn_name, filled=False,
                               attempts=attempts, error=exhaust_error,
-                              fill_class=FillOutcomeClass.COMPILE_FAIL.value)
+                              fill_class=_ex_cls.value)
 
-        _ok = (FillOutcomeClass.UNREACHABLE_VERDICT.value if _blocked_by
-               else FillOutcomeClass.CASHED.value)
+        _ok = class_for_kept(
+            passed=_observed_passed[0], unreachable=bool(_blocked_by))
         self.tel.emit("phase_c.fill.class", data={
             "cluster": ctx.cluster_name,
             "unit": f"{rel_file}::{fn_name}",
             "route": "per-fn",
-            "class": _ok,
+            "class": _ok.value,
         })
         return FillResult(file=rel_file, fn_name=fn_name, filled=True,
                           attempts=attempts, blocked_by=tuple(_blocked_by),
-                          fill_class=_ok)
+                          fill_class=_ok.value)

@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, overload
 
 if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
@@ -101,6 +101,7 @@ from pipeline_core.domain.graceful_stop import request_graceful_stop
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
+    declined_unchanged,
     render_pass_audit,
     split_reverted,
     unit_bodies,
@@ -129,6 +130,7 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     FnLocator,
     Frontier,
+    SiteFrontier,
 )
 from pipeline_core.domain.oracle_ledger import (
     SweepOracle,
@@ -179,13 +181,34 @@ from pipeline_core.domain.zero_payoff import (
 )
 
 
+class FilterTestTargets(Protocol):
+    """Preserve key type: dispatch stays Frontier, conviction stays SiteFrontier.
+
+    ``Callable[..., Frontier]`` was a lie that let ``convicting.get(FnLocator)``
+    type-check after conviction became site-keyed (commit 59a314c, 2026-08-29).
+    ``Callable[..., Frontier | SiteFrontier]`` is the other lie — every
+    dispatch assignment then became the union. Overloads are the seam
+    ``filter_test_targets`` already has in ``test_targets.py``.
+    """
+
+    @overload
+    def __call__(self, frontier: Frontier, src_dir: Path) -> Frontier: ...
+
+    @overload
+    def __call__(self, frontier: SiteFrontier, src_dir: Path) -> SiteFrontier: ...
+
+    def __call__(
+        self, frontier: Frontier | SiteFrontier, src_dir: Path,
+    ) -> Frontier | SiteFrontier: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PhaseCTddDeps:
     """Collaborators the TDD fill driver needs, injected by the composition root."""
 
     attribute_failures: Callable[..., AttributionResult]
     build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
-    filter_test_targets: Callable[..., Frontier]
+    filter_test_targets: FilterTestTargets
     check_graceful_stop: Callable[[str], None]
     check_auto_operator: Callable[[int, str], None]
     converge_in_cluster: Callable[..., str | None]
@@ -873,6 +896,7 @@ def run_phase_c_tdd(
     errors: list[str] = []
     _prev_payoff = None
     _prev_fill_classes = FillClassHistogram()
+    _saw_fill = False
 
     # Improvement-driven loop. Track passing-test count across iters;
     # exit only after `max_stalls` consecutive non-improving iters. The 10k
@@ -4083,7 +4107,7 @@ def run_phase_c_tdd(
                     "units": [f"{u.file}::{u.fn_name}" for u, _ in _hits],
                     "prior_run_id": _hits[0][1].run_id})
         _cls_bit = (f" {_prev_fill_classes.rendered()}"
-                    if _prev_fill_classes else "")
+                    if _saw_fill else "")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
              f"oracle={_measure.oracle_size} "
@@ -4132,7 +4156,7 @@ def run_phase_c_tdd(
             "unowned": len(_unowned),
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
             "fill_classes": (
-                _prev_fill_classes.as_dict() if _prev_fill_classes else None),
+                _prev_fill_classes.as_dict() if _saw_fill else None),
         })
 
         # Shadow zero-payoff reading: judge what the PREVIOUS sweep's dispatch
@@ -4309,9 +4333,9 @@ def run_phase_c_tdd(
         errors.extend(sub.errors)
         _prev_payoff = sub.payoff
         _prev_fill_classes = sub.fill_classes or FillClassHistogram()
-        if _prev_fill_classes:
-            deps.log(f"  {tag} [phase-c/tdd] fill returned "
-                     f"{_prev_fill_classes.rendered()}.")
+        _saw_fill = True
+        deps.log(f"  {tag} [phase-c/tdd] fill returned "
+                 f"{_prev_fill_classes.rendered()}.")
         _score_grace(iter_n, pass_count)
 
         # Update recently_filled ring buffer with this iter's actual fills.
@@ -4360,9 +4384,9 @@ def run_phase_c_tdd(
             _batch_esc_unchanged = _batch_unchanged & _batch_escalated
             _batch_esc_flat, _batch_esc_reverted = split_reverted(
                 _batch_esc_unchanged, sub.reverted_fns)
-            _batch_declined = frozenset(
-                k for k in _batch_unchanged
-                if not convicting.get(k) and k not in _batch_escalated)
+            _batch_declined = declined_unchanged(
+                _batch_unchanged, convicting=convicting,
+                escalated=_batch_escalated)
             _batch_unchanged -= _batch_declined
             if deps.ledger_append is not None and (_batch_landed
                                                    or _batch_esc_flat):
@@ -4470,10 +4494,10 @@ def run_phase_c_tdd(
                 # convicted at its dispatch too, barring a verdict move —
                 # which would have ended the flat reading this audit
                 # qualifies.
-                _declined_pass = frozenset(
-                    k for k in _unchanged_pass
-                    if (k in _pass_declined or not convicting.get(k))
-                    and k not in _pass_escalated)
+                _declined_pass = declined_unchanged(
+                    _unchanged_pass, convicting=convicting,
+                    escalated=_pass_escalated,
+                    already_declined=_pass_declined)
                 _unchanged_pass -= _declined_pass
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: PASS AUDIT — "

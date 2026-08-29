@@ -73,6 +73,7 @@ from pipeline_core.domain.failure_signature import (
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillOutcomeClass,
+    class_for_kept,
     note_fill_class,
 )
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
@@ -593,14 +594,31 @@ def fill_impl_blocks(
     _bound_methods_section_for = deps.bound_methods_section_for
     _u2_test_gate = deps.u2_test_gate
     _fill_classes = FillClassCounter()
+    # Created before ``_cls`` so every classification (file-first on the
+    # main thread, impl workers) takes the same lock. ``add`` is a
+    # non-atomic read-modify-write; under PIPELINE_PARALLELISM>1 the
+    # impl route called it off workers with no lock while other sites
+    # held two different ones.
+    _counters_lock = threading.Lock()
 
     def _cls(kind: FillOutcomeClass, unit: str, route: str) -> None:
-        note_fill_class(_emit, _fill_classes, kind,
-                        cluster=cluster_name, unit=unit, route=route)
+        with _counters_lock:
+            note_fill_class(_emit, _fill_classes, kind,
+                            cluster=cluster_name, unit=unit, route=route)
 
-    _locate_site = make_fn_site_locator(
-        SimpleNamespace(enumerate_fns=_enumerate_fns_via_extractor),
-        target_src_dir)
+    def _site_locator() -> Callable[[str, int], FnSite | None]:
+        """Locator from the tree as it is NOW — not a fill-phase snapshot.
+
+        ``_make_record_locator`` memoizes records and file text on first
+        use of a closure. A locator built once at ``fill_impl_blocks``
+        entry then overrode ``container_line_window`` (R3) with a
+        pre-splice container, demoting the target's own error to
+        ``cross``. Built at the post-splice ``focus_diagnostics`` call.
+        """
+        return make_fn_site_locator(
+            SimpleNamespace(enumerate_fns=_enumerate_fns_via_extractor),
+            target_src_dir)
+
     _test_regression_baseline = deps.test_regression_baseline
     _test_regression_gate = deps.test_regression_gate
     ask = deps.ask
@@ -683,8 +701,8 @@ def fill_impl_blocks(
     # Guards the plain-Python aggregate counters (`attempts_total`,
     # `impls_failed`, `errors`) and the retrospective-cache save — the parts
     # of a block's fill that touch SHARED state but fall outside the
-    # per-attempt `_splice_check_lock` critical section.
-    _counters_lock = threading.Lock()
+    # per-attempt `_splice_check_lock` critical section. The lock itself is
+    # created next to `_cls` above so classification shares it.
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     impls_filled = 0
     impls_failed = 0
@@ -1455,6 +1473,7 @@ def fill_impl_blocks(
                 parsed = extract_fn_bodies(_file_reply)
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
+                _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                 return
             _note_reader_loss(_log, _emit, cluster=cluster_name,
                               unit=file_rel, route="file",
@@ -1463,6 +1482,7 @@ def fill_impl_blocks(
                 _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
                      f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
                      "falling back to per-block fills.")
+                _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                 return
             with _splice_check_lock:
                 # Runtime test state for the monotone ratchet, captured NOW
@@ -1659,6 +1679,7 @@ def fill_impl_blocks(
                 if spliced_now == 0:
                     _log(f"  [phase-c/file] {glabel}: nothing spliced — "
                          "falling back to per-block fills.")
+                    _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                     return
                 _attempted_names = [b.fn_name for b in _landed]
                 rc, cargo_out, _diags = _run_cargo_check_diag(
@@ -1856,12 +1877,17 @@ def fill_impl_blocks(
                             "cluster": cluster_name, "file": file_rel,
                             "group": glabel, "still_stubbed": _left})
                         _cls(FillOutcomeClass.WRONG_BODY, glabel, "file")
-                    elif (_crash_keep_file or _nonregr_keep_file
-                          or (_u2_file is not None
-                              and _u2_file.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)):
-                        _cls(FillOutcomeClass.UNREACHABLE_VERDICT, glabel, "file")
                     else:
-                        _cls(FillOutcomeClass.CASHED, glabel, "file")
+                        _passed_f = (frozenset(_bank.resolved) if _bank is not None
+                                     else (_u2_file.self_passed
+                                           if _u2_file is not None else frozenset()))
+                        _kept_f = _crash_keep_file or _nonregr_keep_file
+                        _cls(class_for_kept(
+                            passed=_passed_f, unreachable=_kept_f
+                            or (_u2_file is not None
+                                and _u2_file.decision
+                                is U2Decision.ACCEPT_EXTERNAL_ONLY)),
+                             glabel, "file")
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,
@@ -2749,8 +2775,8 @@ def fill_impl_blocks(
                                  else (_u2_impl.self_passed
                                        if _u2_impl is not None else frozenset()))
                     _kept_i = _u2_external_only or _crash_keep
-                    _cls(FillOutcomeClass.UNREACHABLE_VERDICT if _kept_i
-                         else FillOutcomeClass.CASHED, block_id, "impl")
+                    _cls(class_for_kept(passed=_passed_i, unreachable=_kept_i),
+                         block_id, "impl")
                     _verdict_row(
                         block_id,
                         (Disposition.KEEP_DEFERRED if _kept_i
@@ -2812,6 +2838,7 @@ def fill_impl_blocks(
                         _log(f"  [phase-c/impl] {block_id}: KEPT {spliced_now} "
                              f"fn(s) (B3 non-regressing; {len(_cur_sig)} crate "
                              f"err(s) remain elsewhere) (attempt {fix_attempt}).")
+                        _cls(FillOutcomeClass.UNREACHABLE_VERDICT, block_id, "impl")
                         _emit("phase_c.impl.fill.done", duration_ms=int(
                             (time.monotonic() - _t0) * 1000),
                             data={
@@ -2856,7 +2883,7 @@ def fill_impl_blocks(
                     focus_diagnostics(
                         diagnostics, block.file,
                         line_lo=_err_lo, line_hi=_err_hi,
-                        locate=_locate_site,
+                        locate=_site_locator(),
                         target_container=block.container)
                     or _focus_cargo_errors(cargo_out, block.file))
                 _record_error_codes_seen(cargo_out)
@@ -3325,14 +3352,20 @@ def fill_impl_blocks(
             with _counters_lock:
                 impls_failed += 1
                 _loss = _last_loss[0] if _last_loss else None
-                if _loss in (AttemptLoss.ROUTING_DROP, AttemptLoss.SPLICE_REFUSAL):
-                    _cls(FillOutcomeClass.ANSWER_DROPPED, block_id, "impl")
-                elif last_metric is not None and last_metric.compiles:
-                    _cls(FillOutcomeClass.WRONG_BODY, block_id, "impl")
-                else:
-                    _cls(FillOutcomeClass.COMPILE_FAIL, block_id, "impl")
                 errors.append(f"{block.file}::{block.container}: "
                               f"impl-fill failed after {fix_attempt} attempt(s)")
+            # Classify outside the lock: ``_cls`` takes the same lock
+            # (a nested acquire deadlocks ``threading.Lock``). An
+            # attempt-1 LLM error leaves ``last_metric is None``; that
+            # is a lost answer, not a compile failure (run-priced at
+            # ``1064759-0f23fb68``'s fabricated-win neighbour).
+            if (_loss in (AttemptLoss.ROUTING_DROP, AttemptLoss.SPLICE_REFUSAL)
+                    or last_metric is None):
+                _cls(FillOutcomeClass.ANSWER_DROPPED, block_id, "impl")
+            elif last_metric.compiles:
+                _cls(FillOutcomeClass.WRONG_BODY, block_id, "impl")
+            else:
+                _cls(FillOutcomeClass.COMPILE_FAIL, block_id, "impl")
             _emit("phase_c.impl.fill.fail", duration_ms=int(
                 (time.monotonic() - _t0) * 1000),
                 data={

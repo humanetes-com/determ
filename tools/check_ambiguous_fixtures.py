@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
-"""Fail the gate when the fixture crates all have unique (file, fn_name) keys.
+"""Fail the gate when the fixture crates have no container-distinct homonyms.
 
 WHY. Homonym collapse at write is invisible on hardcrate/microcrate (0%
-ambiguous keys) and is the anyhow plateau (25% of keys, 47% of fns behind
-them — measured 2026-08-29). A gate that only extracts anyhow never sees a
-crate whose names are unique, so it cannot tell whether identity is being
-tested. This gate enumerates the live fixture trees and FAILS when every
-crate's ambiguous-key rate is 0 — the fixture set no longer exercises the
-class. argh (set_flag/parse at 4) is the homonym fixture; hardcrate and
-microcrate are the unique-name negative controls.
+keys with more than one DISTINCT container) and is the anyhow plateau
+(25% of keys — measured 2026-08-29). A (file, fn_name) count treats
+``#[cfg]`` toggle arms as homonyms: hardcrate ``cap_limit`` and
+microcrate ``capacity_hint`` share a name across two arms with
+``container=""`` both, so they collide under ``FnSite`` too and are
+not the class ``FnSite`` fixes. Counting distinct containers per key
+reproduces the plan's numbers (hardcrate/microcrate 0.0%, argh 21.7%
+worst 4) and restores the gate's ability to fail.
 
 USAGE. ``python tools/check_ambiguous_fixtures.py`` from the repo root
-(check.sh runs it). Needs the release skeleton-extractor and the src trees
-under tmp/. Missing trees are skipped and named; if none remain, the gate
-fails (nothing measured).
+(check.sh runs it). Needs the release skeleton-extractor and the src
+trees under tmp/. A missing required crate is a hard failure, not a
+skip — deleting argh used to leave the gate green on the cfg-toggle
+noise.
 
-HOW TO INTERPRET. Per crate: fns, keys, ambiguous% (keys with count>1),
-behind% (fns sharing a key), worst (max homonyms on one key). The gate
-fails when max(ambiguous%) == 0.
+HOW TO INTERPRET. Per crate: keys, container-distinct-homonym keys and
+%, worst distinct-container count on one key. The gate fails when
+max(homonym%) == 0 (identity collapse cannot be tested) or when a
+listed crate is absent/empty.
 """
 from __future__ import annotations
 
 import sys
-from collections import Counter
+from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -38,78 +41,93 @@ CRATES: tuple[tuple[str, Path], ...] = (
 )
 
 
-def ambiguity_of(file_fn: Sequence[tuple[str, str]]) -> dict[str, float | int]:
-    """fns / keys / ambiguous_pct / behind_pct / worst for (file, name) pairs."""
-    n_fns = len(file_fn)
-    counts = Counter(file_fn)
-    n_keys = len(counts)
-    n_amb_keys = sum(1 for c in counts.values() if c > 1)
-    n_behind = sum(c for c in counts.values() if c > 1)
-    worst = max(counts.values()) if counts else 0
-    amb_pct = (100.0 * n_amb_keys / n_keys) if n_keys else 0.0
-    behind_pct = (100.0 * n_behind / n_fns) if n_fns else 0.0
+def container_homonym_of(
+    triples: Sequence[tuple[str, str, str]],
+) -> dict[str, float | int]:
+    """keys / homonym_keys / homonym_pct / worst for (file, name, container).
+
+    Two rows with the same (file, name) and the same container (including
+    both empty — cfg toggle arms) are one site, not a homonym.
+    """
+    by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for file, name, container in triples:
+        by_key[(file, name)].add(container)
+    n_keys = len(by_key)
+    n_hom = sum(1 for cs in by_key.values() if len(cs) > 1)
+    worst = max((len(cs) for cs in by_key.values()), default=0)
+    hom_pct = (100.0 * n_hom / n_keys) if n_keys else 0.0
     return {
-        "fns": n_fns,
+        "fns": len(triples),
         "keys": n_keys,
-        "ambiguous_keys": n_amb_keys,
-        "ambiguous_pct": amb_pct,
-        "behind": n_behind,
-        "behind_pct": behind_pct,
+        "homonym_keys": n_hom,
+        "homonym_pct": hom_pct,
         "worst": worst,
     }
 
 
 def would_fail(stats: Sequence[dict[str, float | int]]) -> bool:
-    """True when the fixture set has no homonyms — identity is untested."""
+    """True when the fixture set has no container-distinct homonyms."""
     if not stats:
         return True
-    return max(float(s["ambiguous_pct"]) for s in stats) == 0.0
+    return max(float(s["homonym_pct"]) for s in stats) == 0.0
 
 
-def _enumerate(src: Path) -> list[tuple[str, str]]:
+def _enumerate(src: Path) -> list[tuple[str, str, str]]:
     sys.path.insert(0, str(ROOT))
     from pipeline_core.adapters.extractor import CliExtractor
     ext = CliExtractor(EXTRACTOR)
     recs = ext.enumerate_fns(src)
     if recs is None:
         return []
-    return [(r.file, r.fn_name) for r in recs]
+    return [(r.file, r.fn_name, r.container or "") for r in recs]
 
 
-def main() -> int:
-    if not EXTRACTOR.exists():
+def evaluate(
+    crates: Sequence[tuple[str, Path]] = CRATES,
+    *,
+    enumerate_fn=None,
+) -> int:
+    """Run the gate over ``crates``. Return 0 ok, 1 fail.
+
+    ``enumerate_fn(src) -> triples`` is injected by tests; live uses
+    the skeleton-extractor.
+    """
+    enum = enumerate_fn or _enumerate
+    if enumerate_fn is None and not EXTRACTOR.exists():
         print(f"FAIL  skeleton-extractor missing at {EXTRACTOR}", file=sys.stderr)
         return 1
     rows: list[dict[str, float | int]] = []
-    skipped: list[str] = []
-    for name, src in CRATES:
+    for name, src in crates:
         if not src.is_dir():
-            skipped.append(f"{name} ({src})")
-            continue
-        pairs = _enumerate(src)
-        if not pairs:
-            skipped.append(f"{name} (enumerate_fns empty/failed)")
-            continue
-        st = ambiguity_of(pairs)
+            print(f"FAIL  required fixture {name} missing at {src}",
+                  file=sys.stderr)
+            return 1
+        triples = enum(src)
+        if not triples:
+            print(f"FAIL  required fixture {name} enumerate_fns empty/failed",
+                  file=sys.stderr)
+            return 1
+        st = container_homonym_of(triples)
         rows.append(st)
         print(
-            f"  {name:12} fns={st['fns']} keys={st['keys']} "
-            f"AMBIGUOUS={st['ambiguous_keys']} ({st['ambiguous_pct']:.1f}%) "
-            f"behind={st['behind']} ({st['behind_pct']:.1f}%) "
-            f"worst={st['worst']}"
+            f"  {name:12} keys={st['keys']} "
+            f"container-distinct-homonym keys={st['homonym_keys']} "
+            f"({st['homonym_pct']:.1f}%) worst={st['worst']}"
         )
-    if skipped:
-        print("  skipped: " + "; ".join(skipped))
     if would_fail(rows):
         print(
-            "FAIL  max ambiguous% == 0 — fixture set has no homonyms; "
-            "identity collapse cannot be tested (need a crate like argh "
-            "with shared (file, fn_name) keys).",
+            "FAIL  max container-distinct-homonym% == 0 — fixture set "
+            "has no (file, name) key with more than one container; "
+            "identity collapse cannot be tested (need a crate like argh).",
             file=sys.stderr,
         )
         return 1
-    print("  OK  fixture ambiguity (max ambiguous% > 0)")
+    print("  OK  fixture ambiguity (max container-distinct-homonym% > 0)")
     return 0
+
+
+def main() -> int:
+    return evaluate()
 
 
 if __name__ == "__main__":

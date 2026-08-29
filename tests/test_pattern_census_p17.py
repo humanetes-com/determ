@@ -41,6 +41,26 @@ def test_p17_histogram_line_names_the_dominant_class() -> None:
     assert "mis=6" in hits[0]["evidence"]
 
 
+def test_p17_fill_returned_line_is_not_double_counted() -> None:
+    """The histogram is logged twice (iter line and ``fill returned``).
+    Summing both was ``2·fills − last_pass``. Only the cargo-test iter
+    line is the census token."""
+    iter_line = (
+        "  [phase-c/tdd] iter 2: cargo test rc=101; pass=83 fail=44 "
+        "oracle=127 (improved=False, stall=1/0); frontier=47; "
+        "classes: cashed=1 wrong=8 mis=6 unreachable=0 dropped=0 compile=4"
+    )
+    returned = (
+        "  [phase-c/tdd] fill returned "
+        "classes: cashed=1 wrong=8 mis=6 unreachable=0 dropped=0 compile=4."
+    )
+    hits = census.detect_p17(_run(iter_line, returned), [])
+    assert len(hits) == 1
+    assert "wrong=8" in hits[0]["evidence"]
+    assert "wrong=16" not in hits[0]["evidence"]
+    assert census.RE_FILL_CLASSES.search(returned) is None
+
+
 def test_p17_pre_emitter_log_is_not_the_class() -> None:
     """Negative control: a 463713-shaped iter line has no classes token."""
     line = (

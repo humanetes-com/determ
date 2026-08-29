@@ -3264,7 +3264,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     permanently_exhausted.add(key)
             self.tel.log(f"  {tag} post-merge iter {iter_n}: "
                          f"{sub.fns_filled} fn(s) filled, "
-                         f"{sub.attempts} attempt(s).")
+                         f"{sub.attempts} attempt(s)"
+                         + (f"; {sub.fill_classes.rendered()}"
+                            if sub.fill_classes is not None else "")
+                         + ".")
             # Per-batch world gate (see the baseline comment above the loop).
             _red_now = self._merged_tree_world_check(project_dir, _spec_map)
             _reverted_worlds = False

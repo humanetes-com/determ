@@ -18,6 +18,45 @@ convicting.setdefault(FnLocator("src/a.rs", "from"), set()).add("t")
     assert any("setdefault" in lab for _ln, lab in hits)
 
 
+def test_planted_convicting_frontier_annotation_is_red() -> None:
+    """The pre-fix write was ``convicting: Frontier = {}``, not a
+    ``setdefault(FnLocator(`` literal. That shape must fail the gate."""
+    src = '''
+from pipeline_core.domain.models import Frontier
+convicting: Frontier = {}
+'''
+    hits = hits_in_tree(ast.parse(src))
+    assert hits, "the Frontier annotation must be visible to the gate"
+    assert any("Frontier" in lab for _ln, lab in hits)
+
+
+def test_sitefrontier_annotation_is_not_a_hit() -> None:
+    src = '''
+from pipeline_core.domain.models import SiteFrontier
+convicting: SiteFrontier = {}
+'''
+    assert hits_in_tree(ast.parse(src)) == []
+
+
+def test_planted_convicting_mapping_fnlocator_is_red() -> None:
+    src = '''
+from collections.abc import Mapping
+from pipeline_core.domain.models import FnLocator
+convicting: Mapping[FnLocator, set[str]] = {}
+'''
+    hits = hits_in_tree(ast.parse(src))
+    assert hits, "Mapping[FnLocator, …] on convicting must be visible"
+    assert any("Frontier" in lab for _ln, lab in hits)
+
+
+def test_dispatch_frontier_annotation_is_not_a_hit() -> None:
+    src = '''
+from pipeline_core.domain.models import Frontier
+dispatch: Frontier = {}
+'''
+    assert hits_in_tree(ast.parse(src)) == []
+
+
 def test_dispatch_setdefault_is_not_a_hit() -> None:
     src = '''
 from pipeline_core.domain.models import FnLocator
