@@ -184,3 +184,27 @@ def test_container_line_window_covers_header_through_close() -> None:
     assert container_line_window(
         text, "impl From<Error> for Box<dyn StdError>") == (5, 7)
     assert container_line_window(text, "") == (0, 0)
+
+
+def test_stamp_reads_exact_site_without_scoring() -> None:
+    """Live S1 path: Debug site has the assert, From site does not — no
+    sources channel required. of_dispatch still stamps nobody."""
+    from pipeline_core.domain.models import FnSite
+    debug_site = FnSite("src/error.rs", "fmt", DEBUG_C)
+    fmt_loc = FnLocator("src/error.rs", "fmt")
+    from_loc = FnLocator("src/error.rs", "from")
+    fr = FailureFrontier.build(
+        {fmt_loc: {"message_error_debug_with_string"},
+         from_loc: {"message_error_debug_with_string"}},
+        {debug_site: {"message_error_debug_with_string"}},
+    )
+    kept = convicting_tests_for_member(
+        fr, "src/error.rs", "fmt", DEBUG_C, (DEBUG_C, DISPLAY_C))
+    assert kept == frozenset({"message_error_debug_with_string"})
+    dropped = convicting_tests_for_member(
+        fr, "src/error.rs", "from", FROM_BOX, (FROM_BOX, FROM_E))
+    assert dropped == frozenset()
+    assert convicting_tests_for_member(
+        FailureFrontier.of_dispatch({fmt_loc: {"message_error_debug_with_string"}}),
+        "src/error.rs", "fmt", DEBUG_C, (DEBUG_C,),
+    ) == frozenset()

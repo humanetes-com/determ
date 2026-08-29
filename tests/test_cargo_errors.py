@@ -263,6 +263,37 @@ def test_focus_diagnostics_line_window_moves_out_of_span_to_elsewhere() -> None:
     assert "E0277" in whole.split("# Errors elsewhere")[0]
 
 
+def test_focus_diagnostics_locate_by_container() -> None:
+    """A same-file diagnostic whose line resolves to another impl moves to
+    the THIS-FILE header even when the line window would have kept it.
+    Locate-miss keeps the window fallback (omitting locate is unchanged)."""
+    from pipeline_core.application.reconstruct.cargo_errors import focus_diagnostics
+    from pipeline_core.domain.models import FnSite
+    other = "error[E0277]: `Own<ErrorImpl>` doesn't implement `PartialEq`"
+    mine = "error[E0308]: mismatched types"
+    other_d = _diag("E0277", "src/error.rs", other, line=145)
+    mine_d = _diag("E0308", "src/error.rs", mine, line=985)
+
+    def locate(_file: str, line: int) -> FnSite | None:
+        if line == 145:
+            return FnSite("src/error.rs", "from", "impl From<Error> for Box<dyn StdError>")
+        if line == 985:
+            return FnSite("src/error.rs", "fmt", "impl Debug for Error")
+        return None
+
+    out = focus_diagnostics(
+        [other_d, mine_d], "src/error.rs",
+        line_lo=1, line_hi=2000,
+        locate=locate, target_container="impl Debug for Error")
+    tgt, _, rest = out.partition("# Errors elsewhere in this file")
+    assert "E0308" in tgt and "E0277" not in tgt
+    assert "E0277" in rest
+    # No locate: window keeps both in target (line_hi covers both).
+    windowed = focus_diagnostics(
+        [other_d, mine_d], "src/error.rs", line_lo=1, line_hi=2000)
+    assert "E0277" in windowed.split("# Errors elsewhere")[0]
+
+
 def test_focus_cargo_errors_parses_ansi_colored_headers() -> None:
     from pipeline_core.application.reconstruct.cargo_errors import focus_cargo_errors
     out_text = ("\x1b[1m\x1b[91merror[E0308]\x1b[0m: mismatched types\n"

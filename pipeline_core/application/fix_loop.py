@@ -62,6 +62,7 @@ from pipeline_core.application.reconstruct.write_gate import (
     WriteGateDeps,
     guarded_write,
 )
+from pipeline_core.domain.attribution import as_dispatch
 from pipeline_core.domain.behaviour import union_cluster_suites
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
@@ -583,7 +584,8 @@ def generate_fix_loop(
             deps.compile_error_frontier(output, project_dir, check_cmd, env, timeout),
             project_dir),
         tdd_frontier_fn=lambda output: deps.filter_test_targets(
-            deps.extract_tdd_frontier(output, project_dir), project_dir),
+            as_dispatch(deps.extract_tdd_frontier(output, project_dir)),
+            project_dir),
         behavior_frontier_fn=_behavior_frontier_filtered)
 
     _fix_session = FixSession.for_check_cmd(

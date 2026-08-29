@@ -122,11 +122,15 @@ def test_format_only_test_owns_the_implementer_not_the_dispatcher() -> None:
     # `Debug for Error::fmt` dispatcher. It does NOT own error.rs::fmt (correct,
     # a futile accessor pass) nor any wrapper/Display fmt.
     deps, lines = _deps(_FMT_RECS)
-    frontier, _srcs = behavior_frontier_from_texts(
+    frontier, _sites, _srcs = behavior_frontier_from_texts(
         deps, _ALTDEBUG_FAILED, {"tests/test_fmt.rs": _TEST_FMT}, Path("/x"))
     owners = {f"{k.file}::{k.fn_name}"
               for k, v in frontier.items() if "test_altdebug" in v}
     assert owners == {"src/fmt.rs::debug"}, owners
+    assert any(s.fn_name == "debug" and "test_altdebug" in ts
+               for s, ts in _sites.items())
+    assert not any(s.fn_name == "from" and "test_altdebug" in ts
+                   for s, ts in _sites.items())
     # The `Display::fmt` trait-dispatch call in the Error body must not attach
     # any Display impl (trait token is not a self-type).
     assert FnLocator("src/wrapper.rs", "fmt") not in frontier
@@ -144,7 +148,7 @@ def test_self_contained_fmt_is_its_own_owner() -> None:
          "body_text": "write!(f, \"Error({:?})\", self.code)"},
     ]
     deps, _lines = _deps(self_contained)
-    frontier, _srcs = behavior_frontier_from_texts(
+    frontier, _sites, _srcs = behavior_frontier_from_texts(
         deps, _ALTDEBUG_FAILED, {"tests/test_fmt.rs": _TEST_FMT}, Path("/x"))
     assert frontier.get(FnLocator("src/mine.rs", "fmt")) == {"test_altdebug"}
 
@@ -160,7 +164,7 @@ def test_self_qualified_dispatch_resolves_to_the_dispatchers_self_type() -> None
          "body_text": "write!(f, \"{}\", self)"},
     ]
     deps, _lines = _deps(recs)
-    frontier, _srcs = behavior_frontier_from_texts(
+    frontier, _sites, _srcs = behavior_frontier_from_texts(
         deps, _ALTDEBUG_FAILED, {"tests/test_fmt.rs": _TEST_FMT}, Path("/x"))
     owners = {f"{k.file}::{k.fn_name}"
               for k, v in frontier.items() if "test_altdebug" in v}
@@ -175,7 +179,7 @@ def test_negative_control_self_type_absent_yields_no_owner() -> None:
     # unpatched attributor left every such test.
     wrapper_only = [r for r in _FMT_RECS if r["file"] == "src/wrapper.rs"]
     deps, _lines = _deps(wrapper_only)
-    frontier, _srcs = behavior_frontier_from_texts(
+    frontier, _sites, _srcs = behavior_frontier_from_texts(
         deps, _ALTDEBUG_FAILED, {"tests/test_fmt.rs": _TEST_FMT}, Path("/x"))
     assert frontier == {}
 
@@ -192,7 +196,7 @@ def test_fallback_does_not_override_a_named_fn() -> None:
         "}\n"
     )
     deps, lines = _deps(recs)
-    frontier, _srcs = behavior_frontier_from_texts(
+    frontier, _sites, _srcs = behavior_frontier_from_texts(
         deps, "test t_named ... FAILED\n---- t_named stdout ----\nboom\n",
         {"tests/t.rs": named}, Path("/x"))
     assert frontier.get(FnLocator("src/error.rs", "downcast")) == {"t_named"}

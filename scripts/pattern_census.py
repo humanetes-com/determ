@@ -1204,11 +1204,55 @@ def detect_p16(run: Run, iters: list[dict]) -> list[dict]:
     return hits[:6]
 
 
+RE_FILL_CLASSES = re.compile(
+    r"classes: cashed=(?P<cashed>\d+) wrong=(?P<wrong>\d+) "
+    r"mis=(?P<mis>\d+) unreachable=(?P<unr>\d+) "
+    r"dropped=(?P<drop>\d+) compile=(?P<comp>\d+)")
+
+
+def detect_p17(run: Run, iters: list[dict]) -> list[dict]:
+    """Fill-class histogram — which of cashed/wrong/mis/unreachable/dropped/
+    compile dominated a run's dispatched fills.  Pre-emitter logs have no
+    signature (no hit).  Nothing is gated on the dominant class this
+    code_id; the row exists so the next gate has a measured distribution.
+    """
+    totals = {"cashed": 0, "wrong": 0, "mis": 0,
+              "unreachable": 0, "dropped": 0, "compile": 0}
+    refs: list[str] = []
+    n_lines = 0
+    for ref, m in run.find(RE_FILL_CLASSES):
+        n_lines += 1
+        totals["cashed"] += int(m["cashed"])
+        totals["wrong"] += int(m["wrong"])
+        totals["mis"] += int(m["mis"])
+        totals["unreachable"] += int(m["unr"])
+        totals["dropped"] += int(m["drop"])
+        totals["compile"] += int(m["comp"])
+        if len(refs) < 4:
+            refs.append(ref)
+    total = sum(totals.values())
+    if n_lines == 0 or total == 0:
+        return []
+    dominant = max(totals, key=lambda k: totals[k])
+    pct = 100.0 * totals[dominant] / total
+    return [{
+        "evidence": (
+            f"{n_lines} histogram line(s), {total} fill(s): "
+            f"cashed={totals['cashed']} wrong={totals['wrong']} "
+            f"mis={totals['mis']} unreachable={totals['unreachable']} "
+            f"dropped={totals['dropped']} compile={totals['compile']} "
+            f"— dominant {dominant} ({pct:.0f}%)"
+        ),
+        "refs": refs,
+    }]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
-             "P14": detect_p14, "P15": detect_p15, "P16": detect_p16}
+             "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
+             "P17": detect_p17}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1220,7 +1264,8 @@ CLASS_NAMES = {
     "P12": "silent complement (escalation without installable offer)",
     "P14": "compliance over compiler (identical diagnostic across attempts)",
     "P15": "parked accessor (escalation deferred: unit-set unchanged, never dispatched)",
-    "P16": "regression-derived prescription (retro written from a REGRESSED verdict)"}
+    "P16": "regression-derived prescription (retro written from a REGRESSED verdict)",
+    "P17": "fill-class histogram (dominant cashed/wrong/mis/unreachable/dropped/compile)"}
 
 
 # -------------------------------------------------------------------- report

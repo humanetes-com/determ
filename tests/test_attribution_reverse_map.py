@@ -212,9 +212,9 @@ def test_behavior_does_not_convict_a_test_runtime_located_elsewhere(
         _deps([]), "out", tmp_path, recently_filled=[], test_reverse_map={},
         cluster_name="stable", test_texts={"tests/x.rs": "…"})
     assert "test_boxed_str" in _res.frontier[from_fn]
-    assert "test_boxed_str" not in _res.convicting.get(from_fn, set())
-    assert "test_boxed_str" in _res.convicting[boxed]
-    assert "message_error_debug_with_string" in _res.convicting[from_fn]
+    assert "test_boxed_str" not in _res.convicting_for(from_fn)
+    assert "test_boxed_str" in _res.convicting_for(boxed)
+    assert "message_error_debug_with_string" in _res.convicting_for(from_fn)
 
 
 def test_single_deterministic_path_keeps_its_kind(
@@ -316,8 +316,8 @@ def test_reverse_map_vanished_dispatches_without_convicting(
         cluster_name="stable", extra_failed=frozenset({"test_vanished"}))
     # Dispatch sees both; conviction sees only the located stub panic.
     assert ("lib.rs", "crashy") in _res.frontier
-    assert ("lib.rs", "crashy") not in _res.convicting
-    assert _res.convicting[("lib.rs", "stub_fn")] == {"test_stub"}
+    assert not _res.convicting_for(FnLocator("lib.rs", "crashy"))
+    assert _res.convicting_for(FnLocator("lib.rs", "stub_fn")) == {"test_stub"}
 
 
 def test_classifier_fallback_convicts_nobody(
@@ -423,7 +423,7 @@ def test_the_harness_is_excluded_from_the_path_that_CONVICTS(tmp_path: Path) -> 
     unguarded = attribute_failures(
         deps, output, tmp_path, recently_filled=[], test_reverse_map={},
         cluster_name="nightly", test_texts=texts)
-    assert unguarded.convicting[FnLocator("src/kind.rs", "new")] == {"ui"}, \
+    assert unguarded.convicting_for(FnLocator("src/kind.rs", "new")) == {"ui"}, \
         "without the exclusion the harness convicts by coincidence"
 
     guarded = attribute_failures(

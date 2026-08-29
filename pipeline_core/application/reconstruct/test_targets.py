@@ -7,11 +7,19 @@ composition root passes the enumerated records + a log sink.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from pipeline_core.domain.models import FnLocator, FnRecord, Frontier
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.oracle_immutability import is_oracle_fn
+
+
+def _as_locator(key: FnLocator | FnSite | tuple[str, ...]) -> FnLocator:
+    if isinstance(key, FnSite) or (isinstance(key, tuple) and len(key) == 3):
+        return FnLocator(key[0], key[1])
+    if isinstance(key, FnLocator) or (isinstance(key, tuple) and len(key) == 2):
+        return FnLocator(key[0], key[1])
+    return FnLocator(str(key), "")
 
 
 def is_test_fn_record(rec: dict[str, Any]) -> bool:
@@ -29,19 +37,27 @@ def test_fn_keys(recs: Iterable[dict[str, Any]]) -> set[FnLocator]:
             for r in recs if is_test_fn_record(r)}
 
 
-def filter_test_targets(
-    frontier: Frontier, recs: Iterable[dict[str, Any]],
+def filter_test_targets[K: (FnLocator, FnSite)](
+    frontier: Mapping[K, set[str]], recs: Iterable[dict[str, Any]],
     *, log: Callable[[str], None] | None = None,
-) -> Frontier:
-    """Return `frontier` without any key that resolves to a test fn (per `recs`)."""
+) -> dict[K, set[str]]:
+    """Return `frontier` without any key that resolves to a test fn (per `recs`).
+
+    Keys may be :class:`FnLocator` (dispatch) or :class:`FnSite` (conviction);
+    a site drops when its ``(file, fn_name)`` is an oracle fn. Conviction
+    after site-at-write is a SiteFrontier; dropping oracle keys must not
+    require collapsing back to locators.
+    """
     if not frontier:
-        return frontier
+        return {}
     drop = test_fn_keys(recs)
     if not drop:
-        return frontier
-    kept = {k: v for k, v in frontier.items() if k not in drop}
+        return dict(frontier)
+    kept = {k: v for k, v in frontier.items() if _as_locator(k) not in drop}
     if log:
-        for f, fn in frontier.keys() - kept.keys():
-            log(f"  [fix] skipping test-oracle target {f}::{fn} "
-                f"(immutable: splicing it would rewrite the spec)")
+        for k in frontier:
+            if k not in kept:
+                loc = _as_locator(k)
+                log(f"  [fix] skipping test-oracle target {loc.file}::{loc.fn_name} "
+                    f"(immutable: splicing it would rewrite the spec)")
     return kept

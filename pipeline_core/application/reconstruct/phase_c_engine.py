@@ -48,6 +48,11 @@ from pipeline_core.domain.dispatch import (
     stubs_deferred_by_impl_route,
 )
 from pipeline_core.domain.enums import FillUnit, RouteOrder
+from pipeline_core.domain.fill_class import (
+    FillClassCounter,
+    FillClassHistogram,
+    FillOutcomeClass,
+)
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -325,6 +330,7 @@ class PhaseCFillEngine:
                 ) & tdd_frontier_keys)
                 if not _is_cfg_dead(k))
         _impl_payoff = None
+        _fill_hist = FillClassHistogram()
         if impl_route_deferral_applies(
                 _impl_deferred_stubs, _has_refill_targets,
                 file_primary=self.config.route_order is RouteOrder.FILE_PRIMARY):
@@ -411,6 +417,7 @@ class PhaseCFillEngine:
                 dispatch_ranks=dispatch_ranks,
             )
             _impl_payoff = _impl_stats.payoff
+            _fill_hist = _impl_stats.fill_classes or FillClassHistogram()
             if _impl_stats.dispatched_fns is not None:
                 _dispatched.update(
                     FnLocator(*t) for t in _impl_stats.dispatched_fns)
@@ -423,6 +430,7 @@ class PhaseCFillEngine:
                 "impls_filled": _impl_stats.impls_filled,
                 "impls_failed": _impl_stats.impls_failed,
                 "fns_filled_via_impl": _impl_stats.fns_filled,
+                "fill_classes": _fill_hist,
             }
         else:
             _carryover = {}
@@ -759,6 +767,12 @@ class PhaseCFillEngine:
             if _pass_ctx.retro_gate.total:
                 self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: "
                              f"{_pass_ctx.retro_gate.render()}")
+            _pf = FillClassCounter()
+            for _res in results_this_pass:
+                if _res.fill_class:
+                    with suppress(ValueError):
+                        _pf.add(FillOutcomeClass(_res.fill_class))
+            _fill_hist = _fill_hist.combined_with(_pf.histogram())
 
             # === Per-pass cargo test ===
             # Always run at end of every pass, even when filled_this_pass is empty.
@@ -1149,4 +1163,5 @@ class PhaseCFillEngine:
             dispatched_fns=tuple(sorted(_dispatched)),
             reverted_fns=tuple(sorted(_reverted)),
             payoff=combine_payoffs(_impl_payoff, _last_payoff),
+            fill_classes=_fill_hist,
         )

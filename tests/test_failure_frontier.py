@@ -10,8 +10,10 @@ budget could ever have escaped it.
 """
 from __future__ import annotations
 
-from pipeline_core.domain.attribution import FailureFrontier, FailureKind
-from pipeline_core.domain.models import FnLocator
+from typing import Any
+
+from pipeline_core.domain.attribution import FailureFrontier, FailureKind, canon_site
+from pipeline_core.domain.models import FnLocator, FnSite
 
 A = FnLocator("src/a.rs", "producer")
 B = FnLocator("src/b.rs", "accessor")
@@ -101,3 +103,97 @@ def test_sources_travel_on_the_frontier_and_match_bare_names() -> None:
     assert "{:?}" in fr.source_for("test_rev")
     assert fr.source_for("chain::test_rev") == fr.source_for("test_rev")
     assert FailureFrontier.build(dispatch, convicting).source_for("test_rev") == ""
+
+
+def test_build_lifts_locator_convicting_to_empty_container_site() -> None:
+    """of_direct / locator-keyed build still stamps via convicting_for."""
+    fr = FailureFrontier.build({A: {"t1"}}, {A: {"t1"}})
+    assert fr.convicting_for(A) == {"t1"}
+    from pipeline_core.domain.models import FnSite
+    assert FnSite(A.file, A.fn_name, "") in fr.convicting
+
+
+def test_site_tests_are_subset_of_dispatch_locator() -> None:
+    """Every test on a site is in dispatch[FnLocator(file, name)]."""
+    from pipeline_core.domain.models import FnSite
+    from_cont = "impl From<Error> for Box<dyn StdError>"
+    boxed = FnSite("src/error.rs", "construct_from_boxed", "impl Error")
+    from_site = FnSite("src/error.rs", "from", from_cont)
+    loc_boxed = FnLocator("src/error.rs", "construct_from_boxed")
+    loc_from = FnLocator("src/error.rs", "from")
+    fr = FailureFrontier.build(
+        {loc_boxed: {"test_boxed_str"}, loc_from: {"test_boxed_str", "dbg"}},
+        {boxed: {"test_boxed_str"}, from_site: {"dbg"}},
+    )
+    for site, tests in fr.convicting.items():
+        loc = FnLocator(site.file, site.fn_name)
+        assert tests <= fr.dispatch[loc]
+
+
+def test_runtime_site_does_not_convict_from_homonym() -> None:
+    """When only the construct_from_boxed SITE carries test_boxed_str,
+    convicting_for(from) is empty — the pre-S1 locator map put that test
+    on every ``from``."""
+    from pipeline_core.domain.models import FnSite
+    boxed = FnSite("src/error.rs", "construct_from_boxed", "impl Error")
+    from_site = FnSite(
+        "src/error.rs", "from",
+        "impl From<Error> for Box<dyn StdError + Send + 'static>")
+    loc_boxed = FnLocator(boxed.file, boxed.fn_name)
+    loc_from = FnLocator(from_site.file, from_site.fn_name)
+    fr = FailureFrontier.build(
+        {loc_boxed: {"test_boxed_str"}, loc_from: {"test_boxed_str"}},
+        {boxed: {"test_boxed_str"}},
+    )
+    assert "test_boxed_str" in fr.convicting_for_site(boxed)
+    assert not fr.convicting_for_site(from_site)
+    assert "test_boxed_str" not in fr.convicting_for(loc_from)
+    assert "test_boxed_str" in fr.convicting_for(loc_boxed)
+
+
+def test_extract_tdd_frontier_writes_the_located_site(monkeypatch: Any) -> None:
+    """RUNTIME write: a stub panic inside construct_from_boxed convicts
+    that site only. Pre-S1 the same panic sat on FnLocator(..., 'from')
+    because make_fn_locator dropped the container."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import pipeline_core.application.reconstruct.attribution as attr
+
+    boxed = FnSite("src/error.rs", "construct_from_boxed", "impl Error")
+    monkeypatch.setattr(
+        attr, "make_fn_site_locator",
+        lambda *_a, **_k: lambda _f, _l: boxed)
+    output = (
+        "test test_boxed_str ... FAILED\n\n"
+        "failures:\n\n"
+        "---- test_boxed_str stdout ----\n"
+        "thread 'test_boxed_str' panicked at src/error.rs:287:9:\n"
+        "not implemented\n\n"
+        "failures:\n    test_boxed_str\n"
+    )
+    dispatch, sites = attr.extract_tdd_frontier(
+        SimpleNamespace(structure=SimpleNamespace()), output, Path("/x"))
+    want = canon_site(boxed)
+    loc = FnLocator(want.file, want.fn_name)
+    assert dispatch[loc] == {"test_boxed_str"}
+    assert sites[want] == {"test_boxed_str"}
+    assert not any(s.fn_name == "from" for s in sites)
+
+
+def test_filter_test_targets_drops_oracle_sites() -> None:
+    """Conviction is a SiteFrontier; oracle keys drop by (file, name)
+    without collapsing the surviving site back to a locator."""
+    from pipeline_core.application.reconstruct.test_targets import (
+        filter_test_targets,
+    )
+    prod = FnSite("src/lib.rs", "cap_limit", "impl Foo")
+    oracle = FnSite("src/lib.rs", "extra_cap_limit", "mod tests")
+    recs = [
+        {"file": "src/lib.rs", "fn_name": "cap_limit", "cfg_predicates": []},
+        {"file": "src/lib.rs", "fn_name": "extra_cap_limit",
+         "cfg_predicates": ["test"], "container": "mod tests"},
+    ]
+    out = filter_test_targets({prod: {"t1"}, oracle: {"t2"}}, recs)
+    assert prod in out and oracle not in out
+    assert out[prod] == {"t1"}

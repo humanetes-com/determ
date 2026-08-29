@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
 
-from pipeline_core.domain.models import FnLocator, Frontier
+from pipeline_core.domain.models import FnLocator, FnSite, Frontier, SiteFrontier
 from pipeline_core.domain.rust_idents import _skip_generics, canon_token_text
 
 
@@ -63,17 +63,21 @@ class FailureFrontier:
     Over-inclusion here is cheap and often deliberate (unattributed stubs,
     producer escalation): the worst case is an attempt that changes nothing.
 
-    `convicting` — the tests allowed to REVERT that unit when it compiles but
-    they still fail. Over-inclusion here is fatal, not merely wasteful: a unit
-    convicted by a test it cannot influence is reverted on every attempt, in
-    every iteration, forever.
+    `convicting` — the tests allowed to REVERT a SITE when it compiles but
+    they still fail, keyed by :class:`FnSite`. Over-inclusion here is fatal,
+    not merely wasteful: a unit convicted by a test it cannot influence is
+    reverted on every attempt, in every iteration, forever. Locator-keyed
+    maps passed to ``build`` / ``of_direct`` lift to the empty-container
+    site so existing tests stay green; live attribution writes real
+    containers.
 
-    Built once via `build`, which enforces `convicting[k] ⊆ dispatch[k]` and
-    drops keys absent from dispatch — the invariant lives here, not in each
-    fill route."""
+    Built once via `build`, which enforces every test on site ``s`` is in
+    ``dispatch[FnLocator(s.file, s.fn_name)]`` and drops sites whose locator
+    is absent from dispatch — the invariant lives here, not in each fill
+    route."""
 
     dispatch: Frontier
-    convicting: Frontier
+    convicting: SiteFrontier
     # What the failing tests SAID — panic site + assertion text per test, keyed
     # as libtest printed the name (`test_report.failure_evidence_by_test`). The
     # prompt that asks for a re-fill owes the model this: on 2026-08-20 (run
@@ -94,23 +98,30 @@ class FailureFrontier:
 
     @classmethod
     def build(
-        cls, dispatch: Frontier, convicting: Frontier,
+        cls, dispatch: Frontier,
+        convicting: Mapping[FnLocator, set[str]] | Mapping[FnSite, set[str]],
         evidence: Mapping[str, str] | None = None,
         sources: Mapping[str, str] | None = None,
     ) -> FailureFrontier:
-        narrowed = {
-            key: (convicting.get(key, set()) & tests)
-            for key, tests in dispatch.items()
-            if convicting.get(key)
-        }
-        return cls(dict(dispatch), {k: v for k, v in narrowed.items() if v},
+        sites: SiteFrontier = {}
+        for key, tests in convicting.items():
+            site = key_as_site(key)
+            loc = FnLocator(site.file, site.fn_name)
+            if loc not in dispatch:
+                continue
+            kept = set(tests) & dispatch[loc]
+            if kept:
+                sites.setdefault(site, set()).update(kept)
+        return cls(dict(dispatch), sites,
                    dict(evidence or {}), dict(sources or {}))
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:
         """A frontier whose every attribution rests on direct evidence — the
         two projections coincide."""
-        return cls(dict(attributed), {k: set(v) for k, v in attributed.items() if v})
+        return cls(
+            dict(attributed),
+            {key_as_site(k): set(v) for k, v in attributed.items() if v})
 
     @classmethod
     def of_dispatch(cls, dispatch: Frontier) -> FailureFrontier:
@@ -123,7 +134,26 @@ class FailureFrontier:
         return self.dispatch.get(key, set())
 
     def convicting_for(self, key: FnLocator) -> set[str]:
-        return self.convicting.get(key, set())
+        """Union of every site with this file+name — file-first U2 still
+        keys on locators. Homonym-precise reads use
+        :meth:`convicting_for_site`."""
+        out: set[str] = set()
+        for site, tests in self.convicting.items():
+            if site.file == key.file and site.fn_name == key.fn_name:
+                out |= tests
+        return out
+
+    def convicting_for_site(self, site: FnSite) -> set[str]:
+        """Tests that convict this canonical site, exactly.
+
+        Empty-container of_direct rows are a different site (``container=""``)
+        and are NOT mixed in: a Debug lookup must not inherit a locator-lifted
+        Debug-assert that of_direct parked on the bare ``fmt`` bucket. The
+        stamp's scoring fallback still reads :meth:`convicting_for` for those
+        of_direct fixtures.
+        """
+        want = key_as_site(site)
+        return set(self.convicting.get(want, set()))
 
     def _named(self, mapping: Mapping[str, str], test: str) -> str:
         """Exact name first; a bare name (the escalation's `test_rev`) matches
@@ -151,17 +181,56 @@ class FailureFrontier:
 
 class AttributionResult(NamedTuple):
     """`frontier` is the DISPATCH map (every path's attributions unioned);
-    `convicting` is the direct-evidence subset of it (see
+    `convicting` is the direct-evidence subset keyed by :class:`FnSite` (see
     `FailureKind.convicts`). Both are returned together so a caller cannot
-    reach for one and silently get the other."""
+    reach for one and silently get the other. Locator-keyed maps from tests
+    and fallbacks lift to the empty-container site at write."""
 
     frontier: Frontier
     kind: FailureKind
-    convicting: Frontier
+    convicting: SiteFrontier
     # Test-own source keyed as attribution named the test. Empty when the
     # behavior path did not run (no `test_texts`). Default `{}` so existing
     # three-argument constructors stay valid.
     sources: Mapping[str, str] = {}
+
+    def convicting_for(self, key: FnLocator) -> set[str]:
+        """Union over sites with this file+name — the locator view tests
+        used when convicting was itself a Frontier."""
+        out: set[str] = set()
+        for k, tests in self.convicting.items():
+            if k[0] == key.file and k[1] == key.fn_name:
+                out |= tests
+        return out
+
+
+def key_as_site(key: FnLocator | FnSite | tuple[str, ...]) -> FnSite:
+    """Lift a dispatch locator (or a 2-tuple) to the empty-container site;
+    canonicalise an already-qualified site. ``build`` uses this so locator-
+    keyed test fixtures keep working after convicting became a SiteFrontier."""
+    if isinstance(key, FnSite) or (isinstance(key, tuple) and len(key) == 3):
+        return canon_site(FnSite(key[0], key[1], key[2]))
+    return FnSite(key[0], key[1], "")
+
+
+def canon_site(site: FnSite) -> FnSite:
+    """Identity comparison form: container run through :func:`container_key`."""
+    cont = site.container or ""
+    return FnSite(site.file, site.fn_name, container_key(cont) if cont else "")
+
+
+def lift_sites(dispatch: Frontier) -> SiteFrontier:
+    """Empty-container sites for a locator-only map (monkeypatches, fallbacks)."""
+    return {FnSite(k.file, k.fn_name, ""): set(v)
+            for k, v in dispatch.items() if v}
+
+
+def as_dispatch(raw: Frontier | tuple[Frontier, SiteFrontier]) -> Frontier:
+    """Public extractors may return ``(dispatch, sites)``; fix-loop still
+    wants the dispatch map alone."""
+    if isinstance(raw, tuple):
+        return raw[0]
+    return raw
 
 
 def container_key(container: str) -> str:

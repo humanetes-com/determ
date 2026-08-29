@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from pipeline_core.domain.pass_payoff import PassPayoff
 
 from pipeline_core.domain.cfg import CfgAtom
+from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.import_repair import ImportFix
 
 
@@ -33,11 +34,16 @@ def _strs(v: Any) -> tuple[str, ...]:
 
 
 class FnLocator(NamedTuple):
-    """Identity of one reconstructable function: its ``file`` (repo-relative
-    ``.rs`` path) and ``fn_name``. This ``(file, fn_name)`` pair is the pipeline's
-    ubiquitous fill-unit key — the frontier key, the container-index key, the
-    attribution reverse-map value, the leaf-first ordering unit, the fix-loop
-    repair target.
+    """DISPATCH identity: ``(file, fn_name)``. The frontier key, the batch
+    cap, leaf-first ordering, the reverse-map value, the fix-loop repair
+    target. Several impls in one file may share this pair (six ``from``,
+    eight ``fmt``) — dispatch is allowed to be ambiguous; a fill route then
+    expands the locator into the containers it will actually write.
+
+    Conviction, reversion, exhaustion, error focusing and the refill stamp
+    take a :class:`FnSite`. Keying those on a locator is the collapse that
+    stamped every ``From`` coercion with a panic inside ``construct_from_boxed``
+    (run ``463713-b7c666c8``, 2026-08-28/29).
 
     A ``NamedTuple`` (deliberately, not a frozen dataclass): it stays structurally
     a 2-tuple, so it is a *drop-in* for every existing ``set`` membership, ``dict``
@@ -48,7 +54,7 @@ class FnLocator(NamedTuple):
 
     Caveat: it does NOT structurally differ from the unrelated ``(rel_path,
     content)`` pair also spelled ``tuple[str, str]`` — the guard against confusing
-    the two is reader/annotation-level, not runtime. See PLAN.md PORT CAMPAIGN 3.
+    the two is reader/annotation-level, not runtime.
     """
 
     file: str
@@ -56,20 +62,21 @@ class FnLocator(NamedTuple):
 
 
 class FnSite(NamedTuple):
-    """Container-qualified identity of a reconstructable function: ``(file,
-    fn_name, container)``. Where :class:`FnLocator` keys the file-and-name plane
-    (frontier, dispatch, leaf-ordering — one fn per name in the common case),
-    ``FnSite`` disambiguates the SAME name across impls in one file: the free
-    ``fn not(cond)`` (``container=""``) vs the ``Bool`` trait method ``fn not``
-    (``container="impl Bool for &bool"``); the six ``fn from`` across the
-    ``From<…>`` impls; the eight ``fn fmt`` across Debug/Display.
+    """IDENTITY of a reconstructable function: ``(file, fn_name, container)``.
+    Where :class:`FnLocator` is the dispatch key (may be ambiguous), ``FnSite``
+    is the unit conviction / reversion / exhaustion / error-focusing / refill
+    stamp read. The free ``fn not(cond)`` (``container=""``) vs the ``Bool``
+    trait method ``fn not`` (``container="impl Bool for &bool"``); the six
+    ``fn from`` across the ``From<…>`` impls; the eight ``fn fmt`` across
+    Debug/Display.
 
     Used by the U2 blame partition: a test that panics in a still-stubbed fn is
     only the unit's OWN failure when the panic site's ``(file, fn_name,
     container)`` matches the unit — a name-only match wrongly charges a unit for
     a same-named SIBLING's stub. Container equality must be taken canonically
-    (``canon_container``) because the extractor and the impl-manifest render the
-    same header with different spacing (``impl Bool for & bool`` vs ``&bool``)."""
+    (``container_key`` / ``canon_container``) because the extractor and the
+    impl-manifest render the same header with different spacing
+    (``impl Bool for & bool`` vs ``&bool``)."""
 
     file: str
     fn_name: str
@@ -426,6 +433,11 @@ class DispatchFamily:
 # dataclass — is its correct domain form. The key is a `FnLocator` (file, fn_name).
 Frontier = dict[FnLocator, set[str]]
 
+# Conviction / stamp identity: one site per (file, name, canonical container).
+# Invariant: every test on site ``s`` is a subset of
+# ``dispatch[FnLocator(s.file, s.fn_name)]``.
+SiteFrontier = dict[FnSite, set[str]]
+
 
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
@@ -726,6 +738,10 @@ class FillResult:
     attempts: int = 0
     error: str | None = None
     blocked_by: tuple[FnSite, ...] = ()
+    # Terminal :class:`~pipeline_core.domain.fill_class.FillOutcomeClass`
+    # value for this unit, or "" when the engine did not classify it
+    # (skip-before-dispatch, tests). Aggregated onto ClusterFillResult.
+    fill_class: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -814,6 +830,10 @@ class ClusterFillResult:
     # next batch by blocker frequency — the field the two fill routes used
     # to leave on a log line that nothing outer consumed.
     payoff: PassPayoff | None = None
+    # Per-fill class histogram for this call (impl + per-fn combined).
+    # None: caller/test did not populate it. The TDD driver prints the
+    # previous call's histogram on the next iter line.
+    fill_classes: FillClassHistogram | None = None
 
 
 @dataclass(frozen=True, slots=True)

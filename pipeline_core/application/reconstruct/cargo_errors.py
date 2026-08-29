@@ -8,10 +8,12 @@ these helpers shape arbitrary captured TEXT where they don't).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
+from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.import_repair import import_fixes_from_message
-from pipeline_core.domain.models import Diagnostic
+from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_results import strip_ansi
 
 
@@ -139,7 +141,9 @@ def strip_cargo_warnings(output: str) -> str:
 
 def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
                       max_target: int = 8, max_cross: int = 4,
-                      line_lo: int = 0, line_hi: int = 0) -> str:
+                      line_lo: int = 0, line_hi: int = 0,
+                      locate: Callable[[str, int], FnSite | None] | None = None,
+                      target_container: str = "") -> str:
     """Diagnostics-first error focusing (P7): render rustc's OWN complete
     blocks, capped by diagnostic COUNT — never by characters — so the model
     always sees a diagnostic whole (an E0308 cut before its expected/found
@@ -156,6 +160,12 @@ def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
     (byte-identical to file-only focusing). A diagnostic with no line
     stays in the target bucket when the file matches.
 
+    When ``locate`` and ``target_container`` are set, a same-file
+    diagnostic whose line resolves to a fn is in-span iff that fn's
+    container matches the target (canonical). Locate-miss and line 0
+    keep the window fallback, so omitting locate is byte-identical to
+    the pre-locate behaviour.
+
     ANSI stripped, duplicates and `aborting due to …` summaries
     dropped. Returns "" when nothing renders — callers fall back to the
     text path (:func:`focus_cargo_errors`)."""
@@ -165,6 +175,7 @@ def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
     cross: list[str] = []
     seen: set[str] = set()
     windowed = line_lo > 0 and line_hi > 0
+    want_cont = container_key(target_container) if target_container else ""
     for d in diagnostics:
         text = strip_ansi(d.rendered or d.message).strip()
         if not text or "aborting due to" in text:
@@ -175,6 +186,10 @@ def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
         same_file = bool(d.file) and d.file.rsplit("/", 1)[-1] == base
         in_span = (not windowed or d.line <= 0
                    or line_lo <= d.line <= line_hi)
+        if (locate is not None and want_cont and same_file and d.line > 0):
+            hit = locate(d.file, d.line)
+            if hit is not None:
+                in_span = container_key(hit.container) == want_cont
         if same_file and in_span:
             target.append(text)
         elif same_file:

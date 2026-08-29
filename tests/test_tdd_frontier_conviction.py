@@ -112,4 +112,4 @@ def test_escalation_can_never_dispatch_a_test_fn(
         if fr is None:
             continue
         assert _TEST_FN not in fr.dispatch
-        assert _TEST_FN not in fr.convicting
+        assert not fr.convicting_for(_TEST_FN)

@@ -31,6 +31,12 @@ PID_LAYERS=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/check_extraction_invariants.py \
     > "$GATE_TMP/extraction.out" 2>&1 &
 PID_EXTRACTION=$!
+"$SCRIPT_DIR/.venv/bin/python" tools/check_ambiguous_fixtures.py \
+    > "$GATE_TMP/fixtures.out" 2>&1 &
+PID_FIXTURES=$!
+"$SCRIPT_DIR/.venv/bin/python" tools/check_identity_contract.py \
+    > "$GATE_TMP/identity.out" 2>&1 &
+PID_IDENTITY=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/loc_ratchet.py \
     > "$GATE_TMP/loc.out" 2>&1 &
 PID_LOC=$!
@@ -80,11 +86,13 @@ gate() {  # gate <name> <pid> <outfile>
     fi
 }
 
-echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, rust)..."
+echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, fixture ambiguity, identity contract, rust)..."
 gate "mypy" "$PID_MYPY" "$GATE_TMP/mypy.out"
 gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
 gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
+gate "fixture ambiguity" "$PID_FIXTURES" "$GATE_TMP/fixtures.out"
+gate "identity contract" "$PID_IDENTITY" "$GATE_TMP/identity.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
 gate "skeleton-extractor cargo fmt --check (rust $RUST_GATE_TOOLCHAIN)" "$PID_RUSTFMT" "$GATE_TMP/rustfmt.out"
 gate "skeleton-extractor cargo clippy + test + doc (rust $RUST_GATE_TOOLCHAIN)" "$PID_CARGO" "$GATE_TMP/cargo.out"

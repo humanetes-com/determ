@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 
 from pipeline_core.domain.attribution import FailureFrontier, container_key
 from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
-from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from pipeline_core.domain.rust_idents import impl_trait_name
 from pipeline_core.domain.test_report import parse_panic_location
 from pipeline_core.domain.test_results import identifiers_in
@@ -114,12 +114,15 @@ def convicting_tests_for_member(
 ) -> frozenset[str]:
     """Tests that may revert THIS member, not a same-named sibling.
 
-    Starts from ``convicting_for`` (never ``tests_for``). A STUB_PANIC whose
-    quoted site is a src file is not owned by an assertion-shaped coercion
-    impl — those stay on the locate() unit (T1a already dropped them from
-    other keys' convicting when RUNTIME fired). Remaining assertion tests
-    pass :func:`assertion_owned_by_container`.
+    Starts from the site-precise map when this container was written
+    (live RUNTIME/COMPILE/BEHAVIOR). Falls back to ``convicting_for`` plus
+    :func:`assertion_owned_by_container` for of_direct fixtures that lifted
+    locators to the empty-container site — scoring stays until those
+    fixtures write real containers. Never ``tests_for``.
     """
+    exact = frontier.convicting_for_site(FnSite(file, fn_name, container))
+    if exact:
+        return frozenset(exact)
     raw = frontier.convicting_for(FnLocator(file, fn_name))
     if not raw:
         return frozenset()

@@ -49,6 +49,7 @@ from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
+from pipeline_core.domain.fill_class import FillOutcomeClass
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
@@ -1474,8 +1475,24 @@ class FillOneFn:
                              f"{rel_file}::{fn_name}: "
                              f"reverted after {fix_attempt} attempt(s) "
                              f"({_retro_round} retro round(s)).")
+            self.tel.emit("phase_c.fill.class", data={
+                "cluster": ctx.cluster_name,
+                "unit": f"{rel_file}::{fn_name}",
+                "route": "per-fn",
+                "class": FillOutcomeClass.COMPILE_FAIL.value,
+            })
             return FillResult(file=rel_file, fn_name=fn_name, filled=False,
-                              attempts=attempts, error=exhaust_error)
+                              attempts=attempts, error=exhaust_error,
+                              fill_class=FillOutcomeClass.COMPILE_FAIL.value)
 
+        _ok = (FillOutcomeClass.UNREACHABLE_VERDICT.value if _blocked_by
+               else FillOutcomeClass.CASHED.value)
+        self.tel.emit("phase_c.fill.class", data={
+            "cluster": ctx.cluster_name,
+            "unit": f"{rel_file}::{fn_name}",
+            "route": "per-fn",
+            "class": _ok,
+        })
         return FillResult(file=rel_file, fn_name=fn_name, filled=True,
-                          attempts=attempts, blocked_by=tuple(_blocked_by))
+                          attempts=attempts, blocked_by=tuple(_blocked_by),
+                          fill_class=_ok)

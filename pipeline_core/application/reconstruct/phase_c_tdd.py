@@ -90,6 +90,7 @@ from pipeline_core.domain.escalation_lifetime import (
     product_addition_keys,
     sustain_escalation_products,
 )
+from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.flat_score import (
     FlatScoreDecision,
     ScoreReading,
@@ -871,6 +872,7 @@ def run_phase_c_tdd(
     total_bytes = 0
     errors: list[str] = []
     _prev_payoff = None
+    _prev_fill_classes = FillClassHistogram()
 
     # Improvement-driven loop. Track passing-test count across iters;
     # exit only after `max_stalls` consecutive non-improving iters. The 10k
@@ -4080,6 +4082,8 @@ def run_phase_c_tdd(
                     "cluster": cluster.name, "iter": iter_n,
                     "units": [f"{u.file}::{u.fn_name}" for u, _ in _hits],
                     "prior_run_id": _hits[0][1].run_id})
+        _cls_bit = (f" {_prev_fill_classes.rendered()}"
+                    if _prev_fill_classes else "")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
              f"({dt:.1f}s); pass={pass_count} fail={fail_count} "
              f"oracle={_measure.oracle_size} "
@@ -4087,7 +4091,7 @@ def run_phase_c_tdd(
              f"frontier={len(eligible)} fn(s) ({kind}), "
              f"{skipped_perm} skipped as exhausted; "
              f"unowned={len(_unowned)}; "
-             f"dispatching {_batch.rendered}.")
+             f"dispatching {_batch.rendered}.{_cls_bit}")
         # The ordered frontier this iteration walked, as one digest. It is a
         # DIAGNOSTIC and never a gate: a hash of the population cannot decide
         # whether a carried cursor is valid, because the population moves for
@@ -4127,6 +4131,8 @@ def run_phase_c_tdd(
             "pass_completed": _batch.completes_pass,
             "unowned": len(_unowned),
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
+            "fill_classes": (
+                _prev_fill_classes.as_dict() if _prev_fill_classes else None),
         })
 
         # Shadow zero-payoff reading: judge what the PREVIOUS sweep's dispatch
@@ -4302,6 +4308,10 @@ def run_phase_c_tdd(
         total_bytes += sub.bytes_filled
         errors.extend(sub.errors)
         _prev_payoff = sub.payoff
+        _prev_fill_classes = sub.fill_classes or FillClassHistogram()
+        if _prev_fill_classes:
+            deps.log(f"  {tag} [phase-c/tdd] fill returned "
+                     f"{_prev_fill_classes.rendered()}.")
         _score_grace(iter_n, pass_count)
 
         # Update recently_filled ring buffer with this iter's actual fills.

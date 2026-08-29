@@ -15,9 +15,11 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
 from pipeline_core.application.reconstruct.cargo_errors import (
     ecodes_in_text,
     excerpt_for_code,
@@ -67,6 +69,11 @@ from pipeline_core.domain.enums import RouteOrder
 from pipeline_core.domain.failure_signature import (
     attempt_invariant,
     structural_group_note,
+)
+from pipeline_core.domain.fill_class import (
+    FillClassCounter,
+    FillOutcomeClass,
+    note_fill_class,
 )
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.identity import ContainerId, RetroKey
@@ -585,6 +592,15 @@ def fill_impl_blocks(
     _types_section_for_fix = deps.types_section_for_fix
     _bound_methods_section_for = deps.bound_methods_section_for
     _u2_test_gate = deps.u2_test_gate
+    _fill_classes = FillClassCounter()
+
+    def _cls(kind: FillOutcomeClass, unit: str, route: str) -> None:
+        note_fill_class(_emit, _fill_classes, kind,
+                        cluster=cluster_name, unit=unit, route=route)
+
+    _locate_site = make_fn_site_locator(
+        SimpleNamespace(enumerate_fns=_enumerate_fns_via_extractor),
+        target_src_dir)
     _test_regression_baseline = deps.test_regression_baseline
     _test_regression_gate = deps.test_regression_gate
     ask = deps.ask
@@ -722,7 +738,9 @@ def fill_impl_blocks(
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
-        return ClusterFillResult(dispatched_fns=())
+        return ClusterFillResult(
+            dispatched_fns=(),
+            fill_classes=_fill_classes.histogram())
 
     # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
@@ -1837,6 +1855,13 @@ def fill_impl_blocks(
                         _emit("phase_c.file.fill.mismatch", data={
                             "cluster": cluster_name, "file": file_rel,
                             "group": glabel, "still_stubbed": _left})
+                        _cls(FillOutcomeClass.WRONG_BODY, glabel, "file")
+                    elif (_crash_keep_file or _nonregr_keep_file
+                          or (_u2_file is not None
+                              and _u2_file.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)):
+                        _cls(FillOutcomeClass.UNREACHABLE_VERDICT, glabel, "file")
+                    else:
+                        _cls(FillOutcomeClass.CASHED, glabel, "file")
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,
@@ -1926,6 +1951,9 @@ def fill_impl_blocks(
                     "banked": _bank is not None,
                     "error_codes": sorted(ecodes_in_text(prior_error)),
                     "retrying": _more})
+                if not _more:
+                    _cls(FillOutcomeClass.COMPILE_FAIL if rc != 0
+                         else FillOutcomeClass.WRONG_BODY, glabel, "file")
 
     def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
@@ -2038,6 +2066,7 @@ def fill_impl_blocks(
                     "cluster": cluster_name, "file": block.file,
                     "container": block.container,
                     "members": [m.fn_name for m in block.refill_members]})
+                _cls(FillOutcomeClass.MIS_TARGETED, block_id, "impl")
                 return
             if len(_owned) < len(block.refill_members):
                 block = replace(block, refill_members=_owned)
@@ -2720,6 +2749,8 @@ def fill_impl_blocks(
                                  else (_u2_impl.self_passed
                                        if _u2_impl is not None else frozenset()))
                     _kept_i = _u2_external_only or _crash_keep
+                    _cls(FillOutcomeClass.UNREACHABLE_VERDICT if _kept_i
+                         else FillOutcomeClass.CASHED, block_id, "impl")
                     _verdict_row(
                         block_id,
                         (Disposition.KEEP_DEFERRED if _kept_i
@@ -2824,7 +2855,9 @@ def fill_impl_blocks(
                 last_error_excerpt = (
                     focus_diagnostics(
                         diagnostics, block.file,
-                        line_lo=_err_lo, line_hi=_err_hi)
+                        line_lo=_err_lo, line_hi=_err_hi,
+                        locate=_locate_site,
+                        target_container=block.container)
                     or _focus_cargo_errors(cargo_out, block.file))
                 _record_error_codes_seen(cargo_out)
                 if deps.retire_contradicted_notes is not None and fr_path:
@@ -3291,6 +3324,13 @@ def fill_impl_blocks(
                             attempt=fix_attempt, model_calls=fix_attempt)
             with _counters_lock:
                 impls_failed += 1
+                _loss = _last_loss[0] if _last_loss else None
+                if _loss in (AttemptLoss.ROUTING_DROP, AttemptLoss.SPLICE_REFUSAL):
+                    _cls(FillOutcomeClass.ANSWER_DROPPED, block_id, "impl")
+                elif last_metric is not None and last_metric.compiles:
+                    _cls(FillOutcomeClass.WRONG_BODY, block_id, "impl")
+                else:
+                    _cls(FillOutcomeClass.COMPILE_FAIL, block_id, "impl")
                 errors.append(f"{block.file}::{block.container}: "
                               f"impl-fill failed after {fix_attempt} attempt(s)")
             _emit("phase_c.impl.fill.fail", duration_ms=int(
@@ -3462,4 +3502,5 @@ def fill_impl_blocks(
         dispatched_fns=tuple(sorted(dispatched_keys)),
         reverted_fns=tuple(sorted(reverted_keys)),
         payoff=_payoff,
+        fill_classes=_fill_classes.histogram(),
     )

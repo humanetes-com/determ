@@ -26,10 +26,19 @@ from pipeline_core.application.reconstruct.test_targets import (
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureKind,
+    as_dispatch,
+    canon_site,
     container_key,
+    lift_sites,
     line_to_fn_record,
 )
-from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite, Frontier
+from pipeline_core.domain.models import (
+    Diagnostic,
+    FnLocator,
+    FnSite,
+    Frontier,
+    SiteFrontier,
+)
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_idents import (
     ascii_word_tokens,
@@ -148,32 +157,36 @@ def make_fn_site_locator(
 
 def extract_tdd_frontier(deps: AttributionDeps,
     test_output: str, src_dir: Path,
-) -> Frontier:
-    """Parse cargo test output → frontier dict.
+) -> tuple[Frontier, SiteFrontier]:
+    """Parse cargo test output → (dispatch map, site-precise convicting).
 
-    Keys are (file_rel, fn_name), values are the test names that panicked in a
-    still-unfilled `unimplemented!()`/`todo!()` stub inside that fn. Built on
-    the shared structured parser (`parse_test_output`): only STUB_PANIC
-    failures are included — they map cleanly to a still-unfilled fn.
-    Assertion-failure attribution is a separate pass (`behavior_frontier`).
+    Dispatch keys are (file_rel, fn_name). Site keys keep the container the
+    panic landed in, so a RUNTIME hit at ``construct_from_boxed`` does not
+    convict a ``from`` site. Built on the shared structured parser
+    (`parse_test_output`): only STUB_PANIC failures are included.
 
-    Returns {} when no stub panics resolve (build failed before any test ran,
-    or every failure is an assertion).
+    Returns ``({}, {})`` when no stub panics resolve (build failed before any
+    test ran, or every failure is an assertion). Callers that want dispatch
+    only use :func:`as_dispatch`.
     """
     frontier: Frontier = {}
+    sites: SiteFrontier = {}
     if not test_output:
-        return frontier
-    locate = make_fn_locator(deps.structure, src_dir)
+        return frontier, sites
+    locate = make_fn_site_locator(deps.structure, src_dir)
     for f in parse_test_output(test_output).failures:
         if f.kind is not TestFailureKind.STUB_PANIC:
             continue
         if not (f.panic_file and f.panic_line is not None):
             continue
-        key = locate(f.panic_file, f.panic_line)
-        if key is None:
+        site = locate(f.panic_file, f.panic_line)
+        if site is None:
             continue
-        frontier.setdefault(key, set()).add(f.test_name)
-    return frontier
+        site = canon_site(site)
+        loc = FnLocator(site.file, site.fn_name)
+        frontier.setdefault(loc, set()).add(f.test_name)
+        sites.setdefault(site, set()).add(f.test_name)
+    return frontier, sites
 
 def behavior_frontier(
     deps: AttributionDeps,
@@ -198,7 +211,9 @@ def behavior_frontier(
         if tp.exists():
             with suppress(Exception):
                 texts[trel] = tp.read_text(encoding="utf-8", errors="replace")
-    return behavior_frontier_from_texts(deps, test_output, texts, project_dir)
+    fr, _sites, srcs = behavior_frontier_from_texts(
+        deps, test_output, texts, project_dir)
+    return fr, srcs
 
 
 def _format_traits_used(test_src: str) -> frozenset[str]:
@@ -266,6 +281,7 @@ def _format_impl_calls(body_text: str) -> frozenset[tuple[str, str]]:
 def _attribute_format_only_test(
     tname: str, tsrc: str, file_text: str,
     by_name: dict[str, list[dict[str, Any]]], frontier: Frontier,
+    sites: SiteFrontier,
     log: Callable[[str], None],
 ) -> None:
     """Give a frontier owner to a failing test whose only crate contact is a
@@ -314,10 +330,13 @@ def _attribute_format_only_test(
     file_idents = identifiers_in(_code_only)
     added: set[FnLocator] = set()
 
-    def _add(key: FnLocator) -> None:
+    def _add(key: FnLocator, rec: dict[str, Any] | None = None) -> None:
         if tname not in frontier.get(key, set()):
             added.add(key)
         frontier.setdefault(key, set()).add(tname)
+        cont = str(rec.get("container", "") or "") if rec is not None else ""
+        sites.setdefault(canon_site(FnSite(key.file, key.fn_name, cont)),
+                         set()).add(tname)
 
     for rec in fmt_recs:
         parsed = _impl_trait_and_self(str(rec.get("container", "")))
@@ -327,7 +346,7 @@ def _attribute_format_only_test(
         if not (trait in traits and self_ty in file_idents):
             continue
         # Follow the dispatcher's call to its real formatting implementer.
-        implementers: set[FnLocator] = set()
+        implementers: list[tuple[FnLocator, dict[str, Any]]] = []
         for qual, method in _format_impl_calls(str(rec.get("body_text", "") or "")):
             if qual == "Self":
                 # `Self::debug(r, f)` inside `impl Debug for Error` names the
@@ -342,13 +361,17 @@ def _attribute_format_only_test(
                 # (else it would match every `impl Display for X`).
                 if (icont != str(rec.get("container", ""))
                         and qual == (impl_self_type(icont) or "")):
-                    implementers.add(FnLocator(irec["file"], method))
+                    implementers.append((FnLocator(irec["file"], method), irec))
         if implementers:
-            for k in implementers:
-                _add(k)
+            seen: set[FnLocator] = set()
+            for k, irec in implementers:
+                if k in seen:
+                    continue
+                seen.add(k)
+                _add(k, irec)
         else:
             # The matched fmt is self-contained — it IS the implementer.
-            _add(FnLocator(rec["file"], "fmt"))
+            _add(FnLocator(rec["file"], "fmt"), rec)
     if added:
         log(f"  [attribution/behavior] {tname}: no crate fn named in its "
             "source (formatting-macro test) — attributed to "
@@ -363,7 +386,7 @@ def behavior_frontier_from_texts(
     deps: AttributionDeps,
     test_output: str, texts: dict[str, str], fns_root: Path,
     unrepairable_tests: frozenset[str] = frozenset(),
-) -> tuple[Frontier, dict[str, tuple[str, str]]]:
+) -> tuple[Frontier, SiteFrontier, dict[str, tuple[str, str]]]:
     """Core of :func:`behavior_frontier` over already-loaded test texts
     ({rel_path: content}) — the phase-c TDD loop holds the cluster's test pairs
     in memory, so it attributes without re-reading files. `fns_root` is the
@@ -381,7 +404,7 @@ def behavior_frontier_from_texts(
         failed = [t for t in failed
                   if t.split("::")[-1] not in unrepairable_tests]
     if not failed or not texts:
-        return {}, {}
+        return {}, {}, {}
     index = build_test_name_index(texts)
     by_name: dict[str, list[dict[str, Any]]] = {}
     for r in deps.structure.enumerate_fns(fns_root) or []:
@@ -392,6 +415,7 @@ def behavior_frontier_from_texts(
             continue
         by_name.setdefault(r.get("fn_name", ""), []).append(r)
     frontier: Frontier = {}
+    sites: SiteFrontier = {}
     test_srcs: dict[str, tuple[str, str]] = {}
     for tname in failed:
         bare = tname.split("::")[-1].strip()
@@ -412,27 +436,34 @@ def behavior_frontier_from_texts(
                 if len(recs) > 1 and not (
                         identifiers_in(rec.get("container", "")) & idents):
                     continue
-                frontier.setdefault(FnLocator(rec["file"], fn_name), set()).add(tname)
+                key = FnLocator(rec["file"], fn_name)
+                frontier.setdefault(key, set()).add(tname)
+                sites.setdefault(
+                    canon_site(FnSite(rec["file"], fn_name,
+                                      rec.get("container", "") or "")),
+                    set()).add(tname)
                 _owned = True
         if not _owned:
             # A formatting-macro test names no crate fn and so owns no unit;
             # attribute it through the format trait it uses (additive only —
             # runs solely because the primary attribution left it unowned).
             _attribute_format_only_test(
-                tname, tsrc, texts[trel], by_name, frontier, deps.log)
-    return frontier, test_srcs
+                tname, tsrc, texts[trel], by_name, frontier, sites, deps.log)
+    return frontier, sites, test_srcs
 
 def extract_tdd_compile_frontier(deps: AttributionDeps,
     build_output: str, src_dir: Path,
-) -> Frontier:
+) -> tuple[Frontier, SiteFrontier]:
     """When cargo test fails because cargo BUILD failed (compile errors,
     not panics), parse error[Exxxx] messages → fn records. Same shape as
     `_extract_tdd_frontier` but with test names replaced by "<compile>"
-    so the caller can distinguish.
+    so the caller can distinguish. Sites keep the container the diagnostic
+    resolved to.
     """
     frontier: Frontier = {}
+    sites: SiteFrontier = {}
     if not build_output:
-        return frontier
+        return frontier, sites
     fn_records_by_file: dict[str, list[dict[str, Any]]] = {}
     file_text_cache: dict[str, str] = {}
     for _diag in parse_rustc_compile_errors(build_output):
@@ -459,8 +490,11 @@ def extract_tdd_compile_frontier(deps: AttributionDeps,
         rec = line_to_fn_record(file_text_cache[rel], line_no, recs)
         if rec is None:
             continue
-        frontier.setdefault(FnLocator(rel, rec["fn_name"]), set()).add("<compile>")
-    return frontier
+        loc = FnLocator(rel, rec["fn_name"])
+        site = canon_site(FnSite(rel, rec["fn_name"], rec.get("container", "") or ""))
+        frontier.setdefault(loc, set()).add("<compile>")
+        sites.setdefault(site, set()).add("<compile>")
+    return frontier, sites
 
 def _resolved_diag_records(
     diagnostics: list[Diagnostic], src_dir: Path,
@@ -589,7 +623,7 @@ def compile_error_frontier(
             return frontier_from_diags(deps, diags, project_dir)
     except Exception as e:
         deps.log(f"  [fix loop] structured frontier failed ({e}) → text fallback")
-    return extract_tdd_compile_frontier(deps, output, project_dir)
+    return as_dispatch(extract_tdd_compile_frontier(deps, output, project_dir))
 
 def build_test_reverse_map(
     deps: AttributionDeps,
@@ -864,42 +898,77 @@ def attribute_failures(
     _vanished = _repairable(extra_failed)
 
     merged: Frontier = {}
-    convicting: Frontier = {}
-    # A test RUNTIME/COMPILE already located AT a unit. BEHAVIOR may also
-    # name that test on a different unit (the four `from` impls share
+    convicting: SiteFrontier = {}
+    # A test RUNTIME/COMPILE already located AT a site. BEHAVIOR may also
+    # name that test on a different site (the four `from` impls share
     # `Error` with Debug asserts). Dispatch still unions both; conviction
-    # does not — the locate() unit owns the revert. Run `463713-b7c666c8`
+    # does not — the locate() site owns the revert. Run `463713-b7c666c8`
     # (2026-08-28/29) otherwise convicted `From<Error> for Box<dyn …>` of
     # `test_boxed_str`, which panicked inside still-stubbed
     # `construct_from_boxed`.
-    observed_at: dict[str, FnLocator] = {}
+    observed_at: dict[str, FnSite] = {}
     _src_map: dict[str, str] = {}
 
-    def _merge(add: Frontier, kind: FailureKind) -> None:
-        if add:
-            contributors.append(kind)
-            for k, v in add.items():
-                merged.setdefault(k, set()).update(v)
-                if not kind.convicts:
-                    continue
-                if kind is FailureKind.BEHAVIOR:
-                    kept = {t for t in v if observed_at.get(t, k) == k}
-                    if kept:
-                        convicting.setdefault(k, set()).update(kept)
-                    continue
-                convicting.setdefault(k, set()).update(v)
-                for t in v:
-                    observed_at.setdefault(t, k)
+    def _unpack_pair(raw: Any) -> tuple[Frontier, SiteFrontier]:
+        """Live extractors return ``(dispatch, sites)``. Tests monkeypatch
+        a locator-only dict or a 2-tuple; lift those to empty-container
+        sites so T1a still holds on locators."""
+        if isinstance(raw, tuple) and len(raw) == 2:
+            a, b = raw
+            if (isinstance(b, dict) and b
+                    and (isinstance(next(iter(b)), FnSite)
+                         or (isinstance(next(iter(b)), tuple)
+                             and len(next(iter(b))) == 3))):
+                return a, b
+            return a, lift_sites(a) if isinstance(a, dict) else {}
+        if isinstance(raw, dict):
+            return raw, lift_sites(raw)
+        return {}, {}
 
-    _merge(_strip(extract_tdd_frontier(deps, test_output, src_dir)),
-           FailureKind.RUNTIME)
-    _merge(_strip(extract_tdd_compile_frontier(deps, test_output, src_dir)),
-           FailureKind.COMPILE)
+    def _strip_sites(sm: SiteFrontier) -> SiteFrontier:
+        if not _test_keys:
+            return sm
+        return {s: v for s, v in sm.items()
+                if FnLocator(s.file, s.fn_name) not in _test_keys}
+
+    def _merge(add: Frontier, kind: FailureKind,
+               sites: SiteFrontier | None = None) -> None:
+        if not add:
+            return
+        contributors.append(kind)
+        for k, v in add.items():
+            merged.setdefault(k, set()).update(v)
+        if not kind.convicts:
+            return
+        site_map = sites if sites is not None else lift_sites(add)
+        for site, v in site_map.items():
+            site = canon_site(site)
+            if kind is FailureKind.BEHAVIOR:
+                kept = {t for t in v if observed_at.get(t, site) == site}
+                if kept:
+                    convicting.setdefault(site, set()).update(kept)
+                continue
+            convicting.setdefault(site, set()).update(v)
+            for t in v:
+                observed_at.setdefault(t, site)
+
+    _rt_d, _rt_s = _unpack_pair(extract_tdd_frontier(deps, test_output, src_dir))
+    _merge(_strip(_rt_d), FailureKind.RUNTIME, _strip_sites(_rt_s))
+    _cc_d, _cc_s = _unpack_pair(
+        extract_tdd_compile_frontier(deps, test_output, src_dir))
+    _merge(_strip(_cc_d), FailureKind.COMPILE, _strip_sites(_cc_s))
     if test_texts:
-        _bf, _srcs = behavior_frontier_from_texts(
+        _bf_raw: Any = behavior_frontier_from_texts(
             deps, test_output, test_texts, src_dir, unrepairable_tests)
+        if isinstance(_bf_raw, tuple) and len(_bf_raw) == 3:
+            _bf, _bf_sites, _srcs = _bf_raw
+        elif isinstance(_bf_raw, tuple) and len(_bf_raw) == 2:
+            _bf, _srcs = _bf_raw
+            _bf_sites = lift_sites(_bf)
+        else:
+            _bf, _bf_sites, _srcs = {}, {}, {}
         _src_map = {name: src for name, (_rel, src) in _srcs.items()}
-        _merge(_strip(_bf), FailureKind.BEHAVIOR)
+        _merge(_strip(_bf), FailureKind.BEHAVIOR, _strip_sites(_bf_sites))
     # Vanished tests (`extra_failed` — expected but absent from the output:
     # their binary segfaulted or stopped compiling) leave NO panic line, no
     # compile error, no behavioral evidence, so paths 1-3 can never see them
