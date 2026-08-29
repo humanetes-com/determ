@@ -25,7 +25,7 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 )
 from pipeline_core.domain import model_notes as mn
 from pipeline_core.domain.llm_output import parse_self_note
-from pipeline_core.domain.rust_scan import contains_word, item_names
+from pipeline_core.domain.rust_scan import item_names, names_method_call
 
 _NOTE_EXTRACTION_PROMPT = """A model attempted to implement a Rust function and
 the first attempt did not compile. The second (or later) attempt did compile.
@@ -308,9 +308,14 @@ class FileModelNotesStore:
                     self._log("  [notes] layout-contradicted note kept out of "
                               f"prompt (field not in current layout): {note[:100]}…")
         if hidden_symbols:
+            # Call position, not word presence: `not` is a real method here
+            # (`Bool::not`, declared in `mod __private::not` in src/lib.rs), so it
+            # is walled from every other file and a whole-word test dropped every
+            # note containing the ordinary English "not" — 3 of the 5 stored notes
+            # on 2026-08-29, only one of which named an unreachable call.
             dropped_hidden = [
                 n for n in notes
-                if any(contains_word(n, s) for s in hidden_symbols)]
+                if any(names_method_call(n, s) for s in hidden_symbols)]
             if dropped_hidden:
                 dead = set(dropped_hidden)
                 notes = [n for n in notes if n not in dead]

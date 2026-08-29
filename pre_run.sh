@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # The gate a run has to pass before `continue.sh` will start one.
 #
-# Two stages, in this order, because they answer different questions and the
-# second is unreadable while the first is red:
+# Three stages, in this order, because they answer different questions and each is
+# unreadable while the one before it is red:
 #
-#   1. check.sh — "is the code correct". Static gates, the pytest suite, the
+#   1. the extractor build — "is the binary the pipeline runs the one these sources
+#      describe". The stamp covers the Rust sources; the pipeline executes a
+#      compiled artefact, and only a build keeps the two from drifting apart.
+#   2. check.sh — "is the code correct". Static gates, the pytest suite, the
 #      coverage ratchet. A type error or a broken invariant fails here.
-#   2. walks    — "does the loop's decision sequence go where the theory says".
+#   3. walks    — "does the loop's decision sequence go where the theory says".
 #      Each walk replays a recorded pathological run through the real
 #      `run_phase_c_tdd` with cargo and the model stubbed, and asserts on the
 #      DECISION the fix was supposed to make reachable. A walk carries its own
@@ -41,29 +44,64 @@ echo "=============================================================="
 echo " PRE-RUN GATE"
 echo "=============================================================="
 
-# --- stage 1: is the code correct ----------------------------------------- #
+# --- stage 1: the binary the pipeline actually runs ------------------------ #
+# The stamp hashes the extractor's Rust SOURCES and prunes target/, and nothing on
+# the launch path ever rebuilt the binary — only setup.sh runs `cargo build
+# --release`. So an extractor edit moved the stamp, check.sh compiled the extractor
+# from source under the pinned gate toolchain and passed, this gate stamped, and the
+# pipeline went on running a release binary from days earlier: one stamp, two
+# behaviours, no signal.
+#
+# Measured 2026-08-29, run 955468-7b947bd0. target/release/skeleton-extractor was
+# built 2026-08-24 21:31 while src/model.rs and src/enumerate.rs carried the
+# 2026-08-28 16:48 change adding TypeRecord.mod_path and MethodRecord.file/mod_path.
+# Enumerating the live tree with that binary returned StdError with no mod_path key
+# at all, so type_nameable_from never walled and hidden_symbols_from_types returned
+# empty; TYPES_IN_SCOPE kept advertising `ext_context` (declared in a private `mod
+# ext` in another file) to src/error.rs fills, and the compiler kept answering
+# error[E0603] `module ext is private` at impl attempt 4 and error[E0599] at
+# attempt 6.
+#
+# Building here — rather than warning that the binary looks stale — is what makes
+# the class unrepeatable: after a passing gate the binary is by construction the one
+# these sources describe. A warning would just be the "build before launching"
+# habit that the rest of this file exists to stop relying on.
+if [[ "$_WALKS_ONLY" == true ]]; then
+    echo ""
+    echo "--- stage 1/3: extractor build ....... SKIPPED (--walks-only) ---"
+else
+    echo ""
+    echo "--- stage 1/3: cargo build --release (the extractor binary the pipeline runs) ---"
+    if ! (cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo build --release); then
+        echo ""
+        echo "PRE-RUN FAILED at stage 1 (extractor build). No stamp written; continue.sh will refuse."
+        exit 1
+    fi
+fi
+
+# --- stage 2: is the code correct ----------------------------------------- #
 if [[ "$_WALKS_ONLY" == true ]]; then
     # For the fix-iterate loop only: a walk failure is the signal being chased,
     # and re-running the full static sweep between attempts costs more than it
     # catches. This path deliberately writes NO stamp — see the end of the file.
     echo ""
-    echo "--- stage 1/2: check.sh ....... SKIPPED (--walks-only) ---"
+    echo "--- stage 2/3: check.sh ....... SKIPPED (--walks-only) ---"
 else
     echo ""
-    echo "--- stage 1/2: check.sh (static gates, pytest, coverage ratchet) ---"
+    echo "--- stage 2/3: check.sh (static gates, pytest, coverage ratchet) ---"
     if ! bash "$SCRIPT_DIR/check.sh"; then
         echo ""
-        echo "PRE-RUN FAILED at stage 1 (check.sh). No stamp written; continue.sh will refuse."
+        echo "PRE-RUN FAILED at stage 2 (check.sh). No stamp written; continue.sh will refuse."
         # check.sh's pytest run collects the walks too — they are left in it so the
         # coverage they carry keeps counting against the ratchet. So a walk can fail
-        # here, under a stage-1 heading; check.sh's own output names the test.
+        # here, under a stage-2 heading; check.sh's own output names the test.
         exit 1
     fi
 fi
 
-# --- stage 2: does the loop decide what the theory says -------------------- #
+# --- stage 3: does the loop decide what the theory says -------------------- #
 echo ""
-echo "--- stage 2/2: walks (recorded runs replayed through the real loop) ---"
+echo "--- stage 3/3: walks (recorded runs replayed through the real loop) ---"
 set +e
 "$SCRIPT_DIR/.venv/bin/python" -m pytest -m walk --timeout=120 --timeout-method=thread -q
 _WALK_RC=$?
@@ -75,11 +113,11 @@ set -e
 if [[ "$_WALK_RC" -eq 5 ]]; then
     echo ""
     echo "  WARNING  no walks are registered (pytest -m walk collected nothing)."
-    echo "           Stage 2 vouched for NOTHING. Every control-loop pathology"
+    echo "           Stage 3 vouched for NOTHING. Every control-loop pathology"
     echo "           this repo has hit so far is still un-gated."
 elif [[ "$_WALK_RC" -ne 0 ]]; then
     echo ""
-    echo "PRE-RUN FAILED at stage 2 (walks). No stamp written; continue.sh will refuse."
+    echo "PRE-RUN FAILED at stage 3 (walks). No stamp written; continue.sh will refuse."
     echo "A walk failure means the loop's decisions diverged from the trajectory the"
     echo "fix predicted — read the walk's assertion, not the pass count."
     exit 1
@@ -91,7 +129,7 @@ fi
 # fix, and it leaves any existing stamp exactly as it found it.
 if [[ "$_WALKS_ONLY" == true ]]; then
     echo ""
-    echo "Walks pass. NO stamp written (--walks-only skipped check.sh)."
+    echo "Walks pass. NO stamp written (--walks-only skipped the extractor build and check.sh)."
     echo "Run 'bash pre_run.sh' with no flags before launching."
     exit 0
 fi

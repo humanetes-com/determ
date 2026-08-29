@@ -116,3 +116,19 @@ def test_hidden_symbols_are_walled_methods_in_another_file() -> None:
     hidden = hidden_symbols_from_types([stderror], "src/error.rs")
     assert hidden == frozenset({"ext_context"})
     assert hidden_symbols_from_types([stderror], "src/context.rs") == frozenset()
+
+
+def test_hidden_symbols_are_names_not_prose_markers() -> None:
+    """`hidden_symbols_from_types` returns method NAMES; the contract is that
+    the caller tests them in call position. A method name may be an English
+    word — this crate's `Bool::not` lives in `mod __private::not` — so the
+    set legitimately contains `not`, and it is the notes filter's job not to
+    read that as prose."""
+    bool_rec = TypeRecord(
+        name="Bool", file="src/lib.rs", kind="struct", is_pub=True,
+        mod_path="__private::not",
+        methods=(MethodRecord(name="not", file="src/lib.rs",
+                              mod_path="__private::not"),))
+    hidden = hidden_symbols_from_types([bool_rec], "src/error.rs")
+    assert hidden == frozenset({"not"})
+    assert hidden_symbols_from_types([bool_rec], "src/lib.rs") == frozenset()

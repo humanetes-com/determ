@@ -18,6 +18,16 @@
 # locate a definition. What is deliberately OUTSIDE it: tests (a new test cannot
 # make a passing gate stale), the .md notes, and cargo's target/ directory.
 #
+# target/ stays out on purpose — a build product is not an input to what the loop
+# decides, and hashing it would make every rebuild look like a code change. The
+# consequence is that this hash describes the extractor's SOURCES while the
+# pipeline executes a COMPILED binary, and the two can disagree silently: on
+# 2026-08-29 the release binary was four days older than src/model.rs, so the
+# TypeRecord.mod_path the Python side filters on was absent from its output and a
+# shipped private-mod wall was inert while the stamp read as current. pre_run.sh
+# closes that by BUILDING the extractor before it stamps, so a cleared tree is one
+# whose binary these sources produced. Do not "fix" the drift by hashing target/.
+#
 # The hash covers file CONTENTS and repo-relative paths only. `sha256sum` prints
 # the path it was given, so hashing its output verbatim would make the stamp
 # depend on how the caller spelled the root — `pipeline_tree_stamp .` and

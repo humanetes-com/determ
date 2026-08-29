@@ -322,6 +322,7 @@ from pipeline_core.domain.rust_scan import (  # noqa: E402
     contains_word,
     count_macro_calls,
     count_word,
+    names_method_call,
 )
 
 _WORD_TEXTS = [
@@ -334,6 +335,26 @@ def test_contains_word_matches_regex():
     for t in _WORD_TEXTS:
         for w in ("foo", "bar", "Foo", "x"):
             assert contains_word(t, w) == bool(re.search(r"\b" + re.escape(w) + r"\b", t)), (t, w)
+
+
+def test_names_method_call_matches_call_position_only():
+    """The notes-filter contract: `.name`, `::name`, `name(`, `name::<T>(`
+    and nothing else. `not` is a live hidden symbol (Bool::not behind
+    `mod __private::not`); the shapes below are the ones that must not
+    collide with English "not" and must still catch an advertised call."""
+    assert names_method_call("use e.ext_context(context)", "ext_context")
+    assert names_method_call("use e.ext_context", "ext_context")
+    assert names_method_call("use Bool::not", "not")
+    assert names_method_call("not(x)", "not")
+    assert names_method_call("not::<T>(x)", "not")
+    # English / identifier collisions the whole-word rule took.
+    assert not names_method_call("it was not unambiguous", "not")
+    assert not names_method_call("not value.fmt(f)", "not")
+    assert not names_method_call("cannot compile", "not")
+    assert not names_method_call("note that", "not")
+    assert not names_method_call("`not`", "not")
+    # Residual: a parenthesized aside looks like `name(`.
+    assert names_method_call("is not (yet) implemented", "not")
 
 
 def test_count_word_matches_regex():

@@ -312,3 +312,66 @@ def test_hidden_symbols_drop_notes_that_name_an_unreachable_method(
         fr, "src/context.rs", "ext_context",
         hidden_symbols=frozenset())
     assert "ext_context" in kept
+
+
+def test_hidden_symbol_that_is_an_english_word_drops_only_call_sites(
+        tmp_path) -> None:
+    """The crate declares `Bool::not` inside `mod __private::not` (src/lib.rs),
+    so `not` is walled from every other file and `hidden_symbols_from_types`
+    returns it for src/error.rs. Matching hidden symbols as bare words then
+    dropped every note containing the ordinary English "not" — measured
+    2026-08-29 on the live tree, 3 of the 5 stored notes, of which only the
+    `ext_context` one advertises an unreachable call.
+
+    Fixture is the live five-note FR file (tmp/anyhow/functional_requirements_anyhow.md
+    2026-08-29), not a paraphrase: hidden={'ext_context','not'} dropped 3 under
+    whole-word and 1 under call-position. The claim pinned here is the plan's:
+    a note is dropped when it tells the model to CALL an unreachable method, and
+    kept when it merely contains the word. The negative control is the 3-vs-1
+    count under the pre-fix whole-word rule on those same strings.
+    """
+    # Live FR notes, byte-for-byte. E0034's "not" is `not value.fmt(f)`, not
+    # "it was not unambiguous"; E0609's is `not wrapper fields`.
+    notes = [
+        ("[E0277] I tried Error::new(e).context(context) because I assumed "
+         "the inner error implemented core::error::Error, but the generic "
+         "error only guarantees StdError so the trait bound fails, use "
+         "e.ext_context(context) not Error::new(e).context(context)."),
+        ("[E0034] I tried calling fmt directly because I assumed it resolved "
+         "uniquely, but it was ambiguous between Debug and Display impls, so "
+         "use fully qualified trait syntax Display::fmt(&value, f) not "
+         "value.fmt(f)."),
+        ("[E0606] I tried casting a shared reference to *mut T with `as` for "
+         "`NonNull::new_unchecked` because Rust forbids casting `&'a T` as "
+         "`*mut T`; use `NonNull::from` to build a `NonNull` from a reference "
+         "instead of a manual `as` cast."),
+        ("[E0609] I tried accessing fields like number started and inner on "
+         "self for formatted writing because I confused a pretty print wrapper "
+         "type with the underlying Buf buffer, use self.bytes and "
+         "self.written for direct writes not wrapper fields"),
+        ("[E0451] I tried constructing Ref by directly initializing its "
+         "fields because I assumed they were public, but lifetime is private "
+         "so direct construction fails, so use Ref::from_raw instead of a "
+         "manual struct literal."),
+    ]
+    hidden = frozenset({"ext_context", "not"})
+    fr = _fr(tmp_path, notes)
+    out = _store().filter_for_prompt(
+        fr, "src/error.rs", "construct", hidden_symbols=hidden)
+    assert "[E0277]" not in out
+    assert "[E0034]" in out
+    assert "[E0606]" in out
+    assert "[E0609]" in out
+    assert "[E0451]" in out
+
+    from pipeline_core.domain.rust_scan import contains_word, names_method_call
+    dropped_word = [n for n in notes
+                    if any(contains_word(n, s) for s in hidden)]
+    dropped_call = [n for n in notes
+                    if any(names_method_call(n, s) for s in hidden)]
+    assert len(dropped_word) == 3, [n[1:7] for n in dropped_word]
+    assert len(dropped_call) == 1, [n[1:7] for n in dropped_call]
+    assert dropped_call[0].startswith("[E0277]")
+    assert names_method_call(notes[0], "ext_context")
+    assert not names_method_call(notes[1], "not")
+    assert not names_method_call(notes[3], "not")

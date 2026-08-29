@@ -863,7 +863,7 @@ for the record; the copy `./commit.sh` reads is `last_commit_message.txt`.
 
 ## The commands this repo's gate is made of
 
-    bash pre_run.sh                 # check.sh + walks, then stamp the tree
+    bash pre_run.sh                 # extractor release build + check.sh + walks, then stamp
     bash pre_run.sh --walks-only    # walks alone; writes NO stamp, for the fix loop
     bash continue.sh                # refuses (exit 3) unless the stamp matches
     bash continue.sh --no-pre-run   # launch untested, printed loudly
@@ -879,12 +879,22 @@ untracked). Both are sourced, never executed.
 
 ## A run does not start until something has vouched for the code
 
-`bash pre_run.sh` is the gate; `continue.sh` refuses to launch without it. Two
-stages, in this order because the second is unreadable while the first is red:
+`bash pre_run.sh` is the gate; `continue.sh` refuses to launch without it. Three
+stages, in this order because each is unreadable while the one before it is red:
 
-1. **check.sh** — is the code correct. Static gates, the pytest suite, the
-   coverage ratchet.
-2. **walks** (`pytest -m walk`) — does the loop's decision sequence go where the
+1. **extractor build** — `cargo build --release` in `tools/skeleton_extractor`.
+   The stamp hashes the extractor's Rust sources and prunes `target/`; the
+   pipeline executes the compiled binary. Without this stage a passing gate
+   can stamp sources the running binary does not implement: run
+   `955468-7b947bd0` (2026-08-29) executed a four-day-old release binary whose
+   `TypeRecord.mod_path` was absent, so a shipped private-mod wall was inert
+   while `code_id` and the stamp both read as current. `--walks-only` skips
+   it. Building rather than warning is what makes the class unrepeatable.
+2. **check.sh** — is the code correct. Static gates, the pytest suite, the
+   coverage ratchet. Compiles the extractor under the pinned gate toolchain in
+   the debug profile — that green line is not a statement about
+   `target/release`.
+3. **walks** (`pytest -m walk`) — does the loop's decision sequence go where the
    theory says. A walk replays a recorded pathological run through the real
    `run_phase_c_tdd` with cargo and the model stubbed.
 

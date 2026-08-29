@@ -36,6 +36,52 @@ def contains_word(text: str, word: str) -> bool:
     return False
 
 
+def names_method_call(text: str, name: str) -> bool:
+    """True when `name` appears in `text` in CALL position — `.name`, `::name`,
+    `name(`, or a turbofished `name::<T>(` — rather than merely as a word.
+
+    The notes filter needs "does this note advertise calling this method", and a
+    bare whole-word test answers a different question the moment a method name is
+    also an English word. Measured 2026-08-29 on the live anyhow tree: the crate
+    declares `Bool::not` inside `mod __private::not` in `src/lib.rs`, so `not` is
+    walled from every other file and became a hidden symbol; `contains_word`
+    matched the ordinary prose "not" and would have dropped 3 of the 5 stored
+    notes, of which only the `ext_context` one names an unreachable call. Prose
+    can never look like a call, so call-position matching closes the collision for
+    every English-colliding method the crate has (`is`, `new`, `from`, `context`,
+    `source`, `read`, `extend` are all method names here too). A parenthesized
+    English aside after the word (`is not (yet) implemented`) does look like
+    `name(` and is dropped; none of the five stored notes on 2026-08-29 take that
+    shape. Receiver / path position (`.name`, `::name`) does not require
+    parentheses, so `use e.ext_context` and `Bool::not` count as advertising the call.
+
+    Deliberately NOT a general "is this identifier used as code" test: a note that
+    merely mentions a symbol in passing is left in the prompt, because the thing
+    being prevented is an instruction to CALL something unreachable.
+    """
+    start = 0
+    while (k := text.find(name, start)) >= 0:
+        start = k + 1
+        before = text[k - 1] if k > 0 else ""
+        if before in _IDENT_CHARS:
+            continue
+        rest = text[k + len(name):]
+        after = rest[0] if rest else ""
+        if after in _IDENT_CHARS:
+            continue
+        # Receiver / path position: `.name`, `::name`.
+        if before == "." or text[max(0, k - 2):k] == "::":
+            return True
+        # Call position: `name(` or `name::<T>(`, whitespace tolerated.
+        tail = rest.lstrip()
+        if tail.startswith("("):
+            return True
+        if tail.startswith("::<") and ">" in tail:
+            if tail[tail.find(">") + 1:].lstrip().startswith("("):
+                return True
+    return False
+
+
 def count_word(text: str, word: str) -> int:
     """Count of whole-word occurrences of identifier `word` — byte-equivalent to
     ``len(re.findall(r'\\bword\\b', text))`` (non-overlapping; resumes past each hit)."""

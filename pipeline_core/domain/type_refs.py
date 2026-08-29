@@ -58,8 +58,15 @@ def hidden_symbols_from_types(
     type_records: list[TypeRecord], target_file: str,
 ) -> frozenset[str]:
     """Method names whose only declaration is behind a private-mod wall in
-    another file — not callable from `target_file`. A note naming one of
-    these as a word is advertising an unreachable symbol."""
+    another file — not callable from `target_file`.
+
+    These are names, not prose markers. The caller must test them in CALL
+    position (`names_method_call`), because a method name is free to collide
+    with an ordinary English word: this crate declares `Bool::not` inside
+    `mod __private::not` in `src/lib.rs`, so `not` is returned here for every
+    other file, and matching it as a bare word drops any note containing "not".
+    `is`, `new`, `from`, `context` and `source` are method names here too.
+    """
     if not target_file:
         return frozenset()
     other_walled: set[str] = set()
