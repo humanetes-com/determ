@@ -254,6 +254,31 @@ def test_the_file_first_plan_line_names_the_crash_first() -> None:
         "an ordinary name match in the same block keeps its re-check line")
 
 
+def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
+    """Run `1790133-2181e509`'s error.rs file-first prompt named `drop` on the
+    crashed line. `into_boxed_dyn_error` was in CRASH_EVIDENCE and not on the
+    write list. Once blamed, `_plan_line` (the live builder's instruction
+    slot) must carry the ownership MUST. A `drop` crash must not — that body
+    already forgets, and the MUST on it would re-instruct the innocent
+    destructor.
+    """
+    drop_plan = BlockFillPlan(header="impl Drop for Error {",
+                              refills=("drop",), crashed=("drop",))
+    drop_line = _plan_line(drop_plan)
+    assert "A TEST BINARY CRASHED INSIDE THIS BODY" in drop_line
+    assert "self must not drop" not in drop_line, (
+        "negative control: a destructor crash must not grow the conversion MUST")
+
+    conv = BlockFillPlan(header="impl Error {",
+                         refills=("into_boxed_dyn_error",),
+                         crashed=("into_boxed_dyn_error",))
+    line = _plan_line(conv)
+    assert "into_boxed_dyn_error" in line
+    assert "MUST:" in line
+    assert "self must not drop" in line
+    assert "let own = self.inner" in line
+
+
 def test_a_re_offered_unit_does_not_hold_the_traversal_open() -> None:
     """The exemption buys a re-dispatch, not a second traversal credit.
 

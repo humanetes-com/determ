@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.construction_recipe import construction_recipe_prefix
+from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -62,9 +63,11 @@ def build_per_fn_prompt(
     notes_block = tag_block("MODEL_NOTES", notes_section)
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
-        prefix="A test binary CRASHED and this fn is on the faulting or "
-               "origin stack. This is runtime evidence from the actual "
-               "crash, stronger than any failing-test guess:\n")
+        prefix=crash_evidence_prefix(
+            "A test binary CRASHED and this fn is on the faulting or "
+            "origin stack. This is runtime evidence from the actual "
+            "crash, stronger than any failing-test guess:\n",
+            (fn_name,)))
     # F10 Use-B (M5): concrete RIGHT usage examples harvested from the real
     # lib's doc-tests/examples — teaches the API SHAPE by example. After notes,
     # before the file context (same slot the archetype prescribes).
@@ -212,9 +215,11 @@ def build_per_fn_fix_prompt(
     notes_block = tag_block("MODEL_NOTES", notes_section)
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
-        prefix="A test binary CRASHED and this fn is on the faulting or "
-               "origin stack. This is runtime evidence from the actual "
-               "crash, stronger than any failing-test guess:\n")
+        prefix=crash_evidence_prefix(
+            "A test binary CRASHED and this fn is on the faulting or "
+            "origin stack. This is runtime evidence from the actual "
+            "crash, stronger than any failing-test guess:\n",
+            (fn_name,)))
     usage_block = tag_block(
         "USAGE_EXAMPLES", sections.usage_examples,
         prefix="Real, working uses of this crate's public API (harvested from "

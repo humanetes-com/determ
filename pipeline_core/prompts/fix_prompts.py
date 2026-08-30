@@ -21,6 +21,7 @@ from pipeline_core.domain.construction_recipe import (
     construction_recipe_prefix,
     construction_recipes_for,
 )
+from pipeline_core.domain.crash_site import ownership_transfer_must
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
@@ -261,12 +262,22 @@ def _plan_line(p: BlockFillPlan) -> str:
         # fault. It states what the tree DID rather than what a verdict
         # implies, because the verdict for these units does not exist: their
         # binary aborted before reporting one.
-        parts.append("REWRITE — A TEST BINARY CRASHED INSIDE THIS BODY (a "
-                     "memory fault, with this fn on the faulting frame; the "
-                     "tests attributed to it report no verdict at all because "
-                     "the process aborted. It compiles and it is still wrong "
-                     "— look at what it does with ownership, lifetimes or raw "
-                     "pointers, and see CRASH_EVIDENCE): " + ", ".join(crashed))
+        crash_clause = (
+            "REWRITE — A TEST BINARY CRASHED INSIDE THIS BODY (a "
+            "memory fault, with this fn on the faulting frame; the "
+            "tests attributed to it report no verdict at all because "
+            "the process aborted. It compiles and it is still wrong "
+            "— look at what it does with ownership, lifetimes or raw "
+            "pointers, and see CRASH_EVIDENCE): " + ", ".join(crashed))
+        # Conversion family only. `drop` is a correct destructor; putting
+        # this MUST on a drop rewrite re-instructs the innocent body the
+        # skip exists to stop aiming at. Run `1790133-2181e509` had
+        # `into_boxed_dyn_error` in CRASH_EVIDENCE and still wrote
+        # `let own = self.inner` because this slot named drop.
+        extra = ownership_transfer_must(crashed)
+        if extra:
+            crash_clause += " — " + extra
+        parts.append(crash_clause)
     if direct:
         parts.append("rewrite (a body exists, but its test still fails): "
                      + ", ".join(direct))

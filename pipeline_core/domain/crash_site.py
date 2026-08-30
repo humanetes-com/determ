@@ -103,6 +103,106 @@ def authorable_frames(
                  if not is_gen_tests_sibling_name(f.file_rel.rsplit("/", 1)[-1]))
 
 
+def non_destructor_frames(
+    frames: tuple[CrashFrame, ...],
+) -> tuple[CrashFrame, ...]:
+    """`frames` minus the destructors, for use where a frame becomes BLAME.
+
+    THE RULE THIS ENCODES: the frame that RELEASED a resource is not the frame
+    that owns the bug. On a use-after-free the `freed by` stack's innermost
+    in-crate frame is the destructor BY CONSTRUCTION — freeing is what a
+    destructor is for — and the defect is always that some other body kept or
+    handed out a second owner. Blaming the freer aims every rewrite at a
+    correct body.
+
+    Measured, run `1618155-b60a8c4c` (2026-08-30, cluster `stable`), report
+    `logs/asan/asan-20260830T031254431377.txt`. Twelve tests unmeasurable
+    behind `heap-use-after-free` in five binaries. The READ stack holds no
+    `src/` frame at all — `drop_glue::<Option<Backtrace>>` inside
+    `drop_glue::<ErrorImpl<MyErr>>` inside `drop_glue::<Box<dyn Error + Sync +
+    Send>>`, reached from `behaviour_stable_gen_1.rs:29`. The `freed by` stack
+    is `<anyhow::Error as core::ops::drop::Drop>::drop` at `src/error.rs:706`,
+    called from that test's line 27 — `let boxed = err.into_boxed_dyn_error();`
+    So the allocation is freed by the conversion and read by the `Box` the
+    conversion returned, and the real defect is `into_boxed_dyn_error` taking
+    `self` by value and never neutralising it before handing the pointer to
+    `object_boxed`. `Error::drop` reads the vtable and calls `object_drop`: a
+    correct destructor with nothing in it to fix.
+
+    What blaming it cost: the layout retrigger spent 2 of a cap of 2 on that
+    blame and the cap is per-blame and outlives the process (identical refusal
+    in five consecutive runs); then the crash-evidence dispatch put it at ranks
+    0-2 with the fault as its instruction, the model rewrote the body, 14 fns
+    landed — and iter 2 read `pass=101 improved=False`, `cashed=0`, with the
+    same five binaries still crashed. The loop ran the experiment: it fixed the
+    blamed body and the crash did not move. `into_boxed_dyn_error` has never
+    been aimed at for this crash.
+
+    THIS FUNCTION IS THE FILTER, NOT THE POLICY. Applying it unconditionally
+    was wrong and a recorded walk caught it: where the destructor is the only
+    in-crate frame the evidence has, discarding it leaves the aim with nothing.
+    :func:`prefer_non_destructor` is the policy callers want — it uses this
+    filter when something survives it and keeps the destructor when nothing
+    does.
+
+    Compiler drop glue and `drop_in_place` are matched with the same marks:
+    they are the same event with the destructor inlined away.
+
+    THE BARE NAME IS MATCHED TOO, because the symbol marks only reach ASAN.
+    A gdb backtrace carries no `as core::ops::drop::Drop>` in its symbol — the
+    debugger prints the function, not the trait impl that owns it — so a
+    mark-only test skips the destructor on the sanitized site and misses it on
+    every native one. Measured on run `1790133-2181e509` (2026-08-30 05:20:18),
+    which is this filter's first live sweep: the ASAN site correctly reported
+    `blamed: null, origin_frames: [["src/error.rs", 705, "drop"]]`, and two
+    SIGSEGV siblings built from gdb frames still read
+    `blamed: ["src/error.rs", "drop"]` from
+
+        frames: [["src/error.rs", 705, "drop"],
+                 ["src/error.rs", 610,
+                  "reallocate_into_boxed_dyn_error_without_backtrace"]]
+
+    In Rust a method named `drop` is `Drop::drop` — the trait's only method,
+    and the name is reserved by convention for it; a free `drop` is
+    `core::mem::drop`, which is a destructor by another route. Neither is ever
+    the body that owns an ownership bug, so the name alone is a safe test.
+
+    What it buys on that stack is the whole point of the rule: skipping the
+    destructor promotes `reallocate_into_boxed_dyn_error_without_backtrace`,
+    the frame that CALLED it — a conversion in the same family as
+    `into_boxed_dyn_error`, which is where this crash actually lives. The
+    caller was in the evidence the whole time, one frame out.
+    """
+    return tuple(f for f in frames
+                 if f.fn_name != "drop"
+                 and not any(m in f.symbol for m in _DROP_SYMBOL_MARKS))
+
+
+def prefer_non_destructor(
+    frames: tuple[CrashFrame, ...],
+) -> tuple[CrashFrame, ...]:
+    """`frames` with destructors dropped — unless that empties it.
+
+    A DESTRUCTOR IS THE WEAKEST CANDIDATE, NOT A DISQUALIFIED ONE, and this
+    fallback is the whole difference between the two. Where a caller survives
+    behind the destructor, that caller is the blame and the destructor never
+    should have been. Where the destructor is the ONLY in-crate frame the
+    evidence has, discarding it buys nothing and costs the aim: blame goes
+    empty, the layout retrigger is handed no component, and the mechanism that
+    the recorded walk `tests/walks/test_walk_mech_budget_lockout.py` exists to
+    protect — "the aim is handed `src/error.rs::drop` as ORIGIN blame, not the
+    crashing test's `src/error.gen_tests_1.rs` frame" — regresses to the
+    starvation it was written to end. That walk caught exactly this when the
+    filter was applied unconditionally.
+
+    So the rule is a PREFERENCE over the candidate list, not a filter on
+    eligibility, and it composes with the module's standing judgement that
+    weak blame beats none wherever nothing better exists.
+    """
+    kept = non_destructor_frames(frames)
+    return kept or frames
+
+
 # A drop is running when the symbol is a `Drop::drop` impl, the compiler's drop
 # glue, or `drop_in_place`. Matched on the DEMANGLED symbol, which is what ASAN
 # prints for a Rust binary built with debuginfo.
@@ -140,6 +240,188 @@ _POINTER_SENTINELS = ("dangling()", "::null()", "::null_mut()")
 # `reallocate_into_boxed_dyn_error_without_backtrace` and `Drop::drop`, and all
 # four are correct.
 _SENTINEL_EXCHANGE_CALLS = ("replace(", "swap(", "ptr::write")
+
+# Conversions that take Error by value and return Box<dyn Error + Send + Sync>.
+# A use-after-free whose READ stack is drop glue for that Box wrapping ErrorImpl
+# is this family's defect: the body copies the pointer, hands it to a Box, and
+# lets self drop. Named from the recorded READ stack of run `1618155-b60a8c4c`
+# (2026-08-30), fixture `tests/fixtures/crash/uaf_into_boxed_dyn_error_1618155_2026-08-30.txt`.
+CONVERSION_FAMILY: frozenset[str] = frozenset({
+    "into_boxed_dyn_error",
+    "object_boxed",
+    "reallocate_into_boxed_dyn_error_without_backtrace",
+    "object_reallocate_boxed",
+})
+_BOX_DYN_ERROR_MARKS = (
+    "Box<dyn core::error::Error",
+    "Box<dyn std::error::Error",
+)
+_ERROR_IMPL_MARK = "ErrorImpl<"
+_CONVERSION_CALL_RE = re.compile(
+    r"(?:\.|::)\s*("
+    + "|".join(sorted((re.escape(n) for n in CONVERSION_FAMILY),
+                      key=len, reverse=True))
+    + r")\s*\("
+)
+# The instruction a conversion-crash fill was missing. Run `1790133-2181e509`'s
+# error.rs file-first prompt (sha 667e2060fd67e07451e68f24bb4790186067bd541caa7ac22ffbe432dea50c15)
+# quoted `into_boxed_dyn_error` in the file and named it in CRASH_EVIDENCE and
+# still instructed `drop`. The live builder is `build_file_fill_prompt`; the
+# slot that would have converted that fill is `_plan_line`. Without this
+# sentence a correctly aimed conversion fill re-emits `let own = self.inner`.
+OWNERSHIP_TRANSFER_MUST = (
+    "MUST: after the pointer is handed to a Box, self must not drop "
+    "(ManuallyDrop, or ptr::read plus mem::forget). A `let own = self.inner` "
+    "copy leaves two owners and the destructor frees what the Box holds."
+)
+
+
+def _raw_is_destructor(func: str) -> bool:
+    return (bare_fn_name(func) == "drop"
+            or any(m in func for m in _DROP_SYMBOL_MARKS))
+
+
+def _raw_is_toolchain(file_: str) -> bool:
+    return any(m in file_ for m in _TOOLCHAIN_PATH_MARKS)
+
+
+def _has_boxed_dyn_error_send_sync(symbols: str) -> bool:
+    """True when a demangled symbol names `Box<dyn Error + Sync + Send>`.
+
+    The window is the Box type itself, not the whole stack: every ASAN
+    backtrace also carries `Box<dyn FnOnce + Send>` in thread start, and
+    matching Send on the concatenated symbols would fire on an Arc
+    double-drop too.
+    """
+    for mark in _BOX_DYN_ERROR_MARKS:
+        start = 0
+        while True:
+            i = symbols.find(mark, start)
+            if i < 0:
+                break
+            window = symbols[i:i + 160]
+            if "Sync" in window and "Send" in window:
+                return True
+            start = i + len(mark)
+    return False
+
+
+def conversion_family_from_access(
+    raw_frames: list[dict[str, object]],
+) -> frozenset[str]:
+    """The conversion family iff the ACCESS (READ) stack's type chain is
+    `Box<dyn Error + Sync + Send>` wrapping `ErrorImpl`.
+
+    That type chain is the suspect filter so a mis-parse cannot promote an
+    unrelated fn. An Arc double-drop (`test_downcast::test_drop`, run
+    `1064759-0f23fb68`) has neither mark and returns empty — recovery stays
+    off, last-resort blame stays `drop`, and the walk that injects a
+    hardcoded drop site is untouched.
+    """
+    symbols = "\n".join(str(r.get("func") or "") for r in raw_frames)
+    if _ERROR_IMPL_MARK not in symbols:
+        return frozenset()
+    if not _has_boxed_dyn_error_send_sync(symbols):
+        return frozenset()
+    return CONVERSION_FAMILY
+
+
+def crate_fn_named_on_source_line(
+    source_line: str,
+    family: frozenset[str],
+) -> str | None:
+    """The unique family name the source line calls, or None.
+
+    Unique is the gate: a line that names two conversions is not a
+    resolution, and a line that names none (`downcast_ref`, `drop`) is not
+    one either. The recorded line is `let boxed = err.into_boxed_dyn_error();`.
+    """
+    hits = [m.group(1) for m in _CONVERSION_CALL_RE.finditer(source_line)
+            if m.group(1) in family]
+    uniq = list(dict.fromkeys(hits))
+    return uniq[0] if len(uniq) == 1 else None
+
+
+def first_test_file_after_destructor(
+    origin: list[dict[str, object]],
+) -> tuple[str, int] | None:
+    """If the first in-crate origin frame is a destructor and the next
+    non-toolchain frame is a test file, return ``(file_rel, line)``.
+
+    That is the inlined-conversion shape: `Drop::drop` at `src/error.rs:706`
+    called from `tests/behaviour_stable_gen_1.rs:27`. A next frame still in
+    `src/` is left for :func:`prefer_non_destructor` — that is how
+    `reallocate_into_boxed_dyn_error_without_backtrace` is already promoted
+    on the gdb siblings.
+    """
+    seen_destructor = False
+    for rec in origin:
+        file_ = str(rec.get("file") or "")
+        func = str(rec.get("func") or "")
+        if not file_ or not func or _raw_is_toolchain(file_):
+            continue
+        if not seen_destructor:
+            if file_.startswith("src/") and _raw_is_destructor(func):
+                seen_destructor = True
+                continue
+            return None
+        if file_.startswith("tests/"):
+            raw_line = rec.get("line")
+            if isinstance(raw_line, int) and raw_line >= 1:
+                return (file_, raw_line)
+            return None
+        return None
+    return None
+
+
+def recover_owner_from_caller_source(
+    origin_raw: list[dict[str, object]],
+    access_raw: list[dict[str, object]],
+    source_line: str,
+) -> CrashFrame | None:
+    """Name the conversion the test line called, gated by the READ stack.
+
+    The destructor's file supplies :class:`CrashFrame`.file_rel so this does
+    not need an extractor map. ``line`` is 0: the conversion was inlined and
+    has no crate frame of its own.
+    """
+    family = conversion_family_from_access(access_raw)
+    if not family:
+        return None
+    name = crate_fn_named_on_source_line(source_line, family)
+    if name is None:
+        return None
+    dest_file = ""
+    for rec in origin_raw:
+        file_ = str(rec.get("file") or "")
+        func = str(rec.get("func") or "")
+        if file_.startswith("src/") and _raw_is_destructor(func):
+            dest_file = file_
+            break
+    if not dest_file:
+        return None
+    return CrashFrame(file_rel=dest_file, line=0, fn_name=name, symbol=name)
+
+
+def ownership_transfer_must(names: Collection[str]) -> str:
+    """The plan-line MUST when a crashed refill is a conversion, else empty.
+
+    File-first appends this to `_plan_line`'s CRASHED clause. Per-fn and
+    per-impl prepend it to the CRASH_EVIDENCE prefix so a conversion fill
+    cannot be dispatched by a sibling route that omits the sentence.
+    """
+    if CONVERSION_FAMILY.intersection(names):
+        return OWNERSHIP_TRANSFER_MUST
+    return ""
+
+
+def crash_evidence_prefix(base: str, names: Collection[str]) -> str:
+    """``base`` with :data:`OWNERSHIP_TRANSFER_MUST` in front when ``names``
+    intersects the conversion family. Empty evidence still renders empty
+    because :func:`tag_block` drops a blank content regardless of prefix.
+    """
+    extra = ownership_transfer_must(names)
+    return f"{extra}\n{base}" if extra else base
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,13 +602,20 @@ class CrashSite:
         `authorable_frames` — a generated test sibling is an access path, never
         a body the loop can be asked to fix (see that function for the run this
         cost). Blaming nobody is the honest answer there too."""
-        origin = authorable_frames(self.origin_frames)
+        origin = self.culprit_origin_frames
         if origin:
             return origin[0]
         if self.origin_unattributed:
             return None
-        access = authorable_frames(self.frames)
+        access = prefer_non_destructor(authorable_frames(self.frames))
         return access[0] if access else None
+
+    @property
+    def culprit_origin_frames(self) -> tuple[CrashFrame, ...]:
+        """Origin frames that can carry BLAME: authorable, and not a
+        destructor. See :func:`non_destructor_frames` for why freeing a
+        resource never convicts the body that freed it."""
+        return prefer_non_destructor(authorable_frames(self.origin_frames))
 
     @property
     def origin_unattributed(self) -> bool:
@@ -341,7 +630,7 @@ class CrashSite:
         origin-capable detector looked and placed no frame in-crate" — still
         arms."""
         return (self.is_memory_fault and self.origin_capable
-                and not authorable_frames(self.origin_frames))
+                and not self.culprit_origin_frames)
 
     @property
     def blamed_locator(self) -> FnLocator | None:
@@ -550,19 +839,37 @@ def site_from_frames(
     max_frames: int = 6,
     raw_report: str = "",
     origin_capable: bool = False,
+    source_line: str | None = None,
 ) -> CrashSite:
     """Build a :class:`CrashSite` from debugger frame records
     (``{"file": …, "line": …, "func": …}``), keeping only frames whose file
     lies inside the crate source tree (relative ``src/…`` paths — the
     compiler embeds workspace-relative paths for crate-local code, absolute
     paths for std/deps). ``origin_raw_frames`` (ASAN's allocation stack)
-    localizes the code that created the invalid memory."""
+    localizes the code that created the invalid memory.
+
+    ``source_line`` is the test-file line the free stack's next frame points
+    at, when that frame is not in ``src/``. Recovery prepends a synthetic
+    origin frame for the conversion that line uniquely names, gated by the
+    ACCESS stack's type chain. Omitted (the default) leaves blame unchanged
+    — destructor last resort when nothing else survives. That default is
+    what keeps the recorded walk
+    ``tests/walks/test_walk_mech_budget_lockout.py`` green: it injects a
+    hardcoded drop site and never passes a source line.
+    """
+    origin_raw = origin_raw_frames or []
+    origin = _crate_frames(origin_raw, crate_file_prefix, max_frames)
+    if source_line:
+        recovered = recover_owner_from_caller_source(
+            origin_raw, raw_frames, source_line)
+        if recovered is not None:
+            origin = (recovered,) + tuple(
+                f for f in origin if f.fn_name != recovered.fn_name)
     return CrashSite(
         binary_label=binary_label, test_name=test_name,
         signal=signal or "fatal signal",
         frames=_crate_frames(raw_frames, crate_file_prefix, max_frames),
-        origin_frames=_crate_frames(origin_raw_frames or [],
-                                    crate_file_prefix, max_frames),
+        origin_frames=origin,
         raw_report=raw_report, origin_capable=origin_capable)
 
 

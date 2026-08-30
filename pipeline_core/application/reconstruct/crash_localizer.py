@@ -26,6 +26,7 @@ from pathlib import Path
 from pipeline_core.domain.crash_site import (
     CrashSite,
     asan_stack_excerpt,
+    first_test_file_after_destructor,
     is_memory_fault_signal,
     parse_asan_report,
     relativize_frame_files,
@@ -51,6 +52,34 @@ class CrashLocalizerDeps:
 _is_memory_fault = is_memory_fault_signal
 
 
+def _caller_source_line(
+    origin: list[dict[str, object]],
+    workspace_root: Path,
+) -> str | None:
+    """The test-file line the free stack points at after an in-crate
+    destructor, or None.
+
+    I/O lives here: :func:`first_test_file_after_destructor` is pure and
+    names the path; this reads it. A missing file, a line past EOF, or a
+    next frame still in ``src/`` returns None and blame is unchanged —
+    destructor last resort, which is what the existing localizer tests
+    (workspace ``/w``, no tree on disk) rely on.
+    """
+    loc = first_test_file_after_destructor(origin)
+    if loc is None:
+        return None
+    file_rel, line_no = loc
+    path = workspace_root / file_rel
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    if not (1 <= line_no <= len(lines)):
+        return None
+    return lines[line_no - 1]
+
+
 def _asan_site(
     deps: CrashLocalizerDeps,
     test_cmd: str,
@@ -74,9 +103,10 @@ def _asan_site(
     a_crashed = [b for b in parse_binary_results(out) if not b.completed]
     label = a_crashed[0].label if a_crashed else "?"
     test = a_crashed[0].dangling if a_crashed else None
-    site = site_from_frames(label, test, kind, access, origin_raw_frames=origin,
-                            raw_report=asan_stack_excerpt(out),
-                            origin_capable=True)
+    site = site_from_frames(
+        label, test, kind, access, origin_raw_frames=origin,
+        raw_report=asan_stack_excerpt(out), origin_capable=True,
+        source_line=_caller_source_line(origin, workspace_root))
     if site.origin_unattributed:
         # The report HAD a free/alloc stack (that is what stacks[1] is); every
         # frame in it was filtered out as non-crate. Say so, and say WHICH

@@ -320,3 +320,40 @@ def test_nobody_verdict_names_the_starvation_raw_addresses() -> None:
     nobody = [m for m in logged if "blaming NOBODY" in m]
     assert nobody and "NO frame symbolized" in nobody[0]
     assert "llvm-symbolizer" in nobody[0]
+
+
+def test_asan_uaf_blames_the_conversion_named_on_the_test_line(tmp_path: Path) -> None:
+    """The plan's sentence at the I/O contract: the localizer reads line 27
+    of the crashing test off disk and blame is `into_boxed_dyn_error`.
+
+    Negative control is the same report against a workspace with no test
+    file — blame stays `drop`, which is what every existing localizer test
+    (workspace `/w`) still asserts.
+    """
+    fixture = (
+        Path(__file__).parent / "fixtures" / "crash"
+        / "uaf_into_boxed_dyn_error_1618155_2026-08-30.txt"
+    ).read_text()
+    live_root = "/home/user/determ/tmp/anyhow/.skeleton-filled/stable"
+    report = fixture.replace(live_root, str(tmp_path))
+    asan_out = (
+        "    Running tests/behaviour_stable_gen_1.rs "
+        "(target-asan/debug/deps/behaviour_stable_gen_1-999)\n"
+        "running 1 test\n"
+        "test behaviour_probe_stable_trait_object_identity_0 ...\n"
+        + report
+    )
+
+    empty, _ = _deps(gdb_result=None, asan_result=(101, asan_out))
+    (without,) = _run(empty, root=tmp_path)
+    assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
+        "negative control: no test file on disk, recovery cannot fire")
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "behaviour_stable_gen_1.rs").write_text(
+        "\n" * 26 + "let boxed = err.into_boxed_dyn_error();\n")
+    deps, _ = _deps(gdb_result=None, asan_result=(101, asan_out))
+    (site,) = _run(deps, root=tmp_path)
+    assert site.blamed_locator == FnLocator("src/error.rs", "into_boxed_dyn_error")
+
