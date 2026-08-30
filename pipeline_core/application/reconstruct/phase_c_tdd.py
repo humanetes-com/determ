@@ -30,6 +30,7 @@ from pipeline_core.application.reconstruct.impl_fill import followup_think_env_o
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
     closure_withheld,
+    hollow_count,
     ratchet_breach,
     restore_src_tree,
     snapshot_due,
@@ -1612,12 +1613,19 @@ def run_phase_c_tdd(
             # cost is a binary aborted by a still-hollow stub's panic, so a
             # breach whose every lost test crash-vanished under stub-only
             # panics is the component closing, not last iter's fills
-            # regressing. Restoring the snapshot here re-opens the very holes
-            # the closure just paid to fill.
+            # regressing — but only while the hollow set strictly shrank.
+            # Restoring the snapshot here while holes are closing re-opens
+            # the very holes the closure just paid to fill. A drop that
+            # leaves the hollow set flat (run `1160135-7b10cdfa`: peel put
+            # two constructors back, kept ten rewrites, 15 stubs still 15)
+            # is last iter's fills, and the charge restores the snapshot.
             _withheld = closure_withheld(
                 _breach, _bratchet_passing - _sweep.passing,
                 TestStateReading(parse_binary_results(output)).judged_names,
-                stub_only_crash(output))
+                stub_only_crash(output),
+                hollow_now=hollow_count(snapshot_src_tree(target_src_dir)),
+                hollow_at_snapshot=hollow_count(_bratchet_snap),
+            )
         if _withheld:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: batch ratchet — "
                      f"breach ({_breach}) NOT charged: {_withheld}.")
@@ -3730,6 +3738,26 @@ def run_phase_c_tdd(
             **dict.fromkeys(_chain_keys, 1),
             **dict.fromkeys(crash_blamed, 0),
         }
+        # A unit filed `declined` BEFORE the fault was localized is carrying a
+        # record that now contradicts its instruction: `declined` asserts
+        # "returning it unchanged was what we asked for", and this sweep is
+        # about to ask it to rewrite. Excluding it from the next write is not
+        # enough — the set accumulates across batches AND is resumed from the
+        # floor (`_resume.declined`), so a stale entry outlives the process
+        # that made it and is what `cursor_carry` keeps unconditionally.
+        # `src/error.rs::drop` and `src/ptr.rs::as_ptr` were both on the live
+        # floor's `declined` list under an active heap-use-after-free blame.
+        # Retract on the sweep that re-derives the evidence.
+        _crash_retracted = _pass_declined & _crash_grades.keys()
+        if _crash_retracted:
+            _pass_declined -= _crash_retracted
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                f"{len(_crash_retracted)} unit(s) RETRACTED from the pass's "
+                "declined set — a fault now names them, so 'returned it "
+                "unchanged as instructed' is no longer what happened: "
+                + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                   for k in _crash_retracted)[:8]))
         # BLOCKER-HISTOGRAM ORDERING. First-fill already admits the live-stub
         # producers into the batch; constructor-first ranking used to wait on
         # `_esc_keys`, which is empty on the first pass because census P15
@@ -3798,10 +3826,23 @@ def run_phase_c_tdd(
         ordered = promote_crash_evidence(ordered, _crash_grades)
         if _pass_cohort is None:
             _pass_cohort = tuple(key for key, _ in ordered)
+        # The promotion above is worthless unless the cursor is told to let
+        # these through: `take_batch` subtracts `attempted` FIRST, so a graded
+        # unit offered once earlier in the pass is dropped before its rank is
+        # ever consulted (see `take_batch`'s `exempt`).
         _batch = take_batch([key for key, _ in ordered], _pass_attempted,
-                            _dispatch_cap, cohort=_pass_cohort)
+                            _dispatch_cap, cohort=_pass_cohort,
+                            exempt=_crash_grades.keys())
         if _crash_grades:
             _aimed = [k for k in _batch.keys if k in _crash_grades]
+            # When none are aimed the reason can no longer be rank — crash
+            # promotion runs last and outranks everything above it, so there is
+            # no such thing as "higher-graded evidence". Saying there was is
+            # how this survived five processes unread: the line named a cause
+            # that cannot exist, and every session that read it moved on. The
+            # only remaining explanation is that the graded units are not in
+            # this sweep's frontier at all.
+            _off = [k for k in _crash_grades if k not in set(_batch.keys)]
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: "
                 f"{len(_crash_grades)} unit(s) carry crash evidence this "
@@ -3809,7 +3850,10 @@ def run_phase_c_tdd(
                 "are in this batch"
                 + (": " + ", ".join(f"{k.file}::{k.fn_name}"
                                     for k in _aimed[:8]) if _aimed else
-                   " — the batch is full of higher-graded evidence."))
+                   " — NONE, and not because anything outranks them: they are "
+                   "absent from this sweep's frontier (withheld as exhausted, "
+                   "or no longer a fill target): " + ", ".join(
+                       f"{k.file}::{k.fn_name}" for k in _off[:8])))
 
         # GPU protector, half 2 of 2 — the only thing below this line that costs
         # GPU is the dispatch, and this reading says the last one bought nothing
@@ -4386,7 +4430,8 @@ def run_phase_c_tdd(
                 _batch_esc_unchanged, sub.reverted_fns)
             _batch_declined = declined_unchanged(
                 _batch_unchanged, convicting=convicting,
-                escalated=_batch_escalated)
+                escalated=_batch_escalated,
+                crash_evidence=frozenset(_crash_grades))
             _batch_unchanged -= _batch_declined
             if deps.ledger_append is not None and (_batch_landed
                                                    or _batch_esc_flat):
@@ -4497,7 +4542,8 @@ def run_phase_c_tdd(
                 _declined_pass = declined_unchanged(
                     _unchanged_pass, convicting=convicting,
                     escalated=_pass_escalated,
-                    already_declined=_pass_declined)
+                    already_declined=_pass_declined,
+                    crash_evidence=frozenset(_crash_grades))
                 _unchanged_pass -= _declined_pass
                 deps.log(
                     f"  {tag} [phase-c/tdd] iter {iter_n}: PASS AUDIT — "

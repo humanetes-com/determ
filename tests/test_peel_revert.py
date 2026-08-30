@@ -271,3 +271,23 @@ def test_reapply_replays_the_overwrite_authorization(tmp_path) -> None:
     res_old, _rc2, _o2, _d2 = _drive(authorized=False)
     assert isinstance(res_old, PeelRefusal)
     assert res_old.reason == "reapply_failed"
+
+
+def test_peel_keep_refused_when_hollow_did_not_shrink() -> None:
+    from pipeline_core.application.reconstruct.peel_revert import peel_keep_allowed
+    two_stubs = (
+        "fn construct_from_boxed() {\n    unimplemented!()\n}\n"
+        "fn context() {\n    unimplemented!()\n}\n"
+        "fn drop() {\n    1\n}\n")
+    one_stub = (
+        "fn construct_from_boxed() {\n    real()\n}\n"
+        "fn context() {\n    unimplemented!()\n}\n"
+        "fn drop() {\n    1\n}\n")
+    # Live 1160135-7b10cdfa: peel put the two constructors back, ten
+    # accessors stayed filled — hollow did not drop. Survivors must not keep.
+    assert peel_keep_allowed(two_stubs, two_stubs,
+                             ["construct_from_boxed", "context"]) is False
+    # A peel that actually closed a hole may keep the survivors.
+    assert peel_keep_allowed(two_stubs, one_stub, ["context"]) is True
+    # Nothing re-stubbed: the keep question is not this function's.
+    assert peel_keep_allowed(two_stubs, two_stubs, []) is True

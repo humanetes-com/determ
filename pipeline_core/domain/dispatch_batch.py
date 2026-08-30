@@ -115,6 +115,7 @@ class DispatchBatch[K: Hashable]:
 def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
                             cap: int,
                             cohort: Iterable[K] | None = None,
+                            exempt: Iterable[K] | None = None,
                             ) -> DispatchBatch[K]:
     """Next slice of `ordered` this pass has not attempted yet.
 
@@ -123,6 +124,35 @@ def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
     disables batching and returns the whole pending set, which is the pre-cap
     behaviour — keep that available, because a small crate whose frontier is
     already under the cap should not pay for the machinery.
+
+    `exempt` is the units whose motivating evidence is LIVE ON THIS SWEEP, and
+    it is subtracted from `attempted` before anything else runs. Without it the
+    cursor silently voids every ranking applied above it: `promote_crash_evidence`
+    moves a fault's blamed frames to the front of `ordered`, and the very next
+    statement drops them again because an earlier batch of the same pass had
+    already offered them once. Priority applied to a list the filter has already
+    emptied is not priority.
+
+    Measured, run `1519852-5d607329` (2026-08-30, cluster stable): five binaries
+    dead of `AddressSanitizer: heap-use-after-free`, 13 tests reporting no
+    verdict, the localizer blaming `src/error.rs::drop` with `::object_drop` and
+    `src/ptr.rs::as_ptr` aimed as evidence — and all three sitting in the
+    persisted cursor's `attempted`. The batch line read `0 of them are in this
+    batch`, five processes in a row (log lines 1556, 1914, 2182, 2419, 2676),
+    while the loop's own fallback for a capped-out retrigger is "the blamed fn
+    stays in the fill frontier with its crash report instead". That fallback was
+    unreachable by construction.
+
+    WHY THIS CANNOT SPIN, and why the bound is not another cap. The exemption is
+    recomputed from evidence the sweep re-derives, so it ends by itself the
+    moment the fault does — a right body produces no crash, no blame, no
+    exemption. What bounds a unit the model cannot fix is the machinery that
+    already owns that question: conviction and exhaustion withhold it from
+    `ordered` upstream, and an exempt unit that is not in `ordered` cannot be
+    taken. The cursor is a per-pass FAIRNESS device — it exists so the head does
+    not starve the tail — and fairness is the wrong instrument for a unit that
+    is blocking 13 tests. A second cap here would rebuild the retrigger's own
+    failure: a budget that expires while the fault it was spent on is still live.
 
     `cohort` is the frontier the CURRENT pass opened over. The pass closes when
     every one of those units has been attempted or has left the frontier —
@@ -136,10 +166,21 @@ def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
     one starts here, over the frontier as it stands NOW rather than as it stood
     when the last pass opened.
     """
-    seen = set(attempted)
+    served = set(attempted)
+    seen = served - set(exempt or ())
     pending = [k for k in ordered if k not in seen]
     live = set(ordered)
-    outstanding = (live if cohort is None else live & set(cohort)) - seen
+    # TRAVERSAL ACCOUNTING IGNORES THE EXEMPTION, deliberately. A unit re-offered
+    # on live evidence has already had its turn in this pass, so counting it as
+    # outstanding would hold the traversal open — and a fault blaming more frames
+    # than the cap could then never be fully taken in one batch, leaving
+    # `completes_pass` permanently False. Both terminators denominated in
+    # completed passes (the flat-score guard and `TDD_MAX_STALLS`) would go
+    # quietly dead, which is the deadlock shape `domain/pass_highwater.py`
+    # documents: a gate whose unlock condition is progress the situation
+    # prevents. The exemption buys a re-dispatch; it does not buy a second
+    # traversal credit.
+    outstanding = (live if cohort is None else live & set(cohort)) - served
     if not pending:
         # Pass closed. Reopen on the current frontier; `attempted_before` is 0
         # because none of THIS pass's traversal has happened yet.

@@ -277,7 +277,8 @@ class FnFixUnit(_BaseFixUnit):
                 file_rel=t.file_rel, fn_name=t.fn_name, container=t.container or ""),
             retro_block=_retro_block(retro),
             gotchas_block=self.deps.prompts.gotchas_block(output),
-            tests_block=self.deps.prompts.tests_block(frozenset({t.fn_name})))
+            tests_block=self.deps.prompts.tests_block(frozenset({t.fn_name})),
+            container=t.container or "")
         resp = self._ask(prompt, full_error=output)
         bodies = extract_fn_bodies(resp)
         blk = next((b for b in bodies if b.get("fn_name") == t.fn_name),
@@ -444,6 +445,7 @@ def one_shot_fill(
         sig_text, _ss, bs, be = loc
         cur_body = file_text[bs:be]
         errs = output[-err_cap:] if len(output) > err_cap else output
+        container = _container_for(fn, sig_text, fn_records)
         if kind == "behavior":
             tests_block = ""
             for tn in sorted(targets[FnLocator(rel, fn)]):
@@ -452,16 +454,16 @@ def one_shot_fill(
                     tests_block += f"// {trel} :: {tn}\n{tsrc}\n\n"
             must = identity_must_instruction(
                 behaviour_specs,
-                units=(IdentityMustUnit(
-                    fn, _container_for(fn, sig_text, fn_records), sig_text),))
+                units=(IdentityMustUnit(fn, container, sig_text),))
             prompt = build_behavior_fix_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,
                 sig_text=sig_text, cur_body=cur_body, tests_block=tests_block,
-                errs=errs, identity_must=must)
+                errs=errs, identity_must=must, container=container)
         else:
             prompt = build_tdd_stub_fill_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,
-                sig_text=sig_text, cur_body=cur_body, errs=errs)
+                sig_text=sig_text, cur_body=cur_body, errs=errs,
+                container=container)
         bodies = extract_fn_bodies(model.ask(prompt))
         blk = next((b for b in bodies if b.get("fn_name") == fn),
                    bodies[0] if bodies else None)

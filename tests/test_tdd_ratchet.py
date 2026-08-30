@@ -368,7 +368,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
 
 def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
              frontier=None, fills_per_iter=0, max_stalls="2",
-             graceful_stop=None, fill=None, **kw) -> None:
+             graceful_stop=None, fill=None, src_text: str = "orig",
+             mutate_text: str = "FILLED", **kw) -> None:
     """Drive the TDD loop with ratchet ON over a scripted cargo-output list.
     Each cargo call pops the next output (last one repeats); the call ALSO
     mutates src/a.rs when the popped entry says so — simulating a fill that
@@ -393,14 +394,14 @@ def _run_tdd(monkeypatch, tmp_path: Path, outputs, events, retrigger=None, *,
     monkeypatch.setenv("TDD_NO_VERDICT_SWEEPS", "0")
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
-    (src / "a.rs").write_text("orig", encoding="utf-8")
+    (src / "a.rs").write_text(src_text, encoding="utf-8")
     seq = list(outputs)
 
     def _cargo(*a: Any, **k: Any):
         entry = seq.pop(0) if len(seq) > 1 else seq[0]
         out, mutate, rc = entry if len(entry) == 3 else (*entry, 101)
         if mutate:
-            (src / "a.rs").write_text("FILLED", encoding="utf-8")
+            (src / "a.rs").write_text(mutate_text, encoding="utf-8")
         return rc, out
 
     run_phase_c_tdd(
@@ -1161,8 +1162,23 @@ def test_the_loop_offers_the_stub_set_to_the_conviction_release(
 # `not implemented`. Charging that breach restores the pre-closure tree and
 # erases the very fills the closure needs — the ratchet becomes the lottery
 # reset. Withheld ONLY while the evidence holds: every lost test crash-
-# vanished (none flipped red in a completed binary) AND the capture's panics
-# are stub panics exclusively.
+# vanished (none flipped red in a completed binary), the capture's panics
+# are stub panics exclusively, AND the hollow set strictly shrank.
+
+
+_HSHRINK = {"hollow_now": 13, "hollow_at_snapshot": 15}
+_HFLAT = {"hollow_now": 15, "hollow_at_snapshot": 15}
+
+
+def test_hollow_count_sums_stubbed_fns_across_files() -> None:
+    from pipeline_core.application.reconstruct.tdd_ratchet import hollow_count
+    texts = {
+        "a.rs": "fn f() {\n    unimplemented!()\n}\nfn g() {\n    1\n}\n",
+        "b.rs": "fn h() {\n    unimplemented!()\n}\n",
+    }
+    assert hollow_count(texts) == 2
+    assert hollow_count(None) == 0
+    assert hollow_count({}) == 0
 
 
 def test_closure_withhold_forgives_stub_crash_vanished_breach() -> None:
@@ -1171,19 +1187,36 @@ def test_closure_withhold_forgives_stub_crash_vanished_breach() -> None:
         "pass_count 11<13",
         lost=frozenset({"x", "y"}),
         judged_now=frozenset({"a", "b"}),
-        stub_crash_sites=frozenset({("src/error.rs", 64)}))
+        stub_crash_sites=frozenset({("src/error.rs", 64)}),
+        **_HSHRINK)
     assert reason and "src/error.rs:64" in reason
+
+
+def test_closure_withhold_charges_when_hollow_did_not_shrink() -> None:
+    # The live 83→23 of run 1160135-7b10cdfa: every lost test vanished with a
+    # stub panic, but the hollow set was still 15. That is last iter's fills,
+    # not a component closing. Pre-fix this returned a withhold string.
+    from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
+    assert closure_withheld(
+        "pass_count 23<83",
+        lost=frozenset({"x", "y"}),
+        judged_now=frozenset({"a", "b"}),
+        stub_crash_sites=frozenset({("src/error.rs", 287),
+                                    ("src/error.rs", 402)}),
+        **_HFLAT) == ""
 
 
 def test_closure_withhold_charges_when_a_lost_test_flipped_red() -> None:
     # A lost test that RECEIVED a verdict in a completed binary is a real
-    # regression, not crash noise — the breach stands.
+    # regression, not crash noise — the breach stands even while hollow
+    # shrinks (the case that would otherwise withhold).
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     assert closure_withheld(
         "pass_count 12<13",
         lost=frozenset({"x"}),
         judged_now=frozenset({"x"}),
-        stub_crash_sites=frozenset({("src/error.rs", 64)})) == ""
+        stub_crash_sites=frozenset({("src/error.rs", 64)}),
+        **_HSHRINK) == ""
 
 
 def test_closure_withhold_charges_without_stub_evidence() -> None:
@@ -1192,14 +1225,42 @@ def test_closure_withhold_charges_without_stub_evidence() -> None:
         "pass_count 11<13",
         lost=frozenset({"x", "y"}),
         judged_now=frozenset(),
-        stub_crash_sites=frozenset()) == ""
+        stub_crash_sites=frozenset(),
+        **_HSHRINK) == ""
 
 
 def test_closure_withhold_needs_a_breach_and_a_loss() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     assert closure_withheld(
         "", lost=frozenset({"x"}), judged_now=frozenset(),
-        stub_crash_sites=frozenset({("src/error.rs", 64)})) == ""
+        stub_crash_sites=frozenset({("src/error.rs", 64)}),
+        **_HSHRINK) == ""
     assert closure_withheld(
         "pass_count 11<13", lost=frozenset(), judged_now=frozenset(),
-        stub_crash_sites=frozenset({("src/error.rs", 64)})) == ""
+        stub_crash_sites=frozenset({("src/error.rs", 64)}),
+        **_HSHRINK) == ""
+
+
+_STUB_BODY = "fn construct_from_boxed() {\n    unimplemented!()\n}\n"
+_STUB_MUTATED = _STUB_BODY + "// rewritten accessor\n"
+_STUB_CRASH_LOST = (
+    "test t1 ... \n"
+    "thread 't1' panicked at src/a.rs:2:5:\n"
+    "not implemented\n"
+    "test result: FAILED. 0 passed; 0 failed; 0 ignored")
+
+
+def test_stub_crash_vanished_breach_reverts_when_hollow_stayed_flat(
+        tmp_path: Path, monkeypatch) -> None:
+    """The plan's fixture at loop grain: a reproduced pass-count drop whose
+    only panics are stub panics, with the hollow set unchanged, must CHARGE
+    and restore the snapshot. Pre-fix this withheld and left the dropped
+    tree on disk (run 1160135-7b10cdfa, 83→23, hollow 15→15)."""
+    events: list[tuple[str, dict]] = []
+    _run_tdd(monkeypatch, tmp_path,
+             [(_INTACT, False), (_STUB_CRASH_LOST, True),
+              (_STUB_CRASH_LOST, False)], events,
+             src_text=_STUB_BODY, mutate_text=_STUB_MUTATED)
+    assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == _STUB_BODY
+    assert any(ev == "phase_c.tdd.batch_revert" for ev, _ in events)
+    assert not any(ev == "phase_c.tdd.batch_withheld" for ev, _ in events)

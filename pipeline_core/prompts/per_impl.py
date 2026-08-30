@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline_core.domain.construction_recipe import construction_recipes_for
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
@@ -87,7 +88,8 @@ def build_per_impl_prompt(
         # cfg never compiles is rendered as one the model must NOT answer
         # (see `format_impl_block_for_prompt`).
         fill_fn_names=frozenset(m.fn_name for m in stub_members),
-        inferred_fn_names=sections.inferred_refill_names)
+        inferred_fn_names=sections.inferred_refill_names,
+        crashed_fn_names=sections.crashed_refill_names)
     related_renders = []
     for rb in related_blocks:
         related_renders.append(
@@ -197,7 +199,8 @@ def build_per_impl_prompt(
         refill_block = tag_block(
             "REFILL_TARGETS",
             sections.refill_evidence,
-            prefix="Members marked [REFILL] / [REFILL?] in TARGET_IMPL_BLOCK "
+            prefix="Members marked [REFILL] / [REFILL?] / [REFILL!] in "
+                   "TARGET_IMPL_BLOCK "
                    "above already COMPILE. What the record supports for each, "
                    "and the failing tests' own words (their source is under "
                    "Tests below). If a member shares a private field/scheme "
@@ -228,6 +231,9 @@ def build_per_impl_prompt(
                           + "\n" + FN_LITERAL_RULE)
 
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
+    recipe_text = construction_recipes_for(
+        (m.fn_name for m in (*stub_members, *refill_members)), container)
+    recipe_part = (f"{recipe_text}\n\n" if recipe_text else "")
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     return f"""Implement the marked [STUB] fns in this Rust impl block so the
@@ -240,7 +246,7 @@ when the impl block declares `T: ?Sized`).
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
 Stubs to fill in this response: {stub_names}
 
-{identity_part}<RUST_GOTCHAS>
+{recipe_part}{identity_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}

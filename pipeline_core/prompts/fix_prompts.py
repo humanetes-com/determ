@@ -16,6 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pipeline_core.domain.construction_recipe import (
+    construction_recipe,
+    construction_recipe_prefix,
+    construction_recipes_for,
+)
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
@@ -45,13 +50,20 @@ def build_fn_fix_prompt(
     retro_block: str,
     gotchas_block: str,
     tests_block: str,
+    container: str = "",
 ) -> str:
-    """Re-fill ONE fn by body splice (per-fn inner cargo-check loop)."""
+    """Re-fill ONE fn by body splice (per-fn inner cargo-check loop).
+
+    ``container`` feeds the stub-time construction recipe. Empty (the
+    default) leaves the prompt byte-identical for every unit the recipe
+    does not name.
+    """
+    recipe_part = construction_recipe_prefix(fn_name, container)
     return f"""ONE Rust function does not compile. Return ONLY its corrected body.
 {thinking_directive}File: {file_rel} | Fn: {fn_name}
 {sig_rule}{sig_text}
 
-Current body (it does NOT compile):
+{recipe_part}Current body (it does NOT compile):
 {{
 {cur_body}
 }}
@@ -135,6 +147,16 @@ class BlockFillPlan:
     # `rewrite` went to `from` in 20 and `new` re-check in 17. The escalation
     # had just declared those accessors futile.
     escalated: tuple[str, ...] = ()
+    # The subset a runtime fault's own frame named. It is listed FIRST and it
+    # outranks `inferred` because the two are produced by the same event: a
+    # crashed binary reports no verdict, so the crash strips its own blamed
+    # unit of the convicting test that would have graded it `direct`, and the
+    # unit arrives here looking like a name match. Run `1519852-5d607329`
+    # (2026-08-30) dispatched `src/error.rs` file-first with
+    # `src/error.rs::drop` in `inferred` while ASAN was blaming that exact
+    # frame for a heap-use-after-free costing 13 unmeasurable tests; the
+    # re-check line told it to return the body unchanged and it did.
+    crashed: tuple[str, ...] = ()
     # Free fns of the file an ESCALATED producer could INSTALL into a
     # fn-pointer table it builds (`domain.installable_fns`). Nothing measured
     # THEM, so they get neither the escalated line (a measurement about a
@@ -185,22 +207,66 @@ class BlockFillPlan:
     identity_must: str = ""
 
 
+def _recipe_for_plan(p: BlockFillPlan) -> dict[str, str]:
+    """Name → recipe for every stub/refill this plan lists.
+
+    Computed from name + header, never from a sections field: a forgotten
+    kwarg cannot omit the instruction the signature already names. Run
+    ``1383168-eb151d09``: both units were stubs, ``producer_bypass_offered``
+    empty, fill classes ``cashed=0 compile=3``.
+    """
+    out: dict[str, str] = {}
+    for name in (*p.stubs, *p.refills):
+        if name in out:
+            continue
+        text = construction_recipe(name, p.header)
+        if text:
+            out[name] = text
+    return out
+
+
 def _plan_line(p: BlockFillPlan) -> str:
     where = f"in `{p.header.splitlines()[0]}`" if p.header else "free fns"
     parts = []
-    if p.stubs:
-        parts.append("write: " + ", ".join(p.stubs))
+    recipes = _recipe_for_plan(p)
+    recipe_names = frozenset(recipes)
+    stubs_plain = tuple(s for s in p.stubs if s not in recipe_names)
+    if stubs_plain:
+        parts.append("write: " + ", ".join(stubs_plain))
+    seen_recipe: set[str] = set()
+    for name in (*p.stubs, *p.refills):
+        if name in seen_recipe or name not in recipes:
+            continue
+        seen_recipe.add(name)
+        parts.append(f"{recipes[name]}: {name}")
     bypass_names = frozenset(b.fn_name for b in p.bypass)
+    crashed = tuple(r for r in p.refills if r in p.crashed)
     direct = tuple(r for r in p.refills
                    if r not in p.inferred and r not in p.escalated
-                   and r not in p.installable and r not in bypass_names)
+                   and r not in p.installable and r not in bypass_names
+                   and r not in recipe_names and r not in p.crashed)
     escalated = tuple(r for r in p.refills
                       if r in p.escalated and r not in p.installable
-                      and r not in bypass_names)
-    installable = tuple(r for r in p.refills if r in p.installable)
+                      and r not in bypass_names and r not in recipe_names
+                      and r not in p.crashed)
+    installable = tuple(r for r in p.refills
+                        if r in p.installable and r not in recipe_names
+                        and r not in p.crashed)
     inferred = tuple(r for r in p.refills
                      if r in p.inferred and r not in p.escalated
-                     and r not in p.installable and r not in bypass_names)
+                     and r not in p.installable and r not in bypass_names
+                     and r not in recipe_names and r not in p.crashed)
+    if crashed:
+        # First in the line, and the only grade whose premise is an observed
+        # fault. It states what the tree DID rather than what a verdict
+        # implies, because the verdict for these units does not exist: their
+        # binary aborted before reporting one.
+        parts.append("REWRITE — A TEST BINARY CRASHED INSIDE THIS BODY (a "
+                     "memory fault, with this fn on the faulting frame; the "
+                     "tests attributed to it report no verdict at all because "
+                     "the process aborted. It compiles and it is still wrong "
+                     "— look at what it does with ownership, lifetimes or raw "
+                     "pointers, and see CRASH_EVIDENCE): " + ", ".join(crashed))
     if direct:
         parts.append("rewrite (a body exists, but its test still fails): "
                      + ", ".join(direct))
@@ -239,7 +305,8 @@ def _plan_line(p: BlockFillPlan) -> str:
                         b.erases_generic)
                     == (wrapper, producer, producer_file, same_file,
                         erases_generic)
-                    and b.fn_name in p.refills)
+                    and b.fn_name in p.refills
+                    and b.fn_name not in recipe_names)
         if not fns:
             continue
         # The relation is stated, not a verdict on the body: what was measured
@@ -452,6 +519,11 @@ def build_maximal_impl_prompt(
     `identity_must` is the same TypeId instruction the budgeted per-impl
     prompt carries after the stub list. Empty (the default) leaves the
     prompt byte-identical to a call that never named the kwarg.
+
+    Construction recipes are derived from ``stub_names`` + ``container``,
+    not a sections field: a last-resort prompt for ``Error::context`` or
+    ``construct_from_boxed`` must carry the compile-time shape even when
+    identity Then is empty.
     """
     header = container.splitlines()[0] if container else "impl"
     names = ", ".join(stub_names)
@@ -459,6 +531,8 @@ def build_maximal_impl_prompt(
                   f"{tests_block}\n" if tests_block.strip() else "")
     notes_part = (f"\nNotes from earlier attempts:\n{notes}\n"
                   if notes.strip() else "")
+    recipe_text = construction_recipes_for(stub_names, container)
+    recipe_part = (f"{recipe_text}\n" if recipe_text else "")
     must_part = (f"{identity_must}\n" if identity_must.strip() else "")
     return f"""Previous attempts to implement functions in this Rust file failed.
 You now see the ENTIRE current file. Implement or CORRECT the function(s)
@@ -466,7 +540,7 @@ You now see the ENTIRE current file. Implement or CORRECT the function(s)
 already have a body that compiles but whose test still fails; rewrite its
 behavior. Keep every signature EXACTLY as written; change bodies only.
 File: {file_rel}
-{must_part}```rust
+{recipe_part}{must_part}```rust
 {file_text}
 ```
 {tests_part}Compiler errors from the last attempt:
@@ -491,6 +565,7 @@ def build_behavior_fix_prompt(
     tests_block: str,
     errs: str,
     identity_must: str = "",
+    container: str = "",
 ) -> str:
     """Correct a fn that compiles but FAILS its tests (behaviour wrong).
 
@@ -500,7 +575,10 @@ def build_behavior_fix_prompt(
     is evidence the 2026-08-26 constructor fills had and still wrapped.
     Empty (the default) leaves the prompt byte-identical to a call that
     never named the kwarg.
+
+    ``container`` feeds the stub-time construction recipe (same default).
     """
+    recipe_part = construction_recipe_prefix(fn_name, container)
     must_part = (f"{identity_must}\n\n" if identity_must.strip() else "")
     return (
         f"ONE Rust function compiles but FAILS its tests — "
@@ -508,7 +586,7 @@ def build_behavior_fix_prompt(
         f"{thinking_directive}"
         f"File: {file_rel} | Fn: {fn_name}\n"
         f"Signature (do NOT change it):\n{sig_text}\n\n"
-        f"{must_part}"
+        f"{recipe_part}{must_part}"
         f"Current body (wrong — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
         f"Failing test source (the behaviour the body must satisfy):\n"
         f"```\n{tests_block}```\n"
@@ -528,13 +606,21 @@ def build_tdd_stub_fill_prompt(
     sig_text: str,
     cur_body: str,
     errs: str,
+    container: str = "",
 ) -> str:
-    """Fill an unimplemented stub that compiles but fails tests."""
+    """Fill an unimplemented stub that compiles but fails tests.
+
+    ``container`` feeds the stub-time construction recipe. Empty (the
+    default) leaves the prompt byte-identical for every unit the recipe
+    does not name.
+    """
+    recipe_part = construction_recipe_prefix(fn_name, container)
     return (
         f"ONE Rust function has an unimplemented body — fill it.\n"
         f"{thinking_directive}"
         f"File: {file_rel} | Fn: {fn_name}\n"
         f"Signature (do NOT change it):\n{sig_text}\n\n"
+        f"{recipe_part}"
         f"Current body (unimplemented — replace it):\n{{{{\n{cur_body}\n}}}}\n\n"
         f"Test failure output:\n```\n{errs}\n```\n"
         f"Return the corrected body as EXACTLY one block "

@@ -330,17 +330,15 @@ def test_file_fill_plan_renders_the_call_form_only_for_a_generic_self() -> None:
     assert "PRODUCER" not in bare_line
 
 
-def test_file_fill_plan_concrete_self_gets_the_table_form_and_no_producer_name() -> None:
-    """A concrete-self bypass (`Error::context` — `erases_generic=False`)
-    renders the TABLE form: the measured relation and the goal, and the
-    producer's name NOWHERE in it. The call form for exactly this entry is
-    what the model executed over the compiler three times (run
-    `57025-6ba652f2`, identical `E0277` at 17:45/17:55/18:05 UTC — the
-    recorded pre-fix control: prompt sha `09a55899…` carries "rewrite it to
-    call `construct_from_context`" for `context`); and upstream's own body
-    here builds the wrapper's chain vtable inline rather than calling the
-    typed producer, so the call would be wrong even where bounds could be
-    arranged."""
+def test_file_fill_plan_concrete_self_gets_the_chain_recipe_not_the_producer_bypass() -> None:
+    """Error::context at stub/refill time is the CHAIN TABLE recipe, even
+    when a bypass entry is present. producer_bypasses keyed on constructs_type
+    of a body peel had already restored to unimplemented, so the bypass never
+    reached this unit on run 1383168-eb151d09. The signature recipe must
+    outrank BUILD THE PER-TYPE TABLE (which named the same wrapper but
+    waited on escalation). construct_from_context is named only as a do-not.
+    """
+    from pipeline_core.domain.construction_recipe import CHAIN_TABLE_RECIPE
     out = _file_fill([BlockFillPlan(
         "impl Error", (), ("context",),
         bypass=(ProducerBypass(
@@ -350,17 +348,32 @@ def test_file_fill_plan_concrete_self_gets_the_table_form_and_no_producer_name()
             erases_generic=False),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
-    assert "BUILD THE PER-TYPE TABLE" in line
-    assert "construct_from_context" not in line
+    assert CHAIN_TABLE_RECIPE in line
+    assert "BUILD THE PER-TYPE TABLE" not in line
     assert "REWRITE TO INVOKE" not in line
+    assert "rewrite it to call `construct_from_context`" not in line
+    assert "Do not call `construct_from_context`" in line
     assert "ContextError" in line
-    assert "CHAIN-walking" in line
-    assert "different impl" in line
-    # Unconditional "candidate fns are writable in this prompt" is false
-    # for context.rs (chain fns live in error.rs). Writability is only a
-    # condition: name them, do not rewrite unless listed.
-    assert "the candidate fns are writable in this prompt" not in line
     assert line.rstrip().endswith("context")
+    stub = _file_fill([BlockFillPlan("impl Error", ("context",), ())])
+    stub_line = next(ln for ln in stub.splitlines()
+                     if ln.startswith("  in `impl Error`"))
+    assert CHAIN_TABLE_RECIPE in stub_line
+    assert "write:" not in stub_line
+
+
+def test_file_fill_plan_stub_construct_from_boxed_gets_wrap_the_box() -> None:
+    """construct_from_boxed was never a bypass target. The recipe fires on
+    a stub-only plan and never instructs calling construct_from_std."""
+    from pipeline_core.domain.construction_recipe import WRAP_BOX_RECIPE
+    out = _file_fill([BlockFillPlan("impl Error", ("construct_from_boxed",), ())])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert WRAP_BOX_RECIPE in line
+    assert "write:" not in line
+    assert "rewrite it to call `construct_from_std`" not in line
+    assert "Do not call `construct_from_std`" in line
+    assert line.rstrip().endswith("construct_from_boxed")
 
 
 def test_file_fill_plan_call_and_table_forms_in_one_prompt_stay_split() -> None:
@@ -408,9 +421,30 @@ def test_file_fill_plan_call_and_table_forms_in_one_prompt_stay_split() -> None:
     assert "BUILD THE PER-TYPE TABLE" not in table
 
 
-def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
-    """A fn both ESCALATED and a bypass gets the bypass line: the wrapper
-    relation is the half of the instruction the plain REWRITE grade lacks."""
+def test_file_fill_plan_table_form_still_fires_for_a_non_recipe_concrete_self() -> None:
+    """The signature recipe outranks bypass only for the two named units.
+    A different concrete-self bypass still gets BUILD THE PER-TYPE TABLE
+    — the form run 57025-6ba652f2 needed once the producer name was
+    stripped from the instruction."""
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), ("wrap",),
+        bypass=(ProducerBypass(
+            fn_name="wrap", container="impl Error",
+            wrapper="ContextError", producer="construct_from_context",
+            producer_file="src/error.rs", same_file=True,
+            erases_generic=False),))])
+    line = next(ln for ln in out.splitlines()
+                if ln.startswith("  in `impl Error`"))
+    assert "BUILD THE PER-TYPE TABLE" in line
+    assert "rewrite it to call `construct_from_context`" not in line
+    assert line.rstrip().endswith("wrap")
+
+
+def test_file_fill_plan_recipe_outranks_bypass_and_escalated_for_context() -> None:
+    """A fn both ESCALATED and a bypass AND a signature recipe gets the
+    recipe: the compile-time shape is what a stub can actually follow.
+    The other escalated member keeps the measured-grade line."""
+    from pipeline_core.domain.construction_recipe import CHAIN_TABLE_RECIPE
     out = _file_fill([BlockFillPlan(
         "impl Error", (), ("context", "construct_from_std"),
         escalated=("context", "construct_from_std"),
@@ -421,11 +455,13 @@ def test_file_fill_plan_bypass_outranks_the_escalated_grade() -> None:
             erases_generic=False),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
-    assert "BUILD THE PER-TYPE TABLE" in line
-    # the other escalated member keeps the measured-grade line
+    assert CHAIN_TABLE_RECIPE in line
+    assert "BUILD THE PER-TYPE TABLE" not in line
     assert "REWRITE (the fns that consume" in line
-    assert line.split("REWRITE (the fns that consume")[1].startswith(
-        " what this one produces")
+    rewrite = line.split("REWRITE (the fns that consume")[1]
+    assert rewrite.startswith(" what this one produces")
+    assert "construct_from_std" in rewrite.split("): ", 1)[1]
+    assert "context" not in rewrite.split("): ", 1)[1]
 
 
 def test_file_fill_plan_line_carries_the_oracle_pins_on_escalated() -> None:

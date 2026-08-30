@@ -39,6 +39,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
     LandedBody,
     PeelResult,
     peel_file_first,
+    peel_keep_allowed,
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
@@ -118,6 +119,7 @@ from pipeline_core.domain.refill_evidence import (
     attributed_test_leaves,
     collect_refill_evidence,
     container_header,
+    crashed_refill_names,
     escalated_refill_names,
     history_for_block,
     inferred_refill_names,
@@ -795,6 +797,20 @@ def fill_impl_blocks(
          "oversized)."
          + (f" {_refill_block_count} behavioral re-fill block(s) "
             "(filled bodies with failing tests)." if _refill_block_count else ""))
+    # The route's unit COUNT, as a fact rather than a log sentence. A fill step
+    # is a sequence of routes and each route a sequence of units, and until
+    # this was emitted the only unit count in the stream was the per-fn route's
+    # (`phase_c.pass.start.stubs`) — so an observer could say a fill was in the
+    # impl route and never how far through it. On run `1383168-eb151d09`
+    # (2026-08-29) that gap covered 21:41 -> 22:30 UTC, the longest single
+    # stretch of the iteration. `units` is what this route will dispatch;
+    # `skipped` is what it hands to the per-fn fallback, which is the other
+    # route's work and never this one's denominator.
+    _emit("phase_c.fill.route_plan", data={
+        "cluster": cluster_name, "route": "impl",
+        "units": len(viable_blocks),
+        "skipped": len(blocks) - len(viable_blocks),
+        "refill_units": _refill_block_count})
     _deferred_refills = refills_deferred_by_impl_route(
         blocks, max_stubs=_PER_IMPL_MAX_STUBS)
     if _deferred_refills:
@@ -1059,6 +1075,7 @@ def fill_impl_blocks(
             _impl_block_id(b.file, b.container):
                 collect_refill_evidence(b, fblocks, _frontier_tests,
                                         escalated=escalated_keys,
+                                        crashed=crash_blamed or frozenset(),
                                         read_source=_read_source,
                                         history=history_for_block(
                                             b, ledger_entries,
@@ -1339,6 +1356,8 @@ def fill_impl_blocks(
             inferred=tuple(sorted(inferred_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             escalated=tuple(sorted(escalated_refill_names(
+                _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+            crashed=tuple(sorted(crashed_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             bypass=_bypass_for(b.container),
             pins=_block_pins[_impl_block_id(b.file, b.container)],
@@ -1682,6 +1701,7 @@ def fill_impl_blocks(
                     _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                     return
                 _attempted_names = [b.fn_name for b in _landed]
+                _peel_reverted: tuple[str, ...] = ()
                 rc, cargo_out, _diags = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
                 if rc != 0:
@@ -1714,6 +1734,7 @@ def fill_impl_blocks(
                         cargo_out, _diags = _p_out, list(_p_diags)
                         _landed = list(_peel.kept)
                         spliced_now = len(_landed)
+                        _peel_reverted = _peel.reverted
                         _note_reverted(file_rel, _peel.reverted)
                         _log(f"  [phase-c/file] {glabel}: PEELED "
                              f"{len(_peel.reverted)} body(ies) the compiler "
@@ -1847,13 +1868,34 @@ def fill_impl_blocks(
                          "— nothing newly red, but "
                          f"{_joint.site_movement}. Same verdict vector, fewer "
                          "assertions reached: the old bodies were closer.")
+                # Peel that put names back as stubs without shrinking this
+                # file's hollow set: the survivors are rewrites of already-
+                # filled bodies. The unmeasurable keep below would land them
+                # (baseline binaries already crashed, so the regression gate
+                # cannot see the new cost) and the rest of the iteration
+                # would run at the dropped score. Run `1160135-7b10cdfa`:
+                # two constructors peeled, ten accessors kept, pass 83 → 23.
+                _peel_refuse_keep = bool(_peel_reverted) and not peel_keep_allowed(
+                    snapshot,
+                    file_path.read_text(encoding="utf-8", errors="replace"),
+                    _peel_reverted)
+                if _peel_refuse_keep:
+                    if _crash_keep_file or _nonregr_keep_file:
+                        _log(f"  [phase-c/file] {glabel}: peel restored "
+                             f"{list(_peel_reverted)}; hollow did not shrink "
+                             "— unmeasurable keep refused, reverting to the "
+                             "pre-attempt file.")
+                    _crash_keep_file = False
+                    _nonregr_keep_file = False
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
-                    stub_free=stub_free)
+                    stub_free=stub_free,
+                    introduced_stubs=bool(_peel_reverted))
                     if rc == 0 else None)
-                if rc == 0 and (not _u2_reject or _bank is not None
-                                or _crash_keep_file or _nonregr_keep_file
-                                ) and _regr_file is None:
+                if (rc == 0 and not _peel_refuse_keep
+                        and (not _u2_reject or _bank is not None
+                             or _crash_keep_file or _nonregr_keep_file)
+                        and _regr_file is None):
                     fns_filled_total += spliced_now
                     _log(f"  [phase-c/file] {glabel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass"
@@ -1925,6 +1967,11 @@ def fill_impl_blocks(
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
+                elif _peel_refuse_keep:
+                    _revert_reason = (
+                        "peel restored stub(s) and this file's hollow set "
+                        "did not shrink")
+                    prior_error = ""
                 elif rc == 0:
                     _revert_reason = "U2 test failure (no strict improvement)"
                     prior_error = _u2_file.detail if _u2_file is not None else ""
@@ -2219,11 +2266,13 @@ def fill_impl_blocks(
         # `test_iter`/`test_len`/`test_rev` (run `902902-daee577d`).
         _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests,
                                               escalated=escalated_keys,
+                                              crashed=crash_blamed or frozenset(),
                                               read_source=_read_source,
                                               history=history_for_block(
                                                   block, ledger_entries,
                                                   oracle_fp=oracle_fp))
         _inferred_refill = inferred_refill_names(_refill_evs)
+        _crashed_refill = crashed_refill_names(_refill_evs)
         # Capped by distinct FILES, as on the file route.
         test_blocks = attributed_test_blocks(
             attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
@@ -2445,6 +2494,7 @@ def fill_impl_blocks(
                         _block_where, _crate_type_records, file_rel=block.file),
                     refill_evidence=_refill_evidence_text,
                     inferred_refill_names=_inferred_refill,
+                    crashed_refill_names=_crashed_refill,
                     sibling_rejected=_steer.shared,
                     identity_must=_identity_must(
                         *block.stub_members, *block.refill_members)),
@@ -2937,6 +2987,29 @@ def fill_impl_blocks(
                 _exc = excerpt_for_code(last_error_excerpt, _c)
                 if _exc:
                     _log(f"  [phase-c/impl] {block_id}:   {_exc.splitlines()[0]}")
+            # The same fix-loop trajectory the PER-FN route has published since
+            # it was written (`fill_one_fn.py::_on_fn_failure`), from the route
+            # that needs it more: on run `1383168-eb151d09` (2026-08-29) the
+            # per-fn route emitted eleven `loop.iter` records across its four
+            # units while `impl Error` spent 21:41:11 -> 22:29:46 UTC — 48
+            # minutes, five attempts and a maximal last-resort call — and
+            # published start, `maximal` and fail, so nothing between them said
+            # whether the block was converging. The floor and the stall count
+            # are what answer that (floor falling = the model is closing on it;
+            # stall climbing = it is re-buying the same wrong answer), and both
+            # are already in hand here. Same event name and same field set as
+            # the per-fn emit, so every consumer reads one shape per route.
+            _emit("loop.iter", data={
+                "name": "phase_c.impl",
+                "cluster": cluster_name,
+                "file": block.file, "container": block.container,
+                "iter": attempt_n,
+                "metric_new": outcome.metric.compile_errors,
+                "metric_new_failing_tests": outcome.metric.failing_tests,
+                "metric_best": str(gauge.best),
+                "improved": gauge.stalls == 0,
+                "stalled": gauge.stalls,
+            })
 
         def _on_impl_stall(attempt_n: int, gauge: FloorStall) -> None:
             _codes = sorted(ecodes_in_text(last_error_excerpt))
@@ -3399,6 +3472,16 @@ def fill_impl_blocks(
                  f"{len(_ff_units)} file unit(s) dispatch first "
                  f"({sum(len(bs) for _, bs in _ff_units)} block(s), "
                  "free fns and single-block files included).")
+        # Same reading for the file route (see the impl route's emit): the unit
+        # count the fill step is about to walk, published whichever route order
+        # is in force — the log line above prints only under file_primary, and
+        # an observer that could only see the primary route's denominator would
+        # go blind exactly when the order is switched.
+        _emit("phase_c.fill.route_plan", data={
+            "cluster": cluster_name, "route": "file",
+            "units": len(_ff_units),
+            "blocks": sum(len(bs) for _, bs in _ff_units),
+            "order": str(_route_order)})
         # One FILE is this route's unit, so independent files dispatch to a
         # pool for exactly the reasons the per-block route below already
         # states: `_splice_check_lock` and `_counters_lock` serialise

@@ -969,6 +969,7 @@ def format_impl_block_for_prompt(
     *,
     fill_fn_names: frozenset[str] | None = None,
     inferred_fn_names: frozenset[str] = frozenset(),
+    crashed_fn_names: frozenset[str] = frozenset(),
     candidate_fn_names: frozenset[str] = frozenset(),
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every
@@ -995,6 +996,15 @@ def format_impl_block_for_prompt(
     return the body unchanged when it is right, instead of the certainty
     "its test below FAILS — rewrite" that had a correct `source` body rewritten
     and `construct_from_context` degraded on the same day.
+
+    `crashed_fn_names` — re-fill members a runtime fault's own frame named.
+    They are tagged `[REFILL!]` and NEVER `[REFILL?]`: a crashed binary
+    reports no verdict, so these units reach the prompt with no convicting
+    test and used to render as "implicated by NAME only … else return it
+    unchanged" — the weakest instruction in the vocabulary, handed to the one
+    body the tree had just faulted inside. `src/error.rs::drop` was given that
+    tag on every sweep of runs `842437`…`1519852` (2026-08-29/30), returned
+    unchanged as instructed, and kept 13 tests unmeasurable the whole time.
 
     `candidate_fn_names` — for a RELATED block: members that are the
     same-named re-fill candidates for the same failing tests, shown in full
@@ -1032,7 +1042,16 @@ def format_impl_block_for_prompt(
             lines.append(f"    {sig} {tag}")
         elif m.fn_name in refill_fn_names:
             body = m.body_text.strip().replace("\n", "\n    ")
-            if m.fn_name in inferred_fn_names:
+            if m.fn_name in crashed_fn_names:
+                # Checked before `inferred_fn_names`: the crash is what
+                # removed this unit's convicting test, so it arrives graded
+                # as inference and would otherwise be told to stand pat.
+                lines.append(
+                    f"    {sig} {{ /* [REFILL!] a test binary CRASHED with a "
+                    f"MEMORY FAULT inside this body — see CRASH_EVIDENCE and "
+                    f"REFILL_TARGETS. It compiles; it is still WRONG. Rewrite "
+                    f"it — do NOT return it unchanged */ {body} }}")
+            elif m.fn_name in inferred_fn_names:
                 lines.append(
                     f"    {sig} {{ /* [REFILL?] compiles; implicated by NAME "
                     f"only — see REFILL_TARGETS. Rewrite ONLY if wrong for "

@@ -19,6 +19,9 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from pipeline_core.monitor import iteration_steps as _steps
+from pipeline_core.monitor.fill_progress import FillProgress, fold_fill
+
 # Default mirrors monitor.py's logs/ layout; monitor injects the discovered path.
 EVENTS_LOG: str = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -392,13 +395,25 @@ def phase_c_state() -> dict[str, Any]:
         "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
         "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
         "tdd_max_stalls": None,
-        # The oracle the last sweep could actually RUN (`oracle_size`) and the
-        # oracle the tree declares (`oracle_static`). They differ exactly when
-        # tests are unreachable — a crashed test binary takes its whole file's
-        # tests with it — so the gap is the part of the target no fill can move
-        # until the crash is gone, and the score bar is drawn against the
-        # runnable one with the gap named beside it.
+        # The oracle the last sweep COUNTED (`oracle_size` = pass + fail) and
+        # the oracle the tree declares (`oracle_static`). The score bar is
+        # drawn against the counted one with the gap named beside it — and the
+        # gap is split by cause from the three fields below it, never reported
+        # as one lump called "unreachable" (see monitor/oracle_gap.py: the
+        # crash's own lost tests are inside `fail`, while the gap is the
+        # verdicts a crashed binary printed before aborting plus the tests
+        # that never ran).
         "tdd_oracle": None, "tdd_oracle_static": None,
+        # `incomplete` = binaries that opened a section and printed no
+        # trailer; the pair vectors are (binary, test) from the same parse the
+        # counters come from, so a pair whose binary is incomplete is a verdict
+        # that was observed and could not be counted.
+        "tdd_incomplete_binaries": [], "tdd_passed_pairs": [],
+        "tdd_failed_pairs": [],
+        # Which step of the current TDD iteration the loop was last OBSERVED
+        # in (monitor/iteration_steps.py), and the ISO stamp of the event that
+        # put it there — the panel renders time-in-step from it.
+        "tdd_step": None, "tdd_step_since": None,
         # ISO ts of each tdd.iter event this run, in arrival order. Consecutive
         # gaps are whole-iteration durations (the summary prints once per
         # iter), which is what the panel's `~N/iter` median is computed from.
@@ -419,13 +434,26 @@ def phase_c_state() -> dict[str, Any]:
         # Cumulative body-fills landed (phase_c.fill.progress) — mid-sweep
         # progress independent of the per-sweep pass reading.
         "fills_landed": 0,
+        # Where inside the `fill` step the loop is: which of the three routes,
+        # how many units each has closed of the count it planned, and the
+        # fix-loop gauge of every unit still in flight
+        # (:mod:`pipeline_core.monitor.fill_progress`). The step strip reports
+        # `fill` for nearly the whole iteration, so this is the level the
+        # panel's remaining questions are answered at.
+        "fill": FillProgress(),
         # ISO ts of the newest completed fill unit (done or fail, any of the
         # three fill shapes). Its age is the finest-grain stall signal the
         # events carry: fills tick every few minutes on a healthy iteration.
         "last_fill_ts_iso": None,
     }
+    # `loop.iter` is the two fill routes' per-attempt gauge (floor + stall,
+    # `fill_one_fn.py::_on_fn_failure` and `impl_fill.py::_on_impl_failure`).
+    # It is the only reading that says whether a unit 40 minutes into its fix
+    # loop is converging, and the name does not start with `phase_c.` — so a
+    # filter written as a single prefix dropped it and the panel had the fill's
+    # elapsed time and nothing about its direction.
     events = read_recent_events(
-        lambda n: n.startswith("phase_c.") or n == "cluster.done")
+        lambda n: n.startswith("phase_c.") or n in ("cluster.done", "loop.iter"))
 
     if not events:
         return out
@@ -439,6 +467,15 @@ def phase_c_state() -> dict[str, Any]:
         ev = e["event"]
         d = e.get("data", {})
         last_ts_iso = e.get("ts") or last_ts_iso
+        # Which step of the TDD iteration this event proves the loop was in.
+        # An event the map does not know leaves the step alone — that rule is
+        # what keeps a newly-added event name from moving the strip by
+        # accident. The stamp moves only on a CHANGE, so the panel's
+        # time-in-step measures the step and not the last event inside it.
+        _step = _steps.step_of_event(ev, d)
+        if _step is not None and _step != out["tdd_step"]:
+            out["tdd_step"] = _step
+            out["tdd_step_since"] = e.get("ts")
         # Cluster ordering: record first-seen order so we can show k/N progress.
         _cl = d.get("cluster") or e.get("cluster")
         if _cl and _cl not in out["clusters_seen"]:
@@ -615,6 +652,12 @@ def phase_c_state() -> dict[str, Any]:
             out["tdd_kind"] = d.get("kind", out["tdd_kind"])
             out["tdd_oracle"] = d.get("oracle_size", out["tdd_oracle"])
             out["tdd_oracle_static"] = d.get("oracle_static", out["tdd_oracle_static"])
+            # Replaced wholesale, never merged: each of the three describes
+            # THIS sweep's parse, and a stale pair vector beside a fresh
+            # oracle would decompose the gap with the wrong binaries.
+            out["tdd_incomplete_binaries"] = list(d.get("incomplete") or [])
+            out["tdd_passed_pairs"] = list(d.get("passed_pairs") or [])
+            out["tdd_failed_pairs"] = list(d.get("failed_pairs") or [])
             if _tcl:
                 _cs = out["tdd_by_cluster"].setdefault(
                     _tcl, {"iter": 0, "pass": None, "fail": None,
@@ -627,6 +670,7 @@ def phase_c_state() -> dict[str, Any]:
                 _cs["frontier"] = d.get("frontier_size", _cs["frontier"])
                 _cs["stall"] = d.get("stall", _cs["stall"])
 
+    out["fill"] = fold_fill(events)
     _now = time.time()
     _flight: list[dict[str, Any]] = []
     for _lbl, _u in in_flight_units.items():

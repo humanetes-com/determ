@@ -62,12 +62,14 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.attribution import container_key
+from pipeline_core.domain.rust_scan import stubbed_fn_names
 
 __all__ = [
     "LandedBody",
     "PeelRefusal",
     "PeelResult",
     "peel_file_first",
+    "peel_keep_allowed",
     "peel_to_compiling",
 ]
 
@@ -130,6 +132,25 @@ class PeelRefusal:
     reason: str
     rounds: int
     dropped: tuple[str, ...] = ()
+
+
+def peel_keep_allowed(
+    snapshot: str, current: str, reverted: Sequence[str],
+) -> bool:
+    """Whether peel survivors may take an unmeasurable keep.
+
+    True when nothing was re-stubbed, or when this file's hollow set strictly
+    shrank versus the pre-attempt snapshot (some stubs became bodies). False
+    when the peel put names back as stubs and the hollow count did not drop:
+    the survivors are rewrites of already-filled bodies, and keeping them is
+    how run `1160135-7b10cdfa` (2026-08-29) took pass 83 to 23 —
+    `construct_from_boxed` and `context` peeled, ten accessors kept, more
+    binaries dying on those same two stub lines. The batch ratchet would
+    claw the tree back a sweep later; refusing here saves the rest of the
+    iteration."""
+    if not reverted:
+        return True
+    return len(stubbed_fn_names(current)) < len(stubbed_fn_names(snapshot))
 
 
 def peel_to_compiling(

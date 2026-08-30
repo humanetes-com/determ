@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.construction_recipe import construction_recipe_prefix
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -120,6 +121,7 @@ def build_per_fn_prompt(
                "requirements, build rules, API ground truth). When your plan "
                "conflicts with them, follow the spec.\n")
     container_line = f"In: {container}\n" if container else ""
+    recipe_part = construction_recipe_prefix(fn_name, container)
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     return f"""Implement ONE Rust function so its tests pass.
@@ -128,7 +130,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {container_line}Signature (verbatim, do not change):
 {sig_text}
 
-{identity_part}<RUST_GOTCHAS>
+{recipe_part}{identity_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
@@ -222,6 +224,7 @@ def build_per_fn_fix_prompt(
     # P3.2: full detail block for gotchas matching the current error.
     gotchas_block = tag_block("RUST_GOTCHAS_DETAIL", gotchas_for_error(error_excerpt))
     container_line = f"In: {container}\n" if container else ""
+    recipe_part = construction_recipe_prefix(fn_name, container)
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
@@ -313,7 +316,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {container_line}Signature (verbatim, do not change):
 {sig_text}
 
-{identity_part}<RUST_GOTCHAS>
+{recipe_part}{identity_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}

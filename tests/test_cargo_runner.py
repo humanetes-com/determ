@@ -561,6 +561,29 @@ def test_regression_gate_keeps_fill_when_crash_is_stub_panic_only() -> None:
     assert any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired)
 
 
+def test_regression_gate_reverts_stub_panic_when_this_fill_introduced_stubs() -> None:
+    # Same capture as the keep above: a previously-completing binary dies on
+    # a stub panic. The caller just put that stub back (file-first peel).
+    # Pre-fix this returned None (keep) and the peel's own panic exonerated
+    # it — run 1160135-7b10cdfa. With introduced_stubs the gate reverts.
+    fired: list[tuple[str, str]] = []
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    res = test_regression_gate(
+        _const_run_cargo(
+            101, _crashed_after("thread 'x' panicked at src/error.rs:64:17:\n"
+                                "not implemented\n")),
+        "cargo test", Path("."), {}, _completed_baseline(),
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired.append((loc, m)),
+        introduced_stubs=True)
+    assert res is not None
+    assert res[0].newly_crashed and not res[0].newly_red
+    assert any(loc == "phase-c/crash_introduced_stub_reverted" for loc, _ in fired)
+    assert not any(loc == "phase-c/crash_blocked_kept" for loc, _ in fired)
+
+
 def test_regression_gate_keeps_crash_without_stub_evidence_as_unmeasurable() -> None:
     # The inversion at this gate: a crash-only regression with NO stub-panic
     # attribution — a segfault, or an assertion panic beside a stub panic —

@@ -14,6 +14,7 @@ def test_failed_body_with_content() -> None:
     assert "//   let x = 1;" in body
     assert "//   error[E0308]: mismatch" in body
     assert is_unimplemented_body(body)  # ends in unimplemented!()
+    assert "did not compile — do not repeat this approach" in body
 
 
 def test_failed_body_empty_inputs_use_placeholders() -> None:

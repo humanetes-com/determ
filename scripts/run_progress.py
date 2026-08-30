@@ -63,8 +63,19 @@ Per-iteration columns, grouped by what owns them:
            counts across the jump are not comparable.
     meas   `oracle_size` = pass + fail: tests that returned a verdict. This
            is the 87 and the 105.
-    miss   full - meas: tests that reported NOTHING — a crashed binary, a
-           compile failure. `miss > 0` means the score below is a partial
+    miss   full - meas: declared tests the sweep did not COUNT. NOT the
+           tests a crash took down — those report nothing and are counted
+           as FAILING (the loop's `ORACLE SHRUNK — counting N as failing`,
+           and the `vanish` tag in NOTES below is where they are reported).
+           What lands here is (a) the verdicts an aborted binary managed to
+           PRINT before it died — `pass`/`fail` are summed from libtest
+           `test result:` trailers and an aborted binary never prints one —
+           and (b) tests that never ran at all: libtest `ignored` (cfg-gated
+           to another cluster) plus any static over-count. Cluster `stable`,
+           2026-08-29: `miss` 12 was 10 printed-then-dropped verdicts across
+           5 aborted binaries and the 2 `requires nightly` tests this
+           cluster ignores; it read 2 for the whole preceding week with no
+           crash at all. `miss > 0` means the score below is a partial
            reading; a "best tree" is only durable on a full oracle.
 
   SCORE — the objective

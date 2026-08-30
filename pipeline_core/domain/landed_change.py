@@ -89,16 +89,38 @@ def declined_unchanged(
     convicting: Mapping[Any, set[str]],
     escalated: frozenset[FnLocator] | set[FnLocator],
     already_declined: frozenset[FnLocator] | set[FnLocator] = frozenset(),
+    crash_evidence: frozenset[FnLocator] | set[FnLocator] = frozenset(),
 ) -> frozenset[FnLocator]:
     """Unchanged units whose 'return it unchanged' was the instruction.
 
     Escalated units are never declined: their instruction was rewrite.
     ``already_declined`` is the pass cursor's record from earlier batches
     of the same traversal (the pass-close fallback).
+
+    NEITHER ARE UNITS UNDER LIVE CRASH EVIDENCE, and this is the one clause
+    that has to be checked before ``already_declined`` rather than beside it.
+    The test below is "no failing test convicts this unit" — and a crashed
+    binary reports no verdict for anything inside it, so a fault's own blamed
+    frame passes that test BECAUSE it crashed. The louder the failure, the more
+    confidently the unit was filed as correctly standing pat.
+
+    What that cost, run `1519852-5d607329` (2026-08-30, cluster stable):
+    `src/error.rs::drop` and `src/ptr.rs::as_ptr` were both written to the
+    persisted floor's `declined` while ASAN was blaming `drop`'s frame for a
+    heap-use-after-free that kept 13 tests unmeasurable. `declined` is the one
+    population :func:`domain.tdd_floor.cursor_carry` carries across a `code_id`
+    move UNCONDITIONALLY — on the premise that landing nothing was the
+    instructed outcome and a fill-path fix gives no reason to re-offer it — so
+    every relaunch inherited the verdict that the crashing body was fine.
+    Fixing it here rather than in the carry is deliberate: the carry's premise
+    is correct for what `declined` is supposed to mean, and every other reader
+    of the field (the pass-close audit, the re-buy detector, the resume) then
+    stays correct without knowing what a crash is.
     """
     return frozenset(
         k for k in unchanged
         if k not in escalated
+        and k not in crash_evidence
         and (k in already_declined or not locator_has_convicting(convicting, k)))
 
 

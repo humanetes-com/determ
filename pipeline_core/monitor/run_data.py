@@ -22,7 +22,7 @@ import subprocess
 import time
 from typing import Any
 
-from . import events_data
+from . import events_data, render
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -143,6 +143,36 @@ def find_project_dir() -> str | None:
             if best is None or mtime > best[0]:
                 best = (mtime, os.path.join(tmp, name))
     return best[1] if best else None
+
+
+def phase_progress(project_dir: str | None) -> tuple[set[str], str]:
+    """`(done phase keys, current stage line)` from pipeline_state.md.
+
+    The pipeline's own state file is authoritative for phase status: the
+    `[key] done` entries give real per-phase completion and the `current:`
+    line gives the active stage. The rendering half is
+    `render.phase_bar_rows`; this half is here so the strip's I/O sits with
+    the other state readers rather than in the TUI god-file.
+
+    `task2-4` is the combined reconstruct marker — one key for the whole
+    task2a…task4 span — and is expanded by the caller that knows the phase
+    sequence, not here.
+    """
+    done_keys: set[str] = set()
+    cur = ""
+    if not project_dir:
+        return done_keys, cur
+    try:
+        with open(os.path.join(project_dir, "pipeline_state.md")) as _f:
+            for line in _f:
+                key = render.state_done_key(line)
+                if key is not None:
+                    done_keys.add(key)
+                if line.startswith("current:"):
+                    cur = line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return done_keys, cur
 
 
 def _cluster_list_value(text: str) -> str | None:

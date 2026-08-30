@@ -20,12 +20,17 @@ from pipeline_core.monitor import worker_streams as _ws
 # ── score bar ────────────────────────────────────────────────────────────────
 
 
-def test_score_row_draws_against_the_runnable_oracle() -> None:
+def test_score_row_draws_against_the_counted_oracle() -> None:
     """The one quantity the run exists to move had no gauge. It is drawn
-    against `oracle_size` (what the sweep could execute), with the gap to
-    `oracle_static` reported as unreachable rather than folded in: on
+    against `oracle_size` (`pass + fail`, what the sweep counted), with the
+    gap to `oracle_static` named beside it rather than folded in: on
     669347-cf33eae3 a crash took ten test binaries down and 4 of 107 declared
-    tests could not run at all, which no fill can reach."""
+    tests are outside the count.
+
+    This reading predates the binary-qualified pair vectors, so the gap cannot
+    be split by cause — and the row says so by reporting it whole instead of
+    guessing a cause. The split itself is pinned on recorded events in
+    tests/test_monitor_iteration_steps.py."""
     state = {"tdd_pass": 9, "tdd_fail": 94, "tdd_oracle": 103,
              "tdd_oracle_static": 107, "tdd_pass_hist": [39, 9]}
     row = _render.score_row(state)
@@ -34,8 +39,12 @@ def test_score_row_draws_against_the_runnable_oracle() -> None:
     assert "9/103 passing (9%)" in text
     assert "↓30" in text                    # signed against the previous sweep
     assert "94 failing" in text
-    assert "4 unreachable" in text
     assert "9/107" not in text              # never the declared oracle
+    # The shortfall is its own row, below the score.
+    gap = _render.plain(_render.oracle_row(state) or "")
+    assert "107 declared" in gap and "4 outside the count" in gap
+    assert "unreachable" not in text + gap  # named the crash's OWN casualties,
+                                            # which are counted, as failing
 
 
 def test_score_row_absent_without_a_reading() -> None:

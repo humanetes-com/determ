@@ -14,6 +14,10 @@ from datetime import datetime
 from statistics import median
 from typing import Any
 
+from pipeline_core.monitor.fill_progress import ROUTES, FillProgress
+from pipeline_core.monitor.iteration_steps import STEPS, step_index
+from pipeline_core.monitor.oracle_gap import oracle_gap
+
 
 def bold(s: str) -> str:      return f"\033[1m{s}\033[0m"
 def dim(s: str) -> str:       return f"\033[2m{s}\033[0m"
@@ -200,20 +204,276 @@ def _fmt_dur(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+PHASE_SEQ: tuple[str, ...] = (
+    "task0a", "task0b", "task0c", "strip", "task1",
+    "task2a", "task2b", "task2c", "task3", "task4",
+)
+
+
+def phase_bar_rows(done_keys: set[str], cur: str) -> list[str]:
+    """The whole-run phase strip: ✓done / ▶current / ·pending across t0a…t4,
+    plus the `current:` line's detail beneath it.
+
+    Pure — the pipeline_state.md read is `run_data.phase_progress`. The strip
+    one level down, inside t2a, is :func:`iteration_step_row`; the two share
+    this vocabulary deliberately, because they answer the same question at two
+    scales and an operator should not have to learn it twice.
+    """
+    done = set(done_keys)
+    # The combined reconstruct marker means the whole loop finished.
+    if "task2-4" in done:
+        done |= {"task2a", "task2b", "task2c", "task3", "task4"}
+    stage = cur.split("/", 1)[0].strip() if cur else ""
+    if stage in ("task2", "task2-4"):
+        stage = "task2c"
+    cells: list[str] = []
+    for p in PHASE_SEQ:
+        short = p.replace("task", "t")
+        if p == stage and p not in done:
+            cells.append(cyan("▶" + short))
+        elif p in done:
+            cells.append(green("✓" + short))
+        else:
+            cells.append(dim("·" + short))
+    rows = ["  phase    " + " ".join(cells)]
+    detail = cur.split("/", 2)[-1].strip() if cur.count("/") >= 1 else ""
+    if detail and detail != cur:
+        rows.append("           " + dim(detail))
+    return rows
+
+
+def iteration_step_row(state: dict[str, Any], now: float) -> str | None:
+    """Where inside the TDD iteration the loop is, as a strip.
+
+    The same vocabulary as the `phase` strip at the top of the panel — ✓ done
+    this iteration, ▶ current, · not reached — one level down: that strip
+    stops at `t2a`, and t2a is a multi-hour loop of five steps
+    (:mod:`pipeline_core.monitor.iteration_steps`). Without this row the panel
+    could distinguish "the fill has been running for 40 minutes" from "cargo
+    test has been hung for 40 minutes" only by reading the log by eye.
+
+    The trailing reading is time-in-step, and it is the point of the row: a
+    `sweep` that has been current for 20 minutes, or a `grade` that never
+    advances, is a finding, where the same 20 minutes under `fill` is a
+    healthy long generation. It is taken from `tdd_step_age_s` when the caller
+    has a better clock for the current step than the event stream does (the
+    sweep publishes no events, so its age is the pipeline log's own staleness)
+    and from the transition stamp otherwise.
+
+    Returns None until a step has been observed — never a guessed `sweep`,
+    which would put a hang on screen that nothing measured.
+    """
+    step = state.get("tdd_step")
+    if not isinstance(step, str) or step_index(step) < 0:
+        return None
+    cur = step_index(step)
+    cells: list[str] = []
+    for i, s in enumerate(STEPS):
+        if i == cur:
+            cells.append(cyan("▶" + s.id))
+        elif i < cur:
+            cells.append(green("✓" + s.id))
+        else:
+            cells.append(dim("·" + s.id))
+    age = state.get("tdd_step_age_s")
+    if not isinstance(age, (int, float)):
+        since = _iso_ts_seconds(state.get("tdd_step_since") or "")
+        age = max(0.0, now - since) if since is not None else None
+    tail = dim(f"  {_fmt_dur(float(age))} in {step}") if age is not None else ""
+    return "           step     " + "  ".join(cells) + tail
+
+
+def in_flight_row(state: dict[str, Any], covered: set[str]) -> str | None:
+    """The compact in-flight list — the FALLBACK for units the fill fold
+    cannot place.
+
+    In-flight fills are the parallel set (up to `PIPELINE_PARALLELISM` at
+    once), longest-running first (the unit eating the iteration): ↻ a
+    behavioural re-fill, ⊞ an impl block, ▤ a file, plain a per-fn, each with
+    its elapsed time.
+
+    Two suppressions, and both are the same rule — never print one unit twice.
+    `covered` is the threads the worker gauges already carry with a live token
+    count; listing both printed every in-flight fill twice on four consecutive
+    rows. And once :func:`fill_rows` has listed the units with their fix-loop
+    floor and stall, this row has strictly less to say than the rows above it,
+    so it steps aside entirely. What is left for it is the case it was written
+    for: a unit whose thread has no live stream file (an older record with no
+    thread, or a call that has not opened its log yet).
+
+    Returns `in-flight idle` when the events show nothing in flight at all —
+    an empty row and a quiet loop are different states.
+    """
+    flight_all = state.get("in_flight") or []
+    fill = state.get("fill")
+    flight = ([] if (isinstance(fill, FillProgress) and fill.live)
+              else [u for u in flight_all if u.get("thread") not in covered])
+    if not flight:
+        return f"           in-flight {dim('idle')}" if not flight_all else None
+    bits = []
+    for u in flight[:4]:
+        age = u.get("age_s")
+        shown = ("?" if age is None else f"{age}s" if age < 60 else f"{age // 60}m")
+        kind = u.get("kind")
+        tag = ("↻" if u.get("refill") else "⊞" if kind == "impl"
+               else "▤" if kind == "file" else "")
+        bits.append(f"{tag}{(u.get('label') or '?').splitlines()[0][:30]}({shown})")
+    more = f"  +{len(flight) - 4}" if len(flight) > 4 else ""
+    return f"           in-flight {cyan('  '.join(bits))}{dim(more)}"
+
+
+def fill_rows(state: dict[str, Any], now: float) -> list[str]:
+    """The fill block of the Phase C panel: the route strip plus one row per
+    unit in flight.
+
+    One level below :func:`iteration_step_row`, and it exists because that
+    strip's answer stopped being useful the moment it became accurate: on run
+    `1383168-eb151d09` (2026-08-29) iter 1 the sweep took 0.7 s and
+    grade/aim/frontier finished inside two more, so `▶fill` stood alone for
+    1 h 43 m. The two rows below split that span by route
+    (:func:`fill_route_row`) and then by the body each route is writing
+    (:func:`fill_unit_rows`).
+
+    Composed here rather than in ``monitor.py`` so the panel gains a call
+    instead of a block — the LOC ratchet's rule, and the reason every other
+    multi-row reading on this panel already has an entry point of its own.
+    """
+    fill = state.get("fill")
+    if not isinstance(fill, FillProgress) or not fill:
+        return []
+    row = fill_route_row(fill)
+    return ([row] if row else []) + fill_unit_rows(fill, now)
+
+
+def fill_route_row(fill: FillProgress) -> str | None:
+    """One level below the `step` strip: WHERE INSIDE the fill the loop is.
+
+    Same vocabulary as the `phase` and `step` strips above it, because it is
+    the same question at a third scale and the operator should not have to
+    learn it three times. It exists because the step strip's answer stopped
+    being useful the moment it was accurate: on run `1383168-eb151d09`
+    (2026-08-29) iter 1 the four steps before the fill finished in under two
+    seconds and `▶fill` then stood alone for 1 h 43 m.
+
+    The three routes fill units of different sizes — a whole file, one impl
+    block, one fn (:mod:`pipeline_core.monitor.fill_progress`) — and a unit
+    that fails one route falls through to the next, so the counters stay
+    SEPARATE and are never summed into a single fill bar: on that iteration
+    `context` and `construct_from_boxed` were attempted by all three, and a
+    summed bar would have counted the iteration's two hardest units three
+    times each.
+
+    A route draws a bar only against the unit count IT published — the
+    file/impl routes on `phase_c.fill.route_plan`, the per-fn route on
+    `phase_c.pass.start`. Records written before those emits carry no plan,
+    and such a route shows `finished/started` with a `~` and no bar rather
+    than borrowing the frontier or the dispatch cap as a denominator. The
+    batch is named at the end of the row for the same reason it is not the
+    denominator: it counts frontier UNITS the sweep dispatched, which is not
+    the count of units any one route walks.
+    """
+    if not fill.routes:
+        return None
+    cells: list[str] = []
+    for r in fill.routes:
+        denom = r.denominator
+        # Without a plan the only honest fraction is "closed of opened", and
+        # it is labelled `seen` so a route that has closed the one unit it
+        # opened cannot be read as a route that has closed its whole plan.
+        count = (f"{r.finished}/{denom}" if denom is not None
+                 else f"{r.finished}/{r.started} seen")
+        if r.id == fill.current:
+            body = f"▶{r.id} {count}"
+            if denom:
+                body += f" [{progress_bar(r.finished / denom * 100, 10)}]"
+            cells.append(cyan(body))
+        elif r.finished >= r.started > 0:
+            cells.append(green(f"✓{r.id} {count}"))
+        else:
+            cells.append(dim(f"·{r.id} {count}"))
+    for unseen in ROUTES:
+        if not any(x.id == unseen for x in fill.routes):
+            cells.append(dim("·" + unseen))
+    tail = dim(f"  batch {fill.batch}") if fill.batch else ""
+    return "           fill     " + "  ".join(cells) + tail
+
+
+def fill_unit_rows(fill: FillProgress, now: float, limit: int = 4) -> list[str]:
+    """One row per unit currently being filled — the answer to "which body".
+
+    The label alone was already on screen (the worker gauges carry it beside
+    their token bar), and the label alone is not the reading: a unit that has
+    been in flight for 40 minutes is either converging or re-buying the same
+    wrong answer, and only the fix loop's own gauge separates those. So each
+    row carries what `loop.iter` publishes per failed attempt — the attempt
+    count, the FLOOR (best metric the unit has reached) and the STALL (attempts
+    since that floor last improved).
+
+    Read the pair, not the elapsed time. A falling floor is the model closing
+    on the body and the minutes are being spent well; a stall climbing at a
+    fixed floor is the shape that ends in a revert, and it is visible here
+    attempts before the route logs it. `attempt N` with an empty floor is a
+    unit whose first answer has not come back yet — never a zero passed off as
+    a measurement.
+
+    The file route is the only one with an attempt CEILING
+    (`PHASE_C_FILE_MAX_ATTEMPTS`, carried on `file.fill.revert`), so it is the
+    only one that renders `2/3`. The impl and per-fn loops stop on a floor
+    stall whose bound is adjusted per module before use and is not in the
+    stream, so their attempt is a count and is printed as one.
+    """
+    rows: list[str] = []
+    units = sorted(fill.live, key=lambda u: _iso_ts_seconds(u.since_iso) or now)
+    for u in units[:limit]:
+        tag = ("↻" if u.refill else "⊞" if u.route == "impl"
+               else "▤" if u.route == "file" else " ")
+        # Pad BEFORE colouring: an f-string width counts the ANSI escape bytes,
+        # so `f"{cyan(x):<26}"` pads a coloured label to nothing and every
+        # column right of it stops lining up (the same trap
+        # `monitor/worker_streams.py` names).
+        seg = [f"{tag} " + cyan(f"{u.label.splitlines()[0][:26]:<26}")]
+        since = _iso_ts_seconds(u.since_iso)
+        if since is not None:
+            seg.append(dim(f"{_fmt_dur(max(0.0, now - since)):>5}"))
+        if u.members > 1:
+            seg.append(dim(f"{u.members} member(s)"))
+        if u.attempt:
+            att = (f"attempt {u.attempt}/{u.max_attempts}" if u.max_attempts
+                   else f"attempt {u.attempt}")
+            seg.append(att)
+        if u.floor:
+            seg.append(dim(f"floor {u.floor}"))
+        if u.stalled:
+            seg.append(yellow(f"stall {u.stalled}"))
+        elif u.improving:
+            seg.append(green("floor fell"))
+        rows.append("           unit     " + "  ".join(seg))
+    if len(units) > limit:
+        rows.append("           " + dim(f"         +{len(units) - limit} more in flight"))
+    return rows
+
+
 def score_row(state: dict[str, Any]) -> str | None:
-    """The target, as a bar: tests passing out of the oracle the sweep could run.
+    """The target, as a bar: tests passing out of the oracle the sweep counted.
 
     The panel had every component of this number (`pass=9 fail=94` on the tdd
     row, `oracle_size` nowhere) and no picture of the distance left, so the one
     quantity the whole run exists to move was the only one with no gauge.
 
     Two denominators, and the difference is the finding, not a detail. The bar
-    is drawn against `oracle_size` — the tests the last sweep could execute —
-    while `oracle_static` is what the tree declares. On run 669347-cf33eae3
-    (2026-08-15) a crash took ten test binaries down and the runnable oracle
-    fell to 103 of 107 declared: filling every remaining fn cannot reach the
-    difference, so it is reported as unreachable rather than folded into a
-    denominator that would make the score look worse than the work.
+    is drawn against `oracle_size` — `pass + fail`, what the sweep counted —
+    while `oracle_static` is what the cluster's test inventory declares.
+    Folding the difference into the denominator would make the score look worse
+    than the work, so it is named beside the bar instead — split by cause
+    (:mod:`pipeline_core.monitor.oracle_gap`), never as one lump.
+
+    It used to render as `N unreachable (crashed binaries)`, which named the
+    wrong tests: a crashed binary's lost tests are COUNTED, as failing
+    (`ORACLE SHRUNK — counting 13 as failing`), and the gap is the verdicts a
+    crashed binary printed before aborting — invisible to counters summed from
+    libtest trailers — plus the tests that never ran at all. On cluster
+    `stable`, 2026-08-29, that mislabel hid five passing tests inside a "12
+    unreachable".
 
     The delta is against the previous sweep of this cluster, and it is signed:
     a re-stub by the crash/layout retrigger is a deliberate, expected drop, and
@@ -233,10 +493,28 @@ def score_row(state: dict[str, Any]) -> str | None:
     failing = state.get("tdd_fail")
     if failing is not None:
         seg.append(red(f"{failing} failing") if failing else green("0 failing"))
-    static = state.get("tdd_oracle_static")
-    if isinstance(static, int) and static > oracle:
-        seg.append(yellow(f"{static - oracle} unreachable (crashed binaries)"))
     return f"           score    [{progress_bar(pct, 24)}]  {'  '.join(seg)}"
+
+
+def oracle_row(state: dict[str, Any]) -> str | None:
+    """What the cluster DECLARES, and what of it the sweep did not count.
+
+    Its own row rather than a third segment of the score row: the honest
+    sentence is too long to survive `box_lines`' truncation there (the score
+    row is ~80 visible columns before it), and the segment it replaces was
+    cut mid-phrase on any terminal narrower than ~115 columns — which is how
+    a wrong four-word label went unread for weeks.
+
+    Absent when the sweep counted everything the inventory declares, so the
+    row appears exactly when the measurement is short and says by how much
+    and why (:mod:`pipeline_core.monitor.oracle_gap`).
+    """
+    gap = oracle_gap(state)
+    if gap is None:
+        return None
+    static = state.get("tdd_oracle_static")
+    return (f"           oracle   {dim(f'{static} declared')}  "
+            f"{yellow(gap.rendered)}")
 
 
 def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:

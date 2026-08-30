@@ -91,7 +91,10 @@ def make_failed_attempt_body(attempted_body: str, error_excerpt: str,
 
     The body carries the SKELETON_STUB_FAILED_ATTEMPT sentinel so a later
     pass's `_scan_unimplemented_functions` re-discovers this fn as still
-    needing a fill — but the model sees the failure history in context.
+    needing a fill. The attempted body is labelled as a do-not-repeat:
+    quoting it as a hint handed the next fill the recipe that just failed
+    (run ``1383168-eb151d09``, ``construct_from_boxed`` quoting
+    ``construct_from_std`` on the Box).
     """
     ts = int(time.time())
     lines = [
@@ -102,7 +105,7 @@ def make_failed_attempt_body(attempted_body: str, error_excerpt: str,
         "// pass will retry — by then more sibling functions in this file will",
         "// be implemented, giving the model richer context.",
         "//",
-        "// ATTEMPTED BODY:",
+        "// ATTEMPTED BODY (did not compile — do not repeat this approach):",
     ]
     if attempted_body:
         for ln in attempted_body.splitlines()[:60]:

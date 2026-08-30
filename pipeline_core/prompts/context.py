@@ -95,6 +95,11 @@ class PerImplSections:
     # Re-fill members whose attribution is inference only — rendered with the
     # `[REFILL?]` tag so a possibly-correct body is not declared failing.
     inferred_refill_names: frozenset[str] = frozenset()
+    # Re-fill members a runtime fault's own frame named — rendered `[REFILL!]`.
+    # Kept separate from the set above rather than subtracted from it because
+    # the crash is what STRIPS these units of a convicting test, so they arrive
+    # looking like inference and would otherwise be told to stand pat.
+    crashed_refill_names: frozenset[str] = frozenset()
     # The previous attempt's rejected expressions that the SIBLING_REFERENCE
     # body carries (`domain.sibling_steer`). Non-empty flips that section's
     # prefix from "follow the same structural pattern" to "this is the pattern

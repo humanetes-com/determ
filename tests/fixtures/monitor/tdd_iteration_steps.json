@@ -1,0 +1,299 @@
+{
+ "why": "Recorded from logs/events.jsonl. `boundary` is the phase_c.* stream across one real TDD iteration boundary of cluster stable on 2026-08-29 (the tail of iter 1's file-first fills, the sweep that follows \u2014 which emits nothing \u2014 and on into the next dispatch). `no_frontier_continue` is one iteration that dispatched nothing.",
+ "boundary": [
+  {
+   "ts": "2026-08-29T18:27:29.056+00:00",
+   "event": "phase_c.file.fill.peeled"
+  },
+  {
+   "ts": "2026-08-29T18:27:30.498+00:00",
+   "event": "phase_c.file.fill.mismatch"
+  },
+  {
+   "ts": "2026-08-29T18:27:30.499+00:00",
+   "event": "phase_c.fill.class"
+  },
+  {
+   "ts": "2026-08-29T18:27:30.499+00:00",
+   "event": "phase_c.file.fill.done"
+  },
+  {
+   "ts": "2026-08-29T18:27:30.499+00:00",
+   "event": "phase_c.verdict"
+  },
+  {
+   "ts": "2026-08-29T18:27:30.743+00:00",
+   "event": "phase_c.impl.fill.start"
+  },
+  {
+   "ts": "2026-08-29T18:27:31.313+00:00",
+   "event": "phase_c.tdd.final_sweep"
+  },
+  {
+   "ts": "2026-08-29T18:27:52.436+00:00",
+   "event": "phase_c.cluster.prepass_heal_verdict"
+  },
+  {
+   "ts": "2026-08-29T18:27:53.864+00:00",
+   "event": "phase_c.ledger.reseed"
+  },
+  {
+   "ts": "2026-08-29T18:27:54.514+00:00",
+   "event": "phase_c.tdd.oracle_vanished"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.645+00:00",
+   "event": "phase_c.crash.localized"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.crash.producer_aimed"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_sustained"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.695+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_withheld"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_withheld"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.696+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_withheld"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_withheld"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.697+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.698+00:00",
+   "event": "phase_c.attribution.escalation_deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.745+00:00",
+   "event": "phase_c.attribution.unattributed"
+  },
+  {
+   "ts": "2026-08-29T18:27:58.745+00:00",
+   "event": "phase_c.dispatch.deferred"
+  },
+  {
+   "ts": "2026-08-29T18:27:59.379+00:00",
+   "event": "phase_c.tdd.oracle_vanished"
+  },
+  {
+   "ts": "2026-08-29T18:27:59.531+00:00",
+   "event": "phase_c.re_buy"
+  },
+  {
+   "ts": "2026-08-29T18:27:59.531+00:00",
+   "event": "phase_c.tdd.iter",
+   "data": {
+    "cluster": "stable",
+    "iter": 1,
+    "kind": "merged",
+    "dispatched": 12,
+    "frontier_size": 48
+   }
+  },
+  {
+   "ts": "2026-08-29T18:28:00.308+00:00",
+   "event": "phase_c.file.fill.start"
+  },
+  {
+   "ts": "2026-08-29T18:28:00.388+00:00",
+   "event": "phase_c.file.fill.start"
+  },
+  {
+   "ts": "2026-08-29T18:28:00.699+00:00",
+   "event": "phase_c.file.fill.start"
+  },
+  {
+   "ts": "2026-08-29T18:31:07.610+00:00",
+   "event": "phase_c.file.fill.peeled"
+  },
+  {
+   "ts": "2026-08-29T18:31:09.126+00:00",
+   "event": "phase_c.fill.class"
+  },
+  {
+   "ts": "2026-08-29T18:31:09.126+00:00",
+   "event": "phase_c.file.fill.done"
+  },
+  {
+   "ts": "2026-08-29T18:31:09.126+00:00",
+   "event": "phase_c.verdict"
+  }
+ ],
+ "no_frontier_continue": {
+  "ts": "2026-08-01T12:07:13.879+00:00",
+  "event": "phase_c.tdd.iter",
+  "data": {
+   "cluster": "nightly",
+   "iter": 4,
+   "kind": "no_frontier_continue",
+   "dispatched": null,
+   "frontier_size": 0
+  }
+ }
+}

@@ -22,9 +22,12 @@ def test_state_done_key_matches_old_regex() -> None:
         mm = old_re.match(line)
         return mm.group(1) if mm else None
 
+    # Through the render module, not a monitor.py alias: the pipeline_state
+    # read moved to run_data.phase_progress with the phase strip, and
+    # monitor.py no longer imports this helper.
     for line in ["[stable] done\n", "[task0c/nightly]   done extra", "[x] donezo",
                  "[a/b/c] done", "[only]done", "no bracket", "[ ] done", "[k]\tdone"]:
-        assert m._state_done_key(line) == old(line), repr(line)
+        assert _render.state_done_key(line) == old(line), repr(line)
 
 
 def test_call_start_value_matches_old_regex() -> None:

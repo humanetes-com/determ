@@ -89,6 +89,7 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
+from pipeline_core.monitor import iteration_steps as _steps  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
 from pipeline_core.monitor.engine_metrics import (  # noqa: E402
     engine_rows as _engine_rows,
@@ -124,19 +125,31 @@ from pipeline_core.monitor.render import (
     event_format as _event_format,
 )
 from pipeline_core.monitor.render import (
+    fill_rows as _fill_rows,
+)
+from pipeline_core.monitor.render import (
+    in_flight_row as _in_flight_row,
+)
+from pipeline_core.monitor.render import (
     iteration_progress_rows as _iteration_progress_rows,
 )
 from pipeline_core.monitor.render import (
+    iteration_step_row as _iteration_step_row,
+)
+from pipeline_core.monitor.render import (
     loop_hierarchy_rows as _loop_hierarchy_rows,
+)
+from pipeline_core.monitor.render import (
+    oracle_row as _oracle_row,
+)
+from pipeline_core.monitor.render import (
+    phase_bar_rows as _phase_bar_rows,
 )
 from pipeline_core.monitor.render import (
     plain as _plain,
 )
 from pipeline_core.monitor.render import (
     score_row as _score_row,
-)
-from pipeline_core.monitor.render import (
-    state_done_key as _state_done_key,
 )
 from pipeline_core.monitor.vllm_status import (  # noqa: E402
     vllm_status_rows as _vllm_status,
@@ -373,6 +386,17 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     rows.append(f"  reconstruct  cluster={cluster}  {_driver_counter(state)}  "
                 f"last={age_s}")
 
+    # One level below the `phase` strip at the top: that one stops at t2a,
+    # and t2a is a multi-hour loop whose five steps the panel could not name.
+    # Directly under the reconstruct header because it answers the same
+    # question that header opens — where in the loop are we.
+    _step = _iteration_step_row(state, time.time())
+    if _step:
+        rows.append(_step)
+
+    # And one level below THAT: which fill route, and which body in it.
+    rows.extend(_fill_rows(state, time.time()))
+
     # Per-cluster overview — where we are across all clusters. Prefer the
     # authoritative baked order/total from the log; fall back to events-seen.
     _seen = _baked_cluster_order() or (state.get("clusters_seen") or [])
@@ -437,6 +461,11 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
     _score = _score_row(state)
     if _score:
         rows.append(_score)
+    # Beneath the score, and only when the sweep counted fewer tests than the
+    # cluster declares: how big the shortfall is and what it is made of.
+    _oracle = _oracle_row(state)
+    if _oracle:
+        rows.append(_oracle)
     # Intra-iteration progress (render.iteration_progress_rows): pace bar
     # (elapsed vs median iteration length — moves every refresh), fills
     # counter with last-fill age, frontier context; plus a `bodies` bar only
@@ -466,30 +495,9 @@ def _phase_c_panel_rows(state: dict[str, Any]) -> list[str]:
                 f"{red(f'✗ failed={failed}')}  "
                 f"{dim(f'⊘ skip={skip}')}  "
                 f"{dim(f'(done={total_done})')}  {dim(f'notes={notes}')}")
-    # In-flight fills — the parallel set (up to PIPELINE_PARALLELISM at once),
-    # longest-running first (the block eating the iter). ↻ = behavioral re-fill,
-    # ⊞ = impl block, plain = per-fn; each annotated with elapsed.
-    #
-    # Only the units NO worker row covers: a worker row carries the same unit
-    # with its live token count, so listing both printed every in-flight fill
-    # twice on four consecutive rows. A unit whose thread has no live stream
-    # file (an older event without a thread, or a call that has not opened its
-    # log yet) still belongs here — that is the case this row now exists for.
-    flight = [u for u in _flight if u.get("thread") not in _covered]
-    if flight:
-        _ifb = []
-        for u in flight[:4]:
-            _a = u.get("age_s")
-            _age = ("?" if _a is None else f"{_a}s" if _a < 60 else f"{_a // 60}m")
-            _k = u.get("kind")
-            _tag = ("↻" if u.get("refill")
-                    else "⊞" if _k == "impl" else "▤" if _k == "file" else "")
-            _lab = (u.get("label") or "?").splitlines()[0][:30]
-            _ifb.append(f"{_tag}{_lab}({_age})")
-        _more = f"  +{len(flight) - 4}" if len(flight) > 4 else ""
-        rows.append(f"           in-flight {cyan('  '.join(_ifb))}{dim(_more)}")
-    elif not _flight:
-        rows.append(f"           in-flight {dim('idle')}")
+    _if = _in_flight_row(state, _covered)
+    if _if:
+        rows.append(_if)
     hot = state.get("hot_fn")
     if hot:
         rows.append(f"           hot fn   {dim(hot[0])} ({hot[1]} attempts)")
@@ -527,50 +535,6 @@ def _flow_audit_rows(data: dict[str, Any]) -> list[str]:
     return rows
 
 
-_PHASE_SEQ = ["task0a", "task0b", "task0c", "strip", "task1",
-              "task2a", "task2b", "task2c", "task3", "task4"]
-
-
-def _phase_bar() -> list[str]:
-    """Render the full pipeline phase sequence with ✓done / ▶current / ·pending,
-    read from pipeline_state.md (authoritative): the `[key] done` entries give
-    real per-phase status, the `current:` line gives the active stage."""
-    pd = _find_project_dir()
-    done_keys: set[str] = set()
-    cur = ""
-    if pd:
-        try:
-            with open(os.path.join(pd, "pipeline_state.md")) as _f:
-                for line in _f:
-                    key = _state_done_key(line)
-                    if key is not None:
-                        done_keys.add(key)
-                    if line.startswith("current:"):
-                        cur = line.split(":", 1)[1].strip()
-        except Exception:
-            pass
-    # The combined reconstruct marker means the whole loop finished.
-    if "task2-4" in done_keys:
-        done_keys |= {"task2a", "task2b", "task2c", "task3", "task4"}
-    stage = cur.split("/", 1)[0].strip() if cur else ""
-    if stage in ("task2", "task2-4"):
-        stage = "task2c"
-    cells = []
-    for p in _PHASE_SEQ:
-        short = p.replace("task", "t")
-        if p == stage and p not in done_keys:
-            cells.append(cyan("▶" + short))
-        elif p in done_keys:
-            cells.append(green("✓" + short))
-        else:
-            cells.append(dim("·" + short))
-    rows = ["  phase    " + " ".join(cells)]
-    _detail = cur.split("/", 2)[-1].strip() if cur.count("/") >= 1 else ""
-    if _detail and _detail != cur:
-        rows.append("           " + dim(_detail))
-    return rows
-
-
 def pipeline_status():
     prog  = _pipeline_log_facts()       # debt#7: task0c progress from structured events
     prog.update(_log_tail_meta())       # + raw-log presentation (last_line, age)
@@ -601,7 +565,7 @@ def pipeline_status():
     rows.extend(_vllm_status(_w() - 4))
 
     # Full pipeline phase sequence (t0a … t4) with the current stage highlighted.
-    rows.extend(_phase_bar())
+    rows.extend(_phase_bar_rows(*_rd.phase_progress(_find_project_dir())))
 
     # ── Header: status + coverage ────────────────────────────────────────────
     _cov_data = _parse_coverage_json(_find_project_dir())
@@ -629,7 +593,7 @@ def pipeline_status():
     )
 
     # (The old log-parsed "phases" line was removed — the state-driven
-    # _phase_bar() above is the single, granular phase display. tp is still
+    # the phase strip above is the single, granular phase display. tp is still
     # parsed below for the fix-phase detection further down.)
     # debt#7: task progression is now derived purely from structured events.
     tp = _task_progression()
@@ -641,6 +605,16 @@ def pipeline_status():
     _pc: dict[str, Any] = {}
     try:
         _pc = _phase_c_state()
+        # The sweep is the one iteration step that publishes no event — cargo
+        # is running — so the loop's own `iter N: running cargo test...` line,
+        # while it is the log's LAST line, is what says so, and the log's
+        # staleness is then the time spent in the step. Applied here rather
+        # than in the fold because only this layer reads the raw log.
+        _lstep = _steps.step_of_log_line(prog.get("last_line") or "")
+        if _lstep:
+            _pc["tdd_step"] = _lstep
+            _pc["tdd_step_since"] = None
+            _pc["tdd_step_age_s"] = prog.get("age")
         for r in _phase_c_panel_rows(_pc):
             rows.append(r)
     except Exception as _e:

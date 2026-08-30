@@ -173,6 +173,7 @@ def test_regression_gate(
     timeout: int,
     guard: Callable[[str, str], None],
     stub_free: bool = False,
+    introduced_stubs: bool = False,
 ) -> tuple[RegressionComparison, str] | None:
     """Global non-regression gate (the monotone ratchet). A fill is a REGRESSION
     if it turns a previously-passing test red, crashes a previously-completing
@@ -199,6 +200,13 @@ def test_regression_gate(
     no hollow body when the pass began. It decides the crash-only branch
     below: the keep there rests on a still-hollow sibling being able to
     speak, and in a stub-free tree none can.
+
+    ``introduced_stubs`` — the caller just put hollow bodies back (file-first
+    peel). The stub-panic keep below would then exonerate the peel's own
+    restored stubs: run `1160135-7b10cdfa` (2026-08-29) peeled
+    `construct_from_boxed` and `context` back to `unimplemented!()`, kept
+    ten rewrites, and those two panics withheld 60 vanished passes. A caller
+    that introduced the panicking stubs must revert, not keep.
     """
     if not (enabled and test_cmd and baseline is not None):
         return None
@@ -245,14 +253,24 @@ def test_regression_gate(
     # stub fills the same gate judges everything again with real verdicts.
     # NOTE for future call sites: every current caller judges a FILL (hollow →
     # body). A caller judging the reverse direction — deliberately
-    # INTRODUCING a stub — must not use this gate without revisiting this
-    # branch, because a stub restore's own panic would exonerate itself.
+    # INTRODUCING a stub — must pass ``introduced_stubs=True``, because a
+    # stub restore's own panic would otherwise exonerate itself. File-first
+    # peel is that caller.
     if (cmp.newly_crashed and not cmp.newly_red
             and cmp.cur_pass >= cmp.base_pass
             and cmp.cur_executed >= cmp.base_executed):
         _stub_sites = stub_only_crash(_raw[-1] if _raw else "")
         if _stub_sites:
             _locs = sorted(f"{f}:{ln}" for f, ln in _stub_sites)
+            if introduced_stubs:
+                guard("phase-c/crash_introduced_stub_reverted",
+                      f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
+                      f"{list(cmp.newly_crashed)} crashed, and the capture's "
+                      f"only panic(s) are stub panics at {_locs} — this fill "
+                      "put those stub(s) back, so the panic is its own; "
+                      "REVERTED rather than kept (cost: "
+                      f"{cmp.crash_lost_pass} baseline pass(es))")
+                return cmp, render_regression_detail(cmp)
             guard("phase-c/crash_blocked_kept",
                   f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
                   f"{list(cmp.newly_crashed)} crashed, and the capture's only "

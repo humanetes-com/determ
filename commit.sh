@@ -38,7 +38,7 @@
 #                        because git log travels with the repo and the .md
 #                        trackers do not, or the message carries assistant
 #                        attribution (`Co-Authored-By:`, "Generated with",
-#                        Claude/Anthropic, 🤖). The commits are the user's,
+#                        Claude/Anthropic/Cursor/Grok/Fable, 🤖). The commits are the user's,
 #                        authored under the user's name; a trailer naming a
 #                        model adds nothing a reader can act on and stays in
 #                        the object forever. The assistant tooling appends
@@ -87,8 +87,10 @@ fi
 # Assistant attribution never reaches the object: the commits are the user's,
 # and the drafting tool's default convention appends a Co-Authored-By trailer
 # naming the model. Checked over the whole message, not just the subject —
-# the trailer lands at the bottom.
-if ATTRIB="$(grep -n -i -E 'co-authored-by|generated with|claude|anthropic|🤖' "$NORMALIZED")"; then
+# the trailer lands at the bottom. The name list is the editors and models
+# that draft here (Claude, Cursor, Grok, Fable); substring match, same as
+# `claude` already matching the conventions filename.
+if ATTRIB="$(grep -n -i -E 'co-authored-by|generated with|claude|anthropic|cursor|grok|fable|🤖' "$NORMALIZED")"; then
     echo "refusing: the message carries assistant attribution —" >&2
     echo "$ATTRIB" | sed 's/^/          /' >&2
     echo "          rewrite $MSG_FILE without it; the commit is yours, not a model's" >&2

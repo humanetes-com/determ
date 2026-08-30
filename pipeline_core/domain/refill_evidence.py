@@ -47,9 +47,13 @@ from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
 
 class Attribution(Enum):
-    """How strongly the record implicates a re-fill target. Three states,
-    because collapsing the last two into one bool is what locked the pass at
-    92.
+    """How strongly the record implicates a re-fill target. Four states,
+    because collapsing any two of them into one bool has now locked the pass
+    twice — at 92, and at 83.
+
+    CRASHED — a runtime fault's own faulting frame names this unit. The
+    strongest evidence the loop ever holds about a body: not an inference from
+    a verdict, but a memory error the tree produced under ASAN, with a frame.
 
     DIRECT — an attributed test's OWN failure points at this unit. Unchanged
     meaning, unchanged prompt line.
@@ -62,16 +66,38 @@ class Attribution(Enum):
     NAMED — a traversal step or a name match mentioned the fn and nothing was
     measured. Only this one deserves "leave it unchanged".
 
-    Why the split. `direct` was a bool and `inferred` its complement, so
-    ESCALATED and NAMED rendered identically — as `re-check (… implicated by
-    NAME only — rewrite ONLY if it is wrong for its bounds, else leave it
-    unchanged)`. On the live tree that grade went to the five
+    Why the ESCALATED split. `direct` was a bool and `inferred` its
+    complement, so ESCALATED and NAMED rendered identically — as `re-check (…
+    implicated by NAME only — rewrite ONLY if it is wrong for its bounds, else
+    leave it unchanged)`. On the live tree that grade went to the five
     `construct_from_*` in all three prompts that listed them, while `rewrite`
     went to `from` twenty times over — the accessors the escalation had just
     declared futile. The unit is escalated BECAUSE its consumers were measured
     futile, and was then handed the weakest instruction in the vocabulary.
+
+    WHY CRASHED IS THE SAME DEFECT ONE CHANNEL OVER, and why it cannot be
+    folded into DIRECT. The grade below reads `frontier.convicting_for(key)`
+    to earn DIRECT — and a crashed binary reports NO verdict for any test in
+    it, so a unit blamed for the crash has no convicting test BY CONSTRUCTION.
+    The fault is what erases the evidence that would have graded it. It
+    therefore fell through to NAMED and was rendered "compiles; implicated by
+    NAME only … else return it unchanged" — the weakest instruction in the
+    vocabulary handed to the one body the tree had just proved wrong.
+
+    Measured, run `1519852-5d607329` (2026-08-29/30, cluster stable):
+    `tests/behaviour_stable_gen_1.rs` and four sibling binaries died on
+    `AddressSanitizer: heap-use-after-free`, the localizer blamed
+    `src/error.rs::drop` from the faulting frame, and 13 tests reported no
+    verdict for the whole run. `drop` came back byte-identical and was filed
+    `declined` — "landing nothing was the instructed outcome" — which was
+    true: that WAS the instruction it was given. Its body forgets a `&mut`
+    borrow and then hands the pointer to `object_drop`. CRASHED ranks above
+    DIRECT because when both apply the memory fault is the more specific
+    instruction, and a unit whose tests crash rarely has a live verdict to
+    compete with anyway.
     """
 
+    CRASHED = auto()
     DIRECT = auto()
     ESCALATED = auto()
     NAMED = auto()
@@ -224,6 +250,7 @@ def collect_refill_evidence(
     *,
     max_tests: int = 6,
     escalated: frozenset[FnLocator] = frozenset(),
+    crashed: frozenset[FnLocator] = frozenset(),
     read_source: Callable[[str], str | None] | None = None,
     history: Mapping[str, Sequence[TryRecord]] | None = None,
 ) -> tuple[RefillEvidence, ...]:
@@ -243,9 +270,16 @@ def collect_refill_evidence(
         key = FnLocator(block.file, m.fn_name)
         tests = (tuple(sorted(frontier.tests_for(key)))[:max_tests]
                  if frontier is not None else ())
+        # An observed fault outranks every verdict-derived grade, and it has
+        # to be tested FIRST rather than as a fallback: a crashed binary
+        # reports no verdict, so `convicting_for` is empty for exactly the
+        # units the crash implicates and the fault would otherwise fall
+        # through to NAMED ("return it unchanged"). See `Attribution`.
         # A convicting test outranks the escalation: the unit's own failure is
         # better evidence than the measurement that its consumers were futile.
-        if frontier is not None and frontier.convicting_for(key):
+        if key in crashed:
+            grade = Attribution.CRASHED
+        elif frontier is not None and frontier.convicting_for(key):
             grade = Attribution.DIRECT
         elif key in escalated:
             grade = Attribution.ESCALATED
@@ -291,9 +325,17 @@ def inferred_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
     """Members the record NAMES and never measured — rendered `[REFILL?]` and
     graded `re-check`. Escalated members are deliberately NOT here: they were
     measured, and telling the model to leave them unchanged is what this split
-    exists to stop."""
+    exists to stop. Neither are CRASHED members, for the same reason and with
+    a stronger premise: the tree faulted inside them."""
     return frozenset(e.fn_name for e in evidence
                      if e.attribution is Attribution.NAMED)
+
+
+def crashed_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
+    """Members a runtime fault's own frame named. Rendered with the fault as
+    the instruction, never as `[REFILL?] … else return it unchanged`."""
+    return frozenset(e.fn_name for e in evidence
+                     if e.attribution is Attribution.CRASHED)
 
 
 def escalated_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
@@ -336,7 +378,22 @@ def render_refill_evidence(
     as they render the pins twice."""
     lines: list[str] = []
     for e in evidence:
-        if e.direct:
+        if e.attribution is Attribution.CRASHED:
+            # The one grade whose premise is an OBSERVED fault rather than a
+            # verdict, so it states what faulted and does not hedge. It must
+            # come before the `else` below: that branch's sentence is "nothing
+            # singles out THIS body … return it UNCHANGED", which is the exact
+            # instruction that kept `src/error.rs::drop` on the tree across
+            # five processes while it was leaking a use-after-free.
+            lines.append(
+                f"`{e.fn_name}` — CRASHED: a test binary died of a MEMORY "
+                f"FAULT and the faulting frame is this body. This is not an "
+                f"inference from a verdict — the tests attributed to it report "
+                f"NO verdict at all, because the process that would have run "
+                f"them aborted. Rewrite it: the fault is in what this body "
+                f"does with ownership, lifetimes or raw pointers. Read the "
+                f"fault text below before writing.")
+        elif e.direct:
             lines.append(
                 f"`{e.fn_name}` — DIRECT: a failing test's own failure points "
                 f"at this body. Rewrite its BEHAVIOR; keep the signature.")

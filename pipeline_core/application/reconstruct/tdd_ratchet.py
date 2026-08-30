@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.layout_retrigger import RefillGrace
+from pipeline_core.domain.rust_scan import stubbed_fn_names
 
 
 def ratchet_breach(
@@ -97,11 +98,26 @@ def breach_withheld(breach: str, grace: RefillGrace) -> str:
     return ""
 
 
+def hollow_count(src_texts: dict[str, str] | None) -> int:
+    """How many fns in these file texts are still skeleton stubs.
+
+    The closure withhold is for a shrinking hole set (hollow → body). Counted
+    from file text so the ratchet and the fill gates share
+    :func:`stubbed_fn_names` rather than a second scanner. ``None`` or an
+    empty mapping is zero hollow, not "unknown"."""
+    if not src_texts:
+        return 0
+    return sum(len(stubbed_fn_names(text)) for text in src_texts.values())
+
+
 def closure_withheld(
     breach: str,
     lost: frozenset[str],
     judged_now: frozenset[str],
     stub_crash_sites: frozenset[tuple[str, int]],
+    *,
+    hollow_now: int,
+    hollow_at_snapshot: int,
 ) -> str:
     """Why this breach is a coupled component CLOSING, not a regression
     ('' = charge it normally). The second standing withhold beside
@@ -123,15 +139,22 @@ def closure_withheld(
 
     Withheld ONLY while the evidence holds, and it expires by itself: every
     lost test must have VANISHED with a crash (a lost test that received a
-    verdict in a completed binary really regressed — charge), and the
-    capture's panics must be stub panics exclusively (a segfault or an
-    assertion panic is the fill's own fault — charge). Once the last
-    drop-reachable stub fills, the binaries complete, both conditions turn
-    false, and the ratchet judges the closed component against the snapshot
-    with real verdicts."""
+    verdict in a completed binary really regressed — charge), the capture's
+    panics must be stub panics exclusively (a segfault or an assertion panic
+    is the fill's own fault — charge), AND the hollow set must have strictly
+    shrunk versus the snapshot. A sweep that costs passing tests with the
+    same hollow set is not a closure: run `1160135-7b10cdfa` (2026-08-29)
+    peeled `construct_from_boxed` and `context` back to `unimplemented!()`,
+    kept ten accessor rewrites, and 60 passes vanished with binaries dying
+    on those same two stub lines — hollow 15 → 15, pass 83 → 23. Charging
+    that restores the snapshot. Once the last drop-reachable stub fills, the
+    binaries complete, the conditions turn false, and the ratchet judges the
+    closed component against the snapshot with real verdicts."""
     if not (breach and lost and stub_crash_sites):
         return ""
     if lost & judged_now:
+        return ""
+    if hollow_now >= hollow_at_snapshot:
         return ""
     _locs = ", ".join(f"{f}:{ln}" for f, ln in sorted(stub_crash_sites))
     return (f"all {len(lost)} lost test(s) vanished with a binary whose only "

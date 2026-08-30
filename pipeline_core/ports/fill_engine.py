@@ -111,6 +111,7 @@ class Cargo(Protocol):
     def test_regression_gate(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
         baseline: TestStateReading | None, *, stub_free: bool = False,
+        introduced_stubs: bool = False,
     ) -> tuple[RegressionComparison, str] | None: ...
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = ...) -> str: ...
