@@ -952,25 +952,58 @@ def test_a_caller_that_never_scores_is_unaffected():
     assert not any(k.startswith("payoff:") for k in (f.saved_attempts or {}))
 
 
-def _blame_collision() -> _Fakes:
+def _blame_collision(*, stub_blamed: bool = False) -> _Fakes:
     """Cluster `stable` as it stood at 2026-08-08T08:19Z, reduced to the two
     components that mattered. Registry order puts the private `StdError` helper
     trait (`src/context.rs`) at a LOWER index than the component that declares
     the blamed fn, and the blamed fn's return type spells `StdError` because
-    that is the crate's alias for `std::error::Error` — a different symbol."""
-    f = _Fakes(fn_records=[
-        FnRecord(file="error.rs", fn_name="object_reallocate_boxed",
+    that is the crate's alias for `std::error::Error` — a different symbol.
+
+    `stub_blamed=True` is the layout-route case: a stub body still needs a
+    component selected. The live class is a filled body (`stub_blamed=False`)
+    — that must not open a re-author at all.
+    """
+    rec = FnRecord(file="error.rs", fn_name="object_reallocate_boxed",
                  sig_text=("unsafe fn object_reallocate_boxed(e: Own<ErrorImpl>)"
                            " -> Box<dyn StdError + Send + Sync + 'static>"),
-                 body_text="let unerased = e.cast::<ErrorImpl<E>>().boxed();"),
-    ])
+                 body_text="let unerased = e.cast::<ErrorImpl<E>>().boxed();")
+    if stub_blamed:
+        rec = replace(rec, has_unimplemented_body=True,
+                      body_text="unimplemented!()")
+    # Confound is stubbed*2 >= members. One stub and no siblings is always
+    # confounded, so a stub blamed body would never reach the walk. Two
+    # filled siblings keep the layout route open for the stub case.
+    siblings = [
+        FnRecord(file="error.rs", fn_name="object_drop",
+                 body_text="unsafe { (e.vtable.object_drop)(e) }"),
+        FnRecord(file="error.rs", fn_name="vtable",
+                 body_text="ErrorVTable { object_drop: object_drop }"),
+    ]
+    f = _Fakes(fn_records=[rec, *siblings])
     f._records = [
         LayoutComponentRecord(frozenset({"StdError"}), LayoutOutcome.FROZEN),
         LayoutComponentRecord(
-            frozenset({"ErrorImpl", "object_reallocate_boxed", "vtable"}),
+            frozenset({"ErrorImpl", "object_reallocate_boxed", "vtable",
+                       "object_drop"}),
             LayoutOutcome.FROZEN),
     ]
     return f
+
+
+def _stub_fmt_records() -> list[FnRecord]:
+    """Canonical fakes with `fmt` flagged as a stub so the layout route
+    stays open, while the body still spells ErrorImpl so REFERENCES
+    grading is unchanged. The default `_Fakes` `fmt` is filled; blaming
+    that must not fire."""
+    return [
+        FnRecord(file="error.rs", fn_name="fmt",
+                 sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
+                 body_text=("let x: &ErrorImpl = self.inner.get(); "
+                            "write!(f, \"{}\", x)"),
+                 has_unimplemented_body=True),
+        FnRecord(file="chain.rs", fn_name="next",
+                 sig_text="fn next(&mut self) -> Option<u8>", body_text="None"),
+    ]
 
 
 def _uaf_evidence():
@@ -984,13 +1017,36 @@ def _uaf_evidence():
 
 def test_the_crash_walk_fires_at_the_component_that_declares_the_blamed_fn():
     """Registry index is not evidence. The declarer is recorded SECOND here and
-    must still be the one re-authored."""
-    f = _blame_collision()
+    must still be the one re-authored. A stub body keeps the layout route
+    open; a filled body is the next test."""
+    f = _blame_collision(stub_blamed=True)
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
                            f.deps(), crash_evidence=_uaf_evidence())
     assert res.fired and res.succeeded and res.cause == "RUNTIME_CRASH"
     assert "object_reallocate_boxed" in (f.committed[0] if f.committed else "")
     assert "StdError" not in (f.committed[0] if f.committed else "")
+
+
+def test_filled_body_frame_blame_does_not_open_a_reauthor():
+    """The live class: ASAN named a filled conversion. Cause C's first move
+    is to revert that body. The fill loop already has the blame as crash
+    evidence. Negative control: the same records with a stub body still
+    fire at the declarer, not StdError."""
+    f = _blame_collision()
+    res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                           f.deps(), crash_evidence=_uaf_evidence())
+    assert not res.fired
+    assert res.reason == "filled-body frame blame"
+    assert f.committed == []
+    assert f.tree_plans == []
+    assert f.reverted_calls == []
+    assert any("names a FILLED body" in ln for ln in f.logs)
+    g = _blame_collision(stub_blamed=True)
+    res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                            g.deps(), crash_evidence=_uaf_evidence())
+    assert res2.fired and res2.succeeded and res2.cause == "RUNTIME_CRASH"
+    assert "object_reallocate_boxed" in (g.committed[0] if g.committed else "")
+    assert "StdError" not in (g.committed[0] if g.committed else "")
 
 
 def test_a_capped_declarer_stops_the_crash_walk_instead_of_demoting_to_a_mention():
@@ -1004,8 +1060,8 @@ def test_a_capped_declarer_stops_the_crash_walk_instead_of_demoting_to_a_mention
     re-authored again' is a complete answer. Nothing is re-authored, nothing is
     reverted, and the sweep goes on to fill: the blamed fn is already in the
     frontier carrying its ASAN report, which is the retry a body fault wants."""
-    f = _blame_collision()
-    f.attempts = {"ErrorImpl|object_reallocate_boxed|vtable": 2}
+    f = _blame_collision(stub_blamed=True)
+    f.attempts = {"ErrorImpl|object_drop|object_reallocate_boxed|vtable": 2}
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
                            f.deps(), crash_evidence=_uaf_evidence())
     assert not res.fired
@@ -1020,7 +1076,7 @@ def test_a_crash_no_component_declares_still_reaches_the_ones_it_mentions():
     """The tier must not make cause C weaker where it worked: with no declarer
     among the candidates the referencing tier is the whole of the evidence, and
     it still fires."""
-    f = _Fakes()   # canonical records: `fmt` references ErrorImpl, declares nothing
+    f = _Fakes(fn_records=_stub_fmt_records())
     from pipeline_core.domain.layout_retrigger import CrashEvidence
     ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
                        suspect_fns=frozenset(),
@@ -1087,7 +1143,7 @@ def test_a_new_localizer_blame_reopens_a_refuted_component():
                      "", f.deps(), crash_evidence=_uaf_ev())
     ev2 = dc_replace(_uaf_ev(), blamed_fns=frozenset(
         {FnLocator("src/error.rs", "fmt")}))
-    f2 = _Fakes(attempts=f.saved_attempts)
+    f2 = _Fakes(attempts=f.saved_attempts, fn_records=_stub_fmt_records())
     res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f2.deps(), crash_evidence=ev2)
     assert res2.fired and res2.succeeded
@@ -1136,7 +1192,7 @@ def test_a_new_blame_opens_a_fresh_rounds_budget():
                      "", f2.deps(), crash_evidence=_uaf_ev())
     ev_blamed = dc_replace(_uaf_ev(), blamed_fns=frozenset(
         {FnLocator("src/error.rs", "fmt")}))
-    f3 = _Fakes(attempts=f2.saved_attempts)
+    f3 = _Fakes(attempts=f2.saved_attempts, fn_records=_stub_fmt_records())
     res3 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f3.deps(), crash_evidence=ev_blamed)
     assert res3.fired and res3.succeeded
@@ -1298,7 +1354,7 @@ def test_a_refused_candidate_is_not_reported_as_evidence_that_matched_nothing():
     declaring it, so the tier is REFERENCES and the OWNS exit does not catch
     this path."""
     from pipeline_core.domain.layout_retrigger import CrashEvidence
-    f = _Fakes()                      # canonical records: `fmt` references it
+    f = _Fakes(fn_records=_stub_fmt_records())
     f.attempts = {"ErrorImpl": 2}     # == the `max_attempts` deps() hands over
     ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
                        suspect_fns=frozenset(),
@@ -1566,7 +1622,8 @@ def test_an_unlocatable_component_the_fault_NAMED_refuses_the_whole_fire():
     from pipeline_core.domain.layout_retrigger import CrashEvidence
 
     f = _Fakes(reply='<LAYOUT_ITEM name="CastTo" kind="trait">'
-                     'pub trait CastTo { type Target; }</LAYOUT_ITEM>')
+                     'pub trait CastTo { type Target; }</LAYOUT_ITEM>',
+               fn_records=_stub_fmt_records())
     f._records = [_authored_record(
         {"ErrorImpl", "CastTo"},
         {"ErrorImpl": "struct ErrorImpl { GONE: u8 }", "CastTo": _CASTTO_STALE})]

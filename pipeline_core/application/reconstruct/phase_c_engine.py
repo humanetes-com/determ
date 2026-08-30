@@ -146,6 +146,7 @@ class PhaseCFillEngine:
         self, target_src_dir: Path, stubs: list[Stub],
         tdd_frontier_keys: set[FnLocator] | None,
         tdd_frontier_tests: FailureFrontier | None,
+        crash_blamed: frozenset[FnLocator] | None = None,
     ) -> list[Stub]:
         """Frontier fns that are already FILLED (not stubs) but have a failing
         attributed test → behavioral re-fill targets (`refill=True`).
@@ -159,7 +160,10 @@ class PhaseCFillEngine:
         oversized), the stamp reads ``tests_for`` — per-fn is those units'
         only rewrite planner, and an inferred-only free fn (``vtable`` via
         escalation, 2026-08-04) is stranded if the stamp demands direct
-        evidence. Same predicate as ``collect_impl_refill_targets``.
+        Same predicate as ``collect_impl_refill_targets``. A locator in
+        ``crash_blamed`` is a refill even when no test convicts it: a
+        crashed binary reports no verdict, and without the stamp the
+        blamed conversion never reaches the write list.
 
         A frontier key that is neither a stub nor an enumerated fn resolves to
         nothing and would drop out here without a trace — the failure mode that
@@ -167,6 +171,7 @@ class PhaseCFillEngine:
         was printed every sweep. Such keys are reported, never swallowed."""
         if not (tdd_frontier_keys and tdd_frontier_tests):
             return []
+        crashed = crash_blamed or frozenset()
         _stub_keys = {s.key for s in stubs}
         _records = [Stub.from_dict(r)
                     for r in self.ws.enumerate_fns(target_src_dir) or []]
@@ -187,9 +192,9 @@ class PhaseCFillEngine:
                 if FnLocator(m.file, m.fn_name) in _stub_keys)
             dispatched = tuple(
                 m for m in members
-                if FnLocator(m.file, m.fn_name) not in _stub_keys
-                and FnLocator(m.file, m.fn_name) in tdd_frontier_keys
-                and tdd_frontier_tests.tests_for(FnLocator(m.file, m.fn_name)))
+                if (loc := FnLocator(m.file, m.fn_name)) not in _stub_keys
+                and loc in tdd_frontier_keys
+                and (tdd_frontier_tests.tests_for(loc) or loc in crashed))
             probe = ImplBlock(
                 file=file, container=container, members=members,
                 stub_members=stub_m, refill_members=dispatched)
@@ -209,7 +214,7 @@ class PhaseCFillEngine:
                     containers_by_key.get(rec.key, [rec.container])))
             else:
                 tests = set(tdd_frontier_tests.tests_for(rec.key))
-            if not tests:
+            if not tests and rec.key not in crashed:
                 continue
             out.append(replace(rec, refill=True))
             _seen.add(ident)
@@ -322,7 +327,8 @@ class PhaseCFillEngine:
             _blocks_now = collect_impl_refill_targets(
                 self.ws.collect_impl_blocks_for_cluster(target_src_dir, cluster) or [],
                 tdd_frontier_keys, tdd_frontier_tests,
-                max_stubs=self.config.per_impl_max_stubs)
+                max_stubs=self.config.per_impl_max_stubs,
+                crash_blamed=crash_blamed or frozenset())
             _has_refill_targets = any(b.refill_members for b in _blocks_now)
             _impl_deferred_stubs = frozenset(
                 k for k in (stubs_deferred_by_impl_route(
@@ -522,7 +528,8 @@ class PhaseCFillEngine:
             # guarded by the regression ratchet. Only when the outer loop passes
             # the frontier's failing-test map.
             _refill_recs = self._collect_refill_targets(
-                target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests)
+                target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests,
+                crash_blamed=crash_blamed or frozenset())
             # The re-fill list was computed from the PREVIOUS iteration's test
             # run, and the impl/file routes have already written bodies this
             # call — so a target's failing test may already be fixed. Re-fills

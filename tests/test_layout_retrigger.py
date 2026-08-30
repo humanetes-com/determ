@@ -5,6 +5,8 @@ mechanical and rejection budgets the walk spends. The ACTION that walks the
 components lives one layer up and is pinned in `test_retrigger_layout.py`."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pipeline_core.domain.layout_retrigger import (
     PAYOFF_HIGH_KEY,
     PAYOFF_ZERO_KEY,
@@ -166,6 +168,33 @@ def test_crash_retrigger_fires_on_member_or_referencing_suspect():
     assert classify_crash_retrigger(
         CrashEvidence(frozenset(), frozenset()), records, comp,
     ) is LayoutRetriggerCause.NONE
+
+
+def test_crash_blame_is_filled_body_only_when_every_named_body_compiles():
+    """Admission still returns RUNTIME_CRASH; this is the fire gate.
+    Empty blamed_fns, a missing record, and a stub body all keep the
+    layout route. The live fixture is filled object_reallocate_boxed."""
+    from pipeline_core.domain.layout_retrigger import (
+        CrashEvidence,
+        crash_blame_is_filled_body,
+    )
+    loc = FnLocator("src/error.rs", "object_reallocate_boxed")
+    ev = CrashEvidence(vanished=frozenset({"t"}),
+                       suspect_fns=frozenset(),
+                       blamed_fns=frozenset({loc}))
+    filled = [FnRecord(file="src/error.rs", fn_name="object_reallocate_boxed",
+                       body_text="let unerased = e.cast::<ErrorImpl<E>>().boxed();")]
+    assert crash_blame_is_filled_body(ev, filled) is True
+    stub = [replace(filled[0], has_unimplemented_body=True,
+                    body_text="unimplemented!()")]
+    assert crash_blame_is_filled_body(ev, stub) is False, (
+        "negative control: a stub blamed body still opens the layout route")
+    assert crash_blame_is_filled_body(
+        CrashEvidence(vanished=frozenset({"t"}),
+                      suspect_fns=frozenset(),
+                      blamed_fns=frozenset()),
+        filled) is False
+    assert crash_blame_is_filled_body(ev, []) is False
 
 
 def test_crash_blame_decides_and_excludes_components_the_fault_never_touched():

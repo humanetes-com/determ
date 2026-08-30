@@ -768,7 +768,8 @@ def fill_impl_blocks(
     # wrong bodies to a per-fn refill that can only touch one member at a time.
     blocks = collect_impl_refill_targets(
         blocks, tdd_frontier_keys, tdd_frontier_tests,
-        max_stubs=_PER_IMPL_MAX_STUBS)
+        max_stubs=_PER_IMPL_MAX_STUBS,
+        crash_blamed=crash_blamed or frozenset())
 
     # Every impl in the cluster, kept whole. Narrowing below answers "what do we
     # fill?"; routing a file-wide model reply asks the different question "what

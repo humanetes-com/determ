@@ -41,6 +41,7 @@ from pipeline_core.domain.crash_site import (
     first_test_file_after_destructor,
     non_destructor_frames,
     parse_asan_report,
+    prefer_non_destructor,
     relativize_frame_files,
     site_from_frames,
 )
@@ -72,11 +73,13 @@ def _parsed_stacks() -> tuple[str, list[dict[str, object]], list[dict[str, objec
 
 def _parsed_site(*, source_line: str | None = None) -> CrashSite:
     kind, access, origin = _parsed_stacks()
+    loc = (first_test_file_after_destructor(origin)
+           if source_line is not None else None)
     return site_from_frames(
         "tests/behaviour_stable_gen_1.rs",
         "behaviour_probe_stable_trait_object_identity_0", kind, access,
         origin_raw_frames=origin, raw_report=REPORT.read_text(),
-        origin_capable=True, source_line=source_line)
+        origin_capable=True, source_line=source_line, source_loc=loc)
 
 
 def _site(origin: list[dict[str, object]]) -> CrashSite:
@@ -144,6 +147,9 @@ def test_the_recorded_report_blames_the_conversion_the_test_line_names() -> None
     assert site.blamed.fn_name == "into_boxed_dyn_error"
     assert site.blamed.file_rel == "src/error.rs"
     assert site.origin_unattributed is False
+    text = site.render_evidence()
+    assert "src/error.rs:0" not in text
+    assert "named by tests/behaviour_stable_gen_1.rs:27" in text
 
 
 def test_recovery_stays_off_without_the_box_errorimpl_type_chain() -> None:
@@ -249,3 +255,66 @@ def test_a_bare_drop_symbol_is_still_a_destructor() -> None:
                    symbol="convert"),
     )
     assert [f.fn_name for f in non_destructor_frames(frames)] == ["convert"]
+
+
+def test_object_drop_is_a_destructor_the_same_way_the_crate_names_it() -> None:
+    """destruction_path_subjects already treats a drop token as a destructor.
+    Blame skip must, or object_drop is promoted over the conversion."""
+    frames = (
+        CrashFrame(file_rel="src/error.rs", line=1, fn_name="object_drop",
+                   symbol="anyhow::error::object_drop"),
+        CrashFrame(file_rel="src/error.rs", line=2,
+                   fn_name="into_boxed_dyn_error",
+                   symbol="anyhow::Error::into_boxed_dyn_error"),
+    )
+    assert [f.fn_name for f in non_destructor_frames(frames)] == [
+        "into_boxed_dyn_error"]
+    alone = (
+        CrashFrame(file_rel="src/error.rs", line=1, fn_name="object_drop",
+                   symbol="anyhow::error::object_drop"),
+    )
+    assert prefer_non_destructor(alone) == alone
+
+
+def test_a_from_wrapper_source_line_names_the_conversion() -> None:
+    """Live convert-test stack, run 1869206-7fd52754, report
+    asan-20260830T083211573812.txt: freed-by is Error::drop then
+    From<Error> for Box<dyn Error> at src/error.rs:955 whose body is
+    error.into_boxed_dyn_error(). Preferring from aims the wrapper.
+    The READ stack is Box<dyn Error> wrapping ErrorImpl, without Send+Sync
+    — the auto-trait window was requiring one From impl's traits and
+    missed this one."""
+    origin = [
+        {"func": "<anyhow::Error as core::ops::drop::Drop>::drop",
+         "file": "src/error.rs", "line": 704},
+        {"func": ("<alloc::boxed::Box<dyn core::error::Error> as "
+                  "core::convert::From<anyhow::Error>>::from"),
+         "file": "src/error.rs", "line": 955},
+    ]
+    access = [
+        {"func": ("core::ptr::drop_glue::<anyhow::error::ErrorImpl<"
+                  "test_convert::drop::DetectDrop>>"),
+         "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 825},
+        {"func": ("core::ptr::drop_glue::<alloc::boxed::Box<"
+                  "dyn core::error::Error>>"),
+         "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 825},
+    ]
+    loc = ("src/error.rs", 955)
+    assert first_test_file_after_destructor(origin) == loc
+    without = site_from_frames(
+        "tests/test_convert.rs", "test_convert",
+        "AddressSanitizer: heap-use-after-free", access,
+        origin_raw_frames=origin, origin_capable=True)
+    assert without.blamed_locator == FnLocator("src/error.rs", "from"), (
+        "negative control: omitting the source line prefers from")
+    site = site_from_frames(
+        "tests/test_convert.rs", "test_convert",
+        "AddressSanitizer: heap-use-after-free", access,
+        origin_raw_frames=origin, origin_capable=True,
+        source_line="        error.into_boxed_dyn_error()",
+        source_loc=loc)
+    assert site.blamed is not None
+    assert site.blamed.fn_name == "into_boxed_dyn_error"
+    text = site.render_evidence()
+    assert "src/error.rs:0" not in text
+    assert "named by src/error.rs:955" in text

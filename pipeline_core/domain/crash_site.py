@@ -33,6 +33,10 @@ class CrashFrame:
     line: int
     fn_name: str
     symbol: str
+    # When this frame was recovered from a caller source line that is not
+    # itself a crate frame of the named fn (inlined conversion, From wrapper),
+    # this is that (file, line). Render uses it instead of fabricating `:0`.
+    named_by: tuple[str, int] | None = None
 
 
 # Signals that mean "memory was used after it stopped being valid". For this
@@ -174,7 +178,7 @@ def non_destructor_frames(
     caller was in the evidence the whole time, one frame out.
     """
     return tuple(f for f in frames
-                 if f.fn_name != "drop"
+                 if not _is_destructor_fn_name(f.fn_name)
                  and not any(m in f.symbol for m in _DROP_SYMBOL_MARKS))
 
 
@@ -201,6 +205,19 @@ def prefer_non_destructor(
     """
     kept = non_destructor_frames(frames)
     return kept or frames
+
+
+def _is_destructor_fn_name(fn_name: str) -> bool:
+    """A drop token in the crate's own vocabulary: `drop`, `object_drop`,
+    `object_drop_front`, `context_drop_rest`, `context_chain_drop_rest`.
+
+    Same rule :func:`destruction_path_subjects` uses on extractor names —
+    a substring match would also catch `dropdown`. The skip that feeds
+    blame must treat those names as destructors too: otherwise
+    `object_drop` survives `non_destructor_frames` and is promoted over
+    the conversion that called it.
+    """
+    return fn_name == "drop" or "drop" in fn_name.split("_")
 
 
 # A drop is running when the symbol is a `Drop::drop` impl, the compiler's drop
@@ -277,7 +294,7 @@ OWNERSHIP_TRANSFER_MUST = (
 
 
 def _raw_is_destructor(func: str) -> bool:
-    return (bare_fn_name(func) == "drop"
+    return (_is_destructor_fn_name(bare_fn_name(func))
             or any(m in func for m in _DROP_SYMBOL_MARKS))
 
 
@@ -285,32 +302,25 @@ def _raw_is_toolchain(file_: str) -> bool:
     return any(m in file_ for m in _TOOLCHAIN_PATH_MARKS)
 
 
-def _has_boxed_dyn_error_send_sync(symbols: str) -> bool:
-    """True when a demangled symbol names `Box<dyn Error + Sync + Send>`.
+def _has_boxed_dyn_error(symbols: str) -> bool:
+    """True when a demangled symbol names `Box<dyn Error>` (any auto traits).
 
-    The window is the Box type itself, not the whole stack: every ASAN
-    backtrace also carries `Box<dyn FnOnce + Send>` in thread start, and
-    matching Send on the concatenated symbols would fire on an Arc
-    double-drop too.
+    The mark is the Box-of-Error type itself, not Send/Sync on the window.
+    Requiring both auto traits missed `From<Error> for Box<dyn Error>` at
+    `src/error.rs:952` (run `1869206-7fd52754`, report
+    `logs/asan/asan-20260830T083211573812.txt`, convert-test READ stack
+    `drop_glue::<Box<dyn core::error::Error>>` wrapping `ErrorImpl`).
+    `Box<dyn FnOnce + Send>` in thread start does not match these marks, so
+    an Arc double-drop still returns empty via the ErrorImpl gate.
     """
-    for mark in _BOX_DYN_ERROR_MARKS:
-        start = 0
-        while True:
-            i = symbols.find(mark, start)
-            if i < 0:
-                break
-            window = symbols[i:i + 160]
-            if "Sync" in window and "Send" in window:
-                return True
-            start = i + len(mark)
-    return False
+    return any(m in symbols for m in _BOX_DYN_ERROR_MARKS)
 
 
 def conversion_family_from_access(
     raw_frames: list[dict[str, object]],
 ) -> frozenset[str]:
     """The conversion family iff the ACCESS (READ) stack's type chain is
-    `Box<dyn Error + Sync + Send>` wrapping `ErrorImpl`.
+    `Box<dyn Error>` wrapping `ErrorImpl`.
 
     That type chain is the suspect filter so a mis-parse cannot promote an
     unrelated fn. An Arc double-drop (`test_downcast::test_drop`, run
@@ -321,7 +331,7 @@ def conversion_family_from_access(
     symbols = "\n".join(str(r.get("func") or "") for r in raw_frames)
     if _ERROR_IMPL_MARK not in symbols:
         return frozenset()
-    if not _has_boxed_dyn_error_send_sync(symbols):
+    if not _has_boxed_dyn_error(symbols):
         return frozenset()
     return CONVERSION_FAMILY
 
@@ -345,14 +355,27 @@ def crate_fn_named_on_source_line(
 def first_test_file_after_destructor(
     origin: list[dict[str, object]],
 ) -> tuple[str, int] | None:
-    """If the first in-crate origin frame is a destructor and the next
-    non-toolchain frame is a test file, return ``(file_rel, line)``.
+    """If the first in-crate origin frame is a destructor, return the next
+    non-toolchain caller's ``(file_rel, line)`` when that caller is not
+    itself a conversion.
 
-    That is the inlined-conversion shape: `Drop::drop` at `src/error.rs:706`
-    called from `tests/behaviour_stable_gen_1.rs:27`. A next frame still in
-    `src/` is left for :func:`prefer_non_destructor` — that is how
-    `reallocate_into_boxed_dyn_error_without_backtrace` is already promoted
-    on the gdb siblings.
+    Two shapes, one owner:
+
+    * a test file — the conversion was inlined
+      (`Drop::drop` at `src/error.rs:706` from
+      `tests/behaviour_stable_gen_1.rs:27`);
+    * an in-crate wrapper whose bare name is not in
+      :data:`CONVERSION_FAMILY` — live, `From<Error> for Box<dyn Error>`
+      at `src/error.rs:955` (`error.into_boxed_dyn_error()`), run
+      `1869206-7fd52754`, report
+      `logs/asan/asan-20260830T083211573812.txt`. Preferring `from` aims
+      the wrapper; four `fn from` bodies share one locator shape, so
+      `from` must not join the family.
+
+    A next frame already in the family (`reallocate_into_boxed_dyn_error_
+    without_backtrace`) is left for :func:`prefer_non_destructor` — that
+    is how the gdb siblings already promote it. Consecutive destructor
+    frames (`Error::drop` then `object_drop`) are walked past.
     """
     seen_destructor = False
     for rec in origin:
@@ -365,11 +388,17 @@ def first_test_file_after_destructor(
                 seen_destructor = True
                 continue
             return None
-        if file_.startswith("tests/"):
-            raw_line = rec.get("line")
-            if isinstance(raw_line, int) and raw_line >= 1:
-                return (file_, raw_line)
+        if file_.startswith("src/") and _raw_is_destructor(func):
+            continue
+        raw_line = rec.get("line")
+        if not (isinstance(raw_line, int) and raw_line >= 1):
             return None
+        if file_.startswith("tests/"):
+            return (file_, raw_line)
+        if file_.startswith("src/"):
+            if bare_fn_name(func) in CONVERSION_FAMILY:
+                return None
+            return (file_, raw_line)
         return None
     return None
 
@@ -378,12 +407,16 @@ def recover_owner_from_caller_source(
     origin_raw: list[dict[str, object]],
     access_raw: list[dict[str, object]],
     source_line: str,
+    *,
+    named_by: tuple[str, int] | None = None,
 ) -> CrashFrame | None:
-    """Name the conversion the test line called, gated by the READ stack.
+    """Name the conversion the caller line called, gated by the READ stack.
 
     The destructor's file supplies :class:`CrashFrame`.file_rel so this does
     not need an extractor map. ``line`` is 0: the conversion was inlined and
-    has no crate frame of its own.
+    has no crate frame of its own. ``named_by`` is the (file, line) that
+    justified the recovery — render prints that instead of fabricating
+    ``:0``.
     """
     family = conversion_family_from_access(access_raw)
     if not family:
@@ -400,7 +433,24 @@ def recover_owner_from_caller_source(
             break
     if not dest_file:
         return None
-    return CrashFrame(file_rel=dest_file, line=0, fn_name=name, symbol=name)
+    return CrashFrame(file_rel=dest_file, line=0, fn_name=name, symbol=name,
+                      named_by=named_by)
+
+
+def _frame_locus(fr: CrashFrame) -> str:
+    """Where a frame is shown in prompt evidence.
+
+    A recovered conversion has no crate line of its own (`line` is 0).
+    Printing `src/error.rs:0` is a fabricated location — live, the
+    error.rs file-first prompt of run `1869206-7fd52754` (sha
+    `1a7625b18d24a2d5d50896a4fce613f8b0ff73a822924e6aa78300917d49769c`)
+    named `into_boxed_dyn_error` at `:0` twice. Name the caller line that
+    justified the recovery instead.
+    """
+    if fr.named_by is not None:
+        src, ln = fr.named_by
+        return f"{fr.file_rel} (named by {src}:{ln})"
+    return f"{fr.file_rel}:{fr.line}"
 
 
 def ownership_transfer_must(names: Collection[str]) -> str:
@@ -652,11 +702,11 @@ class CrashSite:
             f"{where} — it never reported its remaining tests.",
             "Faulting access (innermost first, crate frames only):",
         ]
-        lines += [f"  #{i} {fr.symbol} at {fr.file_rel}:{fr.line}"
+        lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
                   for i, fr in enumerate(self.frames)]
         if self.origin_frames:
             lines.append("The invalid memory it reads was CREATED by:")
-            lines += [f"  #{i} {fr.symbol} at {fr.file_rel}:{fr.line}"
+            lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
                       for i, fr in enumerate(self.origin_frames)]
         raw_origin = origin_stack_text(self.raw_report)
         if raw_origin:
@@ -675,7 +725,7 @@ class CrashSite:
         if f is not None:
             lines.append(
                 f"Fix the pointer/lifetime scheme in `{f.fn_name}` "
-                f"({f.file_rel}:{f.line}) — this class of silent crash means "
+                f"({_frame_locus(f)}) — this class of silent crash means "
                 "memory that outlived its owner (dangling 'static from a "
                 "stack local, wrong cast target, double free). Do not patch "
                 "the calling test's fn.")
@@ -840,6 +890,7 @@ def site_from_frames(
     raw_report: str = "",
     origin_capable: bool = False,
     source_line: str | None = None,
+    source_loc: tuple[str, int] | None = None,
 ) -> CrashSite:
     """Build a :class:`CrashSite` from debugger frame records
     (``{"file": …, "line": …, "func": …}``), keeping only frames whose file
@@ -848,12 +899,14 @@ def site_from_frames(
     paths for std/deps). ``origin_raw_frames`` (ASAN's allocation stack)
     localizes the code that created the invalid memory.
 
-    ``source_line`` is the test-file line the free stack's next frame points
-    at, when that frame is not in ``src/``. Recovery prepends a synthetic
-    origin frame for the conversion that line uniquely names, gated by the
-    ACCESS stack's type chain. Omitted (the default) leaves blame unchanged
-    — destructor last resort when nothing else survives. That default is
-    what keeps the recorded walk
+    ``source_line`` is the caller line the free stack's next non-destructor
+    frame points at (a test file, or an in-crate wrapper that is not
+    itself a conversion). Recovery prepends a synthetic origin frame for
+    the conversion that line uniquely names, gated by the ACCESS stack's
+    type chain. ``source_loc`` is that (file, line) so render can name it
+    instead of fabricating ``:0``. Omitted (the default) leaves blame
+    unchanged — destructor last resort when nothing else survives. That
+    default is what keeps the recorded walk
     ``tests/walks/test_walk_mech_budget_lockout.py`` green: it injects a
     hardcoded drop site and never passes a source line.
     """
@@ -861,7 +914,7 @@ def site_from_frames(
     origin = _crate_frames(origin_raw, crate_file_prefix, max_frames)
     if source_line:
         recovered = recover_owner_from_caller_source(
-            origin_raw, raw_frames, source_line)
+            origin_raw, raw_frames, source_line, named_by=source_loc)
         if recovered is not None:
             origin = (recovered,) + tuple(
                 f for f in origin if f.fn_name != recovered.fn_name)
@@ -1252,7 +1305,7 @@ def destruction_path_subjects(
         if not _is_authorable_file(file_):
             continue
         loc = FnLocator(file_, fn_name)
-        if "drop" in fn_name.split("_") or fn_name == "drop":
+        if _is_destructor_fn_name(fn_name):
             named.add(loc)
             continue
         body = str(rec.get("body_text") or "")

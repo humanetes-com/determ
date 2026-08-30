@@ -25,10 +25,22 @@
 #   ./commit.sh <any git commit flag> ...   # all args pass through
 #
 # Preconditions: last_commit_message.txt exists, is non-empty, and describes
-# the changes actually staged — it is overwritten on every batch, so it holds
-# the CURRENT batch's message and nothing older. Nothing is staged for you
-# unless you ask (`-a`, or `git add` first); the script refuses rather than
+# the changes actually staged — it is written fresh for every batch, so it
+# holds the CURRENT batch's message and nothing older. Nothing is staged for
+# you unless you ask (`-a`, or `git add` first); the script refuses rather than
 # guess what belongs in the commit.
+#
+# THE MESSAGE FILE IS CONSUMED. On a commit that succeeds, last_commit_message.txt
+# is deleted. A message describes one batch and stops being true the moment that
+# batch is in the object store, but the file used to survive the commit and stay
+# readable — so a later `./commit.sh` on an unrelated batch, run before the next
+# message was written, would silently commit under the PREVIOUS batch's subject
+# and body. Overwriting-every-batch made that window small; deleting on success
+# closes it, and the refusal above turns the mistake into an exit 2 that names
+# what to do. The consequence to know: a second `./commit.sh --amend` needs the
+# message written again, because the first one consumed it. `git commit --amend`
+# with no `-F` still reuses what is already on HEAD if all that is wanted is to
+# restage.
 #
 # HOW TO READ THE OUTPUT
 #   "refusing: ..."      nothing was committed and the tree is untouched —
@@ -47,7 +59,8 @@
 #                        each batch has to remember.
 #   "warning: ..."       the commit happened; the subject is over 72 columns
 #                        and will be truncated in `git log --oneline`.
-#   "committed <sha> <subject>"   done; the file is left in place.
+#   "committed <sha> <subject>"   done; last_commit_message.txt has been
+#                        removed — write a new one for the next batch.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -116,4 +129,10 @@ fi
 
 git commit -F "$NORMALIZED" "$@"
 
+# Only past `set -e`, i.e. only when git actually made the commit. The message
+# has been consumed: leaving it on disk is what lets an unrelated later batch
+# commit under this batch's subject.
+rm -f "$MSG_FILE"
+
 echo "committed $(git rev-parse --short HEAD) $SUBJECT"
+echo "consumed $MSG_FILE — write a new message for the next batch"

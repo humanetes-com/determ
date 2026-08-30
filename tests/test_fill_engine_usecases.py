@@ -548,6 +548,29 @@ def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
                for m in fake.logs)
 
 
+def test_collect_refill_targets_stamps_crash_blamed_without_tests(
+        tmp_path: Path) -> None:
+    """Per-fn twin of the impl stamp: a crash-blamed filled body with no
+    verdict is still a refill. Negative control is the same call without
+    crash_blamed."""
+    from pipeline_core.domain.models import FnLocator
+    fns = [
+        {"file": "src/error.rs", "fn_name": "into_boxed_dyn_error",
+         "container": "impl Error",
+         "sig_text": "fn into_boxed_dyn_error(self)"},
+    ]
+    eng = _engine(FakeFill(fns=fns), FillUnit.FN)
+    loc = FnLocator("src/error.rs", "into_boxed_dyn_error")
+    keys = {loc}
+    tests = FailureFrontier.of_direct(
+        {FnLocator("src/error.rs", "other"): {"t"}})
+    assert eng._collect_refill_targets(tmp_path, [], keys, tests) == []
+    out = eng._collect_refill_targets(
+        tmp_path, [], keys, tests, crash_blamed=frozenset({loc}))
+    assert [(s.fn_name, s.refill) for s in out] == [
+        ("into_boxed_dyn_error", True)]
+
+
 def test_stale_refill_dropped_when_its_test_passes_after_earlier_fills(
         tmp_path: Path) -> None:
     """The re-fill list is computed from the PREVIOUS iteration's test run; the

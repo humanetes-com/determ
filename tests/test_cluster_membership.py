@@ -200,6 +200,32 @@ def test_collect_impl_refill_targets_noop_without_frontier():
     assert cm.collect_impl_refill_targets([block], set(), {}) == [block]
 
 
+def test_collect_impl_refill_targets_stamps_crash_blamed_without_tests():
+    """A crashed binary reports no verdict. The blamed filled body is still
+    a refill — otherwise file-first packs the file's other members and the
+    MUST never reaches the conversion. Live: run 1869206-7fd52754, blamed
+    into_boxed_dyn_error, write list was the vtable complement."""
+    loc = FnLocator("src/error.rs", "into_boxed_dyn_error")
+    member = FnRecord(
+        file="src/error.rs", fn_name="into_boxed_dyn_error",
+        container="impl Error",
+        sig_text="fn into_boxed_dyn_error(self)",
+        has_unimplemented_body=False)
+    block = ImplBlock(file="src/error.rs", container="impl Error",
+                      members=(member,), stub_members=())
+    frontier = FailureFrontier.of_direct(
+        {FnLocator("src/error.rs", "other"): {"t"}})
+    without = cm.collect_impl_refill_targets(
+        [block], tdd_frontier_keys={loc}, tdd_frontier_tests=frontier)
+    assert without[0].refill_members == (), (
+        "negative control: no tests_for and no crash_blamed leaves it unstamped")
+    with_crash = cm.collect_impl_refill_targets(
+        [block], tdd_frontier_keys={loc}, tdd_frontier_tests=frontier,
+        crash_blamed=frozenset({loc}))
+    assert [m.fn_name for m in with_crash[0].refill_members] == [
+        "into_boxed_dyn_error"]
+
+
 class _Cluster:
     name = "stable"
     cfg_true: list[str] = []

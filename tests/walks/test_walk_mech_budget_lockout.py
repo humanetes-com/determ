@@ -75,16 +75,25 @@ def _asan_site():
                     "  freed by thread T0 here:\n    #0 <anyhow::Error>::drop"))
 
 
-def _mega_records():
+def _mega_records(*, stub_drop: bool = False):
     """The component's own bodies as the aim grades them. `drop` is not one of
     the 34 NAMES — it grades OWNS through its container, `impl Drop for Error`,
     whose self type is. That indirection is the whole reason the live line
     reads `inside code 1 component(s) declare` for a fn no component key
-    spells."""
+    spells.
+
+    The recorded drop was filled. A filled-body frame blame is a fill, not a
+    layout re-author, and is pinned in test_retrigger_layout. Mechanical-
+    streak reachability is the class that remains after that gate, so those
+    tests pass stub_drop=True to keep the layout route open.
+    """
+    body = ("unimplemented!()" if stub_drop
+            else "unsafe { (vtable(self.inner.ptr).object_drop)(self.inner) }")
     return [
         FnRecord(file="error.rs", fn_name="drop", container="impl Drop for Error",
                  sig_text="fn drop(&mut self)",
-                 body_text="unsafe { (vtable(self.inner.ptr).object_drop)(self.inner) }"),
+                 body_text=body,
+                 has_unimplemented_body=stub_drop),
         FnRecord(file="error.rs", fn_name="construct",
                  sig_text=("unsafe fn construct<E>(error: E, vtable: &'static "
                            "ErrorVTable, backtrace: Option<Backtrace>) -> Self"),
@@ -115,7 +124,8 @@ def _replay(monkeypatch, tmp_path):
     return logs, events, seen
 
 
-def _aim(evidence, attempts: dict[str, int], code_id: str | None):
+def _aim(evidence, attempts: dict[str, int], code_id: str | None,
+         *, stub_drop: bool = False):
     """Drive the REAL `retrigger_layout` with the evidence the driver built and
     the store the live run read. Authoring is stubbed to REJECTED, so `fired`
     means the walk REACHED the component and spent an attempt on it — the
@@ -124,7 +134,7 @@ def _aim(evidence, attempts: dict[str, int], code_id: str | None):
     from pipeline_core.application.retrigger_layout import retrigger_layout
     from tests.test_retrigger_layout import _CRATE, _mega_fakes
     f = _mega_fakes(compiles=False, attempts=dict(attempts), code_id=code_id,
-                    fn_records=_mega_records())
+                    fn_records=_mega_records(stub_drop=stub_drop))
     return retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
                             f.deps(), crash_evidence=evidence), f
 
@@ -152,20 +162,19 @@ def test_the_sweep_hands_the_aim_an_in_crate_origin(
 
 def test_negative_control_the_locked_store_refuses_the_graded_component(
         tmp_path: Path, monkeypatch) -> None:
-    """The recorded decision, reproduced: the same evidence, the same store,
-    read by a caller that names no build. Refused at the mechanical cap, with
-    nothing charged and nothing committed — 30 tests left uncounted for the
-    rest of the run."""
+    """The recorded drop was filled. Under new code that evidence never
+    opens a re-author — filled-body frame blame is a fill. The mechanical
+    cap is not consulted. Negative control of the old lockout is the
+    stub-drop tests below, where the layout route still opens."""
     _logs, _events, seen = _replay(monkeypatch, tmp_path)
     res, f = _aim(next(e for e in seen if e is not None), _locked_store(), None)
 
     assert not res.fired
-    assert any("mechanical failure(s) already refunded" in ln for ln in f.logs)
+    assert res.reason == "filled-body frame blame"
+    assert any("names a FILLED body" in ln for ln in f.logs)
     assert not f.committed
-    # It graded the component FIRST and refused after — the aim is not what
-    # failed here, which is exactly why the refusal reads as a lockout.
-    assert any("the observed fault is inside code 1 component(s) declare" in ln
-               for ln in f.logs)
+    assert not any("mechanical failure(s) already refunded" in ln
+                   for ln in f.logs)
 
 
 def test_a_streak_no_build_has_earned_reaches_the_component_again(
@@ -174,7 +183,8 @@ def test_a_streak_no_build_has_earned_reaches_the_component_again(
     same two `mech:` rows, read by a build that has not failed here, charges
     attempt 1 against the component the crash owns."""
     _logs, _events, seen = _replay(monkeypatch, tmp_path)
-    res, f = _aim(next(e for e in seen if e is not None), _locked_store(), _THIS_BUILD)
+    res, f = _aim(next(e for e in seen if e is not None), _locked_store(),
+                  _THIS_BUILD, stub_drop=True)
 
     assert res.fired, "the aim was still refused by a streak from another build"
     assert f.committed and "attempt 1" in f.committed[0]
@@ -194,7 +204,8 @@ def test_an_operator_stop_no_longer_spends_the_budget(
     from pipeline_core.application.retrigger_layout import retrigger_layout
     from tests.test_retrigger_layout import _CRATE, _mega_fakes
     f = _mega_fakes(compiles=False, attempts=store, code_id=_THIS_BUILD,
-                    fn_records=_mega_records(), stopped_pids={462635})
+                    fn_records=_mega_records(stub_drop=True),
+                    stopped_pids={462635})
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
                            f.deps(), crash_evidence=next(
                                e for e in seen if e is not None))

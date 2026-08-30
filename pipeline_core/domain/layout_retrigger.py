@@ -1086,11 +1086,48 @@ def classify_crash_retrigger(
     Admitting a component is NOT choosing it. This still returns RUNTIME_CRASH
     for every component the fault so much as mentions, and the caller walks them
     in registry order — see `crash_candidate_grade` and `top_blame_tier` for the
-    rank that decides between them."""
+    rank that decides between them.
+
+    Admission is also not the fire. A frame-derived blame whose named body
+    is already filled is a fill, not a layout re-author:
+    `crash_blame_is_filled_body` sits in `retrigger_layout` before apply
+    and revert. Changing only this classifier would not stop the fire —
+    the action hardcodes `cause = RUNTIME_CRASH` after grading."""
     return (LayoutRetriggerCause.NONE
             if crash_candidate_grade(evidence, fn_records, component_names)
             is BlameGrade.NONE
             else LayoutRetriggerCause.RUNTIME_CRASH)
+
+
+def crash_blame_is_filled_body(
+    evidence: CrashEvidence,
+    fn_records: list[FnRecord],
+) -> bool:
+    """True when every origin-blamed locator has a filled (not stub) body.
+
+    Cause C re-authors types. A use-after-free whose named body already
+    compiles is a fill: the layout walk's first move is to revert that
+    body. Live, run `1869206-7fd52754` blamed `into_boxed_dyn_error`
+    (frame_derived, filled), graded OWNS, hardcoded RUNTIME_CRASH, and
+    opened a re-author of Error — then died locating Mut in ptr.rs. The
+    fill loop already had the blame as crash evidence.
+
+    Empty `blamed_fns` is not this claim — chain / unattributed /
+    reachability stay on the layout route. A locator with no record
+    cannot be shown to be filled — False, layout route stays. A stub
+    blamed body is False — layout route stays.
+    """
+    if not evidence.blamed_fns:
+        return False
+    by_loc = {FnLocator(r.file, r.fn_name): r for r in fn_records}
+    for loc in evidence.blamed_fns:
+        rec = by_loc.get(loc)
+        if rec is None or rec.has_unimplemented_body:
+            return False
+        body = (rec.body_text or "").strip()
+        if not body or body in ("unimplemented!()", "::core::unimplemented!()"):
+            return False
+    return True
 
 
 def crash_candidate_grade(

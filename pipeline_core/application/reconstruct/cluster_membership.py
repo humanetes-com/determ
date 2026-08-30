@@ -208,6 +208,7 @@ def collect_impl_refill_targets(
     tdd_frontier_tests: FailureFrontier | None,
     *,
     max_stubs: int = 12,
+    crash_blamed: frozenset[FnLocator] | None = None,
 ) -> list[ImplBlock]:
     """Block-level analog of
     `PhaseCFillEngine._collect_refill_targets`: for each block, find members
@@ -224,18 +225,29 @@ def collect_impl_refill_targets(
     (``vtable`` via escalation) is stranded if the stamp demands direct
     evidence. Empty unless the TDD outer loop supplied both the frontier
     keys and the failing-test map (mirrors the per-fn version's same
-    guard)."""
+    guard).
+
+    A crashed binary reports no verdict, so ``tests_for`` /
+    ``convicting_for`` are empty for the blamed body. Without a stamp the
+    file-first write list is the file's other refill members plus the
+    installable complement, and ``_plan_line``'s CRASHED clause (the MUST)
+    never sees the conversion. Live: run ``1869206-7fd52754``, blamed
+    ``into_boxed_dyn_error``, write list was ``object_boxed`` /
+    ``object_drop`` / … graded REWRITE WITH THE PRODUCER. A locator in
+    ``crash_blamed`` is a refill even when no test convicts it.
+    """
     if not (tdd_frontier_keys and tdd_frontier_tests):
         return blocks
+    crashed = crash_blamed or frozenset()
     homs = homonym_containers(blocks)
     out: list[ImplBlock] = []
     for b in blocks:
         stub_keys = {FnLocator(b.file, m.fn_name) for m in b.stub_members}
         dispatched = tuple(
             m for m in b.members
-            if FnLocator(b.file, m.fn_name) in tdd_frontier_keys
-            and FnLocator(b.file, m.fn_name) not in stub_keys
-            and tdd_frontier_tests.tests_for(FnLocator(b.file, m.fn_name))
+            if (loc := FnLocator(b.file, m.fn_name)) in tdd_frontier_keys
+            and loc not in stub_keys
+            and (tdd_frontier_tests.tests_for(loc) or loc in crashed)
         )
         probe = dataclasses.replace(b, refill_members=dispatched)
         if impl_route_covers(probe, max_stubs=max_stubs):
@@ -244,6 +256,7 @@ def collect_impl_refill_targets(
                 if convicting_tests_for_member(
                     tdd_frontier_tests, b.file, m.fn_name, b.container,
                     homs.get((b.file, m.fn_name), (b.container,)))
+                or FnLocator(b.file, m.fn_name) in crashed
             )
         else:
             refill = dispatched

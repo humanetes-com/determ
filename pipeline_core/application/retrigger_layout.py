@@ -71,6 +71,7 @@ from pipeline_core.domain.layout_retrigger import (
     classify_compile_retrigger,
     classify_layout_retrigger,
     code_build_stamp,
+    crash_blame_is_filled_body,
     crash_blame_signature,
     crash_candidate_grade,
     crash_component_refutation,
@@ -575,6 +576,16 @@ def retrigger_layout(
     _blame_tier = BlameGrade.NONE
     if crash_evidence is not None:
         _live_records = deps.enumerate_fns(filled_crate_dir) or []
+        if crash_blame_is_filled_body(crash_evidence, _live_records):
+            blamed = ", ".join(sorted(
+                f"{b.file}::{b.fn_name}" for b in crash_evidence.blamed_fns))
+            deps.log(
+                f"  [layout-retrigger] {cfg_cluster}: frame-derived blame "
+                f"{blamed} names a FILLED body — that is a fill, not a "
+                "layout re-author. Not opening a re-author budget. The fill "
+                "loop already has the blame as crash evidence.")
+            return RetriggerResult(
+                fired=False, reason="filled-body frame blame")
         _graded = [(rec, crash_candidate_grade(
             crash_evidence, _live_records, rec.names)) for rec in candidates]
         _blame_tier = top_blame_tier(g for _, g in _graded)

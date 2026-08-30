@@ -55,29 +55,29 @@ _is_memory_fault = is_memory_fault_signal
 def _caller_source_line(
     origin: list[dict[str, object]],
     workspace_root: Path,
-) -> str | None:
-    """The test-file line the free stack points at after an in-crate
-    destructor, or None.
+) -> tuple[str | None, tuple[str, int] | None]:
+    """The caller line the free stack points at after an in-crate
+    destructor, and its (file, line), or (None, None).
 
     I/O lives here: :func:`first_test_file_after_destructor` is pure and
-    names the path; this reads it. A missing file, a line past EOF, or a
-    next frame still in ``src/`` returns None and blame is unchanged —
-    destructor last resort, which is what the existing localizer tests
+    names the path; this reads it. A missing file, a line past EOF, or no
+    recoverable caller returns None and blame is unchanged — destructor
+    last resort, which is what the existing localizer tests
     (workspace ``/w``, no tree on disk) rely on.
     """
     loc = first_test_file_after_destructor(origin)
     if loc is None:
-        return None
+        return None, None
     file_rel, line_no = loc
     path = workspace_root / file_rel
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return None, None
     lines = text.splitlines()
     if not (1 <= line_no <= len(lines)):
-        return None
-    return lines[line_no - 1]
+        return None, None
+    return lines[line_no - 1], loc
 
 
 def _asan_site(
@@ -103,10 +103,11 @@ def _asan_site(
     a_crashed = [b for b in parse_binary_results(out) if not b.completed]
     label = a_crashed[0].label if a_crashed else "?"
     test = a_crashed[0].dangling if a_crashed else None
+    source_line, source_loc = _caller_source_line(origin, workspace_root)
     site = site_from_frames(
         label, test, kind, access, origin_raw_frames=origin,
         raw_report=asan_stack_excerpt(out), origin_capable=True,
-        source_line=_caller_source_line(origin, workspace_root))
+        source_line=source_line, source_loc=source_loc)
     if site.origin_unattributed:
         # The report HAD a free/alloc stack (that is what stacks[1] is); every
         # frame in it was filtered out as non-crate. Say so, and say WHICH
