@@ -101,6 +101,9 @@ from pipeline_core.adapters.coverage import (
 from pipeline_core.adapters.coverage import (
     run_tarpaulin as _cov_run_tarpaulin,
 )
+from pipeline_core.adapters.coverage_owner import (
+    measure_coverage_slice as _measure_coverage_slice,
+)
 from pipeline_core.adapters.discovery import (
     collect_examples as _disc_collect_examples,
 )
@@ -2542,6 +2545,8 @@ def build_app(
             # caches it per iteration (`_oracle_fp` in `phase_c_tdd.py`);
             # this is the uncached adapter.
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
+            measure_coverage_slice=lambda pd, cl: _measure_coverage_slice(
+                pd, cl, log=ports.log),
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

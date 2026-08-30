@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.construction_recipe import construction_recipe_prefix
+from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
@@ -127,13 +128,14 @@ def build_per_fn_prompt(
     recipe_part = construction_recipe_prefix(fn_name, container)
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
+    coverage_part = instruction_opener(file_rel, (fn_name,))
     return f"""Implement ONE Rust function so its tests pass.
 
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
 {container_line}Signature (verbatim, do not change):
 {sig_text}
 
-{recipe_part}{identity_part}<RUST_GOTCHAS>
+{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
@@ -232,6 +234,7 @@ def build_per_fn_fix_prompt(
     recipe_part = construction_recipe_prefix(fn_name, container)
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
+    coverage_part = instruction_opener(file_rel, (fn_name,))
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
     # Bound-provided method inventory (see initial builder) — surfaced on
     # the fix path where the E0277 thrash happens.
@@ -321,7 +324,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {container_line}Signature (verbatim, do not change):
 {sig_text}
 
-{recipe_part}{identity_part}<RUST_GOTCHAS>
+{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}

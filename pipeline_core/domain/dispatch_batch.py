@@ -70,7 +70,7 @@ frontier), which is what every caller that does not track a pass does.
 """
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Collection, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 #: Frontier units dispatched per iteration when the cap is left at its default.
@@ -368,3 +368,67 @@ def promote_producers[K: Hashable, V](
     for slot, item in zip(esc_positions, reordered, strict=True):
         out[slot] = item
     return out
+
+
+def service_bucket[K: Hashable](
+    key: K,
+    served: Collection[K],
+    flat: Collection[K],
+    dead: Collection[K] = (),
+) -> int:
+    """0 never-served live, 1 served live, 2 served-and-flat live, 3 dead.
+
+    Dead last regardless of service: a body no test executes cannot move a
+    verdict, and never-served-first would otherwise put those dead units at
+    the head of every batch. On the 2026-08-30 product the never-served
+    dead units that occupy cap slots without this bucket are
+    `src/context.rs::write_str` and `src/error.rs::erase`. A locator is in
+    `dead` only when every body under that name is unexecuted; a live
+    sibling (error.rs::backtrace at line 389 vs ErrorImpl at 918) must
+    not be demoted.
+    """
+    if key in dead:
+        return 3
+    if key not in served:
+        return 0
+    if key in flat:
+        return 2
+    return 1
+
+
+def promote_by_service[K: Hashable, V](
+    ordered: Sequence[tuple[K, V]],
+    served: Collection[K],
+    flat: Collection[K],
+    dead: Collection[K] = (),
+) -> list[tuple[K, V]]:
+    """`ordered` with never-served live units first, then served, then
+    served-and-last-graded-flat, then dead. Stable within a bucket.
+
+    WHY THIS IS NOT A KEY IN `order_frontier`. That ranking runs BEFORE
+    `promote_producers`, which then puts the table-builders — the units the
+    ledger already graded flat — back at the head of the product block.
+    Computed 2026-08-30 on run `2220347-7fa9b90f`'s floor: `src/lib.rs::
+    format_err` is rank 12 under `order_frontier` (leaf-name frequency
+    already broke the 3-test group; the filename tie the first draft named
+    was not the live tie) and rank 21 after `promote_producers`, identical
+    with or without a service component in `order_frontier`'s key. Adding
+    the component before `file_rel` cannot survive constructor-first, so
+    the closer sits HERE, after that promotion and before crash evidence
+    (which still outranks everything).
+
+    Empty `served`/`flat`/`dead` is a no-op (every unit buckets 0, original
+    index wins) — walks and a first fill of a virgin cluster are unchanged.
+    Crash promotion that runs after this still wins.
+    """
+    if not served and not flat and not dead:
+        return list(ordered)
+    return [
+        item for _, item in sorted(
+            enumerate(ordered),
+            key=lambda idx_item: (
+                service_bucket(idx_item[1][0], served, flat, dead),
+                idx_item[0],
+            ),
+        )
+    ]

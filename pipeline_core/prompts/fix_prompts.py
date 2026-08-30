@@ -21,6 +21,7 @@ from pipeline_core.domain.construction_recipe import (
     construction_recipe_prefix,
     construction_recipes_for,
 )
+from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import ownership_transfer_must
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
@@ -212,6 +213,11 @@ class BlockFillPlan:
     # there is no body yet. Run `2932-cf516410` had the pin in the quoted
     # test and still wrapped because this slot was empty on `write:`.
     identity_must: str = ""
+    # Coverage sentences for this block's units (dead body / unreachable
+    # lines). Empty when the sweep has no reading or none of the units
+    # speak. Instruction slot, not an evidence section: a fill can carry
+    # the profile and still wrap. Bound by the TDD driver for one sweep.
+    coverage_must: str = ""
 
 
 def _recipe_for_plan(p: BlockFillPlan) -> dict[str, str]:
@@ -414,7 +420,9 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "unchanged): " + ", ".join(inferred))
     line = f"  {where} -> " + "; ".join(parts)
     if p.identity_must:
-        return line + " — " + p.identity_must
+        line = line + " — " + p.identity_must
+    if p.coverage_must:
+        line = line + " — " + p.coverage_must
     return line
 
 
@@ -568,6 +576,7 @@ def build_maximal_impl_prompt(
     recipe_text = construction_recipes_for(stub_names, container)
     recipe_part = (f"{recipe_text}\n" if recipe_text else "")
     must_part = (f"{identity_must}\n" if identity_must.strip() else "")
+    must_part += instruction_opener(file_rel, stub_names)
     return f"""Previous attempts to implement functions in this Rust file failed.
 You now see the ENTIRE current file. Implement or CORRECT the function(s)
 {names} of `{header}` so the file compiles and the tests pass — some may
@@ -614,6 +623,7 @@ def build_behavior_fix_prompt(
     """
     recipe_part = construction_recipe_prefix(fn_name, container)
     must_part = (f"{identity_must}\n\n" if identity_must.strip() else "")
+    must_part += instruction_opener(file_rel, (fn_name,))
     return (
         f"ONE Rust function compiles but FAILS its tests — "
         f"its behaviour is wrong. Correct the body.\n"

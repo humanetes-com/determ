@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, overload
 
@@ -54,6 +55,7 @@ from pipeline_core.domain.body_ledger import (
     rebuy_hits,
     rows_for_units,
 )
+from pipeline_core.domain.coverage_slice import bind as bind_coverage_slice
 from pipeline_core.domain.crash_site import (
     blamed_locators,
     callee_subjects,
@@ -80,6 +82,7 @@ from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
     overlay_crash_on_ranks,
     promote_by_blocker_counts,
+    promote_by_service,
     promote_crash_evidence,
     promote_producers,
     promote_product_ahead,
@@ -363,6 +366,13 @@ class PhaseCTddDeps:
     # have re-seeded 73 of 85 stable units onto the cold run's regenerated
     # oracle, 2026-08-26).
     oracle_fp: Callable[..., str] | None = None
+    # Whole-suite coverage of the filled tree, taken on a staged copy with
+    # its own CARGO_TARGET_DIR (instrumentation must not touch the loop's
+    # target dir). Returns a CoverageSlice of dead locators / dead-region
+    # sentences, or None when the reading cannot be taken. None here
+    # disables dead-body demotion and the coverage instruction; ranking
+    # then uses service/flat only.
+    measure_coverage_slice: Callable[..., Any] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -471,6 +481,21 @@ def _keys_to_locators(keys: Iterable[str]) -> frozenset[FnLocator]:
     return frozenset(out)
 
 
+def _clear_coverage_on_return(
+    fn: Callable[..., ClusterFillResult],
+) -> Callable[..., ClusterFillResult]:
+    """The coverage slice is process-global; a stop after bind must not
+    leak it into task2c / task3 or the next walk."""
+    @wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> ClusterFillResult:
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            bind_coverage_slice(None)
+    return wrapped
+
+
+@_clear_coverage_on_return
 def run_phase_c_tdd(
     deps: PhaseCTddDeps,
     *, project_dir: Path,
@@ -1545,6 +1570,7 @@ def run_phase_c_tdd(
 
     while True:
         iter_n += 1
+        bind_coverage_slice(None)
         if iter_n > _tdd_backstop:
             deps.log(f"  {tag} [phase-c/tdd] backstop {_tdd_backstop} reached — "
                  "stopping. This should never happen — stall budget should "
@@ -3822,6 +3848,46 @@ def run_phase_c_tdd(
                     f"delegators in the escalated cohort ({len(_callees)} "
                     "resolved callee(s) next): " + ", ".join(
                         sorted(f"{k.file}::{k.fn_name}" for k in _builders)[:8]))
+        # SERVICE / DEAD ranking. Constructor-first above puts the table-
+        # builders at the head of the product; the ones the ledger already
+        # graded `flat` then occupy the whole cap, and a never-served owner
+        # (`src/lib.rs::format_err` at rank 21 on run `2220347-7fa9b90f`)
+        # never reaches a batch. This sits AFTER that promotion so the
+        # never-served / not-flat / flat / dead buckets actually decide
+        # take_batch. Crash still runs after and still wins.
+        _flat_keys = {
+            FnLocator(_k.file, _k.fn_name)
+            for _k, _e in latest_by_unit(_ledger_entries()).items()
+            if _e.state is BodyState.FLAT}
+        _cov = None
+        if deps.measure_coverage_slice is not None:
+            _cov = deps.measure_coverage_slice(project_dir, cluster.name)
+        bind_coverage_slice(_cov)
+        _dead_keys: frozenset[FnLocator] = (
+            _cov.dead if _cov is not None else frozenset())
+        _before_svc = [k for k, _ in ordered]
+        ordered = promote_by_service(
+            ordered, set(_served_at), _flat_keys, _dead_keys)
+        if [k for k, _ in ordered] != _before_svc:
+            _never = [k for k, _ in ordered if k not in _served_at
+                      and k not in _dead_keys]
+            _flat_n = sum(1 for k, _ in ordered if k in _flat_keys
+                          and k not in _dead_keys)
+            deps.log(
+                f"  {tag} [phase-c/dispatch] service order: "
+                f"{len(_never)} never-served unit(s) rank before served; "
+                f"{_flat_n} last-graded flat sink"
+                + (f"; {len(_dead_keys)} dead body(ies) demoted — "
+                   "executed by no test: "
+                   + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                      for k in _dead_keys)[:6])
+                   if _dead_keys else ""))
+            deps.emit("phase_c.dispatch.service_order", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "never_served": [f"{k.file}::{k.fn_name}" for k in _never],
+                "flat": sorted(f"{k.file}::{k.fn_name}" for k in _flat_keys),
+                "dead": sorted(f"{k.file}::{k.fn_name}" for k in _dead_keys),
+            })
         # Crash evidence outranks everything, including the producer order above.
         ordered = promote_crash_evidence(ordered, _crash_grades)
         if _pass_cohort is None:

@@ -135,6 +135,18 @@ def test_negative_control_the_old_rule_re_sends_the_identical_batch(
                            declined=saved.declined)
 
     monkeypatch.setattr(_floor_mod, "cursor_carry", _pre_fix_carry)
+    # Service ranking is a different lock: never-served-first would itself
+    # skip `f` (it is in the floor's served record) and the first batch
+    # would be `g` under BOTH the old cursor rule and the new one — so this
+    # control could not fail. Identity-ranking restores the isolation the
+    # cursor rule needs.
+    def _identity(ordered, served, flat, dead=()):  # noqa: ARG001
+        return list(ordered)
+
+    monkeypatch.setattr(
+        "pipeline_core.application.reconstruct.phase_c_tdd.promote_by_service",
+        _identity,
+    )
     logs, batches = _process(monkeypatch, tmp_path, floor)
     assert batches and batches[0] == (_U1,), (
         f"negative control: the old rule re-sends the identical first batch, "

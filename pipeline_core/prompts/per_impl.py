@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.construction_recipe import construction_recipes_for
+from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.prompts.context import PerImplSections
@@ -240,6 +241,8 @@ def build_per_impl_prompt(
     recipe_part = (f"{recipe_text}\n\n" if recipe_text else "")
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
+    coverage_part = instruction_opener(
+        file_rel, (m.fn_name for m in (*stub_members, *refill_members)))
     return f"""Implement the marked [STUB] fns in this Rust impl block so the
 tests pass. The unit of work is the IMPL BLOCK — design every member
 together; each fn must respect the impl header's generic parameters,
@@ -250,7 +253,7 @@ when the impl block declares `T: ?Sized`).
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
 Stubs to fill in this response: {stub_names}
 
-{recipe_part}{identity_part}<RUST_GOTCHAS>
+{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}

@@ -60,6 +60,7 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
+from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
     file_route_units,
@@ -648,6 +649,9 @@ def fill_impl_blocks(
         Display::fmt would get a MUST it cannot satisfy.
         """
         return identity_must_instruction(behaviour_specs, units=items)
+
+    def _coverage_must(file_rel: str, *names: str) -> str:
+        return coverage_must_for(file_rel, names)
 
     def _convicting_for_block(b: ImplBlock) -> frozenset[str]:
         """Tests with DIRECT evidence at this block's members — U2's
@@ -1253,7 +1257,11 @@ def fill_impl_blocks(
             bypass=_free_bypass, pins=_union_pins,
             identity_must=_identity_must(
                 *(_unit_for(i.fn_name) for i in _installable),
-                *(_unit_for(x.fn_name, x.container) for x in _free_bypass)))]
+                *(_unit_for(x.fn_name, x.container) for x in _free_bypass)),
+            coverage_must=_coverage_must(
+                file_rel,
+                *(i.fn_name for i in _installable),
+                *(x.fn_name for x in _free_bypass)))]
             if _installable or _free_bypass else [])
         # The evidence section's entry for them: the relation, stated per fn,
         # so the model can see WHICH table field each one answers to. The
@@ -1379,7 +1387,11 @@ def fill_impl_blocks(
             identity_must=_identity_must(
                 *b.stub_members, *b.refill_members,
                 *(_unit_for(x.fn_name, x.container)
-                  for x in _bypass_for(b.container))))
+                  for x in _bypass_for(b.container))),
+            coverage_must=_coverage_must(
+                b.file,
+                *(m.fn_name for m in (*b.stub_members, *b.refill_members)),
+                *(x.fn_name for x in _bypass_for(b.container))))
             for b in fblocks]
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
@@ -1387,7 +1399,9 @@ def fill_impl_blocks(
             _c, (), tuple(x.fn_name for x in _entries),
             bypass=tuple(_entries), pins=_pins_for_bypass(_entries),
             identity_must=_identity_must(
-                *(_unit_for(x.fn_name, x.container) for x in _entries)))
+                *(_unit_for(x.fn_name, x.container) for x in _entries)),
+            coverage_must=_coverage_must(
+                file_rel, *(x.fn_name for x in _entries)))
             for _c, _entries in sorted(_bypass_by_container.items())
             if _c not in _covered]
         # The grade label naming what this prompt's write list actually
