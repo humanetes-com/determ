@@ -860,6 +860,8 @@ _HELPERS = _Helpers(
             sink)),
     test_regression_gate=lambda tc, cwd, env, base, **kw: _regression_guard.gate(
         _run_cargo, _guard, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env, base,
+        observe=lambda cmp: _fill_reading.publish_fill_reading(
+            cmp, emit=_emit, log=_log),
         **kw),
     per_impl_max_stubs=_PER_IMPL_MAX_STUBS,
     converge_in_cluster=lambda *a, **k: _converge_in_cluster(*a, **k),
@@ -1059,6 +1061,7 @@ def _ask_retrospective(prompt: str, model: str | None = None) -> str:
 # Cargo diagnostic parsing relocated to application/reconstruct/cargo_errors.py
 # (regex-free): the rendered-text error-signature fallback is now
 # the structured `err_sig_from_text` scan (R7 standing rule).
+import pipeline_core.application.reconstruct.fill_reading as _fill_reading  # noqa: E402
 import pipeline_core.application.reconstruct.regression_guard as _regression_guard  # noqa: E402
 
 

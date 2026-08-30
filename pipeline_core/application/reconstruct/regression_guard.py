@@ -66,8 +66,17 @@ def gate(
     *,
     stub_free: bool = False,
     introduced_stubs: bool = False,
+    observe: Callable[[RegressionComparison], None] | None = None,
 ) -> tuple[RegressionComparison, str] | None:
+    """``observe`` receives the comparison the gate measures, on every path.
+
+    It is the only way a score reaches the record between two sweeps: this
+    module published nothing at all until 2026-08-30, so the full-suite
+    reading taken on every splice was computed and dropped, and a fill phase
+    of two to four hours produced no score anywhere. See
+    `application/reconstruct/fill_reading.py`."""
     return cargo_runner.test_regression_gate(
         run_cargo, test_cmd, cwd, env, base,
         enabled=unified_on and _guard_on(), timeout=timeout, guard=guard,
-        stub_free=stub_free, introduced_stubs=introduced_stubs)
+        stub_free=stub_free, introduced_stubs=introduced_stubs,
+        observe=observe)

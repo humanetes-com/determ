@@ -174,6 +174,7 @@ def test_regression_gate(
     guard: Callable[[str, str], None],
     stub_free: bool = False,
     introduced_stubs: bool = False,
+    observe: Callable[[RegressionComparison], None] | None = None,
 ) -> tuple[RegressionComparison, str] | None:
     """Global non-regression gate (the monotone ratchet). A fill is a REGRESSION
     if it turns a previously-passing test red, crashes a previously-completing
@@ -220,6 +221,15 @@ def test_regression_gate(
     if after is None:
         return None  # crate not compiling now ⇒ can't judge; defer to TDD loop
     cmp = compare_readings(baseline, after)
+    # PUBLISH THE READING. This full-suite measurement runs on every splice and
+    # its numbers were discarded on every path — the gate reduced them to a
+    # yes/no, so nothing in the event store carried a score between one
+    # iteration's sweep and the next, and the only way to read one was to kill
+    # the run. Fired here, at the measurement, so it cannot alter the decision
+    # below; `application/reconstruct/fill_reading.py` documents why the
+    # OUTCOME is deliberately not threaded through the six exits that follow.
+    if observe is not None:
+        observe(cmp)
     if cmp.excluded_crashed:
         guard("phase-c/u2_missing_verdict",
               f"binaries {list(cmp.excluded_crashed)} were already crashed at "
