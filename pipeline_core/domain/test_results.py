@@ -1507,6 +1507,31 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
     return tuple(out)
 
 
+def still_open_names(output: str) -> frozenset[str]:
+    """A name is open if it reported FAILED or it never reported a verdict.
+
+    ``parse_failed_tests`` is "reported fail" — U2, fail-counts, and the
+    retry's TEST mode are correctly aimed by those names. A SIGABRT, an
+    ASAN abort, a segfault emit none of those lines, so a probe that asks
+    "are this unit's attributed tests in the failed set" treats a crash
+    as success. Run `1911637-d0fab212` iters 3–5: `test_large_alignment`
+    SIGABRTed with no FAILED line; the probe dropped `downcast_ref` and
+    `object_downcast` as already passing.
+
+    Implementation is a wrap, not a new parser: every name
+    ``parse_failed_tests`` already reports (including a
+    ``---- name stdout ----`` header that a summary ``FAILED`` line can
+    miss) union every incomplete binary's dangling in-flight name.
+    Ignored tests are not open. ``reconcile_sweep`` stays the SCORE's
+    vanished set; this function has the cargo capture and nothing else.
+    """
+    open_names = set(parse_failed_tests(output))
+    for binary in parse_binary_results(output):
+        if not binary.completed and binary.dangling:
+            open_names.add(binary.dangling)
+    return frozenset(open_names)
+
+
 @dataclass(frozen=True)
 class RegressionComparison:
     """Outcome of a binary-scoped baseline-vs-after comparison.

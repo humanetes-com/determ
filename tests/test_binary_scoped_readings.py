@@ -11,7 +11,9 @@ from pipeline_core.domain.test_results import (
     TestStateReading,
     compare_readings,
     parse_binary_results,
+    parse_failed_tests,
     render_regression_detail,
+    still_open_names,
 )
 
 _TWO_BINARIES = """\
@@ -57,6 +59,31 @@ def test_parse_binary_results_sections_and_crash() -> None:
     # `test delta ...` prefix names the in-flight (crashing) test.
     assert not b.completed and b.dangling == "delta"
     assert b.passed == frozenset({"gamma"}) and b.executed == 1
+
+
+def test_still_open_names_unions_reported_fail_with_dangling() -> None:
+    """A name is open if it reported FAILED or never reported a verdict.
+    `_TWO_BINARIES` is that pair: beta FAILED in a completed binary, delta
+    dangling in a crashed one. `parse_failed_tests` is the negative control
+    for the crash half — it cannot see delta."""
+    assert still_open_names(_TWO_BINARIES) == frozenset({"beta", "delta"})
+    assert "delta" not in parse_failed_tests(_TWO_BINARIES)
+    assert still_open_names(_IGNORED_BINARY) == frozenset()
+    # Run 1911637-d0fab212 iter 3 probe: SIGABRT, no FAILED line.
+    crash = (
+        "    Running tests/test_downcast.rs "
+        "(target/debug/deps/test_downcast-abc)\n"
+        "running 2 tests\n"
+        "test test_downcast ... ok\n"
+        "test test_large_alignment ...\n")
+    assert still_open_names(crash) == frozenset({"test_large_alignment"})
+    assert parse_failed_tests(crash) == set()
+    # Iter-1 drop: those names reported ok, they are not dangling.
+    cashed = (
+        "running 1 test\n"
+        "test t1 ... ok\n"
+        "test result: ok. 1 passed; 0 failed\n")
+    assert still_open_names(cashed) == frozenset()
 
 
 def test_parse_binary_results_trailer_counts_authoritative() -> None:

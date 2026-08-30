@@ -970,6 +970,7 @@ def format_impl_block_for_prompt(
     fill_fn_names: frozenset[str] | None = None,
     inferred_fn_names: frozenset[str] = frozenset(),
     crashed_fn_names: frozenset[str] = frozenset(),
+    aimed_fn_names: frozenset[str] = frozenset(),
     candidate_fn_names: frozenset[str] = frozenset(),
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every
@@ -1005,6 +1006,12 @@ def format_impl_block_for_prompt(
     body the tree had just faulted inside. `src/error.rs::drop` was given that
     tag on every sweep of runs `842437`…`1519852` (2026-08-29/30), returned
     unchanged as instructed, and kept 13 tests unmeasurable the whole time.
+
+    `aimed_fn_names` — re-fill members a callee of the faulting frame. Tagged
+    `[REFILL]` with re-derive-from-types, never `[REFILL?]`. Aimed producers
+    are kept out of `crash_blamed`, so without this set they arrive as
+    inference. Run `1911637-d0fab212` listed `object_downcast` as
+    `[REFILL?]` while `test_large_alignment` still SIGABRTed.
 
     `candidate_fn_names` — for a RELATED block: members that are the
     same-named re-fill candidates for the same failing tests, shown in full
@@ -1051,6 +1058,13 @@ def format_impl_block_for_prompt(
                     f"MEMORY FAULT inside this body — see CRASH_EVIDENCE and "
                     f"REFILL_TARGETS. It compiles; it is still WRONG. Rewrite "
                     f"it — do NOT return it unchanged */ {body} }}")
+            elif m.fn_name in aimed_fn_names:
+                lines.append(
+                    f"    {sig} {{ /* [REFILL] a test binary CRASHED and this "
+                    f"body is a callee of the faulting frame — the pointer "
+                    f"the blamed frame dereferenced is produced here. "
+                    f"Re-derive it from the types it is generic over; do "
+                    f"NOT return it unchanged */ {body} }}")
             elif m.fn_name in inferred_fn_names:
                 lines.append(
                     f"    {sig} {{ /* [REFILL?] compiles; implicated by NAME "

@@ -116,6 +116,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
+    aimed_refill_names,
     attributed_test_leaves,
     collect_refill_evidence,
     container_header,
@@ -1064,6 +1065,13 @@ def fill_impl_blocks(
         with _counters_lock:
             dispatched_keys.update(FnLocator(file_rel, n) for n in wanted)
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
+        # Locators in the crash-evidence dict that are not origin-blame:
+        # callees of the faulting frame. `crash_blamed` convicts; this set
+        # is dispatch. Without it `collect_refill_evidence` grades them
+        # NAMED and `_plan_line` lists them as "leave it unchanged".
+        _aimed_locs = frozenset(
+            loc for loc in (crash_evidence or {})
+            if loc not in (crash_blamed or frozenset()))
         test_blocks: list[tuple[str, str]] = []
         # The evidence behind each re-fill in this file: attributed tests,
         # DIRECT vs INFERRED, same-named candidates, and what the tests said.
@@ -1077,6 +1085,7 @@ def fill_impl_blocks(
                 collect_refill_evidence(b, fblocks, _frontier_tests,
                                         escalated=escalated_keys,
                                         crashed=crash_blamed or frozenset(),
+                                        aimed=_aimed_locs,
                                         read_source=_read_source,
                                         history=history_for_block(
                                             b, ledger_entries,
@@ -1239,6 +1248,8 @@ def fill_impl_blocks(
             tuple(dict.fromkeys((*(i.fn_name for i in _installable),
                                  *(x.fn_name for x in _free_bypass)))),
             installable=tuple(i.fn_name for i in _installable),
+            aimed=tuple(i.fn_name for i in _installable
+                        if FnLocator(file_rel, i.fn_name) in _aimed_locs),
             bypass=_free_bypass, pins=_union_pins,
             identity_must=_identity_must(
                 *(_unit_for(i.fn_name) for i in _installable),
@@ -1359,6 +1370,8 @@ def fill_impl_blocks(
             escalated=tuple(sorted(escalated_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             crashed=tuple(sorted(crashed_refill_names(
+                _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+            aimed=tuple(sorted(aimed_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             bypass=_bypass_for(b.container),
             pins=_block_pins[_impl_block_id(b.file, b.container)],
@@ -2268,12 +2281,19 @@ def fill_impl_blocks(
         _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests,
                                               escalated=escalated_keys,
                                               crashed=crash_blamed or frozenset(),
+                                              aimed=frozenset(
+                                                  loc for loc
+                                                  in (crash_evidence or {})
+                                                  if loc not in (
+                                                      crash_blamed
+                                                      or frozenset())),
                                               read_source=_read_source,
                                               history=history_for_block(
                                                   block, ledger_entries,
                                                   oracle_fp=oracle_fp))
         _inferred_refill = inferred_refill_names(_refill_evs)
         _crashed_refill = crashed_refill_names(_refill_evs)
+        _aimed_refill = aimed_refill_names(_refill_evs)
         # Capped by distinct FILES, as on the file route.
         test_blocks = attributed_test_blocks(
             attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
@@ -2496,6 +2516,7 @@ def fill_impl_blocks(
                     refill_evidence=_refill_evidence_text,
                     inferred_refill_names=_inferred_refill,
                     crashed_refill_names=_crashed_refill,
+                    aimed_refill_names=_aimed_refill,
                     sibling_rejected=_steer.shared,
                     identity_must=_identity_must(
                         *block.stub_members, *block.refill_members)),

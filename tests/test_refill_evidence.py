@@ -25,6 +25,7 @@ from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     Attribution,
     RefillEvidence,
+    aimed_refill_names,
     attributed_test_leaves,
     collect_refill_evidence,
     container_header,
@@ -87,6 +88,36 @@ def test_direct_conviction_is_stated_as_such() -> None:
     text = render_refill_evidence([ev])
     assert "DIRECT" in text and "INFERRED" not in text
     assert "Rewrite its BEHAVIOR" in text
+
+
+def test_aimed_callee_is_not_named() -> None:
+    """Run `1911637-d0fab212`: `object_downcast` was in `crash_texts` and not
+    in `crash_blamed`, so it graded NAMED and the prompt said return it
+    unchanged. AIMED is that split. Negative control: the same locator
+    without `aimed=` is still NAMED."""
+    key = FnLocator("src/error.rs", "object_downcast")
+    member = FnRecord(
+        file="src/error.rs", fn_name="object_downcast",
+        sig_text="fn object_downcast()", body_text="addr_of!(_object)",
+        has_unimplemented_body=False)
+    block = ImplBlock(
+        file="src/error.rs", container="", members=(member,),
+        refill_members=(member,))
+    fr = FailureFrontier.build({key: {"test_large_alignment"}}, {})
+    (named,) = collect_refill_evidence(block, [block], fr)
+    assert named.attribution is Attribution.NAMED
+    assert inferred_refill_names([named]) == frozenset({"object_downcast"})
+    assert "return it UNCHANGED" in render_refill_evidence([named])
+
+    (aimed,) = collect_refill_evidence(
+        block, [block], fr, aimed=frozenset({key}))
+    assert aimed.attribution is Attribution.AIMED
+    assert aimed_refill_names([aimed]) == frozenset({"object_downcast"})
+    assert inferred_refill_names([aimed]) == frozenset()
+    text = render_refill_evidence([aimed])
+    assert "AIMED" in text
+    assert "return it UNCHANGED" not in text
+    assert "Do not return it unchanged" in text
 
 
 def test_no_frontier_is_inference_with_no_tests() -> None:

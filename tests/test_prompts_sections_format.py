@@ -314,6 +314,25 @@ def test_format_impl_block_inferred_refill_is_hedged_not_convicted():
     assert "[REFILL?]" not in direct
 
 
+def test_format_impl_block_aimed_callee_is_not_hedged():
+    """An aimed producer is a callee of the faulting frame, not a name
+    match. `[REFILL?]` is the instruction that kept `object_downcast`
+    byte-identical across three 122 sweeps of run `1911637-d0fab212`."""
+    block = ImplBlock(container="",
+                      members=(_fn("object_downcast", body="addr_of!(_object)"),))
+    named = format_impl_block_for_prompt(
+        block, refill_fn_names=frozenset({"object_downcast"}),
+        inferred_fn_names=frozenset({"object_downcast"}))
+    assert "[REFILL?]" in named and "return it unchanged" in named
+    aimed = format_impl_block_for_prompt(
+        block, refill_fn_names=frozenset({"object_downcast"}),
+        inferred_fn_names=frozenset({"object_downcast"}),
+        aimed_fn_names=frozenset({"object_downcast"}))
+    assert "[REFILL?]" not in aimed
+    assert "callee of the faulting frame" in aimed
+    assert "do NOT return it unchanged" in aimed
+
+
 def test_format_impl_block_related_candidate_is_shown_in_full():
     """In a RELATED block, the same-named re-fill candidate is the competing
     hypothesis — full body, named as a candidate, not a truncated

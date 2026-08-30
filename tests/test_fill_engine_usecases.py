@@ -630,6 +630,39 @@ def test_refill_kept_when_its_test_still_fails_at_the_probe(
     assert any("behavioral re-fill target(s)" in m for m in fake.logs)
 
 
+def test_refill_kept_when_its_test_is_dangling_at_the_probe(
+        tmp_path: Path) -> None:
+    """A SIGABRT emits no FAILED line. The probe used to treat that as
+    "already pass" and drop the blamed unit — run `1911637-d0fab212`
+    iters 3–5, `test_large_alignment` dangling, `downcast_ref` and
+    `object_downcast` dropped. `still_open_names` is the third cargo
+    outcome; a unit whose `tests_for` contains the dangling name stays."""
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    key = FnLocator("src/error.rs", "object_downcast")
+    fake = FakeFill(
+        impl_stats=ClusterFillResult(remaining=1, fns_filled=2,
+                                     dispatched_fns=()),
+        stub_records=[], stub_tuples=[],
+        fns=[{"file": "src/error.rs", "fn_name": "object_downcast",
+              "container": "", "sig_text": "fn object_downcast()"}],
+        run=(101,
+             "    Running tests/test_downcast.rs "
+             "(target/debug/deps/test_downcast-abc)\n"
+             "running 2 tests\n"
+             "test test_downcast ... ok\n"
+             "test test_large_alignment ...\n"),
+    )
+    _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key},
+        tdd_frontier_tests=FailureFrontier.of_direct(
+            {key: {"test_large_alignment"}}),
+        tdd_test_cmd="cargo test", skip_end_pass_test=True)
+    assert "phase_c.refill.stale_dropped" not in fake.events
+    assert any("behavioral re-fill target(s)" in m for m in fake.logs)
+
+
 def _cluster(name: str = "stable"):
     from pipeline_core.domain.models import BuildCluster
     return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],

@@ -291,3 +291,14 @@ def test_peel_keep_refused_when_hollow_did_not_shrink() -> None:
     assert peel_keep_allowed(two_stubs, one_stub, ["context"]) is True
     # Nothing re-stubbed: the keep question is not this function's.
     assert peel_keep_allowed(two_stubs, two_stubs, []) is True
+    # Run 1911637-d0fab212 iter 5 attempt 2: 0 stubs, peel restored
+    # deref_mut to its filled snapshot body. Hollow count 0 == 0 so the
+    # length test refuses; the peeled name is not hollow, so keep.
+    # The 1160135 pair above is the negative control — constructors were
+    # already stubs at snapshot, peel put them back, keep is refused.
+    # `set(current) <= set(snapshot)` is True on that pair and would
+    # reopen 83 → 23; this function must not use it.
+    filled = (
+        "fn deref_mut() {\n    1\n}\n"
+        "fn object_downcast() {\n    2\n}\n")
+    assert peel_keep_allowed(filled, filled, ["deref_mut"]) is True

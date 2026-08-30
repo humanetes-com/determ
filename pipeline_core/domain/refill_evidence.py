@@ -47,9 +47,9 @@ from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
 
 class Attribution(Enum):
-    """How strongly the record implicates a re-fill target. Four states,
+    """How strongly the record implicates a re-fill target. Five states,
     because collapsing any two of them into one bool has now locked the pass
-    twice — at 92, and at 83.
+    twice — at 92, and at 83 — and a fifth collapse locked it at 122.
 
     CRASHED — a runtime fault's own faulting frame names this unit. The
     strongest evidence the loop ever holds about a body: not an inference from
@@ -62,6 +62,17 @@ class Attribution(Enum):
     rewriting its consumers changed no verdict. That is a MEASUREMENT, and it
     is the strongest evidence the loop ever produces about a producer: the
     accessors were tried and they did not pay.
+
+    AIMED — a callee of the faulting frame, computed from that body's own
+    call text (`callee_subjects`), carried as evidence and deliberately kept
+    out of `crash_blamed`. A crashed binary reports no convicting test, so
+    without this grade the producer falls through to NAMED. Run
+    `1911637-d0fab212` dispatched `object_downcast` at crash-evidence rank
+    all three 122 iterations; the prompt graded it INFERRED and said "if it
+    is already right, return it UNCHANGED"; the body that would have cleared
+    `test_large_alignment` was the one that overrode that sentence on a
+    retry, then peel threw it away. Attribution's own docstring already
+    says only NAMED deserves "leave it unchanged".
 
     NAMED — a traversal step or a name match mentioned the fn and nothing was
     measured. Only this one deserves "leave it unchanged".
@@ -100,6 +111,7 @@ class Attribution(Enum):
     CRASHED = auto()
     DIRECT = auto()
     ESCALATED = auto()
+    AIMED = auto()
     NAMED = auto()
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +263,7 @@ def collect_refill_evidence(
     max_tests: int = 6,
     escalated: frozenset[FnLocator] = frozenset(),
     crashed: frozenset[FnLocator] = frozenset(),
+    aimed: frozenset[FnLocator] = frozenset(),
     read_source: Callable[[str], str | None] | None = None,
     history: Mapping[str, Sequence[TryRecord]] | None = None,
 ) -> tuple[RefillEvidence, ...]:
@@ -264,7 +277,10 @@ def collect_refill_evidence(
     `read_source`, each excerpt carries the source line its panic names
     (`quote_panic_site`); without it the excerpt is the message alone.
     `history` is the unit's own prior tries (`try_history`); omitted or empty
-    leaves the rendered section byte-identical to the pre-history prompt."""
+    leaves the rendered section byte-identical to the pre-history prompt.
+    `aimed` is locators in the crash-evidence dict that are not origin-blame
+    (`crash_texts` keys minus `crash_blamed`): callees of the faulting frame,
+    never convict, never revert. Without it they fall through to NAMED."""
     out: list[RefillEvidence] = []
     for m in block.refill_members:
         key = FnLocator(block.file, m.fn_name)
@@ -283,6 +299,8 @@ def collect_refill_evidence(
             grade = Attribution.DIRECT
         elif key in escalated:
             grade = Attribution.ESCALATED
+        elif key in aimed:
+            grade = Attribution.AIMED
         else:
             grade = Attribution.NAMED
         siblings = tuple(
@@ -326,7 +344,11 @@ def inferred_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
     graded `re-check`. Escalated members are deliberately NOT here: they were
     measured, and telling the model to leave them unchanged is what this split
     exists to stop. Neither are CRASHED members, for the same reason and with
-    a stronger premise: the tree faulted inside them."""
+    a stronger premise: the tree faulted inside them. Neither are AIMED
+    members: they are callees of the faulting frame, computed from that
+    body's call text, and NAMED's "leave it unchanged" is the instruction
+    that kept `object_downcast` byte-identical across three 122 sweeps
+    of run `1911637-d0fab212`."""
     return frozenset(e.fn_name for e in evidence
                      if e.attribution is Attribution.NAMED)
 
@@ -336,6 +358,13 @@ def crashed_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
     the instruction, never as `[REFILL?] … else return it unchanged`."""
     return frozenset(e.fn_name for e in evidence
                      if e.attribution is Attribution.CRASHED)
+
+
+def aimed_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
+    """Members a callee of the faulting frame, carried as evidence and never
+    as blame. Rendered as re-derive-from-types, never as `[REFILL?]`."""
+    return frozenset(e.fn_name for e in evidence
+                     if e.attribution is Attribution.AIMED)
 
 
 def escalated_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]:
@@ -410,6 +439,14 @@ def render_refill_evidence(
                 f"changed its verdict, so the defect is not in them — it is in "
                 f"what this fn constructs or returns. This is a measurement, "
                 f"not a claim about which line is wrong. Rewrite it.")
+        elif e.attribution is Attribution.AIMED:
+            lines.append(
+                f"`{e.fn_name}` — AIMED: a test binary died of a MEMORY FAULT "
+                f"and this body is a callee of the faulting frame (evidence, "
+                f"never blame). The pointer the blamed frame dereferenced is "
+                f"produced here. Re-derive it from the types it is generic "
+                f"over — the erased layout must carry the payload type's "
+                f"alignment and field offsets. Do not return it unchanged.")
         else:
             lines.append(
                 f"`{e.fn_name}` — INFERRED: a failing test's path runs through "

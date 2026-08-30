@@ -254,6 +254,45 @@ def test_the_file_first_plan_line_names_the_crash_first() -> None:
         "an ordinary name match in the same block keeps its re-check line")
 
 
+def test_an_aimed_producer_is_not_told_to_return_itself_unchanged() -> None:
+    """Run `1911637-d0fab212`'s error.rs file-first prompt listed
+    `object_downcast` twice: REWRITE WITH THE PRODUCER on the free-fn
+    installable plan and re-check / leave it unchanged on the free-fn
+    block plan. `_plan_line` already drops inferred when the same plan
+    also carries installable; the live contradiction was TWO plans.
+    AIMED consumes the name on both. The live builder is
+    `build_file_fill_prompt`; `_plan_line` is the slot."""
+    installable_plan = BlockFillPlan(
+        header="", refills=("object_downcast",),
+        installable=("object_downcast",))
+    inferred_plan = BlockFillPlan(
+        header="", refills=("object_downcast",),
+        inferred=("object_downcast",))
+    before_install = _plan_line(installable_plan)
+    before_inferred = _plan_line(inferred_plan)
+    assert "REWRITE WITH THE PRODUCER" in before_install
+    assert "re-check" in before_inferred
+    assert "leave it unchanged" in before_inferred, (
+        "negative control: the live prompt handed both instructions")
+
+    aimed_install = BlockFillPlan(
+        header="", refills=("object_downcast",),
+        installable=("object_downcast",),
+        aimed=("object_downcast",))
+    aimed_inferred = BlockFillPlan(
+        header="", refills=("object_downcast",),
+        inferred=("object_downcast",),
+        aimed=("object_downcast",))
+    install_line = _plan_line(aimed_install)
+    inferred_line = _plan_line(aimed_inferred)
+    for line in (install_line, inferred_line):
+        assert "callee of the faulting frame" in line
+        assert "Do not return it unchanged" in line
+        assert "re-check" not in line
+        assert "REWRITE WITH THE PRODUCER" not in line
+        assert line.rstrip().endswith("object_downcast")
+
+
 def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
     """Run `1790133-2181e509`'s error.rs file-first prompt named `drop` on the
     crashed line. `into_boxed_dyn_error` was in CRASH_EVIDENCE and not on the

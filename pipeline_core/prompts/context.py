@@ -100,6 +100,9 @@ class PerImplSections:
     # the crash is what STRIPS these units of a convicting test, so they arrive
     # looking like inference and would otherwise be told to stand pat.
     crashed_refill_names: frozenset[str] = frozenset()
+    # Re-fill members a callee of the faulting frame — rendered as
+    # re-derive-from-types, never `[REFILL?]`.
+    aimed_refill_names: frozenset[str] = frozenset()
     # The previous attempt's rejected expressions that the SIBLING_REFERENCE
     # body carries (`domain.sibling_steer`). Non-empty flips that section's
     # prefix from "follow the same structural pattern" to "this is the pattern

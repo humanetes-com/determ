@@ -66,7 +66,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.pass_payoff import assess_fill_results, combine_payoffs
 from pipeline_core.domain.refill_stamp import convicting_tests_for_member
 from pipeline_core.domain.refine import FixProgress, FloorStall
-from pipeline_core.domain.test_results import parse_failed_tests
+from pipeline_core.domain.test_results import parse_failed_tests, still_open_names
 from pipeline_core.ports.fill_engine import (
     Cargo,
     EngineTelemetry,
@@ -543,13 +543,17 @@ class PhaseCFillEngine:
                               + fns_filled)
             if (_refill_recs and _landed_before > 0
                     and tdd_test_cmd and tdd_frontier_tests is not None):
-                _rc_probe, _out_probe = self.cargo.run(
+                _, _out_probe = self.cargo.run(
                     tdd_test_cmd, target_src_dir, cluster_env, timeout=300)
-                _still_failing = (parse_failed_tests(_out_probe)
-                                  if _rc_probe != 0 else set())
+                # A crashed binary reports no FAILED line. `parse_failed_tests`
+                # is "reported fail"; a SIGABRT is unmeasured, not a pass. Run
+                # `1911637-d0fab212` iters 3–5 dropped `downcast_ref` and
+                # `object_downcast` while `test_large_alignment` was still
+                # dangling. `still_open_names` is that third cargo outcome.
+                _still_open = still_open_names(_out_probe)
                 _fresh_recs = [
                     r for r in _refill_recs
-                    if tdd_frontier_tests.tests_for(r.key) & _still_failing]
+                    if tdd_frontier_tests.tests_for(r.key) & _still_open]
                 _stale = [r for r in _refill_recs if r not in _fresh_recs]
                 if _stale:
                     self.tel.log(

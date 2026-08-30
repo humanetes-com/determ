@@ -139,18 +139,29 @@ def peel_keep_allowed(
 ) -> bool:
     """Whether peel survivors may take an unmeasurable keep.
 
-    True when nothing was re-stubbed, or when this file's hollow set strictly
-    shrank versus the pre-attempt snapshot (some stubs became bodies). False
-    when the peel put names back as stubs and the hollow count did not drop:
-    the survivors are rewrites of already-filled bodies, and keeping them is
-    how run `1160135-7b10cdfa` (2026-08-29) took pass 83 to 23 —
-    `construct_from_boxed` and `context` peeled, ten accessors kept, more
-    binaries dying on those same two stub lines. The batch ratchet would
-    claw the tree back a sweep later; refusing here saves the rest of the
-    iteration."""
+    True when nothing was re-stubbed; when this file's hollow set strictly
+    shrank versus the pre-attempt snapshot (some stubs became bodies); or
+    when every peeled name is filled in ``current`` — the peel restored
+    previous bodies, not holes. False when a peeled name is hollow now and
+    the hollow count did not drop: that is run `1160135-7b10cdfa`
+    (2026-08-29), `construct_from_boxed` and `context` peeled back to the
+    stubs they already were at snapshot, ten accessors kept, pass 83 → 23.
+
+    Run `1911637-d0fab212` iter 5 attempt 2 is the other class: 0 stubs, 3
+    re-fills, peel restored `deref_mut` to its filled snapshot body, and
+    `object_downcast` compiled. Hollow count 0 == 0 so the length test
+    refuses; the peeled name is not hollow, so the survivors may keep.
+    ``set(stubbed_fn_names(current)) <= set(stubbed_fn_names(snapshot))`` is
+    true on both files (the constructors were already stubs at snapshot) and
+    would reopen 83 → 23 — it is not this predicate.
+    """
     if not reverted:
         return True
-    return len(stubbed_fn_names(current)) < len(stubbed_fn_names(snapshot))
+    cur = stubbed_fn_names(current)
+    snap = stubbed_fn_names(snapshot)
+    if len(cur) < len(snap):
+        return True
+    return not any(n in cur for n in reverted)
 
 
 def peel_to_compiling(

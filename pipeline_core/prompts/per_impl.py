@@ -90,7 +90,8 @@ def build_per_impl_prompt(
         # (see `format_impl_block_for_prompt`).
         fill_fn_names=frozenset(m.fn_name for m in stub_members),
         inferred_fn_names=sections.inferred_refill_names,
-        crashed_fn_names=sections.crashed_refill_names)
+        crashed_fn_names=sections.crashed_refill_names,
+        aimed_fn_names=sections.aimed_refill_names)
     related_renders = []
     for rb in related_blocks:
         related_renders.append(

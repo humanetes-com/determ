@@ -158,6 +158,12 @@ class BlockFillPlan:
     # frame for a heap-use-after-free costing 13 unmeasurable tests; the
     # re-check line told it to return the body unchanged and it did.
     crashed: tuple[str, ...] = ()
+    # The subset a callee of the faulting frame, carried as evidence and
+    # kept out of `crash_blamed`. It outranks `inferred` and `installable`
+    # because both of those render "return it unchanged if already right",
+    # and run `1911637-d0fab212` listed `object_downcast` on both lines in
+    # the same prompt while `test_large_alignment` still SIGABRTed.
+    aimed: tuple[str, ...] = ()
     # Free fns of the file an ESCALATED producer could INSTALL into a
     # fn-pointer table it builds (`domain.installable_fns`). Nothing measured
     # THEM, so they get neither the escalated line (a measurement about a
@@ -242,21 +248,26 @@ def _plan_line(p: BlockFillPlan) -> str:
         parts.append(f"{recipes[name]}: {name}")
     bypass_names = frozenset(b.fn_name for b in p.bypass)
     crashed = tuple(r for r in p.refills if r in p.crashed)
+    aimed = tuple(r for r in p.refills
+                  if r in p.aimed and r not in recipe_names
+                  and r not in p.crashed)
     direct = tuple(r for r in p.refills
                    if r not in p.inferred and r not in p.escalated
                    and r not in p.installable and r not in bypass_names
-                   and r not in recipe_names and r not in p.crashed)
+                   and r not in recipe_names and r not in p.crashed
+                   and r not in p.aimed)
     escalated = tuple(r for r in p.refills
                       if r in p.escalated and r not in p.installable
                       and r not in bypass_names and r not in recipe_names
-                      and r not in p.crashed)
+                      and r not in p.crashed and r not in p.aimed)
     installable = tuple(r for r in p.refills
                         if r in p.installable and r not in recipe_names
-                        and r not in p.crashed)
+                        and r not in p.crashed and r not in p.aimed)
     inferred = tuple(r for r in p.refills
                      if r in p.inferred and r not in p.escalated
                      and r not in p.installable and r not in bypass_names
-                     and r not in recipe_names and r not in p.crashed)
+                     and r not in recipe_names and r not in p.crashed
+                     and r not in p.aimed)
     if crashed:
         # First in the line, and the only grade whose premise is an observed
         # fault. It states what the tree DID rather than what a verdict
@@ -278,6 +289,18 @@ def _plan_line(p: BlockFillPlan) -> str:
         if extra:
             crash_clause += " — " + extra
         parts.append(crash_clause)
+    if aimed:
+        # Consumes the name the way CRASHED does. An aimed producer used to
+        # appear twice — REWRITE WITH THE PRODUCER (installable complement)
+        # and re-check / leave it unchanged (NAMED) — and the model could
+        # pick the one that costs nothing. One name, one instruction.
+        parts.append(
+            "REWRITE — A TEST BINARY CRASHED and this body is a callee of "
+            "the faulting frame (evidence, never blame): the pointer the "
+            "blamed frame dereferenced is produced here. Re-derive it from "
+            "the types it is generic over — the erased layout must carry the "
+            "payload type's alignment and field offsets. Do not return it "
+            "unchanged: " + ", ".join(aimed))
     if direct:
         parts.append("rewrite (a body exists, but its test still fails): "
                      + ", ".join(direct))
