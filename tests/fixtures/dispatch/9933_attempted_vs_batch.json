@@ -1,0 +1,41 @@
+{
+  "run_id": "9933-efe68f37",
+  "iter": 1,
+  "note": "Computed from this run's phase_c.tdd.landed_change (the 12-unit batch as landed + unchanged + declined) and the file-first wanted set {context, msg} logged as 1 block(s), 0 stub(s), 2 re-fills then FILE FILLED 14. Under A3 the FLAT arm writes attempted minus landed: one row, src/error.rs::context. Negative control 1 is the live write: 8 esc_unchanged rows, 7 of them absent from attempted.",
+  "batch": [
+    "src/chain.rs::len",
+    "src/ensure.rs::__dispatch_ensure",
+    "src/ensure.rs::write_str",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::context",
+    "src/error.rs::deref",
+    "src/error.rs::deref_mut",
+    "src/error.rs::from_boxed",
+    "src/error.rs::msg",
+    "src/fmt.rs::write_str",
+    "src/lib.rs::format_err",
+    "src/lib.rs::must_use"
+  ],
+  "attempted": [
+    "src/error.rs::context",
+    "src/error.rs::msg"
+  ],
+  "landed": [
+    "src/error.rs::msg"
+  ],
+  "declined": [
+    "src/chain.rs::len",
+    "src/ensure.rs::write_str",
+    "src/fmt.rs::write_str"
+  ],
+  "live_esc_unchanged": [
+    "src/ensure.rs::__dispatch_ensure",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::context",
+    "src/error.rs::deref",
+    "src/error.rs::deref_mut",
+    "src/error.rs::from_boxed",
+    "src/lib.rs::format_err",
+    "src/lib.rs::must_use"
+  ]
+}

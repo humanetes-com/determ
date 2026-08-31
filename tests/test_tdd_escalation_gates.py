@@ -79,16 +79,45 @@ def test_escalation_withheld_while_the_accessor_is_still_a_stub(
         calls.append(tname)
         return {_PROD: {tname}}
 
-    # The accessor is a stub in the cluster scan (dispatch reports it was
-    # never attempted, so it also survives the charge and stays a stub).
+    # The accessor was opened (in dispatched_fns) and left a stub. That is
+    # service, so the two-sweep rule fires; withheld then keeps the stub as
+    # the target instead of escalating to the producer. An empty
+    # dispatched_fns used to mark the unit served anyway — the same lie the
+    # FLAT arm told on run 9933-efe68f37 — and this test keyed on it. Empty
+    # dispatch now parks as never-served (escalation_deferred), which is
+    # also "do not escalate" but is not this gate.
     _run(monkeypatch, tmp_path, events, logs, escalate=_escalate,
-         cluster_stubs=[_ACC], fn_stubs=[_ACC], dispatched=())
+         cluster_stubs=[_ACC], fn_stubs=[_ACC], dispatched=(_ACC,))
     assert calls == []  # escalation never invoked
     assert any(ev == "phase_c.attribution.escalation_withheld" and
                d.get("stub_accessors") == ["src/a.rs::fmt"]
                for ev, d in events)
     assert any("NOT escalating" in ln and "the stub is the target" in ln
                for ln in logs)
+
+
+def test_escalation_defers_when_the_accessor_was_never_opened(
+        tmp_path: Path, monkeypatch) -> None:
+    # NEGATIVE CONTROL of the withheld pin above: the engine reported an
+    # empty dispatched_fns, so _served_at does not include the accessor.
+    # The two-sweep identity is not service — that is the parked-under-cap
+    # rule, not "the stub is the target".
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    calls: list[str] = []
+
+    def _escalate(src_dir, tname, units, producers_out=None):
+        calls.append(tname)
+        return {_PROD: {tname}}
+
+    _run(monkeypatch, tmp_path, events, logs, escalate=_escalate,
+         cluster_stubs=[_ACC], fn_stubs=[_ACC], dispatched=())
+    assert calls == []
+    assert any(ev == "phase_c.attribution.escalation_deferred" and
+               d.get("unserved") == ["src/a.rs::fmt"]
+               for ev, d in events)
+    assert not any(ev == "phase_c.attribution.escalation_withheld"
+                   for ev, d in events)
 
 
 def test_escalation_fires_when_no_accessor_is_a_stub(

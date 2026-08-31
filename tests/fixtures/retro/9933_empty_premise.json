@@ -1,0 +1,88 @@
+{
+  "src/error.rs::msg::Error": {
+    "category": "WRONG_TYPE_CHOICE",
+    "guidance": "Drop the cfg!-gated `crate::backtrace::Backtrace` wrapper and use an always-materialised std backtrace in the body, e.g. `let backtrace = std::backtrace::Backtrace::force_capture(); Self::construct_from_adhoc(message, backtrace)` \u2013 or `let backtrace = Some(std::backtrace::Backtrace::force_capture()); Self::construct_from_adhoc(message, backtrace)` if the constructor takes `Option<_>` \u2013 so the Debug impl receives a real forced capture and emits \u201cStack backtrace\u201d with the `\\n\\n` separator.",
+    "signal": "ok",
+    "retrospective_count": 5,
+    "error_count": 0,
+    "failing_test_count": 2,
+    "best_compile_errors": 0,
+    "best_failing_tests": 2,
+    "fully_exhausted": true,
+    "last_error_preview": "This compiled, but these tests still FAIL: ['test_debug_with_captured_backtrace_and_cause', 'test_debug_with_captured_backtrace_simple']\n\nFix the BEHAVIOR so they pass.\n---- test_debug_with_captured_backtrace_and_cause stdout ----\nthread 't",
+    "cluster": "stable",
+    "layout_fp": "06866ac1",
+    "gate_ver": "comparative_2026_07",
+    "route_ver": "leakproof_revert_2026_07",
+    "convicted_by": [
+      "test_debug_with_captured_backtrace_and_cause",
+      "test_debug_with_captured_backtrace_simple",
+      "test_downcast"
+    ],
+    "regressed": [],
+    "guidance_from_hollow_tree": false,
+    "blocked_on": []
+  },
+  "src/error.rs::context::Error": {
+    "category": "API_HALLUCINATION",
+    "guidance": "The helpers `context_chain_downcast`, `context_chain_drop_rest` and `context_backtrace` are monomorphized on a single generic `C`, not on `<C, Error>`. Replace the vtable entries with the correct single-parameter instantiations while keeping the payload type for the drop/ref entries, e.g. `object_downcast: context_chain_downcast::<C>, object_drop_rest: context_chain_drop_rest::<C>` and `object_backtrace: context_backtrace::<C>` under the `#[cfg(...)]` gate, and leave `object_drop`, `object_ref`, `object_boxed`, `object_reallocate_boxed` as `::<ContextError<C, Error>>` and the `backtrace_if_absent!` / `Self::construct` call unchanged.",
+    "signal": "ok",
+    "retrospective_count": 9,
+    "error_count": 2,
+    "failing_test_count": 0,
+    "best_compile_errors": 0,
+    "best_failing_tests": 0,
+    "fully_exhausted": true,
+    "last_error_preview": "# Errors in target file:\nerror[E0107]: function takes 1 generic argument but 2 generic arguments were supplied\n   --> src/error.rs:352:30\n    |\n352 |             object_downcast: context_chain_downcast::<C, Error>,\n    |                    ",
+    "cluster": "stable",
+    "layout_fp": "06866ac1",
+    "gate_ver": "comparative_2026_07",
+    "route_ver": "leakproof_revert_2026_07",
+    "convicted_by": [
+      "test_debug_with_captured_backtrace_and_cause"
+    ],
+    "regressed": [],
+    "guidance_from_hollow_tree": false,
+    "blocked_on": []
+  },
+  "src/fmt.rs::debug::ErrorImpl": {
+    "category": "API_HALLUCINATION",
+    "guidance": "The chain produced by `ErrorImpl::chain(this)` is `&dyn core::error::Error`, not `Ref<Self>`, so do not call `ErrorImpl::display` on it; format a cause with the Display trait, e.g. `core::fmt::Display::fmt(err_ref, f)?` or `err_ref.fmt(f)?`, and treat `ErrorImpl::backtrace(this)` with its real return type \u2013 it is `Option<&Backtrace>`/`&Backtrace` not `Option<Backtrace>` \u2013 e.g. `if let Some(bt) = ErrorImpl::backtrace(this) { f.write_str(\"\\n\\n\")?; core::fmt::Debug::fmt(bt, f)?; }` instead of assuming an `Option<Backtrace>` and unwrapping a `Some` into a plain `Backtrace`.",
+    "signal": "ok",
+    "retrospective_count": 1,
+    "error_count": 2,
+    "failing_test_count": 0,
+    "best_compile_errors": 2,
+    "best_failing_tests": 0,
+    "fully_exhausted": false,
+    "last_error_preview": "# Errors in target file:\nerror[E0308]: mismatched types\n  --> src/fmt.rs:21:36\n   |\n21 |                 ErrorImpl::display(err_ref, f)?;\n   |                 ------------------ ^^^^^^^ expected `Ref<'_, ErrorImpl>`, found `&dyn Error`\n   |",
+    "cluster": "stable",
+    "layout_fp": "cfe1f50b",
+    "gate_ver": "comparative_2026_07",
+    "route_ver": "leakproof_revert_2026_07",
+    "convicted_by": [
+      "debug_for_anyhow_literal",
+      "display_error_debug_uses_display_via_anyhow_literal",
+      "message_error_debug_delegates_to_inner_via_error_msg",
+      "test_altdebug",
+      "test_debug",
+      "test_debug_format_of_ctx_error_contains_parts",
+      "test_debug_format_of_msg_error_is_message",
+      "wrapper_test_anyhow_literal_debug_delegates",
+      "wrapper_test_anyhow_literal_empty"
+    ],
+    "regressed": [],
+    "guidance_from_hollow_tree": false,
+    "blocked_on": [
+      "display",
+      "write_str"
+    ],
+    "futility_suspended": {
+      "cluster": "stable",
+      "tests": [
+        "test_altdebug"
+      ]
+    }
+  },
+  "__note": "Verbatim records from tmp/anyhow/.phase_c_logs/retrospectives.json after run 9933-efe68f37 (2026-08-31). msg and context have blocked_on []; debug names display/write_str. The ninth screen_guidance rule retires the first two and leaves the third."
+}

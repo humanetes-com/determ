@@ -95,7 +95,8 @@ def _proven_row(tmp_path: Path) -> LedgerEntry:
 def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
          events: list[tuple[str, dict]], logs: list[str],
          fills: int = 0, escalate=None, max_stalls: str = "1",
-         stubbed: bool = True, layout: str = _LAYOUT) -> None:
+         stubbed: bool = True, layout: str = _LAYOUT,
+         dispatched_fns: tuple[tuple[str, str], ...] | None = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
@@ -118,7 +119,8 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
             (src / "a.rs").write_text(
                 layout.replace("\n        unimplemented!()\n    ", _BODY),
                 encoding="utf-8")
-        return ClusterFillResult(attempts=1, fns_filled=fills)
+        return ClusterFillResult(
+            attempts=1, fns_filled=fills, dispatched_fns=dispatched_fns)
 
     stubs = [_UNIT] if stubbed else []
     run_phase_c_tdd(
@@ -398,3 +400,112 @@ def test_an_escalated_unit_that_came_back_unchanged_leaves_a_flat_row(
     assert any(d.get("esc_unchanged") == ["src/a.rs::width"]
                for ev, d in c_events if ev == "phase_c.tdd.landed_change"), (
         "the event key is independent of the writer")
+
+
+_LAYOUT_THREE = """\
+pub struct Own { pub ptr: usize }
+
+impl Own {
+    pub fn depth(&self) -> usize {
+        self.ptr
+    }
+
+    pub fn width(&self) -> usize {
+        self.ptr * 2
+    }
+
+    pub fn height(&self) -> usize {
+        self.ptr * 3
+    }
+}
+"""
+_HEIGHT = FnLocator("src/a.rs", "height")
+
+
+def _escalate_to_width_and_height(_src: Any, tname: str, _units: Any,
+                                 producers_out: Any = None) -> dict[FnLocator, set[str]]:
+    if producers_out is not None:
+        producers_out.add(_PROD)
+        producers_out.add(_HEIGHT)
+    return {_PROD: {tname}, _HEIGHT: {tname}}
+
+
+def test_under_a3_only_an_attempted_escalated_unit_leaves_a_flat_row(
+        monkeypatch, tmp_path: Path) -> None:
+    """The plan's sentence through the real driver. Run `9933-efe68f37`
+    iter 1 asked for 12, the file-first route attempted `{context, msg}`,
+    `msg` landed, and the FLAT arm wrote 8 rows — 7 of them for units no
+    route opened. Under A3 the analog is: three filled units, escalation
+    names `width` and `height`, the engine reports `depth` and `width`
+    attempted (`depth` so the attributed unit is served and escalation
+    is not parked), bodies unchanged. Exactly one `flat` row, `width`.
+    `height` is in the batch and escalated but no route opened it — the
+    seven false FLAT rows of the live iter 1. The `attempted` field on
+    `landed_change` is the write list so the next session does not
+    re-derive it from `logs/prompts/`.
+
+    NEGATIVE CONTROL: `dispatched_fns=None` (legacy/stub engine) still
+    writes a `flat` row for both escalated units — the pre-fix set
+    exactly, which is also what
+    `test_legacy_engine_without_report_reproduces_the_old_burn` pins on
+    the exhaustion path."""
+    _tree(tmp_path, layout=_LAYOUT_THREE)
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+         escalate=_escalate_to_width_and_height, max_stalls="3",
+         stubbed=False, layout=_LAYOUT_THREE,
+         dispatched_fns=(("src/a.rs", "depth"), ("src/a.rs", "width")))
+    named = [d for ev, d in events if ev == "phase_c.tdd.landed_change"
+             and d.get("esc_unchanged")]
+    assert named, "escalation must fire and the FLAT arm must name a set"
+    row = named[0]
+    assert row["esc_unchanged"] == ["src/a.rs::width"]
+    assert "src/a.rs::depth" in row["attempted"]
+    assert "src/a.rs::width" in row["attempted"]
+    assert "src/a.rs::height" not in row["attempted"]
+    assert "src/a.rs::height" not in row["esc_unchanged"]
+    assert "src/a.rs::height" not in row.get("unchanged", [])
+    assert {r.key.fn_name for r in ledger["rows"]
+            if r.state is BodyState.FLAT} == {"width"}
+    assert any("no route attempted" in ln and "height" in ln for ln in logs)
+
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control, layout=_LAYOUT_THREE)
+    c_ledger: dict = {"rows": []}
+    c_events: list[tuple[str, dict]] = []
+    _run(monkeypatch, control, ledger=c_ledger, events=c_events, logs=[],
+         escalate=_escalate_to_width_and_height, max_stalls="3",
+         stubbed=False, layout=_LAYOUT_THREE)
+    c_named = [d for ev, d in c_events if ev == "phase_c.tdd.landed_change"
+               and d.get("esc_unchanged")]
+    assert c_named
+    assert set(c_named[0]["esc_unchanged"]) == {
+        "src/a.rs::width", "src/a.rs::height"}
+    assert {r.key.fn_name for r in c_ledger["rows"]
+            if r.state is BodyState.FLAT} == {"width", "height"}
+
+
+def test_a3_on_the_live_iter1_lists_writes_one_flat_row() -> None:
+    """The plan's fixture, computed on run `9933-efe68f37` iter 1, not on
+    the function's output. Under A3, attempted minus landed is exactly
+    `src/error.rs::context`. Negative control 1: the live write is 8
+    `esc_unchanged` rows, 7 of them absent from the wanted set."""
+    import json
+    from pathlib import Path
+    data = json.loads(
+        (Path(__file__).parent / "fixtures" / "dispatch"
+         / "9933_attempted_vs_batch.json").read_text())
+    batch = set(data["batch"])
+    attempted = set(data["attempted"])
+    landed = set(data["landed"])
+    live_flat = set(data["live_esc_unchanged"])
+    assert len(batch) == 12
+    assert attempted == {"src/error.rs::context", "src/error.rs::msg"}
+    assert landed == {"src/error.rs::msg"}
+    assert attempted - landed == {"src/error.rs::context"}
+    assert len(live_flat) == 8
+    assert len(live_flat - attempted) == 7
+    assert live_flat & attempted == {"src/error.rs::context"}

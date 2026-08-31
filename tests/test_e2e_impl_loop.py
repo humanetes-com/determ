@@ -1296,15 +1296,21 @@ def test_file_first_default_bound_admits_a_stub_plus_refill_workload(
 # guidance string serves layouts that differ. A block convicted while its own
 # guidance named a field the current layout lacks was never fairly attempted.
 
-def _write_retro(ws: Path, guidance: str, *, cluster: str = "t") -> None:
+def _write_retro(ws: Path, guidance: str, *, cluster: str = "t",
+                 blocked_on: list[str] | None = None) -> None:
     d = ws / ".phase_c_logs"
     d.mkdir(parents=True, exist_ok=True)
     # Stamped as if earned here and now, on compile errors (no convicting
     # tests): an unstamped verdict is honoured nowhere (it names neither a
     # context nor its evidence), which would mask what these pin.
+    # Default `blocked_on` is a named stub so these pin layout / cluster /
+    # fingerprint, not the ninth screen_guidance rule (empty blocked_on
+    # retires every stored lesson). Pass blocked_on=[] to pin that rule.
     rec = stamp_conviction(
         {"category": "API_HALLUCINATION", "guidance": guidance,
-         "fully_exhausted": True, "best_error_count": 3},
+         "fully_exhausted": True, "best_error_count": 3,
+         "blocked_on": list(blocked_on if blocked_on is not None
+                            else ["other_stub"])},
         RetroProvenance.current(
             cluster, (ws / "src" / "lib.rs").read_text(encoding="utf-8")),
         ConvictionEvidence(frozenset()))
@@ -1333,6 +1339,23 @@ def test_impl_exhausted_block_still_skipped_when_guidance_matches_layout(
     res = _run(ws)
     assert res.impls_filled == 0 and res.fns_filled == 0
     assert "unimplemented!()" in (ws / "src" / "lib.rs").read_text()
+
+
+def test_impl_exhausted_block_retried_when_blocked_on_is_empty(
+        monkeypatch, tmp_path):
+    # Layout-consistent guidance with empty blocked_on is the ninth rule's
+    # constituency: honouring exhaustion would skip the block, so the
+    # screen would never see the record. Run 9933-efe68f37 left msg and
+    # context in that shape on the per-fn keys; the impl route is the
+    # same skip predicate.
+    ws = _setup(monkeypatch, tmp_path)
+    _write_retro(ws, "Read the payload from the `tag` field of Foo.",
+                 blocked_on=[])
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    assert res.impls_filled == 1 and res.fns_filled == 2
+    assert "unimplemented!()" not in (ws / "src" / "lib.rs").read_text()
 
 
 def test_impl_exhausted_block_retried_when_verdict_earned_in_another_cluster(

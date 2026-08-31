@@ -648,6 +648,33 @@ class GuidanceScreening(NamedTuple):
 
 TEST_SACRIFICING_PRESCRIPTION = "test_sacrificing_prescription"
 CONVICTORS_NEVER_EXECUTE = "convictors_never_execute"
+NO_TREE_PREMISE = "no_tree_premise"
+
+
+def tree_premise_absent(record: Mapping[str, Any] | None) -> bool:
+    """True when a stored conviction recorded no checkable tree premise.
+
+    `blocked_on` absent or empty is the same unfalsifiable claim
+    `impossibility_claim_is_unfounded` already retires for the impossibility
+    half of the channel. Corrective records were excluded there because
+    `asserts_impossibility` is false, so a WRONG_TYPE_CHOICE lesson with
+    `blocked_on: []` steered every re-fill for the life of the store — run
+    `9933-efe68f37` (2026-08-31): `src/error.rs::context::Error` honoured
+    six times into an E0107, `src/error.rs::msg::Error` wrote
+    `force_capture` at loop exit. 30 of 33 records in that run's store
+    were this class.
+
+    A missing cache entry (`{}` / `None`) is not a stored conviction: no
+    guidance and no exhaustion flag means there is nothing to retire.
+    Callers that pass `retros_cache.get(key, {})` must not poison every
+    unit without a record.
+    """
+    if not record:
+        return False
+    if not (record.get("guidance") or record.get("fully_exhausted")):
+        return False
+    stored = record.get("blocked_on")
+    return not isinstance(stored, list) or not stored
 
 
 def screening_unit(file: str, fn_name: str) -> FnLocator | None:
@@ -795,6 +822,22 @@ def screen_guidance(
         if isinstance(convicted, list) and convicted and unreached_by(
                 unit, [str(t) for t in convicted]):
             return GuidanceScreening("", CONVICTORS_NEVER_EXECUTE)
+    # The ninth way, and the one that closes the other half of the
+    # channel `impossibility_claim_is_unfounded` already covers: a
+    # record with `blocked_on` absent or empty cannot expire on its
+    # own evidence. Judged AFTER the eighth rule so a bound Ok
+    # record (empty `blocked_on`, convictors that never enter it)
+    # still retires as `convictors_never_execute` — the 225 bound
+    # tests stay green. Judged BEFORE `stale_evidence` so an
+    # empty-premise behavioural record is this class, not a
+    # moved-blame-map class. A nonempty `blocked_on` still stubbed
+    # (`src/fmt.rs::debug::ErrorImpl`) is not this class. 30 of 33
+    # records on the `9933-efe68f37` store drop on the next read,
+    # including compile-taught lessons that never named a stub —
+    # that trade is the contract, not a mute of the three checkable
+    # rows.
+    if tree_premise_absent(rec):
+        return GuidanceScreening("", NO_TREE_PREMISE)
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return GuidanceScreening("", "stale_evidence")
     text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
@@ -839,6 +882,15 @@ def retired_guidance_line(
                 f"rounds={rec.get('retrospective_count') or 0} was convicted "
                 f"by test(s) that never execute this body ({names[:4]}) "
                 f"— NOT injected ({CONVICTORS_NEVER_EXECUTE}): {head}")
+    if verdict.retired_by == NO_TREE_PREMISE:
+        # Same shape: the record stays, the text is what was dropped.
+        # Run `9933-efe68f37` honoured `src/error.rs::context::Error`
+        # six times with `NO tree premise` and no retirement line.
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} recorded "
+                f"no tree premise — NOT injected ({NO_TREE_PREMISE}): {head}")
     if verdict.retired_by != TEST_SACRIFICING_PRESCRIPTION:
         return ""
     convicted = rec.get("convicted_by")

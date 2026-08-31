@@ -300,12 +300,37 @@ def test_fill_one_exhaustion_honoured_when_guidance_matches_layout(
     ctx.retros_cache["k"] = stamp_conviction(
         {"fully_exhausted": True,
          "guidance": "Read the wrapped error from the `error` field of "
-                     "ErrorImpl."},
+                     "ErrorImpl.",
+         "blocked_on": ["other_stub"]},
         RetroProvenance.current("t", (ws / "src" / "lib.rs").read_text()),
         ConvictionEvidence(frozenset()))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
     assert not res.filled and res.attempts == 0
     assert "phase_c.fn.fill.skip" in fake.events
+
+
+def test_fill_one_exhaustion_not_honoured_when_blocked_on_is_empty(
+        tmp_path: Path) -> None:
+    """A layout-consistent corrective record with empty `blocked_on` cannot
+    convict the unit into a skip: the next launch would never screen, and
+    the ninth rule would have nothing to retire. Run `9933-efe68f37` left
+    `src/error.rs::msg::Error` fully_exhausted with `blocked_on: []`."""
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text(
+        "struct ErrorImpl { vtable: u8, error: u8 }\n"
+        "pub fn answer() {\n unimplemented!()\n}\n")
+    fake = FakeFill(exhausted=True)
+    ctx = _ctx(ws)
+    ctx.retros_cache["k"] = stamp_conviction(
+        {"fully_exhausted": True,
+         "guidance": "Read the wrapped error from the `error` field of "
+                     "ErrorImpl.",
+         "blocked_on": []},
+        RetroProvenance.current("t", (ws / "src" / "lib.rs").read_text()),
+        ConvictionEvidence(frozenset()))
+    _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert "phase_c.fn.fill.skip" not in fake.events
+    assert any("no_tree_premise" in m for m in fake.logs)
 
 
 def test_fill_one_exhaustion_not_honoured_when_earned_elsewhere(
@@ -323,7 +348,8 @@ def test_fill_one_exhaustion_not_honoured_when_earned_elsewhere(
     ctx.retros_cache["k"] = stamp_conviction(
         {"fully_exhausted": True,
          "guidance": "Read the wrapped error from the `error` field of "
-                     "ErrorImpl."},
+                     "ErrorImpl.",
+         "blocked_on": ["other_stub"]},
         RetroProvenance.current(
             "other-cluster", (ws / "src" / "lib.rs").read_text()),
         ConvictionEvidence(frozenset()))
@@ -346,7 +372,8 @@ def test_fill_one_exhaustion_not_honoured_when_its_tests_no_longer_convict(
     ctx = replace(_ctx(ws), tdd_frontier_tests=FailureFrontier.of_direct(
         {FnLocator("lib.rs", "answer"): {"test_mine"}}))
     ctx.retros_cache["k"] = stamp_conviction(
-        {"fully_exhausted": True, "guidance": ""},
+        {"fully_exhausted": True, "guidance": "",
+         "blocked_on": ["other_stub"]},
         RetroProvenance.current("t", (ws / "src" / "lib.rs").read_text()),
         ConvictionEvidence(frozenset({"test_mine", "test_someone_elses"})))
     _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)

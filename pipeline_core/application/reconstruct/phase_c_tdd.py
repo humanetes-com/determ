@@ -3907,12 +3907,29 @@ def run_phase_c_tdd(
         _before_svc = [k for k, _ in ordered]
         ordered = promote_by_service(
             ordered, set(_served_at), _flat_keys, _dead_keys, _red_dead)
-        if [k for k, _ in ordered] != _before_svc:
-            _never = [k for k, _ in ordered if k not in _served_at
-                      and k not in _dead_keys and k not in _red_dead]
-            _flat_n = sum(1 for k, _ in ordered if k in _flat_keys
-                          and k not in _dead_keys and k not in _red_dead)
-            _rd_only = _red_dead - _dead_keys
+        _ranked = [k for k, _ in ordered]
+        _never = [k for k in _ranked if k not in _served_at
+                  and k not in _dead_keys and k not in _red_dead]
+        _flat_n = sum(1 for k in _ranked if k in _flat_keys
+                      and k not in _dead_keys and k not in _red_dead)
+        _rd_only = _red_dead - _dead_keys
+        # RE-BUY DETECTOR, on the ranked frontier, BEFORE the cut.
+        # Run `9933-efe68f37` computed this after `take_batch`, so the
+        # reading named only units already inside the cap. A ranking
+        # bucket that would sink a unit a failing test enters while an
+        # unentered unit occupies the cap is refused (computed on that
+        # run's service-order prefix: sinking `context`/`msg` leaves the
+        # nine never-served and pulls `downcast`/`render`). Detector
+        # only: nothing is demoted, removed, or exhausted.
+        _rebuy: tuple[tuple[FnLocator, LedgerEntry], ...] = ()
+        if not _code_moved:
+            _rebuy = rebuy_hits(
+                _ranked, latest_by_unit(_ledger_entries()),
+                project=project_dir.name, cluster=cluster.name,
+                run_id=deps.run_id, oracle_fp=_oracle_fp(iter_n))
+        _rebuy_names = [f"{u.file}::{u.fn_name}" for u, _ in _rebuy]
+        _order_moved = _ranked != _before_svc
+        if _order_moved:
             deps.log(
                 f"  {tag} [phase-c/dispatch] service order: "
                 f"{len(_never)} never-served unit(s) rank before served; "
@@ -3927,6 +3944,7 @@ def run_phase_c_tdd(
                    + ", ".join(sorted(f"{k.file}::{k.fn_name}"
                                       for k in _rd_only)[:6])
                    if _rd_only else ""))
+        if _order_moved or _rebuy:
             deps.emit("phase_c.dispatch.service_order", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "never_served": [f"{k.file}::{k.fn_name}" for k in _never],
@@ -3934,7 +3952,19 @@ def run_phase_c_tdd(
                 "dead": sorted(f"{k.file}::{k.fn_name}" for k in _dead_keys),
                 "red_dead": sorted(f"{k.file}::{k.fn_name}"
                                    for k in _rd_only),
+                "rebuy": _rebuy_names,
             })
+        if _rebuy:
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: RE-BUY — "
+                f"{len(_rebuy)} unit(s) a prior process already graded "
+                "with an empty verdict delta: "
+                + ", ".join(f"{u.file}::{u.fn_name}" for u, _ in _rebuy[:8])
+                + (f" (+{len(_rebuy) - 8} more)" if len(_rebuy) > 8 else ""))
+            deps.emit("phase_c.re_buy", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "units": _rebuy_names,
+                "prior_run_id": _rebuy[0][1].run_id})
         # Crash evidence outranks everything, including the producer order above.
         ordered = promote_crash_evidence(ordered, _crash_grades)
         if _pass_cohort is None:
@@ -4247,22 +4277,6 @@ def run_phase_c_tdd(
         # Served is whatever fill-return has already stamped — not this batch.
         _persist_floor()
         frontier_keys = set(_batch.keys)
-        if not _code_moved:
-            _hits = rebuy_hits(
-                _batch.keys, latest_by_unit(_ledger_entries()),
-                project=project_dir.name, cluster=cluster.name,
-                run_id=deps.run_id, oracle_fp=_oracle_fp(iter_n))
-            if _hits:
-                deps.log(
-                    f"  {tag} [phase-c/tdd] iter {iter_n}: RE-BUY — "
-                    f"{len(_hits)} unit(s) a prior process already graded "
-                    "with an empty verdict delta: "
-                    + ", ".join(f"{u.file}::{u.fn_name}" for u, _ in _hits[:8])
-                    + (f" (+{len(_hits) - 8} more)" if len(_hits) > 8 else ""))
-                deps.emit("phase_c.re_buy", data={
-                    "cluster": cluster.name, "iter": iter_n,
-                    "units": [f"{u.file}::{u.fn_name}" for u, _ in _hits],
-                    "prior_run_id": _hits[0][1].run_id})
         _cls_bit = (f" {_prev_fill_classes.rendered()}"
                     if _saw_fill else "")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
@@ -4471,10 +4485,27 @@ def run_phase_c_tdd(
             raise
         finally:
             fill_phase_clock.disarm()
-        # Fill returned — this batch was served. A kill that never returned
-        # is not service (the dispatch persist above left these keys off
-        # `_served_at` on purpose).
-        _served_at.update(dict.fromkeys(frontier_keys, iter_n))
+        # What the engine ACTUALLY dispatched. The frontier is what the
+        # driver asked for; the engine narrows it (the impl route defers
+        # itself behind free-fn blockers, the per-fn route takes only
+        # free fns). Run `9933-efe68f37` (2026-08-31) asked for 12, the
+        # file-first route attempted `{context, msg}`, and the two sites
+        # below graded 8 of the 12 as tried — 7 of them never reached a
+        # prompt — because they predated the decode exhaustion charging
+        # already used. `None` = engine did not report (legacy/stub
+        # engines): fall back to the old frontier==dispatched.
+        _sub_dispatched: set[FnLocator] | None = (
+            None if sub.dispatched_fns is None
+            else {FnLocator(*t) for t in sub.dispatched_fns})
+        _attempted = (
+            frontier_keys if _sub_dispatched is None
+            else _sub_dispatched & frontier_keys)
+        # Fill returned — this batch was served, but only the units a
+        # route opened. A kill that never returned is not service (the
+        # dispatch persist above left these keys off `_served_at` on
+        # purpose). A unit the routes never opened keeps its
+        # never-served rank instead of silently dropping to bucket 1.
+        _served_at.update(dict.fromkeys(_attempted, iter_n))
         _persist_floor()
         _capped_n, _capped_m = summarize_capped(_fill_meta)
         # The forced followup's own outcome, folded beside the main-stream
@@ -4537,7 +4568,18 @@ def run_phase_c_tdd(
             # unchanged body is a failed try, and it is reported under its
             # own name so the batch line says which grade declined. The body
             # comparison cannot see WHY nothing landed; the grades can.
-            _batch_unchanged = frontier_keys - _batch_landed
+            # `_attempted` not `frontier_keys`: an escalated unit no route
+            # wrote is not a failed try. Run `9933-efe68f37` iter 1 wrote
+            # eight FLAT rows; seven of them were units the file-first
+            # `wanted` set never opened (`context` was the one it did).
+            # Existing false rows sit until those units are in a `wanted`
+            # set; this cut stops new ones. The 12 installable complement
+            # names omitted from `dispatched_fns` stay out of `_attempted`
+            # on purpose — their prompt sentence is `return it unchanged
+            # only if it is already right`, which `declined_unchanged`
+            # already protects.
+            _batch_unchanged = _attempted - _batch_landed
+            _batch_unattempted = frontier_keys - _attempted
             _batch_esc_unchanged = _batch_unchanged & _batch_escalated
             _batch_esc_flat, _batch_esc_reverted = split_reverted(
                 _batch_esc_unchanged, sub.reverted_fns)
@@ -4616,6 +4658,11 @@ def run_phase_c_tdd(
                        f"{k.file}::{k.fn_name}"
                        for k in _batch_esc_reverted)[:12])
                    if _batch_esc_reverted else "")
+                + (f"; {len(_batch_unattempted)} batch unit(s) no route "
+                   "attempted: " + ", ".join(sorted(
+                       f"{k.file}::{k.fn_name}"
+                       for k in _batch_unattempted)[:12])
+                   if _batch_unattempted else "")
                 + (f"; {_capped_n} of {_capped_m} fill replies reasoning-capped"
                    + (f" ({_fu_cut} followup replies truncated"
                       + (f", {_fu_salv} salvaged to their last closed block"
@@ -4625,6 +4672,8 @@ def run_phase_c_tdd(
             deps.emit("phase_c.tdd.landed_change", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "dispatched": len(frontier_keys),
+                "attempted": sorted(f"{k.file}::{k.fn_name}"
+                                    for k in _attempted),
                 "landed": sorted(f"{k.file}::{k.fn_name}"
                                  for k in _batch_landed),
                 "unchanged": sorted(f"{k.file}::{k.fn_name}"
@@ -4704,19 +4753,10 @@ def run_phase_c_tdd(
             recently_filled.append(k)
         if len(recently_filled) > recently_filled_max:
             recently_filled = recently_filled[-recently_filled_max:]
-        # What the engine ACTUALLY dispatched, when it reports it. The frontier
-        # is what the driver asked for; the engine narrows it (the impl route
-        # defers itself behind free-fn blockers, the per-fn route takes only
-        # free fns), so an impl member can sit in every iteration's frontier
-        # and never be attempted by any route. `None` = engine did not report
-        # (legacy/stub engines): fall back to the old frontier==dispatched.
-        _sub_dispatched: set[FnLocator] | None = (
-            None if sub.dispatched_fns is None
-            else {FnLocator(*t) for t in sub.dispatched_fns})
         # This pass's dispatch set, for the stall exit's conviction window.
-        _dispatched_window.append(frozenset(
-            frontier_keys if _sub_dispatched is None
-            else _sub_dispatched & set(frontier_keys)))
+        # `_attempted` is the same decode as `_served_at` / the FLAT arm
+        # above; `None` engine already fell back to the frontier there.
+        _dispatched_window.append(frozenset(_attempted))
         if len(_dispatched_window) > max(max_stalls, 1) + 1:
             _dispatched_window = _dispatched_window[-(max(max_stalls, 1) + 1):]
         # A re-fill attempt is CHARGEABLE only when the sweep that dispatched

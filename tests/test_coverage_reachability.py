@@ -34,10 +34,12 @@ from pipeline_core.domain.coverage_slice import (
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.retro_gate import (
     CONVICTORS_NEVER_EXECUTE,
+    NO_TREE_PREMISE,
     ConvictionEvidence,
     retired_guidance_line,
     screen_guidance,
     screening_unit,
+    tree_premise_absent,
 )
 
 _FIXTURE = json.loads(
@@ -175,25 +177,40 @@ def test_the_persisted_conviction_is_retired_under_the_reading() -> None:
         _unbind()
 
 
-def test_without_the_reading_the_record_is_honoured() -> None:
-    """The pre-fix behaviour, reproduced: unbound, the guidance reaches the
-    prompt. This is the control the fix has to beat."""
+def test_without_the_reading_a_record_with_named_blockers_is_honoured() -> None:
+    """The eighth-rule unbound control: with nonempty `blocked_on` the ninth
+    rule does not fire, and without the owner map the eighth does not fire
+    either, so the guidance reaches the prompt. The live Ok record has
+    `blocked_on: []` and is now the ninth rule's constituency — that case
+    is pinned next to the 9933 records, not here."""
     _unbind()
+    record = dict(_FIXTURE["retro_record"])
+    record["blocked_on"] = ["format_err"]
     verdict = screen_guidance(
-        _FIXTURE["retro_record"], _FILE_TEXT,
+        record, _FILE_TEXT,
         evidence=ConvictionEvidence(frozenset()), unit=_OK)
     assert "Err(value)" in verdict.text
     assert verdict.retired_by == ""
 
 
-def test_a_caller_that_offers_no_unit_never_fires_the_rule() -> None:
-    """The impl route: its unit is a block, the owner map is keyed per fn."""
+def test_a_caller_that_offers_no_unit_never_fires_the_eighth_rule() -> None:
+    """The impl route: its unit is a block, the owner map is keyed per fn.
+    Empty `blocked_on` still retires as the ninth rule — that rule does
+    not read the owner map. A copy with named blockers is the eighth-rule
+    control at `unit=None`."""
     bind(CoverageSlice(owners=_owners()))
     try:
         verdict = screen_guidance(
             _FIXTURE["retro_record"], _FILE_TEXT,
             evidence=ConvictionEvidence(frozenset()))
         assert verdict.retired_by != CONVICTORS_NEVER_EXECUTE
+        assert verdict.retired_by == NO_TREE_PREMISE
+        named = dict(_FIXTURE["retro_record"])
+        named["blocked_on"] = ["format_err"]
+        kept = screen_guidance(
+            named, _FILE_TEXT, evidence=ConvictionEvidence(frozenset()))
+        assert kept.retired_by != CONVICTORS_NEVER_EXECUTE
+        assert "Err(value)" in kept.text
     finally:
         _unbind()
 
@@ -226,3 +243,57 @@ def test_the_retired_line_names_the_class_and_the_convictor() -> None:
     assert CONVICTORS_NEVER_EXECUTE in line
     assert "test_trailer" in line
     assert "never execute this body" in line
+
+
+# --------------------------------------------- empty blocked_on, ninth rule
+
+_PREMISE = json.loads(
+    (pathlib.Path(__file__).parent / "fixtures" / "retro"
+     / "9933_empty_premise.json").read_text())
+_MSG = FnLocator("src/error.rs", "msg")
+_CONTEXT = FnLocator("src/error.rs", "context")
+_FILE_OK = "pub fn msg() {}\npub fn context() {}\n"
+
+
+def test_empty_blocked_on_records_from_9933_are_retired() -> None:
+    """The plan's sentence: under the ninth rule, screen_guidance on
+    `src/error.rs::msg::Error` and `src/error.rs::context::Error` returns
+    empty text and retired_by set. The force_capture / `::<C, Error>`
+    sentences cannot enter the next prompt. Bound Ok still retires as
+    convictors_never_execute (eighth first)."""
+    _unbind()
+    for key, loc in (("src/error.rs::msg::Error", _MSG),
+                     ("src/error.rs::context::Error", _CONTEXT)):
+        rec = _PREMISE[key]
+        assert rec["blocked_on"] == []
+        assert tree_premise_absent(rec)
+        verdict = screen_guidance(
+            rec, _FILE_OK, evidence=ConvictionEvidence(frozenset()),
+            unit=loc)
+        assert verdict.text == ""
+        assert verdict.retired_by == NO_TREE_PREMISE
+        line = retired_guidance_line(key, rec, verdict)
+        assert NO_TREE_PREMISE in line
+        assert "no tree premise" in line
+    assert "force_capture" in _PREMISE["src/error.rs::msg::Error"]["guidance"]
+    bind(CoverageSlice(owners=_owners()))
+    try:
+        bound = screen_guidance(
+            _FIXTURE["retro_record"], _FILE_TEXT,
+            evidence=ConvictionEvidence(frozenset()), unit=_OK)
+        assert bound.retired_by == CONVICTORS_NEVER_EXECUTE
+    finally:
+        _unbind()
+
+
+def test_a_record_with_named_blockers_is_not_the_ninth_rule() -> None:
+    """`src/fmt.rs::debug::ErrorImpl` names `display`/`write_str`. The
+    ninth rule is not a mute of the three checkable rows."""
+    rec = dict(_PREMISE["src/fmt.rs::debug::ErrorImpl"])
+    rec.pop("futility_suspended", None)
+    assert rec["blocked_on"] == ["display", "write_str"]
+    assert not tree_premise_absent(rec)
+    verdict = screen_guidance(
+        rec, "fn display() { unimplemented!() }\nfn write_str() { unimplemented!() }\n",
+        evidence=ConvictionEvidence(frozenset()), cluster="")
+    assert verdict.retired_by != NO_TREE_PREMISE

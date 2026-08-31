@@ -229,6 +229,7 @@ def test_guidance_drawn_from_a_foreign_red_test_is_withheld() -> None:
                     "\"other error: boxed_err\".",
         "error_count": 0,
         "convicted_by": ["test_from_boxed_basic"],
+        "blocked_on": ["from_boxed"],
     }
     mine = ConvictionEvidence(frozenset({"test_from_boxed_basic"}))
     assert admissible_guidance(behavioural, LAYOUT, evidence=mine)
@@ -241,7 +242,8 @@ def test_compiler_taught_guidance_outlives_any_frontier_change() -> None:
     # test — no change to the blame map can make it wrong, so narrowing the
     # frontier must not cost it (that would throw away the store's real value).
     compiled = {"guidance": "`Self` may not be nested inside a generic arg here.",
-                "error_count": 4, "convicted_by": ["test_whatever"]}
+                "error_count": 4, "convicted_by": ["test_whatever"],
+                "blocked_on": ["construct"]}
     assert admissible_guidance(
         compiled, LAYOUT, evidence=ConvictionEvidence(frozenset()))
     # …but a layout-contradicted lesson is still withheld, on either path.
@@ -299,7 +301,8 @@ def test_guidance_prescribing_a_field_as_a_fn_is_retired() -> None:
     assert admissible_guidance(poisoned, VTABLE_LAYOUT, evidence=NO_TESTS) == ""
     # The correct direction names a fn the file declares and must survive.
     sound = {"guidance": "Assign `object_drop_front::<E>` to the drop_rest slot.",
-             "error_count": 3, "convicted_by": []}
+             "error_count": 3, "convicted_by": [],
+             "blocked_on": ["object_drop"]}
     assert admissible_guidance(sound, VTABLE_LAYOUT, evidence=NO_TESTS)
 
 
@@ -310,7 +313,8 @@ def test_path_qualified_and_type_turbofish_are_not_call_claims() -> None:
     for text in ("Use `crate::vt::object_drop_rest::<E>` here.",
                  "Annotate it `Own::<ErrorImpl>` explicitly."):
         assert admissible_guidance(
-            {"guidance": text, "error_count": 3, "convicted_by": []},
+            {"guidance": text, "error_count": 3, "convicted_by": [],
+             "blocked_on": ["object_drop"]},
             VTABLE_LAYOUT, evidence=NO_TESTS) == text
 
 
@@ -403,6 +407,42 @@ def test_corrective_guidance_is_untouched_by_the_impossibility_rule() -> None:
     assert not impossibility_claim_is_unfounded(rec, frozenset())
 
 
+def test_corrective_guidance_with_no_tree_premise_is_retired_at_screen() -> None:
+    """The impossibility function still ignores corrective; screen_guidance
+    does not. Same record as the function-level control, judged where the
+    other eight rules are judged. A missing cache entry is not a stored
+    conviction."""
+    from pipeline_core.domain.retro_gate import (
+        NO_TREE_PREMISE,
+        impossibility_claim_is_unfounded,
+        tree_premise_absent,
+    )
+    rec = {"guidance": "`this.deref()` resolves to the inherent `deref` on "
+                       "`Ref` which returns `()`. Deref via the trait instead, "
+                       "e.g. `unsafe { *this }`.",
+           "error_count": 2, "blocked_on": []}
+    assert not impossibility_claim_is_unfounded(rec, frozenset())
+    assert tree_premise_absent(rec)
+    assert not tree_premise_absent({})
+    assert not tree_premise_absent(None)
+    verdict = screen_guidance(rec, LAYOUT, evidence=NO_TESTS)
+    assert verdict.text == ""
+    assert verdict.retired_by == NO_TREE_PREMISE
+    line = retired_guidance_line("src/error.rs::deref::Error", rec, verdict)
+    assert NO_TREE_PREMISE in line
+    assert "no tree premise" in line
+
+
+def test_impossibility_with_no_tree_premise_still_names_impossibility() -> None:
+    """Ninth is after impossibility, so the more specific class wins."""
+    rec = {"guidance": "The skeleton does not expose the VTable layout, so the "
+                       "chain cannot be traversed correctly with only this.",
+           "error_count": 0, "blocked_on": []}
+    verdict = screen_guidance(rec, LAYOUT, evidence=NO_TESTS)
+    assert verdict.text == ""
+    assert verdict.retired_by == "impossibility_unfounded"
+
+
 def test_negative_control_the_pre_fix_gate_admits_all_three() -> None:
     """Without the impossibility rule the three records pass every other gate:
     the layout sieve finds no field lie, `GUIDANCE_FROM_HOLLOW_TREE` is keyed
@@ -475,6 +515,7 @@ def test_futility_suspension_withholds_guidance_for_the_stamping_cluster_only() 
     # test is the suspension stamp.
     rec = {"guidance": "In the Buffered arm keep the storage as a Vec.",
            "error_count": 1,
+           "blocked_on": ["next_back"],
            FUTILITY_SUSPENDED: {"cluster": "stable", "tests": ["test_rev"]}}
     assert futility_suspension_applies(rec, "stable")
     assert not futility_suspension_applies(rec, "nightly")
@@ -486,7 +527,8 @@ def test_futility_suspension_withholds_guidance_for_the_stamping_cluster_only() 
     # NEGATIVE CONTROL — pre-fix shape: the same record with no stamp (or a
     # caller passing no cluster) flows exactly as before.
     assert admissible_guidance(rec, "", evidence=NO_TESTS) != ""
-    unstamped = {"guidance": rec["guidance"], "error_count": 1}
+    unstamped = {"guidance": rec["guidance"], "error_count": 1,
+                 "blocked_on": rec["blocked_on"]}
     assert admissible_guidance(unstamped, "", evidence=NO_TESTS,
                                cluster="stable") != ""
 
@@ -747,12 +789,15 @@ def test_live_bothdebug_record_is_regression_scoped_for_the_tests_it_prescribes_
     assert not regression_scoped(stamped, ConvictionEvidence(frozenset({"test_as"})))
     assert not regression_scoped(stamped, ConvictionEvidence(frozenset({"ensure::test_as"})))
     # NEGATIVE CONTROL 1: the record as it sits in the store — no
-    # `regressed` stamp — falls to today's rule, `stale_evidence`
-    # (`error_count 0`, `convicted_by []`, a test on the unit), and is not
-    # this class. That is what makes the stamp load-bearing.
-    assert not regression_scoped(rec, ConvictionEvidence(trailer))
-    assert _screen(rec, trailer).retired_by == "stale_evidence"
-    assert _screen(rec, trailer).text == ""
+    # `regressed` stamp — with a named blocker so the ninth rule does
+    # not fire, falls to today's rule, `stale_evidence` (`error_count 0`,
+    # `convicted_by []`, a test on the unit), and is not this class.
+    # That is what makes the stamp load-bearing.
+    rec_named = dict(rec)
+    rec_named["blocked_on"] = ["render"]
+    assert not regression_scoped(rec_named, ConvictionEvidence(trailer))
+    assert _screen(rec_named, trailer).retired_by == "stale_evidence"
+    assert _screen(rec_named, trailer).text == ""
     # NEGATIVE CONTROL 2: the suspension outranks it where it applies.
     assert _screen(_live_bothdebug(), trailer).retired_by == "futility_suspended"
     # NEGATIVE CONTROL 3: a compiler-taught record (`error_count 2`) is
@@ -762,6 +807,7 @@ def test_live_bothdebug_record_is_regression_scoped_for_the_tests_it_prescribes_
     taught = dict(stamped)
     taught["error_count"] = 2
     taught["regressed"] = list(regressed_tests_from_excerpt("error[E0277]: …"))
+    taught["blocked_on"] = ["render"]
     assert not regression_scoped(taught, ConvictionEvidence(trailer))
     verdict = _screen(taught, trailer)
     assert verdict.retired_by == ""

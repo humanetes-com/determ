@@ -88,6 +88,7 @@ from pipeline_core.domain.retro_gate import (
     screen_guidance,
     screening_unit,
     stamp_conviction,
+    tree_premise_absent,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import U2Decision
@@ -296,6 +297,23 @@ class FillOneFn:
                          "regression of test(s) this fn does not answer for "
                          "— retro guidance withheld (regression_scoped), "
                          "exhaustion not honoured (regression-scoped).")
+        # A stored lesson with `blocked_on` absent or empty cannot expire
+        # on its own evidence and must not convict the unit into a skip
+        # either: honouring `fully_exhausted` here would mean the next
+        # launch never screens, so the ninth rule would have nothing to
+        # retire. Run `9933-efe68f37` left `src/error.rs::msg::Error` and
+        # `::context::Error` exhausted with empty `blocked_on`; without
+        # this clause the relaunch would skip them and the `force_capture`
+        # / `::<C, Error>` sentences would stay out of prompts only because
+        # there was no prompt. Same shape as the impl route's
+        # impossibility-unfounded skip: guidance withheld, exhaustion not
+        # honoured, record stays.
+        elif tree_premise_absent(_retro_rec):
+            _poisoned_retro = True
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
+                         f"[{container}]: retro guidance recorded no tree "
+                         "premise — retro guidance withheld, exhaustion not "
+                         "honoured (no_tree_premise).")
         # …and a conviction earned in ANOTHER context (other cluster's layout,
         # the absolute acceptance gate, the pre-group route set), or drawn from
         # tests that no longer convict this fn, is proof of nothing here —

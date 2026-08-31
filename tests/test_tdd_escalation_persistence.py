@@ -399,6 +399,41 @@ def test_without_the_persisted_product_an_attribution_shift_re_buys_accessors(
     assert batches and batches[0] == (_NEW_ACC,)
 
 
+_OTHER = FnLocator("src/b.rs", "other")
+
+
+def test_rebuy_is_computed_on_the_ranked_frontier_not_the_cut_batch(
+        tmp_path, monkeypatch) -> None:
+    """The detector reads the ranked frontier before take_batch. Run
+    `9933-efe68f37` computed hits on the cut batch, so a unit a prior
+    process already graded empty-delta that sat behind the cap was
+    invisible until it was bought. Cap 1, two attributed units, prior
+    row on the second: the hit is on service_order and re_buy even
+    though the dispatched batch does not contain it."""
+    prior = [LedgerEntry(
+        key=LedgerKey(project=tmp_path.name, cluster="stable",
+                      file=_OTHER.file, fn_name=_OTHER.fn_name),
+        body_sha="x", bodies=("x",), sig_sha="s", layout_fp="f",
+        run_id="349271-d876e4a9", verdict_delta=(),
+        state=BodyState.PROVEN)]
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    _run(_deps(
+        logs=[], events=events, batches=batches, floor={},
+        escalations=[], ledger_load=lambda *a, **k: prior,
+        run_id="this-process",
+        attribute=lambda: AttributionResult(
+            {_ACC: {"t2"}, _OTHER: {"t3"}}, FailureKind.RUNTIME,
+            {_ACC: {"t2"}, _OTHER: {"t3"}}),
+    ), tmp_path, monkeypatch, guard="9", dispatch_cap="1")
+    buys = [d for ev, d in events if ev == "phase_c.re_buy"]
+    assert buys and f"{_OTHER.file}::{_OTHER.fn_name}" in buys[0]["units"]
+    assert f"{_ACC.file}::{_ACC.fn_name}" not in buys[0]["units"]
+    orders = [d for ev, d in events if ev == "phase_c.dispatch.service_order"]
+    assert orders and f"{_OTHER.file}::{_OTHER.fn_name}" in orders[0]["rebuy"]
+    assert batches and _OTHER not in batches[0]
+
+
 def test_rebuy_emits_at_dispatch_for_a_prior_process_empty_delta(
         tmp_path, monkeypatch) -> None:
     """Walk-shaped: `349271-d876e4a9`'s 7-of-7 accessor re-buy, here as one

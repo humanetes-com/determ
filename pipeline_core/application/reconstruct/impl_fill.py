@@ -164,6 +164,7 @@ from pipeline_core.domain.retro_gate import (
     screen_guidance,
     screening_unit,
     stamp_conviction,
+    tree_premise_absent,
 )
 from pipeline_core.domain.rust_idents import (
     canon_container,
@@ -2129,6 +2130,11 @@ def fill_impl_blocks(
                  "cannot be done, on a tree premise that has since moved (or "
                  "that it never recorded) — guidance withheld, exhaustion not "
                  "honoured (impossibility-unfounded).")
+        elif tree_premise_absent(_retro_rec):
+            _poisoned_retro = True
+            _log(f"  [phase-c/impl] {block_id}: retro guidance recorded no "
+                 "tree premise — guidance withheld, exhaustion not honoured "
+                 "(no_tree_premise).")
         # A verdict earned in another context (other cluster's layout, the
         # absolute acceptance gate, the pre-group route set) sampled a
         # different problem — it cannot convict this block. Neither can one
