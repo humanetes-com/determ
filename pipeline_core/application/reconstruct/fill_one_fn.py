@@ -47,6 +47,9 @@ from pipeline_core.application.reconstruct.pull_resolver import (
 )
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
+from pipeline_core.domain.coverage_slice import (
+    unreached_by as coverage_unreached_by,
+)
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.fill_class import FillOutcomeClass, class_for_kept
@@ -83,6 +86,7 @@ from pipeline_core.domain.retro_gate import (
     regression_scoped,
     retired_guidance_line,
     screen_guidance,
+    screening_unit,
     stamp_conviction,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -573,7 +577,8 @@ class FillOneFn:
                 _retro_verdict = screen_guidance(
                     _retro_rec, cur_text, evidence=_answers,
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
-                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file))
+                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
+                    unit=screening_unit(rel_file, fn_name))
                 _retro_guidance = _retro_verdict.text
                 # The line carries the STORE key (file::fn::container), not a
                 # display name: `fn new` exists under three containers, and
@@ -855,6 +860,42 @@ class FillOneFn:
                                     "blocked_on": sorted(
                                         f"{k.file}::{k.fn_name}"
                                         for k in _held),
+                                })
+                            _u2_fail_sig = None
+                    # The same refusal on measured evidence rather than on
+                    # stub-ness. The check above asks whether a hollow
+                    # sibling holds every failing test; this asks whether
+                    # the failing tests enter this body at all. Both are
+                    # attempt-invariant, and they are not the same set:
+                    # on cluster `stable`, run `2450551-9a6a8683`
+                    # (2026-08-30), one stub remained in 209 fillable
+                    # units so nothing was sibling-blocked, and the fix
+                    # loop still spent 4,550 s over five attempts and two
+                    # retrospective rounds on `src/lib.rs::Ok` for
+                    # `test_trailer` — which enters 24 bodies, `format_err`
+                    # and `must_use` in `lib.rs`, never `Ok`. It was alone
+                    # in the first dependency level at pool width 1, so
+                    # the pass's other three units waited behind it, and
+                    # the body it finally kept was the one it started
+                    # with. Refuses only on positive evidence; see
+                    # `convictors_never_enter`.
+                    if _u2_fail_sig is not None:
+                        _unreached = coverage_unreached_by(
+                            FnLocator(rel_file, fn_name), _v.self_failures)
+                        if _unreached:
+                            _names = ", ".join(sorted(_unreached))
+                            self.tel.log(
+                                f"  [phase-c/per-fn] {idx}/{ctx.total} kept "
+                                f"{rel_file}::{fn_name} (compiles; no failing "
+                                f"attributed test executes this body — "
+                                f"{_names} enter(s) the crate elsewhere; fix "
+                                "loop skipped, deferred to outer loop).")
+                            self.tel.emit(
+                                "phase_c.fn.u2_coverage_unreached", data={
+                                    "cluster": ctx.cluster_name,
+                                    "pass_n": ctx.pass_n,
+                                    "file": rel_file, "fn": fn_name,
+                                    "failing_tests": sorted(_unreached),
                                 })
                             _u2_fail_sig = None
                 elif _v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY:
@@ -1165,7 +1206,8 @@ class FillOneFn:
                 _prior_guidance = admissible_guidance(
                     _prior, snapshot, evidence=_answers,
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
-                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file))
+                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
+                    unit=screening_unit(rel_file, fn_name))
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,
@@ -1237,6 +1279,40 @@ class FillOneFn:
                             f"  [phase-c/retro] {rel_file}::{fn_name}: NOT "
                             "exhausting — the last error is a splice/nesting "
                             "diagnostic, not a verdict on the body.")
+                    # Same rule, measured: a verdict drawn from tests that
+                    # never enter this body is a verdict about somewhere
+                    # else. Convicting on it parks the unit AND stores a
+                    # lesson the next prompt obeys — on run
+                    # `2450551-9a6a8683` the record written here told every
+                    # later attempt to make `Ok<T>(v)` yield `Err(v)`,
+                    # which cannot typecheck (E0308 twice, then E0512
+                    # "cannot transmute between types of different sizes"),
+                    # and it persisted to disk as `fully_exhausted` where
+                    # nothing could retire it: the retirement rule wants
+                    # compile evidence, and a body that never compiles is
+                    # never adopted. The pre-loop gate above normally
+                    # prevents this round happening at all; this is the
+                    # arm for a conviction reached some other way. Drop
+                    # the guidance too — parking is reversible, a stored
+                    # lesson steers every future prompt for the unit.
+                    _cov_unreached = coverage_unreached_by(
+                        _unit_loc, _evidence.tests)
+                    if _cov_unreached:
+                        _full_exhaust = False
+                        _retro = {**_retro, "guidance": ""}
+                        self.tel.log(
+                            f"  [phase-c/retro] {rel_file}::{fn_name}: NOT "
+                            "exhausting and storing no guidance — no "
+                            "convicting test executes this body "
+                            f"({', '.join(sorted(_cov_unreached))}); the "
+                            "attempt bought no evidence about this unit.")
+                        self.tel.emit(
+                            "phase_c.retro.coverage_unreached", data={
+                                "cluster": ctx.cluster_name,
+                                "pass_n": ctx.pass_n,
+                                "file": rel_file, "fn": fn_name,
+                                "convicted_by": sorted(_cov_unreached),
+                            })
                     _new_count = _prior_count + 1
                     # Stamped with the context it was earned in (same cluster,
 

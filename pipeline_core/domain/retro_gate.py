@@ -26,12 +26,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, NamedTuple
 
+from .coverage_slice import unreached_by
 from .model_notes import (
     LayoutJudgement,
     judge_note_against_layout,
     layout_safe_guidance,
     struct_fields,
 )
+from .models import FnLocator
 from .rust_idents import impl_self_type
 from .rust_scan import contains_word, struct_names, stubbed_fn_names
 
@@ -645,6 +647,24 @@ class GuidanceScreening(NamedTuple):
 
 
 TEST_SACRIFICING_PRESCRIPTION = "test_sacrificing_prescription"
+CONVICTORS_NEVER_EXECUTE = "convictors_never_execute"
+
+
+def screening_unit(file: str, fn_name: str) -> FnLocator | None:
+    """The locator `screen_guidance`'s eighth rule may judge, or None.
+
+    The owner map is keyed per fn. A block record is stored under `*impl*`,
+    which is never a body llvm-cov names, so passing that locator would
+    refuse every block whose convicted_by tests entered any crate body —
+    a sibling's reachability, not this block's. File-first yields both
+    kinds of key from `file_first_guidance_keys` (the live Ok record is
+    one of the per-fn keys); this is what keeps the `*impl*` keys on the
+    impl-route policy and the per-fn keys on the per-fn policy, in the
+    one place the eighth rule is judged.
+    """
+    if not file or not fn_name or fn_name == "*impl*":
+        return None
+    return FnLocator(file, fn_name)
 
 
 def admissible_guidance(
@@ -653,12 +673,13 @@ def admissible_guidance(
     anchor_types: frozenset[str] = frozenset(),
     cluster: str = "",
     cfg_dead: frozenset[str] = frozenset(),
+    unit: FnLocator | None = None,
 ) -> str:
     """The stored lesson a prompt may carry, or ``""`` — `screen_guidance`'s
     text half, for the callers that do not log the verdict."""
     return screen_guidance(record, file_text, evidence=evidence,
                           anchor_types=anchor_types, cluster=cluster,
-                          cfg_dead=cfg_dead).text
+                          cfg_dead=cfg_dead, unit=unit).text
 
 
 def screen_guidance(
@@ -667,6 +688,7 @@ def screen_guidance(
     anchor_types: frozenset[str] = frozenset(),
     cluster: str = "",
     cfg_dead: frozenset[str] = frozenset(),
+    unit: FnLocator | None = None,
 ) -> GuidanceScreening:
     """The stored lesson a prompt may carry, or ``""``, with the retiring rule.
 
@@ -747,6 +769,32 @@ def screen_guidance(
     # and "drop the 40-byte buffer" makes none. See `regression_scoped`.
     if regression_scoped(rec, evidence):
         return GuidanceScreening("", REGRESSION_SCOPED)
+    # The eighth way, and the only one drawn from a measurement rather than
+    # from the record's own text: the tests the record was convicted on do
+    # not execute the body it advises about. `stale_evidence` below asks
+    # whether those tests still blame the unit — a record can pass that and
+    # still be a diagnosis of somewhere else, because attribution can blame
+    # a unit no convicting test enters. Live instance, cluster `stable`,
+    # run `2450551-9a6a8683` (2026-08-30): `src/lib.rs::Ok` carries
+    # `convicted_by: ["test_trailer"]` and guidance to return `Err(value)`
+    # from `fn Ok<T>(value: T) -> Result<T>`; `test_trailer` enters 24
+    # bodies and none of them is `Ok`. `fully_exhausted` is stamped, so
+    # nothing retires it on its own evidence — obeying it never compiles,
+    # and the retirement rules want compile evidence. Judged here rather
+    # than at the injection sites so the rule cannot drift between them;
+    # `unit=None` can never fire it, and neither can an unbound or silent
+    # coverage reading. Callers pass `screening_unit(file, fn)` so a
+    # block key (`*impl*`) stays None — the honest predicate there is
+    # "no fn of this block is entered", which this signature cannot
+    # express — and a per-fn key (file-first's Ok, the per-fn route)
+    # carries the locator the owner map actually names. Passing no unit
+    # at a per-fn injection site is how the live Ok record would still
+    # steer the file-first prompt for `src/lib.rs`.
+    if unit is not None:
+        convicted = rec.get("convicted_by")
+        if isinstance(convicted, list) and convicted and unreached_by(
+                unit, [str(t) for t in convicted]):
+            return GuidanceScreening("", CONVICTORS_NEVER_EXECUTE)
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return GuidanceScreening("", "stale_evidence")
     text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
@@ -756,12 +804,14 @@ def screen_guidance(
 def retired_guidance_line(
     unit_key: str, record: Mapping[str, Any] | None, verdict: GuidanceScreening,
 ) -> str:
-    """One log line when a stored record was retired as a test-sacrificing
-    prescription, or "" — the retirement the next reader must be able to see,
-    because the record stays in the store and its text is what was dropped.
-    The other retirements keep their existing silence (the per-batch tally
-    counts them); this class gets a line because its instance steered the
-    crawl's central unit for a week with no signature but the honoured line."""
+    """One log line when a stored record was retired as a class whose
+    instance steered with no signature but the honoured line, or "".
+
+    The record stays in the store and its text is what was dropped, so
+    silence would convert the honoured line into nothing — the same
+    observability hole those classes were written to close. The other
+    retirements keep their existing silence (the per-batch tally counts
+    them)."""
     rec = record or {}
     if verdict.retired_by == REGRESSION_SCOPED:
         # Same reason the class above gets a line: the record stays in the
@@ -776,6 +826,19 @@ def retired_guidance_line(
                 f"from a regression of {len(regressed)} test(s) this unit "
                 f"does not answer for ({regressed[:4]}) — retro guidance "
                 f"withheld ({REGRESSION_SCOPED}): {head}")
+    if verdict.retired_by == CONVICTORS_NEVER_EXECUTE:
+        # Same reason: the Ok record (`src/lib.rs::Ok::`, run
+        # `2450551-9a6a8683`) stays on disk as `fully_exhausted` and
+        # nothing retires it on its own evidence. Dropping the honoured
+        # line without a retired one would make the next launch look as
+        # if the unit had no record.
+        names = [str(t) for t in (rec.get("convicted_by") or [])]
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} was convicted "
+                f"by test(s) that never execute this body ({names[:4]}) "
+                f"— NOT injected ({CONVICTORS_NEVER_EXECUTE}): {head}")
     if verdict.retired_by != TEST_SACRIFICING_PRESCRIPTION:
         return ""
     convicted = rec.get("convicted_by")

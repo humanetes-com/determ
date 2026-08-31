@@ -55,7 +55,10 @@ from pipeline_core.domain.body_ledger import (
     rebuy_hits,
     rows_for_units,
 )
-from pipeline_core.domain.coverage_slice import bind as bind_coverage_slice
+from pipeline_core.domain.coverage_slice import (
+    bind as bind_coverage_slice,
+)
+from pipeline_core.domain.coverage_slice import red_dead_units
 from pipeline_core.domain.crash_site import (
     blamed_locators,
     callee_subjects,
@@ -366,12 +369,15 @@ class PhaseCTddDeps:
     # have re-seeded 73 of 85 stable units onto the cold run's regenerated
     # oracle, 2026-08-26).
     oracle_fp: Callable[..., str] | None = None
-    # Whole-suite coverage of the filled tree, taken on a staged copy with
-    # its own CARGO_TARGET_DIR (instrumentation must not touch the loop's
-    # target dir). Returns a CoverageSlice of dead locators / dead-region
-    # sentences, or None when the reading cannot be taken. None here
-    # disables dead-body demotion and the coverage instruction; ranking
-    # then uses service/flat only.
+    # Coverage of the filled tree, taken on a staged copy with its own
+    # CARGO_TARGET_DIR (instrumentation must not touch the loop's target
+    # dir). Returns a CoverageSlice of dead locators / dead-region
+    # sentences / per-failing-test owner sets, or None when the reading
+    # cannot be taken. Called with `failing_tests=` so the owner map is
+    # measured on the red set only. None here disables dead-body
+    # demotion, the coverage instruction AND both reachability refusals
+    # (the pre-loop gate in `fill_one_fn`, `screen_guidance`'s
+    # `convictors_never_execute`); ranking then uses service/flat only.
     measure_coverage_slice: Callable[..., Any] | None = None
 
 
@@ -3861,18 +3867,52 @@ def run_phase_c_tdd(
             if _e.state is BodyState.FLAT}
         _cov = None
         if deps.measure_coverage_slice is not None:
-            _cov = deps.measure_coverage_slice(project_dir, cluster.name)
+            # The failing set is what pass C profiles: the owner map exists
+            # to answer "can a rewrite of this unit move THIS red test",
+            # and a passing test asks nothing. Costs one instrumented run
+            # per failing test on a staged copy.
+            _cov = deps.measure_coverage_slice(
+                project_dir, cluster.name,
+                failing_tests=frozenset(cur_failed))
         bind_coverage_slice(_cov)
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
+        # The owner map decided a refusal and reached no record: nothing in
+        # `events.jsonl` carried it, so every later argument about whether a
+        # demotion was right had to re-measure the tree to find out what the
+        # loop had read. Emit the reading that justifies the ranking, with
+        # the ranking.
+        if _cov is not None and _cov.owners:
+            deps.emit("phase_c.coverage.owner_map", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "failing": sorted(cur_failed),
+                "measured": sorted(_cov.owners),
+                "owners": {t: sorted(f"{k.file}::{k.fn_name}" for k in ks)
+                           for t, ks in sorted(_cov.owners.items())},
+            })
+        # RED-DEAD DEMOTION. `dead` above is a whole-suite merge and cannot
+        # say "no FAILING test enters this body", which is the only question
+        # that decides whether a rewrite can move a verdict THIS sweep. The
+        # escalated cohort is exempt: an escalated producer is unentered
+        # precisely when the chain breaks upstream of it, and on this
+        # iteration's own frontier a rule without the exemption sinks 9
+        # live escalated units, 5 of them never-served (`red_dead_units`
+        # carries the computation). Crash promotion runs after this and
+        # re-lifts anything a fault names.
+        _red_dead: frozenset[FnLocator] = frozenset()
+        if _cov is not None and _cov.owners:
+            _red_dead = red_dead_units(
+                (k for k, _ in ordered), cur_failed, _cov.owners,
+                exempt=_esc_keys | _product_keys | _crash_grades.keys())
         _before_svc = [k for k, _ in ordered]
         ordered = promote_by_service(
-            ordered, set(_served_at), _flat_keys, _dead_keys)
+            ordered, set(_served_at), _flat_keys, _dead_keys, _red_dead)
         if [k for k, _ in ordered] != _before_svc:
             _never = [k for k, _ in ordered if k not in _served_at
-                      and k not in _dead_keys]
+                      and k not in _dead_keys and k not in _red_dead]
             _flat_n = sum(1 for k, _ in ordered if k in _flat_keys
-                          and k not in _dead_keys)
+                          and k not in _dead_keys and k not in _red_dead)
+            _rd_only = _red_dead - _dead_keys
             deps.log(
                 f"  {tag} [phase-c/dispatch] service order: "
                 f"{len(_never)} never-served unit(s) rank before served; "
@@ -3881,12 +3921,19 @@ def run_phase_c_tdd(
                    "executed by no test: "
                    + ", ".join(sorted(f"{k.file}::{k.fn_name}"
                                       for k in _dead_keys)[:6])
-                   if _dead_keys else ""))
+                   if _dead_keys else "")
+                + (f"; {len(_rd_only)} red-dead body(ies) demoted — "
+                   "alive, but executed by no FAILING test: "
+                   + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                      for k in _rd_only)[:6])
+                   if _rd_only else ""))
             deps.emit("phase_c.dispatch.service_order", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "never_served": [f"{k.file}::{k.fn_name}" for k in _never],
                 "flat": sorted(f"{k.file}::{k.fn_name}" for k in _flat_keys),
                 "dead": sorted(f"{k.file}::{k.fn_name}" for k in _dead_keys),
+                "red_dead": sorted(f"{k.file}::{k.fn_name}"
+                                   for k in _rd_only),
             })
         # Crash evidence outranks everything, including the producer order above.
         ordered = promote_crash_evidence(ordered, _crash_grades)

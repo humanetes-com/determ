@@ -162,6 +162,7 @@ from pipeline_core.domain.retro_gate import (
     regression_scoped,
     retired_guidance_line,
     screen_guidance,
+    screening_unit,
     stamp_conviction,
 )
 from pipeline_core.domain.rust_idents import (
@@ -1453,7 +1454,8 @@ def fill_impl_blocks(
                 evidence=ConvictionEvidence(
                     _answers_for_block(_blk) if _blk is not None else frozenset()),
                 anchor_types=anchor_types_for_container(_rcont),
-                cluster=cluster_name, cfg_dead=_cfg_dead_fns(_rf))
+                cluster=cluster_name, cfg_dead=_cfg_dead_fns(_rf),
+                unit=screening_unit(_rf, _rfn))
             if (_hline := honoured_guidance_line(_fk, _frec, _fverdict.text)):
                 _log(f"  {_hline}")
             if (_rline := retired_guidance_line(_fk, _frec, _fverdict)):
@@ -2385,7 +2387,8 @@ def fill_impl_blocks(
         _prior_verdict = screen_guidance(
             _prior_rec, snapshot, evidence=_block_answers,
             anchor_types=anchor_types_for_container(block.container),
-            cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file))
+            cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
+            unit=screening_unit(block.file, "*impl*"))
         prior_retro = _prior_verdict.text
         # The line carries the STORE key so the grep lands on the record.
         if (_hline := honoured_guidance_line(
@@ -3237,7 +3240,8 @@ def fill_impl_blocks(
                         prior, snapshot, evidence=_block_answers,
                         anchor_types=anchor_types_for_container(block.container),
                         cluster=cluster_name,
-                        cfg_dead=_cfg_dead_fns(block.file)),
+                        cfg_dead=_cfg_dead_fns(block.file),
+                        unit=screening_unit(block.file, "*impl*")),
                     # The pins of the tests this block answers for: the
                     # diagnosis may not prescribe away an observable they
                     # name (`build_phase_c_retro_prompt`).
@@ -3368,7 +3372,8 @@ def fill_impl_blocks(
             _prior_verdict = screen_guidance(
                 _prior_rec, snapshot, evidence=_block_answers,
                 anchor_types=anchor_types_for_container(block.container),
-                cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file))
+                cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
+                unit=screening_unit(block.file, "*impl*"))
             prior_retro = _prior_verdict.text
             if (_hline := honoured_guidance_line(
                     _prior_key, _prior_rec, prior_retro)):

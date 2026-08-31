@@ -1050,6 +1050,154 @@ def test_the_same_rejection_unblocked_still_burns_the_fix_loop(
     assert fake.ask_calls > 1, "the fix loop re-prompted (the measured burn)"
 
 
+# ---- coverage-unreached U2 rejection: the same refusal, measured ----
+# The stub predicate above is a special case. On cluster `stable`, run
+# `2450551-9a6a8683` (2026-08-30), one stub remained in 209 fillable units so
+# nothing was sibling-blocked, and the fix loop still spent 4,550 s over five
+# attempts and two retrospective rounds rewriting `src/lib.rs::Ok` for
+# `test_trailer` — a test that enters 24 bodies, none of them `Ok`. The live
+# records are pinned in `tests/test_coverage_reachability.py`; these pin the
+# engine wiring.
+
+def _cov_ctx(ws: Path) -> PerFnPassCtx:
+    """A REJECT with nothing sibling-blocked — only coverage can refuse it."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+    })
+    return replace(_ctx(ws), tdd_frontier_tests=frontier,
+                   still_stubbed=frozenset())
+
+
+def test_coverage_unreached_rejection_is_kept_with_one_call(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.coverage_slice import CoverageSlice, bind
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    bind(CoverageSlice(owners={
+        "t_hub": frozenset({FnLocator("lib.rs", "elsewhere")})}))
+    try:
+        fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                             body=("Ok(())", "R"))
+        res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                                  ctx=_cov_ctx(ws))
+    finally:
+        bind(None)
+    assert res.filled, "the compiling body is kept, not re-prompted"
+    assert fake.ask_calls == 1, "zero further calls — the fix loop never ran"
+    assert fake.diagnose_calls == 0 and not fake.saved, (
+        "no retrospective, no conviction on a test that never enters the body")
+    assert "phase_c.fn.u2_coverage_unreached" in fake.events
+    assert any("no failing attributed test executes this body" in m
+               for m in fake.logs)
+
+
+def test_the_same_rejection_unmeasured_still_burns_the_fix_loop(
+        tmp_path: Path) -> None:
+    """Negative control: with nothing bound — every run before this change —
+    the identical REJECT re-enters the fix loop and the burn reproduces."""
+    from pipeline_core.domain.coverage_slice import bind
+    ws = _mk_ws(tmp_path)
+    bind(None)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_cov_ctx(ws))
+    assert not res.filled
+    assert fake.ask_calls > 1, "the fix loop re-prompted (the measured burn)"
+
+
+def test_a_unit_the_failing_test_does_execute_still_enters_the_fix_loop(
+        tmp_path: Path) -> None:
+    """Over-refusal control: the live counterpart is `src/error.rs::deref_mut`,
+    which both deref_mut tests do enter — the gate must decline there."""
+    from pipeline_core.domain.coverage_slice import CoverageSlice, bind
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    bind(CoverageSlice(owners={
+        "t_hub": frozenset({FnLocator("lib.rs", "answer"),
+                            FnLocator("lib.rs", "elsewhere")})}))
+    try:
+        fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                             body=("Ok(())", "R"))
+        res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                                  ctx=_cov_ctx(ws))
+    finally:
+        bind(None)
+    assert not res.filled
+    assert fake.ask_calls > 1, "the loop has real work and must do it"
+
+
+def test_a_conviction_is_refused_when_no_convictor_executes_the_body(
+        tmp_path: Path) -> None:
+    """The write-side arm. The gate above never sees a COMPILE-failure loop —
+    it lives in the U2 REJECT branch — so a conviction can still be reached on
+    tests that do not execute the unit. Persisting it parks the unit AND
+    stores a lesson every later prompt obeys: on run `2450551-9a6a8683` the
+    record written here told the model to make `Ok<T>(v)` yield `Err(v)`,
+    which cannot typecheck, and it reached disk as `fully_exhausted` where
+    nothing could retire it (the retirement rules want compile evidence, and
+    a body that never compiles is never adopted)."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.coverage_slice import CoverageSlice, bind
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+    })
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
+                  still_stubbed=frozenset())
+    bind(CoverageSlice(owners={
+        "t_hub": frozenset({FnLocator("lib.rs", "elsewhere")})}))
+    try:
+        fake = RecordingFill(run=(1, "error[E0308]: mismatched types"),
+                             body=("Ok(())", "R"))
+        res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                                  ctx=ctx)
+    finally:
+        bind(None)
+    assert not res.filled
+    assert fake.saved, "the record is still written — only its verdict changes"
+    stored = fake.saved[-1][-1]
+    rec = stored[next(iter(stored))]
+    assert rec["fully_exhausted"] is False, "the unit is not parked"
+    assert rec["guidance"] == "", (
+        "and stores no lesson: parking is reversible, stored guidance steers "
+        "every future prompt for the unit")
+    assert "phase_c.retro.coverage_unreached" in fake.events
+
+
+def test_without_the_reading_the_same_conviction_is_persisted(
+        tmp_path: Path) -> None:
+    """Negative control for the write-side arm: unbound, the identical run
+    parks the unit and stores the lesson — the pre-fix behaviour."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.coverage_slice import bind
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+    })
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
+                  still_stubbed=frozenset())
+    bind(None)
+    fake = RecordingFill(run=(1, "error[E0308]: mismatched types"),
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=ctx)
+    assert not res.filled
+    assert fake.saved
+    stored = fake.saved[-1][-1]
+    rec = stored[next(iter(stored))]
+    assert rec["fully_exhausted"] is True
+    assert rec["guidance"] == "g"
+    assert "phase_c.retro.coverage_unreached" not in fake.events
+
+
 def test_a_partially_blocked_rejection_still_enters_the_fix_loop(
         tmp_path: Path) -> None:
     """One failing test the unit owns outright -> the loop has real work; the

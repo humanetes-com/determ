@@ -10,6 +10,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.adapters import coverage_owner as cov
 from pipeline_core.adapters.coverage_owner import (
     _body_counts,
@@ -342,3 +344,193 @@ def test_measure_logs_and_returns_none_on_oserror(
     assert measure_coverage_slice(
         project, "stable", log=notes.append) is None
     assert any("probe failed" in n for n in notes)
+
+
+# ---- pass C: per-test owner sets ----
+# The whole-suite merge says a body ran, not WHICH test ran it, so it can only
+# convict a body nothing executes. The per-test profile is what answers "can a
+# rewrite of this unit move THIS red test" — the question that cost 4,550 s on
+# `src/lib.rs::Ok` for `test_trailer`, run `2450551-9a6a8683`, 2026-08-30.
+
+def _owner_project(tmp_path: Path) -> Path:
+    project = tmp_path / "proj"
+    src = project / ".skeleton-filled" / "stable" / "src"
+    src.mkdir(parents=True)
+    (src / "lib.rs").write_text(
+        "fn entered() {\n    let a = 1;\n}\n"
+        "fn elsewhere() {\n    let z = 0;\n}\n", encoding="utf-8")
+    return project
+
+
+def _owner_env(monkeypatch, claimed: set[str]) -> None:
+    """Every binary claims the tests in `claimed` and no others."""
+    monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def _fake_run(cmd, cwd, env=None):
+        filt = cmd[cmd.index("--exact") + 1] if "--exact" in cmd else ""
+        if filt and env and "LLVM_PROFILE_FILE" in env:
+            Path(env["LLVM_PROFILE_FILE"]).write_text("raw")
+        out = "running 1 test\n" if filt in claimed else "running 0 tests\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(cov, "_run", _fake_run)
+    monkeypatch.setattr(cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
+
+
+def test_owner_map_names_the_bodies_one_test_enters(
+        monkeypatch, tmp_path: Path) -> None:
+    project = _owner_project(tmp_path)
+    _owner_env(monkeypatch, {"t_one"})
+
+    def _fake_export(prof_files, objects, dest, profdata_bin, cov_bin):
+        src = str(dest.parent.parent / "tree" / "src" / "lib.rs")
+        return {"data": [{"functions": [
+            {"filenames": [src], "count": 4, "regions": [[1, 1, 3, 1, 4]]},
+            {"filenames": [src], "count": 0, "regions": [[4, 1, 6, 1, 0]]},
+        ]}]}
+
+    monkeypatch.setattr(cov, "_merge_export", _fake_export)
+    notes: list[str] = []
+    slice_ = measure_coverage_slice(project, "stable",
+                                    failing_tests=["t_one"], log=notes.append)
+    assert slice_ is not None
+    assert slice_.owners["t_one"] == frozenset(
+        {FnLocator("src/lib.rs", "entered")}), slice_.owners
+    assert any("owner set for 1/1" in n for n in notes), notes
+
+
+def test_a_test_no_binary_claims_is_absent_not_empty(
+        monkeypatch, tmp_path: Path) -> None:
+    """Unmeasured and measured-empty license different answers, so the
+    adapter must not collapse them: an absent test decides nothing, while an
+    empty owner set would be read as a positive reading."""
+    project = _owner_project(tmp_path)
+    _owner_env(monkeypatch, set())
+    monkeypatch.setattr(
+        cov, "_merge_export",
+        lambda *a, **k: {"data": [{"functions": []}]})
+    slice_ = measure_coverage_slice(project, "stable",
+                                    failing_tests=["t_missing"])
+    assert slice_ is not None
+    assert "t_missing" not in slice_.owners
+
+
+def test_no_failing_tests_leaves_the_owner_map_empty(
+        monkeypatch, tmp_path: Path) -> None:
+    """The reading degrades to what it was before pass C existed."""
+    project = _owner_project(tmp_path)
+    _owner_env(monkeypatch, {"t_one"})
+    monkeypatch.setattr(
+        cov, "_merge_export",
+        lambda *a, **k: {"data": [{"functions": []}]})
+    slice_ = measure_coverage_slice(project, "stable")
+    assert slice_ is not None
+    assert dict(slice_.owners) == {}
+
+
+def test_owner_map_filters_on_the_cargo_name_not_the_leaf(
+        monkeypatch, tmp_path: Path) -> None:
+    """`--exact` matches the full cargo name. A generated test
+    `gen_tests_2::t_one` is unmeasured if the leaf is what the binary sees,
+    and then the gate degrades to pre-fix silence for every qualified name."""
+    project = _owner_project(tmp_path)
+    seen: list[str] = []
+    monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def _fake_run(cmd, cwd, env=None):
+        filt = cmd[cmd.index("--exact") + 1] if "--exact" in cmd else ""
+        if filt:
+            seen.append(filt)
+        if filt and env and "LLVM_PROFILE_FILE" in env:
+            Path(env["LLVM_PROFILE_FILE"]).write_text("raw")
+        out = ("running 1 test\n" if filt == "gen_tests_2::t_one"
+               else "running 0 tests\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(cov, "_run", _fake_run)
+    monkeypatch.setattr(cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
+
+    def _fake_export(prof_files, objects, dest, profdata_bin, cov_bin):
+        src = str(dest.parent.parent / "tree" / "src" / "lib.rs")
+        return {"data": [{"functions": [
+            {"filenames": [src], "count": 4, "regions": [[1, 1, 3, 1, 4]]},
+        ]}]}
+
+    monkeypatch.setattr(cov, "_merge_export", _fake_export)
+    slice_ = measure_coverage_slice(
+        project, "stable", failing_tests=["gen_tests_2::t_one"])
+    assert slice_ is not None
+    assert "gen_tests_2::t_one" in seen
+    assert "t_one" not in seen
+    assert "gen_tests_2::t_one" in slice_.owners
+
+
+def test_two_tests_sharing_a_leaf_do_not_share_a_profile(
+        monkeypatch, tmp_path: Path) -> None:
+    """The leaf as a filename would clobber: `a::t` then `b::t` write the
+    same `one-t.profraw`."""
+    project = _owner_project(tmp_path)
+    paths: list[str] = []
+    monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    def _fake_run(cmd, cwd, env=None):
+        if "--exact" in cmd and env and "LLVM_PROFILE_FILE" in env:
+            paths.append(env["LLVM_PROFILE_FILE"])
+            Path(env["LLVM_PROFILE_FILE"]).write_text("raw")
+        return subprocess.CompletedProcess(cmd, 0, stdout="running 1 test\n",
+                                           stderr="")
+
+    monkeypatch.setattr(cov, "_run", _fake_run)
+    monkeypatch.setattr(cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
+    monkeypatch.setattr(
+        cov, "_merge_export",
+        lambda *a, **k: {"data": [{"functions": []}]})
+    slice_ = measure_coverage_slice(
+        project, "stable", failing_tests=["a::t", "b::t"])
+    assert slice_ is not None
+    stems = {p.rsplit("/", 1)[-1] for p in paths}
+    assert stems == {"one-a_t.profraw", "one-b_t.profraw"}, stems
+
+
+def test_a_generator_of_failing_tests_is_not_counted_as_zero(
+        monkeypatch, tmp_path: Path) -> None:
+    """The live-validation log line is `owner set for N/N`. Consuming the
+    iterable twice would print `1/0` whenever a caller passed a generator."""
+    project = _owner_project(tmp_path)
+    _owner_env(monkeypatch, {"t_one"})
+    monkeypatch.setattr(
+        cov, "_merge_export",
+        lambda *a, **k: {"data": [{"functions": []}]})
+    notes: list[str] = []
+    slice_ = measure_coverage_slice(
+        project, "stable",
+        failing_tests=(t for t in ["t_one"]), log=notes.append)
+    assert slice_ is not None
+    assert any("owner set for 1/1" in n for n in notes), notes
+
+
+def test_the_composition_binding_accepts_failing_tests(
+        monkeypatch, tmp_path: Path) -> None:
+    """Run 2629191-02835a4c aborted both clusters: composition bound
+    `lambda pd, cl` and the driver now passes `failing_tests=`."""
+    from pipeline_core.composition import _tdd_measure_coverage
+
+    seen: dict[str, object] = {}
+
+    def _fake(pd, cl, *, failing_tests=(), log=None):
+        seen["failing"] = failing_tests
+        seen["log"] = log
+        return None
+
+    monkeypatch.setattr(
+        "pipeline_core.composition._measure_coverage_slice", _fake)
+    notes: list[str] = []
+    logger = notes.append
+    bound = _tdd_measure_coverage(logger)
+    assert bound(tmp_path, "stable", failing_tests=frozenset({"t"})) is None
+    assert seen["failing"] == frozenset({"t"})
+    assert seen["log"] is logger
+    # Negative control: the two-argument lambda that shipped is the crash.
+    old = lambda pd, cl: None  # noqa: E731
+    with pytest.raises(TypeError, match="failing_tests"):
+        old(tmp_path, "stable", failing_tests=frozenset({"t"}))

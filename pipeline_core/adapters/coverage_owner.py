@@ -20,7 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from pipeline_core.domain.coverage_slice import (
 from pipeline_core.domain.models import FnLocator
 
 _FN_DECL = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
+_PROF_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None,
@@ -177,6 +178,16 @@ def _body_end(tree: Path, rel: str, start: int) -> int:
     return end
 
 
+def _prof_stem(name: str) -> str:
+    """A filesystem-safe unique stem for one test's profile artefacts.
+
+    `--exact` filters on the cargo name (`gen_tests_2::t`), not the leaf.
+    Two tests that share a leaf would otherwise write the same
+    `one-{leaf}.profraw` and the second would clobber the first.
+    """
+    return _PROF_STEM.sub("_", name).strip("_") or "t"
+
+
 def _counted_bodies(
     tree: Path,
     bodies: Mapping[tuple[str, int], int],
@@ -203,17 +214,74 @@ def _counted_bodies(
     return out
 
 
+def _owner_map(
+    tree: Path, bins: list[Path], prof: Path, env: dict[str, str],
+    tests: Iterable[str], profdata_bin: str, cov_bin: str,
+) -> dict[str, frozenset[FnLocator]]:
+    """Which crate bodies does each named test enter, one profile per test.
+
+    Pass C of `scripts/coverage_owner_probe.py`, promoted into the loop.
+    The whole-suite merge cannot answer this: it says a body ran, not
+    which test ran it, so it can only convict a body nothing executes.
+    A test is profiled alone under `--exact` on whichever binary reports
+    `running 1 test` for it; the filter is the cargo name the sweep
+    parsed (`gen_tests_2::t`), not the leaf — `--exact t` does not match
+    a module-qualified name, and a name no binary claims is left OUT of
+    the mapping rather than mapped to the empty set, because unmeasured
+    and measured-empty license different answers (`convictors_never_enter`).
+
+    Cost is one binary invocation per test per candidate binary until the
+    owning one answers, plus a merge and an export. Measured on the
+    2026-08-30 stable tree: sub-second per test against a 6 s
+    uninstrumented build of the same suite, which is why this runs on the
+    failing set only and never on the whole oracle.
+    """
+    owners: dict[str, frozenset[FnLocator]] = {}
+    for name in dict.fromkeys(tests):
+        stem = _prof_stem(name)
+        raw = prof / f"one-{stem}.profraw"
+        hit: Path | None = None
+        for b in bins:
+            raw.unlink(missing_ok=True)
+            e = dict(env)
+            e["LLVM_PROFILE_FILE"] = str(raw)
+            out = _run([str(b), "--exact", name, "--test-threads=1"],
+                       cwd=tree, env=e)
+            if "running 1 test" in (out.stdout or ""):
+                hit = b
+                break
+        if hit is None or not raw.exists():
+            continue
+        export = _merge_export([raw], [hit], prof / f"one-{stem}.json",
+                               profdata_bin, cov_bin)
+        if export is None:
+            continue
+        entered = {
+            FnLocator(rel, _fn_at(tree, rel, start))
+            for (rel, start), count in _body_counts(export, tree).items()
+            if count > 0
+        }
+        owners[name] = frozenset(
+            loc for loc in entered if loc.fn_name != "?")
+    return owners
+
+
 def measure_coverage_slice(
     project_dir: Path,
     cluster: str,
     *,
+    failing_tests: Iterable[str] = (),
     log: Callable[[str], None] | None = None,
 ) -> CoverageSlice | None:
-    """Pass A of the owner probe: whole-suite profile on a staged copy.
+    """Pass A of the owner probe, plus pass C over `failing_tests`.
 
-    Returns a slice of dead locators and dead-region sentences, or None
-    when the reading cannot be taken. Never writes into the loop's
-    target dir.
+    Returns a slice of dead locators, dead-region sentences and the
+    per-test owner sets, or None when the reading cannot be taken. Never
+    writes into the loop's target dir.
+
+    `failing_tests` is the sweep's failing set. Empty leaves `owners`
+    empty, and every consumer of it then declines to refuse anything —
+    the reading degrades to what it was before the owner map existed.
     """
     profdata_bin = os.environ.get("LLVM_PROFDATA", "llvm-profdata")
     cov_bin = os.environ.get("LLVM_COV", "llvm-cov")
@@ -256,11 +324,16 @@ def measure_coverage_slice(
             return None
         bodies = _body_counts(export, tree)
         lines = _region_counts(export, tree)
-        slice_ = slice_from_counts(_counted_bodies(tree, bodies, lines))
+        asked = tuple(dict.fromkeys(failing_tests))
+        owners = _owner_map(tree, bins, prof, env, asked,
+                            profdata_bin, cov_bin)
+        slice_ = slice_from_counts(_counted_bodies(tree, bodies, lines),
+                                   owners=owners, failing=asked)
         if log:
             log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
-                f"{len(slice_.dead_regions)} body(ies) with unreachable lines "
-                f"(staged, own target dir)")
+                f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "
+                f"owner set for {len(owners)}/{len(asked)} failing test(s) "
+                "(staged, own target dir)")
         return slice_
     except (OSError, subprocess.SubprocessError) as exc:
         if log:

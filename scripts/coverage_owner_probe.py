@@ -390,13 +390,13 @@ def main() -> int:
         # Pass C — one profile per failing test, on its own binary.
         owner: dict[str, set[tuple[str, int]]] = {}
         for t in failed:
-            bare = t.rsplit("::", 1)[-1]
+            stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", t).strip("_") or "t"
             hit: Path | None = None
             for b in bins:
                 e = dict(env)
-                e["LLVM_PROFILE_FILE"] = str(prof / f"one-{bare}.profraw")
-                (prof / f"one-{bare}.profraw").unlink(missing_ok=True)
-                out = run([str(b), "--exact", bare, "--test-threads=1"],
+                e["LLVM_PROFILE_FILE"] = str(prof / f"one-{stem}.profraw")
+                (prof / f"one-{stem}.profraw").unlink(missing_ok=True)
+                out = run([str(b), "--exact", t, "--test-threads=1"],
                           cwd=tree, env=e)
                 if "running 1 test" in (out.stdout or ""):
                     hit = b
@@ -404,8 +404,8 @@ def main() -> int:
             if hit is None:
                 owner[t] = set()
                 continue
-            ex = merge_and_export([prof / f"one-{bare}.profraw"], [hit],
-                                  prof / f"one-{bare}.json", profdata_bin, cov_bin)
+            ex = merge_and_export([prof / f"one-{stem}.profraw"], [hit],
+                                  prof / f"one-{stem}.json", profdata_bin, cov_bin)
             owner[t] = {k for k, c in body_counts(ex, tree).items() if c > 0} \
                 if ex else set()
         t_measure = time.time() - t0

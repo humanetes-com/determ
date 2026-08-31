@@ -1124,6 +1124,20 @@ class App:
     run_deps: RunDeps
 
 
+def _tdd_measure_coverage(
+    log: Callable[[str], None],
+) -> Callable[..., Any]:
+    """The coverage probe bound into run_phase_c_tdd.
+
+    Must accept every keyword the driver passes. Run `2629191-02835a4c`
+    (2026-08-30) aborted both clusters on the first dispatch ranking:
+    composition had `lambda pd, cl: …` and the driver now passes
+    `failing_tests=` so pass C profiles the red set. A two-argument
+    lambda TypeErrors; functools.partial forwards keywords.
+    """
+    return functools.partial(_measure_coverage_slice, log=log)
+
+
 def build_app(
     adapters: Adapters,
     settings: Settings,
@@ -2545,8 +2559,7 @@ def build_app(
             # caches it per iteration (`_oracle_fp` in `phase_c_tdd.py`);
             # this is the uncached adapter.
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
-            measure_coverage_slice=lambda pd, cl: _measure_coverage_slice(
-                pd, cl, log=ports.log),
+            measure_coverage_slice=_tdd_measure_coverage(ports.log),
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

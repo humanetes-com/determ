@@ -375,8 +375,10 @@ def service_bucket[K: Hashable](
     served: Collection[K],
     flat: Collection[K],
     dead: Collection[K] = (),
+    red_dead: Collection[K] = (),
 ) -> int:
-    """0 never-served live, 1 served live, 2 served-and-flat live, 3 dead.
+    """0 never-served live, 1 served live, 2 served-and-flat live,
+    3 red-dead, 4 dead.
 
     Dead last regardless of service: a body no test executes cannot move a
     verdict, and never-served-first would otherwise put those dead units at
@@ -386,8 +388,19 @@ def service_bucket[K: Hashable](
     `dead` only when every body under that name is unexecuted; a live
     sibling (error.rs::backtrace at line 389 vs ErrorImpl at 918) must
     not be demoted.
+
+    `red_dead` is the same argument one step weaker and one step more
+    useful: no FAILING test executes the body, so a rewrite cannot move a
+    red verdict this sweep even though passing tests keep it alive and out
+    of `dead`. It sits directly above `dead` because dead is the stronger
+    statement and implies this one — the order is checked dead-first so a
+    unit in both buckets grades as dead. `src/lib.rs::Ok` is the unit that
+    named it: generic and `#[inline]`, absent from the profile rather than
+    zero-count, so `dead` can never hold it however long nothing calls it.
     """
     if key in dead:
+        return 4
+    if key in red_dead:
         return 3
     if key not in served:
         return 0
@@ -401,9 +414,11 @@ def promote_by_service[K: Hashable, V](
     served: Collection[K],
     flat: Collection[K],
     dead: Collection[K] = (),
+    red_dead: Collection[K] = (),
 ) -> list[tuple[K, V]]:
     """`ordered` with never-served live units first, then served, then
-    served-and-last-graded-flat, then dead. Stable within a bucket.
+    served-and-last-graded-flat, then red-dead, then dead. Stable within a
+    bucket.
 
     WHY THIS IS NOT A KEY IN `order_frontier`. That ranking runs BEFORE
     `promote_producers`, which then puts the table-builders — the units the
@@ -417,17 +432,19 @@ def promote_by_service[K: Hashable, V](
     the closer sits HERE, after that promotion and before crash evidence
     (which still outranks everything).
 
-    Empty `served`/`flat`/`dead` is a no-op (every unit buckets 0, original
-    index wins) — walks and a first fill of a virgin cluster are unchanged.
-    Crash promotion that runs after this still wins.
+    Empty `served`/`flat`/`dead`/`red_dead` is a no-op (every unit buckets 0,
+    original index wins) — walks and a first fill of a virgin cluster are
+    unchanged. Crash promotion that runs after this still wins, which is why
+    a crash-blamed unit needs no exemption from `red_dead`: an observed fault
+    re-promotes it above every bucket here.
     """
-    if not served and not flat and not dead:
+    if not served and not flat and not dead and not red_dead:
         return list(ordered)
     return [
         item for _, item in sorted(
             enumerate(ordered),
             key=lambda idx_item: (
-                service_bucket(idx_item[1][0], served, flat, dead),
+                service_bucket(idx_item[1][0], served, flat, dead, red_dead),
                 idx_item[0],
             ),
         )
