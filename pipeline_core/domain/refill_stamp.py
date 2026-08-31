@@ -105,6 +105,24 @@ def _stub_panic_in_src(text: str) -> bool:
     return "unimplemented" in text or "not implemented" in text or "todo!" in text
 
 
+def stamp_reads_dispatch(*, covers: bool, file_primary: bool) -> bool:
+    """Whether the refill stamp reads ``tests_for`` rather than ``convicting_for``.
+
+    ``impl_route_covers`` keys on stub+refill count, not on the block's total
+    members. A 40-member ``impl Error`` with two work items in the batch looks
+    coverable, so the stamp used ``convicting_for`` and dropped every
+    dispatch-only constructor; then file-primary took the file anyway and the
+    impl route dropped the block. Run ``125003-269e2338`` (2026-08-31): 9 of
+    12 batch units ``no route attempted``, including ``construct_from_boxed``
+    sitting in the same block as the two members that did enter the write list.
+
+    Under file-primary the file pass writes every block with work, so the
+    impl-route homonym filter is the wrong planner. The filter stays for the
+    default route order on a block that route will actually attempt.
+    """
+    return file_primary or not covers
+
+
 def convicting_tests_for_member(
     frontier: FailureFrontier,
     file: str,

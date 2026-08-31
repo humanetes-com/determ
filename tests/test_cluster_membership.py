@@ -180,6 +180,45 @@ def test_collect_impl_refill_targets_dispatch_stamps_free_fn_only_route():
     assert [m.fn_name for m in out[0].refill_members] == ["vtable"]
 
 
+def test_file_primary_stamps_a_dispatch_only_constructor_the_impl_route_would_cover():
+    """The live miss on run 125003-269e2338: impl Error looks coverable
+    because unit size is work items (two members ≤ 12), so the default
+    stamp used convicting_for and dropped construct_from_boxed; file-primary
+    then wrote the file and the impl route dropped the block. Negative
+    control is the same block under the default order.
+    """
+    construct = FnRecord(
+        file="src/error.rs", fn_name="construct_from_boxed",
+        container="impl Error",
+        sig_text="fn construct_from_boxed()", has_unimplemented_body=False)
+    context = FnRecord(
+        file="src/error.rs", fn_name="context",
+        container="impl Error",
+        sig_text="fn context()", has_unimplemented_body=False)
+    block = ImplBlock(
+        file="src/error.rs", container="impl Error",
+        members=(construct, context), stub_members=())
+    keys = {
+        FnLocator("src/error.rs", "construct_from_boxed"),
+        FnLocator("src/error.rs", "context"),
+    }
+    # Dispatch names both; only context has direct evidence.
+    frontier = FailureFrontier.build(
+        {FnLocator("src/error.rs", "construct_from_boxed"): {"test_boxed_str"},
+         FnLocator("src/error.rs", "context"): {"test_context"}},
+        {FnLocator("src/error.rs", "context"): {"test_context"}},
+    )
+    covered = cm.collect_impl_refill_targets(
+        [block], keys, frontier)
+    assert [m.fn_name for m in covered[0].refill_members] == ["context"], (
+        "negative control: default order on a coverable block keeps "
+        "convicting_for and omits the dispatch-only constructor")
+    planned = cm.collect_impl_refill_targets(
+        [block], keys, frontier, file_primary=True)
+    assert [m.fn_name for m in planned[0].refill_members] == [
+        "construct_from_boxed", "context"]
+
+
 def test_collect_impl_refill_targets_excludes_actual_stubs():
     # A member still IN stub_members is a normal stub fill, never a refill target
     # (even if it happens to be named in the frontier).

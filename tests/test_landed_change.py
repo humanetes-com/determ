@@ -27,6 +27,7 @@ from pipeline_core.domain.landed_change import (
     locator_has_convicting,
     render_pass_audit,
     split_reverted,
+    unattempted_units,
     unit_bodies,
 )
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator, FnSite
@@ -88,6 +89,23 @@ def test_split_reverted_keeps_identical_reply_flat_and_drops_the_peel() -> None:
     # escalated unit would have been written FLAT.
     all_flat, none = split_reverted(constructors | {peeled}, ())
     assert all_flat == constructors | {peeled} and not none
+
+
+def test_unattempted_units_drops_a_landed_passenger() -> None:
+    """A whole-file answer can rewrite a frontier unit the route never
+    opened. That unit is landed, not unattempted. The pre-fix expression
+    (`frontier - attempted`) still names it — that is the control."""
+    depth = FnLocator("src/a.rs", "depth")
+    width = FnLocator("src/a.rs", "width")
+    height = FnLocator("src/a.rs", "height")
+    frontier = frozenset({depth, width, height})
+    attempted = frozenset({depth, width})
+    landed = frozenset({height})
+    assert unattempted_units(frontier, attempted, landed) == frozenset()
+    # NEGATIVE CONTROL: the expression before landed was subtracted.
+    assert frontier - attempted == frozenset({height})
+    # An unopened unit that did NOT move stays unattempted — the A3 line.
+    assert unattempted_units(frontier, attempted, frozenset()) == frozenset({height})
 
 
 def test_declined_unchanged_unions_sites_not_locator_get() -> None:

@@ -96,7 +96,8 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
          events: list[tuple[str, dict]], logs: list[str],
          fills: int = 0, escalate=None, max_stalls: str = "1",
          stubbed: bool = True, layout: str = _LAYOUT,
-         dispatched_fns: tuple[tuple[str, str], ...] | None = None) -> None:
+         dispatched_fns: tuple[tuple[str, str], ...] | None = None,
+         fill_write: Any = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
@@ -119,6 +120,8 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
             (src / "a.rs").write_text(
                 layout.replace("\n        unimplemented!()\n    ", _BODY),
                 encoding="utf-8")
+        if fill_write is not None:
+            fill_write(src)
         return ClusterFillResult(
             attempts=1, fns_filled=fills, dispatched_fns=dispatched_fns)
 
@@ -467,6 +470,7 @@ def test_under_a3_only_an_attempted_escalated_unit_leaves_a_flat_row(
     assert "src/a.rs::height" not in row["attempted"]
     assert "src/a.rs::height" not in row["esc_unchanged"]
     assert "src/a.rs::height" not in row.get("unchanged", [])
+    assert "src/a.rs::height" in row["unattempted"]
     assert {r.key.fn_name for r in ledger["rows"]
             if r.state is BodyState.FLAT} == {"width"}
     assert any("no route attempted" in ln and "height" in ln for ln in logs)
@@ -488,6 +492,84 @@ def test_under_a3_only_an_attempted_escalated_unit_leaves_a_flat_row(
             if r.state is BodyState.FLAT} == {"width", "height"}
 
 
+def test_a_landed_passenger_is_not_reported_as_unattempted(
+        monkeypatch, tmp_path: Path) -> None:
+    """A whole-file answer can rewrite a frontier unit the route never
+    targeted — a passenger of the write list. Its body moved, so the audit
+    event records it as landed; a "no route attempted" row naming the same
+    unit one field over would contradict that list inside one event. Here
+    the engine reports `depth` and `width` attempted while the fill also
+    rewrites `height`'s body: `height` must be in the landed list, not in
+    `unattempted`, and the FLAT set is still exactly `width` (attempted,
+    escalated, unchanged).
+
+    NEGATIVE CONTROL: the pre-fix expression (`frontier - attempted`, no
+    landed subtraction) is injected at the same call site. Height is then
+    in both `landed` and `unattempted` of one event."""
+    _tree(tmp_path, layout=_LAYOUT_THREE)
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+
+    def _rewrite_height(src: Path) -> None:
+        # Alternates so EVERY fill call moves the body — the escalated
+        # audit fires on a later iteration than the first fill, and an
+        # idempotent rewrite would land nothing by then.
+        a = src / "a.rs"
+        text = a.read_text(encoding="utf-8")
+        text = (text.replace("self.ptr * 3", "self.ptr * 4")
+                if "self.ptr * 3" in text
+                else text.replace("self.ptr * 4", "self.ptr * 3"))
+        a.write_text(text, encoding="utf-8")
+
+    _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+         escalate=_escalate_to_width_and_height, max_stalls="3",
+         stubbed=False, layout=_LAYOUT_THREE,
+         dispatched_fns=(("src/a.rs", "depth"), ("src/a.rs", "width")),
+         fill_write=_rewrite_height)
+    named = [d for ev, d in events if ev == "phase_c.tdd.landed_change"
+             and d.get("esc_unchanged")]
+    assert named, "escalation must fire and the FLAT arm must name a set"
+    row = named[0]
+    assert "src/a.rs::height" in row["landed"]
+    assert "src/a.rs::height" not in row["attempted"]
+    assert "src/a.rs::height" not in row["unattempted"]
+    assert row["esc_unchanged"] == ["src/a.rs::width"]
+    assert not any("no route attempted" in ln and "height" in ln
+                   for ln in logs)
+    assert {r.key.fn_name for r in ledger["rows"]
+            if r.state is BodyState.FLAT} == {"width"}
+
+    # NEGATIVE CONTROL: the pre-fix expression, injected at the same
+    # call site. Height is in unattempted and the log names it, while
+    # landed still lists it — the contradiction this field exists to stop.
+    import pipeline_core.application.reconstruct.phase_c_tdd as driver
+
+    def _old(frontier, attempted, landed):
+        return frozenset(frontier) - frozenset(attempted)
+
+    monkeypatch.setattr(driver, "unattempted_units", _old)
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control, layout=_LAYOUT_THREE)
+    c_ledger: dict = {"rows": []}
+    c_events: list[tuple[str, dict]] = []
+    c_logs: list[str] = []
+    _run(monkeypatch, control, ledger=c_ledger, events=c_events, logs=c_logs,
+         escalate=_escalate_to_width_and_height, max_stalls="3",
+         stubbed=False, layout=_LAYOUT_THREE,
+         dispatched_fns=(("src/a.rs", "depth"), ("src/a.rs", "width")),
+         fill_write=_rewrite_height)
+    c_named = [d for ev, d in c_events if ev == "phase_c.tdd.landed_change"
+               and d.get("esc_unchanged")]
+    assert c_named
+    c_row = c_named[0]
+    assert "src/a.rs::height" in c_row["landed"]
+    assert "src/a.rs::height" in c_row["unattempted"]
+    assert any("no route attempted" in ln and "height" in ln
+               for ln in c_logs)
+
+
 def test_a3_on_the_live_iter1_lists_writes_one_flat_row() -> None:
     """The plan's fixture, computed on run `9933-efe68f37` iter 1, not on
     the function's output. Under A3, attempted minus landed is exactly
@@ -506,6 +588,11 @@ def test_a3_on_the_live_iter1_lists_writes_one_flat_row() -> None:
     assert attempted == {"src/error.rs::context", "src/error.rs::msg"}
     assert landed == {"src/error.rs::msg"}
     assert attempted - landed == {"src/error.rs::context"}
+    assert landed <= attempted, (
+        "this run had no passenger; landed is a subset of attempted, so "
+        "subtracting landed from unattempted is a no-op here")
+    assert batch - attempted - landed == batch - attempted
+    assert len(batch - attempted - landed) == 10
     assert len(live_flat) == 8
     assert len(live_flat - attempted) == 7
     assert live_flat & attempted == {"src/error.rs::context"}

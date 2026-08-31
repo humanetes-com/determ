@@ -36,6 +36,7 @@ from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.refill_stamp import (
     convicting_tests_for_member,
     homonym_containers,
+    stamp_reads_dispatch,
 )
 from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.rust_scan import (
@@ -209,6 +210,7 @@ def collect_impl_refill_targets(
     *,
     max_stubs: int = 12,
     crash_blamed: frozenset[FnLocator] | None = None,
+    file_primary: bool = False,
 ) -> list[ImplBlock]:
     """Block-level analog of
     `PhaseCFillEngine._collect_refill_targets`: for each block, find members
@@ -220,12 +222,13 @@ def collect_impl_refill_targets(
     (``domain.refill_stamp``): dispatch over-includes, and a compiling
     ``from`` that inherited Debug asserts is a GPU re-buy (run
     ``463713-b7c666c8``). For a block that route will never attempt
-    (free-fn / oversized), the stamp reads ``tests_for`` — file-first is
-    the only planner those units have, and an inferred-only free fn
-    (``vtable`` via escalation) is stranded if the stamp demands direct
-    evidence. Empty unless the TDD outer loop supplied both the frontier
-    keys and the failing-test map (mirrors the per-fn version's same
-    guard).
+    (free-fn / oversized), OR under file-primary where the file pass writes
+    the block and the impl route then drops it, the stamp reads
+    ``tests_for`` — otherwise a dispatch-only constructor in the batch is
+    stranded in a still-coverable-looking Error impl (run
+    ``125003-269e2338``: 9 of 12 ``no route attempted``). Empty unless the
+    TDD outer loop supplied both the frontier keys and the failing-test map
+    (mirrors the per-fn version's same guard).
 
     A crashed binary reports no verdict, so ``tests_for`` /
     ``convicting_for`` are empty for the blamed body. Without a stamp the
@@ -250,7 +253,10 @@ def collect_impl_refill_targets(
             and (tdd_frontier_tests.tests_for(loc) or loc in crashed)
         )
         probe = dataclasses.replace(b, refill_members=dispatched)
-        if impl_route_covers(probe, max_stubs=max_stubs):
+        covers = impl_route_covers(probe, max_stubs=max_stubs)
+        if stamp_reads_dispatch(covers=covers, file_primary=file_primary):
+            refill = dispatched
+        else:
             refill = tuple(
                 m for m in dispatched
                 if convicting_tests_for_member(
@@ -258,8 +264,6 @@ def collect_impl_refill_targets(
                     homs.get((b.file, m.fn_name), (b.container,)))
                 or FnLocator(b.file, m.fn_name) in crashed
             )
-        else:
-            refill = dispatched
         out.append(dataclasses.replace(b, refill_members=refill) if refill else b)
     return out
 

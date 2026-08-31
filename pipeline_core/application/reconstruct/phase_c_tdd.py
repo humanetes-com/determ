@@ -111,6 +111,7 @@ from pipeline_core.domain.landed_change import (
     declined_unchanged,
     render_pass_audit,
     split_reverted,
+    unattempted_units,
     unit_bodies,
 )
 from pipeline_core.domain.layout_retrigger import (
@@ -4579,7 +4580,11 @@ def run_phase_c_tdd(
             # only if it is already right`, which `declined_unchanged`
             # already protects.
             _batch_unchanged = _attempted - _batch_landed
-            _batch_unattempted = frontier_keys - _attempted
+            # Passengers (landed, never opened) are not unattempted; they
+            # still earn no `_served_at` stamp — that update is `_attempted`
+            # only, a few lines up.
+            _batch_unattempted = unattempted_units(
+                frontier_keys, _attempted, _batch_landed)
             _batch_esc_unchanged = _batch_unchanged & _batch_escalated
             _batch_esc_flat, _batch_esc_reverted = split_reverted(
                 _batch_esc_unchanged, sub.reverted_fns)
@@ -4676,6 +4681,8 @@ def run_phase_c_tdd(
                                     for k in _attempted),
                 "landed": sorted(f"{k.file}::{k.fn_name}"
                                  for k in _batch_landed),
+                "unattempted": sorted(f"{k.file}::{k.fn_name}"
+                                      for k in _batch_unattempted),
                 "unchanged": sorted(f"{k.file}::{k.fn_name}"
                                     for k in _batch_unchanged),
                 "declined": sorted(f"{k.file}::{k.fn_name}"

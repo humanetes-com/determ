@@ -88,6 +88,7 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # P6 data-vs-render split: the events.jsonl readers live in the data module; this
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
+from pipeline_core.domain import graceful_stop  # noqa: E402
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import iteration_steps as _steps  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
@@ -825,7 +826,7 @@ _view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fie
 _scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0, "fields": 0}   # lines scrolled up from bottom (0=bottom)
 _show_hints  = True           # inline field-hint strip under the monitor view (toggle: [t])
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
-_graceful_pending = os.path.exists("/tmp/pipeline_graceful_stop")  # survives monitor restart
+_graceful_pending = graceful_stop.SENTINEL_PATH.exists()  # survives monitor restart
 
 # Auto-operator toggle: sentinel presence enables stall-triggered operator_run.sh
 # passes, mirroring the graceful-stop sentinel's touch/remove convention above.
@@ -1239,10 +1240,9 @@ def _run_action(key):
         return
     if _confirm == "graceful":
         if key == "y":
-            global _graceful_pending
             _graceful_pending = True
-            open("/tmp/pipeline_graceful_stop", "w").close()
-            _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--graceful"])
+            graceful_stop.SENTINEL_PATH.touch()
+            _action_msg = cyan("◑ graceful stop requested — pipeline will exit at next checkpoint")
         else:
             _action_msg = dim("graceful cancelled")
         _confirm = None
@@ -1266,14 +1266,13 @@ def _run_action(key):
         if _graceful_pending:
             _graceful_pending = False
             with contextlib.suppress(FileNotFoundError):
-                os.remove("/tmp/pipeline_graceful_stop")
+                graceful_stop.SENTINEL_PATH.unlink()
             _action_msg = dim("graceful cancelled")
         elif _pipeline_running():
             _confirm    = "graceful"
-            _action_msg = cyan("◑ graceful continue — finish current attempt then reload — confirm? [y/n]")
+            _action_msg = cyan("◑ graceful stop — finish current attempt then exit — confirm? [y/n]")
         else:
-            _detach(["bash", os.path.join(SCRIPT_DIR, "continue.sh"), "--y"])
-            _action_msg = green("▶ continue.sh launched (pipeline was not running)")
+            _action_msg = dim("pipeline was not running")
     elif key == "w":
         tag = _augmentation_tag()
         if tag:
@@ -1356,15 +1355,15 @@ def main():
                 _flush_frame()
 
             if _graceful_pending:
-                if not os.path.exists("/tmp/pipeline_graceful_stop"):
+                if not graceful_stop.SENTINEL_PATH.exists():
                     _graceful_pending = False
                     _action_msg = ""
                 else:
-                    _action_msg = bg_white(" ◑ graceful — waiting for pipeline to restart… ")
+                    _action_msg = bg_white(" ◑ graceful — waiting for pipeline to exit… ")
             elif _confirm == "continue":
                 _action_msg = green("▶ continue (will kill running pipeline) — confirm? [y/n]")
             elif _confirm == "graceful":
-                _action_msg = cyan("◑ graceful continue — finish current attempt then reload — confirm? [y/n]")
+                _action_msg = cyan("◑ graceful stop — finish current attempt then exit — confirm? [y/n]")
             elif _confirm == "wipe":
                 _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
             elif _confirm == "wipe-augmented":

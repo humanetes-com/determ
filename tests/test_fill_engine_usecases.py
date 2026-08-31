@@ -19,7 +19,7 @@ from pipeline_core.application.reconstruct.phase_c_engine import (
     PhaseCFillEngine,
 )
 from pipeline_core.domain.attribution import FailureFrontier
-from pipeline_core.domain.enums import FillUnit
+from pipeline_core.domain.enums import FillUnit, RouteOrder
 from pipeline_core.domain.models import (
     ClusterFillResult,
     FnFixContext,
@@ -454,10 +454,12 @@ def test_fill_one_empty_response_stops(tmp_path: Path) -> None:
 
 # ---- PhaseCFillEngine shells ----
 
-def _engine(fake: FakeFill, fill_unit: FillUnit) -> PhaseCFillEngine:
+def _engine(fake: FakeFill, fill_unit: FillUnit,
+            route_order: RouteOrder = RouteOrder.DEFAULT) -> PhaseCFillEngine:
     cfg = EngineConfig(parallelism=1, fill_unit=fill_unit,
                        per_pass_test_fix_hard_cap=6, per_pass_test_fix_max_stalls=2,
-                       pass_max_stalls=2, fix_err_cap=2000)
+                       pass_max_stalls=2, fix_err_cap=2000,
+                       route_order=route_order)
     return PhaseCFillEngine(tel=fake, mut=fake, cargo=fake, prompt=fake, ws=fake,
                             retros=fake, tests=fake, stall=fake, impl_path=fake,
                             fill_one=_fill_one(fake), config=cfg)
@@ -573,6 +575,31 @@ def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
     assert "phase_c.refill.dangling_keys" in fake.events
     assert any("nowhere.rs::ghostfn" in m and "match no enumerated fn" in m
                for m in fake.logs)
+
+
+def test_collect_refill_targets_file_primary_stamps_dispatch_only_constructor(
+        tmp_path: Path) -> None:
+    """Per-fn twin of the impl stamp: under file-primary a coverable impl
+    Error member that only has dispatch tests is still a refill. Negative
+    control is the default route order, which keeps convicting_for."""
+    from pipeline_core.domain.models import FnLocator
+    fns = [
+        {"file": "src/error.rs", "fn_name": "construct_from_boxed",
+         "container": "impl Error",
+         "sig_text": "fn construct_from_boxed()"},
+    ]
+    loc = FnLocator("src/error.rs", "construct_from_boxed")
+    keys = {loc}
+    tests = FailureFrontier.of_dispatch({loc: {"test_boxed_str"}})
+    default = _engine(FakeFill(fns=fns), FillUnit.FN)
+    assert default._collect_refill_targets(tmp_path, [], keys, tests) == [], (
+        "negative control: default order on a coverable block omits the "
+        "dispatch-only constructor")
+    primary = _engine(FakeFill(fns=fns), FillUnit.FN,
+                      route_order=RouteOrder.FILE_PRIMARY)
+    out = primary._collect_refill_targets(tmp_path, [], keys, tests)
+    assert [(s.fn_name, s.refill) for s in out] == [
+        ("construct_from_boxed", True)]
 
 
 def test_collect_refill_targets_stamps_crash_blamed_without_tests(

@@ -634,6 +634,12 @@ def fill_impl_blocks(
     _PER_FN_FIX_HARD_CAP = deps.per_fn_fix_hard_cap
     _PER_IMPL_MAX_STUBS = deps.per_impl_max_stubs
     _TASK2_MODEL = deps.task2_model
+    # Resolved once: the stamp below and the file-first unit list must agree
+    # on which planner writes the block. Unset env is the model's default
+    # (Muse → file-primary).
+    _route_env = os.getenv("PHASE_C_ROUTE_ORDER")
+    _route_order = resolve_route_order(_route_env, _TASK2_MODEL)
+    _file_primary = _route_order is RouteOrder.FILE_PRIMARY
     if cluster_env is None:
         cluster_env = _cargo_env()
     # Absent frontier (fn_walk driver) = nothing dispatched by test, nothing
@@ -776,7 +782,8 @@ def fill_impl_blocks(
     blocks = collect_impl_refill_targets(
         blocks, tdd_frontier_keys, tdd_frontier_tests,
         max_stubs=_PER_IMPL_MAX_STUBS,
-        crash_blamed=crash_blamed or frozenset())
+        crash_blamed=crash_blamed or frozenset(),
+        file_primary=_file_primary)
 
     # Every impl in the cluster, kept whole. Narrowing below answers "what do we
     # fill?"; routing a file-wide model reply asks the different question "what
@@ -3504,15 +3511,13 @@ def fill_impl_blocks(
     # skips blocks the file pass completed). Unit selection is
     # `file_route_units` (domain): the historical multi-block-only selection
     # by default; every frontier file — free fns and single-block files
-    # included — under file_primary. Unset env resolves to the model's
-    # validated default (`model_defaults.py`), explicit env always wins.
-    _route_env = os.getenv("PHASE_C_ROUTE_ORDER")
-    _route_order = resolve_route_order(_route_env, _TASK2_MODEL)
+    # included — under file_primary. Route order was resolved at the stamp
+    # above so the write list and the file pass cannot disagree.
     if os.getenv("PHASE_C_FILE_FIRST", "1") != "0":
         _ff_units = file_route_units(
             blocks, max_stubs=_PER_IMPL_MAX_STUBS,
-            file_primary=_route_order is RouteOrder.FILE_PRIMARY)
-        if _route_order is RouteOrder.FILE_PRIMARY and _ff_units:
+            file_primary=_file_primary)
+        if _file_primary and _ff_units:
             _src = "env" if (_route_env or "").strip() else (
                 f"model default for {_TASK2_MODEL}")
             _log(f"  [phase-c/file] route order file_primary ({_src}): "

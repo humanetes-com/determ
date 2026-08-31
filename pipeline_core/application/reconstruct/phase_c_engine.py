@@ -64,7 +64,10 @@ from pipeline_core.domain.models import (
     Stub,
 )
 from pipeline_core.domain.pass_payoff import assess_fill_results, combine_payoffs
-from pipeline_core.domain.refill_stamp import convicting_tests_for_member
+from pipeline_core.domain.refill_stamp import (
+    convicting_tests_for_member,
+    stamp_reads_dispatch,
+)
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_results import parse_failed_tests, still_open_names
 from pipeline_core.ports.fill_engine import (
@@ -154,14 +157,11 @@ class PhaseCFillEngine:
         failing-test map (i.e. `driver=tdd`); the legacy `fn_walk` driver has its
         own internal test-fix loop and passes neither.
 
-        For a member the impl route will attempt, the stamp reads
-        ``convicting_for`` plus the container-homonym filter: dispatch
-        over-includes. For a member that route never covers (free-fn /
-        oversized), the stamp reads ``tests_for`` — per-fn is those units'
-        only rewrite planner, and an inferred-only free fn (``vtable`` via
-        escalation, 2026-08-04) is stranded if the stamp demands direct
-        Same predicate as ``collect_impl_refill_targets``. A locator in
-        ``crash_blamed`` is a refill even when no test convicts it: a
+        Same predicate as ``collect_impl_refill_targets``, including
+        ``file_primary``: under that order the file pass writes the block
+        and the impl route drops it, so a dispatch-only batch member must
+        still stamp or it is stranded (run ``125003-269e2338``). A locator
+        in ``crash_blamed`` is a refill even when no test convicts it: a
         crashed binary reports no verdict, and without the stamp the
         blamed conversion never reaches the write list.
 
@@ -208,12 +208,14 @@ class PhaseCFillEngine:
                 continue
             if rec.key not in tdd_frontier_keys:
                 continue
-            if covers.get((rec.file, rec.container), False):
+            if stamp_reads_dispatch(
+                    covers=covers.get((rec.file, rec.container), False),
+                    file_primary=self.config.route_order is RouteOrder.FILE_PRIMARY):
+                tests = set(tdd_frontier_tests.tests_for(rec.key))
+            else:
                 tests = set(convicting_tests_for_member(
                     tdd_frontier_tests, rec.file, rec.fn_name, rec.container,
                     containers_by_key.get(rec.key, [rec.container])))
-            else:
-                tests = set(tdd_frontier_tests.tests_for(rec.key))
             if not tests and rec.key not in crashed:
                 continue
             out.append(replace(rec, refill=True))
@@ -328,7 +330,8 @@ class PhaseCFillEngine:
                 self.ws.collect_impl_blocks_for_cluster(target_src_dir, cluster) or [],
                 tdd_frontier_keys, tdd_frontier_tests,
                 max_stubs=self.config.per_impl_max_stubs,
-                crash_blamed=crash_blamed or frozenset())
+                crash_blamed=crash_blamed or frozenset(),
+                file_primary=self.config.route_order is RouteOrder.FILE_PRIMARY)
             _has_refill_targets = any(b.refill_members for b in _blocks_now)
             _impl_deferred_stubs = frozenset(
                 k for k in (stubs_deferred_by_impl_route(

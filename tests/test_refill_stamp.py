@@ -17,6 +17,7 @@ from pipeline_core.domain.refill_stamp import (
     blocks_after_file_first,
     container_line_window,
     convicting_tests_for_member,
+    stamp_reads_dispatch,
 )
 
 DEBUG_C = "impl Debug for Error"
@@ -208,3 +209,13 @@ def test_stamp_reads_exact_site_without_scoring() -> None:
         FailureFrontier.of_dispatch({fmt_loc: {"message_error_debug_with_string"}}),
         "src/error.rs", "fmt", DEBUG_C, (DEBUG_C,),
     ) == frozenset()
+
+
+def test_stamp_reads_dispatch_when_file_primary_even_if_the_block_looks_coverable() -> None:
+    """File-primary writes the block; a coverable work-item count must not
+    keep convicting_for. Negative control: default order on a covered block
+    still uses the homonym filter."""
+    assert stamp_reads_dispatch(covers=True, file_primary=True)
+    assert not stamp_reads_dispatch(covers=True, file_primary=False)
+    assert stamp_reads_dispatch(covers=False, file_primary=False)
+    assert stamp_reads_dispatch(covers=False, file_primary=True)

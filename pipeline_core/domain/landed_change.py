@@ -153,6 +153,23 @@ def changed_units(
     return frozenset(k for k in keys if before.get(k, ()) != after.get(k, ()))
 
 
+def unattempted_units(
+    frontier: Iterable[FnLocator],
+    attempted: Iterable[FnLocator],
+    landed: Iterable[FnLocator],
+) -> frozenset[FnLocator]:
+    """Frontier units no route opened and whose body did not move.
+
+    A whole-file answer can rewrite a frontier unit the route never
+    targeted (a passenger of the write list). Subtracting `landed` keeps
+    that unit out of the "no route attempted" set: its body moved, and
+    naming it unattempted in the same audit contradicts the landed list.
+    A passenger still earns no served-at stamp — that update keys on
+    `attempted` only, which this function does not touch.
+    """
+    return frozenset(frontier) - frozenset(attempted) - frozenset(landed)
+
+
 def _named(units: frozenset[FnLocator] | set[FnLocator], sample: int) -> str:
     named = ", ".join(sorted(f"{k.file}::{k.fn_name}" for k in units)[:sample])
     more = len(units) - min(len(units), sample)
