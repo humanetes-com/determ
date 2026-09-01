@@ -61,18 +61,76 @@ def filter_tests_for_cluster(
             if not file_top_cfg_excluded(content, cfg_true, cfg_false)]
 
 
+def _leading_attr_text(definition: str) -> str:
+    """The attribute block above a rendered item's head — doc comments and
+    blank lines skipped, everything from the first code line on ignored.
+
+    Only the leading block may speak for the ITEM: a `#[cfg(...)]` on an
+    inner field or variant gates that member, and reading it as the type's
+    own gate would delete a live type over a dead field."""
+    out: list[str] = []
+    for raw in definition.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+        if not line.startswith("#["):
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
+def cfg_dead_type_records(
+    records: list[TypeRecord], cluster: Any,
+) -> frozenset[str]:
+    """Names of the type records whose OWN definition is gated by a cfg this
+    cluster decides False — the arm the build does not compile."""
+    if cluster is None:
+        return frozenset()
+    cfg_set = _cfg.cluster_cfg_set(cluster)
+    dead: set[str] = set()
+    for r in records:
+        preds = _cfg.cfg_inline_predicates(_leading_attr_text(r.definition))
+        if preds and any(cfg_set.evaluate(p) is False for p in preds):
+            dead.add(r.name)
+    return frozenset(dead)
+
+
 def cluster_filter_type_methods(
     records: list[TypeRecord], cluster: Any,
 ) -> list[TypeRecord]:
-    """Drop methods whose cfg is excluded by `cluster` so TYPES_IN_SCOPE
-    advertises only what compiles here (Hard Rule 8). A method is kept unless
-    one of its cfg predicates evaluates definitively False; undecidable
-    predicates are kept (conservative). `cluster is None` → unchanged."""
+    """Drop what `cluster` does not compile so TYPES_IN_SCOPE advertises only
+    what exists here (Hard Rule 8): a METHOD whose cfg evaluates definitively
+    False, and a whole TYPE RECORD whose own leading cfg does. Undecidable
+    predicates are kept (conservative). `cluster is None` → unchanged.
+
+    The record-level drop is the half added after run `617614-0abaf2d0`
+    (2026-09-01). `src/backtrace.rs` is the standard no-std shim — `#[cfg(
+    feature = "std")] pub(crate) use std::backtrace::Backtrace;` beside
+    `#[cfg(not(feature = "std"))] pub(crate) enum Backtrace {}` — and only the
+    second is an ITEM, so the extractor emitted the DEAD arm as the sole
+    record for that name: `enum Backtrace`, no fields, no variants, no
+    methods. TYPES_IN_SCOPE rendered it verbatim while RUST_GOTCHAS told the
+    model to use only what that table shows and never to call an associated
+    fn a type does not define, and the pair fill's reasoning trace cites
+    exactly that ("But types in scope just enum Backtrace. Might be opaque.")
+    when it proposes `status()` on what is really a `std::backtrace::
+    Backtrace` and then drops it. A type absent from the table asserts
+    nothing; a dead arm rendered as the definition asserts something false.
+
+    What it deliberately does not do: name what the live arm resolves to.
+    The extractor already knows (`--enumerate-uses` returns `src/backtrace.rs`
+    alias `Backtrace` -> `std::backtrace::Backtrace`), but no route carries
+    use records into the type section, and inventing that channel here would
+    be a second mechanism inside a one-line screen. The file's own `use` is
+    already quoted in the prompt's source block."""
     if cluster is None:
         return records
-    cfg_set = _cfg.CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
+    cfg_set = _cfg.cluster_cfg_set(cluster)
+    dead = cfg_dead_type_records(records, cluster)
     out: list[TypeRecord] = []
     for r in records:
+        if r.name in dead:
+            continue
         kept = tuple(
             m for m in r.methods
             if not any(cfg_set.evaluate(p) is False for p in m.cfg_predicates)
@@ -124,7 +182,7 @@ def cluster_gate_for_sibling(
     base_gate = cluster_cfg_attr(cluster, all_clusters)
     if not base_gate or not getattr(cluster, "is_default", False):
         return base_gate
-    contexts = [_cfg.CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+    contexts = [_cfg.cluster_cfg_set(c)
                 for c in all_clusters]
     if _cfg.lines_are_cluster_specific(source_text, set(uncov_lines or ()), contexts):
         return base_gate
@@ -474,7 +532,7 @@ def fn_belongs_to_cluster(
     Conservative on uncertainty: an undecidable predicate defaults to True
     (include the stub) — better to waste a call than miss a fn we should fill.
     """
-    cfg_set = _cfg.CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
+    cfg_set = _cfg.cluster_cfg_set(cluster)
     preds: list[str] = []
     file_pred = file_cfg_predicate(target_src_dir, file_rel, mod_records=mod_records)
     if file_pred:

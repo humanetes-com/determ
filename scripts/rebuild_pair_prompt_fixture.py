@@ -35,6 +35,19 @@ HOW TO INTERPRET THE OUTPUT.
   second dispatch actually carries. The decision rule: if the list is empty
   or the attributed file is missing, the assembly is mis-wired — do not
   ship; if both GOOD lines print, the mechanism fires on the live records.
+- `DOC REGION` — the second fixture, for the evidence the assembly still did
+  not carry after the above shipped. Run `617614-0abaf2d0` dispatched the
+  same pair WITH the attributed tests and their panics (`convicting: [both
+  leftovers]`, prompt `905844798707`) and the write reverted on the same ten
+  siblings: the reply delegated the `Stack backtrace` header to a
+  `std::backtrace::Backtrace` formatter, which emits no such string. The
+  crate documents the answer on `pub struct Error` and the type renderer cut
+  it to two lines and an ellipsis. OLD is that entry read from the recorded
+  prompt (the negative control, not a re-simulation); NEW is the same record
+  rendered with the observables the attributed tests assert. GOOD iff the
+  `Stack backtrace:` block and the sentence introducing it are present in
+  NEW and absent from OLD. `added chars` is the cost against the recorded
+  prompt's 76 984.
 """
 from __future__ import annotations
 
@@ -54,11 +67,26 @@ from pipeline_core.application.reconstruct.test_locator import (  # noqa: E402
     find_tests_referencing_fn,
 )
 from pipeline_core.domain.attribution import FailureFrontier  # noqa: E402
-from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock  # noqa: E402
+from pipeline_core.domain.models import (  # noqa: E402
+    FnLocator,
+    FnRecord,
+    ImplBlock,
+    TypeRecord,
+)
+from pipeline_core.domain.refill_evidence import (  # noqa: E402
+    asserted_output_literals,
+)
+from pipeline_core.prompts.sections import format_type_for_prompt  # noqa: E402
 
 RUN = "537093-ffcfd139"
 OLD_PROMPT = ROOT / ("logs/prompts/f226f03a7097d9e86aef9b06ff9c5afa8fd4a4fed2"
                      "036d6edd8b6c9f67541708.txt")
+# The SECOND dispatch of the same pair, one run later, with the shared
+# assembly's evidence present — the negative control for the doc fixture.
+EVIDENCED_PROMPT = ROOT / ("logs/prompts/905844798707a66b36d49865bccb1b1196519"
+                           "58ed70cfb209dbcc8f39eb61301.txt")
+PINNING_TEST_FILE = "fmt_gen_3.rs"
+DOCUMENTED_TYPE = "Error"
 PROJECT = ROOT / "tmp" / "anyhow"
 TREE = PROJECT / ".skeleton-filled" / "stable"
 TESTS_DIR = PROJECT / "tests"
@@ -161,7 +189,69 @@ def main() -> int:
     print("regressed section present: "
           + ("GOOD" if "reddened these previously-passing"
              in with_prior.refill_evidence else "BAD"))
-    return 0 if (ok_file and both_panics and quoted and added) else 1
+    doc_ok = _doc_region_fixture()
+    return 0 if (ok_file and both_panics and quoted and added
+                 and doc_ok) else 1
+
+
+def _error_type_record() -> TypeRecord | None:
+    """The live extractor's own record for the documented type — the same
+    input the prompt builder reads, not a hand-made definition."""
+    from pipeline_core.adapters.extractor import CliExtractor
+    binary = ROOT / ("tools/skeleton_extractor/target/release/"
+                     "skeleton-extractor")
+    if not binary.exists():
+        return None
+    recs = CliExtractor(binary).enumerate_types(TREE)
+    for rec in recs or ():
+        if rec.name == DOCUMENTED_TYPE:
+            return rec
+    return None
+
+
+def _recorded_entry(prompt_text: str) -> str:
+    """The recorded prompt's own rendering of the documented type: the
+    `<TYPES_IN_SCOPE>` entry (blank-line separated) whose head names it."""
+    span = prompt_text.split("<TYPES_IN_SCOPE>", 1)[-1].split(
+        "</TYPES_IN_SCOPE>", 1)[0]
+    for entry in span.split("\n\n"):
+        for line in entry.splitlines():
+            if line.startswith("///") or line.startswith("#["):
+                continue
+            if line.split("<")[0].strip().endswith(f" {DOCUMENTED_TYPE}"):
+                return entry.strip()
+            break
+    return ""
+
+
+def _doc_region_fixture() -> bool:
+    rec = _error_type_record()
+    if rec is None or not EVIDENCED_PROMPT.exists():
+        print("\nDOC REGION: SKIP (extractor binary or recorded prompt "
+              "absent — build the extractor and keep the prompt store)")
+        return False
+    observables = asserted_output_literals(
+        (TESTS_DIR / PINNING_TEST_FILE).read_text(encoding="utf-8"))
+    old_entry = _recorded_entry(
+        EVIDENCED_PROMPT.read_text(encoding="utf-8"))
+    new_entry = format_type_for_prompt(rec, observables)
+    marker = "Stack backtrace:"
+    intro = "if there is a backtrace available"
+    print(f"\nDOC REGION (observables from tests/{PINNING_TEST_FILE}): "
+          f"{sorted(observables)}")
+    print(f"  OLD (recorded prompt {EVIDENCED_PROMPT.name[:12]}) "
+          f"{DOCUMENTED_TYPE} doc lines: "
+          f"{len([l for l in old_entry.splitlines() if l.startswith('///')])}"
+          f"  carries {marker!r}: {marker in old_entry}")
+    new_doc = [ln for ln in new_entry.splitlines() if ln.startswith("///")]
+    print(f"  NEW {DOCUMENTED_TYPE} doc lines: {len(new_doc)}"
+          f"  carries {marker!r}: {marker in new_entry}"
+          f"  carries the introducing sentence: {intro in new_entry}")
+    print(f"  added chars: {len(new_entry) - len(old_entry)}")
+    ok = (marker not in old_entry and marker in new_entry
+          and intro in new_entry)
+    print("DOC REGION: " + ("GOOD" if ok else "BAD"))
+    return ok
 
 
 if __name__ == "__main__":

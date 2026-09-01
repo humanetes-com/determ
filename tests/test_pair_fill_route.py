@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.domain.attribution import FailureFrontier, FormatterPair
-from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
+from pipeline_core.domain.models import (
+    FnLocator,
+    FnRecord,
+    FnSite,
+    ImplBlock,
+    TypeRecord,
+)
 from tests.harness import (
     diag,
     install_cluster_scan,
@@ -74,7 +80,30 @@ def _blocks() -> list[ImplBlock]:
     ]
 
 
-def _setup(monkeypatch, tmp_path: Path) -> Path:
+# A documented `Report`, in the shape rustdoc produces: summary, prose, then
+# a sentence introducing a fenced example that states the rendering. The
+# attributed test above asserts a literal from that fence.
+DOCUMENTED_REPORT = TypeRecord(
+    file="lib.rs", kind="struct", name="Report",
+    definition="\n".join([
+        "/// A report.",
+        "///",
+        "/// `Report` carries one message.",
+        "///",
+        "/// The message is whatever the caller handed in; the renderer",
+        "/// decides how it reaches a terminal.",
+        "///",
+        "/// and when the renderer has run:",
+        "///",
+        "/// ```console",
+        "/// rendered hi",
+        "/// ```",
+        "pub struct Report { msg: String }",
+    ]),
+)
+
+
+def _setup(monkeypatch, tmp_path: Path, types: list | None = None) -> Path:
     ws = tmp_path / "ws"
     (ws / "src").mkdir(parents=True)
     (ws / "src" / "lib.rs").write_text(DISPATCHER_LIB)
@@ -85,7 +114,7 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: None)
     install_fake_extractor(
         monkeypatch, fns=lambda sd: pipeline._STRUCTURE.enumerate_fns(sd),
-        types=[], dispatch_families=[])
+        types=types or [], dispatch_families=[])
     return ws
 
 
@@ -411,3 +440,53 @@ def test_without_a_pair_the_route_is_inert(monkeypatch, tmp_path):
             {_DISP: {"t_pair"}}, {_DISP: {"t_pair"}}),
     )
     assert not any("PAIRED WRITE" in p for p in prompts)
+
+
+def test_the_pair_prompt_carries_a_documented_types_own_statement_of_a_pin(
+        monkeypatch, tmp_path):
+    """A type whose doc states an observable the attributed failing test
+    pins carries that doc region into the fill prompt — the fenced example
+    AND the sentence introducing it, past the leading-lines cap.
+
+    The class (run `617614-0abaf2d0`, 2026-09-01): the pair dispatched with
+    its convicting tests, their panics and their source, and still wrapped,
+    because the crate's own worked example of the asserted format sat at doc
+    line 50 of 101 and the renderer kept three. Every earlier prompt showed
+    two lines and an ellipsis instead."""
+    ws = _setup(monkeypatch, tmp_path, types=[DOCUMENTED_REPORT])
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run_with_tests(ws, tests)
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "/// and when the renderer has run:" in pair_prompt
+    assert "/// rendered hi" in pair_prompt
+
+
+def test_negative_control_no_attributed_pin_leaves_the_doc_capped(
+        monkeypatch, tmp_path):
+    """The pre-fix render, which is also what a target with no attributed
+    failing test still gets: the leading window and an ellipsis, with the
+    crate's own statement of the format absent. Without this failing, the
+    test above proves nothing."""
+    ws = _setup(monkeypatch, tmp_path, types=[DOCUMENTED_REPORT])
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    # Same dispatch, no attributed tests — the frontier convicts nobody, so
+    # nothing pins an observable and the doc stays at its leading window.
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=tests,
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys={_DISP},
+        tdd_frontier_tests=FailureFrontier.build(
+            {_DISP: set(), _IMPL: set()}, {}, pairs=(_PAIR,)),
+        tdd_test_cmd="cargo test",
+    )
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "/// A report." in pair_prompt
+    assert "/// and when the renderer has run:" not in pair_prompt
+    assert "/// rendered hi" not in pair_prompt

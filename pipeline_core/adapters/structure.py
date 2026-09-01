@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.cargo_toml import cargo_default_features
 from pipeline_core.domain.models import (
     BuildCluster,
     ConstRecord,
@@ -105,6 +106,20 @@ def load_baked_clusters(project_dir: Path) -> list[BuildCluster]:
     path = project_dir / ".skeleton" / "_clusters.json"
     if not path.exists():
         return []
+    # The crate's own default-on cargo features, read from the manifest rather
+    # than the manifest-time cluster record: they are a property of the CRATE,
+    # not of the cluster plan, and reading them here means the corrected cfg
+    # world reaches an already-baked tree without a re-bake (the bake is
+    # frozen once `_clusters.json` is written). Absent/unparsable manifest is
+    # the empty set — the pre-fix behaviour.
+    defaults: list[str] = []
+    manifest = project_dir / "Cargo.toml"
+    if manifest.exists():
+        try:
+            defaults = cargo_default_features(
+                manifest.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            defaults = []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -119,6 +134,7 @@ def load_baked_clusters(project_dir: Path) -> list[BuildCluster]:
             active_cfg=list(c.get("active_cfg", []) or []),
             prompt_nightly_rule=c.get("prompt_nightly_rule", "") or "",
             is_default=bool(c.get("is_default", False)),
+            default_features=list(defaults),
         )
         # cfg_true / cfg_false / toolchain are read-only @properties derived from
         # active_cfg / excluded_cfg / requires_nightly — written into the manifest

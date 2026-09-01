@@ -67,9 +67,15 @@ def compute_cluster_macro_invariants(src_dir: Path, cluster: BuildCluster | None
     by_name: dict[str, list[tuple[str, str, str]]] = {}
     for name, cfg, body, src in variants:
         by_name.setdefault(name, []).append((cfg, body, src))
-    cfg_true = {_cfg.normalize_pred(p) for p in cluster.cfg_true}
-    cfg_false = {_cfg.normalize_pred(p) for p in cluster.cfg_false}
-    cfg_set = _cfg.CfgSet.of(cfg_true, cfg_false)
+    # The cluster's ONE evaluation context, which knows the crate's default-on
+    # features. Open-coded from `cfg_true`/`cfg_false` alone this section
+    # rendered nothing on the live `stable` tree (2026-09-01): `backtrace!`'s
+    # two arms are gated on `feature = "std"` and its negation, both
+    # undecidable without the defaults, so the pair fill that had to know
+    # what `Backtrace` is saw every arm in the FILE block and no expansion
+    # here. With the defaults carried it renders the std arm —
+    # `Some(std::backtrace::Backtrace::capture())`.
+    cfg_set = _cfg.cluster_cfg_set(cluster)
     lines: list[str] = []
     for name in sorted(by_name):
         vs = by_name[name]

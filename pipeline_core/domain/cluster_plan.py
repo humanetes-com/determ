@@ -375,9 +375,17 @@ def merged_view_cluster(clusters: Iterable[BuildCluster]) -> BuildCluster | None
         return None
     active = set(cs[0].active_cfg or [])
     excluded = set(cs[0].excluded_cfg or [])
+    # The crate's default-on features are a property of the CRATE, so every
+    # cluster carries the same list and the intersection is that list; taken
+    # by intersection anyway so the merged view asserts nothing a member does
+    # not. Left empty, the merged wave evaluated with the pre-fix inverted
+    # world (`excludes_for_cargo('feature = "std"')` True on the live
+    # clusters, 2026-09-01) while every per-cluster wave had the corrected one.
+    defaults = set(cs[0].default_features or [])
     for c in cs[1:]:
         active &= set(c.active_cfg or [])
         excluded &= set(c.excluded_cfg or [])
+        defaults &= set(c.default_features or [])
     names = ", ".join(sorted(c.name for c in cs))
     return BuildCluster(
         name="merged",
@@ -385,6 +393,7 @@ def merged_view_cluster(clusters: Iterable[BuildCluster]) -> BuildCluster | None
         tarpaulin_exclude_files=[],
         excluded_cfg=sorted(excluded),
         active_cfg=sorted(active),
+        default_features=sorted(defaults),
         prompt_nightly_rule=(
             "- COMPILER CLUSTER: merged — this tree is compiled by EVERY "
             f"cluster ({names}), each under its own cfg. A body must hold in "

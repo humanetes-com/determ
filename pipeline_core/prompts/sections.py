@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from pipeline_core.domain.models import DispatchFamily, ImplBlock, TypeRecord
+from pipeline_core.domain.refill_evidence import collapse_ws
 
 # Standard library trait contracts. When a fn is being implemented
 # inside `impl Trait for X`, inject the trait's documented behavior so the
@@ -1130,11 +1131,134 @@ def _construct_hint(rec: TypeRecord) -> str | None:
 _TYPE_DOC_MAX_LINES = 3
 _TYPE_DOC_MAX_CHARS = 200
 
+# Budget for doc regions kept BEYOND the leading window because they state an
+# observable a failing test pins. The leading-window cap above is sized for the
+# one-or-two-line contract sentence the layout author writes; the UPSTREAM
+# crate's own doc on the same item is a worked example of runtime behaviour and
+# is long by nature — `Error` on the live `stable` tree is 101 doc lines /
+# 3 087 chars, with `Stack backtrace:` at doc line 50 (2026-09-01, run
+# `617614-0abaf2d0`). Two dispatches of the formatter pair guessed at that
+# header from an assertion because the block stating it was cut; neither
+# guess is satisfiable, since no formatting of a `std::backtrace::Backtrace`
+# emits it. These bound what a pinned region may add to a prompt already
+# measuring ~77 000 chars.
+_TYPE_DOC_PINNED_MAX_LINES = 30
+_TYPE_DOC_PINNED_MAX_CHARS = 1600
+_DOC_ELISION = "/// …"
 
-def _type_doc_lines(definition: str) -> list[str]:
+
+def _leading_doc_texts(definition: str) -> list[str]:
+    """Texts of the leading `///` block in order, blank doc lines INCLUDED as
+    `""` and inner indentation preserved (one rustdoc leading space removed).
+
+    Structure is what the pinned-region selection reads: a fenced example and
+    the paragraph introducing it are both runs of these entries. Blank RAW
+    lines and `//!` / `//` are skipped without ending the block; the first
+    attribute or the item head ends it, exactly where `_type_layout_attrs`
+    begins reading."""
+    out: list[str] = []
+    for raw in definition.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//!") or (
+                line.startswith("//") and not line.startswith("///")):
+            continue
+        if not line.startswith("///"):
+            break
+        text = line[3:]
+        out.append(text[1:] if text.startswith(" ") else text)
+    return out
+
+
+def _fence_spans(texts: list[str]) -> list[tuple[int, int]]:
+    """(open, close) index pairs of the ``` fenced blocks in a doc block. An
+    unclosed fence runs to the end — a doc that opens one and stops is still
+    an example, and dropping it would lose exactly the content this selection
+    exists to keep."""
+    spans: list[tuple[int, int]] = []
+    open_i: int | None = None
+    for i, t in enumerate(texts):
+        if not t.strip().startswith("```"):
+            continue
+        if open_i is None:
+            open_i = i
+        else:
+            spans.append((open_i, i))
+            open_i = None
+    if open_i is not None:
+        spans.append((open_i, len(texts) - 1))
+    return spans
+
+
+def _doc_region(texts: list[str], hit: int,
+                spans: list[tuple[int, int]]) -> tuple[int, int]:
+    """The doc region a hit at index `hit` belongs to.
+
+    Inside a fence: the whole fence PLUS the prose paragraph immediately
+    above it. Rustdoc's universal shape is that a fenced example is
+    introduced by the sentence over it, and that sentence is where the
+    CONDITION under which the example holds is stated — on the live tree,
+    `and if there is a backtrace available:` sits directly above the block
+    carrying `Stack backtrace:`, and it is the conditional two fills failed
+    to establish. Outside a fence: the contiguous non-blank paragraph."""
+    for a, b in spans:
+        if a <= hit <= b:
+            j = a - 1
+            while j >= 0 and not texts[j].strip():
+                j -= 1
+            if j < 0 or texts[j].strip().startswith("```"):
+                return a, b
+            while j >= 0 and texts[j].strip() and not texts[
+                    j].strip().startswith("```"):
+                j -= 1
+            return j + 1, b
+    start = hit
+    while start > 0 and texts[start - 1].strip():
+        start -= 1
+    end = hit
+    while end + 1 < len(texts) and texts[end + 1].strip():
+        end += 1
+    return start, end
+
+
+def _pinned_doc_indices(texts: list[str],
+                        observables: frozenset[str]) -> list[int]:
+    """Indices of the doc lines to keep because some observable is stated in
+    their region, in source order, under both pinned budgets. Match is a
+    plain substring of the whitespace-collapsed line — the observables arrive
+    collapsed and unescaped for exactly that (`asserted_output_literals`)."""
+    if not observables:
+        return []
+    spans = _fence_spans(texts)
+    regions: list[tuple[int, int]] = []
+    for i, t in enumerate(texts):
+        line = collapse_ws(t)
+        if not line or not any(o in line for o in observables):
+            continue
+        region = _doc_region(texts, i, spans)
+        if not any(a <= region[0] and region[1] <= b for a, b in regions):
+            regions.append(region)
+    kept: list[int] = []
+    used = 0
+    for a, b in sorted(set(regions)):
+        for i in range(a, b + 1):
+            if i in kept:
+                continue
+            cost = len(texts[i][:_TYPE_DOC_MAX_CHARS]) + 5
+            if (len(kept) >= _TYPE_DOC_PINNED_MAX_LINES
+                    or used + cost > _TYPE_DOC_PINNED_MAX_CHARS):
+                return kept
+            kept.append(i)
+            used += cost
+    return kept
+
+
+def _type_doc_lines(definition: str,
+                    observables: frozenset[str] = frozenset()) -> list[str]:
     """The LEADING `///` doc lines of a type's rendered `definition`, trimmed,
     at most `_TYPE_DOC_MAX_LINES` of `_TYPE_DOC_MAX_CHARS` each (an over-long
-    line ends in `…`, and so does the last kept line when more follow).
+    line ends in `…`, and so does the last kept line when more follow) — plus,
+    when `observables` is non-empty, the doc regions further down that STATE
+    one of them.
 
     Authored contract lines reach the fill prompts only through this renderer.
     `format_type_for_prompt` rebuilds the type line from kind/name/fields/
@@ -1144,18 +1268,25 @@ def _type_doc_lines(definition: str) -> list[str]:
     comments FIRST in `render_item_definition`), and was dropped here: the
     live `stable` tree's documented `Chain` rendered bare (2026-08-26). Only
     the leading block counts — `//!` inner docs and `//` comments are not docs
-    of the item and are skipped; the first attribute or the item head ends
-    the block, exactly where `_type_layout_attrs` begins reading."""
+    of the item and are skipped; the first attribute or the item head ends the
+    block, exactly where `_type_layout_attrs` begins reading.
+
+    `observables` is the set of literal texts the target's attributed failing
+    tests assert appear in some rendering. A crate that documents its own
+    output format documents the answer to those assertions, and the leading
+    window — three lines, sized for an authored contract sentence — cuts it
+    out: `Error`'s doc rendered as two lines and an ellipsis while its
+    `Stack backtrace:` example sat at doc line 50, and two formatter fills
+    guessed the header from the assertion instead (run `617614-0abaf2d0`,
+    2026-09-01, both reverted on the same ten sibling tests). Empty
+    `observables` renders byte-identically to before this argument existed,
+    so every prompt with no attributed failing test is unchanged."""
+    texts = _leading_doc_texts(definition)
     out: list[str] = []
     truncated = False
-    for raw in definition.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("//!") or (
-                line.startswith("//") and not line.startswith("///")):
-            continue
-        if not line.startswith("///"):
-            break
-        text = line[3:].strip()
+    leading_idx: set[int] = set()
+    for i, text in enumerate(texts):
+        text = text.strip()
         if not text:
             continue
         if len(out) >= _TYPE_DOC_MAX_LINES:
@@ -1164,8 +1295,24 @@ def _type_doc_lines(definition: str) -> list[str]:
         if len(text) > _TYPE_DOC_MAX_CHARS:
             text = text[:_TYPE_DOC_MAX_CHARS - 1].rstrip() + "…"
         out.append(f"/// {text}")
+        leading_idx.add(i)
     if truncated and out and not out[-1].endswith("…"):
         out[-1] += " …"
+    pinned = [i for i in _pinned_doc_indices(texts, observables)
+              if i not in leading_idx]
+    if not pinned:
+        return out
+    if out:
+        out.append(_DOC_ELISION)
+    prev: int | None = None
+    for i in pinned:
+        if prev is not None and i != prev + 1:
+            out.append(_DOC_ELISION)
+        text = texts[i]
+        if len(text) > _TYPE_DOC_MAX_CHARS:
+            text = text[:_TYPE_DOC_MAX_CHARS - 1].rstrip() + "…"
+        out.append(f"/// {text}".rstrip())
+        prev = i
     return out
 
 
@@ -1231,7 +1378,9 @@ def _emit_layout_attr(attr_line: str, out: list[str]) -> None:
         out.append(f"#[{' '.join(inner.split())}]")
 
 
-def format_type_for_prompt(rec: TypeRecord) -> str:
+def format_type_for_prompt(
+    rec: TypeRecord, observables: frozenset[str] = frozenset(),
+) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
     The rendering includes a field-vs-method annotation: each name is shown with `.x`
@@ -1247,6 +1396,11 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
     doc lines above those (`_type_doc_lines`): the contract sentence t1.5
     authors on an item has no other route into a fill prompt, and was
     dropped here before that renderer existed.
+
+    `observables` are the literal texts the target's attributed failing tests
+    assert appear in some rendering; a doc region of this type that STATES one
+    of them survives the leading-lines cap. Default empty renders exactly as
+    before the argument existed.
     """
     kind = rec.kind or "?"
     name = rec.name or "?"
@@ -1255,7 +1409,8 @@ def format_type_for_prompt(rec: TypeRecord) -> str:
     variants = rec.variants
     methods = rec.methods
     definition = rec.definition or ""
-    lines = [*_type_doc_lines(definition), *_type_layout_attrs(definition),
+    lines = [*_type_doc_lines(definition, observables),
+             *_type_layout_attrs(definition),
              f"{kind} {name}{generics}"]
     if fields:
         lines.append("  fields (access with .name):")

@@ -15,7 +15,7 @@ Pure domain: stdlib only, no I/O. Parsing happens in the adapter, which is the s
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
@@ -522,6 +522,16 @@ class BuildCluster:
     active_cfg: list[str]               # cfg predicates active (on top of default)
     prompt_nightly_rule: str            # nightly boundary sentence(s) for generation prompts
     is_default: bool = True             # True for the baseline stable cluster
+    # Cargo features the crate turns on by itself (`[features] default = [...]`).
+    # NOT part of `cfg_true`: that list is what this cluster adds on TOP of the
+    # default build and is what reaches cargo/RUSTFLAGS and the skeletoniser,
+    # whereas "is this item compiled here" additionally has to know the crate's
+    # own defaults. Conflating the two is what made `excludes_for_cargo` answer
+    # that `feature = "std"` — anyhow's default-on feature, and the arm the
+    # whole build compiles — was EXCLUDED, while keeping the `not(feature =
+    # "std")` arm (live cluster `stable`, 2026-09-01). `eval_cfg_true` is the
+    # evaluation half; `domain.cfg.cluster_cfg_set` is its one reader.
+    default_features: list[str] = field(default_factory=list)
     gated_files: set[str] | None = None  # source files (rel paths) gated behind excluded_cfg — skip augmentation
     requires_nightly: bool = False      # cluster needs nightly toolchain (set at runtime when E0554 detected)
 
@@ -542,6 +552,20 @@ class BuildCluster:
     def cfg_false(self) -> list[str]:
         """cfg predicates that evaluate false under this cluster (bare + feature form)."""
         return self._expand(self.excluded_cfg)
+
+    @property
+    def eval_cfg_true(self) -> list[str]:
+        """`cfg_true` plus the crate's own default features, for deciding
+        whether an item is COMPILED here.
+
+        Only the `feature = "X"` form: a cargo feature is never a bare cfg
+        ident, and `_expand`'s bare form exists for `--cfg N` flags, which a
+        default feature is not. Kept separate from `cfg_true` because that
+        property is also the skeletoniser's argument, and a bake that starts
+        dropping the crate's inactive cfg arms rewrites the authored layout —
+        a tree-construction change, validatable only by a wipe."""
+        return [*self.cfg_true,
+                *(f'feature = "{f}"' for f in (self.default_features or []))]
 
     @property
     def features(self) -> list[str]:

@@ -679,6 +679,134 @@ def helper_asserted_literals(src: str, helpers: frozenset[str]) -> list[str]:
     return out
 
 
+# The shortest asserted literal that can identify a doc region. Run
+# `617614-0abaf2d0` (2026-09-01) pins `"Stack backtrace"` (15) and
+# `"\n\nCaused by:"` (10 after whitespace collapse); the same tests also pin
+# `"inner"` and `"outer"` (5), which match prose in almost any doc block and
+# would select regions at random. Six is the first length at which a literal
+# names something rather than occurring in something.
+_OBSERVABLE_MIN_CHARS = 6
+
+_RUST_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0",
+                 "\\": "\\", '"': '"', "'": "'"}
+
+
+def _unescape_rust_literal(token: str) -> str:
+    """The TEXT a Rust string-literal source token stands for. `token`
+    includes its quotes. Unknown escapes yield the escaped character itself
+    — this feeds a substring match, never a compiler."""
+    body = token[1:-1]
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c != "\\" or i + 1 >= len(body):
+            out.append(c)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        out.append(_RUST_ESCAPES.get(nxt, nxt))
+        i += 2
+    return "".join(out)
+
+
+def collapse_ws(text: str) -> str:
+    """One-space-joined, stripped. Both sides of an observable match run
+    through this so a literal spanning newlines (`"\n\nCaused by:"`) still
+    matches the doc line that states it (`/// Caused by:`)."""
+    return " ".join(text.split())
+
+
+def _string_literal_tokens(text: str) -> list[str]:
+    """Every double-quoted literal token in `text`, quotes included.
+    Escapes are honoured so a `\"` never closes a token."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != '"':
+            i += 1
+            continue
+        j = i + 1
+        while j < n and text[j] != '"':
+            j += 2 if text[j] == "\\" else 1
+        if j >= n:
+            break
+        out.append(text[i:j + 1])
+        i = j + 1
+    return out
+
+
+def asserted_output_literals(
+    *sources: str, helpers: Iterable[str] = (),
+) -> frozenset[str]:
+    """The literal texts a test asserts appear in some value's rendering.
+
+    Every string literal appearing ANYWHERE inside an assertion call's
+    argument span — `assert!(s.contains("Stack backtrace") ||
+    s.contains("stack backtrace"))` yields both, where
+    `helper_asserted_literals` yields neither: that function reads only a
+    call's LAST argument and only when the call has two or more, which is
+    the `assert_err(closure, "msg")` shape, not the nested-predicate shape.
+    The two are complements and both feed the pins.
+
+    Returned WHITESPACE-COLLAPSED and unescaped — the text as it would read
+    in output, so a caller can substring-match it against prose. Literals
+    shorter than `_OBSERVABLE_MIN_CHARS` after collapsing, or carrying no
+    alphanumeric character (a bare `"\n\n"`, a `"{:#?}"` format string), are
+    dropped: they occur in everything and so identify nothing.
+
+    An assertion call is one whose ident starts with `assert` or is one of
+    `helpers` (`assertion_helper_names` of the test's own file).
+    """
+    out: set[str] = set()
+    helper_names = frozenset(h for h in helpers if h)
+    for src in sources:
+        if not src:
+            continue
+        for m in _CALL_OPEN.finditer(src):
+            ident = m.group(1)
+            if not (ident.startswith("assert") or ident in helper_names):
+                continue
+            parsed = _call_arguments(src, m.end() - 1)
+            if parsed is None:
+                continue
+            args, _close = parsed
+            for token in _string_literal_tokens(" , ".join(args)):
+                text = collapse_ws(_unescape_rust_literal(token))
+                if len(text) >= _OBSERVABLE_MIN_CHARS and any(
+                        ch.isalnum() for ch in text):
+                    out.add(text)
+    return frozenset(out)
+
+
+def asserted_output_literals_from_tests(
+    leaves: Iterable[str], files: Iterable[str],
+) -> frozenset[str]:
+    """`asserted_output_literals` over the attributed leaves' own item
+    source, with the same leaf/whole-file fallback discipline as
+    `pinned_observables_from_tests`: a leaf that cannot be sliced
+    contributes nothing rather than leaking its file's siblings."""
+    leaf_list = tuple(leaves)
+    if not leaf_list:
+        return frozenset()
+    file_list = tuple(files)
+    helpers = frozenset().union(
+        *(assertion_helper_names(f) for f in file_list)) if file_list \
+        else frozenset()
+    items = []
+    for leaf in leaf_list:
+        found = ""
+        for src in file_list:
+            found = test_item_source(src, leaf)
+            if found:
+                break
+        items.append(found or "")
+    if any(items):
+        return asserted_output_literals(*items, helpers=helpers)
+    return asserted_output_literals(*file_list, helpers=helpers)
+
+
 def assertion_helper_names(file_src: str) -> frozenset[str]:
     """Names of the fns `file_src` defines whose body asserts — the
     `assert_err` of `tests/test_ensure.rs:78`. `#[test]` fns are excluded:

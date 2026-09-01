@@ -80,9 +80,12 @@ def format_skeleton_index_for_cluster(
     """
     if cluster is None:
         return format_skeleton_index(skeleton_files)
-    cfg_true = {_cfg.normalize_pred(p) for p in cluster.cfg_true}
-    cfg_false = {_cfg.normalize_pred(p) for p in cluster.cfg_false}
-    cfg_set = _cfg.CfgSet.of(cfg_true, cfg_false)
+    # The cluster's ONE evaluation context (`domain.cfg.cluster_cfg_set`),
+    # which carries the crate's default-on features: built from `cfg_true` /
+    # `cfg_false` alone, `not(feature = "std")` was undecidable and the live
+    # `stable` index kept `src/backtrace.rs`'s dead `enum Backtrace {}` arm
+    # beside the `use` the build actually compiles (2026-09-01).
+    cfg_set = _cfg.cluster_cfg_set(cluster)
 
     # Per-item cfg attr matcher: a leading `#[cfg(...)]` (or several) above the
     # item declaration — via domain.cfg.match_cfg_attr_line.

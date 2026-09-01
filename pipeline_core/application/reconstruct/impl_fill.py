@@ -131,6 +131,7 @@ from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
     aimed_refill_names,
+    asserted_output_literals_from_tests,
     attributed_test_leaves,
     collect_refill_evidence,
     container_header,
@@ -1169,6 +1170,16 @@ def fill_impl_blocks(
                 attributed_test_leaves(evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
                 _test_texts)
             for bid, evs in _file_refill_evs.items()}
+        # TYPES_IN_SCOPE on this route is selected over the WHOLE file, so
+        # the observables that may keep a documented type's own statement of
+        # an expectation are the file's union — the same scope `_union_pins`
+        # already takes, for the same reason.
+        _file_observables = frozenset().union(*(
+            asserted_output_literals_from_tests(
+                attributed_test_leaves(evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
+                _test_texts)
+            for evs in _file_refill_evs.values())) if _file_refill_evs \
+            else frozenset()
         for fn_name in wanted[:6]:
             for path_str, txt in _find_tests_referencing_fn(
                     tests_dir_files, fn_name, max_blocks=2):
@@ -1522,7 +1533,7 @@ def fill_impl_blocks(
             # signatures because that is all it may write.
             _file_types = _types_section_for_fix(
                 "", snapshot, prior_error, "", "", _crate_type_records,
-                file_rel=file_rel)
+                file_rel=file_rel, observables=_file_observables)
             _plans: list[BlockFillPlan] = [
                 *_free_plan, *_block_plans, *_extra_plans]
             if _retry_names is not None:
@@ -2694,7 +2705,7 @@ def fill_impl_blocks(
             _types_section_eff = _types_section_for_fix(
                 _member_sigs_text, "", last_error_excerpt or "",
                 _block_container, _block_where, _crate_type_records,
-                file_rel=block.file)
+                file_rel=block.file, observables=_block_ev.observables)
             # Attempt 2+: does the sibling reference carry the expression the
             # previous attempt was rejected on? Then the two sections
             # contradict each other and the prefix must say so — run
@@ -3856,7 +3867,7 @@ def fill_impl_blocks(
                 " ".join(m.sig_text for m in (*b.stub_members,
                                               *b.refill_members)),
                 _htxt, "", b.container, _hwc, _crate_type_records,
-                file_rel=b.file)
+                file_rel=b.file, observables=_pair_ev.observables)
             for b, _htxt, _hwc in _half_ctx) if s))
         _bound_join = "\n\n".join(dict.fromkeys(s for s in (
             _bound_methods_section_for(

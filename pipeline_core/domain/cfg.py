@@ -649,6 +649,41 @@ class CfgSet:
         return tree.evaluate(aug) is False
 
 
+def cluster_cfg_set(cluster: object) -> CfgSet:
+    """The ONE evaluation context for "is this item compiled in this cluster".
+
+    Duck-typed on `BuildCluster` (`eval_cfg_true` / `cfg_false` /
+    `default_features`) so this stays in the domain with no model import —
+    hence `object` rather than a typing `Any`, which this module's own
+    `Any` cfg-predicate node shadows.
+    `cluster is None` is the no-cluster context — everything undecidable,
+    which is what every caller's conservative branch already expects.
+
+    It exists because ten reconstruct-side call sites open-coded
+    `CfgSet.of(cluster.cfg_true, cluster.cfg_false)` and therefore evaluated
+    without the crate's default features. `is_off_for_cargo` reads a
+    `feature = "X"` not in `default_features` as provably off, so on the live
+    `stable` cluster (`cfg_true: []`, default `["std"]`)
+    `excludes_for_cargo('feature = "std"')` answered True and
+    `excludes_for_cargo('not(feature = "std"))'` answered False: the arm the
+    build compiles read as excluded and the dead arm as kept, for every crate
+    with a default-on feature. Measured on the live tree (2026-09-01), the
+    corrected context moves 36 of 359 fn records from undecidable to
+    decidably ACTIVE and none to inactive, and proves exactly one type record
+    dead — `src/backtrace.rs`'s `#[cfg(not(feature = "std"))] enum Backtrace`,
+    whose method-less rendering in TYPES_IN_SCOPE is what a fill cited when
+    it rejected calling `status()` on a `std::backtrace::Backtrace`."""
+    if cluster is None:
+        return CfgSet.of()
+    true_ = getattr(cluster, "eval_cfg_true", None) or getattr(
+        cluster, "cfg_true", ()) or ()
+    return CfgSet.of(
+        tuple(true_),
+        tuple(getattr(cluster, "cfg_false", ())),
+        tuple(getattr(cluster, "default_features", ()) or ()),
+    )
+
+
 def filter_cfg_inactive_branches(text: str, cfg_set: CfgSet) -> str:
     """Strip `#[cfg(P)]` blocks whose predicate evaluates decidably False under
     ``cfg_set``. Prompt-render use only — the model sees the active variant of

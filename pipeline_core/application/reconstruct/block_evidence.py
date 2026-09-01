@@ -35,6 +35,7 @@ from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     RefillEvidence,
     aimed_refill_names,
+    asserted_output_literals_from_tests,
     attributed_test_leaves,
     collect_refill_evidence,
     crashed_refill_names,
@@ -67,6 +68,11 @@ _NAME_MATCH_BLOCKS = 2
 class BlockEvidence:
     """Everything a block-serving prompt may claim about its targets.
 
+    `observables` are the literal texts those tests assert appear in some
+    rendering — the type renderer keeps a documented type's own statement of
+    one past its leading-lines cap, which is how a crate that documents its
+    output format tells a fill what the assertion means.
+
     `test_blocks` is attributed-first, then name-match, capped by distinct
     file. `refill_evidence` is the rendered REFILL section (with the pins
     and, when a previous joint write of these members was reverted for
@@ -78,6 +84,7 @@ class BlockEvidence:
     test_blocks: tuple[tuple[str, str], ...]
     refill_evidence: str
     pins: str
+    observables: frozenset[str]
     inferred_names: frozenset[str]
     crashed_names: frozenset[str]
     aimed_names: frozenset[str]
@@ -155,8 +162,10 @@ def assemble_block_evidence(
         file_cap=file_cap, into=[])
     # Pins from the ATTRIBUTED sources only — the name-match files below are
     # a fallback channel and must not leak a sibling test's pins.
-    pins = pinned_observables_from_tests(
-        leaves, (t for _, t in test_blocks))
+    attributed_sources = tuple(t for _, t in test_blocks)
+    pins = pinned_observables_from_tests(leaves, attributed_sources)
+    observables = asserted_output_literals_from_tests(
+        leaves, attributed_sources)
     esc_names = escalated_refill_names(evidence)
     structs = frozenset(tuple_structs)
     wraps = any(
@@ -174,8 +183,13 @@ def assemble_block_evidence(
         prior_blocks = attributed_test_blocks(
             prior_leaves, lambda leaf: find_tests(leaf, 1),
             file_cap=file_cap, into=[])
-        prior_pins = pinned_observables_from_tests(
-            prior_leaves, (t for _, t in prior_blocks))
+        prior_sources = tuple(t for _, t in prior_blocks)
+        prior_pins = pinned_observables_from_tests(prior_leaves, prior_sources)
+        # A reddened test's assertions are expectations the next write must
+        # honour, so they select documentation exactly as the attributed
+        # ones do.
+        observables |= asserted_output_literals_from_tests(
+            prior_leaves, prior_sources)
         seen = {p for p, _ in test_blocks}
         for path_str, txt in prior_blocks:
             if path_str not in seen:
@@ -196,6 +210,7 @@ def assemble_block_evidence(
         test_blocks=tuple(test_blocks),
         refill_evidence=rendered,
         pins=pins,
+        observables=observables,
         inferred_names=inferred_refill_names(evidence),
         crashed_names=crashed_refill_names(evidence),
         aimed_names=aimed_refill_names(evidence),

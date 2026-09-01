@@ -41,7 +41,7 @@ from pipeline_core.application.reconstruct.scheduling import (
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
-from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.cfg import cluster_cfg_set
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
     impl_route_deferral_applies,
@@ -693,7 +693,7 @@ class PhaseCFillEngine:
                 splice_check_lock=_splice_check_lock, retros_cache=_retros_cache,
                 idiom_blocks=_idiom_blocks, pass_n=pass_n, total=len(stubs),
                 cluster_cfg_set=(
-                    CfgSet.of(cluster.cfg_true, cluster.cfg_false)
+                    cluster_cfg_set(cluster)
                     if cluster is not None else None
                 ),
                 behaviour_specs=behaviour_specs,

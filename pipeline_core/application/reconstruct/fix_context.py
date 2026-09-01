@@ -68,6 +68,7 @@ class FixContextAssembler:
         impl_where: str,
         type_records: list[TypeRecord],
         file_rel: str = "",
+        observables: frozenset[str] = frozenset(),
     ) -> str:
         """TYPES_IN_SCOPE for retry/fix prompts (P5.1 parity). Selects from
         everything that can name a type at fix time — the signature, the
@@ -77,7 +78,13 @@ class FixContextAssembler:
 
         `file_rel` filters to types (and methods) nameable from that file:
         a `pub trait` behind `mod ext` in another file is not callable here,
-        however `is_pub` it reads."""
+        however `is_pub` it reads.
+
+        `observables` are the literal texts the target's attributed failing
+        tests assert appear in some rendering — a documented type that STATES
+        one of them carries that doc region past the leading-lines cap
+        (`_type_doc_lines`). Empty for the retry/fix routes, which have a
+        compiler diagnostic rather than an attributed test."""
         search = "\n".join([
             sig_text or "", container or "", impl_where or "",
             body_text or "", error_excerpt or "",
@@ -85,7 +92,8 @@ class FixContextAssembler:
         recs = types_referenced_in_text(
             search, type_records, visible_from=file_rel,
         )[:self.budgets.types_count]
-        full = "\n\n".join(format_type_for_prompt(r) for r in recs)
+        full = "\n\n".join(
+            format_type_for_prompt(r, observables) for r in recs)
         if len(full) > self.budgets.types_section:  # Plan 9 F5: surface starvation
             self.guard("phase-c/types_truncated",
                        f"{(container or sig_text)[:50]}: type context {len(full):,} > "

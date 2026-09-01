@@ -45,7 +45,7 @@ from ...application.workspace_lifecycle import (
     save_merged_best_tree,
 )
 from ...domain.attribution import FailureFrontier, FailureKind
-from ...domain.cfg import CfgSet
+from ...domain.cfg import CfgSet, cluster_cfg_set
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
 from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH, take_batch
@@ -2557,7 +2557,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         exactly as it did before this gate existed."""
         if cluster is None:
             return None
-        return CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
+        return cluster_cfg_set(cluster)
 
     def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path],
                        donor_clusters: dict[str, Any] | None = None) -> int:
