@@ -7,6 +7,7 @@ the existing `ports/fill_engine.py` role ports (overlaps `_PhaseCFillAdapter`).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import queue as _queue_mod
 import threading
@@ -20,6 +21,9 @@ from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
+from pipeline_core.application.reconstruct.block_evidence import (
+    assemble_block_evidence,
+)
 from pipeline_core.application.reconstruct.cargo_errors import (
     ecodes_in_text,
     excerpt_for_code,
@@ -120,6 +124,7 @@ from pipeline_core.domain.pair_fill import (
     PairDispatch,
     blocks_after_pair_fill,
     pair_dispatches,
+    pair_record_container,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
 from pipeline_core.domain.reasoning_cap import serving_units
@@ -152,6 +157,8 @@ from pipeline_core.domain.refine import (
     best_progress_of,
 )
 from pipeline_core.domain.retro_gate import (
+    JOINT_BODY_SHA,
+    JOINT_MEMBERS,
     BlockedOnStubs,
     ConvictionEvidence,
     ConvictionStanding,
@@ -2496,56 +2503,34 @@ def fill_impl_blocks(
         # blueprint/notes context surfaced too, not just the stubs'.
         refill_fn_names = [m.fn_name for m in block.refill_members]
         _fill_target_names = stub_fn_names + refill_fn_names
-        test_blocks: list[tuple[str, str]] = []
         # What the record supports for each re-fill member — DIRECT vs
         # INFERRED, the attributed tests, same-named candidates in the file,
-        # and the tests' own failure text (`domain.refill_evidence`). The
-        # attributed tests' SOURCE is looked up first: the name-match below
-        # found `tests/test_source.rs` for a `source` member and nothing for
-        # `ext_context`, while the frontier that stamped the re-fill named
-        # `test_iter`/`test_len`/`test_rev` (run `902902-daee577d`).
-        _refill_evs = collect_refill_evidence(block, blocks, _frontier_tests,
-                                              escalated=escalated_keys,
-                                              crashed=crash_blamed or frozenset(),
-                                              aimed=frozenset(
-                                                  loc for loc
-                                                  in (crash_evidence or {})
-                                                  if loc not in (
-                                                      crash_blamed
-                                                      or frozenset())),
-                                              read_source=_read_source,
-                                              history=history_for_block(
-                                                  block, ledger_entries,
-                                                  oracle_fp=oracle_fp))
-        _inferred_refill = inferred_refill_names(_refill_evs)
-        _crashed_refill = crashed_refill_names(_refill_evs)
-        _aimed_refill = aimed_refill_names(_refill_evs)
-        # Capped by distinct FILES, as on the file route.
-        test_blocks = attributed_test_blocks(
-            attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
-            lambda leaf: _find_tests_referencing_fn(
-                tests_dir_files, leaf, max_blocks=1),
-            file_cap=_ATTRIBUTED_TEST_FILE_CAP,
-            into=test_blocks)
-        _pins = pinned_observables_from_tests(
-            attributed_test_leaves(_refill_evs, cap=_ATTRIBUTED_TEST_LEAF_CAP),
-            (t for _, t in test_blocks))
-        # The block's own escalated bodies, as the frontier recorded them
-        # (this route is the file-first fallback; a member the file route
-        # landed is no longer a refill here).
-        _esc_names = escalated_refill_names(_refill_evs)
-        _block_wraps_here = any(
-            wraps_crate_tuple_struct(m.body_text, _tuple_structs)
-            for m in block.refill_members if m.fn_name in _esc_names)
-        _refill_evidence_text = render_refill_evidence(
-            _refill_evs, pins=_pins, wraps=_block_wraps_here)
-        # Reuse the per-fn test finder by unioning tests touching any
-        # stub/refill target.
-        for fn_name in _fill_target_names[:4]:
-            for path_str, txt in _find_tests_referencing_fn(
-                    tests_dir_files, fn_name, max_blocks=2):
-                if not any(p == path_str for p, _ in test_blocks):
-                    test_blocks.append((path_str, txt))
+        # the tests' own failure text, their SOURCE (attributed-first, then
+        # name-match, capped by distinct file) and the pins — the ONE
+        # assembly every block-serving route calls (`block_evidence`), so a
+        # route cannot be added with a subset of the evidence (the pair
+        # route shipped with one of these seven calls and its prompt was
+        # blind — run `537093-ffcfd139`, 2026-09-01).
+        _block_ev = assemble_block_evidence(
+            (block,), blocks, _frontier_tests,
+            find_tests=lambda leaf, mx: _find_tests_referencing_fn(
+                tests_dir_files, leaf, max_blocks=mx),
+            escalated=escalated_keys,
+            crashed=crash_blamed or frozenset(),
+            aimed=frozenset(
+                loc for loc in (crash_evidence or {})
+                if loc not in (crash_blamed or frozenset())),
+            read_source=_read_source,
+            ledger_entries=ledger_entries, oracle_fp=oracle_fp,
+            tuple_structs=_tuple_structs,
+            leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
+            file_cap=_ATTRIBUTED_TEST_FILE_CAP)
+        _inferred_refill = _block_ev.inferred_names
+        _crashed_refill = _block_ev.crashed_names
+        _aimed_refill = _block_ev.aimed_names
+        test_blocks = list(_block_ev.test_blocks)
+        _pins = _block_ev.pins
+        _refill_evidence_text = _block_ev.refill_evidence
         # Types in scope: union over all stub signatures in this block,
         # plus the impl header and its where clause — the self-type
         # (e.g. `impl Display for BoxedError`) appears in no member sig,
@@ -2611,7 +2596,7 @@ def fill_impl_blocks(
         # Computed OUTSIDE the notes branch: the escalated set also decides
         # the completion policy of the ask below (`followup_think`), which
         # must not depend on whether an FR file exists.
-        _esc_targets = escalated_refill_names(_refill_evs)
+        _esc_targets = _block_ev.escalated_names
         if fr_path is not None:
             # The notes filter applies on the per-block route too — this is
             # the FALLBACK the file-first takes after a compile-failed attempt
@@ -3820,12 +3805,42 @@ def fill_impl_blocks(
         _pair_tests: set[str] = set()
         for _loc in _pair_locs:
             _pair_tests |= _frontier_tests.convicting_for(_loc)
-        _pair_test_blocks: list[tuple[str, str]] = []
-        for _loc in sorted(_pair_locs):
-            for _tp, _tt in _find_tests_referencing_fn(
-                    tests_dir_files, _loc.fn_name, max_blocks=2):
-                if not any(p == _tp for p, _ in _pair_test_blocks):
-                    _pair_test_blocks.append((_tp, _tt))
+        # The pair's durable memory: one retro-store record keyed on BOTH
+        # endpoints. Its `regressed` stamp is the previous joint write's
+        # newly-red set (a measurement the next prompt renders as evidence),
+        # its guidance the screened diagnosis of that write, and its
+        # `last_prompt_sha` what makes a byte-identical rebuild a printed
+        # refusal instead of a silent temperature resample — the pair's
+        # retries are separated by a traversal pass, so call-scoped feedback
+        # (file-first's `prior_error`, per-impl's `last_error`) cannot carry.
+        _pair_key = _retro_key(pair.dispatcher.file, "*pair*",
+                               pair_record_container(pair))
+        _pair_rec = retros_cache.get(_pair_key, {}) or {}
+        _prior_regressed = tuple(
+            str(t) for t in (_pair_rec.get("regressed") or []))
+        # The FULL evidence assembly, over both halves' members — the same
+        # call the per-impl route makes (`block_evidence`): attributed test
+        # SOURCE first, the failing tests' own words, the pins, then the
+        # name-match fallback. The route this replaces had only the name
+        # match: run `537093-ffcfd139`'s pair prompt carried three test
+        # files, none holding its two convicting tests, and no evidence
+        # block — the transaction was correct and the prompt was blind.
+        _pair_ev = assemble_block_evidence(
+            (pd.dispatcher_block, pd.implementer_block), all_blocks,
+            _frontier_tests,
+            find_tests=lambda leaf, mx: _find_tests_referencing_fn(
+                tests_dir_files, leaf, max_blocks=mx),
+            escalated=escalated_keys,
+            crashed=crash_blamed or frozenset(),
+            aimed=frozenset(
+                loc for loc in (crash_evidence or {})
+                if loc not in (crash_blamed or frozenset())),
+            read_source=_read_source,
+            ledger_entries=ledger_entries, oracle_fp=oracle_fp,
+            tuple_structs=_tuple_structs,
+            prior_regressed=_prior_regressed,
+            leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
+            file_cap=_ATTRIBUTED_TEST_FILE_CAP)
         _half_ctx: list[tuple[ImplBlock, str, str]] = []
         for b in halves:
             try:
@@ -3847,6 +3862,74 @@ def fill_impl_blocks(
             _bound_methods_section_for(
                 _hwc, _crate_type_records, file_rel=b.file)
             for b, _htxt, _hwc in _half_ctx) if s))
+        # The pair record's guidance, under the ONE screening every stored
+        # lesson goes through — judged against BOTH halves' text (a layout or
+        # impossibility claim about either file retires it) and under the
+        # pair's own scope: `joint_members` exempts a record earned by this
+        # same transaction from `regression_scoped` (its acceptance gate
+        # re-judges the reddened tests), and `joint_body_sha` expires it the
+        # moment any route lands a different body in either member.
+        _halves_text = "\n".join(_htxt for _b, _htxt, _hwc in _half_ctx)
+        _pair_answers = ConvictionEvidence(frozenset(
+            t for loc in _pair_locs for t in _frontier_tests.tests_for(loc)))
+        _pair_verdict = screen_guidance(
+            _pair_rec, _halves_text, evidence=_pair_answers,
+            anchor_types=(
+                anchor_types_for_container(pd.dispatcher_block.container)
+                | anchor_types_for_container(pd.implementer_block.container)),
+            cluster=cluster_name,
+            cfg_dead=(_cfg_dead_fns(pd.dispatcher_block.file)
+                      | _cfg_dead_fns(pd.implementer_block.file)),
+            unit=None,
+            joint_members=pd.member_scope(),
+            joint_body_sha=pd.member_body_sha())
+        _pair_retro = _pair_verdict.text
+        if (_hline := honoured_guidance_line(
+                str(_pair_key), _pair_rec, _pair_retro)):
+            _log(f"  {_hline}")
+        if (_rline := retired_guidance_line(
+                str(_pair_key), _pair_rec, _pair_verdict)):
+            _log(f"  {_rline}")
+        prompt = _build_per_impl_prompt(
+            block=pd.dispatcher_block,
+            related_blocks=[],
+            test_blocks=list(_pair_ev.test_blocks),
+            module_name=module_name,
+            cluster_name=cluster_name,
+            sections=PerImplSections(
+                types=_types_join, invariants=invariants_section,
+                notes="", crate_idioms="", dispatch_family="",
+                macros=macros_section, siblings="",
+                retrospective_guidance=_pair_retro,
+                bound_methods=_bound_join,
+                refill_evidence=_pair_ev.refill_evidence,
+                inferred_refill_names=_pair_ev.inferred_names,
+                crashed_refill_names=_pair_ev.crashed_names,
+                aimed_refill_names=_pair_ev.aimed_names,
+                identity_must=_identity_must(
+                    *(m for b in halves
+                      for m in (*b.stub_members, *b.refill_members)))),
+            fr_path=fr_path,
+            partner_block=pd.implementer_block)
+        # The refusal the other routes already have: identical bytes to the
+        # last prompt this pair SENT means the feedback did not change, and
+        # another call buys a temperature resample of the same question —
+        # the pair's dispatches are a traversal pass apart, so without the
+        # durable sha this resample was silent (run `537093-ffcfd139` would
+        # have rebuilt `f226f03a7097` verbatim at its second dispatch).
+        _prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if _prompt_sha == str(_pair_rec.get("last_prompt_sha") or ""):
+            _log(f"  [phase-c/pair] {pair_id}: rebuilt a byte-identical "
+                 "prompt — the revert feedback did not change, so another "
+                 "call buys a temperature resample of the same question; "
+                 "pair not dispatched this pass.")
+            _emit("phase_c.pair.fill.resample_skipped", data={
+                "cluster": cluster_name,
+                "dispatcher": (f"{pair.dispatcher.file}::"
+                               f"{pair.dispatcher.fn_name}"),
+                "implementer": (f"{pair.implementer.file}::"
+                                f"{pair.implementer.fn_name}")})
+            return
         _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
              "implementer written under ONE judgment across "
              f"{len(halves)} files ({len(_pair_tests)} convicting test(s)).")
@@ -3859,23 +3942,13 @@ def fill_impl_blocks(
         with _counters_lock:
             attempts_total += 1
             dispatched_keys.update(_pair_locs)
-        prompt = _build_per_impl_prompt(
-            block=pd.dispatcher_block,
-            related_blocks=[],
-            test_blocks=_pair_test_blocks,
-            module_name=module_name,
-            cluster_name=cluster_name,
-            sections=PerImplSections(
-                types=_types_join, invariants=invariants_section,
-                notes="", crate_idioms="", dispatch_family="",
-                macros=macros_section, siblings="",
-                retrospective_guidance="",
-                bound_methods=_bound_join,
-                identity_must=_identity_must(
-                    *(m for b in halves
-                      for m in (*b.stub_members, *b.refill_members)))),
-            fr_path=fr_path,
-            partner_block=pd.implementer_block)
+            # The sha of what is being SENT, persisted before the reply can
+            # arrive — the refusal above compares against the last prompt
+            # sent, not the last one that produced a revert.
+            retros_cache[_pair_key] = {
+                **(retros_cache.get(_pair_key, {}) or {}),
+                "last_prompt_sha": _prompt_sha}
+            _save_retrospectives(project_dir, retros_cache)
         try:
             with serving_units(f"{k.file}::{k.fn_name}"
                                for k in sorted(_pair_locs)):
@@ -3892,6 +3965,67 @@ def fill_impl_blocks(
             with _counters_lock:
                 answer_lost_keys.update(_pair_locs)
             return
+
+        def _record_pair_regression(_rcmp: RegressionComparison,
+                                    _rdetail: str) -> None:
+            """The pair's durable memory of its own joint revert: the
+            diagnosis (screened like every stored lesson on the next read),
+            the newly-red set as the `regressed` stamp (what the next
+            prompt renders as measured evidence), and the joint premise —
+            the member set and the kept bodies' sha, which is what lets the
+            same transaction read the lesson back (`joint_members` exempts
+            it from `regression_scoped`; `joint_body_sha` expires it when
+            either member's body moves). Transient LLM failures update no
+            state, exactly as the per-impl retro rule."""
+            try:
+                retro = _phase_c_retrospective(
+                    fn_name="*pair*",
+                    sig_text=pair_record_container(pair),
+                    container=pair_record_container(pair),
+                    file_rel=pair.dispatcher.file,
+                    cluster_name=cluster_name,
+                    last_body=_pair_reply[:_FAILED_BODY_CAP],
+                    error_excerpt=_rdetail,
+                    fix_attempts=1,
+                    prior_retrospective=_pair_retro,
+                    pinned_observables=_pair_ev.pins)
+                _signal = retro.get("signal", "")
+                if _signal in ("llm_error", "empty_response"):
+                    raise RuntimeError(f"transient retro signal: {_signal}")
+                _prov = RetroProvenance.current(cluster_name, _halves_text)
+                _blockers = BlockedOnStubs.at_conviction(
+                    _pair_reply[:_FAILED_BODY_CAP], _halves_text)
+                with _counters_lock:
+                    _kept_sha = str((retros_cache.get(_pair_key, {}) or {})
+                                    .get("last_prompt_sha") or "")
+                    _rec = stamp_conviction({
+                        "category": retro.get("category", ""),
+                        "guidance": retro.get("guidance", ""),
+                        "signal": _signal,
+                        "retrospective_count": int(
+                            _pair_rec.get("retrospective_count", 0)) + 1,
+                        "error_count": 0,
+                        "failing_test_count": len(_rcmp.newly_red),
+                        # The pair re-dispatches once per traversal pass by
+                        # design; exhaustion semantics belong to the routes
+                        # that own retry budgets.
+                        "fully_exhausted": False,
+                        "last_error_preview": _rdetail[:240],
+                    }, _prov, _pair_answers, _blockers,
+                        regressed=tuple(sorted(_rcmp.newly_red)))
+                    _rec[JOINT_MEMBERS] = sorted(pd.member_scope())
+                    _rec[JOINT_BODY_SHA] = pd.member_body_sha()
+                    _rec["last_prompt_sha"] = _kept_sha
+                    retros_cache[_pair_key] = _rec
+                    _save_retrospectives(project_dir, retros_cache)
+                _log(f"  [phase-c/pair/retro] {pair_id}: joint revert "
+                     f"recorded ({len(_rcmp.newly_red)} newly-red test(s), "
+                     "premise = both member bodies on the kept tree) — the "
+                     "next pair prompt carries the diagnosis and what those "
+                     "tests assert.")
+            except Exception as _re:
+                _log(f"  [phase-c/pair/retro] {pair_id}: {_re}")
+
         with _splice_check_lock:
             _snaps = {
                 b.file: (target_src_dir / b.file).read_text(encoding="utf-8")
@@ -3996,6 +4130,12 @@ def fill_impl_blocks(
                 _emit("phase_c.pair.fill.reverted", data={
                     "cluster": cluster_name, "why": "regression",
                     "detail": _rcmp.summary})
+                # The transaction remembers its own revert: the diagnosis is
+                # a model call made while still holding the splice lock,
+                # which is uncontended here — pair jobs run serially on this
+                # thread BEFORE any worker pool starts (`_pair_jobs` loop
+                # precedes the file-first dispatch).
+                _record_pair_regression(_rcmp, _rdetail)
                 return
             if (_pair_u2 is not None
                     and _pair_u2.decision is U2Decision.REJECT):

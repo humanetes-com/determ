@@ -184,6 +184,217 @@ def test_a_reply_covering_one_half_keeps_nothing(monkeypatch, tmp_path):
     assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
 
 
+DISPLAY_TEST = """#[test]
+fn t_pair() {
+    let r = Report { msg: String::from("hi") };
+    assert_eq!(format!("{}", r), "rendered hi");
+}
+"""
+
+KEEP_TEST = """#[test]
+fn t_keep() {
+    let r = Report { msg: String::from("p") };
+    assert_eq!(format!("{}", r), "plain p");
+}
+"""
+
+RETRO_REPLY = (
+    "CATEGORY: WRONG_APPROACH\n"
+    "GUIDANCE: Gate the extra render on the measured status so the plain "
+    "arm keeps its existing contract.\n")
+
+_EVIDENCE = {"t_pair": ('panicked at tests/display_gen_1.rs:4:5: assertion '
+                        '`left == right` failed\n  left: "hi"\n  right: '
+                        '"rendered hi"')}
+
+
+def _write_tests(ws: Path) -> list[Path]:
+    (ws / "tests").mkdir(exist_ok=True)
+    (ws / "tests" / "display_gen_1.rs").write_text(DISPLAY_TEST)
+    (ws / "tests" / "keep_gen_1.rs").write_text(KEEP_TEST)
+    return [ws / "tests" / "display_gen_1.rs", ws / "tests" / "keep_gen_1.rs"]
+
+
+def _evidence_frontier() -> FailureFrontier:
+    return FailureFrontier.build(
+        {_DISP: {"t_pair"}, _IMPL: {"t_pair"}},
+        {_DISP: {"t_pair"}, _IMPL: {"t_pair"}},
+        evidence=_EVIDENCE,
+        pairs=(_PAIR,))
+
+
+def _install_routed_model(monkeypatch, prompts: list[str]) -> None:
+    """Route by prompt kind: the pair fill gets the paired reply, the retro
+    diagnosis its CATEGORY/GUIDANCE lines, anything else an empty reply."""
+    def _ask(prompt, *a, **k):
+        prompts.append(prompt)
+        if "You are diagnosing why a reconstruction attempt" in prompt:
+            return RETRO_REPLY
+        if "PAIRED WRITE" in prompt:
+            return PAIR_REPLY
+        return ""
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _ask)
+
+
+def _capture_logs(monkeypatch) -> list[str]:
+    logs: list[str] = []
+    monkeypatch.setattr(pipeline, "_log", lambda m: logs.append(str(m)))
+    return logs
+
+
+def _regressing_guard(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.test_results import RegressionComparison
+    cmp = RegressionComparison(
+        newly_red=frozenset({"t_keep"}), newly_crashed=(),
+        excluded_crashed=(), not_run=(), measured=("t_keep", "t_pair"),
+        base_pass=1, cur_pass=0, base_executed=2, cur_executed=2)
+    monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
+        baseline=lambda *a, **k: object(),
+        gate=lambda *a, **k: (
+            cmp, "This compiled, but it REGRESSED previously-passing "
+                 "test(s): ['t_keep'] (cluster pass count 1→0).")))
+
+
+def _run_with_tests(ws: Path, tests: list[Path]) -> pipeline.ClusterFillResult:
+    return pipeline._phase_c_fill_impl_blocks(  # type: ignore[no-any-return]
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=tests,
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys={_DISP},
+        tdd_frontier_tests=_evidence_frontier(),
+        tdd_test_cmd="cargo test",
+    )
+
+
+def test_the_pair_prompt_carries_its_attributed_tests_and_their_evidence(
+        monkeypatch, tmp_path):
+    """A pair dispatch carries the source and failure text of the tests its
+    members are attributed to: the attributed test's FILE is in the Tests
+    section (looked up by the failing test's name, not by an fn-name match
+    the test never writes), and REFILL_EVIDENCE quotes what the test said.
+    The recorded pre-fix shape — prompt `f226f03a7097` of run
+    `537093-ffcfd139`, three name-matched files, no evidence block — is the
+    negative this closes."""
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run_with_tests(ws, tests)
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "display_gen_1.rs" in pair_prompt
+    assert "<REFILL_TARGETS>" in pair_prompt
+    assert "t_pair said:" in pair_prompt
+    assert 'assertion `left == right` failed' in pair_prompt
+    # The frontier convicts both members, so the grade is DIRECT — not the
+    # name-match-only INFERRED the old channel produced.
+    assert "DIRECT: a failing test's own failure points" in pair_prompt
+
+
+def test_no_attributed_tests_means_name_match_only_and_no_direct_claim(
+        monkeypatch, tmp_path):
+    """Second negative control from the plan: a member set with no
+    attributed failing tests renders no DIRECT claim and pulls no
+    attributed test file — the name-match fallback alone, unchanged."""
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=tests,
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys={_DISP},
+        tdd_frontier_tests=FailureFrontier.build(
+            {_DISP: set(), _IMPL: set()}, {}, pairs=(_PAIR,)),
+    )
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "display_gen_1.rs" not in pair_prompt
+    assert "DIRECT: a failing test's own failure points" not in pair_prompt
+
+
+def test_a_joint_revert_is_remembered_and_the_next_prompt_differs(
+        monkeypatch, tmp_path):
+    """The transaction remembers its own revert. Dispatch 1 regresses and
+    both halves revert; the durable record lands with the newly-red set,
+    the joint premise and the diagnosis. Dispatch 2 (a fresh engine call,
+    as the next traversal pass is) rebuilds a DIFFERENT prompt that carries:
+    the reddened tests' names and assertions (the honestly-labelled
+    section), their source file, and the screened guidance — so the
+    identical-prompt refusal does not fire."""
+    import json as _json
+
+    from pipeline_core.adapters.retros import retrospectives_path
+    from pipeline_core.domain.retro_gate import JOINT_BODY_SHA, JOINT_MEMBERS
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    logs = _capture_logs(monkeypatch)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _regressing_guard(monkeypatch)
+    _run_with_tests(ws, tests)
+    assert (ws / "src" / "lib.rs").read_text() == DISPATCHER_LIB
+    assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
+    data = _json.loads(retrospectives_path(ws).read_text())
+    (key,) = [k for k in data if "*pair*" in k]
+    rec = data[key]
+    assert rec["regressed"] == ["t_keep"]
+    assert rec[JOINT_MEMBERS] == ["lib.rs::fmt", "render.rs::render"]
+    assert rec[JOINT_BODY_SHA]
+    assert rec["last_prompt_sha"]
+    assert "Gate the extra render" in rec["guidance"]
+    first = [p for p in prompts if "PAIRED WRITE" in p]
+    assert len(first) == 1
+    # Second dispatch: the next pass re-dispatches the pair.
+    _run_with_tests(ws, tests)
+    pair_prompts = [p for p in prompts if "PAIRED WRITE" in p]
+    assert len(pair_prompts) == 2, "the refusal must NOT fire — the prompt changed"
+    second = pair_prompts[1]
+    assert second != first[0]
+    assert "reddened these previously-passing test(s)" in second
+    assert "t_keep" in second
+    assert "keep_gen_1.rs" in second
+    assert 'they assert: "plain p"' in second
+    assert "Gate the extra render" in second
+    assert not any("rebuilt a byte-identical prompt" in ln for ln in logs)
+
+
+def test_negative_control_no_memory_means_the_refusal_fires(
+        monkeypatch, tmp_path):
+    """With the diagnosis suppressed (transient retro failure — no record
+    beyond the prompt sha), the second dispatch rebuilds the identical
+    prompt, and the route refuses the temperature resample instead of
+    silently spending the call — the recorded run's second dispatch would
+    have rebuilt `f226f03a7097` verbatim."""
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+
+    def _ask(prompt, *a, **k):
+        prompts.append(prompt)
+        if "You are diagnosing why a reconstruction attempt" in prompt:
+            return ""  # transient: empty retro → no record written
+        if "PAIRED WRITE" in prompt:
+            return PAIR_REPLY
+        return ""
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _ask)
+    logs = _capture_logs(monkeypatch)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _regressing_guard(monkeypatch)
+    _run_with_tests(ws, tests)
+    assert len([p for p in prompts if "PAIRED WRITE" in p]) == 1
+    _run_with_tests(ws, tests)
+    assert len([p for p in prompts if "PAIRED WRITE" in p]) == 1, (
+        "byte-identical rebuild must be refused, not re-sent")
+    assert any("rebuilt a byte-identical prompt" in ln for ln in logs)
+
+
 def test_without_a_pair_the_route_is_inert(monkeypatch, tmp_path):
     """No pair on the frontier → no pair prompt; the ordinary routes keep
     the call (pre-fix behaviour preserved)."""

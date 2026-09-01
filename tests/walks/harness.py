@@ -41,6 +41,12 @@ stated here rather than hidden in the fixture:
   passes `inventory=` (the true count) and `chronic_vanished=` (how many
   names never report) to `replay`; recorded pass/fail rows are still served
   verbatim — the model only adds the names that never appear.
+* *The failing tests' words.* Each FAILED test gets a synthetic libtest
+  stdout section with a one-line panic, so the loop's own evidence
+  extraction (`failure_evidence_by_test` → `FailureFrontier.evidence`)
+  carries an entry per failing test — the seam the pair-evidence walk
+  asserts on. The text is synthetic exactly as the names are; nothing in a
+  walk turns on what it says, only on it being present.
 
 Past the first iteration where the fix changes what the loop does, the recording
 stops describing anything real — the pipeline would have filled different fns
@@ -71,6 +77,11 @@ def render_sweep(passed: int, named: int) -> str:
     """
     lines = [f"test t{i} ... {'ok' if i <= passed else 'FAILED'}"
              for i in range(1, named + 1)]
+    for i in range(passed + 1, named + 1):
+        lines.append(f"---- t{i} stdout ----")
+        lines.append(f"thread 't{i}' panicked at tests/walk.rs:1:1:")
+        lines.append(f"assertion failed in t{i}")
+        lines.append("")
     verdict = "ok" if passed == named else "FAILED"
     lines.append(f"test result: {verdict}. {passed} passed; "
                  f"{named - passed} failed; 0 ignored")

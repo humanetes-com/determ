@@ -663,6 +663,22 @@ NO_TREE_PREMISE = "no_tree_premise"
 #: enter the same bodies and expires when that reading moves.
 CONVICTOR_ENTRY = "convictor_entry"
 CONVICTOR_ENTRY_MOVED = "convictor_entry_moved"
+#: Fields a JOINT-transaction record (a cross-file pair written and judged
+#: as one splice+reading) stamps at write: the member set the transaction
+#: wrote (`joint_members`, sorted `file::fn` strings) and the sha of those
+#: members' KEPT bodies after the revert (`joint_body_sha`). Together they
+#: are the record's checkable premise — the lesson diagnoses a joint write
+#: against exactly that tree state, stands while the member bodies still
+#: hold it, and expires the moment any route lands a different body in
+#: either member (`joint_premise_moved`). They also scope the regression
+#: screen: the reddened tests ARE tests the same transaction answers for at
+#: its own acceptance gate (the joint reading re-judges the whole baseline),
+#: so a record read back by the SAME member set is not `regression_scoped` —
+#: while a per-half read of any record without a matching set keeps today's
+#: withhold (the `SmallBuf` poison class).
+JOINT_MEMBERS = "joint_members"
+JOINT_BODY_SHA = "joint_body_sha"
+JOINT_PREMISE_MOVED = "joint_premise_moved"
 
 
 def tree_premise_absent(record: Mapping[str, Any] | None) -> bool:
@@ -695,6 +711,11 @@ def tree_premise_absent(record: Mapping[str, Any] | None) -> bool:
         return False
     entry = record.get(CONVICTOR_ENTRY)
     if isinstance(entry, Mapping) and any(v for v in entry.values()):
+        return False
+    # A joint-transaction record's premise is the member bodies it diagnosed
+    # against (`JOINT_BODY_SHA`) — checkable, and checked by
+    # `joint_premise_moved` at the read site.
+    if str(record.get(JOINT_BODY_SHA) or ""):
         return False
     stored = record.get("blocked_on")
     return not isinstance(stored, list) or not stored
@@ -750,12 +771,16 @@ def admissible_guidance(
     cluster: str = "",
     cfg_dead: frozenset[str] = frozenset(),
     unit: FnLocator | None = None,
+    joint_members: frozenset[str] = frozenset(),
+    joint_body_sha: str = "",
 ) -> str:
     """The stored lesson a prompt may carry, or ``""`` — `screen_guidance`'s
     text half, for the callers that do not log the verdict."""
     return screen_guidance(record, file_text, evidence=evidence,
                           anchor_types=anchor_types, cluster=cluster,
-                          cfg_dead=cfg_dead, unit=unit).text
+                          cfg_dead=cfg_dead, unit=unit,
+                          joint_members=joint_members,
+                          joint_body_sha=joint_body_sha).text
 
 
 def screen_guidance(
@@ -765,6 +790,8 @@ def screen_guidance(
     cluster: str = "",
     cfg_dead: frozenset[str] = frozenset(),
     unit: FnLocator | None = None,
+    joint_members: frozenset[str] = frozenset(),
+    joint_body_sha: str = "",
 ) -> GuidanceScreening:
     """The stored lesson a prompt may carry, or ``""``, with the retiring rule.
 
@@ -843,8 +870,26 @@ def screen_guidance(
     # this unit does not answer for. `stale_evidence` reads `convicted_by`,
     # which such a record stamps empty; the layout rule reads field claims,
     # and "drop the 40-byte buffer" makes none. See `regression_scoped`.
-    if regression_scoped(rec, evidence):
+    # EXEMPT: a JOINT-transaction record read back by the same member set
+    # that earned it (`joint_members` equal and non-empty). Its acceptance
+    # gate re-judges the whole baseline, so the reddened tests are tests the
+    # transaction answers for — the disjointness premise mis-models it. A
+    # per-half read (no member set passed, or a different one) keeps the
+    # withhold: that is the poison the rule exists for.
+    _stored_scope = rec.get(JOINT_MEMBERS)
+    _same_transaction = bool(
+        joint_members and isinstance(_stored_scope, list) and _stored_scope
+        and frozenset(str(s) for s in _stored_scope) == joint_members)
+    if not _same_transaction and regression_scoped(rec, evidence):
         return GuidanceScreening("", REGRESSION_SCOPED)
+    # A joint record's own expiry: the lesson diagnosed a joint write against
+    # the member bodies whose sha it stamped; when either body has since
+    # moved (any route landed something), the state it explains is gone.
+    # Conservative on ignorance — a caller that passes no current sha (every
+    # non-joint injection site) decides nothing.
+    _stored_sha = str(rec.get(JOINT_BODY_SHA) or "")
+    if _stored_sha and joint_body_sha and _stored_sha != joint_body_sha:
+        return GuidanceScreening("", JOINT_PREMISE_MOVED)
     # The eighth way, and the only one drawn from a measurement rather than
     # from the record's own text: the tests the record was convicted on do
     # not execute the body it advises about. `stale_evidence` below asks
@@ -962,6 +1007,16 @@ def retired_guidance_line(
                 f"when its convicting test(s) ({names[:4]}) entered a "
                 f"different set of bodies — the execution it explains is "
                 f"superseded; NOT injected ({CONVICTOR_ENTRY_MOVED}): {head}")
+    if verdict.retired_by == JOINT_PREMISE_MOVED:
+        # Same shape as the entry-moved expiry: healthy, but the record stays
+        # on disk, so silence would make the next launch read it as never
+        # screened.
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} diagnosed a "
+                f"joint write against member bodies that have since moved — "
+                f"NOT injected ({JOINT_PREMISE_MOVED}): {head}")
     if verdict.retired_by != TEST_SACRIFICING_PRESCRIPTION:
         return ""
     convicted = rec.get("convicted_by")

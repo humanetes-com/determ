@@ -29,6 +29,7 @@ from dataclasses import replace
 from typing import NamedTuple
 
 from pipeline_core.domain.attribution import FormatterPair, container_key
+from pipeline_core.domain.body_ledger import body_sha
 from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock
 
 
@@ -43,6 +44,35 @@ class PairDispatch(NamedTuple):
 
     def member_locators(self) -> frozenset[FnLocator]:
         return self.pair.member_locators()
+
+    def member_scope(self) -> frozenset[str]:
+        """The transaction's member identity as `file::fn` strings — the
+        `joint_members` stamp a pair's durable record carries and the scope
+        a read-back is judged under (the same-transaction exemption of the
+        regression screen)."""
+        return frozenset(f"{k.file}::{k.fn_name}"
+                         for k in self.member_locators())
+
+    def member_body_sha(self) -> str:
+        """Identity of the members' CURRENT bodies, in deterministic member
+        order — the checkable premise a joint-transaction record stamps at
+        write (post-revert, the kept tree) and re-computes at read: the
+        lesson diagnoses a joint write against exactly this tree state and
+        expires when any route lands a different body in either member."""
+        texts = []
+        for b in (self.dispatcher_block, self.implementer_block):
+            for m in sorted((*b.stub_members, *b.refill_members),
+                            key=lambda m: (b.file, m.fn_name)):
+                texts.append(m.body_text)
+        return body_sha(texts)
+
+
+def pair_record_container(pair: FormatterPair) -> str:
+    """The container half of a pair record's retro-store key — both
+    endpoints, so a pair's memory can never collide with either member
+    block's own `*impl*` record."""
+    d, i = pair.dispatcher, pair.implementer
+    return f"{d.file}::{d.fn_name}+{i.file}::{i.fn_name}"
 
 
 def _endpoint_block(
