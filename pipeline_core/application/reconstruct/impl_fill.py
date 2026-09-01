@@ -3821,9 +3821,15 @@ def fill_impl_blocks(
         # newly-red set (a measurement the next prompt renders as evidence),
         # its guidance the screened diagnosis of that write, and its
         # `last_prompt_sha` what makes a byte-identical rebuild a printed
-        # refusal instead of a silent temperature resample — the pair's
-        # retries are separated by a traversal pass, so call-scoped feedback
-        # (file-first's `prior_error`, per-impl's `last_error`) cannot carry.
+        # refusal instead of a silent temperature resample. A compile
+        # failure is not a regression: cargo already answered, so the
+        # diagnostic goes into `last_error` (the builder slot per-impl
+        # already has) and is retried in this call; `last_compile_error`
+        # on the record carries it to the next pass and `last_prompt_sha`
+        # is cleared so the identical-prompt refusal cannot lock the pair
+        # out (run `719098-e021d93b`, 2026-09-01: E0599 `OsStr::from_bytes`
+        # reverted the joint write, stamped the no-error prompt's sha, and
+        # the next pass would have rebuilt that prompt verbatim).
         _pair_key = _retro_key(pair.dispatcher.file, "*pair*",
                                pair_record_container(pair))
         _pair_rec = retros_cache.get(_pair_key, {}) or {}
@@ -3850,6 +3856,7 @@ def fill_impl_blocks(
             ledger_entries=ledger_entries, oracle_fp=oracle_fp,
             tuple_structs=_tuple_structs,
             prior_regressed=_prior_regressed,
+            joint_rewrite=True,
             leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
             file_cap=_ATTRIBUTED_TEST_FILE_CAP)
         _half_ctx: list[tuple[ImplBlock, str, str]] = []
@@ -3901,307 +3908,361 @@ def fill_impl_blocks(
         if (_rline := retired_guidance_line(
                 str(_pair_key), _pair_rec, _pair_verdict)):
             _log(f"  {_rline}")
-        prompt = _build_per_impl_prompt(
-            block=pd.dispatcher_block,
-            related_blocks=[],
-            test_blocks=list(_pair_ev.test_blocks),
-            module_name=module_name,
-            cluster_name=cluster_name,
-            sections=PerImplSections(
-                types=_types_join, invariants=invariants_section,
-                notes="", crate_idioms="", dispatch_family="",
-                macros=macros_section, siblings="",
-                retrospective_guidance=_pair_retro,
-                bound_methods=_bound_join,
-                refill_evidence=_pair_ev.refill_evidence,
-                inferred_refill_names=_pair_ev.inferred_names,
-                crashed_refill_names=_pair_ev.crashed_names,
-                aimed_refill_names=_pair_ev.aimed_names,
-                identity_must=_identity_must(
-                    *(m for b in halves
-                      for m in (*b.stub_members, *b.refill_members)))),
-            fr_path=fr_path,
-            partner_block=pd.implementer_block)
-        # The refusal the other routes already have: identical bytes to the
-        # last prompt this pair SENT means the feedback did not change, and
-        # another call buys a temperature resample of the same question —
-        # the pair's dispatches are a traversal pass apart, so without the
-        # durable sha this resample was silent (run `537093-ffcfd139` would
-        # have rebuilt `f226f03a7097` verbatim at its second dispatch).
-        _prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        if _prompt_sha == str(_pair_rec.get("last_prompt_sha") or ""):
-            _log(f"  [phase-c/pair] {pair_id}: rebuilt a byte-identical "
-                 "prompt — the revert feedback did not change, so another "
-                 "call buys a temperature resample of the same question; "
-                 "pair not dispatched this pass.")
-            _emit("phase_c.pair.fill.resample_skipped", data={
-                "cluster": cluster_name,
-                "dispatcher": (f"{pair.dispatcher.file}::"
-                               f"{pair.dispatcher.fn_name}"),
-                "implementer": (f"{pair.implementer.file}::"
-                                f"{pair.implementer.fn_name}")})
-            return
-        _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
-             "implementer written under ONE judgment across "
-             f"{len(halves)} files ({len(_pair_tests)} convicting test(s)).")
-        _emit("phase_c.pair.fill.start", data={
-            "cluster": cluster_name,
-            "dispatcher": f"{pair.dispatcher.file}::{pair.dispatcher.fn_name}",
-            "implementer": (f"{pair.implementer.file}::"
-                            f"{pair.implementer.fn_name}"),
-            "convicting": sorted(_pair_tests)})
-        with _counters_lock:
-            attempts_total += 1
-            dispatched_keys.update(_pair_locs)
-            # The sha of what is being SENT, persisted before the reply can
-            # arrive — the refusal above compares against the last prompt
-            # sent, not the last one that produced a revert.
-            retros_cache[_pair_key] = {
-                **(retros_cache.get(_pair_key, {}) or {}),
-                "last_prompt_sha": _prompt_sha}
-            _save_retrospectives(project_dir, retros_cache)
-        try:
-            with serving_units(f"{k.file}::{k.fn_name}"
-                               for k in sorted(_pair_locs)):
-                _pair_reply = _ask_fill(prompt)
-        except Exception as _pe:
-            _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
-            with _counters_lock:
-                answer_lost_keys.update(_pair_locs)
-            return
-        _pair_parsed = extract_fn_bodies(_pair_reply)
-        if not _pair_parsed:
-            _log(f"  [phase-c/pair] {pair_id}: empty/no FN blocks "
-                 f"({fn_tag_occurrences(_pair_reply)} FN tag(s) in reply).")
-            with _counters_lock:
-                answer_lost_keys.update(_pair_locs)
-            return
 
-        def _record_pair_regression(_rcmp: RegressionComparison,
-                                    _rdetail: str) -> None:
-            """The pair's durable memory of its own joint revert: the
-            diagnosis (screened like every stored lesson on the next read),
-            the newly-red set as the `regressed` stamp (what the next
-            prompt renders as measured evidence), and the joint premise —
-            the member set and the kept bodies' sha, which is what lets the
-            same transaction read the lesson back (`joint_members` exempts
-            it from `regression_scoped`; `joint_body_sha` expires it when
-            either member's body moves). Transient LLM failures update no
-            state, exactly as the per-impl retro rule."""
-            try:
-                retro = _phase_c_retrospective(
-                    fn_name="*pair*",
-                    sig_text=pair_record_container(pair),
-                    container=pair_record_container(pair),
-                    file_rel=pair.dispatcher.file,
-                    cluster_name=cluster_name,
-                    last_body=_pair_reply[:_FAILED_BODY_CAP],
-                    error_excerpt=_rdetail,
-                    fix_attempts=1,
-                    prior_retrospective=_pair_retro,
-                    pinned_observables=_pair_ev.pins)
-                _signal = retro.get("signal", "")
-                if _signal in ("llm_error", "empty_response"):
-                    raise RuntimeError(f"transient retro signal: {_signal}")
-                _prov = RetroProvenance.current(cluster_name, _halves_text)
-                _blockers = BlockedOnStubs.at_conviction(
-                    _pair_reply[:_FAILED_BODY_CAP], _halves_text)
-                with _counters_lock:
-                    _kept_sha = str((retros_cache.get(_pair_key, {}) or {})
-                                    .get("last_prompt_sha") or "")
-                    _rec = stamp_conviction({
-                        "category": retro.get("category", ""),
-                        "guidance": retro.get("guidance", ""),
-                        "signal": _signal,
-                        "retrospective_count": int(
-                            _pair_rec.get("retrospective_count", 0)) + 1,
-                        "error_count": 0,
-                        "failing_test_count": len(_rcmp.newly_red),
-                        # The pair re-dispatches once per traversal pass by
-                        # design; exhaustion semantics belong to the routes
-                        # that own retry budgets.
-                        "fully_exhausted": False,
-                        "last_error_preview": _rdetail[:240],
-                    }, _prov, _pair_answers, _blockers,
-                        regressed=tuple(sorted(_rcmp.newly_red)))
-                    _rec[JOINT_MEMBERS] = sorted(pd.member_scope())
-                    _rec[JOINT_BODY_SHA] = pd.member_body_sha()
-                    _rec["last_prompt_sha"] = _kept_sha
-                    retros_cache[_pair_key] = _rec
-                    _save_retrospectives(project_dir, retros_cache)
-                _log(f"  [phase-c/pair/retro] {pair_id}: joint revert "
-                     f"recorded ({len(_rcmp.newly_red)} newly-red test(s), "
-                     "premise = both member bodies on the kept tree) — the "
-                     "next pair prompt carries the diagnosis and what those "
-                     "tests assert.")
-            except Exception as _re:
-                _log(f"  [phase-c/pair/retro] {pair_id}: {_re}")
+        def _make_pair_prompt(_err: str) -> str:
+            return _build_per_impl_prompt(
+                block=pd.dispatcher_block,
+                related_blocks=[],
+                test_blocks=list(_pair_ev.test_blocks),
+                module_name=module_name,
+                cluster_name=cluster_name,
+                sections=PerImplSections(
+                    types=_types_join, invariants=invariants_section,
+                    notes="", crate_idioms="", dispatch_family="",
+                    macros=macros_section, siblings="",
+                    retrospective_guidance=_pair_retro,
+                    bound_methods=_bound_join,
+                    refill_evidence=_pair_ev.refill_evidence,
+                    inferred_refill_names=_pair_ev.inferred_names,
+                    crashed_refill_names=_pair_ev.crashed_names,
+                    aimed_refill_names=_pair_ev.aimed_names,
+                    identity_must=_identity_must(
+                        *(m for b in halves
+                          for m in (*b.stub_members, *b.refill_members))),
+                    last_error=_err),
+                fr_path=fr_path,
+                partner_block=pd.implementer_block)
 
-        with _splice_check_lock:
-            _snaps = {
-                b.file: (target_src_dir / b.file).read_text(encoding="utf-8")
-                for b in halves}
-            _pair_base_raw: list[str] = []
-            _pair_baseline = _test_regression_baseline(
-                tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
-            _spliced_by_file: dict[str, list[str]] = {}
-            for b, _htxt, _hwc in _half_ctx:
-                _routing = route_fn_bodies(
-                    _pair_parsed, target=b.container, related=[],
-                    trait_defaults=trait_default_hosts(all_blocks, b.file),
-                    members=members_in_file(all_blocks, b.file))
-                _half_names = {m.fn_name for m in (*b.stub_members,
-                                                   *b.refill_members)}
-                _half_refills = {m.fn_name for m in b.refill_members}
-                for _rb in _routing.routed:
-                    _fd = _rb.fn_data
-                    if _fd["fn_name"] not in _half_names:
-                        continue
-                    _wc2 = _fd["where_clause"]
-                    if _wc2 and (_rb.via_trait_default
-                                 or signature_fixed_by_trait(_rb.container)):
-                        _wc2 = None
-                    _ok, _reason, _delta = _splice_fn_with_where(
-                        target_src_dir / b.file, _rb.container,
-                        _fd["fn_name"], _fd["body"], _wc2,
-                        allow_nonstub=_fd["fn_name"] in _half_refills,
-                        sig_text=_rb.sig_text)
-                    if _ok:
-                        _spliced_by_file.setdefault(b.file, []).append(
-                            _fd["fn_name"])
-                    else:
-                        _log(f"  [phase-c/pair] {pair_id}: splice "
-                             f"`{_fd['fn_name']}` failed: {_reason}")
-
-            def _revert_pair() -> None:
-                for _pf, _ptxt in _snaps.items():
-                    (target_src_dir / _pf).write_text(
-                        _ptxt, encoding="utf-8")
-                for _pf, _pnames in _spliced_by_file.items():
-                    _note_reverted(_pf, _pnames)
-
-            _n_spliced = sum(len(v) for v in _spliced_by_file.values())
-            if len(_spliced_by_file) < len(halves):
-                # HALF a pair on the tree is exactly the state this route
-                # exists to never create — revert whatever landed.
-                if _n_spliced:
-                    _revert_pair()
-                _log(f"  [phase-c/pair] {pair_id}: reply covered "
-                     f"{len(_spliced_by_file)} of {len(halves)} files — "
-                     "nothing kept (the transaction needs both halves).")
-                _cls(FillOutcomeClass.ANSWER_DROPPED, pair_id, "pair")
-                _emit("phase_c.pair.fill.partial", data={
+        _last_error = with_blamed_type_api(
+            str(_pair_rec.get("last_compile_error") or ""),
+            _crate_type_records) if _pair_rec.get("last_compile_error") else ""
+        for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
+            prompt = _make_pair_prompt(_last_error)
+            # Compare against the sha of the last prompt SENT (the cache,
+            # which this loop updates), not the entry snapshot: an in-call
+            # compile retry must see attempt 1's stamp. A compile retry
+            # that rebuilds those same bytes (the diagnostic did not
+            # change) still clears the sha — otherwise the next pass
+            # seeds LAST_ERROR, rebuilds the same prompt, and the
+            # refusal locks the pair out of the error-informed question
+            # (run `719098-e021d93b`, 2026-09-01).
+            _prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            _prev_sha = str(
+                (retros_cache.get(_pair_key, {}) or {}).get("last_prompt_sha")
+                or "")
+            if _prompt_sha == _prev_sha:
+                _log(f"  [phase-c/pair] {pair_id}: rebuilt a byte-identical "
+                     "prompt — the revert feedback did not change, so another "
+                     "call buys a temperature resample of the same question; "
+                     "pair not dispatched this pass.")
+                _emit("phase_c.pair.fill.resample_skipped", data={
                     "cluster": cluster_name,
-                    "spliced": {f: sorted(ns)
-                                for f, ns in _spliced_by_file.items()}})
+                    "dispatcher": (f"{pair.dispatcher.file}::"
+                                   f"{pair.dispatcher.fn_name}"),
+                    "implementer": (f"{pair.implementer.file}::"
+                                    f"{pair.implementer.fn_name}")})
+                if _last_error:
+                    with _counters_lock:
+                        _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                        _crec["last_prompt_sha"] = ""
+                        retros_cache[_pair_key] = _crec
+                        _save_retrospectives(project_dir, retros_cache)
                 return
-            rc, _pair_out, _pair_diags = _run_cargo_check_diag(
-                check_cmd, target_src_dir, cluster_env)
-            if rc != 0:
-                _pair_sig = _cargo_err_sig_from_diagnostics(_pair_diags)
-                _revert_pair()
-                _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
-                     f"compile failed ({len(_pair_sig)} err(s)).")
-                _verdict_row(
-                    pair_id, Disposition.REVERT,
-                    "pair fill compile failed — both splices reverted as "
-                    "one transaction",
-                    outcome=GateOutcome.NEGATIVE, attempt=1,
-                    evidence=tuple(sorted(_pair_sig)), model_calls=1)
-                _cls(FillOutcomeClass.COMPILE_FAIL, pair_id, "pair")
-                with _counters_lock:
-                    impls_failed += 1
-                _emit("phase_c.pair.fill.reverted", data={
-                    "cluster": cluster_name, "why": "compile",
-                    "errors": len(_pair_sig)})
-                return
-            _pair_sites = frozenset(
-                FnSite(b.file, m.fn_name, b.container)
-                for b in halves
-                for m in (*b.stub_members, *b.refill_members))
-            _pair_u2 = _u2_test_gate(_pair_tests, _pair_sites, tdd_test_cmd,
-                                     target_src_dir, cluster_env)
-            _pair_regr = _test_regression_gate(
-                tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
-                stub_free=stub_free)
-            if _pair_regr is not None:
-                _rcmp, _rdetail = _pair_regr
-                _revert_pair()
-                _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
-                     f"regressed sibling test(s): {_rcmp.summary}.")
-                _verdict_row(
-                    pair_id, Disposition.REVERT,
-                    f"pair regressed sibling test(s): {_rcmp.summary} — "
-                    "both splices reverted as one transaction",
-                    outcome=GateOutcome.NEGATIVE, attempt=1,
-                    evidence=tuple(sorted(_rcmp.signature)), model_calls=1)
-                _cls(FillOutcomeClass.WRONG_BODY, pair_id, "pair")
-                with _counters_lock:
-                    impls_failed += 1
-                _emit("phase_c.pair.fill.reverted", data={
-                    "cluster": cluster_name, "why": "regression",
-                    "detail": _rcmp.summary})
-                # The transaction remembers its own revert: the diagnosis is
-                # a model call made while still holding the splice lock,
-                # which is uncontended here — pair jobs run serially on this
-                # thread BEFORE any worker pool starts (`_pair_jobs` loop
-                # precedes the file-first dispatch).
-                _record_pair_regression(_rcmp, _rdetail)
-                return
-            if (_pair_u2 is not None
-                    and _pair_u2.decision is U2Decision.REJECT):
-                _revert_pair()
-                _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
-                     f"{len(_pair_u2.self_failures)} convicting test(s) "
-                     "still failing after the joint write.")
-                _verdict_row(
-                    pair_id, Disposition.REVERT,
-                    "pair convicting tests still failing — both splices "
-                    "reverted as one transaction",
-                    outcome=GateOutcome.NEGATIVE, attempt=1,
-                    evidence=tuple(sorted(_pair_u2.self_failures)),
-                    model_calls=1)
-                _cls(FillOutcomeClass.WRONG_BODY, pair_id, "pair")
-                with _counters_lock:
-                    impls_failed += 1
-                _emit("phase_c.pair.fill.reverted", data={
-                    "cluster": cluster_name, "why": "u2",
-                    "failing": sorted(_pair_u2.self_failures)})
-                return
-            with _counters_lock:
-                fns_filled_total += _n_spliced
-                impls_filled += 1
-            block_outcomes.append(UnitOutcome(landed=True))
-            _pair_passed = (_pair_u2.self_passed
-                            if _pair_u2 is not None else frozenset())
-            _pair_kept_unreachable = (
-                _pair_u2 is not None
-                and _pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
-            _cls(class_for_kept(passed=_pair_passed,
-                                unreachable=_pair_kept_unreachable),
-                 pair_id, "pair")
-            _verdict_row(
-                pair_id,
-                (Disposition.KEEP_DEFERRED if _pair_kept_unreachable
-                 else Disposition.ACCEPT),
-                (f"pair accepted — {len(_pair_passed)} convicting test(s) "
-                 "observed passing" if _pair_passed
-                 else "pair kept — compiles, no regression; judged at the "
-                 "next sweep"),
-                outcome=(GateOutcome.POSITIVE
-                         if _pair_passed and not _pair_kept_unreachable
-                         else GateOutcome.UNMEASURABLE),
-                evidence=tuple(sorted(_pair_passed)), attempt=1,
-                validity=ValidityVector(binary_completed=True),
-                model_calls=1)
-            _log(f"  [phase-c/pair] {pair_id}: FILLED {_n_spliced} fn(s) "
-                 "across both halves"
-                 + (f" — {len(_pair_passed)} convicting test(s) passing."
-                    if _pair_passed else "."))
-            _emit("phase_c.pair.fill.done", data={
+            _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
+                 "implementer written under ONE judgment across "
+                 f"{len(halves)} files ({len(_pair_tests)} convicting test(s)).")
+            _emit("phase_c.pair.fill.start", data={
                 "cluster": cluster_name,
-                "members_filled": _n_spliced,
-                "passed": sorted(_pair_passed)})
+                "dispatcher": f"{pair.dispatcher.file}::{pair.dispatcher.fn_name}",
+                "implementer": (f"{pair.implementer.file}::"
+                                f"{pair.implementer.fn_name}"),
+                "convicting": sorted(_pair_tests)})
+            with _counters_lock:
+                attempts_total += 1
+                dispatched_keys.update(_pair_locs)
+                # The sha of what is being SENT, persisted before the reply can
+                # arrive — the refusal above compares against the last prompt
+                # sent, not the last one that produced a revert.
+                retros_cache[_pair_key] = {
+                    **(retros_cache.get(_pair_key, {}) or {}),
+                    "last_prompt_sha": _prompt_sha}
+                _save_retrospectives(project_dir, retros_cache)
+            try:
+                with serving_units(f"{k.file}::{k.fn_name}"
+                                   for k in sorted(_pair_locs)):
+                    _pair_reply = _ask_fill(prompt)
+            except Exception as _pe:
+                _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
+                with _counters_lock:
+                    answer_lost_keys.update(_pair_locs)
+                return
+            _pair_parsed = extract_fn_bodies(_pair_reply)
+            if not _pair_parsed:
+                _log(f"  [phase-c/pair] {pair_id}: empty/no FN blocks "
+                     f"({fn_tag_occurrences(_pair_reply)} FN tag(s) in reply).")
+                with _counters_lock:
+                    answer_lost_keys.update(_pair_locs)
+                return
+
+            def _record_pair_regression(_rcmp: RegressionComparison,
+                                        _rdetail: str,
+                                        *,
+                                        _reply: str = _pair_reply) -> None:
+                """The pair's durable memory of its own joint revert: the
+                diagnosis (screened like every stored lesson on the next read),
+                the newly-red set as the `regressed` stamp (what the next
+                prompt renders as measured evidence), and the joint premise —
+                the member set and the kept bodies' sha, which is what lets the
+                same transaction read the lesson back (`joint_members` exempts
+                it from `regression_scoped`; `joint_body_sha` expires it when
+                either member's body moves). Transient LLM failures update no
+                state, exactly as the per-impl retro rule."""
+                try:
+                    retro = _phase_c_retrospective(
+                        fn_name="*pair*",
+                        sig_text=pair_record_container(pair),
+                        container=pair_record_container(pair),
+                        file_rel=pair.dispatcher.file,
+                        cluster_name=cluster_name,
+                        last_body=_reply[:_FAILED_BODY_CAP],
+                        error_excerpt=_rdetail,
+                        fix_attempts=1,
+                        prior_retrospective=_pair_retro,
+                        pinned_observables=_pair_ev.pins)
+                    _signal = retro.get("signal", "")
+                    if _signal in ("llm_error", "empty_response"):
+                        raise RuntimeError(f"transient retro signal: {_signal}")
+                    _prov = RetroProvenance.current(cluster_name, _halves_text)
+                    _blockers = BlockedOnStubs.at_conviction(
+                        _reply[:_FAILED_BODY_CAP], _halves_text)
+                    with _counters_lock:
+                        _kept_sha = str((retros_cache.get(_pair_key, {}) or {})
+                                        .get("last_prompt_sha") or "")
+                        _rec = stamp_conviction({
+                            "category": retro.get("category", ""),
+                            "guidance": retro.get("guidance", ""),
+                            "signal": _signal,
+                            "retrospective_count": int(
+                                _pair_rec.get("retrospective_count", 0)) + 1,
+                            "error_count": 0,
+                            "failing_test_count": len(_rcmp.newly_red),
+                            # The pair re-dispatches once per traversal pass by
+                            # design; exhaustion semantics belong to the routes
+                            # that own retry budgets.
+                            "fully_exhausted": False,
+                            "last_error_preview": _rdetail[:240],
+                        }, _prov, _pair_answers, _blockers,
+                            regressed=tuple(sorted(_rcmp.newly_red)))
+                        _rec[JOINT_MEMBERS] = sorted(pd.member_scope())
+                        _rec[JOINT_BODY_SHA] = pd.member_body_sha()
+                        _rec["last_prompt_sha"] = _kept_sha
+                        retros_cache[_pair_key] = _rec
+                        _save_retrospectives(project_dir, retros_cache)
+                    _log(f"  [phase-c/pair/retro] {pair_id}: joint revert "
+                         f"recorded ({len(_rcmp.newly_red)} newly-red test(s), "
+                         "premise = both member bodies on the kept tree) — the "
+                         "next pair prompt carries the diagnosis and what those "
+                         "tests assert.")
+                except Exception as _re:
+                    _log(f"  [phase-c/pair/retro] {pair_id}: {_re}")
+
+            with _splice_check_lock:
+                _snaps = {
+                    b.file: (target_src_dir / b.file).read_text(encoding="utf-8")
+                    for b in halves}
+                _pair_base_raw: list[str] = []
+                _pair_baseline = _test_regression_baseline(
+                    tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
+                _spliced_by_file: dict[str, list[str]] = {}
+                for b, _htxt, _hwc in _half_ctx:
+                    _routing = route_fn_bodies(
+                        _pair_parsed, target=b.container, related=[],
+                        trait_defaults=trait_default_hosts(all_blocks, b.file),
+                        members=members_in_file(all_blocks, b.file))
+                    _half_names = {m.fn_name for m in (*b.stub_members,
+                                                       *b.refill_members)}
+                    _half_refills = {m.fn_name for m in b.refill_members}
+                    for _rb in _routing.routed:
+                        _fd = _rb.fn_data
+                        if _fd["fn_name"] not in _half_names:
+                            continue
+                        _wc2 = _fd["where_clause"]
+                        if _wc2 and (_rb.via_trait_default
+                                     or signature_fixed_by_trait(_rb.container)):
+                            _wc2 = None
+                        _ok, _reason, _delta = _splice_fn_with_where(
+                            target_src_dir / b.file, _rb.container,
+                            _fd["fn_name"], _fd["body"], _wc2,
+                            allow_nonstub=_fd["fn_name"] in _half_refills,
+                            sig_text=_rb.sig_text)
+                        if _ok:
+                            _spliced_by_file.setdefault(b.file, []).append(
+                                _fd["fn_name"])
+                        else:
+                            _log(f"  [phase-c/pair] {pair_id}: splice "
+                                 f"`{_fd['fn_name']}` failed: {_reason}")
+
+                def _revert_pair(_kept: dict[str, str] = _snaps,
+                                 _names: dict[str, list[str]] = _spliced_by_file
+                                 ) -> None:
+                    for _pf, _ptxt in _kept.items():
+                        (target_src_dir / _pf).write_text(
+                            _ptxt, encoding="utf-8")
+                    for _pf, _pnames in _names.items():
+                        _note_reverted(_pf, _pnames)
+
+                _n_spliced = sum(len(v) for v in _spliced_by_file.values())
+                if len(_spliced_by_file) < len(halves):
+                    # HALF a pair on the tree is exactly the state this route
+                    # exists to never create — revert whatever landed.
+                    if _n_spliced:
+                        _revert_pair()
+                    _log(f"  [phase-c/pair] {pair_id}: reply covered "
+                         f"{len(_spliced_by_file)} of {len(halves)} files — "
+                         "nothing kept (the transaction needs both halves).")
+                    _cls(FillOutcomeClass.ANSWER_DROPPED, pair_id, "pair")
+                    _emit("phase_c.pair.fill.partial", data={
+                        "cluster": cluster_name,
+                        "spliced": {f: sorted(ns)
+                                    for f, ns in _spliced_by_file.items()}})
+                    return
+                rc, _pair_out, _pair_diags = _run_cargo_check_diag(
+                    check_cmd, target_src_dir, cluster_env)
+                if rc != 0:
+                    _pair_sig = _cargo_err_sig_from_diagnostics(_pair_diags)
+                    _revert_pair()
+                    _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
+                         f"compile failed ({len(_pair_sig)} err(s)).")
+                    _verdict_row(
+                        pair_id, Disposition.REVERT,
+                        "pair fill compile failed — both splices reverted as "
+                        "one transaction",
+                        outcome=GateOutcome.NEGATIVE, attempt=1,
+                        evidence=tuple(sorted(_pair_sig)), model_calls=1)
+                    _cls(FillOutcomeClass.COMPILE_FAIL, pair_id, "pair")
+                    with _counters_lock:
+                        impls_failed += 1
+                    _emit("phase_c.pair.fill.reverted", data={
+                        "cluster": cluster_name, "why": "compile",
+                        "errors": len(_pair_sig), "attempt": _attempt})
+                    _excerpt_parts = [
+                        _focus_cargo_errors(_pair_out, b.file) for b in halves]
+                    _excerpt = "\n".join(x for x in _excerpt_parts if x).strip()
+                    if not _excerpt:
+                        _excerpt = "\n".join(_pair_sig)
+                    _last_error = with_blamed_type_api(
+                        _excerpt, _crate_type_records)
+                    with _counters_lock:
+                        _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                        _crec["last_compile_error"] = _last_error[:4000]
+                        retros_cache[_pair_key] = _crec
+                        _save_retrospectives(project_dir, retros_cache)
+                    if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
+                        _log(f"  [phase-c/pair] {pair_id}: compile failed — "
+                             f"retrying with LAST_ERROR "
+                             f"(attempt {_attempt + 1}/"
+                             f"{_FILE_FIRST_MAX_ATTEMPTS}).")
+                        continue
+                    with _counters_lock:
+                        _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                        _crec["last_prompt_sha"] = ""
+                        retros_cache[_pair_key] = _crec
+                        _save_retrospectives(project_dir, retros_cache)
+                    return
+                with _counters_lock:
+                    _krec = dict(retros_cache.get(_pair_key, {}) or {})
+                    if _krec.get("last_compile_error"):
+                        _krec["last_compile_error"] = ""
+                        retros_cache[_pair_key] = _krec
+                        _save_retrospectives(project_dir, retros_cache)
+                _pair_sites = frozenset(
+                    FnSite(b.file, m.fn_name, b.container)
+                    for b in halves
+                    for m in (*b.stub_members, *b.refill_members))
+                _pair_u2 = _u2_test_gate(_pair_tests, _pair_sites, tdd_test_cmd,
+                                         target_src_dir, cluster_env)
+                _pair_regr = _test_regression_gate(
+                    tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
+                    stub_free=stub_free)
+                if _pair_regr is not None:
+                    _rcmp, _rdetail = _pair_regr
+                    _revert_pair()
+                    _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
+                         f"regressed sibling test(s): {_rcmp.summary}.")
+                    _verdict_row(
+                        pair_id, Disposition.REVERT,
+                        f"pair regressed sibling test(s): {_rcmp.summary} — "
+                        "both splices reverted as one transaction",
+                        outcome=GateOutcome.NEGATIVE, attempt=1,
+                        evidence=tuple(sorted(_rcmp.signature)), model_calls=1)
+                    _cls(FillOutcomeClass.WRONG_BODY, pair_id, "pair")
+                    with _counters_lock:
+                        impls_failed += 1
+                    _emit("phase_c.pair.fill.reverted", data={
+                        "cluster": cluster_name, "why": "regression",
+                        "detail": _rcmp.summary})
+                    # The transaction remembers its own revert: the diagnosis is
+                    # a model call made while still holding the splice lock,
+                    # which is uncontended here — pair jobs run serially on this
+                    # thread BEFORE any worker pool starts (`_pair_jobs` loop
+                    # precedes the file-first dispatch).
+                    _record_pair_regression(_rcmp, _rdetail)
+                    return
+                if (_pair_u2 is not None
+                        and _pair_u2.decision is U2Decision.REJECT):
+                    _revert_pair()
+                    _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
+                         f"{len(_pair_u2.self_failures)} convicting test(s) "
+                         "still failing after the joint write.")
+                    _verdict_row(
+                        pair_id, Disposition.REVERT,
+                        "pair convicting tests still failing — both splices "
+                        "reverted as one transaction",
+                        outcome=GateOutcome.NEGATIVE, attempt=1,
+                        evidence=tuple(sorted(_pair_u2.self_failures)),
+                        model_calls=1)
+                    _cls(FillOutcomeClass.WRONG_BODY, pair_id, "pair")
+                    with _counters_lock:
+                        impls_failed += 1
+                    _emit("phase_c.pair.fill.reverted", data={
+                        "cluster": cluster_name, "why": "u2",
+                        "failing": sorted(_pair_u2.self_failures)})
+                    return
+                with _counters_lock:
+                    fns_filled_total += _n_spliced
+                    impls_filled += 1
+                block_outcomes.append(UnitOutcome(landed=True))
+                _pair_passed = (_pair_u2.self_passed
+                                if _pair_u2 is not None else frozenset())
+                _pair_kept_unreachable = (
+                    _pair_u2 is not None
+                    and _pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
+                _cls(class_for_kept(passed=_pair_passed,
+                                    unreachable=_pair_kept_unreachable),
+                     pair_id, "pair")
+                _verdict_row(
+                    pair_id,
+                    (Disposition.KEEP_DEFERRED if _pair_kept_unreachable
+                     else Disposition.ACCEPT),
+                    (f"pair accepted — {len(_pair_passed)} convicting test(s) "
+                     "observed passing" if _pair_passed
+                     else "pair kept — compiles, no regression; judged at the "
+                     "next sweep"),
+                    outcome=(GateOutcome.POSITIVE
+                             if _pair_passed and not _pair_kept_unreachable
+                             else GateOutcome.UNMEASURABLE),
+                    evidence=tuple(sorted(_pair_passed)), attempt=1,
+                    validity=ValidityVector(binary_completed=True),
+                    model_calls=1)
+                _log(f"  [phase-c/pair] {pair_id}: FILLED {_n_spliced} fn(s) "
+                     "across both halves"
+                     + (f" — {len(_pair_passed)} convicting test(s) passing."
+                        if _pair_passed else "."))
+                _emit("phase_c.pair.fill.done", data={
+                    "cluster": cluster_name,
+                    "members_filled": _n_spliced,
+                    "passed": sorted(_pair_passed)})
+                return
 
     _pair_served: set[FnLocator] = set()
     _pair_jobs = pair_dispatches(

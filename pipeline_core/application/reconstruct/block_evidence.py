@@ -24,7 +24,7 @@ it renders edges the frontier already holds.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pipeline_core.application.reconstruct.test_locator import (
@@ -33,6 +33,7 @@ from pipeline_core.application.reconstruct.test_locator import (
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.refill_evidence import (
+    Attribution,
     RefillEvidence,
     aimed_refill_names,
     asserted_output_literals_from_tests,
@@ -116,6 +117,43 @@ def render_prior_regression(
     return "\n".join(lines)
 
 
+def promote_pair_write_grades(
+    evidence: tuple[RefillEvidence, ...],
+) -> tuple[RefillEvidence, ...]:
+    """A hop pair is one write. Coverage of the CURRENT tree often proves
+    the failing tests enter the dispatcher and not the implementer — that
+    emptiness is the pair's premise (the dispatcher does not yet call the
+    implementer on this arm), not a licence to leave the implementer
+    unchanged.
+
+    NAMED members in this assembly become DIRECT, carrying the union of
+    tests and excerpts already on DIRECT members so REFILL_TARGETS names
+    the same convicting tests on both halves. CRASHED / ESCALATED / AIMED
+    grades outrank and are left alone. If nobody in the assembly is
+    DIRECT, the tuple is returned unchanged — a pair with no convicting
+    tests is still a name-match fill, not a silent promotion.
+
+    Prompt rendering only: the frontier's test-to-unit edges are not
+    touched. The same call on a Display dispatcher in `lib.rs` whose
+    tests do not yet enter `render.rs` promotes identically.
+    """
+    donors = [e for e in evidence if e.attribution is Attribution.DIRECT]
+    if not donors:
+        return evidence
+    tests = tuple(dict.fromkeys(t for e in donors for t in e.tests))
+    excerpts = tuple(dict.fromkeys(x for e in donors for x in e.excerpts))
+    out: list[RefillEvidence] = []
+    for e in evidence:
+        if e.attribution is Attribution.NAMED:
+            out.append(replace(
+                e, attribution=Attribution.DIRECT,
+                tests=e.tests or tests,
+                excerpts=e.excerpts or excerpts))
+        else:
+            out.append(e)
+    return tuple(out)
+
+
 def assemble_block_evidence(
     target_blocks: Sequence[ImplBlock],
     all_blocks: Sequence[ImplBlock],
@@ -130,6 +168,7 @@ def assemble_block_evidence(
     oracle_fp: str = "",
     tuple_structs: Iterable[str] = (),
     prior_regressed: Sequence[str] = (),
+    joint_rewrite: bool = False,
     leaf_cap: int = ATTRIBUTED_TEST_LEAF_CAP,
     file_cap: int = ATTRIBUTED_TEST_FILE_CAP,
 ) -> BlockEvidence:
@@ -146,7 +185,14 @@ def assemble_block_evidence(
     `prior_regressed` is the newly-red set a previous JOINT write of these
     members was reverted on (the pair route's durable record). Its tests'
     source enters `test_blocks` under its own file cap of the same size,
-    and the evidence text gains `render_prior_regression`."""
+    and the evidence text gains `render_prior_regression`.
+
+    `joint_rewrite` is the pair route's flag: both endpoints are one write,
+    so an unentered implementer is not graded INFERRED (run `719098-e021d93b`,
+    2026-09-01: coverage redirected the leftovers onto the dispatcher, REFILL
+    told the implementer to return unchanged, and the reply left
+    `Debug::fmt(bt, f)`). One-block callers leave this false and stay
+    byte-identical."""
     evs: list[RefillEvidence] = []
     for b in target_blocks:
         evs.extend(collect_refill_evidence(
@@ -156,6 +202,8 @@ def assemble_block_evidence(
             history=history_for_block(b, ledger_entries,
                                       oracle_fp=oracle_fp)))
     evidence = tuple(evs)
+    if joint_rewrite:
+        evidence = promote_pair_write_grades(evidence)
     leaves = attributed_test_leaves(evidence, cap=leaf_cap)
     test_blocks: list[tuple[str, str]] = attributed_test_blocks(
         leaves, lambda leaf: find_tests(leaf, 1),

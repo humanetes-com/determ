@@ -490,3 +490,99 @@ def test_negative_control_no_attributed_pin_leaves_the_doc_capped(
     assert "/// A report." in pair_prompt
     assert "/// and when the renderer has run:" not in pair_prompt
     assert "/// rendered hi" not in pair_prompt
+
+
+COMPILE_OUT = (
+    "error[E0599]: no function or associated item named `from_bytes` "
+    "found for struct `OsStr`\n"
+    "  --> src/lib.rs:2:20\n"
+)
+
+
+def _dispatcher_only_frontier() -> FailureFrontier:
+    """The live pair's grade split: the hop still names both members, but
+    coverage convicts only the dispatcher — the implementer is unentered
+    because the dispatcher does not yet call it on this arm."""
+    return FailureFrontier.build(
+        {_DISP: {"t_pair"}, _IMPL: {"t_pair"}},
+        {_DISP: {"t_pair"}},
+        evidence=_EVIDENCE,
+        pairs=(_PAIR,))
+
+
+def test_an_unentered_implementer_is_still_a_rewrite_on_the_pair(
+        monkeypatch, tmp_path):
+    """A pair whose convicting tests enter only the dispatcher still
+    grades the implementer DIRECT and tells it to write the pinned
+    literal. The recorded miss (run `719098-e021d93b`, prompt
+    `7919cf60eba2`): REFILL_TARGETS said return the implementer
+    UNCHANGED, TARGET_IMPL_BLOCK said rewrite the BEHAVIOR, and the
+    reply followed REFILL_TARGETS.
+
+    Negative control is test_no_attributed_tests_means_name_match_only_
+    and_no_direct_claim — no donor, no promotion."""
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=tests,
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys={_DISP},
+        tdd_frontier_tests=_dispatcher_only_frontier(),
+        tdd_test_cmd="cargo test",
+    )
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "`fmt` — DIRECT:" in pair_prompt
+    assert "`render` — DIRECT:" in pair_prompt
+    assert "return it UNCHANGED" not in pair_prompt
+    assert "implicated by NAME only" not in pair_prompt
+    assert "write the literal in the implementer" in pair_prompt
+    assert "rewrite the BEHAVIOR" in pair_prompt
+
+
+def test_a_compile_fail_retries_with_last_error_and_does_not_lock_the_next_pass(
+        monkeypatch, tmp_path):
+    """A compile failure is cargo answering, not a regression. The pair
+    retries in this call with LAST_ERROR (the builder slot per-impl
+    already had) and clears last_prompt_sha on exhaust so the next pass
+    is not refused as a resample of the no-error prompt. The recorded
+    miss (run `719098-e021d93b`): E0599 OsStr::from_bytes reverted the
+    joint write, stamped the no-error prompt's sha, and the next pass
+    would have rebuilt that prompt verbatim."""
+    import json as _json
+
+    from pipeline_core.adapters.retros import retrospectives_path
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, COMPILE_OUT, [
+            diag("src/lib.rs", code="E0599",
+                 message="no function named `from_bytes`")]))
+    _run_with_tests(ws, tests)
+    first_wave = [p for p in prompts if "PAIRED WRITE" in p]
+    assert first_wave, "the pair must dispatch"
+    assert "<LAST_ERROR>" not in first_wave[0]
+    data = _json.loads(retrospectives_path(ws).read_text())
+    (key,) = [k for k in data if "*pair*" in k]
+    rec = data[key]
+    assert rec.get("last_compile_error")
+    assert "from_bytes" in rec["last_compile_error"]
+    assert not rec.get("last_prompt_sha"), (
+        "compile exhaust must clear the sha so the next pass is not locked")
+    if len(first_wave) > 1:
+        assert "<LAST_ERROR>" in first_wave[1]
+        assert "from_bytes" in first_wave[1]
+    n = len(first_wave)
+    _run_with_tests(ws, tests)
+    second_wave = [p for p in prompts if "PAIRED WRITE" in p]
+    assert len(second_wave) > n, (
+        "cleared sha must allow the next pass to send the LAST_ERROR prompt")
+    assert "<LAST_ERROR>" in second_wave[n]
+    assert "from_bytes" in second_wave[n]
+

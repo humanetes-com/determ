@@ -265,7 +265,10 @@ def build_per_impl_prompt(
             partner_block, mark_target=True,
             refill_fn_names=_p_refills,
             fill_fn_names=frozenset(
-                m.fn_name for m in partner_block.stub_members))
+                m.fn_name for m in partner_block.stub_members),
+            inferred_fn_names=sections.inferred_refill_names,
+            crashed_fn_names=sections.crashed_refill_names,
+            aimed_fn_names=sections.aimed_refill_names)
         partner_section = (
             f"\n<TARGET_IMPL_BLOCK file=\"{partner_block.file}\">\n"
             "```rust\n"
@@ -280,7 +283,14 @@ def build_per_impl_prompt(
             "format trait; the second is the implementer it delegates to. "
             "They are accepted or rejected TOGETHER, so design the "
             "delegation and the implementation to agree: neither half is "
-            "correct alone.\n\n")
+            "correct alone. The implementer is a rewrite even when coverage "
+            "of the current tree shows the failing tests do not enter it: "
+            "they do not enter it because the dispatcher does not yet call "
+            "it on this arm, which is the other half of this write. A "
+            "pinned output substring in REFILL_TARGETS is emitted by this "
+            "pair. Debug or Display of a field cannot produce a substring "
+            "that field's own formatter does not print — write the literal "
+            "in the implementer.\n\n")
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
     if partner_names:
         stub_names = (f"{stub_names} ({file_rel}); "
