@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, NamedTuple
 
-from .coverage_slice import unreached_by
+from .coverage_slice import measured_entry_sets, unreached_by
 from .model_notes import (
     LayoutJudgement,
     judge_note_against_layout,
@@ -649,6 +649,20 @@ class GuidanceScreening(NamedTuple):
 TEST_SACRIFICING_PRESCRIPTION = "test_sacrificing_prescription"
 CONVICTORS_NEVER_EXECUTE = "convictors_never_execute"
 NO_TREE_PREMISE = "no_tree_premise"
+#: Field: the measured entry set per convicting test at conviction time
+#: (`{test: ["file::fn", …]}`), stamped by `stamp_conviction` for behavioural
+#: records. On the endgame tree `blocked_on` is empty on essentially every
+#: new record (`BlockedOnStubs.at_conviction` reads STUB callees, and one
+#: stub remained in 209 fillable units), so every behavioural lesson was
+#: retired as `no_tree_premise` on its first read — one model call per retro
+#: round for a guidance product discarded by design (2026-09-01: 53
+#: `no_tree_premise` retirements in the current log against 9 honours, and
+#: 0 of 19 `src/error.rs` prompts carried MODEL_NOTES). This stamp is the
+#: checkable premise that keeps the channel alive: the lesson explains a
+#: failure OF THIS EXECUTION, so it stands while its convicting tests still
+#: enter the same bodies and expires when that reading moves.
+CONVICTOR_ENTRY = "convictor_entry"
+CONVICTOR_ENTRY_MOVED = "convictor_entry_moved"
 
 
 def tree_premise_absent(record: Mapping[str, Any] | None) -> bool:
@@ -668,13 +682,48 @@ def tree_premise_absent(record: Mapping[str, Any] | None) -> bool:
     guidance and no exhaustion flag means there is nothing to retire.
     Callers that pass `retros_cache.get(key, {})` must not poison every
     unit without a record.
+
+    A `convictor_entry` stamp is a premise too: a behavioural lesson whose
+    convicting tests' measured entry sets were recorded at conviction is
+    checkable against the current reading (`convictor_entry_moved`), so it
+    is not this class even with `blocked_on: []` — which is the endgame-tree
+    case this stamp exists for.
     """
     if not record:
         return False
     if not (record.get("guidance") or record.get("fully_exhausted")):
         return False
+    entry = record.get(CONVICTOR_ENTRY)
+    if isinstance(entry, Mapping) and any(v for v in entry.values()):
+        return False
     stored = record.get("blocked_on")
     return not isinstance(stored, list) or not stored
+
+
+def convictor_entry_moved(record: Mapping[str, Any] | None) -> bool:
+    """True when a stamped convicting test measurably enters a DIFFERENT set
+    of bodies than it did at conviction time.
+
+    The lesson diagnosed an execution: "given what this test ran, here is why
+    it failed". When a later fill redirects that execution — the test now
+    enters other bodies — the diagnosis describes a superseded run, the same
+    shape as `convictors_never_execute` one measurement earlier. Conservative
+    on ignorance exactly as `measured_entry_sets` is: an unbound reading or a
+    test the current sweep did not measure decides nothing, so the record is
+    honoured as before the stamp existed."""
+    if not record:
+        return False
+    entry = record.get(CONVICTOR_ENTRY)
+    if not isinstance(entry, Mapping) or not entry:
+        return False
+    current = measured_entry_sets(str(t) for t in entry)
+    for t, stamped in entry.items():
+        now = current.get(str(t))
+        if now is None:
+            continue
+        if frozenset(now) != frozenset(str(x) for x in (stamped or [])):
+            return True
+    return False
 
 
 def screening_unit(file: str, fn_name: str) -> FnLocator | None:
@@ -838,6 +887,14 @@ def screen_guidance(
     # rows.
     if tree_premise_absent(rec):
         return GuidanceScreening("", NO_TREE_PREMISE)
+    # The tenth way, the ninth rule's complement for records that DO carry
+    # the premise: the stamped convicting tests now measurably enter
+    # different bodies, so the lesson explains a superseded execution.
+    # Judged after `tree_premise_absent` (a record without the stamp is
+    # never this class) and before `stale_evidence` (the blame map can be
+    # unchanged while the entry reading moves).
+    if convictor_entry_moved(rec):
+        return GuidanceScreening("", CONVICTOR_ENTRY_MOVED)
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return GuidanceScreening("", "stale_evidence")
     text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
@@ -891,6 +948,20 @@ def retired_guidance_line(
                 f"category={rec.get('category') or '?'} "
                 f"rounds={rec.get('retrospective_count') or 0} recorded "
                 f"no tree premise — NOT injected ({NO_TREE_PREMISE}): {head}")
+    if verdict.retired_by == CONVICTOR_ENTRY_MOVED:
+        # A healthy expiry, but the same observability need: the record
+        # stays on disk, so silence would make the next launch read it as
+        # never screened.
+        entry = rec.get(CONVICTOR_ENTRY)
+        names = sorted(str(t) for t in entry) if isinstance(
+            entry, Mapping) else []
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} was earned "
+                f"when its convicting test(s) ({names[:4]}) entered a "
+                f"different set of bodies — the execution it explains is "
+                f"superseded; NOT injected ({CONVICTOR_ENTRY_MOVED}): {head}")
     if verdict.retired_by != TEST_SACRIFICING_PRESCRIPTION:
         return ""
     convicted = rec.get("convicted_by")
@@ -938,8 +1009,12 @@ def honoured_guidance_line(
         return ""
     rec = record or {}
     blocked = rec.get("blocked_on")
-    premise = (f"blocked_on[{len(blocked)}]" if isinstance(blocked, list)
-               and blocked else "NO tree premise")
+    entry = rec.get(CONVICTOR_ENTRY)
+    premise = ("NO tree premise")
+    if isinstance(blocked, list) and blocked:
+        premise = f"blocked_on[{len(blocked)}]"
+    elif isinstance(entry, Mapping) and entry:
+        premise = f"convictor_entry[{len(entry)}]"
     head = " ".join(guidance.split())[:90]
     return (f"[phase-c/retro-honoured] {unit_key}: "
             f"category={rec.get('category') or '?'} "
@@ -971,6 +1046,19 @@ def stamp_conviction(
     legacy record."""
     stamped = evidence.stamp(provenance.stamp(record))
     stamped["regressed"] = sorted(regressed)
+    # Behavioural records (learned from test outcomes, `error_count` 0) get
+    # the entry premise: the bodies each convicting test measurably entered
+    # at conviction time. This is what keeps such a lesson alive on a tree
+    # with no stub callees to record in `blocked_on` — it stands while the
+    # reading stands and `convictor_entry_moved` expires it when a fill
+    # redirects the execution. Unbound / unmeasured stamps nothing, and the
+    # record then falls to `tree_premise_absent` exactly as before.
+    if int(stamped.get("error_count") or 0) == 0:
+        _entries = measured_entry_sets(
+            str(t) for t in (stamped.get("convicted_by") or []))
+        if _entries:
+            stamped[CONVICTOR_ENTRY] = {
+                t: list(v) for t, v in _entries.items()}
     if blockers is None:
         return stamped
     stamped[GUIDANCE_FROM_HOLLOW_TREE] = bool(

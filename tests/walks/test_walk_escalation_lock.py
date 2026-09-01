@@ -126,8 +126,8 @@ def test_negative_control_blinding_the_sustain_restores_the_shrink(
     _process(monkeypatch, tmp_path, floor)
     monkeypatch.setattr(
         _mod, "sustain_escalation_products",
-        lambda products, units_by_test, stub_keys: SustainResult(
-            merges={}, sustained=(), dropped=()))
+        lambda products, units_by_test, stub_keys, format_tests=frozenset():
+            SustainResult(merges={}, sustained=(), dropped=()))
     events: list[tuple[str, dict]] = []
     logs, _, _ = _process(monkeypatch, tmp_path, floor, events)
     stop = [ln for ln in logs if "GPU_GUARD_STOP" in ln]

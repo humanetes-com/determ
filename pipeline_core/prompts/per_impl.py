@@ -58,6 +58,7 @@ def build_per_impl_prompt(
     sections: PerImplSections,
     *,
     fr_path: Path | None = None,
+    partner_block: ImplBlock | None = None,
 ) -> str:
     """Per-impl-block prompt — fills every stub fn in `block` and (when
     `related_blocks` is non-empty) jointly designs sibling impls of the
@@ -69,6 +70,15 @@ def build_per_impl_prompt(
     prompts cannot show together).
 
     `sections`: every injected section as a frozen no-default record.
+
+    `partner_block` is the pair route's two-block write list: a SECOND
+    target block, from ANOTHER file, rendered as its own
+    `<TARGET_IMPL_BLOCK file=…>` and named in the write list — the
+    co-dependent half of a dispatcher/implementer transaction (a format
+    dispatcher's delegation arm and the sibling-file implementer it
+    delegates to are each rejected by the revert gate alone; the pair
+    lands them under one judgment). None leaves the prompt byte-identical
+    to the single-block render.
     """
     types_section = sections.types
     invariants_section = sections.invariants
@@ -231,11 +241,50 @@ def build_per_impl_prompt(
             "  // body (no outer braces, no signature)\n"
             "</FN>"
         )
+    if partner_block is not None:
+        for m in (*partner_block.stub_members,
+                  *partner_block.refill_members)[:1]:
+            output_example.append(
+                f'<FN name="{m.fn_name}" block="{partner_block.container}">\n'
+                "  // body (no outer braces, no signature)\n"
+                "</FN>"
+            )
     output_example_str = (("\n".join(output_example) if output_example else
                            '<FN name="..." block="...">\nbody\n</FN>')
                           + "\n" + FN_LITERAL_RULE)
 
+    partner_section = ""
+    pair_part = ""
+    partner_names = ""
+    partner_file = ""
+    if partner_block is not None:
+        partner_file = partner_block.file
+        _p_refills = frozenset(
+            m.fn_name for m in partner_block.refill_members)
+        partner_render = format_impl_block_for_prompt(
+            partner_block, mark_target=True,
+            refill_fn_names=_p_refills,
+            fill_fn_names=frozenset(
+                m.fn_name for m in partner_block.stub_members))
+        partner_section = (
+            f"\n<TARGET_IMPL_BLOCK file=\"{partner_block.file}\">\n"
+            "```rust\n"
+            f"{partner_render}\n"
+            "```\n</TARGET_IMPL_BLOCK>\n")
+        partner_names = ", ".join(
+            m.fn_name for m in (*partner_block.stub_members,
+                                *partner_block.refill_members))
+        pair_part = (
+            "PAIRED WRITE — this response fills BOTH target blocks, in two "
+            "different files, as ONE design. The first block dispatches a "
+            "format trait; the second is the implementer it delegates to. "
+            "They are accepted or rejected TOGETHER, so design the "
+            "delegation and the implementation to agree: neither half is "
+            "correct alone.\n\n")
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
+    if partner_names:
+        stub_names = (f"{stub_names} ({file_rel}); "
+                      f"{partner_names} ({partner_file})")
     recipe_text = construction_recipes_for(
         (m.fn_name for m in (*stub_members, *refill_members)), container)
     recipe_part = (f"{recipe_text}\n\n" if recipe_text else "")
@@ -253,7 +302,7 @@ when the impl block declares `T: ?Sized`).
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
 Stubs to fill in this response: {stub_names}
 
-{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
+{pair_part}{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
@@ -262,7 +311,7 @@ Stubs to fill in this response: {stub_names}
 {target_render}
 ```
 </TARGET_IMPL_BLOCK>
-{macros_block}
+{partner_section}{macros_block}
 Tests (read-only):
 {tests_section}
 

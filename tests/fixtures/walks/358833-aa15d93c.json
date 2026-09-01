@@ -1,0 +1,59 @@
+{
+  "run_id": "358833-aa15d93c",
+  "cluster": "stable",
+  "entry_best": 135,
+  "iterations": [
+    {
+      "iter": 1,
+      "passed": 135,
+      "failed": 2,
+      "oracle": 137,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 24,
+      "kind": "behavior",
+      "exhausted": 0
+    },
+    {
+      "iter": 2,
+      "passed": 135,
+      "failed": 2,
+      "oracle": 137,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 23,
+      "kind": "behavior",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmission_refused_against": 135,
+      "fills": 8,
+      "passed": 135,
+      "failed": 2,
+      "oracle": 137,
+      "improved": false,
+      "stall": 1,
+      "max_stall": 0,
+      "frontier": 22,
+      "kind": "behavior",
+      "exhausted": 0
+    },
+    {
+      "iter": 4,
+      "readmission_refused_against": 135,
+      "fills": 19,
+      "passed": 135,
+      "failed": 2,
+      "oracle": 137,
+      "improved": false,
+      "stall": 1,
+      "max_stall": 0,
+      "frontier": 13,
+      "kind": "behavior",
+      "exhausted": 1
+    }
+  ]
+}

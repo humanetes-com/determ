@@ -7,13 +7,55 @@ mapping, moved out of pipeline.py.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
 
 from pipeline_core.domain.models import FnLocator, FnSite, Frontier, SiteFrontier
 from pipeline_core.domain.rust_idents import _skip_generics, canon_token_text
+
+
+class FormatterPair(NamedTuple):
+    """A trait-format dispatcher and the sibling implementer its body
+    delegates to, as the format-only attribution hop resolved them — both
+    container-qualified, because `FnLocator` erases the impl (`Debug for
+    Error::fmt` and `Display for Error::fmt` share a locator).
+
+    Recorded whenever the hop follows a dispatcher's call to a crate
+    formatting implementer, in EITHER attribution direction. The pair is a
+    dispatch unit of its own when the two members live in different files:
+    the paying write can be co-dependent — a delegation arm in the
+    dispatcher plus the section it delegates to in the implementer — and
+    file-scoped fills judged independently are each rejected by the revert
+    gate while the joint state would cash (run `358833-aa15d93c`,
+    2026-09-01: three `src/fmt.rs` opens and two `src/error.rs` reverts,
+    no joint judgment possible)."""
+
+    dispatcher: FnSite
+    implementer: FnSite
+
+    @property
+    def cross_file(self) -> bool:
+        return self.dispatcher.file != self.implementer.file
+
+    def member_locators(self) -> frozenset[FnLocator]:
+        return frozenset((
+            FnLocator(self.dispatcher.file, self.dispatcher.fn_name),
+            FnLocator(self.implementer.file, self.implementer.fn_name)))
+
+
+def pair_for_unit(
+    pairs: Iterable[FormatterPair], unit: FnLocator,
+) -> FormatterPair | None:
+    """The cross-file pair a dispatched unit belongs to, if any — the match
+    is on file+name because dispatch keys are locators. Same-file pairs are
+    never returned: file-first already writes both members under one
+    judgment, so they need no route of their own."""
+    for p in pairs:
+        if p.cross_file and unit in p.member_locators():
+            return p
+    return None
 
 
 class FailureKind(StrEnum):
@@ -95,6 +137,12 @@ class FailureFrontier:
     # tokens on run `463713-b7c666c8`), so scoring evidence uniquely owned
     # nobody and dropped Debug asserts from every `fmt` homonym.
     sources: Mapping[str, str] = field(default_factory=dict)
+    # Dispatcher/implementer pairs the format-only attribution hop resolved
+    # (`FormatterPair`), carried on the frontier for the same reason the
+    # evidence is: the pair-fill route lives at the far end of the engine
+    # seams and the frontier already travels all of them. Only cross-file
+    # pairs ever dispatch (`pair_for_unit`).
+    pairs: frozenset[FormatterPair] = frozenset()
 
     @classmethod
     def build(
@@ -102,6 +150,7 @@ class FailureFrontier:
         convicting: Mapping[FnLocator, set[str]] | Mapping[FnSite, set[str]],
         evidence: Mapping[str, str] | None = None,
         sources: Mapping[str, str] | None = None,
+        pairs: Iterable[FormatterPair] = (),
     ) -> FailureFrontier:
         sites: SiteFrontier = {}
         for key, tests in convicting.items():
@@ -113,7 +162,8 @@ class FailureFrontier:
             if kept:
                 sites.setdefault(site, set()).update(kept)
         return cls(dict(dispatch), sites,
-                   dict(evidence or {}), dict(sources or {}))
+                   dict(evidence or {}), dict(sources or {}),
+                   frozenset(pairs))
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:
@@ -193,6 +243,9 @@ class AttributionResult(NamedTuple):
     # behavior path did not run (no `test_texts`). Default `{}` so existing
     # three-argument constructors stay valid.
     sources: Mapping[str, str] = {}
+    # The formatter dispatcher/implementer pairs the behavior path's hop
+    # resolved this sweep (`FormatterPair`). Empty when the hop did not fire.
+    pairs: frozenset[FormatterPair] = frozenset()
 
     def convicting_for(self, key: FnLocator) -> set[str]:
         """Union over sites with this file+name — the locator view tests
@@ -202,6 +255,19 @@ class AttributionResult(NamedTuple):
             if k[0] == key.file and k[1] == key.fn_name:
                 out |= tests
         return out
+
+    def source_for(self, test: str) -> str:
+        """The failing test's own source (signature + body), or "". Exact
+        name first, then last-`::`-segment match — cargo prints
+        `module::test` where attribution may have keyed the bare name, the
+        same reconciliation `FailureFrontier._named` applies."""
+        if test in self.sources:
+            return self.sources[test]
+        leaf = test.rsplit("::", 1)[-1]
+        for name, text in self.sources.items():
+            if name.rsplit("::", 1)[-1] == leaf:
+                return text
+        return ""
 
 
 def key_as_site(key: FnLocator | FnSite | tuple[str, ...]) -> FnSite:

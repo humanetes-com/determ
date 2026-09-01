@@ -119,3 +119,46 @@ def test_followup_cut_ignores_stream_rows_and_clean_followups() -> None:
     assert summarize_followup_cut(rows) == 0
     assert summarize_capped(rows) == (1, 1)
     assert summarize_followup_cut([]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# the per-unit join: which units' EVERY reply was capped
+# --------------------------------------------------------------------------- #
+def test_serving_units_stamps_rows_and_the_fold_reads_them() -> None:
+    """Run `358833-aa15d93c` iter 3 (2026-09-01) wrote 8 FLAT rows in a batch
+    whose own audit said `3 of 4 fill replies reasoning-capped` — the count
+    and the grades shared a window with no join. `serving_units` is the join:
+    rows recorded inside carry the units the call serves, and
+    `units_all_replies_capped` names the units every one of whose joined
+    replies was truncated."""
+    from pipeline_core.domain.reasoning_cap import (
+        serving_units,
+        units_all_replies_capped,
+    )
+    with collect_stream_meta() as rows:
+        with serving_units(("src/a.rs::width", "src/a.rs::depth")):
+            record_stream_meta({"finish_reason": "length", "stop": "",
+                                "followup": True})
+            record_followup_meta({"finish_reason": "length"})
+        with serving_units(("src/a.rs::depth",)):
+            record_stream_meta({"finish_reason": "stop", "stop": "",
+                                "followup": False})
+        # An unjoined call (a retrospective) counts toward no unit.
+        record_stream_meta({"finish_reason": "length", "stop": "",
+                            "followup": True})
+    assert rows[0]["units"] == ("src/a.rs::width", "src/a.rs::depth")
+    assert "units" not in rows[-1]
+    # width: 1 reply, capped -> in. depth: 2 replies, one clean -> out.
+    # The followup row is a second completion of the same call: no vote.
+    assert units_all_replies_capped(rows) == frozenset({"src/a.rs::width"})
+
+
+def test_units_fold_negative_controls() -> None:
+    from pipeline_core.domain.reasoning_cap import units_all_replies_capped
+    # An uncapped joined reply keeps the unit out (a measured refusal).
+    rows = [{"finish_reason": "stop", "units": ("src/a.rs::f",)}]
+    assert units_all_replies_capped(rows) == frozenset()
+    # No joined rows at all: empty, so the FLAT arm is untouched.
+    assert units_all_replies_capped(
+        [{"finish_reason": "length"}]) == frozenset()
+    assert units_all_replies_capped([]) == frozenset()

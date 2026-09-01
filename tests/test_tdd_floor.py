@@ -398,3 +398,48 @@ def test_malformed_product_entries_parse_as_empty() -> None:
     assert parsed is not None
     names = {t for t, *_ in parsed.escalation_products}
     assert names == {"t_ok"}
+
+
+# --- the verified service view rides beside the inclusive record -----------
+
+def test_served_verified_round_trips_and_never_falls_back_to_served() -> None:
+    """The inclusive `served` is contaminated for the life of the floor —
+    before the route-scoped decode the loop stamped every batch unit served
+    (run `9933-efe68f37` iter 1: 12 stamped, `wanted` was `{context, msg}`),
+    the stamps are monotone, and no later record distinguishes them (the
+    ledger rows of the same window grade the same lie). The ranking's view
+    therefore parses ONLY its own field: an old floor reads None and the
+    never-served bucket starts empty and re-earns, instead of trusting a
+    stamp nothing can verify."""
+    from pipeline_core.domain.tdd_floor import TddFloor, resume_floor
+    f = _floor_with(served=("src/a.rs::x", "src/a.rs::y"),
+                    served_verified=("src/a.rs::x",))
+    d = f.to_dict()
+    assert d["served_verified"] == ["src/a.rs::x"]
+    assert TddFloor.from_dict(d) == f
+    r = resume_floor(f, cluster="stable", tree_sha="t" * 16,
+                     oracle_size=105, code_id="c" * 12)
+    assert r.served == ("src/a.rs::x", "src/a.rs::y")
+    assert r.served_verified == ("src/a.rs::x",)
+    # Negative control — the pre-split floor: `served` present, no verified
+    # field. The fire's view keeps every stamp; the ranking's view is None,
+    # NOT a copy of `served`.
+    del d["served_verified"]
+    parsed = TddFloor.from_dict(d)
+    assert parsed is not None and parsed.served_verified is None
+    old = resume_floor(parsed, cluster="stable", tree_sha="t" * 16,
+                       oracle_size=105, code_id="c" * 12)
+    assert old.served == ("src/a.rs::x", "src/a.rs::y")
+    assert old.served_verified is None
+
+
+def test_served_verified_survives_a_code_move_and_dies_with_the_cluster() -> None:
+    from pipeline_core.domain.tdd_floor import resume_floor
+    saved = _floor_with(served=("src/a.rs::x",),
+                        served_verified=("src/a.rs::x",))
+    moved = resume_floor(saved, cluster="stable", tree_sha="t" * 16,
+                         oracle_size=105, code_id="d" * 12)
+    assert moved.served_verified == ("src/a.rs::x",)
+    other = resume_floor(saved, cluster="nightly", tree_sha="t" * 16,
+                         oracle_size=105, code_id="c" * 12)
+    assert other.served_verified is None

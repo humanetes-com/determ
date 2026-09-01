@@ -31,7 +31,7 @@ _FAILING = ("test t1 ... ok\ntest t2 ... FAILED\n"
 
 def _run(monkeypatch, tmp_path: Path, events, logs, *,
          escalate, cluster_stubs, fn_stubs,
-         dispatched=None) -> None:
+         dispatched=None, sources=None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     from pipeline_core.domain.models import BuildCluster
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "1")
@@ -51,10 +51,17 @@ def _run(monkeypatch, tmp_path: Path, events, logs, *,
         _cargo, lambda pd, cl, stems, lib=False: (2, frozenset({"t1", "t2"})),
         events, None, frontier={_ACC: {"t2"}}, fill=_fill, logs=logs,
         stubs=cluster_stubs)
-    deps = deps.__class__(**{
-        **{f: getattr(deps, f) for f in deps.__dataclass_fields__},
+    _overrides: dict[str, Any] = {
         "scan_unimplemented_functions": lambda *a, **k: list(fn_stubs),
         "escalate_to_producers": escalate,
+    }
+    if sources is not None:
+        from pipeline_core.domain.attribution import AttributionResult, FailureKind
+        _overrides["attribute_failures"] = lambda *a, **k: AttributionResult(
+            {_ACC: {"t2"}}, FailureKind.NO_FRONTIER, {}, dict(sources))
+    deps = deps.__class__(**{
+        **{f: getattr(deps, f) for f in deps.__dataclass_fields__},
+        **_overrides,
     })
     run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path,
@@ -248,3 +255,52 @@ def test_escalation_releases_the_stored_verdict_on_its_target(
     esc = [d for ev, d in events if ev == "phase_c.attribution.escalated"]
     assert esc and esc[0].get("disk_released") == ["src/a.rs::*impl*::Producer"]
     assert any("released 1 stored exhaustion verdict(s)" in ln for ln in logs)
+
+
+def test_escalation_withheld_for_a_format_trait_test(
+        tmp_path: Path, monkeypatch) -> None:
+    """A test whose own source renders via `{:?}` never buys a producer
+    escalation: builders of the accessors' container cannot change what the
+    format trait emits, and the format-implementer attribution owns that
+    evidence (run `114436-9cb17382`: two Debug-substring tests re-bought a
+    42-unit constructor family every sweep while the formatter was never
+    dispatched under a rewrite grade)."""
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    calls: list[str] = []
+
+    def _escalate(src_dir, tname, units, producers_out=None):
+        calls.append(tname)
+        return {_PROD: {tname}}
+
+    _run(monkeypatch, tmp_path, events, logs, escalate=_escalate,
+         cluster_stubs=[], fn_stubs=[], dispatched=None,
+         sources={"t2": 'fn t2() { let v = build();\n'
+                        '    assert_eq!("X", format!("{:?}", v)); }'})
+    assert calls == [], "a format-trait test must never reach the producer scan"
+    assert any(ev == "phase_c.attribution.escalation_withheld" and
+               d.get("format_traits") == ["Debug"]
+               for ev, d in events), events
+    assert any("NOT escalating" in ln
+               and "format trait" in ln for ln in logs)
+    assert not any(ev == "phase_c.attribution.escalated" for ev, _ in events)
+
+
+def test_escalation_still_fires_for_a_non_format_test(
+        tmp_path: Path, monkeypatch) -> None:
+    # Negative control: the same shape with a source that formats nothing
+    # escalates exactly as before the gate.
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    calls: list[str] = []
+
+    def _escalate(src_dir, tname, units, producers_out=None):
+        calls.append(tname)
+        return {_PROD: {tname}}
+
+    _run(monkeypatch, tmp_path, events, logs, escalate=_escalate,
+         cluster_stubs=[], fn_stubs=[], dispatched=None,
+         sources={"t2": 'fn t2() { let v = build();\n'
+                        '    assert!(v.downcast::<Real>().is_ok()); }'})
+    assert calls, "a non-format test still escalates"
+    assert any(ev == "phase_c.attribution.escalated" for ev, _ in events)

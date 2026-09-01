@@ -379,3 +379,51 @@ def unreached_by(unit: FnLocator, tests: Iterable[str]) -> frozenset[str] | None
     if reading is None:
         return None
     return convictors_never_enter(unit, tests, reading.owners)
+
+
+def unreached_by_test(unit: FnLocator, test: str) -> bool:
+    """One test's positive-evidence read against the BOUND reading: True only
+    when the test was measured, entered at least one crate body, and `unit`
+    is not among them — the same asymmetric-ignorance rule as
+    `convictors_never_enter`, for a caller holding a single test name.
+
+    Name reconciliation is exact-first-then-leaf (`FailureFrontier._named`):
+    the owner map is keyed as the sweep parsed the name (`gen_tests_2::t` or
+    the bare leaf) while attribution may hold the other form, and an aliased
+    miss must read as "unmeasured", never as "enters nothing". Unbound, or
+    an unmeasured test, returns False and the caller behaves as it did
+    before the reading existed."""
+    reading = _bound
+    if reading is None:
+        return False
+    key = test
+    if key not in reading.owners:
+        leaf = test.rsplit("::", 1)[-1]
+        key_match = [n for n in reading.owners
+                     if n.rsplit("::", 1)[-1] == leaf]
+        if len(key_match) != 1:
+            return False
+        key = key_match[0]
+    return bool(convictors_never_enter(unit, [key], reading.owners))
+
+
+def measured_entry_sets(tests: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """The bound reading's measured entry set per test, rendered as sorted
+    `file::fn` strings — the checkable premise a behavioural retrospective is
+    stamped with at conviction time, and the current reading it is compared
+    against on read.
+
+    Same positive-evidence rule as `convictors_never_enter`: a test absent
+    from the owner map was never profiled, and an empty owner set is what a
+    crashed binary produces — both are omitted rather than recorded as "enters
+    nothing". Unbound returns `{}`, so a caller without a sweep reading stamps
+    no premise and judges none."""
+    reading = _bound
+    if reading is None:
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for t in dict.fromkeys(tests):
+        entered = reading.owners.get(t)
+        if entered:
+            out[t] = tuple(sorted(f"{u.file}::{u.fn_name}" for u in entered))
+    return out

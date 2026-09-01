@@ -26,12 +26,14 @@ from pipeline_core.application.reconstruct.test_targets import (
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureKind,
+    FormatterPair,
     as_dispatch,
     canon_site,
     container_key,
     lift_sites,
     line_to_fn_record,
 )
+from pipeline_core.domain.coverage_slice import unreached_by_test
 from pipeline_core.domain.models import (
     Diagnostic,
     FnLocator,
@@ -40,6 +42,7 @@ from pipeline_core.domain.models import (
     SiteFrontier,
 )
 from pipeline_core.domain.oracle_immutability import is_oracle_path
+from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.rust_idents import (
     ascii_word_tokens,
     impl_self_type,
@@ -222,19 +225,18 @@ def behavior_frontier(
     return fr, srcs
 
 
-def _format_traits_used(test_src: str) -> frozenset[str]:
-    """Which std formatting traits a test's OWN source invokes, from its format
-    placeholders and stringify calls: `{:?}`/`{:#?}` need `Debug`, `{}`/`{:#}`/
-    `.to_string()` need `Display`. Used only to hand an owner to a test whose
-    single contact with the crate is a formatting-macro dispatch that no
-    identifier in it names."""
-    traits: set[str] = set()
-    if "{:?}" in test_src or "{:#?}" in test_src:
-        traits.add("Debug")
-    if ("{}" in test_src or "{:#}" in test_src
-            or ".to_string()" in test_src):
-        traits.add("Display")
-    return frozenset(traits)
+def _code_only(text: str) -> str:
+    """`text` with every string/char-literal and comment span blanked to
+    spaces, so an identifier scan sees only what the code NAMES. An
+    expected-output constant, an env-var name (`RUST_BACKTRACE`) or a doc
+    comment mentions tokens without calling anything: on run
+    `114436-9cb17382` the failing Debug tests owned a fn named `backtrace`
+    solely through `std::env::set_var("RUST_BACKTRACE", …)` and the asserted
+    substring `Stack backtrace`, and that ownership fed a futility escalation
+    toward that accessor's producers."""
+    mask = code_mask(text)
+    return "".join(ch if not m else " "
+                   for ch, m in zip(text, mask, strict=False))
 
 
 def _impl_trait_and_self(container: str) -> tuple[str, str] | None:
@@ -289,6 +291,8 @@ def _attribute_format_only_test(
     by_name: dict[str, list[dict[str, Any]]], frontier: Frontier,
     sites: SiteFrontier,
     log: Callable[[str], None],
+    owned: bool = False,
+    pairs_out: set[FormatterPair] | None = None,
 ) -> None:
     """Give a frontier owner to a failing test whose only crate contact is a
     formatting macro (`format!("{:#?}", v)`), which names no crate fn — so
@@ -316,10 +320,38 @@ def _attribute_format_only_test(
     formatting method (`Qualifier::fmt`/`::debug` where the qualifier is a real
     fn record's container token), attribute THAT implementer — the body the
     verdict actually pins. Only when the matched `fmt` calls no sibling
-    formatter (it IS the implementer) is the `fmt` itself attributed. Called
-    ONLY for a test the primary attribution left unowned, so it adds an owner
-    and never changes one."""
-    traits = _format_traits_used(tsrc)
+    formatter (it IS the implementer) is the `fmt` itself attributed.
+
+    `owned=False` is the original constituency: a test the primary attribution
+    left unowned, for which this adds the only owner it will ever have.
+    `owned=True` is a test that DOES name crate fns and still renders through a
+    format trait — its identifier owners (a fixture constructor, `.context()`)
+    cannot change what `{:?}` emits, so the implementer is attributed BESIDE
+    them; without that, the futility escalation asks who produces the
+    accessors' container and buys the constructor family instead of the
+    formatter (run `114436-9cb17382`, the 135/137 plateau). Additive in both
+    modes: an owner is only ever added, never removed or replaced.
+
+    THE HOP'S THEORY IS MEASURABLE, AND THE MEASUREMENT WINS. "The
+    implementer is the body the verdict actually pins" assumes the
+    dispatcher delegates on the failing test's arm; a dispatcher that
+    delegates only under `f.alternate()` refutes that for a `{:?}` test, and
+    the sweep's own owner map says so — run `358833-aa15d93c` (2026-09-01)
+    printed the attribution to `src/fmt.rs::debug` two lines above `red-dead
+    … executed by no FAILING test: src/fmt.rs::debug`, every sweep, while
+    the refuted owner kept eating file-first attempts and the per-impl fix
+    loop. So each followed implementer is screened against the BOUND
+    coverage reading (`unreached_by_test` — the previous sweep's, since
+    attribution runs before this sweep's bind): positively proven unentered
+    drops it, and when every implementer drops, the matched dispatcher —
+    the body coverage shows the test DOES pin — is attributed instead. An
+    unmeasured test, an unbound reading or a crashed binary changes nothing
+    (the conservative rule refuses only on positive evidence).
+
+    `pairs_out` collects the dispatcher/implementer pairs the hop resolved
+    (`FormatterPair`, container-qualified), in BOTH directions — the pair is
+    what the cross-file pair-fill route dispatches as one transaction."""
+    traits = format_traits_used(tsrc)
     fmt_recs = by_name.get("fmt")
     if not traits or not fmt_recs:
         return
@@ -330,11 +362,11 @@ def _attribute_format_only_test(
     # printed in an expected string (4 spurious `fmt` dispatchers on the live
     # `test_fmt.rs`). `code_mask` masks string/char/comment spans, so the only
     # survivors are types the test's real code names (`io::Error` etc.).
-    _mask = code_mask(file_text)
-    _code_only = "".join(
-        ch if not m else " " for ch, m in zip(file_text, _mask, strict=False))
-    file_idents = identifiers_in(_code_only)
+    file_idents = identifiers_in(_code_only(file_text))
     added: set[FnLocator] = set()
+    # Implementers the bound coverage reading positively proves this test
+    # never enters — the redirect the final log line names.
+    redirected: list[FnLocator] = []
 
     def _add(key: FnLocator, rec: dict[str, Any] | None = None) -> None:
         if tname not in frontier.get(key, set()):
@@ -369,29 +401,61 @@ def _attribute_format_only_test(
                         and qual == (impl_self_type(icont) or "")):
                     implementers.append((FnLocator(irec["file"], method), irec))
         if implementers:
+            _disp_site = FnSite(rec["file"], "fmt",
+                                str(rec.get("container", "") or ""))
             seen: set[FnLocator] = set()
+            kept_impls: list[tuple[FnLocator, dict[str, Any]]] = []
+            unentered: list[FnLocator] = []
             for k, irec in implementers:
                 if k in seen:
                     continue
                 seen.add(k)
+                if pairs_out is not None:
+                    pairs_out.add(FormatterPair(
+                        _disp_site,
+                        FnSite(k.file, k.fn_name,
+                               str(irec.get("container", "") or ""))))
+                if unreached_by_test(k, tname):
+                    unentered.append(k)
+                else:
+                    kept_impls.append((k, irec))
+            for k, irec in kept_impls:
                 _add(k, irec)
+            if unentered and not kept_impls:
+                # Every followed implementer is measured-unentered by this
+                # test: the delegation the theory assumed does not run on
+                # the failing arm. The dispatcher is the measured owner.
+                _add(FnLocator(rec["file"], "fmt"), rec)
+                redirected.extend(unentered)
         else:
             # The matched fmt is self-contained — it IS the implementer.
             _add(FnLocator(rec["file"], "fmt"), rec)
     if added:
-        log(f"  [attribution/behavior] {tname}: no crate fn named in its "
-            "source (formatting-macro test) — attributed to "
+        _why = ("no crate fn named in its source (formatting-macro test)"
+                if not owned else
+                "renders through a format trait its identifier owners cannot "
+                "satisfy")
+        log(f"  [attribution/behavior] {tname}: {_why} — attributed to "
             + ", ".join(f"{k.file}::{k.fn_name}"
                         for k in sorted(added, key=lambda k: (k.file, k.fn_name)))
             + f" via {'/'.join(sorted(traits))} on a self-type the test file "
-            "names, following the dispatcher to its formatting implementer; "
-            "without this the test owns no unit and no sweep can move it.")
+            "names, following the dispatcher to its formatting implementer"
+            + ("" if not redirected else
+               " — REDIRECTED to the dispatcher: the sweep's coverage "
+               "reading proves this test never enters "
+               + ", ".join(f"{k.file}::{k.fn_name}"
+                           for k in sorted(redirected)))
+            + ("; without this the test owns no unit and no sweep can move it."
+               if not owned else
+               "; without this only the escalation could widen past the "
+               "identifier owners, and it widens to their producers."))
 
 
 def behavior_frontier_from_texts(
     deps: AttributionDeps,
     test_output: str, texts: dict[str, str], fns_root: Path,
     unrepairable_tests: frozenset[str] = frozenset(),
+    pairs_out: set[FormatterPair] | None = None,
 ) -> tuple[Frontier, SiteFrontier, dict[str, tuple[str, str]]]:
     """Core of :func:`behavior_frontier` over already-loaded test texts
     ({rel_path: content}) — the phase-c TDD loop holds the cluster's test pairs
@@ -433,7 +497,13 @@ def behavior_frontier_from_texts(
             continue
         sig_text, _ss, _bs, _be = loc
         tsrc = f"{sig_text} {{{texts[trel][_bs:_be]}}}"
-        idents = identifiers_in(tsrc)
+        # Identifier scan over the test's CODE only. A token inside a string
+        # or char literal is not a call: `std::env::set_var("RUST_BACKTRACE",
+        # …)` and an asserted substring `Stack backtrace` made a Debug test
+        # own a fn named `backtrace` (run `114436-9cb17382`), and that false
+        # edge fed the futility escalation the producer set of an accessor
+        # the test never calls. The prompt still quotes `tsrc` unmasked.
+        idents = identifiers_in(_code_only(tsrc))
         test_srcs[tname] = (trel, tsrc)
         _owned = False
         for fn_name in idents & set(by_name):
@@ -449,12 +519,17 @@ def behavior_frontier_from_texts(
                                       rec.get("container", "") or "")),
                     set()).add(tname)
                 _owned = True
-        if not _owned:
+        if not _owned or format_traits_used(tsrc):
             # A formatting-macro test names no crate fn and so owns no unit;
-            # attribute it through the format trait it uses (additive only —
-            # runs solely because the primary attribution left it unowned).
+            # attribute it through the format trait it uses. Additive only —
+            # and no longer gated on being unowned: a test whose real calls
+            # are a fixture constructor plus `format!("{:?}", …)` owns the
+            # constructor, but no constructor rewrite changes what the format
+            # trait emits, so the implementer is attributed beside it (the
+            # hop no-ops for a test that uses no format trait).
             _attribute_format_only_test(
-                tname, tsrc, texts[trel], by_name, frontier, sites, deps.log)
+                tname, tsrc, texts[trel], by_name, frontier, sites, deps.log,
+                owned=_owned, pairs_out=pairs_out)
     return frontier, sites, test_srcs
 
 def extract_tdd_compile_frontier(deps: AttributionDeps,
@@ -963,9 +1038,11 @@ def attribute_failures(
     _cc_d, _cc_s = _unpack_pair(
         extract_tdd_compile_frontier(deps, test_output, src_dir))
     _merge(_strip(_cc_d), FailureKind.COMPILE, _strip_sites(_cc_s))
+    _hop_pairs: set[FormatterPair] = set()
     if test_texts:
         _bf_raw: Any = behavior_frontier_from_texts(
-            deps, test_output, test_texts, src_dir, unrepairable_tests)
+            deps, test_output, test_texts, src_dir, unrepairable_tests,
+            pairs_out=_hop_pairs)
         if isinstance(_bf_raw, tuple) and len(_bf_raw) == 3:
             _bf, _bf_sites, _srcs = _bf_raw
         elif isinstance(_bf_raw, tuple) and len(_bf_raw) == 2:
@@ -994,7 +1071,8 @@ def attribute_failures(
         # One contributor → keep its kind (preserves per-path stats); several →
         # MERGED so the union is visible in logs/events.
         kind = contributors[0] if len(contributors) == 1 else FailureKind.MERGED
-        return AttributionResult(merged, kind, convicting, _src_map)
+        return AttributionResult(merged, kind, convicting, _src_map,
+                                 frozenset(_hop_pairs))
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = _failing()

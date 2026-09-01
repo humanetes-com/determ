@@ -37,7 +37,7 @@ from typing import Literal
 from pipeline_core.domain.models import FnLocator
 
 #: Why a fired product was dropped this sweep.
-DropReason = Literal["stub_accessor", "not_failing"]
+DropReason = Literal["stub_accessor", "not_failing", "format_trait_test"]
 
 #: A fired escalation as the loop remembers it: the futile unit-set that
 #: EARNED the fire, and the additions the fire computed. The additions are
@@ -64,11 +64,21 @@ def sustain_escalation_products(
     products: dict[str, FiredProduct],
     units_by_test: dict[str, set[FnLocator]],
     stub_keys: frozenset[FnLocator],
+    format_tests: frozenset[str] = frozenset(),
 ) -> SustainResult:
     """Decide, per fired test, whether its product still has live evidence.
 
     ``products`` is not mutated — the caller deletes the ``dropped`` entries,
     so the decision stays testable apart from the loop's state.
+
+    ``format_tests`` are fired tests whose own source renders through a
+    format trait (`{:?}` / `{}` / `.to_string()`). Their products are dropped:
+    a producer escalation answers "who builds the accessors' container", and
+    no builder changes what the format trait emits — the format-implementer
+    attribution owns that evidence. The gate lives at sustain as well as at
+    fire because products are floor-persisted: a product fired (or resumed)
+    before the fire-side gate existed would otherwise re-merge every sweep
+    (the 42-unit constructor family of run `114436-9cb17382`).
     """
     merges: dict[FnLocator, set[str]] = {}
     sustained: list[str] = []
@@ -77,6 +87,9 @@ def sustain_escalation_products(
         units = units_by_test.get(tname)
         if units is None:
             dropped.append((tname, "not_failing"))
+            continue
+        if tname in format_tests:
+            dropped.append((tname, "format_trait_test"))
             continue
         if any(u in stub_keys for u in (units or ())):
             dropped.append((tname, "stub_accessor"))

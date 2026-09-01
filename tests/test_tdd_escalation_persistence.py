@@ -488,3 +488,42 @@ def test_rebuy_does_not_fire_on_the_same_process_or_after_a_code_move(
                run_id="new-process"),
          tmp_path, monkeypatch)
     assert not any(ev == "phase_c.re_buy" for ev, _ in events)
+
+
+def test_a_pre_split_floor_re_earns_the_verified_view_and_keeps_the_fire(
+        tmp_path, monkeypatch) -> None:
+    """The verified-service split. A floor from before `served_verified`
+    carries stamps the batch-wide rule may have written (run `9933-efe68f37`
+    iter 1: 12 stamped, `wanted` was `{context, msg}`) and nothing can now
+    distinguish them. On resume the ranking's view starts EMPTY and re-earns
+    stamps as routes open units; the fire's inclusive view keeps every stamp,
+    so the resumed escalation still fires at its first sweep."""
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    row = dict(floor["row"])
+    # A pre-split floor: inclusive stamps only, one of them unverifiable
+    # (the producer was never route-opened by any process).
+    row.pop("served_verified", None)
+    row["served"] = sorted(set(row.get("served") or [])
+                           | {"src/b.rs::producer"})
+    floor["row"] = row
+
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    escalations: list[tuple[str, frozenset[FnLocator]]] = []
+    _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
+               escalations=escalations), tmp_path, monkeypatch)
+    # The inclusive view still arms the resumed fire: the producer reaches
+    # a batch exactly as in the unmodified resume.
+    assert any(_PROD in b for b in batches)
+    saved = floor.get("row") or {}
+    verified = set(saved.get("served_verified") or [])
+    # Re-earned from this process's own route-scoped returns only — the
+    # inherited unverifiable stamp is NOT adopted…
+    assert verified, "the resumed process re-earns verified stamps"
+    assert verified <= {f"{k.file}::{k.fn_name}"
+                       for b in batches for k in b}, (
+        "verified stamps only for units a route actually returned")
+    # …while the inclusive record keeps it for the fire's premise.
+    assert "src/b.rs::producer" in set(saved.get("served") or [])

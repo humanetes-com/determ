@@ -1,0 +1,59 @@
+{
+  "run_id": "9872-51b20f30",
+  "cluster": "stable",
+  "entry_best": 134,
+  "iterations": [
+    {
+      "iter": 1,
+      "passed": 134,
+      "failed": 3,
+      "oracle": 137,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 30,
+      "kind": "behavior",
+      "exhausted": 0
+    },
+    {
+      "iter": 2,
+      "passed": 134,
+      "failed": 3,
+      "oracle": 137,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 30,
+      "kind": "behavior",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmission_refused_against": 134,
+      "fills": 27,
+      "passed": 134,
+      "failed": 3,
+      "oracle": 137,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 30,
+      "kind": "behavior",
+      "exhausted": 0
+    },
+    {
+      "iter": 4,
+      "readmission_refused_against": 134,
+      "fills": 19,
+      "passed": 134,
+      "failed": 3,
+      "oracle": 137,
+      "improved": false,
+      "stall": 1,
+      "max_stall": 0,
+      "frontier": 30,
+      "kind": "behavior",
+      "exhausted": 0
+    }
+  ]
+}

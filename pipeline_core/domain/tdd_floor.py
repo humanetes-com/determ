@@ -187,6 +187,24 @@ class TddFloor:
     # collapsing it into the fallback would re-count the attempted units as
     # served — the kill-mid-fill hole, run `308884` → `2932`.
     served: tuple[str, ...] | None = None
+    # The subset of `served` whose stamps were earned under the route-scoped
+    # rule — `_served_at` keyed on the units a route actually opened
+    # (`dispatched_fns ∩ frontier`), not on the whole batch. `served` itself
+    # is contaminated for the life of the floor: before 2026-08-31 the loop
+    # stamped every batch unit served (run `9933-efe68f37` iter 1: 12
+    # stamped, `wanted` was `{context, msg}`), the stamps are monotone, and
+    # no later record can distinguish them — the ledger's rows from the same
+    # window grade the same lie. So the two consumers split: the futility
+    # fire keeps the INCLUSIVE set (over-stamping there only lets a fire
+    # happen; the trigger re-validates against the live attribution), while
+    # the never-served RANKING reads this verified subset — a stamp it
+    # cannot verify is not evidence the unit was ever tried. A floor from
+    # before the field parses as ``None``: the ranking then starts with
+    # nothing verified and re-earns stamps as routes actually open units,
+    # which converges to the honest index instead of trusting the lie.
+    # Measured cost of trusting it: `never_served=[]` on 24 of 25 rankings
+    # across the five runs after the fix (entries computed 2026-09-01).
+    served_verified: tuple[str, ...] | None = None
     # The escalation PRODUCT: per still-failing test, the producer set the
     # fire computed, keyed by TEST (not by the accessor set). The trigger
     # (`futile_units`) re-derives producers by re-firing on exact accessor-set
@@ -217,6 +235,8 @@ class TddFloor:
                 for t, earned, adds, prods in self.escalation_products}}
         if self.served is not None:
             d["served"] = list(self.served)
+        if self.served_verified is not None:
+            d["served_verified"] = list(self.served_verified)
         return d
 
     @staticmethod
@@ -247,6 +267,9 @@ class TddFloor:
                     str(k) for k in (raw.get("declined") or ())),
                 served=(None if "served" not in raw else tuple(
                     str(k) for k in (raw.get("served") or ()))),
+                served_verified=(
+                    None if "served_verified" not in raw else tuple(
+                        str(k) for k in (raw.get("served_verified") or ()))),
                 futile_units=tuple(sorted(
                     (str(t), tuple(str(u) for u in units))
                     for t, units in _fut.items()
@@ -329,6 +352,12 @@ class FloorResume:
     # cursor's own `attempted ∪ landed ∪ declined`, which is what the old
     # floor can honestly attest.
     served: tuple[str, ...] | None = None
+    # The verified subset (`TddFloor.served_verified`), riding the same
+    # identity rule. ``None`` means the saved floor predates the field: the
+    # ranking's never-served reading then starts empty and re-earns stamps —
+    # it does NOT fall back to `served`, whose pre-field stamps are the
+    # batch-wide contamination the split exists to quarantine.
+    served_verified: tuple[str, ...] | None = None
     # The escalation product (`TddFloor.escalation_products`), resumed on
     # the cluster identity like the trigger. ``None`` means the saved floor
     # predates the field (or there is no floor). The loop seeds only those
@@ -574,6 +603,7 @@ def resume_floor(
             released=_carry.released if _ok else (),
             futility=_futility,
             served=saved.served if _ok else None,
+            served_verified=saved.served_verified if _ok else None,
             products=(saved.escalation_products or None) if _ok else None,
             note=why + " changed"
             + (f"; {_carry.note} resumed anyway — a cursor answers to the "
@@ -602,6 +632,7 @@ def resume_floor(
             released=carry.released,
             futility=saved.futile_units or None,
             served=saved.served,
+            served_verified=saved.served_verified,
             products=saved.escalation_products or None,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
@@ -617,6 +648,7 @@ def resume_floor(
         released=carry.released,
         futility=saved.futile_units or None,
         served=saved.served,
+        served_verified=saved.served_verified,
         products=saved.escalation_products or None,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
               + (f" {carry.note}" if carry.attempted else "")

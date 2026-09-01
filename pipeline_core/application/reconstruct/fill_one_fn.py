@@ -60,6 +60,7 @@ from pipeline_core.domain.model_notes import (
     rejected_symbols_in_errors,
 )
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
+from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import pinned_observables_from_tests
 from pipeline_core.domain.refine import (
@@ -78,6 +79,7 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    convictor_entry_moved,
     evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
@@ -314,6 +316,17 @@ class FillOneFn:
                          f"[{container}]: retro guidance recorded no tree "
                          "premise — retro guidance withheld, exhaustion not "
                          "honoured (no_tree_premise).")
+        # The premise's complement: the record carries an entry stamp and
+        # the stamped convicting tests now measurably enter different
+        # bodies. The lesson (and the attempts its exhaustion counted)
+        # judged an execution a later fill has redirected.
+        elif convictor_entry_moved(_retro_rec):
+            _poisoned_retro = True
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
+                         f"[{container}]: retro guidance was earned when its "
+                         "convicting tests entered a different set of bodies "
+                         "— retro guidance withheld, exhaustion not honoured "
+                         "(convictor_entry_moved).")
         # …and a conviction earned in ANOTHER context (other cluster's layout,
         # the absolute acceptance gate, the pre-group route set), or drawn from
         # tests that no longer convict this fn, is proof of nothing here —
@@ -638,9 +651,13 @@ class FillOneFn:
                     attempt_history=per_fn_history,  # P2
                 )
 
-            body, last_response = self.prompt.ask_per_fn_body(
-                prompt + _pull_menu, fn_name, attempts_log,
-                sig_text=sig_text, answer_request=_answerer)
+            # The stream-meta rows of this call carry the unit they serve,
+            # so the FLAT grading can tell a measured refusal from a
+            # reasoning-capped truncation per unit.
+            with serving_units((f"{rel_file}::{fn_name}",)):
+                body, last_response = self.prompt.ask_per_fn_body(
+                    prompt + _pull_menu, fn_name, attempts_log,
+                    sig_text=sig_text, answer_request=_answerer)
             if body is None:
                 # Model gave no usable response — stop retrying this fn.
                 self.tel.emit("phase_c.fn.fill.skip", data={

@@ -265,7 +265,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  best_mark=None, checkpoints=None, resets=None, stubs=None,
                  retires=None, logs=None, reset_returns=None,
                  localize=None, escalate=None, reverse_map=None,
-                 floor=None, enumerate_fns=None, ledger=None, tree_stubs=None):
+                 floor=None, enumerate_fns=None, ledger=None, tree_stubs=None,
+                 coverage=None, attribute=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -295,9 +296,12 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         return list(reset_returns or [])
 
     return PhaseCTddDeps(
-        attribute_failures=lambda *a, **k: AttributionResult(
+        # `attribute` overrides the whole attribution result — a walk about
+        # the attribution product (the hop's pairs, the binding it read)
+        # supplies its own; every other test keeps the static frontier.
+        attribute_failures=attribute or (lambda *a, **k: AttributionResult(
             dict(frontier or {}), FailureKind.NO_FRONTIER,
-            dict(frontier or {})),
+            dict(frontier or {}))),
         build_test_reverse_map=lambda *a, **k: dict(reverse_map or {}),
         filter_test_targets=lambda frontier, src: frontier,
         check_graceful_stop=graceful_stop or (lambda *a, **k: None),
@@ -328,6 +332,7 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         active_test_inventory=inventory,
         retrigger_layout=retrigger,
         localize_crashes=localize,
+        measure_coverage_slice=coverage,
         escalate_to_producers=escalate,
         # The extractor's per-fn records, so a replay can model the
         # landed-change reading. None (the default) is the pre-existing walk

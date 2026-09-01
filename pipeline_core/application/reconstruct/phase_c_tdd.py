@@ -159,7 +159,9 @@ from pipeline_core.domain.reasoning_cap import (
     collect_stream_meta,
     summarize_capped,
     summarize_followup_salvage,
+    units_all_replies_capped,
 )
+from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
@@ -427,6 +429,7 @@ def _floor_snapshot(
     oracle_size: int, code_id: str,
     attempted: set[FnLocator], landed: set[FnLocator],
     declined: set[FnLocator], served: Iterable[FnLocator],
+    served_verified: Iterable[FnLocator] = (),
     futility: dict[str, frozenset[FnLocator]],
     products: Mapping[str, FiredProduct] | None = None,
     producers: Mapping[str, frozenset[FnLocator]] | None = None,
@@ -476,6 +479,8 @@ def _floor_snapshot(
             f"{_l.file}::{_l.fn_name}" for _l in declined)),
         served=tuple(sorted(
             f"{_l.file}::{_l.fn_name}" for _l in served)),
+        served_verified=tuple(sorted(
+            f"{_l.file}::{_l.fn_name}" for _l in served_verified)),
         futile_units=tuple(sorted(
             (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}" for _l in _us)))
             for _t, _us in futility.items())),
@@ -711,6 +716,17 @@ def run_phase_c_tdd(
     # no longer means "served"; see `escalation_fire_due`. A persisted
     # futility seed counts as served at 0.
     _served_at: dict[FnLocator, int] = {}
+    # The RANKING's view of service: only stamps earned under the
+    # route-scoped rule (`_attempted` = units a route actually opened).
+    # `_served_at` is the fire's premise and is deliberately inclusive — it
+    # carries every floor stamp ever made, including the pre-2026-08-31
+    # batch-wide ones no record can now distinguish (run `9933-efe68f37`:
+    # 12 stamped, `wanted` was `{context, msg}`; `never_served=[]` on 24 of
+    # 25 rankings across the five runs after the route-scoped fix). A stamp
+    # the ranking cannot verify is not evidence the unit was tried, so the
+    # never-served bucket reads this set, seeded only from the floor's
+    # `served_verified` and re-earned as routes open units.
+    _served_verified: set[FnLocator] = set()
     _set_since: dict[str, int] = {}
     # Escalated test -> (the futile unit-set that EARNED its fire, the
     # additions the fire computed). The escalation's product lives exactly as
@@ -1577,12 +1593,25 @@ def run_phase_c_tdd(
             tree_sha=_tree_sha, oracle_size=pass_count + fail_count,
             code_id=_code_id, attempted=_pass_attempted,
             landed=_pass_landed, declined=_pass_declined,
-            served=_served_at, futility=prev_test_units,
+            served=_served_at, served_verified=_served_verified,
+            futility=prev_test_units,
             products=escalation_products, producers=escalation_producers))
 
     while True:
         iter_n += 1
-        bind_coverage_slice(None)
+        # The coverage binding is NOT cleared here: it stands from its
+        # measurement (below, after attribution) until the next measurement
+        # replaces it or a deliberate destruction invalidates it (the
+        # retrigger re-stubs and the batch-ratchet restore clear it at the
+        # site of the destruction — a reading of a discarded tree misleads
+        # every consumer). What the carry-over buys is the attribution
+        # phase: it runs BEFORE this iteration's own measurement, so the
+        # format-hop's measured redirect reads the PREVIOUS sweep's owner
+        # map — keyed by test name, conservative on any test it did not
+        # measure. A blanket clear here made that redirect structurally
+        # unreachable: every attribution saw None (found by the
+        # `358833-aa15d93c` walk's binding-order pin, 2026-09-01). Process
+        # exit still clears via `_clear_coverage_on_return`.
         if iter_n > _tdd_backstop:
             deps.log(f"  {tag} [phase-c/tdd] backstop {_tdd_backstop} reached — "
                  "stopping. This should never happen — stall budget should "
@@ -1719,6 +1748,11 @@ def run_phase_c_tdd(
                 # epoch bump (see the comment above), which is also why the
                 # ledger's own refutation rule carries a body-identity clause
                 # instead of trusting the epoch alone.
+                # The held-over coverage binding described the tree this
+                # restore just discarded — a deliberate destruction
+                # invalidates the measurement for every consumer, this
+                # iteration's attribution included.
+                bind_coverage_slice(None)
                 _reseed_site("after batch-ratchet restore", iter_n)
                 rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
                                             timeout=test_timeout)
@@ -2195,6 +2229,13 @@ def run_phase_c_tdd(
                 _sv_file, _, _sv_fn = _sv_key.partition("::")
                 if _sv_fn:
                     _served_at.setdefault(FnLocator(_sv_file, _sv_fn), 0)
+            # The verified subset seeds ONLY from its own field — a floor
+            # from before the field starts the ranking's view empty rather
+            # than adopting stamps the batch-wide rule may have written.
+            for _sv_key in (_resume.served_verified or ()):
+                _sv_file, _, _sv_fn = _sv_key.partition("::")
+                if _sv_fn:
+                    _served_verified.add(FnLocator(_sv_file, _sv_fn))
             if _resume.futility:
                 for _fut_test, _fut_units in _resume.futility:
                     _seeded = frozenset(
@@ -2836,7 +2877,10 @@ def run_phase_c_tdd(
             # unit that exhausts its refill budget leaves through the D3
             # filter exactly as any frontier unit does.
             _sustain = sustain_escalation_products(
-                escalation_products, units_by_test, _stub_keys)
+                escalation_products, units_by_test, _stub_keys,
+                format_tests=frozenset(
+                    t for t in escalation_products
+                    if format_traits_used(_attr.source_for(t))))
             for k, ts in _sustain.merges.items():
                 frontier.setdefault(k, set()).update(ts)
             for tname, _why in _sustain.dropped:
@@ -2851,7 +2895,13 @@ def run_phase_c_tdd(
                         "it)",
                        "not_failing":
                         "the test no longer fails, so there is no "
-                        "attribution to hold evidence against"}[_why]
+                        "attribution to hold evidence against",
+                       "format_trait_test":
+                        "the test's own source renders through a format "
+                        "trait, so producers of the accessors' container "
+                        "cannot change what it asserts — the "
+                        "format-implementer attribution owns this evidence"
+                       }[_why]
                     + "; a product outliving its evidence would be frontier "
                     "nobody measured.")
                 deps.emit("phase_c.attribution.escalation_dropped",
@@ -2921,6 +2971,31 @@ def run_phase_c_tdd(
                                 "stub_accessors": sorted(
                                     f"{u.file}::{u.fn_name}"
                                     for u in _stub_accessors)})
+                        prev_test_units[tname] = frozenset(units)
+                        continue
+                    # A test whose own source renders through a format trait
+                    # does not escalate to producers: the escalation answers
+                    # "who builds the accessors' container", and no builder
+                    # changes what `{:?}` emits. The attribution's
+                    # format-implementer hop owns that evidence and has
+                    # already attributed the implementer beside the
+                    # identifier owners. Run `114436-9cb17382`: the two
+                    # remaining Debug tests' futility fires bought a 42-unit
+                    # constructor family, re-merged every sweep, while the
+                    # formatter was never dispatched under a rewrite grade.
+                    _fmt_traits = format_traits_used(_attr.source_for(tname))
+                    if _fmt_traits:
+                        deps.log(
+                            f"  {tag} [attribution/escalate] {tname}: NOT "
+                            "escalating — the test's own source renders via "
+                            f"{'/'.join(sorted(_fmt_traits))}; producers of "
+                            "the accessors' container cannot change what the "
+                            "format trait emits, and the format-implementer "
+                            "attribution already owns this evidence.")
+                        deps.emit(
+                            "phase_c.attribution.escalation_withheld", data={
+                                "test": tname,
+                                "format_traits": sorted(_fmt_traits)})
                         prev_test_units[tname] = frozenset(units)
                         continue
                     _fired_producers: set[FnLocator] = set()
@@ -3217,6 +3292,9 @@ def run_phase_c_tdd(
                 # for milliseconds. Only bodies whose file was NOT re-authored
                 # come back; the gate refuses the rest, which is exactly the
                 # retrigger's intent.
+                # Same rule: the re-stub invalidates the held-over
+                # coverage binding (deliberate destruction).
+                bind_coverage_slice(None)
                 _reseed_site("after retrigger re-stub (build cause)", iter_n)
                 _grace = _grant_grace(_retrig_k.reverted_count,
                                       frozenset(_oracle.vanished))
@@ -3553,6 +3631,9 @@ def run_phase_c_tdd(
                     "reverted_count": _retrig_c.reverted_count,
                 })
                 _destruction_epoch += 1
+                # The re-stub invalidates the held-over coverage
+                # binding for every consumer (deliberate destruction).
+                bind_coverage_slice(None)
                 _reseed_site("after retrigger re-stub (crash cause)", iter_n)
                 _grace = _grant_grace(_retrig_c.reverted_count,
                                       frozenset(_oracle.vanished))
@@ -3597,6 +3678,9 @@ def run_phase_c_tdd(
                         "reverted_count": _retrig.reverted_count,
                     })
                     _destruction_epoch += 1
+                    # Same rule: the re-stub invalidates the
+                    # held-over coverage binding.
+                    bind_coverage_slice(None)
                     _reseed_site("after retrigger re-stub (stall cause)",
                                  iter_n)
                     _grace = _grant_grace(_retrig.reverted_count,
@@ -4012,10 +4096,14 @@ def run_phase_c_tdd(
                         (t, set(d)) for t, d in _by_test.items())},
             })
         _before_svc = [k for k, _ in ordered]
+        # The ranking reads the VERIFIED service view, not the fire's
+        # inclusive `_served_at`: a floor stamp the route-scoped rule never
+        # earned kept `never_served` at [] on 24 of 25 rankings after the
+        # decode fix shipped, so never-attempted units could not rank first.
         ordered = promote_by_service(
-            ordered, set(_served_at), _flat_keys, _dead_keys, _red_dead)
+            ordered, set(_served_verified), _flat_keys, _dead_keys, _red_dead)
         _ranked = [k for k, _ in ordered]
-        _never = [k for k in _ranked if k not in _served_at
+        _never = [k for k in _ranked if k not in _served_verified
                   and k not in _dead_keys and k not in _red_dead]
         _flat_n = sum(1 for k in _ranked if k in _flat_keys
                       and k not in _dead_keys and k not in _red_dead)
@@ -4581,7 +4669,11 @@ def run_phase_c_tdd(
                         evidence=failure_evidence_by_test(output),
                         # Test-own source: homonym scoring reads `{:?}` here,
                         # never from libtest evidence (run `463713-b7c666c8`).
-                        sources=_attr.sources),
+                        sources=_attr.sources,
+                        # The formatter dispatcher/implementer pairs the
+                        # attribution hop resolved — the engine's pair route
+                        # dispatches a cross-file pair as one transaction.
+                        pairs=_attr.pairs),
                     escalated_keys=_batch_escalated,
                     escalated_measured=_measured_escalated,
                     ledger_entries=_ledger_entries(),
@@ -4639,6 +4731,7 @@ def run_phase_c_tdd(
         # purpose). A unit the routes never opened keeps its
         # never-served rank instead of silently dropping to bucket 1.
         _served_at.update(dict.fromkeys(_attempted, iter_n))
+        _served_verified.update(_attempted)
         _persist_floor()
         _capped_n, _capped_m = summarize_capped(_fill_meta)
         # The forced followup's own outcome, folded beside the main-stream
@@ -4648,6 +4741,9 @@ def run_phase_c_tdd(
         # `(truncated, salvaged)`: truncated covers a server budget AND a
         # client think-cap break, because the controller salvages both.
         _fu_cut, _fu_salv = summarize_followup_salvage(_fill_meta)
+        # Filled by the landed-change audit below when it runs; the
+        # reasoning-capped emit reads it either way.
+        _batch_esc_capped: frozenset[FnLocator] = frozenset()
         total_filled += sub.fns_filled
         total_attempts += sub.attempts
         total_bytes += sub.bytes_filled
@@ -4725,6 +4821,19 @@ def run_phase_c_tdd(
                 _batch_unchanged, sub.reverted_fns)
             _batch_esc_flat = _batch_flat & _batch_escalated
             _batch_esc_reverted = _batch_reverted & _batch_escalated
+            # A truncated call that re-emits the old body is not a measured
+            # refusal: grading it FLAT is the same overclaim the FLAT arm
+            # below forbids for reverts, and the re-buy detector then stands
+            # on a truncated measurement. Iter 3 of run `358833-aa15d93c`
+            # (2026-09-01) wrote 8 flat rows in a batch whose own audit said
+            # `3 of 4 fill replies reasoning-capped`. A unit whose EVERY
+            # joined reply this batch was capped moves out of the flat set —
+            # treated like `_batch_esc_reverted`: no row, re-seedable.
+            _capped_locs = frozenset(
+                FnLocator(*u.rsplit("::", 1))
+                for u in units_all_replies_capped(_fill_meta) if "::" in u)
+            _batch_esc_capped = frozenset(_batch_esc_flat & _capped_locs)
+            _batch_esc_flat = _batch_esc_flat - _batch_esc_capped
             _batch_declined = declined_unchanged(
                 _batch_flat, convicting=convicting,
                 escalated=_batch_escalated,
@@ -4831,6 +4940,12 @@ def run_phase_c_tdd(
                       + (f", {_fu_salv} salvaged to their last closed block"
                          if _fu_salv else "") + ")" if _fu_cut else "")
                    if _capped_m else "")
+                + ("; ESCALATED, unchanged but every reply capped (NOT "
+                   "graded flat — a truncated call is not a measured "
+                   "refusal): " + ", ".join(sorted(
+                       f"{k.file}::{k.fn_name}"
+                       for k in _batch_esc_capped)[:12])
+                   if _batch_esc_capped else "")
                 + ".")
             deps.emit("phase_c.tdd.landed_change", data={
                 "cluster": cluster.name, "iter": iter_n,
@@ -4855,7 +4970,12 @@ def run_phase_c_tdd(
                 "esc_unchanged": sorted(f"{k.file}::{k.fn_name}"
                                         for k in _batch_esc_flat),
                 "esc_reverted": sorted(f"{k.file}::{k.fn_name}"
-                                       for k in _batch_esc_reverted)})
+                                       for k in _batch_esc_reverted),
+                # Escalated-unchanged units withheld from the FLAT grade
+                # because every joined reply was reasoning-capped — a
+                # truncated call is not a measured refusal.
+                "esc_capped": sorted(f"{k.file}::{k.fn_name}"
+                                     for k in _batch_esc_capped)})
             if _batch.completes_pass:
                 _unchanged_pass = _pass_units_at_close - _pass_landed
                 # The pass's own record FIRST, the current conviction map
@@ -4907,7 +5027,13 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "capped": _capped_n, "replies": _capped_m,
                 "followups_truncated": _fu_cut,
-                "followups_salvaged": _fu_salv})
+                "followups_salvaged": _fu_salv,
+                # Escalated-unchanged units every one of whose joined replies
+                # was capped — held out of the FLAT grade this iter (see the
+                # landed-change audit), so the re-buy detector never stands
+                # on a truncated measurement.
+                "esc_flat_withheld": sorted(
+                    f"{k.file}::{k.fn_name}" for k in _batch_esc_capped)})
         # The landed record's lifetime is the pass's, exactly like the
         # cursor: a closed pass releases both (the audit above has already
         # reported this one), and the next pass accumulates fresh.

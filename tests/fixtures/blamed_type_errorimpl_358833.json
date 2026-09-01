@@ -1,0 +1,114 @@
+{
+ "run_id": "358833-aa15d93c",
+ "source": "extractor enumerate_types over tmp/anyhow/.skeleton-filled/stable, recorded 2026-09-01",
+ "type_records": [
+  {
+   "file": "src/error.rs",
+   "kind": "struct",
+   "name": "ErrorImpl",
+   "generics": "< E = () >",
+   "definition": "#[repr(C)]\npub(crate) struct ErrorImpl<E = ()> {\n    vtable: &'static ErrorVTable,\n    backtrace: Option<Backtrace>,\n    _object: E,\n}",
+   "fields": [
+    {
+     "name": "vtable",
+     "ty": "& 'static ErrorVTable",
+     "is_pub": false
+    },
+    {
+     "name": "backtrace",
+     "ty": "Option < Backtrace >",
+     "is_pub": false
+    },
+    {
+     "name": "_object",
+     "ty": "E",
+     "is_pub": false
+    }
+   ],
+   "variants": [],
+   "methods": [
+    {
+     "name": "erase",
+     "sig": "fn erase (& self) -> Ref < ErrorImpl >",
+     "is_pub": false,
+     "is_exactly_pub": false,
+     "cfg_predicates": [],
+     "file": "src/error.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "error",
+     "sig": "unsafe fn error (this : Ref < Self > ,) -> & (dyn StdError + Send + Sync + 'static)",
+     "is_pub": true,
+     "is_exactly_pub": false,
+     "cfg_predicates": [],
+     "file": "src/error.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "error_mut",
+     "sig": "unsafe fn error_mut (this : Mut < Self > ,) -> & mut (dyn StdError + Send + Sync + 'static)",
+     "is_pub": true,
+     "is_exactly_pub": false,
+     "cfg_predicates": [
+      "any (feature = \"std\" , not (anyhow_no_core_error))"
+     ],
+     "file": "src/error.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "backtrace",
+     "sig": "unsafe fn backtrace (this : Ref < Self >) -> & Backtrace",
+     "is_pub": true,
+     "is_exactly_pub": false,
+     "cfg_predicates": [
+      "feature = \"std\""
+     ],
+     "file": "src/error.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "provide",
+     "sig": "unsafe fn provide < 'a > (this : Ref < 'a , Self > , request : & mut Request < 'a >)",
+     "is_pub": false,
+     "is_exactly_pub": false,
+     "cfg_predicates": [
+      "error_generic_member_access"
+     ],
+     "file": "src/error.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "chain",
+     "sig": "unsafe fn chain (this : Ref < Self >) -> Chain",
+     "is_pub": true,
+     "is_exactly_pub": false,
+     "cfg_predicates": [],
+     "file": "src/error.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "display",
+     "sig": "unsafe fn display (this : Ref < Self > , f : & mut fmt :: Formatter ,) -> fmt :: Result",
+     "is_pub": true,
+     "is_exactly_pub": false,
+     "cfg_predicates": [],
+     "file": "src/fmt.rs",
+     "mod_path": ""
+    },
+    {
+     "name": "debug",
+     "sig": "unsafe fn debug (this : Ref < Self > , f : & mut fmt :: Formatter) -> fmt :: Result",
+     "is_pub": true,
+     "is_exactly_pub": false,
+     "cfg_predicates": [],
+     "file": "src/fmt.rs",
+     "mod_path": ""
+    }
+   ],
+   "is_pub": true,
+   "is_exactly_pub": false,
+   "mod_path": ""
+  }
+ ]
+}

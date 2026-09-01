@@ -59,8 +59,10 @@ from pipeline_core.domain.attempt_loss import (
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
+from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
+from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.dispatch import (
     file_route_units,
@@ -114,7 +116,13 @@ from pipeline_core.domain.models import (
     ImplBlock,
     TypeRecord,
 )
+from pipeline_core.domain.pair_fill import (
+    PairDispatch,
+    blocks_after_pair_fill,
+    pair_dispatches,
+)
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
+from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
     aimed_refill_names,
@@ -153,6 +161,7 @@ from pipeline_core.domain.retro_gate import (
     admissible_guidance,
     anchor_types_for_container,
     conviction_standing,
+    convictor_entry_moved,
     evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
@@ -1523,7 +1532,13 @@ def fill_impl_blocks(
                 refill_evidence="\n".join(
                     s for s in (_file_refill_evidence, _install_evidence,
                                 _bypass_evidence) if s),
-                blueprint=_bp_slice, notes=notes_section, prior_error=prior_error,
+                blueprint=_bp_slice, notes=notes_section,
+                # E0616/E0599 feedback carries the blamed type's crate-visible
+                # fn inventory (`with_blamed_type_api`) — deterministic per
+                # excerpt, so the byte-identical-resample check below still
+                # compares what the model would actually receive.
+                prior_error=with_blamed_type_api(
+                    prior_error, _crate_type_records),
                 crash_evidence=_file_crash,
                 retrospective_guidance=_file_retro,
                 module_name=module_name, cluster_name=cluster_name,
@@ -1559,8 +1574,16 @@ def fill_impl_blocks(
                 "refills": len(refill_names)})
             attempts_total += 1
             try:
-                _file_reply = _ask_fill(
-                    prompt, followup_think=escalated_followup_think(_grade_parts))
+                # The stream-meta rows of this call carry the units it
+                # serves, so the FLAT grading can tell a measured refusal
+                # from a reasoning-capped truncation per unit.
+                with serving_units(
+                        f"{file_rel}::{n}"
+                        for n in (_retry_names if _retry_names is not None
+                                  else wanted)):
+                    _file_reply = _ask_fill(
+                        prompt,
+                        followup_think=escalated_followup_think(_grade_parts))
                 parsed = extract_fn_bodies(_file_reply)
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
@@ -2272,6 +2295,15 @@ def fill_impl_blocks(
             _log(f"  [phase-c/impl] {block_id}: retro guidance recorded no "
                  "tree premise — guidance withheld, exhaustion not honoured "
                  "(no_tree_premise).")
+        # The premise's complement: the stamped convicting tests now
+        # measurably enter different bodies, so the lesson (and the
+        # attempts its exhaustion counted) judged a superseded execution.
+        elif convictor_entry_moved(_retro_rec):
+            _poisoned_retro = True
+            _log(f"  [phase-c/impl] {block_id}: retro guidance was earned "
+                 "when its convicting tests entered a different set of "
+                 "bodies — guidance withheld, exhaustion not honoured "
+                 "(convictor_entry_moved).")
         # A verdict earned in another context (other cluster's layout, the
         # absolute acceptance gate, the pre-group route set) sampled a
         # different problem — it cannot convict this block. Neither can one
@@ -2316,6 +2348,36 @@ def fill_impl_blocks(
                 return
             if len(_owned) < len(block.refill_members):
                 block = replace(block, refill_members=_owned)
+            # The same refusal on MEASURED evidence — the gate the per-fn
+            # route already has twice (`fill_one_fn`, the pre-loop skip and
+            # the retro arm) and this route lacked: on run `358833-aa15d93c`
+            # (2026-09-01) the `src/fmt.rs::ErrorImpl` block ground four
+            # `E0616`/`E0599` rounds plus a maximal last-resort while the
+            # sweep's own owner map proved neither convicting test ever
+            # enters `debug` — the `{:?}` arm of the dispatcher never
+            # delegates here. When EVERY refill member is positively
+            # unentered by every convicting test, no body written in this
+            # block can move those verdicts: defer to the outer loop before
+            # the first model call. `unreached_by` declines on an unbound
+            # reading, an unmeasured test or a crashed binary, so ignorance
+            # changes nothing.
+            _bc_tests = _convicting_for_block(block)
+            if _bc_tests and all(
+                    coverage_unreached_by(
+                        FnLocator(block.file, m.fn_name), _bc_tests)
+                    for m in block.refill_members):
+                _names = ", ".join(sorted(_bc_tests))
+                _log(f"  [phase-c/impl] {block_id}: skipped (refill-only; "
+                     "no convicting test executes any member of this block "
+                     f"— {_names} enter(s) the crate elsewhere; deferred to "
+                     "outer loop).")
+                _emit("phase_c.impl.coverage_unreached", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "members": [m.fn_name for m in block.refill_members],
+                    "convicting": sorted(_bc_tests)})
+                _cls(FillOutcomeClass.MIS_TARGETED, block_id, "impl")
+                return
         # Crash-blocked: a previous attempt of THIS block was reverted for a
         # crash-only regression blamed wholly outside it. While the blamed
         # file is unchanged, re-attempting buys the identical crash
@@ -2574,6 +2636,19 @@ def fill_impl_blocks(
         # test output carries no rustc E-codes — and 0 never beats a prior 0,
         # so a block was parked the round after it started compiling.
         last_metric: FixProgress | None = None
+        # True while the LAST judged attempt's splice was reverted by the
+        # regression gate — a path that banks no salvage, so its metric
+        # describes a file image the tree permanently discarded. The retro
+        # comparison below must not move the floor on it: run
+        # `358833-aa15d93c` (2026-09-01) had the maximal last-resort compile
+        # (0 errors), get REVERTED for reddening 5 passing Debug tests, and
+        # still grade `improved` against a prior floor of 1 — `new_best`
+        # moved to a state the tree does not hold and the loop re-entered
+        # to buy `E0616` again. A compile-fail or U2 revert stays OUT of
+        # this flag: the first is the classic attempt-trajectory floor, the
+        # second banks its compiling image as salvage, so both describe
+        # something the loop can retain.
+        _last_regr_reverted: list[bool] = [False]
         # Best COMPILING file image this block produced. `unimplemented!()` is
         # not a neutral fallback — it panics and aborts the test binary, so
         # every sibling test in it goes unjudged. On exhaustion we restore this
@@ -2675,7 +2750,11 @@ def fill_impl_blocks(
                     # temperature resample (both E0277 units of run
                     # `275772-425da59c`, 2026-08-19: same prompt sha on both
                     # attempts, identical error, whole fix loop spent).
-                    last_error=last_error_excerpt or "",
+                    # An E0616/E0599 additionally carries the blamed type's
+                    # crate-visible fn inventory — the surface the error
+                    # implies the model is missing (`with_blamed_type_api`).
+                    last_error=with_blamed_type_api(
+                        last_error_excerpt or "", _crate_type_records),
                     bound_methods=_bound_methods_section_for(
                         _block_where, _crate_type_records, file_rel=block.file),
                     refill_evidence=_refill_evidence_text,
@@ -2688,8 +2767,11 @@ def fill_impl_blocks(
                 fr_path=fr_path,
             )
             try:
-                response = _ask_fill(
-                    prompt, followup_think=escalated_followup_think(_esc_targets))
+                with serving_units(f"{block.file}::{n}"
+                                   for n in _block_target_names):
+                    response = _ask_fill(
+                        prompt,
+                        followup_think=escalated_followup_think(_esc_targets))
             except Exception as e:
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
                 return FixOutcome("stop")
@@ -2712,6 +2794,7 @@ def fill_impl_blocks(
             budgeted attempts and the maximal last-resort attempt."""
             nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
                 members_filled_this_block, block_already_complete, last_metric
+            _last_regr_reverted[0] = False
             # Hold the global splice+cargo lock while we mutate and check.
             with _splice_check_lock:
                 # Monotone ratchet baseline: the cluster's runtime test state
@@ -2921,6 +3004,7 @@ def fill_impl_blocks(
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
                     file_path.write_text(snapshot, encoding="utf-8")
+                    _last_regr_reverted[0] = True
                     _note_reverted(block.file, _impl_spliced)
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
                          f"fn(s) — regressed sibling test(s): "
@@ -3335,7 +3419,9 @@ def fill_impl_blocks(
                     file_rel=block.file, container=block.container,
                     stub_names=_max_target_names,
                     file_text=_cur_text, tests_block=_tests_text,
-                    errs=last_error_excerpt, notes=notes_section,
+                    errs=with_blamed_type_api(
+                        last_error_excerpt, _crate_type_records),
+                    notes=notes_section,
                     identity_must=_identity_must(
                         *block.stub_members, *block.refill_members))
                 if len(_max_prompt) > _max_cap:
@@ -3349,7 +3435,9 @@ def fill_impl_blocks(
                         "container": block.container,
                         "prompt_chars": len(_max_prompt)})
                     try:
-                        _max_reply = _ask_fill(_max_prompt)
+                        with serving_units(f"{block.file}::{n}"
+                                           for n in _max_target_names):
+                            _max_reply = _ask_fill(_max_prompt)
                         _max_parsed = bind_headerless_names(
                             extract_fn_bodies(_max_reply), _max_target_names)
                         _note_reader_loss(
@@ -3374,6 +3462,7 @@ def fill_impl_blocks(
             # the on-disk store layout stays uniform. Transient LLM failures
             # (llm_error/empty_response) update no state and never retry.
             _retry_informed = False
+            _floor_note = ""
             try:
                 # The attempt's own metric, not a re-parse of its text.
                 cur_progress = last_metric or FixProgress(
@@ -3409,10 +3498,30 @@ def fill_impl_blocks(
                 # bodies. Record the diagnosis but never exhaust, never move
                 # the baseline, and don't retry now (mirrors the per-fn rule).
                 _downstream = _signal == "downstream_only"
+                # A regression-reverted attempt's metric describes a file
+                # image the gate discarded and no salvage retains — the tree
+                # holds `snapshot`, whose floor is `prior_best`. Letting it
+                # move `new_best` graded the discard as progress: run
+                # `358833-aa15d93c`, the maximal last-resort compiled, was
+                # reverted on 5 newly-red Debug tests, `improved` came back
+                # true against the prior floor of 1, and the loop re-entered
+                # at `E0616`. The diagnosis still lands (the record below is
+                # stamped, `regressed=` included); the comparison operates
+                # on what the tree retains.
+                _regr_reverted = _last_regr_reverted[0]
                 if _downstream:
                     new_best = prior_best
                     improved = False
                     full_exhaust = False
+                elif _regr_reverted:
+                    new_best = prior_best
+                    improved = False
+                    # Not-improved on the kept tree, so the same rule as the
+                    # comparison arm below: no re-entry bought on a metric
+                    # the tree does not hold. The retro screens
+                    # (`regression_scoped`, coverage-unreached above) decide
+                    # what the stored record may steer later.
+                    full_exhaust = True
                 elif prior_best is None:
                     new_best = cur_progress
                     improved = True
@@ -3439,6 +3548,33 @@ def fill_impl_blocks(
                     _log(f"  [phase-c/impl/retro] {block_id}: NOT exhausting "
                          "— the last error is a splice/nesting diagnostic, "
                          "not a verdict on the block's bodies.")
+                # Same rule, measured — the per-fn retro arm's coverage
+                # gate, ported: a verdict drawn from tests that provably
+                # never enter any member of this block is a verdict about
+                # somewhere else. Convicting on it parks the block AND
+                # stores a lesson every later prompt obeys. Refuses only on
+                # positive evidence (`convictors_never_enter`); the pre-loop
+                # gate normally prevents this round happening at all, this
+                # is the arm for a conviction reached some other way.
+                _bc_now = _block_evidence.tests
+                _cov_unreached_block = False
+                if (full_exhaust and _bc_now and all(
+                        coverage_unreached_by(
+                            FnLocator(block.file, _m.fn_name), _bc_now)
+                        for _m in (*block.stub_members,
+                                   *block.refill_members))):
+                    full_exhaust = False
+                    _cov_unreached_block = True
+                    retro = {**retro, "guidance": ""}
+                    _log(f"  [phase-c/impl/retro] {block_id}: NOT exhausting "
+                         "and storing no guidance — no convicting test "
+                         "executes any member of this block "
+                         f"({', '.join(sorted(_bc_now))}); the attempt "
+                         "bought no evidence about this block.")
+                    _emit("phase_c.impl.retro.coverage_unreached", data={
+                        "cluster": cluster_name, "file": block.file,
+                        "container": block.container,
+                        "convicted_by": sorted(_bc_now)})
                 # The dict write + on-disk save must be atomic together —
 
                 # two blocks finishing concurrently each write their OWN key
@@ -3499,7 +3635,16 @@ def fill_impl_blocks(
                     evidence=tuple(sorted(_sig_history[-1]))
                     if _sig_history else (),
                     model_calls=fix_attempt)
-                _retry_informed = not full_exhaust and not _downstream
+                # A downstream break, a regression-reverted attempt (the
+                # metric describes a discarded splice) and a measured
+                # coverage-unreached block all withhold the retry: none of
+                # them is evidence a re-prompt of THIS block buys anything,
+                # and the last two are attempt-invariant.
+                _retry_informed = (not full_exhaust and not _downstream
+                                   and not _regr_reverted
+                                   and not _cov_unreached_block)
+                _floor_note = (f"best {prior_best} -> {new_best} on the "
+                               "kept tree")
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
             if not (_retry_informed and _retro_round < _retro_rounds_max):
@@ -3535,9 +3680,13 @@ def fill_impl_blocks(
             if (_rline := retired_guidance_line(
                     _prior_key, _prior_rec, _prior_verdict)):
                 _log(f"  {_rline}")
+            # The floor named here is the KEPT tree's — a comparison that a
+            # reverted attempt can no longer move (the round would not
+            # re-enter), so the line states what it measured instead of
+            # asserting an improvement over a state the tree did not hold.
             _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
-                 "kept the error floor improving — re-entering the fix loop "
-                 "with the new guidance.")
+                 f"kept the error floor improving ({_floor_note}) — "
+                 "re-entering the fix loop with the new guidance.")
             _emit("phase_c.impl.retro_retry", data={
                 "cluster": cluster_name, "file": block.file,
                 "container": block.container, "retro_round": _retro_round,
@@ -3646,6 +3795,288 @@ def fill_impl_blocks(
                     "last_error_preview": last_error_excerpt[:200],
                     "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
                 })
+
+    # PAIR FILL — a cross-file dispatcher/implementer pair the attribution
+    # hop resolved dispatches as ONE transaction, before either file route
+    # can open its halves independently. The class (run `358833-aa15d93c`,
+    # 2026-09-01): the paying write is co-dependent across two files —
+    # delegation alone reddens the no-backtrace Debug tests, the printer
+    # alone is red-dead — so each half is correctly rejected by the revert
+    # gate and no sequence of independently-judged keeps can land the
+    # joint state. One prompt carries both blocks, both replies splice,
+    # one compile + test reading keeps or reverts the two splices
+    # together. Selection is `pair_dispatches` (domain): the hop's own
+    # records and the collected blocks, no live names.
+    def _fill_pair(pd: PairDispatch) -> None:
+        nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+        _check_graceful_stop("pair-fill dispatch")
+        pair = pd.pair
+        halves = (pd.dispatcher_block, pd.implementer_block)
+        pair_id = " + ".join(
+            f"{b.file}::" + ",".join(
+                m.fn_name for m in (*b.stub_members, *b.refill_members))
+            for b in halves)
+        _pair_locs = pd.member_locators()
+        _pair_tests: set[str] = set()
+        for _loc in _pair_locs:
+            _pair_tests |= _frontier_tests.convicting_for(_loc)
+        _pair_test_blocks: list[tuple[str, str]] = []
+        for _loc in sorted(_pair_locs):
+            for _tp, _tt in _find_tests_referencing_fn(
+                    tests_dir_files, _loc.fn_name, max_blocks=2):
+                if not any(p == _tp for p, _ in _pair_test_blocks):
+                    _pair_test_blocks.append((_tp, _tt))
+        _half_ctx: list[tuple[ImplBlock, str, str]] = []
+        for b in halves:
+            try:
+                _htxt = (target_src_dir / b.file).read_text(encoding="utf-8")
+            except OSError as _he:
+                _log(f"  [phase-c/pair] {pair_id}: cannot read {b.file}: "
+                     f"{_he} — pair not dispatched.")
+                return
+            _half_ctx.append(
+                (b, _htxt, _extract_impl_where_clause(_htxt, b.container)))
+        _types_join = "\n\n".join(dict.fromkeys(s for s in (
+            _types_section_for_fix(
+                " ".join(m.sig_text for m in (*b.stub_members,
+                                              *b.refill_members)),
+                _htxt, "", b.container, _hwc, _crate_type_records,
+                file_rel=b.file)
+            for b, _htxt, _hwc in _half_ctx) if s))
+        _bound_join = "\n\n".join(dict.fromkeys(s for s in (
+            _bound_methods_section_for(
+                _hwc, _crate_type_records, file_rel=b.file)
+            for b, _htxt, _hwc in _half_ctx) if s))
+        _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
+             "implementer written under ONE judgment across "
+             f"{len(halves)} files ({len(_pair_tests)} convicting test(s)).")
+        _emit("phase_c.pair.fill.start", data={
+            "cluster": cluster_name,
+            "dispatcher": f"{pair.dispatcher.file}::{pair.dispatcher.fn_name}",
+            "implementer": (f"{pair.implementer.file}::"
+                            f"{pair.implementer.fn_name}"),
+            "convicting": sorted(_pair_tests)})
+        with _counters_lock:
+            attempts_total += 1
+            dispatched_keys.update(_pair_locs)
+        prompt = _build_per_impl_prompt(
+            block=pd.dispatcher_block,
+            related_blocks=[],
+            test_blocks=_pair_test_blocks,
+            module_name=module_name,
+            cluster_name=cluster_name,
+            sections=PerImplSections(
+                types=_types_join, invariants=invariants_section,
+                notes="", crate_idioms="", dispatch_family="",
+                macros=macros_section, siblings="",
+                retrospective_guidance="",
+                bound_methods=_bound_join,
+                identity_must=_identity_must(
+                    *(m for b in halves
+                      for m in (*b.stub_members, *b.refill_members)))),
+            fr_path=fr_path,
+            partner_block=pd.implementer_block)
+        try:
+            with serving_units(f"{k.file}::{k.fn_name}"
+                               for k in sorted(_pair_locs)):
+                _pair_reply = _ask_fill(prompt)
+        except Exception as _pe:
+            _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
+            with _counters_lock:
+                answer_lost_keys.update(_pair_locs)
+            return
+        _pair_parsed = extract_fn_bodies(_pair_reply)
+        if not _pair_parsed:
+            _log(f"  [phase-c/pair] {pair_id}: empty/no FN blocks "
+                 f"({fn_tag_occurrences(_pair_reply)} FN tag(s) in reply).")
+            with _counters_lock:
+                answer_lost_keys.update(_pair_locs)
+            return
+        with _splice_check_lock:
+            _snaps = {
+                b.file: (target_src_dir / b.file).read_text(encoding="utf-8")
+                for b in halves}
+            _pair_base_raw: list[str] = []
+            _pair_baseline = _test_regression_baseline(
+                tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
+            _spliced_by_file: dict[str, list[str]] = {}
+            for b, _htxt, _hwc in _half_ctx:
+                _routing = route_fn_bodies(
+                    _pair_parsed, target=b.container, related=[],
+                    trait_defaults=trait_default_hosts(all_blocks, b.file),
+                    members=members_in_file(all_blocks, b.file))
+                _half_names = {m.fn_name for m in (*b.stub_members,
+                                                   *b.refill_members)}
+                _half_refills = {m.fn_name for m in b.refill_members}
+                for _rb in _routing.routed:
+                    _fd = _rb.fn_data
+                    if _fd["fn_name"] not in _half_names:
+                        continue
+                    _wc2 = _fd["where_clause"]
+                    if _wc2 and (_rb.via_trait_default
+                                 or signature_fixed_by_trait(_rb.container)):
+                        _wc2 = None
+                    _ok, _reason, _delta = _splice_fn_with_where(
+                        target_src_dir / b.file, _rb.container,
+                        _fd["fn_name"], _fd["body"], _wc2,
+                        allow_nonstub=_fd["fn_name"] in _half_refills,
+                        sig_text=_rb.sig_text)
+                    if _ok:
+                        _spliced_by_file.setdefault(b.file, []).append(
+                            _fd["fn_name"])
+                    else:
+                        _log(f"  [phase-c/pair] {pair_id}: splice "
+                             f"`{_fd['fn_name']}` failed: {_reason}")
+
+            def _revert_pair() -> None:
+                for _pf, _ptxt in _snaps.items():
+                    (target_src_dir / _pf).write_text(
+                        _ptxt, encoding="utf-8")
+                for _pf, _pnames in _spliced_by_file.items():
+                    _note_reverted(_pf, _pnames)
+
+            _n_spliced = sum(len(v) for v in _spliced_by_file.values())
+            if len(_spliced_by_file) < len(halves):
+                # HALF a pair on the tree is exactly the state this route
+                # exists to never create — revert whatever landed.
+                if _n_spliced:
+                    _revert_pair()
+                _log(f"  [phase-c/pair] {pair_id}: reply covered "
+                     f"{len(_spliced_by_file)} of {len(halves)} files — "
+                     "nothing kept (the transaction needs both halves).")
+                _cls(FillOutcomeClass.ANSWER_DROPPED, pair_id, "pair")
+                _emit("phase_c.pair.fill.partial", data={
+                    "cluster": cluster_name,
+                    "spliced": {f: sorted(ns)
+                                for f, ns in _spliced_by_file.items()}})
+                return
+            rc, _pair_out, _pair_diags = _run_cargo_check_diag(
+                check_cmd, target_src_dir, cluster_env)
+            if rc != 0:
+                _pair_sig = _cargo_err_sig_from_diagnostics(_pair_diags)
+                _revert_pair()
+                _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
+                     f"compile failed ({len(_pair_sig)} err(s)).")
+                _verdict_row(
+                    pair_id, Disposition.REVERT,
+                    "pair fill compile failed — both splices reverted as "
+                    "one transaction",
+                    outcome=GateOutcome.NEGATIVE, attempt=1,
+                    evidence=tuple(sorted(_pair_sig)), model_calls=1)
+                _cls(FillOutcomeClass.COMPILE_FAIL, pair_id, "pair")
+                with _counters_lock:
+                    impls_failed += 1
+                _emit("phase_c.pair.fill.reverted", data={
+                    "cluster": cluster_name, "why": "compile",
+                    "errors": len(_pair_sig)})
+                return
+            _pair_sites = frozenset(
+                FnSite(b.file, m.fn_name, b.container)
+                for b in halves
+                for m in (*b.stub_members, *b.refill_members))
+            _pair_u2 = _u2_test_gate(_pair_tests, _pair_sites, tdd_test_cmd,
+                                     target_src_dir, cluster_env)
+            _pair_regr = _test_regression_gate(
+                tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
+                stub_free=stub_free)
+            if _pair_regr is not None:
+                _rcmp, _rdetail = _pair_regr
+                _revert_pair()
+                _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
+                     f"regressed sibling test(s): {_rcmp.summary}.")
+                _verdict_row(
+                    pair_id, Disposition.REVERT,
+                    f"pair regressed sibling test(s): {_rcmp.summary} — "
+                    "both splices reverted as one transaction",
+                    outcome=GateOutcome.NEGATIVE, attempt=1,
+                    evidence=tuple(sorted(_rcmp.signature)), model_calls=1)
+                _cls(FillOutcomeClass.WRONG_BODY, pair_id, "pair")
+                with _counters_lock:
+                    impls_failed += 1
+                _emit("phase_c.pair.fill.reverted", data={
+                    "cluster": cluster_name, "why": "regression",
+                    "detail": _rcmp.summary})
+                return
+            if (_pair_u2 is not None
+                    and _pair_u2.decision is U2Decision.REJECT):
+                _revert_pair()
+                _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
+                     f"{len(_pair_u2.self_failures)} convicting test(s) "
+                     "still failing after the joint write.")
+                _verdict_row(
+                    pair_id, Disposition.REVERT,
+                    "pair convicting tests still failing — both splices "
+                    "reverted as one transaction",
+                    outcome=GateOutcome.NEGATIVE, attempt=1,
+                    evidence=tuple(sorted(_pair_u2.self_failures)),
+                    model_calls=1)
+                _cls(FillOutcomeClass.WRONG_BODY, pair_id, "pair")
+                with _counters_lock:
+                    impls_failed += 1
+                _emit("phase_c.pair.fill.reverted", data={
+                    "cluster": cluster_name, "why": "u2",
+                    "failing": sorted(_pair_u2.self_failures)})
+                return
+            with _counters_lock:
+                fns_filled_total += _n_spliced
+                impls_filled += 1
+            block_outcomes.append(UnitOutcome(landed=True))
+            _pair_passed = (_pair_u2.self_passed
+                            if _pair_u2 is not None else frozenset())
+            _pair_kept_unreachable = (
+                _pair_u2 is not None
+                and _pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
+            _cls(class_for_kept(passed=_pair_passed,
+                                unreachable=_pair_kept_unreachable),
+                 pair_id, "pair")
+            _verdict_row(
+                pair_id,
+                (Disposition.KEEP_DEFERRED if _pair_kept_unreachable
+                 else Disposition.ACCEPT),
+                (f"pair accepted — {len(_pair_passed)} convicting test(s) "
+                 "observed passing" if _pair_passed
+                 else "pair kept — compiles, no regression; judged at the "
+                 "next sweep"),
+                outcome=(GateOutcome.POSITIVE
+                         if _pair_passed and not _pair_kept_unreachable
+                         else GateOutcome.UNMEASURABLE),
+                evidence=tuple(sorted(_pair_passed)), attempt=1,
+                validity=ValidityVector(binary_completed=True),
+                model_calls=1)
+            _log(f"  [phase-c/pair] {pair_id}: FILLED {_n_spliced} fn(s) "
+                 "across both halves"
+                 + (f" — {len(_pair_passed)} convicting test(s) passing."
+                    if _pair_passed else "."))
+            _emit("phase_c.pair.fill.done", data={
+                "cluster": cluster_name,
+                "members_filled": _n_spliced,
+                "passed": sorted(_pair_passed)})
+
+    _pair_served: set[FnLocator] = set()
+    _pair_jobs = pair_dispatches(
+        _frontier_tests.pairs, tdd_frontier_keys, all_blocks)
+    for _pd in _pair_jobs:
+        try:
+            _fill_pair(_pd)
+        except Exception as _pfe:
+            _log(f"  [phase-c/pair] worker error: {_pfe}")
+        _pair_served |= _pd.member_locators()
+    if _pair_served:
+        # A same-iteration re-open of a pair-served member is a re-buy —
+        # the next sweep is the first moment the joint write can be judged
+        # (same rule as `blocks_after_file_first` for produced files).
+        blocks, _pair_dropped = blocks_after_pair_fill(
+            blocks, frozenset(_pair_served))
+        viable_blocks, _pair_dropped_v = blocks_after_pair_fill(
+            viable_blocks, frozenset(_pair_served))
+        _dropped_all = sorted(set(_pair_dropped) | set(_pair_dropped_v))
+        if _dropped_all:
+            _log(f"  [phase-c/impl] dropped {len(_dropped_all)} pair-served "
+                 "refill target(s) from the remaining routes this call "
+                 "(next sweep judges the joint write): "
+                 + ", ".join(_dropped_all))
+            _emit("phase_c.impl.refill_deferred_after_pair", data={
+                "cluster": cluster_name, "dropped": _dropped_all})
 
     # File-first pass — one prompt designs a file's frontier together;
     # the per-block loop below handles the remainder (the freshness gate

@@ -29,10 +29,13 @@ from pipeline_core.domain.test_results import identifiers_in
 
 
 def format_traits_used(test_src: str) -> frozenset[str]:
-    """Which std formatting traits a test's OWN source invokes.
+    """Which std formatting traits a test's OWN source invokes, from its
+    format placeholders and stringify calls: `{:?}`/`{:#?}` need `Debug`,
+    `{}`/`{:#}`/`.to_string()` need `Display`.
 
-    Same rule as ``_format_traits_used`` in the attribution application
-    module — kept here so the stamp filter has no application import.
+    The single home of the rule. The attribution module imports it for the
+    format-implementer hop and the futility-escalation gate; the stamp
+    filter reads it directly.
     """
     traits: set[str] = set()
     if "{:?}" in test_src or "{:#?}" in test_src:

@@ -130,3 +130,28 @@ def test_persisted_futility_seed_counts_as_served() -> None:
     from pipeline_core.domain.escalation_lifetime import escalation_fire_due
     units = frozenset({_u("downcast")})
     assert escalation_fire_due(units, units, {_u("downcast"): 0}, since=0).due
+
+
+def test_a_format_trait_test_drops_the_product() -> None:
+    """A producer escalation answers "who builds the accessors' container";
+    no builder changes what `{:?}` renders, so a fired test whose own source
+    formats loses its product — including one resumed from a floor written
+    before the fire-side gate existed (run `114436-9cb17382`: a 42-unit
+    constructor family re-merged every sweep for two Debug-substring
+    tests)."""
+    out = sustain_escalation_products(
+        {"t": _fired()}, {"t": {_ACC}}, _NO_STUBS,
+        format_tests=frozenset({"t"}))
+    assert out.dropped == (("t", "format_trait_test"),)
+    assert out.merges == {}
+
+
+def test_a_non_format_test_is_untouched_by_the_format_gate() -> None:
+    """Negative control: the gate keys on the fired test's own source, not on
+    the product's shape — a test that formats nothing sustains exactly as
+    before the gate existed."""
+    out = sustain_escalation_products(
+        {"t": _fired()}, {"t": {_ACC}}, _NO_STUBS,
+        format_tests=frozenset({"unrelated"}))
+    assert out.sustained == ("t",)
+    assert out.dropped == ()

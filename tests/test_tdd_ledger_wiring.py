@@ -655,3 +655,46 @@ def test_a3_on_the_live_iter1_lists_writes_one_flat_row() -> None:
     assert len(live_flat) == 8
     assert len(live_flat - attempted) == 7
     assert live_flat & attempted == {"src/error.rs::context"}
+
+
+def test_an_escalated_unit_whose_every_reply_was_capped_is_not_graded_flat(
+        monkeypatch, tmp_path: Path) -> None:
+    """FIX to the FLAT arm's denominator: a truncated call that re-emits the
+    old body is not a measured refusal. Iter 3 of run `358833-aa15d93c`
+    (2026-09-01) wrote 8 flat rows in a batch whose own audit said `3 of 4
+    fill replies reasoning-capped`, and the re-buy detector then stood on
+    truncated measurements. Same replay as the FLAT-arm test above, plus the
+    fill recording a capped stream row joined to `width` — the unit moves
+    out of the flat set (no row, re-seedable) and the audit names it.
+
+    The negative control is the FLAT-arm test above itself: an unchanged
+    escalated unit with NO capped reply (that replay records no stream rows,
+    so the join names nothing) still writes its flat row."""
+    from pipeline_core.domain.reasoning_cap import (
+        record_stream_meta,
+        serving_units,
+    )
+    _tree(tmp_path, layout=_LAYOUT_TWO)
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+
+    def _capped_meta(_src: Any) -> None:
+        with serving_units(("src/a.rs::width",)):
+            record_stream_meta({"finish_reason": "length", "stop": "",
+                                "followup": True})
+
+    _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+         escalate=_escalate_to_width, max_stalls="3", stubbed=False,
+         layout=_LAYOUT_TWO, fill_write=_capped_meta)
+    assert any(ev == "phase_c.attribution.escalated" for ev, _ in events)
+    flat = [r for r in ledger["rows"] if r.state is BodyState.FLAT]
+    assert not [r for r in flat if r.key.fn_name == "width"], flat
+    capped_named = [d for ev, d in events
+                    if ev == "phase_c.tdd.landed_change"
+                    and d.get("esc_capped")]
+    assert capped_named and capped_named[0]["esc_capped"] == [
+        "src/a.rs::width"]
+    assert capped_named[0]["esc_unchanged"] == [], (
+        "withheld from the graded set, not merely relabelled")
+    assert any("every reply capped" in ln for ln in logs)

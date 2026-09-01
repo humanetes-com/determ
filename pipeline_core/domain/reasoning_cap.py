@@ -23,11 +23,21 @@ not the reading this exists to take.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 _active: list[dict[str, Any]] | None = None
+
+# The units (`file::fn`) the call currently in flight is serving, bound by
+# the fill route around its ask so the controller's row lands already
+# joined. A ContextVar because fill routes run on worker threads: each
+# thread's binding scopes its own calls while every row still appends into
+# the one window the iteration opened. Empty = an unjoined call (a
+# retrospective, a classifier), whose rows no per-unit fold reads.
+_units_var: ContextVar[tuple[str, ...]] = ContextVar(
+    "reasoning_cap_units", default=())
 
 # Marker key on rows recorded by `record_followup_meta`. Stream rows carry no
 # `kind` so their dict stays byte-identical to the `llm.stream_meta` payload.
@@ -112,10 +122,30 @@ def summarize_followup_salvage(rows: Sequence[Mapping[str, Any]]) -> tuple[int, 
     return truncated, salvaged
 
 
+@contextmanager
+def serving_units(units: Iterable[str]) -> Iterator[None]:
+    """Bind the `file::fn` unit labels the enclosed model call(s) serve.
+
+    Rows recorded inside carry them under `units`, which is the join the
+    FLAT grading needs: run `358833-aa15d93c` iter 3 (2026-09-01) wrote 8
+    FLAT ledger rows in a batch whose audit line said `3 of 4 fill replies
+    reasoning-capped` — the count and the grades lived in the same window
+    with no way to say WHICH units' tries were the truncated ones."""
+    token = _units_var.set(tuple(dict.fromkeys(units)))
+    try:
+        yield
+    finally:
+        _units_var.reset(token)
+
+
 def _record(data: Mapping[str, Any]) -> None:
     active = _active
     if active is not None:
-        active.append(dict(data))
+        row = dict(data)
+        units = _units_var.get()
+        if units:
+            row["units"] = units
+        active.append(row)
 
 
 def record_stream_meta(data: Mapping[str, Any]) -> None:
@@ -131,6 +161,32 @@ def record_followup_meta(data: Mapping[str, Any]) -> None:
     stream's. The tag is added here rather than by the caller so a row can
     never land untagged and inflate `summarize_capped`'s denominator."""
     _record({**data, _KIND: _FOLLOWUP})
+
+
+def units_all_replies_capped(
+    rows: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """The units (`file::fn`) whose EVERY joined main-stream reply in this
+    window was reasoning-capped — at least one reply, all of them capped.
+
+    A truncated call that re-emits the old body is not a measured refusal:
+    grading such a unit FLAT stands the re-buy detector on a truncated
+    measurement, the same overclaim the FLAT arm's own comment forbids for
+    reverts. A unit with any UNCAPPED reply keeps its grade — the model got
+    a full turn and returned the same body. Unjoined rows (no `units`) and
+    followup rows (a second completion of the same call, whose cap
+    `is_reasoning_capped` already folds into the main row) count toward no
+    unit."""
+    total: dict[str, int] = {}
+    capped: dict[str, int] = {}
+    for r in rows:
+        if _is_followup_row(r):
+            continue
+        for u in r.get("units") or ():
+            total[u] = total.get(u, 0) + 1
+            if is_reasoning_capped(r):
+                capped[u] = capped.get(u, 0) + 1
+    return frozenset(u for u, n in total.items() if capped.get(u, 0) == n)
 
 
 @contextmanager
