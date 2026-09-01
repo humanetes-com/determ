@@ -77,8 +77,9 @@ def test_a_row_round_trips_and_a_corrupt_one_costs_one_entry_not_the_run() -> No
                                       "src/error.rs"),))
     back = LedgerEntry.from_dict(e.to_dict())
     assert back == e
-    for bad in (None, [], {}, {"project": "anyhow"},
-                {**e.to_dict(), "state": "hopeful"}):
+    bads: tuple[object, ...] = (None, [], {}, {"project": "anyhow"},
+                                {**e.to_dict(), "state": "hopeful"})
+    for bad in bads:
         assert LedgerEntry.from_dict(bad) is None
 
 
@@ -533,7 +534,8 @@ def test_flat_is_a_grade_and_never_a_seed() -> None:
     # fail (the fourth reading below). The other three readings are
     # unchanged.
     e = _entry(state=BodyState.LANDED)
-    cases = (
+    cases: tuple[tuple[tuple[set[str], set[str]],
+                       tuple[set[str], set[str]], BodyState], ...] = (
         ((set(), set()), ({"o"}, set()), BodyState.UNMEASURED),
         (({"t"}, set()), (set(), {"t"}), BodyState.REFUTED),
         ((set(), {"t"}), (set(), {"t"}), BodyState.FLAT),
@@ -605,6 +607,72 @@ def test_standing_on_tree_reads_the_row_about_the_bytes_on_disk() -> None:
     assert standing_on_tree(rows, {_KEY: "cb41090c"})[_KEY] is proven
     assert standing_on_tree(rows, {_KEY: "not-on-ledger"}) == {}
     assert standing_on_tree(rows, {}) == {}
+
+
+def test_flat_exclusion_holds_only_while_the_rows_premise_holds() -> None:
+    """A FLAT row is a claim about a moment — this body, these convicting
+    tests, this oracle — and licenses exclusion from dispatch only while
+    that premise holds. Dispatch is the only producer of the new body that
+    could clear the grade, so an exclusion keyed on the bare grade is a
+    permanent lock (the pass-81 readmission deadlock shape). NEGATIVE
+    CONTROL inline: the grade-alone read names every flat row below."""
+    from pipeline_core.domain.body_ledger import flat_standing_unchanged
+    same = _entry(state=BodyState.FLAT, convicting=("test_altdebug",))
+    standing = {_KEY: same}
+    # Same oracle, same convicting set: the try is already measured — exclude.
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset({"test_altdebug"})}) == {_KEY}
+    # A convicting test got FIXED: the remainder was in the premise — exclude.
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset()}) == {_KEY}
+    # A NEW test convicts the unit: moved evidence — re-admit.
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset({"test_altdebug",
+                                         "test_trailer"})}) == set()
+    # The oracle moved (tests regenerated): every grade is stale — re-admit.
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now="oracle-B",
+        convicting_now={_KEY: frozenset({"test_altdebug"})}) == set()
+    # A row written before the premise field: evidence unknown — re-admit
+    # once, so the re-grade mints a premised row instead of a forever-lock.
+    legacy = _entry(state=BodyState.FLAT, convicting=())
+    assert flat_standing_unchanged(
+        {_KEY: legacy}, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset({"test_altdebug"})}) == set()
+    # Only FLAT rows are the exclusion's business.
+    proven = _entry(state=BodyState.PROVEN, convicting=("test_altdebug",))
+    assert flat_standing_unchanged(
+        {_KEY: proven}, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset({"test_altdebug"})}) == set()
+    # NEGATIVE CONTROL — the pre-fix read (state alone) excludes all four
+    # flat shapes above, including the moved-evidence and legacy ones.
+    for e in (same, legacy):
+        assert {k for k, r in {_KEY: e}.items()
+                if r.state is BodyState.FLAT} == {_KEY}
+
+
+def test_flat_rows_carry_the_convicting_premise_they_are_scoped_to() -> None:
+    """`rows_for_units` stamps the tests whose failure bought the dispatch,
+    per unit, so the exclusion above has a premise to check."""
+    recs = [{"file": "src/error.rs", "fn_name": "new",
+             "sig_text": "pub fn new(e: E) -> Self",
+             "body_text": "Error::from(e)"}]
+    rows = rows_for_units(
+        [("src/error.rs", "new")], recs, project="anyhow", cluster="stable",
+        state=BodyState.FLAT, items={}, file_of={}, file_fp={},
+        run_id="r", iteration=1, epoch=0, oracle_fp="oracle-A",
+        convicting_of={("src/error.rs", "new"): ["test_b", "test_a"]})
+    assert rows[0].convicting == ("test_a", "test_b")
+    # Round-trips through the index encoding; a pre-field raw dict parses
+    # to the unrecorded premise.
+    assert LedgerEntry.from_dict(rows[0].to_dict()).convicting == (
+        "test_a", "test_b")
+    raw = rows[0].to_dict()
+    del raw["convicting"]
+    assert LedgerEntry.from_dict(raw).convicting == ()
 
 
 _ESC_UNCHANGED_82157_ITER_1 = (

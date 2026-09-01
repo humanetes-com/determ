@@ -51,8 +51,14 @@ HOW TO INTERPRET THE OUTPUT
       skip <N>: already archived              idempotent no-op: <N> already
                                                has a top-level heading in
                                                completed_tech_debt.md
-      refuse <N>: <reason>                    no match, ambiguous match, or
-                                               an OPEN marker without --force
+      refuse <N>: <reason>                    no match, ambiguous match, a
+                                               NUMBERING COLLISION (the id is in
+                                               completed_tech_debt.md under a
+                                               DIFFERENT title), or an OPEN
+                                               marker without --force
+      warn: unnumbered top-level heading ...  an entry with no id: it bounds its
+                                               neighbours' spans correctly but
+                                               cannot be archived until it has one
 
     A "refuse" id leaves BOTH files untouched for that id -- the script
     either moves an entry whole or not at all, never partially. Exit code
@@ -75,27 +81,56 @@ OPEN_MARKER = re.compile(r"\bOPEN\b")
 
 def parse_top_level_spans(
     text: str,
-) -> tuple[list[str], dict[int, tuple[int, int]], set[int]]:
+) -> tuple[list[str], dict[int, tuple[int, int]], set[int], list[tuple[int, str]]]:
+    """Spans end at the next top-level heading of ANY shape, numbered or not.
+
+    An entry's span used to end at the next `# <number>` heading, which made an
+    UNNUMBERED top-level entry invisible. Measured 2026-09-01: one entry had been
+    filed with a prose heading and no id, and it sat between two numbered ones —
+    so the preceding entry's span ran 385 lines past its own end and swallowed
+    the unnumbered entry whole. The OPEN check caught it that day only because
+    the swallowed entry happened to contain the word; `--force` would have
+    archived open work as part of a closed entry, and the archive is verbatim, so
+    there is no signal afterwards that it happened. Any `# ` line is a boundary
+    now, and unnumbered ones are reported so they get an id (only a numbered
+    entry is addressable by this script at all)."""
     lines = text.splitlines(keepends=True)
-    headings: list[tuple[int, int]] = []  # (line_idx, entry_id) -- single-number headings only
+    bounds: list[int] = []            # every top-level heading, the span boundaries
+    headings: list[tuple[int, int]] = []   # (line_idx, entry_id), numbered only
+    unnumbered: list[tuple[int, str]] = []  # (1-based line, heading text)
     for i, line in enumerate(lines):
+        if not line.startswith("# "):
+            continue
+        bounds.append(i)
         m = TOP_HEADING.match(line)
         if m:
             headings.append((i, int(m.group(1))))
+        elif i != 0:  # line 0 is the file's own title
+            unnumbered.append((i + 1, line.strip()))
     spans: dict[int, tuple[int, int]] = {}
     seen: dict[int, int] = {}
-    for idx, (line_idx, entry_id) in enumerate(headings):
-        end = headings[idx + 1][0] if idx + 1 < len(headings) else len(lines)
+    for line_idx, entry_id in headings:
+        nxt = [b for b in bounds if b > line_idx]
+        end = nxt[0] if nxt else len(lines)
         seen[entry_id] = seen.get(entry_id, 0) + 1
         spans[entry_id] = (line_idx, end)
     ambiguous = {eid for eid, count in seen.items() if count > 1}
     for eid in ambiguous:
         spans.pop(eid, None)
-    return lines, spans, ambiguous
+    return lines, spans, ambiguous, unnumbered
 
 
-def already_archived(done_text: str, entry_id: int) -> bool:
-    return re.search(rf"^#\s+{entry_id}\D", done_text, re.MULTILINE) is not None
+def archived_headings(done_text: str, entry_id: int) -> list[str]:
+    """Heading lines in the archive that carry this id, whatever their title."""
+    return [m.group(0).strip() for m in
+            re.finditer(rf"^#\s+{entry_id}\D.*$", done_text, re.MULTILINE)]
+
+
+def _title_of(heading: str) -> str:
+    """A heading's identity for the archived-vs-live comparison: everything
+    after `# <id> `, whitespace-collapsed. Two entries with the same id and
+    different titles are a NUMBERING COLLISION, not an idempotent re-run."""
+    return " ".join(re.sub(r"^#\s+\d+(?:[\u2013-]\d+)?\s*[\u2014-]?\s*", "", heading).split())
 
 
 def main() -> int:
@@ -110,13 +145,39 @@ def main() -> int:
 
     debt_text = DEBT.read_text(encoding="utf-8")
     done_text = DONE.read_text(encoding="utf-8")
-    lines, spans, ambiguous_ids = parse_top_level_spans(debt_text)
+    lines, spans, ambiguous_ids, unnumbered = parse_top_level_spans(debt_text)
+    for line_no, heading in unnumbered:
+        print(f"warn: unnumbered top-level heading at line {line_no} "
+              f"({heading[:60]!r}) -- not addressable by id; give it one")
 
     to_move: list[tuple[int, int, int]] = []  # (entry_id, start, end)
     results: list[tuple[int, str, str]] = []
 
     for entry_id in args.ids:
-        if already_archived(done_text, entry_id):
+        archived = archived_headings(done_text, entry_id)
+        if archived:
+            live_span = spans.get(entry_id)
+            live_heading = lines[live_span[0]].strip() if live_span else ""
+            live_title = _title_of(live_heading)
+            # An id already in the archive is a no-op ONLY when it is the SAME
+            # entry. A DIFFERENT title under the same id is a numbering
+            # collision, and it has happened: on 2026-08-29 one entry was
+            # archived and an unrelated one was filed the same day under the
+            # number it had just vacated. A bare id match then reports "already
+            # archived" for the live entry, which is checked BEFORE the OPEN
+            # marker and before --force, so that entry could never be moved by
+            # this script at all -- it simply sat in the open file, and three
+            # days later still read as open work. Refuse and print both
+            # headings, so the operator renumbers the live one (ids are unique
+            # across the two files by the open file's own stated rule) instead
+            # of losing it.
+            if live_title and not any(_title_of(h) == live_title for h in archived):
+                results.append((entry_id, "refuse",
+                                 f"NUMBERING COLLISION -- completed_tech_debt.md already has "
+                                 f"'{archived[0][:70]}...' under id {entry_id}, and the live entry is "
+                                 f"'{live_heading[:70]}...'. Renumber the live entry (ids are unique "
+                                 f"across both files) and re-run."))
+                continue
             results.append((entry_id, "skip", "already archived"))
             continue
         if entry_id in ambiguous_ids:

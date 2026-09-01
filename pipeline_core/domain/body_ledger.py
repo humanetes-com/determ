@@ -186,6 +186,17 @@ class LedgerEntry:
     source: str = "live"              # "live" | a backfill source label
     rejected_builds: int = 0          # times a re-seed of this body did not build
     oracle_fp: str = ""               # fingerprint of the oracle that graded it
+    # The BARE names of the tests that convicted the try this row grades —
+    # attributed AND failing at the sweep the grade was earned against.
+    # A FLAT claim ("tried and failed, empty delta") is scoped to exactly
+    # these tests: a later reader deciding whether the try is worth
+    # re-buying must compare the tests convicting the unit NOW against
+    # this premise, and a NEW convicting test outside it is moved
+    # evidence. Empty on every row written before the field existed —
+    # `flat_standing_unchanged` reads that as premise-unrecorded and
+    # refuses to exclude, so a legacy flat is re-graded once (minting a
+    # premised row) instead of being locked out of dispatch forever.
+    convicting: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,6 +211,7 @@ class LedgerEntry:
             "epoch": self.epoch, "gate_ver": self.gate_ver,
             "source": self.source, "rejected_builds": self.rejected_builds,
             "oracle_fp": self.oracle_fp,
+            "convicting": list(self.convicting),
         }
 
     @staticmethod
@@ -243,6 +255,9 @@ class LedgerEntry:
                 # Missing on every row written before the field existed:
                 # parses to "" and the gate refuses it once (`reseed_allowed`).
                 oracle_fp=str(raw.get("oracle_fp") or ""),
+                # Missing on pre-field rows: () reads as premise-unrecorded.
+                convicting=tuple(
+                    str(t) for t in (raw.get("convicting") or ())),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -443,6 +458,7 @@ def rows_for_units(
     items: Mapping[str, tuple[str, str]], file_of: Mapping[str, str],
     file_fp: Mapping[str, str], run_id: str, iteration: int, epoch: int,
     oracle_fp: str,
+    convicting_of: Mapping[tuple[str, str], Iterable[str]] | None = None,
 ) -> list[LedgerEntry]:
     """One row per `(file, fn_name)` in `units`, built from the extractor's
     per-fn `records` as they stand NOW — the one construction both audit arms
@@ -487,7 +503,12 @@ def rows_for_units(
             layout_deps=body_layout_deps("\n".join(bodies), "\n".join(sigs),
                                          items, file_of=file_of),
             state=state, run_id=run_id, iteration=iteration, epoch=epoch,
-            oracle_fp=oracle_fp))
+            oracle_fp=oracle_fp,
+            # The premise a FLAT claim is scoped to (see `LedgerEntry.
+            # convicting`); the caller supplies the tests whose failure
+            # bought THIS dispatch, per unit.
+            convicting=tuple(sorted(
+                (convicting_of or {}).get((file, fn_name), ())))))
     return rows
 
 
@@ -729,6 +750,51 @@ def standing_on_tree(
             continue
         best[e.key] = e
     return best
+
+
+def flat_standing_unchanged(
+    standing: Mapping[LedgerKey, LedgerEntry],
+    *,
+    oracle_fp_now: str,
+    convicting_now: Mapping[LedgerKey, frozenset[str]],
+) -> set[LedgerKey]:
+    """Units whose standing claim is FLAT and whose evidence has not moved.
+
+    A FLAT row says "this body, tried under these convicting tests and this
+    oracle, moved nothing" — a claim about a MOMENT. Excluding the unit from
+    dispatch on the claim alone makes the exclusion permanent: dispatch is
+    the only producer of a new body, and a new body is the only thing that
+    writes a new standing row, so a gate keyed on the bare grade is a lock,
+    not a spend guard (the pass-81 readmission deadlock shape). The claim
+    licenses exclusion only while its premise still holds:
+
+    * the tree body is the graded one — `standing` (from `standing_on_tree`)
+      already guarantees it;
+    * the oracle is the one that graded the row — equality on `oracle_fp`
+      (both-empty matches: the same unwired oracle, the harness case; a
+      MIXED pair is a moved or unrecorded oracle and refuses);
+    * no NEW test convicts the unit — the tests convicting it now are a
+      subset of the row's `convicting` premise. A shrunken set still
+      excludes (the remaining convictors were already in the premise); an
+      empty current set excludes trivially (nothing left to buy).
+
+    A row with an EMPTY premise (written before the field existed) refuses:
+    the trade is one re-grade of each legacy flat — run `9872-51b20f30`'s
+    17 on-tree flats re-enter dispatch once, come back graded with a
+    premised row, and are excluded honestly from then on — against a
+    lock class that would otherwise survive on every legacy row forever.
+    """
+    out: set[LedgerKey] = set()
+    for k, e in standing.items():
+        if e.state is not BodyState.FLAT:
+            continue
+        if e.oracle_fp != oracle_fp_now:
+            continue
+        if not e.convicting:
+            continue
+        if convicting_now.get(k, frozenset()) <= frozenset(e.convicting):
+            out.add(k)
+    return out
 
 
 def rebuy_hits(

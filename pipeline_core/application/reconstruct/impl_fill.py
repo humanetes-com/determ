@@ -1566,8 +1566,16 @@ def fill_impl_blocks(
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                 with _counters_lock:
+                    # Only the names THIS attempt pursued are lost: on a
+                    # peel retry the plan was restricted to the peeled
+                    # names, and the kept remainder of the earlier attempt
+                    # was landed and judged — marking it lost would strip
+                    # its service and re-rank a just-landed body as
+                    # never-served.
                     answer_lost_keys.update(
-                        FnLocator(file_rel, n) for n in wanted)
+                        FnLocator(file_rel, n)
+                        for n in (_retry_names if _retry_names is not None
+                                  else wanted))
                 return
             _note_reader_loss(_log, _emit, cluster=cluster_name,
                               unit=file_rel, route="file",
@@ -1578,8 +1586,11 @@ def fill_impl_blocks(
                      "falling back to per-block fills.")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                 with _counters_lock:
+                    # Attempt-scoped, as at the LLM-error return above.
                     answer_lost_keys.update(
-                        FnLocator(file_rel, n) for n in wanted)
+                        FnLocator(file_rel, n)
+                        for n in (_retry_names if _retry_names is not None
+                                  else wanted))
                 return
             with _splice_check_lock:
                 # Runtime test state for the monotone ratchet, captured NOW
@@ -1783,11 +1794,16 @@ def fill_impl_blocks(
                          "falling back to per-block fills.")
                     _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
                     with _counters_lock:
+                        # Attempt-scoped, as at the LLM-error return above.
                         answer_lost_keys.update(
-                            FnLocator(file_rel, n) for n in wanted)
+                            FnLocator(file_rel, n)
+                            for n in (_retry_names if _retry_names is not None
+                                      else wanted))
                     return
                 _attempted_names = [b.fn_name for b in _landed]
                 _peel_reverted: tuple[str, ...] = ()
+                _peel_retry = False
+                _peel_err = ""
                 rc, cargo_out, _diags = _run_cargo_check_diag(
                     check_cmd, target_src_dir, cluster_env)
                 if rc != 0:
@@ -1849,8 +1865,12 @@ def fill_impl_blocks(
                 # A peel that left compiling remainder used to FILE FILLED
                 # return on attempt 1 of 3, so the blamed names never retried
                 # with the diagnostic that named them (run `451330-7e8a7ca9`,
-                # src/fmt.rs::debug). Continue the attempt loop scoped to
-                # those names; last attempt still judges the kept remainder.
+                # src/fmt.rs::debug). The retry is DECIDED here but TAKEN only
+                # after the gates below judge the kept remainder: retrying
+                # before the gates left attempt-1's kept splices on the tree
+                # unjudged whenever the retry attempt exited early (LLM error,
+                # empty reply, nothing spliced) — compile-checked bodies that
+                # no U2 / crash / regression gate ever saw.
                 if _peel_reverted:
                     _peel_err = _focus_cargo_errors(_pre_peel_out, file_rel)
                     _codes = sorted(ecodes_in_text(_peel_err))
@@ -1867,7 +1887,7 @@ def fill_impl_blocks(
                             model_calls=_attempt, route="file",
                             extra={"error_codes": _codes,
                                    "primary": _first_diag})
-                    _more_peel = _attempt < _FILE_FIRST_MAX_ATTEMPTS and rc == 0
+                    _peel_retry = _attempt < _FILE_FIRST_MAX_ATTEMPTS and rc == 0
                     _emit("phase_c.file.fill.revert", data={
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "attempt": _attempt,
@@ -1875,20 +1895,10 @@ def fill_impl_blocks(
                         "reason": "compile failed",
                         "reverted": sorted(_peel_reverted),
                         "error_codes": _codes,
-                        "retrying": _more_peel,
+                        "retrying": _peel_retry,
                         "spliced": spliced_now,
                         "planned": len(stub_names) + len(refill_names),
                         "banked": False})
-                    if _more_peel:
-                        _log(f"  [phase-c/file] {glabel}: peeled "
-                             f"{len(_peel_reverted)} — retrying those names "
-                             "with the pre-peel diagnostic "
-                             f"(kept {spliced_now} compiling body(ies)).")
-                        prior_error = _peel_err
-                        _retry_names = frozenset(_peel_reverted)
-                        snapshot = file_path.read_text(
-                            encoding="utf-8", errors="replace")
-                        continue
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
                     # Stubs AND re-fills. A behavioral re-fill block has no stub
@@ -2043,13 +2053,18 @@ def fill_impl_blocks(
                     # stays a stub on disk (observed: "FILE FILLED 5" with one
                     # fn still `unimplemented!()`). A silent loss here reads
                     # as "filled" forever — re-scan and name the leftovers.
+                    # Peeled names are excluded: they are loudly reverted
+                    # (their own verdict rows and the fill.revert event),
+                    # not a silent splice loss — and with the retry below
+                    # they are about to be re-asked.
                     _left = sorted({
                         str(r.get("fn_name", "")) for r in
                         (_scan_unimplemented_records_for_cluster(
                             target_src_dir, cluster) or [])
                         if _norm_src_rel(r.get("file", ""))
                         == _norm_src_rel(file_rel)
-                        and str(r.get("fn_name", "")) in set(stub_names)})
+                        and str(r.get("fn_name", "")) in set(stub_names)
+                        and str(r.get("fn_name", "")) not in set(_peel_reverted)})
                     if _left:
                         _log(f"  [phase-c/file] {glabel}: POST-FILL MISMATCH "
                              f"— still stubbed after accept: {_left}.")
@@ -2099,6 +2114,21 @@ def fill_impl_blocks(
                         attempt=_attempt,
                         validity=ValidityVector(binary_completed=True),
                         model_calls=_attempt, route="file")
+                    if _peel_retry:
+                        # The kept remainder is judged and banked; NOW retry
+                        # the peeled names with the diagnostic that blamed
+                        # them. The re-read snapshot carries the accepted
+                        # bodies, so a later whole-file revert restores this
+                        # judged state, never the pre-fill one.
+                        _log(f"  [phase-c/file] {glabel}: retrying the "
+                             f"{len(_peel_reverted)} peeled name(s) with "
+                             "the pre-peel diagnostic (kept remainder "
+                             "judged and kept).")
+                        prior_error = _peel_err
+                        _retry_names = frozenset(_peel_reverted)
+                        snapshot = file_path.read_text(
+                            encoding="utf-8", errors="replace")
+                        continue
                     return
                 file_path.write_text(snapshot, encoding="utf-8")
                 _note_reverted(file_rel, _attempted_names)

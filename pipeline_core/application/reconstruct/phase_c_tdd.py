@@ -52,6 +52,7 @@ from pipeline_core.domain.body_ledger import (
     authored_layout_fp,
     body_sha,
     classify,
+    flat_standing_unchanged,
     latest_by_unit,
     rebuy_hits,
     rows_for_units,
@@ -1863,12 +1864,20 @@ def run_phase_c_tdd(
                 # The oracle is stamped HERE, at the grade, not carried
                 # from the landing: an adopted backfilled row arrives with
                 # no oracle at all, and a verdict is a claim about the tests
-                # that were run to reach it.
-                _judged.append(replace(_row, state=_state,
-                                       verdict_delta=_delta, iteration=iter_n,
-                                       epoch=_destruction_epoch,
-                                       run_id=_row.run_id or deps.run_id,
-                                       oracle_fp=_oracle_fp(iter_n)))
+                # that were run to reach it. So is the convicting premise —
+                # the same `names & before.failed` the classification is
+                # scoped to — which is what lets a flat exclusion later tell
+                # "same evidence, do not re-buy" from "a new test convicts
+                # this unit now".
+                _judged.append(replace(
+                    _row, state=_state,
+                    verdict_delta=_delta, iteration=iter_n,
+                    epoch=_destruction_epoch,
+                    run_id=_row.run_id or deps.run_id,
+                    oracle_fp=_oracle_fp(iter_n),
+                    convicting=tuple(sorted(
+                        _attributed
+                        & (_ledger_before or _sweep_view).failed))))
             deps.ledger_append(project_dir, _judged)
             if _ledger_cache is not None:
                 _ledger_cache.extend(_judged)
@@ -3871,18 +3880,30 @@ def run_phase_c_tdd(
         # actually on disk (run `9872-51b20f30`: 10 FLAT vs 18 on-tree). Dispatch
         # reads the on-tree view; re-seed keeps `latest_by_unit`.
         _body_now: dict[LedgerKey, str] = {}
+        _proj, _cl = project_dir.name, cluster.name
         if deps.tree_writer is not None:
-            _proj, _cl = project_dir.name, cluster.name
             for _k, _ in ordered:
                 with suppress(OSError, TypeError, ValueError):
                     _body_now[LedgerKey(_proj, _cl, _k.file, _k.fn_name)] = (
                         body_sha(deps.tree_writer.bodies(_k, target_src_dir)))
         _stand = (standing_on_tree(_ledger_entries(), _body_now)
                   if _body_now else latest_by_unit(_ledger_entries()))
+        # ...and scoped to the claim's PREMISE, not the bare grade: a FLAT
+        # row licenses exclusion only while the same oracle scores the tree
+        # and no NEW test convicts the unit (`flat_standing_unchanged`).
+        # Keyed on the grade alone the exclusion is a permanent lock,
+        # because dispatch is the only producer of the new body that could
+        # ever clear it.
+        _bare_failed_now = frozenset(bare_test_name(t) for t in cur_failed)
+        _convict_now = {
+            LedgerKey(_proj, _cl, _u.file, _u.fn_name): frozenset(
+                bare_test_name(t) for t in _ts) & _bare_failed_now
+            for _u, _ts in eligible.items()}
         _flat_keys = {
             FnLocator(_k.file, _k.fn_name)
-            for _k, _e in _stand.items()
-            if _e.state is BodyState.FLAT}
+            for _k in flat_standing_unchanged(
+                _stand, oracle_fp_now=_oracle_fp(iter_n),
+                convicting_now=_convict_now)}
         _cov = None
         if deps.measure_coverage_slice is not None:
             # The failing set is what pass C profiles: the owner map exists
@@ -4712,12 +4733,27 @@ def run_phase_c_tdd(
             if deps.ledger_append is not None and (_batch_landed
                                                    or _batch_esc_flat):
                 _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
+                # The premise the rows' grades are scoped to: the tests
+                # convicting each unit at DISPATCH (attributed-or-escalated
+                # and failing at the pre-fill sweep). Landed rows get the
+                # premise re-stamped at judgment; the FLAT rows are graded
+                # here, so this stamp is the one `flat_standing_unchanged`
+                # will read.
+                _bare_failed_dispatch = frozenset(
+                    bare_test_name(t) for t in cur_failed)
+                _convicting_of = {
+                    (k.file, k.fn_name): sorted(
+                        frozenset(bare_test_name(t)
+                                  for t in eligible.get(k, ()))
+                        & _bare_failed_dispatch)
+                    for k in (_batch_landed | _batch_esc_flat)}
                 _new_rows = rows_for_units(
                     [(k.file, k.fn_name) for k in _batch_landed], _recs_after,
                     project=project_dir.name, cluster=cluster.name,
                     state=BodyState.LANDED, items=_items, file_of=_file_of,
                     file_fp=_fps, run_id=deps.run_id, iteration=iter_n,
-                    epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n))
+                    epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n),
+                    convicting_of=_convicting_of)
                 if _new_rows:
                     deps.ledger_append(project_dir, _new_rows)
                     _ledger_rows.extend(_new_rows)
@@ -4745,7 +4781,8 @@ def run_phase_c_tdd(
                     cluster=cluster.name, state=BodyState.FLAT, items=_items,
                     file_of=_file_of, file_fp=_fps, run_id=deps.run_id,
                     iteration=iter_n, epoch=_destruction_epoch,
-                    oracle_fp=_oracle_fp(iter_n))
+                    oracle_fp=_oracle_fp(iter_n),
+                    convicting_of=_convicting_of)
                 if _flat_rows:
                     deps.ledger_append(project_dir, _flat_rows)
                     if _ledger_cache is not None:

@@ -651,6 +651,52 @@ def test_file_first_peels_the_blamed_body_and_keeps_the_rest(
     assert "kind" in prompts[1]
 
 
+def test_peel_retry_that_returns_empty_keeps_the_judged_remainder(
+        monkeypatch, tmp_path):
+    """The peel retry is taken only AFTER the gates judge the kept remainder,
+    and an early return on the retry attempt loses only the names that
+    attempt pursued.
+
+    Attempt 1 lands `kind` and `name`; the compiler blames `kind`; the peel
+    keeps `name`, which is judged and FILE FILLED before the retry begins.
+    The retry reply carries no code. `kind` ends as a reverted try
+    (`reverted_fns`), `name` as a judged landing — neither is a lost answer.
+    Before the fix the retry `continue`d past the gates and the early return
+    marked the WHOLE plan lost: `name`'s kept splice sat on the tree with no
+    gate verdict and no FILE FILLED accounting (`fns_filled` 0), and its
+    lost-answer row stripped the service of a body that had just landed."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    prompts: list[str] = []
+    replies = [RESPONSE_TWO, "thinking, but no code today"]
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return replies[min(len(prompts), len(replies)) - 1]
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(
+        monkeypatch,
+        # red once (blaming `kind`), then green after the peel re-stubs it.
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (0, "", [])],
+        frontier={FnLocator("lib.rs", "kind"): {"<compile>"}})
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert "self.tag + 1" in text, "the kept body survives the failed retry"
+    assert res.fns_filled >= 1, (
+        "the kept remainder is judged and banked BEFORE the retry — an "
+        "early-returning retry must not leave it unjudged")
+    assert ("lib.rs", "kind") in res.reverted_fns
+    assert res.answer_lost_fns == (), (
+        "the retry pursued only the peeled names: `name` landed and `kind` "
+        "has a reverted try — neither is a lost answer")
+    assert len(prompts) >= 2 and "kind" in prompts[1], (
+        "the second prompt is the scoped retry")
+
+
 def test_file_first_without_the_peel_loses_the_good_body_too(
         monkeypatch, tmp_path):
     # Negative control. Same reply, same single blamed fn — but with the blame
@@ -1084,7 +1130,8 @@ def test_a_file_that_produced_nothing_keeps_its_per_block_fallback(
     # reply, the promised fallback never runs, and both of its units are
     # carried as lost.
     import pipeline_core.application.reconstruct.impl_fill as impl_fill_mod
-    real_drop = impl_fill_mod.blocks_after_file_first
+    from pipeline_core.domain.refill_stamp import blocks_after_file_first
+    real_drop = blocks_after_file_first
     monkeypatch.setattr(
         impl_fill_mod, "blocks_after_file_first",
         lambda viable, served: real_drop(viable, {"a.rs", "b.rs"}))
