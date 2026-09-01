@@ -449,3 +449,28 @@ def promote_by_service[K: Hashable, V](
             ),
         )
     ]
+
+
+def drop_standing_flat[K: Hashable, V](
+    ordered: Sequence[tuple[K, V]],
+    flat: Collection[K],
+    exempt: Collection[K] = (),
+) -> list[tuple[K, V]]:
+    """Remove units whose standing claim is FLAT from the dispatch list.
+
+    `promote_by_service` only SINKS flats (bucket 2). Under cap 12 a 30-unit
+    frontier still spends the leftover slots — and after a completed
+    traversal, the leftover IS the flats. Run `9872-51b20f30` re-dispatched
+    the 27-unit escalation product three times while never-dispatched
+    measured owners existed. `rebuy_hits` cannot be this owner: it is
+    gated off after a code move and skips the same `run_id`, so this
+    process's own flats (the live spend) never appear. Crash-blamed (or
+    otherwise exempt) units stay: live evidence outranks a prior empty
+    delta. Empty `flat` is a no-op.
+    """
+    if not flat:
+        return list(ordered)
+    skip = set(flat) - set(exempt)
+    if not skip:
+        return list(ordered)
+    return [item for item in ordered if item[0] not in skip]

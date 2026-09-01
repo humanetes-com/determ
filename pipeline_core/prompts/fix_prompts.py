@@ -14,7 +14,8 @@ strings are byte-for-byte the originals (a characterization test pins them).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, replace
 
 from pipeline_core.domain.construction_recipe import (
     construction_recipe,
@@ -218,6 +219,37 @@ class BlockFillPlan:
     # speak. Instruction slot, not an evidence section: a fill can carry
     # the profile and still wrap. Bound by the TDD driver for one sweep.
     coverage_must: str = ""
+
+
+def restrict_fill_plan(
+    plans: Sequence[BlockFillPlan], names: Collection[str],
+) -> list[BlockFillPlan]:
+    """Drop every planned name not in ``names``; drop plans that then list none.
+
+    File-first peel used to accept the compiling remainder and return, so the
+    blamed names never saw a retry with the diagnostic that named them (run
+    ``451330-7e8a7ca9``, 2026-08-31: ``src/fmt.rs::debug`` peeled, FILE FILLED
+    1, attempt 1 of 3 final). The retry loop rebuilds the prompt from this
+    restriction so kept bodies are not re-authorized and the peeled names
+    keep the rewrite instruction.
+    """
+    want = frozenset(names)
+    out: list[BlockFillPlan] = []
+    for p in plans:
+        q = replace(
+            p,
+            stubs=tuple(n for n in p.stubs if n in want),
+            refills=tuple(n for n in p.refills if n in want),
+            inferred=tuple(n for n in p.inferred if n in want),
+            escalated=tuple(n for n in p.escalated if n in want),
+            crashed=tuple(n for n in p.crashed if n in want),
+            aimed=tuple(n for n in p.aimed if n in want),
+            installable=tuple(n for n in p.installable if n in want),
+            bypass=tuple(b for b in p.bypass if b.fn_name in want),
+        )
+        if q.stubs or q.refills:
+            out.append(q)
+    return out
 
 
 def _recipe_for_plan(p: BlockFillPlan) -> dict[str, str]:

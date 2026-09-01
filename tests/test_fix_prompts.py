@@ -17,6 +17,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_fn_fix_prompt,
     build_impl_fix_prompt,
     build_tdd_stub_fill_prompt,
+    restrict_fill_plan,
 )
 
 
@@ -619,3 +620,29 @@ def test_file_fill_first_pass_write_carries_identity_must() -> None:
     assert bare_line == "  in `impl Error` -> write: construct_from_adhoc, msg"
     assert "never a wrapper" not in bare_line
     assert "MUST:" not in bare_line
+
+
+def test_restrict_fill_plan_drops_the_kept_name_and_keeps_the_peeled() -> None:
+    """File-first peel retry must not re-authorize a compiling kept body.
+
+    Run 451330-7e8a7ca9 (2026-08-31): src/fmt.rs peeled debug and accepted
+    the remainder on attempt 1 of 3. A two-name plan restricted to the
+    peeled name drops the kept name; the unfiltered plan still has both
+    (negative control).
+    """
+    plan = BlockFillPlan(
+        header="impl Debug for Error",
+        refills=("debug", "write_str"),
+        escalated=("debug",),
+        inferred=("write_str",),
+    )
+    got = restrict_fill_plan([plan], {"debug"})
+    assert len(got) == 1
+    assert got[0].refills == ("debug",)
+    assert got[0].escalated == ("debug",)
+    assert got[0].inferred == ()
+    assert "write_str" not in got[0].refills
+    # NEGATIVE CONTROL: the unfiltered plan still lists both.
+    assert plan.refills == ("debug", "write_str")
+    empty = restrict_fill_plan([plan], {"never_in_plan"})
+    assert empty == []

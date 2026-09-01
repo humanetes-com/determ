@@ -88,27 +88,29 @@ class BodyState(StrEnum):
     Never re-seeded. This is not a conviction and the retro gate must not read
     it: it says one BODY was wrong, not that a unit is hard."""
     FLAT = "flat"
-    """The unit was dispatched under an escalated REWRITE grade, its
-    attributed convicting tests had run, and the model returned a body
-    IDENTICAL to the one already on the tree — a graded try with an empty
-    verdict delta. A fill that spliced then RESTORED the snapshot (peel of
-    compiler-blamed bodies, compile / U2 / regression revert) is not this
-    state: the tree body is the pre-fill one, not the reply.
+    """A graded try with an empty verdict delta on the tests that convicted
+    the dispatch. Two writers, one claim:
 
-    Before this state existed the row was never written: the landed-change
-    audit appended rows from the landed set only, and an escalated unit that
-    returned unchanged was logged under `ESCALATED, unchanged` and dropped.
-    Run `82157-476ddc16` iter 1 (2026-08-26) dispatched twelve escalated
-    units, nine of them (`src/error.rs::construct`, `construct_from_adhoc`,
-    `construct_from_boxed`, `construct_from_context`, `construct_from_display`,
-    `construct_from_std`, `context`, `msg`, `new`) came back unchanged, and
-    the ledger held no trace of the try — so the next process's re-buy
-    detector, which joins on prior graded rows, could not fire on them.
+    * the landed-change audit, when an escalated REWRITE returned a body
+      IDENTICAL to the one already on the tree. A fill that spliced then
+      RESTORED the snapshot (peel / compile / U2 / regression revert) is
+      not this state: the tree body is the pre-fill one, not the reply.
+    * `classify`, when a landing's convicting tests (attributed AND
+      failing at the pre-landing sweep) ran and all still fail. Passing
+      siblings must not mint `proven` — run `9872-51b20f30` judged
+      `src/fmt.rs::debug` body `f2c853ff` `proven` with `verdict_delta: []`
+      while the convicting test still failed, and that row then poisoned
+      every FLAT consumer.
 
-    NOT re-seedable: an unchanged body under a rewrite instruction is the
-    later measurement of a body whose convicting tests still fail, and a
-    re-seed must not vouch for it on the strength of an earlier, weaker pass.
-    `reseedable` stays PROVEN/UNMEASURED only."""
+    Before the audit arm existed the identical-reply row was never written:
+    run `82157-476ddc16` iter 1 (2026-08-26) dispatched twelve escalated
+    units, nine of them came back unchanged, and the ledger held no trace
+    of the try — so the next process's re-buy detector could not fire.
+
+    NOT re-seedable: a body whose convicting tests still fail is the later
+    measurement of a try that did not pay, and a re-seed must not vouch for
+    it on the strength of an earlier, weaker pass. `reseedable` stays
+    PROVEN/UNMEASURED only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,7 +609,12 @@ def classify(
 
     A sweep that could not be reconciled (`intact` False) judges nothing
     either: that is the crash-noise reading the batch ratchet already refuses
-    to convict on."""
+    to convict on.
+
+    Proof is scoped to the tests that convicted the dispatch (attributed AND
+    failing at `before`). Passing siblings cannot mint `proven`. Convicting
+    tests that ran and all still fail are `flat`: a graded try with an empty
+    delta, not `unmeasured` (the tests ran) and not `proven`."""
     names = frozenset(attributed)
     if not names or not (names & after.ran):
         return BodyState.UNMEASURED, ()
@@ -625,14 +632,21 @@ def classify(
     delta = tuple([(t, "lost") for t in lost] + [(t, "gained") for t in gained])
     if lost:
         return BodyState.REFUTED, delta
+    # Scope proof to the tests that convicted the dispatch (attributed AND
+    # failing at the pre-landing sweep). A passing sibling is not proof:
+    # run `9872-51b20f30` minted empty-delta `proven` for `src/fmt.rs::debug`
+    # from tests that were already green, while the convicting test stayed
+    # red. When those convicting tests ran and all still fail, the landing
+    # is a graded try with an empty delta — `flat`, not `proven` and not
+    # `unmeasured` (`unmeasured` claims the tests did not run).
+    convicting = names & before.failed
+    if convicting:
+        if not (convicting & after.ran):
+            return BodyState.UNMEASURED, delta
+        if not (convicting & after.passed):
+            return BodyState.FLAT, delta
+        return BodyState.PROVEN, delta
     if not (names & after.passed):
-        # The tests RAN and every one of them is still red. Nothing regressed,
-        # so this is not a refutation — but nothing passed either, so calling
-        # it `proven` would put the word back where it started: a body whose
-        # attributed tests are all failing has not been shown to be right, it
-        # has been shown not to have broken anything. `unmeasured` is
-        # re-seedable and claims nothing, which is exactly the state that
-        # describes it.
         return BodyState.UNMEASURED, delta
     return BodyState.PROVEN, delta
 
@@ -683,6 +697,35 @@ def latest_by_unit(entries: Iterable[LedgerEntry]) -> dict[LedgerKey, LedgerEntr
             best[e.key] = e
             continue
         if cur.state is BodyState.PROVEN and e.state is not BodyState.PROVEN:
+            continue
+        best[e.key] = e
+    return best
+
+
+def standing_on_tree(
+    entries: Iterable[LedgerEntry],
+    body_now: Mapping[LedgerKey, str],
+) -> dict[LedgerKey, LedgerEntry]:
+    """Latest row about the body currently on the tree.
+
+    `latest_by_unit` answers the re-seed question: a `proven` row outranks
+    a later row about a DIFFERENT body, so the store can still put the
+    proven bytes back after a destruction. Dispatch asks a different
+    question — what is the standing claim about the bytes that are on
+    disk. Computed on run `9872-51b20f30` against `.skeleton-filled/stable`:
+    `latest_by_unit` FLAT was 10 of the 28-unit cohort, while the latest
+    row whose `body_sha` matched the tree was FLAT for 18 (the eight
+    extras were masked by an off-tree `proven` — `src/context.rs::
+    with_context` tree `997c5614` flat, standing `proven` on `cb41090c`).
+    A proven row about an off-tree body is re-seed inventory, not a live
+    grade. Units with no `body_now` entry, or no row matching it, are
+    omitted (no standing claim).
+    """
+    want = dict(body_now)
+    best: dict[LedgerKey, LedgerEntry] = {}
+    for e in entries:
+        sha = want.get(e.key)
+        if sha is None or e.body_sha != sha:
             continue
         best[e.key] = e
     return best

@@ -252,6 +252,154 @@ def _impl_trait_and_self(container: str) -> tuple[str, str] | None:
     return trait, self_ty
 
 
+def _uses_alternate_debug(src: str) -> bool:
+    return "{:#?}" in src
+
+
+def _uses_plain_debug(src: str) -> bool:
+    """`{:?}` that is not the `{:#?}` placeholder (the latter contains the former)."""
+    return "{:?}" in src.replace("{:#?}", "")
+
+
+def _take_delimited(text: str, open_idx: int, opener: str, closer: str) -> tuple[str, str]:
+    """text[open_idx] is `opener`. Return (inside, after matching closer)."""
+    depth = 0
+    i = open_idx
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1:i], text[i + 1:]
+        elif c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                i += 1
+        i += 1
+    return text[open_idx + 1:], ""
+
+
+def _split_alternate_arms(body: str) -> tuple[str, str] | None:
+    """Then/else bodies of `if …alternate() { then } else { else }`, or None.
+
+    The hop that follows `Qualifier::debug` must not take a call that only
+    runs on the other placeholder: live `Debug for Error::fmt` (run
+    `451330-7e8a7ca9` at pass 134) delegates `{:#?}` to `ErrorImpl::debug` and
+    inlines the `{:?}` chain itself, so a `{:?}` test that followed every call
+    in the body would pin `debug` — which `{:?}` never enters.
+    """
+    idx = body.find(".alternate()")
+    if idx < 0:
+        return None
+    brace = body.find("{", idx)
+    if brace < 0:
+        return None
+    then, rest = _take_delimited(body, brace, "{", "}")
+    stripped = rest.lstrip()
+    if not stripped.startswith("else"):
+        return then, ""
+    else_brace = rest.find("{")
+    if else_brace < 0:
+        return then, ""
+    els, _ = _take_delimited(rest, else_brace, "{", "}")
+    return then, els
+
+
+def _body_slice_for_debug_placeholder(body: str, tsrc: str) -> str:
+    """The arm of a Debug dispatcher the test's placeholder actually takes."""
+    arms = _split_alternate_arms(body)
+    if arms is None:
+        return body
+    then, els = arms
+    want_alt = _uses_alternate_debug(tsrc)
+    want_plain = _uses_plain_debug(tsrc)
+    if want_alt and want_plain:
+        return body
+    if want_alt:
+        return then
+    if want_plain:
+        return els
+    return body
+
+
+def _debug_text_is_the_verdict(tsrc: str) -> bool:
+    """True when the failing assertion pins the Debug-format string itself.
+
+    `format!("{:?}", err)` / `format!("{:#?}", err)` compared or `.contains`'d
+    is a verdict on the Debug impl that ran. `downcast(format!("{:#?}", x))`
+    is not: the format string is an input to another crate fn, and that fn
+    already owns the test. Measured on run `451330-7e8a7ca9` at pass 134:
+    `test_debug_with_captured_backtrace_*` name `Error::msg` / `.context` so
+    primary attribution never opened the format hop, and the loop spent the
+    cap rewriting constructors while `impl Debug for Error::fmt`'s `{:?}` arm
+    never prints `Stack backtrace`.
+    """
+    if not (_uses_alternate_debug(tsrc) or _uses_plain_debug(tsrc)):
+        return False
+    for macro in ("assert_eq!", "assert_ne!"):
+        needle = macro + "("
+        pos = 0
+        while True:
+            i = tsrc.find(needle, pos)
+            if i < 0:
+                break
+            open_idx = i + len(macro)
+            inside, _ = _take_delimited(tsrc, open_idx, "(", ")")
+            for arg in _top_level_args(inside):
+                if arg.startswith("format!"):
+                    return True
+            pos = i + 1
+    # `let s = format!("{:?}", err); assert!(s.contains("Stack backtrace"))`
+    import re
+    for m in re.finditer(
+            r"let\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*format!", tsrc):
+        name = m.group(1)
+        stmt_end = tsrc.find(";", m.end())
+        stmt = tsrc[m.start(): stmt_end if stmt_end >= 0 else len(tsrc)]
+        if not (_uses_alternate_debug(stmt) or _uses_plain_debug(stmt)):
+            continue
+        if (f"assert!({name}." in tsrc.replace(" ", "")
+                or f"assert_eq!({name}" in tsrc.replace(" ", "")
+                or f"assert_ne!({name}" in tsrc.replace(" ", "")
+                or f"{name}.contains" in tsrc
+                or f"{name}.starts_with" in tsrc):
+            return True
+    return False
+
+
+def _top_level_args(inside: str) -> list[str]:
+    args: list[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    n = len(inside)
+    while i < n:
+        c = inside[i]
+        if c in "({[":
+            depth += 1
+        elif c in ")}]":
+            depth -= 1
+        elif c == "," and depth == 0:
+            args.append(inside[start:i].strip())
+            start = i + 1
+        elif c == '"':
+            i += 1
+            while i < n and inside[i] != '"':
+                if inside[i] == "\\":
+                    i += 2
+                    continue
+                i += 1
+        i += 1
+    args.append(inside[start:].strip())
+    return args
+
+
 def _format_impl_calls(body_text: str) -> frozenset[tuple[str, str]]:
     """Qualified formatting-method calls `Qualifier::(fmt|debug)` in a body, as
     `(qualifier, method)` pairs. `unsafe { ErrorImpl::debug(r, f) }` yields

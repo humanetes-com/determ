@@ -11,7 +11,7 @@ import os
 import queue as _queue_mod
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -199,6 +199,7 @@ from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
     build_file_fill_prompt,
     build_maximal_impl_prompt,
+    restrict_fill_plan,
 )
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
@@ -733,6 +734,25 @@ def fill_impl_blocks(
     # U2 / regression). The TDD audit's FLAT arm subtracts this set so a
     # reverted fill is not recorded as "the model returned this body".
     reverted_keys: set[FnLocator] = set()
+    # Units of a file-first call that ended with NO routable reply — the LLM
+    # errored, the parse found no FN blocks, or nothing spliced. The model
+    # was paid and the answer was lost, so grading these as "tried and
+    # failed" fabricates evidence: run `347397-01e2463b` (2026-08-31) graded
+    # src/ensure.rs::__dispatch_ensure and ::render `flat` off an empty
+    # reply, and `render` — an owner of the still-failing test_trailer —
+    # entered the next iteration's flat-sink derank on that row. A later
+    # dispatch of the same unit by the per-impl route supersedes the loss
+    # (that route removes it at its own dispatch stamp), and units with a
+    # reverted try are subtracted at result build — a revert is a real
+    # attempt and `reverted_keys` already carries it.
+    answer_lost_keys: set[FnLocator] = set()
+    # Files whose file-first call actually LANDED bodies this call (a kept
+    # splice — peel survivors and non-regression keeps included). The
+    # same-call refill-only drop below keys on this, never on the dispatch
+    # list: of 23 drops across the 2026-08-31 logs, 8 suppressed the
+    # per-block fallback its own log line had just promised, for files
+    # whose call produced nothing.
+    ff_produced_files: set[str] = set()
 
     def _note_reverted(file_rel: str, names: Sequence[str]) -> None:
         with _counters_lock:
@@ -758,8 +778,9 @@ def fill_impl_blocks(
                      evidence: tuple[str, ...] = (),
                      validity: ValidityVector | None = None,
                      model_calls: int = 0, prompt_chars: int = 0,
-                     route: str = "impl") -> None:
-        _emit("phase_c.verdict", data={
+                     route: str = "impl",
+                     extra: Mapping[str, object] | None = None) -> None:
+        _payload: dict[str, object] = {
             **VerdictRecord(
                 unit=unit, route=route, attempt=attempt,
                 disposition=disposition, reason=reason, outcome=outcome,
@@ -767,7 +788,10 @@ def fill_impl_blocks(
                 evidence_keys=evidence, model_calls=model_calls,
                 prompt_chars=prompt_chars).to_json_dict(),
             "cluster": cluster_name,
-        })
+        }
+        if extra:
+            _payload.update(extra)
+        _emit("phase_c.verdict", data=_payload)
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
@@ -1475,6 +1499,7 @@ def fill_impl_blocks(
         _file_retro = "\n\n".join(_file_retro_parts)
         prior_error = ""
         _prev_prompt: str | None = None
+        _retry_names: frozenset[str] | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
             # TYPES_IN_SCOPE selected over the WHOLE file, which is this
             # route's unit — the per-impl path searches one block's member
@@ -1482,9 +1507,18 @@ def fill_impl_blocks(
             _file_types = _types_section_for_fix(
                 "", snapshot, prior_error, "", "", _crate_type_records,
                 file_rel=file_rel)
+            _plans: list[BlockFillPlan] = [
+                *_free_plan, *_block_plans, *_extra_plans]
+            if _retry_names is not None:
+                _plans = restrict_fill_plan(_plans, _retry_names)
+                _covered = {
+                    n for p in _plans for n in (*p.stubs, *p.refills)}
+                _missing = tuple(sorted(_retry_names - _covered))
+                if _missing:
+                    _plans.append(BlockFillPlan(header="", refills=_missing))
             prompt = build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
-                fill_plan=[*_free_plan, *_block_plans, *_extra_plans],
+                fill_plan=_plans,
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
                 refill_evidence="\n".join(
                     s for s in (_file_refill_evidence, _install_evidence,
@@ -1531,6 +1565,9 @@ def fill_impl_blocks(
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
+                with _counters_lock:
+                    answer_lost_keys.update(
+                        FnLocator(file_rel, n) for n in wanted)
                 return
             _note_reader_loss(_log, _emit, cluster=cluster_name,
                               unit=file_rel, route="file",
@@ -1540,6 +1577,9 @@ def fill_impl_blocks(
                      f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
                      "falling back to per-block fills.")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
+                with _counters_lock:
+                    answer_lost_keys.update(
+                        FnLocator(file_rel, n) for n in wanted)
                 return
             with _splice_check_lock:
                 # Runtime test state for the monotone ratchet, captured NOW
@@ -1604,12 +1644,17 @@ def fill_impl_blocks(
                 _refill_names = joint_overwrite_names(
                     all_blocks, file_rel,
                     (rb.fn_data["fn_name"] for rb in routing.routed))
+                if _retry_names is not None:
+                    _refill_names = frozenset(
+                        n for n in _refill_names if n in _retry_names)
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
                     if wc and (rb.via_trait_default
                                or signature_fixed_by_trait(rb.container)):
                         wc = None
                     _fn = rb.fn_data["fn_name"]
+                    if _retry_names is not None and _fn not in _retry_names:
+                        continue
                     ok, reason, _delta = _splice_fn_with_where(
                         file_path, rb.container, _fn,
                         rb.fn_data["body"], wc,
@@ -1737,6 +1782,9 @@ def fill_impl_blocks(
                     _log(f"  [phase-c/file] {glabel}: nothing spliced — "
                          "falling back to per-block fills.")
                     _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
+                    with _counters_lock:
+                        answer_lost_keys.update(
+                            FnLocator(file_rel, n) for n in wanted)
                     return
                 _attempted_names = [b.fn_name for b in _landed]
                 _peel_reverted: tuple[str, ...] = ()
@@ -1749,6 +1797,7 @@ def fill_impl_blocks(
                         "[phase-c/file]")
                     if _rep is not None:
                         rc, cargo_out, _diags = _rep
+                _pre_peel_out = cargo_out
                 if rc != 0 and len(_landed) > 1:
                     # All-or-nothing at this width never lands anything: see
                     # `peel_revert`. Revert only the bodies the compiler
@@ -1797,6 +1846,49 @@ def fill_impl_blocks(
                             "group": glabel, "reason": _peel.reason,
                             "rounds": _peel.rounds,
                             "dropped": sorted(_peel.dropped)})
+                # A peel that left compiling remainder used to FILE FILLED
+                # return on attempt 1 of 3, so the blamed names never retried
+                # with the diagnostic that named them (run `451330-7e8a7ca9`,
+                # src/fmt.rs::debug). Continue the attempt loop scoped to
+                # those names; last attempt still judges the kept remainder.
+                if _peel_reverted:
+                    _peel_err = _focus_cargo_errors(_pre_peel_out, file_rel)
+                    _codes = sorted(ecodes_in_text(_peel_err))
+                    _first_diag = next(
+                        (ln.strip() for ln in _peel_err.splitlines()
+                         if ln.lstrip().startswith("error[")), "")
+                    for _n in sorted(_peel_reverted):
+                        _verdict_row(
+                            f"{file_rel}::{_n}", Disposition.REVERT,
+                            "compile failed",
+                            outcome=GateOutcome.NEGATIVE,
+                            attempt=_attempt,
+                            validity=ValidityVector(binary_completed=False),
+                            model_calls=_attempt, route="file",
+                            extra={"error_codes": _codes,
+                                   "primary": _first_diag})
+                    _more_peel = _attempt < _FILE_FIRST_MAX_ATTEMPTS and rc == 0
+                    _emit("phase_c.file.fill.revert", data={
+                        "cluster": cluster_name, "file": file_rel,
+                        "group": glabel, "attempt": _attempt,
+                        "max_attempts": _FILE_FIRST_MAX_ATTEMPTS,
+                        "reason": "compile failed",
+                        "reverted": sorted(_peel_reverted),
+                        "error_codes": _codes,
+                        "retrying": _more_peel,
+                        "spliced": spliced_now,
+                        "planned": len(stub_names) + len(refill_names),
+                        "banked": False})
+                    if _more_peel:
+                        _log(f"  [phase-c/file] {glabel}: peeled "
+                             f"{len(_peel_reverted)} — retrying those names "
+                             "with the pre-peel diagnostic "
+                             f"(kept {spliced_now} compiling body(ies)).")
+                        prior_error = _peel_err
+                        _retry_names = frozenset(_peel_reverted)
+                        snapshot = file_path.read_text(
+                            encoding="utf-8", errors="replace")
+                        continue
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
                     # Stubs AND re-fills. A behavioral re-fill block has no stub
@@ -1824,7 +1916,10 @@ def fill_impl_blocks(
                     # letting it reject would revert every attempt forever.
                     _file_tests: set[str] = set()
                     for _key in _unit_fns:
-                        _file_tests |= _frontier_tests.convicting_for(_key)
+                        if _key in escalated_keys:
+                            _file_tests |= _frontier_tests.tests_for(_key)
+                        else:
+                            _file_tests |= _frontier_tests.convicting_for(_key)
                     # Container-qualified sites so a panic in a same-named
                     # sibling (another impl's fn) is not charged to this file.
                     _unit_sites = frozenset(
@@ -1935,6 +2030,11 @@ def fill_impl_blocks(
                              or _crash_keep_file or _nonregr_keep_file)
                         and _regr_file is None):
                     fns_filled_total += spliced_now
+                    # This call DESIGNED the file: the same-call refill-only
+                    # drop below the file pass keys on this set, so a file
+                    # whose call landed nothing keeps the per-block fallback
+                    # its early-return log line promises.
+                    ff_produced_files.add(file_rel)
                     _log(f"  [phase-c/file] {glabel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass"
                          + (f" — banked improvement: {_bank.summary}."
@@ -2238,9 +2338,14 @@ def fill_impl_blocks(
         # Past every skip gate — this block's members are now genuinely being
         # attempted, so they are chargeable if they end the pass still stubs.
         with _counters_lock:
-            dispatched_keys.update(
+            _now_attempted = {
                 FnLocator(block.file, m.fn_name)
-                for m in (*block.stub_members, *block.refill_members))
+                for m in (*block.stub_members, *block.refill_members)}
+            dispatched_keys.update(_now_attempted)
+            # A real per-block attempt supersedes a lost file-first answer
+            # for the same unit — the released fallback running is exactly
+            # what makes the unit attempted after all.
+            answer_lost_keys.difference_update(_now_attempted)
         # Related blocks (same trait, different generic) for the prompt.
         all_blocks_by_id = {_impl_block_id(b.file, b.container): b for b in blocks}
         related_blocks: list[ImplBlock] = []
@@ -2729,7 +2834,13 @@ def fill_impl_blocks(
                     # members' own tests pass too — not just compile.
                     # Conviction-scoped (see the file-first gate above): only
                     # tests with direct evidence at a member may revert the block.
-                    _block_tests = set(_block_evidence.tests)
+                    _block_tests: set[str] = set()
+                    for _bm in (*block.stub_members, *block.refill_members):
+                        _lk = FnLocator(block.file, _bm.fn_name)
+                        if _lk in escalated_keys:
+                            _block_tests |= _frontier_tests.tests_for(_lk)
+                        else:
+                            _block_tests |= _frontier_tests.convicting_for(_lk)
                     # Container-qualified sites: this block's members share
                     # block.container, so a same-named method in ANOTHER impl
                     # (e.g. a different `From` variant's `from`, the free `not`
@@ -3559,14 +3670,24 @@ def fill_impl_blocks(
             describe=lambda u: u[0], log=_log,
             check_stop=_check_graceful_stop,
         )
-        # File-first already designed every served file this call. A
+        # File-first designed every file it LANDED bodies in this call. A
         # refill-only block of those files is a same-iteration re-buy —
         # the next TDD sweep is the first moment it can be judged. Stub-
         # bearing blocks of a served file stay (file-first may have
         # peeled them). Run `463713-b7c666c8` otherwise walked nine
         # compiling refill-only impls after file-first had served their
-        # files, then serialised on `error.rs` overnight.
-        _served_files = {u[0] for u in _ff_units}
+        # files, then serialised on `error.rs` overnight. The key is
+        # PRODUCTION, never the dispatch list: on every early return of
+        # the file route (LLM error, empty/no FN blocks, resample skip,
+        # nothing spliced, final-attempt revert) nothing was designed, so
+        # dropping that file's refill-only blocks suppresses the exact
+        # per-block fallback the early-return log line promises. Run
+        # `347397-01e2463b` iter 1 (2026-08-31): src/ensure.rs replied
+        # empty, its two `__dispatch_ensure` impls were dropped anyway,
+        # and the audit graded both units a FAILED try nobody made — of
+        # that call's 14 dropped blocks, 12 belonged to files that had
+        # produced (kept, correctly) and 2 were this defect.
+        _served_files = set(ff_produced_files)
         if _served_files:
             viable_blocks, _dropped_ff = blocks_after_file_first(
                 viable_blocks, _served_files)
@@ -3669,6 +3790,10 @@ def fill_impl_blocks(
         impls_failed=impls_failed,
         dispatched_fns=tuple(sorted(dispatched_keys)),
         reverted_fns=tuple(sorted(reverted_keys)),
+        # A unit with a reverted try was genuinely attempted (an earlier
+        # attempt's reply reached the tree and was restored), so a later
+        # lost answer for its file does not un-attempt it.
+        answer_lost_fns=tuple(sorted(answer_lost_keys - reverted_keys)),
         payoff=_payoff,
         fill_classes=_fill_classes.histogram(),
     )

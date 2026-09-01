@@ -817,6 +817,18 @@ class ClusterFillResult:
     # did not report dispatch — legacy callers and test stubs — and the
     # driver falls back to treating the whole frontier as dispatched.
     dispatched_fns: tuple[tuple[str, str], ...] | None = None
+    # Units whose ONLY dispatch this call was a file-first prompt that came
+    # back with nothing to route — the LLM errored, the reply parsed to zero
+    # FN blocks, or nothing spliced. They are in `dispatched_fns` (the stamp
+    # is written before the call), but no body of theirs was ever judged, so
+    # the landed-change audit must not grade them: run `347397-01e2463b`
+    # (2026-08-31) wrote `flat` ledger rows for two src/ensure.rs units off
+    # an empty reply, and one of them — an owner of the still-failing
+    # test_trailer — was deranked into the next iteration's flat sink on
+    # that fabricated row. A unit a later route genuinely attempted, or one
+    # with a reverted try, is excluded by the producer. Empty (the default)
+    # means "none lost", so legacy callers and stubs behave as before.
+    answer_lost_fns: tuple[tuple[str, str], ...] = ()
     # Units this fill spliced then RESTORED to the pre-fill body — a peel of
     # compiler-blamed bodies, or a whole-file compile / U2 / regression
     # revert. The landed-change audit's FLAT arm must not treat these as

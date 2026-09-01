@@ -32,6 +32,7 @@ from pipeline_core.domain.body_ledger import (
     reseed_allowed,
     rows_for_units,
     sig_sha_of,
+    standing_on_tree,
     strip_comments,
     text_sha,
 )
@@ -279,16 +280,32 @@ def test_a_crash_noise_sweep_judges_nothing() -> None:
     assert state is BodyState.UNMEASURED
 
 
-def test_tests_that_ran_and_are_all_still_red_prove_nothing() -> None:
-    """The subtler half of the same defect. Nothing regressed, so this is not a
-    refutation — but every attributed test is still failing, so the body has
-    been shown not to have BROKEN anything, which is not the same as being
-    right. `proven` has to mean a test passes."""
+def test_tests_that_ran_and_are_all_still_red_are_a_graded_empty_delta() -> None:
+    """Nothing regressed, so this is not a refutation — but every attributed
+    test is still failing, so the body has been shown not to have BROKEN
+    anything, which is not the same as being right. `proven` has to mean a
+    convicting test passes; an empty delta on tests that ran is `flat`."""
     e = _entry(state=BodyState.LANDED)
     before, after = _views((set(), {"test_new"}), (set(), {"test_new"}))
     state, _ = classify(e, attributed={"test_new"}, before=before, after=after,
                         body_now_sha=e.body_sha)
-    assert state is BodyState.UNMEASURED
+    assert state is BodyState.FLAT
+    assert not replace(e, state=state).reseedable
+
+
+def test_a_passing_sibling_does_not_prove_a_body_whose_convicting_tests_fail(
+) -> None:
+    """Run `9872-51b20f30` judged a landing `proven` with an empty delta
+    because passing siblings sat in `attributed`. The convicting test (red
+    at dispatch, still red after) is the one that decides."""
+    e = _entry(state=BodyState.LANDED)
+    before, after = _views(({"test_green"}, {"test_red"}),
+                           ({"test_green"}, {"test_red"}))
+    state, delta = classify(
+        e, attributed={"test_red", "test_green"},
+        before=before, after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.FLAT
+    assert delta == ()
 
 
 def test_a_measured_non_regression_is_proven_and_names_what_moved() -> None:
@@ -507,23 +524,26 @@ def test_a_row_without_the_oracle_field_parses_to_the_empty_fingerprint() -> Non
 
 # --- the FLAT state -----------------------------------------------------------
 
-def test_flat_is_a_grade_and_never_a_seed_and_classify_never_produces_it() -> None:
+def test_flat_is_a_grade_and_never_a_seed() -> None:
     flat = _entry(state=BodyState.FLAT)
     assert not flat.reseedable
     assert reseed_allowed(flat, file_fp="fp-original", sig_sha=flat.sig_sha,
                           oracle_fp=_ORACLE).reason == "state flat"
-    # `classify` is untouched: over the four readings a sweep can give, the
-    # verdict is one of the three it always was.
+    # classify now produces `flat` when convicting tests ran and all still
+    # fail (the fourth reading below). The other three readings are
+    # unchanged.
     e = _entry(state=BodyState.LANDED)
-    for before, after in (((set(), set()), ({"o"}, set())),
-                          (({"t"}, set()), (set(), {"t"})),
-                          ((set(), {"t"}), (set(), {"t"})),
-                          ((set(), {"t"}), ({"t"}, set()))):
+    cases = (
+        ((set(), set()), ({"o"}, set()), BodyState.UNMEASURED),
+        (({"t"}, set()), (set(), {"t"}), BodyState.REFUTED),
+        ((set(), {"t"}), (set(), {"t"}), BodyState.FLAT),
+        ((set(), {"t"}), ({"t"}, set()), BodyState.PROVEN),
+    )
+    for before, after, want in cases:
         b, a = _views(before, after)
         state, _ = classify(e, attributed={"t"}, before=b, after=a,
                             body_now_sha=e.body_sha)
-        assert state in (BodyState.UNMEASURED, BodyState.REFUTED,
-                         BodyState.PROVEN)
+        assert state is want
 
 
 def test_rebuy_fires_on_a_flat_prior_process_row_and_not_a_same_process_one() -> None:
@@ -567,6 +587,24 @@ def test_a_flat_row_about_the_same_body_supersedes_a_standing_proven_row() -> No
     assert latest_by_unit([proven, flat])[_KEY] is flat
     other = _entry(state=BodyState.FLAT, body_sha="other", bodies=("x",))
     assert latest_by_unit([proven, other])[_KEY] is proven
+
+
+def test_standing_on_tree_reads_the_row_about_the_bytes_on_disk() -> None:
+    """Dispatch question, not the re-seed question. Computed shape of
+    `src/context.rs::with_context` on run `9872-51b20f30`: tree body
+    `997c5614` (flat), latest_by_unit standing `proven` on off-tree
+    `cb41090c`. The on-tree view is the flat row; the re-seed view stays
+    proven. NEGATIVE CONTROL: latest_by_unit on the same rows is proven."""
+    proven = _entry(state=BodyState.PROVEN, body_sha="cb41090c",
+                    bodies=("old",), run_id="prior")
+    flat = _entry(state=BodyState.FLAT, body_sha="997c5614",
+                  bodies=("cur",), run_id="9872-51b20f30")
+    rows = [proven, flat]
+    assert latest_by_unit(rows)[_KEY] is proven
+    assert standing_on_tree(rows, {_KEY: "997c5614"})[_KEY] is flat
+    assert standing_on_tree(rows, {_KEY: "cb41090c"})[_KEY] is proven
+    assert standing_on_tree(rows, {_KEY: "not-on-ledger"}) == {}
+    assert standing_on_tree(rows, {}) == {}
 
 
 _ESC_UNCHANGED_82157_ITER_1 = (

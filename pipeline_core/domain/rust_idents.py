@@ -171,6 +171,26 @@ def impl_trait_name(container: str) -> str | None:
     return None
 
 
+def mod_container_ident(container: str) -> str | None:
+    """Bare ident of an extractor ``mod name`` container, else None.
+
+    Inline-mod fns are recorded with ``container = "mod {ident}"`` — the
+    enumerator pushes that string onto ``container_stack`` (``enumerate.rs``).
+    ``mod __private`` → ``__private``. Nested mods keep the innermost ident
+    (the stack's last entry). Not a path compare: a model tag
+    ``impl crate::__private`` is matched by :func:`impl_head_name`'s last
+    segment against this ident. Empty, ``impl …``, and ``trait …`` return
+    None so an inherent header cannot land on an impl member by this rule.
+    """
+    s = " ".join(container.split())
+    if not s.startswith("mod "):
+        return None
+    rest = s[4:].strip()
+    if not rest:
+        return None
+    return rest.rsplit("::", 1)[-1] or None
+
+
 def impl_head_name(container: str) -> str | None:
     """Bare name an ``impl`` header carries when it names only ONE path.
 
@@ -179,10 +199,11 @@ def impl_head_name(container: str) -> str | None:
     ``for`` separator (that is `impl_trait_name`'s job) or names no path.
 
     In Rust this form is an INHERENT impl on the named type, so it must never
-    be read as "implements that trait" on its own — the only caller is the
-    trait-default routing tier, which additionally requires a trait of that
-    name to exist in the same file AND to declare the member. The model
-    abbreviates ``impl<T> AdhocKind for &T`` to ``impl AdhocKind`` when it tags
+    be read as "implements that trait" on its own. Callers add the matching
+    declaration: the trait-default routing tier requires a trait of that
+    name in the same file that declares the member; member-identity requires
+    a unique ``mod {ident}`` container whose ident equals this last segment.
+    The model abbreviates ``impl<T> AdhocKind for &T`` to ``impl AdhocKind`` when it tags
     a returned body, and a tag that names the trait unambiguously is an answer,
     not a miss."""
     s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())

@@ -239,8 +239,59 @@ contract, not the note.
 
 This rule composes with, and does not license violating, the others in this
 file: the correct fix still may not touch the crate under reconstruction,
-still requires the walk + negative control, and still names the reading that
-validates it before launch.
+still requires the walk + negative control, still names the reading that
+validates it before launch, and still may not be a session steering the
+loop at a named test or unit (the next section).
+
+## Never steer the loop — every solution is a generic pipeline mechanism
+
+The assistant does not aim dispatch, attribution, ranking, exhaustion, or a
+prompt at a unit, test, or fill the session just diagnosed. That is
+influencing the pipeline: the next score measures the steer, not whether the
+loop found the body. The crate under reconstruction is already off-limits;
+this is the same contamination one layer up, in the machinery that chooses
+what to fill.
+
+**The assistant does not put a failing test on a function's owner list.**
+Not by naming the leftover tests. Not by writing a "generic" hop whose
+purpose in this session is that those leftovers gain a new owner. Adding,
+removing, or reassigning a test-to-unit edge is the pipeline's job; doing
+it from a stall write-up is the steer with extra steps. If correspondence
+is wrong, name the existing extractor that should have derived the owner
+and why it did not fire. Do not add the edge.
+
+**Generic means the mechanism does not know the instance.** A change is
+generic only if the same function, with the same arguments, would fire for
+any crate, any remaining-failure set, and any test whose source has the same
+shape — including a test and crate that do not exist yet. If the fix (or
+the test that asserts it) has to name a live leftover (`test_altdebug`,
+`fmt.rs::debug`, `construct_from_adhoc`, "the three Debug failures at
+pass 134"), it is a steer. A predicate written to convert this run's
+leftovers is the same steer even when the leftover names are not in the
+diff.
+
+**The rule, checkable.** Before shipping a stall fix, name the function that
+would carry it and the inputs it reads. Then one of: it is a generic
+mechanism (those inputs contain no live test name, no live unit name, no
+live remaining-failure set, and the change does not attach this session's
+failing tests to a unit they did not already own); or it is a steer —
+stop, do not ship. A test whose fixture is the live leftover names is the
+same steer with a passing suite. The negative control is the same predicate
+on a different crate shape, producing the bad outcome without those names.
+
+**The instance that motivated the rule, 2026-08-31, run `451330-7e8a7ca9`
+at pass 134.** Three tests still failed, all on Debug output. The session
+proposed putting them on the Debug formatter's owner list so the next batch
+would rewrite those bodies instead of constructors — first by naming the
+three tests, then by offering a hop that would have attached them without
+naming them. Both are the assistant assigning owners. The next score would
+have measured that assignment, not reconstruction.
+
+**The tells.** "Put this test on X's owner list"; a hop or ranking change
+whose first customer is this run's leftovers; a match on a leftover test
+or symbol from the live frontier; a plan-line MUST that names the crate's
+remaining failures; any comment or test fixture whose force is the live
+names rather than the shape. On any of them, stop.
 
 ## Nothing leaves this machine
 

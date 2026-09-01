@@ -27,6 +27,7 @@ from pipeline_core.domain.rust_idents import (
     canon_container,
     impl_head_name,
     impl_trait_name,
+    mod_container_ident,
     names_impl_or_trait,
     repair_truncated_generics,
     trait_def_name,
@@ -153,6 +154,31 @@ def members_in_file(
     )
 
 
+def _member_identity_admits(block_attr: str, decls: list[FileMember]) -> bool:
+    """Whether the member-identity tier may bind ``block_attr`` to ``decls``.
+
+    Unique name, not an impl/trait claim → yes (comment or signature tag).
+    Inherent ``impl Ty`` and a free fn (empty container) → yes. Inherent
+    header whose last path segment equals the ident after ``mod `` → yes
+    (``impl crate::__private`` vs extractor ``mod __private``). A trait
+    claim, a non-unique name, or an impl-member declaration → no.
+    """
+    if len(decls) != 1:
+        return False
+    if not names_impl_or_trait(block_attr):
+        return True
+    inherent = (not trait_def_name(block_attr)
+                and not impl_trait_name(block_attr))
+    if not inherent:
+        return False
+    cont = decls[0].container
+    if not cont:
+        return True
+    head = impl_head_name(block_attr)
+    ident = mod_container_ident(cont)
+    return head is not None and ident is not None and head == ident
+
+
 def route_fn_bodies(
     parsed: list[dict[str, Any]], *, target: str, related: list[str],
     trait_defaults: Sequence[TraitDefaultHost] = (),
@@ -197,7 +223,17 @@ def route_fn_bodies(
     as "matches no impl in this file", and the same model in the same run's
     attempt 2 tagged the same fns with their own signature lines and every one
     of them routed. So the tier also fires on an INHERENT impl header — `impl
-    Ty`, no `for`, not a `trait` — when the sole declaration is a free fn.
+    Ty`, no `for`, not a `trait` — when the sole declaration is a free fn,
+    AND when that declaration lives in an inline module whose ident equals
+    the header's head name. Extractor records those fns with
+    ``container = "mod {ident}"``, so the free-fn clause
+    (`not decls[0].container`) fails for them: run `451330-7e8a7ca9`
+    (2026-08-31) dropped `format_err` tagged `impl __private` (and, in an
+    earlier log, `impl crate::__private`) while eleven `free fns`-tagged
+    error.rs bodies routed the same iteration. Compare
+    :func:`impl_head_name` (last path segment) to
+    :func:`mod_container_ident` (ident after ``mod ``), not to the full
+    container string — ``__private`` != ``mod __private``.
 
     Trait claims keep the old strictness, and that is what preserves the
     corruption the gate was written against: `!self`, written for `impl Bool
@@ -207,7 +243,9 @@ def route_fn_bodies(
     free fn can never be what it meant; an inherent header that matches no
     container in the file carries no such claim. `impl Bool for bool`,
     `impl<T> Bool for &T` and `trait Bool` are all excluded by that test, and
-    `impl ErrorImpl<ContextError<C, E>>` is admitted by it.
+    `impl ErrorImpl<ContextError<C, E>>` is admitted by it. `impl __private`
+    against a sole `mod __private` declaration is admitted by the ident
+    compare; a trait claim still is not.
 
     Last because every header that DOES resolve must win: the model's own claim
     about its body outranks an inference from the file."""
@@ -262,12 +300,8 @@ def route_fn_bodies(
         # resolved to nothing is not a claim a free fn can contradict; a TRAIT
         # claim is, because the trait declares the member and a free fn never
         # implements one.
-        inherent_impl = (names_impl_or_trait(block_attr)
-                         and not trait_def_name(block_attr)
-                         and not impl_trait_name(block_attr))
         decls = [m for m in members if m.fn_name == fn_name]
-        if len(decls) == 1 and (not names_impl_or_trait(block_attr)
-                                or (inherent_impl and not decls[0].container)):
+        if _member_identity_admits(block_attr, decls):
             routed.append(RoutedBody(
                 fn_data, decls[0].container,
                 via_member_name=True, sig_text=decls[0].sig_text))

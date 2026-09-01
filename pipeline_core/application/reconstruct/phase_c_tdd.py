@@ -47,6 +47,7 @@ from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.body_ledger import (
     BodyState,
     LedgerEntry,
+    LedgerKey,
     SweepView,
     authored_layout_fp,
     body_sha,
@@ -54,6 +55,7 @@ from pipeline_core.domain.body_ledger import (
     latest_by_unit,
     rebuy_hits,
     rows_for_units,
+    standing_on_tree,
 )
 from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
@@ -83,6 +85,7 @@ from pipeline_core.domain.dispatch import (
 )
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    drop_standing_flat,
     overlay_crash_on_ranks,
     promote_by_blocker_counts,
     promote_by_service,
@@ -93,6 +96,7 @@ from pipeline_core.domain.dispatch_batch import (
 )
 from pipeline_core.domain.escalation_lifetime import (
     FiredProduct,
+    escalate_to_measured_owners,
     escalation_fire_due,
     product_addition_keys,
     sustain_escalation_products,
@@ -3862,9 +3866,22 @@ def run_phase_c_tdd(
         # never reaches a batch. This sits AFTER that promotion so the
         # never-served / not-flat / flat / dead buckets actually decide
         # take_batch. Crash still runs after and still wins.
+        # STANDING CLAIM ABOUT THE TREE, not the re-seed view. `latest_by_unit`
+        # lets an off-tree `proven` mask a later `flat` about the body that is
+        # actually on disk (run `9872-51b20f30`: 10 FLAT vs 18 on-tree). Dispatch
+        # reads the on-tree view; re-seed keeps `latest_by_unit`.
+        _body_now: dict[LedgerKey, str] = {}
+        if deps.tree_writer is not None:
+            _proj, _cl = project_dir.name, cluster.name
+            for _k, _ in ordered:
+                with suppress(OSError, TypeError, ValueError):
+                    _body_now[LedgerKey(_proj, _cl, _k.file, _k.fn_name)] = (
+                        body_sha(deps.tree_writer.bodies(_k, target_src_dir)))
+        _stand = (standing_on_tree(_ledger_entries(), _body_now)
+                  if _body_now else latest_by_unit(_ledger_entries()))
         _flat_keys = {
             FnLocator(_k.file, _k.fn_name)
-            for _k, _e in latest_by_unit(_ledger_entries()).items()
+            for _k, _e in _stand.items()
             if _e.state is BodyState.FLAT}
         _cov = None
         if deps.measure_coverage_slice is not None:
@@ -3905,6 +3922,74 @@ def run_phase_c_tdd(
             _red_dead = red_dead_units(
                 (k for k, _ in ordered), cur_failed, _cov.owners,
                 exempt=_esc_keys | _product_keys | _crash_grades.keys())
+        # OWNER-MAP ADMISSION. Ranking can promote a never-served owner but
+        # cannot put `error.rs::fmt` on the frontier: run `451330-7e8a7ca9`
+        # listed it on all three remaining tests and never dispatched it.
+        # Fire when every attributed-or-escalated unit for a measured test
+        # has been SERVED (or is dead/red-dead) — grade unanimity cannot
+        # fire (run `9872-51b20f30`: never_served=[] from iter 1, FLAT=10,
+        # zero `measured_owners` emissions). Dead product members still
+        # count as exempt-from-service so an unattempted `write_str` cannot
+        # hold the fire. Additions join escalation_producers (ESCALATED
+        # grade) and the frontier; they do not replace an existing producer
+        # product and they do not re-admit permanently_exhausted.
+        _owner_admits: dict[FnLocator, set[str]] = {}
+        _units_for_owners: dict[str, set[FnLocator]] = {}
+        if _cov is not None and _cov.owners:
+            for _ok, _ots in eligible.items():
+                for _ot in _ots:
+                    _units_for_owners.setdefault(
+                        bare_test_name(_ot), set()).add(_ok)
+            _owner_admits = escalate_to_measured_owners(
+                owners={bare_test_name(t): ks for t, ks in _cov.owners.items()},
+                units_by_test=_units_for_owners,
+                graded=_flat_keys | permanently_exhausted,
+                unable=_dead_keys | _red_dead,
+                already_owned=frozenset(eligible),
+                permanently_exhausted=permanently_exhausted,
+                served=frozenset(_served_at),
+            )
+        if _owner_admits:
+            _by_test: dict[str, dict[FnLocator, set[str]]] = {}
+            for _loc, _ts in _owner_admits.items():
+                eligible.setdefault(_loc, set()).update(_ts)
+                for _t in _ts:
+                    _by_test.setdefault(_t, {}).setdefault(_loc, set()).add(_t)
+            for _tname, _cached_add in _by_test.items():
+                if _tname in escalation_products:
+                    _earned, _cached = escalation_products[_tname]
+                    for _loc, _ts in _cached_add.items():
+                        _cached.setdefault(_loc, set()).update(_ts)
+                else:
+                    escalation_products[_tname] = (
+                        frozenset(_units_for_owners.get(_tname, ())),
+                        dict(_cached_add),
+                    )
+                escalation_producers[_tname] = frozenset(
+                    escalation_producers.get(_tname, ())) | frozenset(
+                        _cached_add)
+            _have = {k for k, _ in ordered}
+            for _loc in _owner_admits:
+                if _loc not in _have:
+                    ordered.append((_loc, eligible[_loc]))
+            _esc_keys = frozenset(
+                k for ks in escalation_producers.values() for k in ks)
+            deps.log(
+                f"  {tag} [phase-c/dispatch] measured-owners: "
+                f"{len(_owner_admits)} unit(s) admitted from the owner map "
+                "(every attributed-or-escalated unit served or dead): "
+                + ", ".join(sorted(
+                    f"{k.file}::{k.fn_name}" for k in _owner_admits)[:12]))
+            deps.emit("phase_c.attribution.measured_owners", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "added": sorted(f"{k.file}::{k.fn_name}"
+                                for k in _owner_admits),
+                "tests": sorted(_by_test),
+                "owners": {
+                    t: sorted(f"{k.file}::{k.fn_name}" for k in ks)
+                    for t, ks in sorted(
+                        (t, set(d)) for t, d in _by_test.items())},
+            })
         _before_svc = [k for k, _ in ordered]
         ordered = promote_by_service(
             ordered, set(_served_at), _flat_keys, _dead_keys, _red_dead)
@@ -3968,6 +4053,15 @@ def run_phase_c_tdd(
                 "prior_run_id": _rebuy[0][1].run_id})
         # Crash evidence outranks everything, including the producer order above.
         ordered = promote_crash_evidence(ordered, _crash_grades)
+        # FLAT-UNDER-UNCHANGED-EVIDENCE IS EXCLUSION, not a sink rank.
+        # `promote_by_service` parks flats last; the cap still spends on
+        # them once never-served is empty. `rebuy_hits` cannot close that:
+        # it is off after a code move and skips this run_id, so the
+        # same-process re-buy (the `9872` spend) is invisible to it.
+        # Crash-blamed units stay — live evidence outranks a prior empty
+        # delta.
+        ordered = drop_standing_flat(
+            ordered, _flat_keys, exempt=_crash_grades.keys())
         if _pass_cohort is None:
             _pass_cohort = tuple(key for key, _ in ordered)
         # The promotion above is worthless unless the cursor is told to let
@@ -4501,6 +4595,23 @@ def run_phase_c_tdd(
         _attempted = (
             frontier_keys if _sub_dispatched is None
             else _sub_dispatched & frontier_keys)
+        # A lost answer is not an attempt. `dispatched_fns` is stamped
+        # before the model call, so a file-first call that returned
+        # nothing routable (LLM error, empty/no FN blocks, nothing
+        # spliced) still reports its units dispatched — and grading them
+        # fabricates evidence twice over: run `347397-01e2463b` iter 1
+        # (2026-08-31) wrote `flat` ledger rows for
+        # src/ensure.rs::__dispatch_ensure and ::render off an empty
+        # reply, and `render`, an owner of the failing test_trailer, sat
+        # in the next two iterations' flat-sink derank on that row. The
+        # subtraction (never `-=`: the legacy arm aliases `frontier_keys`)
+        # also keeps them off `_served_at` below, so they keep their
+        # never-served rank and the next iteration retries them — the only
+        # recovery a free-fn refill has, since file-first is its sole
+        # planner. The engine already excludes units another route
+        # genuinely attempted afterwards, and reverted units.
+        _attempted = _attempted - {
+            FnLocator(*t) for t in sub.answer_lost_fns}
         # Fill returned — this batch was served, but only the units a
         # route opened. A kill that never returned is not service (the
         # dispatch persist above left these keys off `_served_at` on
@@ -4585,14 +4696,19 @@ def run_phase_c_tdd(
             # only, a few lines up.
             _batch_unattempted = unattempted_units(
                 frontier_keys, _attempted, _batch_landed)
-            _batch_esc_unchanged = _batch_unchanged & _batch_escalated
-            _batch_esc_flat, _batch_esc_reverted = split_reverted(
-                _batch_esc_unchanged, sub.reverted_fns)
+            # Split the WHOLE unchanged set, not only the escalated slice:
+            # a peeled attributed refill (`src/fmt.rs::debug` on run
+            # `451330-7e8a7ca9`) is reverted, not an identical reply, and
+            # the charger must not treat it as a judged try.
+            _batch_flat, _batch_reverted = split_reverted(
+                _batch_unchanged, sub.reverted_fns)
+            _batch_esc_flat = _batch_flat & _batch_escalated
+            _batch_esc_reverted = _batch_reverted & _batch_escalated
             _batch_declined = declined_unchanged(
-                _batch_unchanged, convicting=convicting,
+                _batch_flat, convicting=convicting,
                 escalated=_batch_escalated,
                 crash_evidence=frozenset(_crash_grades))
-            _batch_unchanged -= _batch_declined
+            _batch_unchanged = set(_batch_flat - _batch_declined)
             if deps.ledger_append is not None and (_batch_landed
                                                    or _batch_esc_flat):
                 _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
@@ -4653,6 +4769,11 @@ def run_phase_c_tdd(
                 + ("; INFERRED, unchanged (not a failed try): " + ", ".join(
                     sorted(f"{k.file}::{k.fn_name}" for k in _batch_declined)[:12])
                    if _batch_declined else "")
+                + ("; reverted (tree body is the snapshot, not the reply): "
+                   + ", ".join(sorted(
+                       f"{k.file}::{k.fn_name}"
+                       for k in _batch_reverted)[:12])
+                   if _batch_reverted else "")
                 + ("; ESCALATED, unchanged (a FAILED try — the instruction "
                    "was rewrite): " + ", ".join(sorted(
                        f"{k.file}::{k.fn_name}"
@@ -4685,6 +4806,8 @@ def run_phase_c_tdd(
                                       for k in _batch_unattempted),
                 "unchanged": sorted(f"{k.file}::{k.fn_name}"
                                     for k in _batch_unchanged),
+                "reverted": sorted(f"{k.file}::{k.fn_name}"
+                                   for k in _batch_reverted),
                 "declined": sorted(f"{k.file}::{k.fn_name}"
                                    for k in _batch_declined),
                 # The escalated-unchanged set under its own name. It is a
@@ -4772,6 +4895,7 @@ def run_phase_c_tdd(
         # never judgeable evidence against the unit.
         _charge_ok = _oracle.intact and _rec.reconciled
         _spared_undispatched: list[FnLocator] = []
+        _reverted_now = {FnLocator(f, n) for f, n in sub.reverted_fns}
         for key in frontier_keys:
             if _sub_dispatched is not None and key not in _sub_dispatched:
                 # NO route attempted this fn — it was refused (deferred,
@@ -4782,6 +4906,28 @@ def run_phase_c_tdd(
                 # budget still bounds the loop if nothing ever dispatches it.
                 if key in cur_stubs:
                     _spared_undispatched.append(key)
+                continue
+            # A lost answer is not a judged try. `_attempted` already
+            # subtracted `answer_lost_fns` (the FLAT arm and `_served_at`
+            # read that set); this charger was the reader that still keyed
+            # on the raw dispatch stamp. Run `347397-01e2463b` iter 1
+            # (2026-08-31): src/ensure.rs replied empty, `__dispatch_ensure`
+            # and `render` were still in `dispatched_fns`, and a second empty
+            # reply would have hit `TDD_REFILL_MAX_ATTEMPTS` (default 2) and
+            # locked `render` out of the next-iteration file-first retry that
+            # is the only recovery a free-fn refill has. They already
+            # surface under "no route attempted" on the landed-change line,
+            # so they do not join `_spared_undispatched` (that line is "a
+            # route never opened them").
+            if key not in _attempted:
+                continue
+            # A peel / compile / U2 revert restored the snapshot; that is
+            # not a judged try of the body the model returned. Charging it
+            # locked `src/fmt.rs::debug` at the refill cap after two peels
+            # (run `451330-7e8a7ca9`, 2026-08-31). The named trade: a
+            # forever-reverting unit never cap-exhausts; attempt caps and
+            # the stall / flat stops still bound the spend.
+            if key in _reverted_now:
                 continue
             if key in cur_stubs:
                 # First-fill attempt left it a stub → exhausted (existing).

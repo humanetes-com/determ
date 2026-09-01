@@ -97,6 +97,7 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
          fills: int = 0, escalate=None, max_stalls: str = "1",
          stubbed: bool = True, layout: str = _LAYOUT,
          dispatched_fns: tuple[tuple[str, str], ...] | None = None,
+         answer_lost_fns: tuple[tuple[str, str], ...] = (),
          fill_write: Any = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
@@ -123,7 +124,8 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
         if fill_write is not None:
             fill_write(src)
         return ClusterFillResult(
-            attempts=1, fns_filled=fills, dispatched_fns=dispatched_fns)
+            attempts=1, fns_filled=fills, dispatched_fns=dispatched_fns,
+            answer_lost_fns=answer_lost_fns)
 
     stubs = [_UNIT] if stubbed else []
     run_phase_c_tdd(
@@ -197,10 +199,11 @@ def test_a_landing_is_recorded_and_the_next_sweep_judges_it(
     assert landed[0].key.fn_name == "depth"
     judged = [r for r in rows if r.state is not BodyState.LANDED]
     assert judged, "the sweep after the landing must judge it"
-    assert judged[0].state is BodyState.UNMEASURED, (
-        "t2 RAN but is red in both readings: nothing regressed and nothing "
-        "passed, so the body has not been shown to be right — `unmeasured` "
-        "is re-seedable and claims nothing, which is what describes it")
+    assert judged[0].state is BodyState.FLAT, (
+        "t2 RAN and is red in both readings: nothing regressed and nothing "
+        "passed, so this is a graded try with an empty delta — `flat`, not "
+        "`proven` and not `unmeasured` (`unmeasured` claims the tests did "
+        "not run)")
     assert any(ev == "phase_c.ledger.judged" for ev, _ in events)
     # Both the landing and its verdict carry the oracle that graded them —
     # the value the real adapter computes over this tree, never "".
@@ -490,6 +493,62 @@ def test_under_a3_only_an_attempted_escalated_unit_leaves_a_flat_row(
         "src/a.rs::width", "src/a.rs::height"}
     assert {r.key.fn_name for r in c_ledger["rows"]
             if r.state is BodyState.FLAT} == {"width", "height"}
+
+
+def test_a_lost_answer_is_not_an_attempt_and_writes_no_flat_row(
+        monkeypatch, tmp_path: Path) -> None:
+    """The dispatch stamp is written before the model call, so a file-first
+    reply that came back with nothing to route still reports its units
+    dispatched — and grading them fabricates evidence. Run `347397-01e2463b`
+    iter 1 (2026-08-31): src/ensure.rs replied with 0 FN tags, the audit
+    graded `__dispatch_ensure` and `render` `ESCALATED, unchanged (a FAILED
+    try)`, and `render` — an owner of the still-failing test_trailer — sat
+    in the next two iterations' flat-sink derank on that fabricated `flat`
+    row. Here the engine reports the loss (`answer_lost_fns`): `height` is
+    dispatched AND lost, so it leaves `attempted`, is listed under `no route
+    attempted`, and writes NO ledger row — while `width`, a unit the call
+    genuinely opened and returned unchanged, still writes its `flat` row (a
+    reply that merely omits a requested unit is a real failed try, which is
+    what keeps the attempted-only audit cut intact).
+
+    NEGATIVE CONTROL: the identical replay with the loss unreported writes
+    `flat` rows for BOTH escalated units — the fabricated row exactly."""
+    _tree(tmp_path, layout=_LAYOUT_THREE)
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+         escalate=_escalate_to_width_and_height, max_stalls="3",
+         stubbed=False, layout=_LAYOUT_THREE,
+         dispatched_fns=(("src/a.rs", "depth"), ("src/a.rs", "width"),
+                         ("src/a.rs", "height")),
+         answer_lost_fns=(("src/a.rs", "height"),))
+    named = [d for ev, d in events if ev == "phase_c.tdd.landed_change"
+             and d.get("esc_unchanged")]
+    assert named, "escalation must fire and the FLAT arm must name a set"
+    row = named[0]
+    assert row["esc_unchanged"] == ["src/a.rs::width"]
+    assert "src/a.rs::width" in row["attempted"]
+    assert "src/a.rs::height" not in row["attempted"], (
+        "a lost answer is not an attempt")
+    assert "src/a.rs::height" in row["unattempted"]
+    assert {r.key.fn_name for r in ledger["rows"]
+            if r.state is BodyState.FLAT} == {"width"}, (
+        "the lost unit writes no row; the omitted-but-served unit still does")
+
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control, layout=_LAYOUT_THREE)
+    c_ledger: dict = {"rows": []}
+    c_events: list[tuple[str, dict]] = []
+    _run(monkeypatch, control, ledger=c_ledger, events=c_events, logs=[],
+         escalate=_escalate_to_width_and_height, max_stalls="3",
+         stubbed=False, layout=_LAYOUT_THREE,
+         dispatched_fns=(("src/a.rs", "depth"), ("src/a.rs", "width"),
+                         ("src/a.rs", "height")))
+    assert {r.key.fn_name for r in c_ledger["rows"]
+            if r.state is BodyState.FLAT} == {"width", "height"}, (
+        "unreported, the lost unit is graded — the fabricated row")
 
 
 def test_a_landed_passenger_is_not_reported_as_unattempted(

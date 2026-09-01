@@ -618,11 +618,23 @@ def test_file_first_peels_the_blamed_body_and_keeps_the_rest(
     # them spent an hour and landed nothing, on ordinary errors in a few of
     # sixteen bodies. Here `kind` is blamed and `name` is not, so `name` must
     # survive instead of being reverted with it.
+    #
+    # After peel, file-first used to FILE FILLED-return on attempt 1 of 3
+    # (run 451330-7e8a7ca9, src/fmt.rs::debug), so the blamed name never
+    # retried. The loop now continues scoped to the peeled names. The
+    # scripted cargo is green from the post-peel check on, so the retry
+    # lands `kind` too; a whole-file revert of attempt 2 would undo `name`.
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
     install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
-    _install_model(monkeypatch, [RESPONSE_TWO])
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return RESPONSE_TWO
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
     install_scripted_cargo(
         monkeypatch,
         # red once (blaming `kind`), then green after the peel re-stubs it.
@@ -631,8 +643,12 @@ def test_file_first_peels_the_blamed_body_and_keeps_the_rest(
         frontier={FnLocator("lib.rs", "kind"): {"<compile>"}})
     _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert "self.tag + 1" in text          # `name` kept
-    assert "unimplemented!()" in text      # `kind` put back
+    assert "self.tag + 1" in text          # `name` kept across the retry
+    assert "unimplemented!()" not in text  # `kind` retried and landed
+    assert len(prompts) == 2, "peel must retry the blamed name file-first"
+    # NEGATIVE CONTROL of the old FILE FILLED return: one call would leave
+    # kind as a stub and never feed the diagnostic.
+    assert "kind" in prompts[1]
 
 
 def test_file_first_without_the_peel_loses_the_good_body_too(
@@ -933,6 +949,156 @@ def test_file_first_lands_a_free_fn_answered_with_an_empty_block_attr(
         "the free fn's body was answered with block=\"\" and never landed:\n"
         + free_body)
     assert "x + 999" not in text                # the stale body is gone
+
+
+IMPL_LIB_A_TWO_REFILLS = """\
+pub struct Foo { tag: u32 }
+pub struct Bar { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        self.tag + 999
+    }
+}
+impl Bar {
+    pub fn name(&self) -> u32 {
+        self.tag + 999
+    }
+}
+"""
+
+IMPL_LIB_B_REFILL_PLUS_FREE = """\
+pub struct Baz { tag: u32 }
+
+pub fn gamma(x: u32) -> u32 {
+    x + 999
+}
+
+impl Baz {
+    pub fn beta(&self) -> u32 {
+        self.tag + 999
+    }
+}
+"""
+
+
+def _two_file_refill_blocks() -> list[ImplBlock]:
+    kind = FnRecord(file="a.rs", fn_name="kind", container="impl Foo",
+                    sig_text="pub fn kind (& self) -> u32",
+                    body_text="self.tag + 999", has_unimplemented_body=False)
+    name = FnRecord(file="a.rs", fn_name="name", container="impl Bar",
+                    sig_text="pub fn name (& self) -> u32",
+                    body_text="self.tag + 999", has_unimplemented_body=False)
+    beta = FnRecord(file="b.rs", fn_name="beta", container="impl Baz",
+                    sig_text="pub fn beta (& self) -> u32",
+                    body_text="self.tag + 999", has_unimplemented_body=False)
+    gamma = FnRecord(file="b.rs", fn_name="gamma", container="",
+                     sig_text="pub fn gamma (x : u32) -> u32",
+                     body_text="x + 999", has_unimplemented_body=False)
+    return [ImplBlock(file="a.rs", container="impl Foo",
+                      members=(kind,), stub_members=()),
+            ImplBlock(file="a.rs", container="impl Bar",
+                      members=(name,), stub_members=()),
+            ImplBlock(file="b.rs", container="impl Baz",
+                      members=(beta,), stub_members=()),
+            ImplBlock(file="b.rs", container="",
+                      members=(gamma,), stub_members=())]
+
+
+def _two_file_setup(monkeypatch, root):
+    ws = _setup(monkeypatch, root)
+    (ws / "src" / "a.rs").write_text(IMPL_LIB_A_TWO_REFILLS)
+    (ws / "src" / "b.rs").write_text(IMPL_LIB_B_REFILL_PLUS_FREE)
+    install_cluster_scan(monkeypatch,
+                         impl_blocks=lambda *a, **k: _two_file_refill_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    return ws
+
+
+def _run_two_file_refills(monkeypatch, ws, replies: list[str],
+                          prompts: list[str]):
+    from pipeline_core.domain.models import FnLocator
+
+    def _ask(prompt, *a, **k):
+        prompts.append(prompt)
+        return replies[len(prompts) - 1]
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _ask)
+    keys = {FnLocator("a.rs", "kind"), FnLocator("a.rs", "name"),
+            FnLocator("b.rs", "beta"), FnLocator("b.rs", "gamma")}
+    return pipeline._phase_c_fill_impl_blocks(
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys=keys,
+        tdd_frontier_tests=FailureFrontier.of_direct(
+            {k: {"test_x"} for k in keys}))
+
+
+_A_FILE_REPLY = ('<FN name="kind" block="impl Foo">self.tag + 1</FN>\n'
+                 '<FN name="name" block="impl Bar">self.tag + 2</FN>')
+_BETA_BLOCK_REPLY = '<FN name="beta" block="impl Baz">self.tag + 7</FN>'
+
+
+def test_a_file_that_produced_nothing_keeps_its_per_block_fallback(
+        monkeypatch, tmp_path):
+    """The same-call refill-only drop keys on PRODUCTION, not on the
+    dispatch list. Run `347397-01e2463b` iter 1 (2026-08-31): the
+    src/ensure.rs file-first call replied with 0 FN tags, logged `falling
+    back to per-block fills`, and six records later the drop removed its two
+    `__dispatch_ensure` impls anyway — the fallback its own log line had
+    just promised — because the served set was the files DISPATCHED, not the
+    files a call landed bodies in. Of that call's 14 dropped blocks, 12
+    belonged to files that had produced (a correct drop) and 2 were this
+    defect.
+
+    Here a.rs produces (FILE FILLED, both refills land) and b.rs replies
+    with no FN tags. a.rs's refill-only blocks are dropped — the
+    same-iteration re-buy guard of run `463713-b7c666c8`, kept — while
+    b.rs's impl block falls back to a real per-block call that lands, and
+    b.rs's free fn, which only the file route can name, is reported LOST
+    (`answer_lost_fns`) rather than graded as a try nobody made."""
+    ws = _two_file_setup(monkeypatch, tmp_path)
+    prompts: list[str] = []
+    res = _run_two_file_refills(
+        monkeypatch, ws,
+        [_A_FILE_REPLY, "thinking, but no code today", _BETA_BLOCK_REPLY],
+        prompts)
+    a_text = (ws / "src" / "a.rs").read_text()
+    b_text = (ws / "src" / "b.rs").read_text()
+    assert "self.tag + 1" in a_text and "self.tag + 2" in a_text, (
+        "a.rs must be designed by its file call")
+    assert "self.tag + 7" in b_text, (
+        "b.rs's impl block must reach the per-block fallback and land")
+    assert "x + 999" in b_text, "the free fn had no fallback route"
+    assert len(prompts) == 3, (
+        "two file calls, then ONE per-block call — the produced file's "
+        f"refill-only blocks stay dropped (got {len(prompts)} prompts)")
+    assert res.answer_lost_fns == (("b.rs", "gamma"),), (
+        "the free-fn refill's only planner returned nothing: lost, not "
+        "attempted; beta was superseded by its real per-block attempt")
+
+    # NEGATIVE CONTROL: the pre-fix served set — the dispatch list, which
+    # here is both files. b.rs's impl block is dropped despite the empty
+    # reply, the promised fallback never runs, and both of its units are
+    # carried as lost.
+    import pipeline_core.application.reconstruct.impl_fill as impl_fill_mod
+    real_drop = impl_fill_mod.blocks_after_file_first
+    monkeypatch.setattr(
+        impl_fill_mod, "blocks_after_file_first",
+        lambda viable, served: real_drop(viable, {"a.rs", "b.rs"}))
+    ws2 = _two_file_setup(monkeypatch, tmp_path / "ctrl")
+    c_prompts: list[str] = []
+    c_res = _run_two_file_refills(
+        monkeypatch, ws2,
+        [_A_FILE_REPLY, "thinking, but no code today", _BETA_BLOCK_REPLY],
+        c_prompts)
+    c_b_text = (ws2 / "src" / "b.rs").read_text()
+    assert "self.tag + 7" not in c_b_text and "self.tag + 999" in c_b_text, (
+        "under the dispatch-keyed drop the fallback is suppressed")
+    assert len(c_prompts) == 2, "no per-block call ever happens"
+    assert c_res.answer_lost_fns == (("b.rs", "beta"), ("b.rs", "gamma"))
 
 
 IMPL_LIB_FREE_REFILL_OVER_BOUND = """\

@@ -30,7 +30,7 @@ re-admission, no per-test logging. Those belong to the fire alone.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -153,3 +153,54 @@ def escalation_fire_due(
         (u for u in units if served_at.get(u, -1) < since),
         key=lambda u: (u.file, u.fn_name)))
     return FireDecision(due=not unserved, unserved=unserved)
+
+
+def escalate_to_measured_owners(
+    *,
+    owners: Mapping[str, Collection[FnLocator]],
+    units_by_test: Mapping[str, Collection[FnLocator]],
+    graded: Collection[FnLocator],
+    unable: Collection[FnLocator],
+    already_owned: Collection[FnLocator],
+    permanently_exhausted: Collection[FnLocator] = (),
+    served: Collection[FnLocator] = (),
+) -> dict[FnLocator, set[str]]:
+    """Admit coverage-slice owners once every attributed-or-escalated unit
+    has been served (or is already unable to pay).
+
+    Grade unanimity cannot fire: run ``9872-51b20f30`` (2026-09-01) served
+    the whole 30-unit cohort from iter 1 (floor-seeded ``_served_at``,
+    ``never_served=[]``) while ``latest_by_unit`` FLAT stayed at 10, so
+    ``phase_c.attribution.measured_owners`` emitted zero times and the
+    loop re-bought the escalation product for three full passes. Service
+    is recorded for a landing, a revert, an INFERRED return, and a
+    sibling-pass proven alike — no grade class can hold the fire.
+
+    ``served`` is the kill-safe fill-return set (``_served_at`` keys).
+    Dead / red-dead still count as exempt-from-service so a never-opened
+    dead product member cannot hold the fire (the 451330 ``write_str``
+    hole). ``graded`` does not fire; it only refuses re-admission of a
+    unit already graded flat. Admissions are owner-map units minus dead
+    minus already-owned minus permanently exhausted minus graded. No
+    live test or unit name is a parameter.
+    """
+    served_keys = frozenset(served)
+    unable_set = frozenset(unable)
+    already = frozenset(already_owned)
+    exhausted = frozenset(permanently_exhausted)
+    graded_set = frozenset(graded)
+    out: dict[FnLocator, set[str]] = {}
+    for tname, owner_set in owners.items():
+        cohort = frozenset(units_by_test.get(tname, ()))
+        if not cohort:
+            continue
+        done = ((cohort & served_keys) | (cohort & unable_set)
+                | (cohort & exhausted))
+        if not cohort <= done:
+            continue
+        for loc in owner_set:
+            if (loc in unable_set or loc in already or loc in exhausted
+                    or loc in graded_set):
+                continue
+            out.setdefault(loc, set()).add(tname)
+    return out

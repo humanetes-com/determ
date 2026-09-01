@@ -17,7 +17,11 @@ from pipeline_core.domain.impl_routing import (
     trait_default_hosts,
 )
 from pipeline_core.domain.models import FnRecord, ImplBlock
-from pipeline_core.domain.rust_idents import canon_container
+from pipeline_core.domain.rust_idents import (
+    canon_container,
+    impl_head_name,
+    mod_container_ident,
+)
 
 
 def test_impl_block_id_stable_across_renderings() -> None:
@@ -548,6 +552,55 @@ def test_inherent_relaxation_does_not_reach_an_impl_member() -> None:
     r = route_fn_bodies([_fn("construct", "impl ErrorImpl<ContextError<C, E>>")],
                         target="impl Other", related=[], members=mems)
     assert r.routed == () and r.dropped_names == ("construct",)
+
+
+def _mod_block(container: str, name: str, sig: str) -> ImplBlock:
+    return ImplBlock(
+        file="src/lib.rs", container=container,
+        members=(FnRecord(fn_name=name, sig_text=sig),))
+
+
+def test_inherent_mod_header_reaches_inline_mod_fn() -> None:
+    # Run 451330-7e8a7ca9 (2026-08-31): format_err tagged `impl __private`
+    # (and, in an earlier log, `impl crate::__private`) was dropped because
+    # the extractor records the declaration as `mod __private`, so the
+    # free-fn clause (`not decls[0].container`) failed. Compare
+    # impl_head_name's last segment to the ident after `mod `, not to the
+    # full container string — `__private` != `mod __private`.
+    assert mod_container_ident("mod __private") == "__private"
+    assert impl_head_name("impl __private") == "__private"
+    assert impl_head_name("impl crate::__private") == "__private"
+    assert impl_head_name("impl __private") != "mod __private"
+    blocks = [_mod_block("mod __private", "format_err",
+                         "fn format_err(args: fmt::Arguments) -> Error")]
+    mems = members_in_file(blocks, "src/lib.rs")
+    for attr in ("impl __private", "impl crate::__private"):
+        r = route_fn_bodies([_fn("format_err", attr)],
+                            target="impl Error", related=[], members=mems)
+        assert r.dropped == (), attr
+        assert r.routed[0].container == "mod __private"
+        assert r.routed[0].via_member_name is True
+        assert "format_err" in r.routed[0].sig_text
+
+
+def test_trait_claim_still_drops_an_inline_mod_fn() -> None:
+    blocks = [_mod_block("mod __private", "format_err",
+                         "fn format_err(args: fmt::Arguments) -> Error")]
+    mems = members_in_file(blocks, "src/lib.rs")
+    r = route_fn_bodies([_fn("format_err", "impl Bool for bool")],
+                        target="impl Error", related=[], members=mems)
+    assert r.routed == () and r.dropped_names == ("format_err",)
+
+
+def test_two_same_named_mod_fns_still_drop() -> None:
+    blocks = [
+        _mod_block("mod a", "format_err", "fn format_err()"),
+        _mod_block("mod b", "format_err", "fn format_err()"),
+    ]
+    mems = members_in_file(blocks, "src/lib.rs")
+    r = route_fn_bodies([_fn("format_err", "impl a")],
+                        target="impl Error", related=[], members=mems)
+    assert r.dropped_names == ("format_err",)
 
 
 def test_member_tier_is_off_by_default() -> None:

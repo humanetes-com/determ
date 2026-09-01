@@ -303,6 +303,10 @@ class PhaseCFillEngine:
         # (an undispatched frontier fn is refused, not judged).
         _dispatched: set[FnLocator] = set()
         _reverted: set[FnLocator] = set()
+        # Units the impl/file pass dispatched but never got an answer for
+        # (see `ClusterFillResult.answer_lost_fns`). A per-fn attempt below
+        # supersedes the loss for its unit.
+        _answer_lost: set[FnLocator] = set()
         # One cfg policy across routes. The impl/file routes refuse a splice
         # at a fn whose every stub occurrence is cfg-gated out of this cluster
         # (`cluster_scoped_splice`), but the DISPATCH side never consulted
@@ -431,6 +435,8 @@ class PhaseCFillEngine:
                 _dispatched.update(
                     FnLocator(*t) for t in _impl_stats.dispatched_fns)
             _reverted.update(FnLocator(*t) for t in _impl_stats.reverted_fns)
+            _answer_lost.update(
+                FnLocator(*t) for t in _impl_stats.answer_lost_fns)
             # If there are still stub members the per-impl path didn't cover
             # (free fns or oversized blocks), fall through to the per-fn path.
             if _impl_stats.remaining == 0:
@@ -740,6 +746,8 @@ class PhaseCFillEngine:
                         # spent on it (attempts==0 is a pre-call skip gate).
                         if res.attempts > 0 or res.filled:
                             _dispatched.add(FnLocator(res.file, res.fn_name))
+                            _answer_lost.discard(
+                                FnLocator(res.file, res.fn_name))
                         if res.filled:
                             fns_filled += 1
                             progress_this_pass += 1
@@ -1175,6 +1183,7 @@ class PhaseCFillEngine:
             impls_failed=_carryover.get("impls_failed", 0),
             dispatched_fns=tuple(sorted(_dispatched)),
             reverted_fns=tuple(sorted(_reverted)),
+            answer_lost_fns=tuple(sorted(_answer_lost - _reverted)),
             payoff=combine_payoffs(_impl_payoff, _last_payoff),
             fill_classes=_fill_hist,
         )

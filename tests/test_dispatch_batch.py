@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    drop_standing_flat,
     promote_crash_evidence,
     take_batch,
 )
@@ -523,3 +524,18 @@ def test_recorded_95878_cohort_dispatches_the_constructors_in_batch_one():
             assert after[i] == k
     second = {(k.file, k.fn_name) for k in after[12:24]}
     assert second >= {("src/ensure.rs", "render"), ("src/ensure.rs", "__dispatch_ensure")}
+
+
+def test_drop_standing_flat_removes_flats_and_keeps_exempt() -> None:
+    """Cap 12 over a 30-unit frontier whose last 10 are flat still spends
+    those slots unless the flats leave the list. Crash-blamed flats stay."""
+    ordered = [(f"u{i}", i) for i in range(30)]
+    flat = {f"u{i}" for i in range(20, 30)}
+    dropped = drop_standing_flat(ordered, flat)
+    assert [k for k, _ in dropped] == [f"u{i}" for i in range(20)]
+    kept = drop_standing_flat(ordered, flat, exempt={"u29"})
+    assert "u29" in {k for k, _ in kept}
+    assert drop_standing_flat(ordered, set()) == ordered
+    batch = take_batch([k for k, _ in dropped], set(), 12)
+    assert batch.keys == tuple(f"u{i}" for i in range(12))
+    assert "u20" not in batch.keys
