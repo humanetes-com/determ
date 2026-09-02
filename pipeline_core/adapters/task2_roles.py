@@ -151,6 +151,7 @@ class CargoBackendAdapter:
     run_check_diag_fn: Callable[..., tuple[int, str, list[Any]]]
     build_test_cmd_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
+    cluster_env_fn: Callable[[Any], dict[str, str]]
     implicated_fns_from_check_fn: Callable[
         [list[Any], str, Path], list[FnLocator]]
     attribute_failures_fn: Callable[..., AttributionResult]
@@ -185,6 +186,9 @@ class CargoBackendAdapter:
 
     def env(self) -> dict[str, str]:
         return self.env_fn()
+
+    def cluster_env(self, cluster: Any) -> dict[str, str]:
+        return self.cluster_env_fn(cluster)
 
     def implicated_fns_from_check(self, diagnostics: list[Any],
                                   rendered_output: str,

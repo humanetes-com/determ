@@ -67,6 +67,30 @@ def test_cov_env_points_instrumentation_at_the_scratch_target(tmp_path: Path) ->
     assert env["LLVM_PROFILE_FILE"] == "/tmp/p.profraw"
 
 
+def test_cov_env_inherits_cluster_rustflags_then_appends_instrumentation(
+        tmp_path: Path) -> None:
+    """The owner map must see the same cfg world the sweep ran. A replace
+    of RUSTFLAGS dropped `--cfg` so a crate-gated test never matched."""
+    env = _cov_env(
+        tmp_path, "/tmp/p.profraw",
+        cluster_env={
+            "RUSTFLAGS": "-A warnings --cfg error_generic_member_access",
+            "RUSTUP_TOOLCHAIN": "nightly",
+        })
+    flags = env["RUSTFLAGS"]
+    assert "--cfg error_generic_member_access" in flags
+    assert "-C instrument-coverage" in flags
+    assert env["RUSTUP_TOOLCHAIN"] == "nightly"
+    assert env["CARGO_TARGET_DIR"] == str(tmp_path / "target-cov")
+    # Isolation: a cluster env that names the loop's target dir must not
+    # leak instrumentation into it.
+    leaked = _cov_env(
+        tmp_path, "/tmp/p.profraw",
+        cluster_env={"CARGO_TARGET_DIR": "/loop/target",
+                     "RUSTFLAGS": "-A warnings"})
+    assert leaked["CARGO_TARGET_DIR"] == str(tmp_path / "target-cov")
+
+
 def test_test_binaries_skips_metadata_and_keeps_executables(tmp_path: Path) -> None:
     deps = tmp_path / "target-cov" / "debug" / "deps"
     deps.mkdir(parents=True)
@@ -517,9 +541,10 @@ def test_the_composition_binding_accepts_failing_tests(
 
     seen: dict[str, object] = {}
 
-    def _fake(pd, cl, *, failing_tests=(), log=None):
+    def _fake(pd, cl, *, failing_tests=(), log=None, cluster_env=None):
         seen["failing"] = failing_tests
         seen["log"] = log
+        seen["cluster_env"] = cluster_env
         return None
 
     monkeypatch.setattr(
@@ -527,9 +552,13 @@ def test_the_composition_binding_accepts_failing_tests(
     notes: list[str] = []
     logger = notes.append
     bound = _tdd_measure_coverage(logger)
-    assert bound(tmp_path, "stable", failing_tests=frozenset({"t"})) is None
+    cluster = {"RUSTUP_TOOLCHAIN": "nightly",
+               "RUSTFLAGS": "-A warnings --cfg X"}
+    assert bound(tmp_path, "stable", failing_tests=frozenset({"t"}),
+                 cluster_env=cluster) is None
     assert seen["failing"] == frozenset({"t"})
     assert seen["log"] is logger
+    assert seen["cluster_env"] == cluster
     # Negative control: the two-argument lambda that shipped is the crash.
     old = lambda pd, cl: None  # noqa: E731
     with pytest.raises(TypeError, match="failing_tests"):

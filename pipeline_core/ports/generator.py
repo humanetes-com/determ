@@ -114,6 +114,10 @@ class Cargo(Protocol):
         *, include_lib: bool = ...,
     ) -> str: ...
     def env(self) -> dict[str, str]: ...
+    # The full env for ONE named cluster (RUSTFLAGS appended, RUSTUP_TOOLCHAIN
+    # set when required) — what every cargo composed from the env alone must
+    # run under. `env()` reads the ACTIVE scope, which task2 never sets.
+    def cluster_env(self, cluster: BuildCluster | None) -> dict[str, str]: ...
     def implicated_fns_from_check(
         self, diagnostics: list[Diagnostic], rendered_output: str,
         target_src_dir: Path,

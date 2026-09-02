@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from pipeline_core.adapters.cargo import apply_cluster_env, base_cargo_env
+from pipeline_core.adapters.cargo import cluster_cargo_env
 from pipeline_core.domain.layout_probe import (
     PIN_PROBE_MARKERS,
     install_probe_region,
@@ -109,7 +109,7 @@ def compile_skeleton_check(
     cluster with its ``RUSTFLAGS=--cfg error_generic_member_access`` but the
     default toolchain switches the nightly-only blocks ON and then builds them
     on stable — E0554 at the crate root, every component, every attempt,
-    whatever the model wrote. ``apply_cluster_env`` is the one place that knows
+    whatever the model wrote. ``cluster_cargo_env`` is the one place that knows
     both halves; going through it keeps this gate compiling under the same
     conditions as the real build."""
     skel_dir = skeleton_dir_for(project_dir, cfg_cluster)
@@ -122,8 +122,7 @@ def compile_skeleton_check(
         # exists to prevent, and False merely leaves the component frozen.
         return False, (f"no baked cluster {cfg_cluster!r} — cannot determine the "
                        "toolchain/cfg the layout gate must compile under")
-    env = base_cargo_env()
-    apply_cluster_env(env, cluster)
+    env = cluster_cargo_env(cluster)
     try:
         proc = subprocess.run(
             ["cargo", "check", "--lib", "--quiet"],
@@ -173,8 +172,7 @@ def compile_filled_check(
     if not (crate_dir / "Cargo.toml").exists() and not _ensure_crate_manifest(
             Path(project_dir), crate_dir):
         return False, "crate manifest missing"
-    env = base_cargo_env()
-    apply_cluster_env(env, cluster)
+    env = cluster_cargo_env(cluster)
     try:
         proc = subprocess.run(
             ["cargo", "check", "--lib", "--quiet"],

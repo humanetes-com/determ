@@ -16,6 +16,7 @@ from pipeline_core.application.reconstruct.per_fn_retry import (
     Task3Cargo,
     Task3Enumerate,
     Task3RetryDeps,
+    env_for_cluster,
     run_task3_inline_retry,
 )
 
@@ -261,3 +262,34 @@ def test_the_prompt_names_the_cfg_atoms_not_just_the_cluster_names(
     assert "`error_generic_member_access` IS active" in inv
     assert "DO NOT EXIST in this world" in inv
     assert "SAME predicate" in inv
+
+
+def test_env_for_cluster_uses_the_injected_mapping_not_dict_update() -> None:
+    """The old overlay replaced RUSTFLAGS and never set the toolchain.
+    With cluster_env bound, that mapping is the whole env. Without it,
+    dict.update still reproduces the recorded rustflags."""
+    from types import SimpleNamespace
+
+    def _unused(*_a, **_k):  # noqa: ANN002, ANN003
+        raise AssertionError("collaborator should not be called on this path")
+
+    cluster = SimpleNamespace(
+        name="nightly", env_extra={"RUSTFLAGS": "--cfg extra"},
+        toolchain="nightly")
+    injected = Task3Cargo(
+        env=lambda: {"RUSTFLAGS": "-A warnings"},
+        run=_unused, check_diag=_unused,
+        cluster_env=lambda c: {
+            "RUSTFLAGS": "-A warnings --cfg extra",
+            "RUSTUP_TOOLCHAIN": "nightly",
+        },
+    )
+    good = env_for_cluster(injected, cluster)
+    assert good["RUSTFLAGS"] == "-A warnings --cfg extra"
+    assert good["RUSTUP_TOOLCHAIN"] == "nightly"
+    old = Task3Cargo(
+        env=lambda: {"RUSTFLAGS": "-A warnings"},
+        run=_unused, check_diag=_unused)
+    bad = env_for_cluster(old, cluster)
+    assert bad["RUSTFLAGS"] == "--cfg extra"
+    assert "RUSTUP_TOOLCHAIN" not in bad

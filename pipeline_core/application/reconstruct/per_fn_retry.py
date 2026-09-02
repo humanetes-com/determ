@@ -161,6 +161,24 @@ class Task3Cargo:
     env: Callable[[], dict[str, str]]
     run: Callable[..., tuple[int, str]]
     check_diag: Callable[..., tuple[int, str, list[Any]]]
+    # Bound to cluster_cargo_env in composition. None keeps env() +
+    # dict.update(env_extra), which replaces RUSTFLAGS and never sets the
+    # toolchain.
+    cluster_env: Callable[..., dict[str, str]] | None = None
+
+
+def env_for_cluster(cargo: Task3Cargo, cluster: Any | None) -> dict[str, str]:
+    """The cargo env for one named cluster, through the injected owner when
+    present. The dict.update fallback is the overlay that dropped `-A
+    warnings` and skipped RUSTUP_TOOLCHAIN on a live nightly cluster
+    (run 216855-03b2a21b)."""
+    if cargo.cluster_env is not None and cluster is not None:
+        return cargo.cluster_env(cluster)
+    e = cargo.env()
+    extra = getattr(cluster, "env_extra", None) if cluster is not None else None
+    if extra:
+        e.update(extra)
+    return e
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,21 +267,14 @@ def run_task3_inline_retry(
         test_command = shlex.join(_parts)
 
     def _env() -> dict[str, str]:
-        # Mirror task3's per-cluster invocation: base cargo env, then the cluster's
-        # env_extra overlaid (its RUSTFLAGS/cfg win over the stale global cluster's).
-        e = deps.cargo.env()
-        if cluster is not None and cluster.env_extra:
-            e.update(cluster.env_extra)
-        return e
+        return env_for_cluster(deps.cargo, cluster)
 
     def _probe(c: Any) -> ClusterProbe:
         # Through the shared renderer, so the gate measures with the SAME command
         # shape task3's own per-cluster run used. No stems and no `--lib` is the
         # unscoped `cargo [+toolchain] test --no-fail-fast` that stage issues.
-        env = deps.cargo.env()
-        if c.env_extra:
-            env.update(c.env_extra)
-        return ClusterProbe(name=c.name, command=build_test_cmd([], c), env=env)
+        return ClusterProbe(name=c.name, command=build_test_cmd([], c),
+                            env=env_for_cluster(deps.cargo, c))
 
     # Every cluster that compiles the files this pass may touch. The primary
     # stays the repair signal (its failures aim the frontier); the others are

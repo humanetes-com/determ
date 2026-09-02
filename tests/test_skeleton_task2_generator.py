@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from pipeline_core.adapters.cargo import cluster_cargo_env
 from pipeline_core.application.generators.task2_generator import (
     StaticSkeletonTask2Generator,
 )
@@ -139,6 +140,9 @@ class FakeAdapter:
 
     def env(self) -> dict[str, str]:
         return {}
+
+    def cluster_env(self, cluster: BuildCluster | None) -> dict[str, str]:
+        return cluster_cargo_env(cluster)
 
     def implicated_fns_from_check(
             self, diagnostics: list[_Diag], rendered_output: str,
@@ -1062,3 +1066,30 @@ def test_prepass_heal_stops_when_a_round_changes_nothing(tmp_path: Path) -> None
     assert len(rounds) == 1, rounds
     assert any("STILL BROKEN after 1 round(s)" in m for m in fake.logs)
     assert "phase_c.cluster.prepass_heal_failed" in fake.events
+
+
+def test_the_env_handed_to_the_loop_is_the_clusters_own_not_the_active_scopes(
+        tmp_path: Path) -> None:
+    """A nightly cluster's env carries RUSTUP_TOOLCHAIN and keeps -A warnings
+    beside the cfg. The sweep never noticed the old shape because its command
+    line says `cargo +nightly`; the assert probe and the coverage instrument,
+    which compose their own cargo from this env alone, ran on stable with the
+    cfg on and failed E0554 (run 216855-03b2a21b, cluster nightly)."""
+    nightly = BuildCluster(
+        name="nightly", env_extra={"RUSTFLAGS": "--cfg error_generic_member_access"},
+        tarpaulin_exclude_files=[], excluded_cfg=[],
+        active_cfg=["error_generic_member_access"], prompt_nightly_rule="",
+        requires_nightly=True)
+    fake = FakeAdapter(clusters_list=[nightly])
+    gen = _gen(fake, _cfg(per_fn=False, tdd=True))
+    env = gen._cluster_env(nightly)
+    assert env["RUSTUP_TOOLCHAIN"] == "nightly"
+    assert env["RUSTFLAGS"] == "-A warnings --cfg error_generic_member_access"
+    # Negative control: the old composition — the active scope's env (never
+    # set in task2) with env_extra merged by dict.update — is what the live
+    # probe stage recorded: rustflags ['--cfg', 'error_generic_member_access'],
+    # no toolchain.
+    old = fake.env()
+    old.update(nightly.env_extra)
+    assert old == {"RUSTFLAGS": "--cfg error_generic_member_access"}
+    assert "RUSTUP_TOOLCHAIN" not in old

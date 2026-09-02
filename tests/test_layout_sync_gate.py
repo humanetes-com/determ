@@ -50,6 +50,9 @@ class _Cargo:
     def env(self) -> dict[str, str]:
         return {}
 
+    def cluster_env(self, cluster: Any) -> dict[str, str]:
+        return {}
+
     def run_check_diag(self, *_a: Any, **_k: Any) -> tuple[int, str, list[Any]]:
         rc = self.rcs[min(self.calls, len(self.rcs) - 1)]
         self.calls += 1

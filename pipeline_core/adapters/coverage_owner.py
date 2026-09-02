@@ -57,10 +57,40 @@ def _stage(project: Path, cluster: str, work: Path) -> Path:
     return dst
 
 
-def _cov_env(tree: Path, profile: str) -> dict[str, str]:
+_INSTRUMENT_FLAG = "-C instrument-coverage"
+
+
+def _cov_env(
+    tree: Path,
+    profile: str,
+    cluster_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Cargo env for the staged coverage tree.
+
+    Isolation is load-bearing: CARGO_TARGET_DIR and LLVM_PROFILE_FILE are
+    always the scratch paths. A cluster env that names the loop's target
+    dir must not leak instrumentation into it.
+
+    Cluster cargo (cfg flags, RUSTUP_TOOLCHAIN) is inherited when
+    `cluster_env` is passed, and instrumentation is APPENDED onto
+    RUSTFLAGS the same way apply_cluster_env appends a cluster's flags.
+    A replace of RUSTFLAGS dropped `--cfg error_generic_member_access`,
+    so cfg-gated tests never matched in the owner map (run
+    216855-03b2a21b, 2026-09-02, nightly coverage listed ui only of
+    three leftovers). None keeps today's replace, which is the
+    negative control the existing test pins.
+    """
     env = dict(os.environ)
+    if cluster_env:
+        env.update(cluster_env)
+        flags = env.get("RUSTFLAGS", "").strip()
+        if "instrument-coverage" not in flags:
+            env["RUSTFLAGS"] = (
+                f"{flags} {_INSTRUMENT_FLAG}".strip() if flags
+                else _INSTRUMENT_FLAG)
+    else:
+        env["RUSTFLAGS"] = _INSTRUMENT_FLAG
     env["CARGO_TARGET_DIR"] = str(tree / "target-cov")
-    env["RUSTFLAGS"] = "-C instrument-coverage"
     env["LLVM_PROFILE_FILE"] = profile
     return env
 
@@ -272,6 +302,7 @@ def measure_coverage_slice(
     *,
     failing_tests: Iterable[str] = (),
     log: Callable[[str], None] | None = None,
+    cluster_env: Mapping[str, str] | None = None,
 ) -> CoverageSlice | None:
     """Pass A of the owner probe, plus pass C over `failing_tests`.
 
@@ -282,6 +313,9 @@ def measure_coverage_slice(
     `failing_tests` is the sweep's failing set. Empty leaves `owners`
     empty, and every consumer of it then declines to refuse anything —
     the reading degrades to what it was before the owner map existed.
+
+    `cluster_env` is the same mapping the sweep's cargo uses. None keeps
+    the pre-inheritance replace of RUSTFLAGS (instrumentation only).
     """
     profdata_bin = os.environ.get("LLVM_PROFDATA", "llvm-profdata")
     cov_bin = os.environ.get("LLVM_COV", "llvm-cov")
@@ -298,7 +332,8 @@ def measure_coverage_slice(
         tree = _stage(project_dir, cluster, work)
         prof = work / "prof"
         prof.mkdir()
-        env = _cov_env(tree, str(prof / "build-%p.profraw"))
+        env = _cov_env(tree, str(prof / "build-%p.profraw"),
+                       cluster_env=cluster_env)
         built = _run(["cargo", "test", "--no-run", "--offline"], cwd=tree,
                      env=env)
         if built.returncode != 0:

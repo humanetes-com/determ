@@ -67,6 +67,12 @@ class Task3Deps:
     # which reconciles cargo's own `running N` against its own silence and needs
     # no inventory at all.
     reference: Callable[[Path], ReferenceMeasurement | None] = lambda _p: None
+    # The env for ONE named cluster (RUSTFLAGS appended, RUSTUP_TOOLCHAIN set
+    # when required). Bound to cluster_cargo_env in composition. None keeps
+    # the old cargo_env() + dict.update(env_extra) overlay for tests that
+    # inject a fake result through env_extra — that overlay is what dropped
+    # -A warnings and skipped the toolchain on a live nightly cluster.
+    cluster_env: Callable[[Any], dict[str, str]] | None = None
 
 
 def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
@@ -124,8 +130,11 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             cmd_parts.append(f"+{cluster.toolchain}")
         cmd_parts += ["test", "--no-fail-fast"]
         cluster_cmd = shlex.join(cmd_parts)
-        cluster_env = deps.cargo_env()
-        cluster_env.update(cluster.env_extra or {})
+        if deps.cluster_env is not None:
+            cluster_env = deps.cluster_env(cluster)
+        else:
+            cluster_env = deps.cargo_env()
+            cluster_env.update(cluster.env_extra or {})
         log(f"  [task3/{cluster.name}] running {cluster_cmd}")
         t_c = time.monotonic()
         try:

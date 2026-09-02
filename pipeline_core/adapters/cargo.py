@@ -74,19 +74,39 @@ def apply_cluster_env(env: dict[str, str], cluster: BuildCluster | None) -> None
         env["RUSTUP_TOOLCHAIN"] = "nightly"
 
 
+def cluster_cargo_env(cluster: BuildCluster | None) -> dict[str, str]:
+    """The full cargo env for ONE named cluster, independent of the active scope.
+
+    Base env, then :func:`apply_cluster_env` — so RUSTFLAGS is `-A warnings`
+    plus the cluster's `--cfg`, and RUSTUP_TOOLCHAIN=nightly is SET when the
+    cluster requires it. This is the mapping every cargo the loop composes for
+    itself must run under, not just the sweep's own command line: the sweep
+    carries the toolchain as `cargo +nightly` in the command, so an env that
+    carried only the cfg went unnoticed there and broke every cargo built from
+    the env alone. Run 216855-03b2a21b (2026-09-02, cluster nightly): the
+    assert probe's stage recorded rustflags `['--cfg',
+    'error_generic_member_access']` under the stable rustc, the lib failed
+    E0554 four times, and every sweep printed `probe produced no observation
+    (rc=101)` — the session's observed-values slot was empty for the exact
+    tests the plateau was about.
+    """
+    env = base_cargo_env()
+    apply_cluster_env(env, cluster)
+    return env
+
+
 class CargoEnv:
     """Builds the cargo subprocess env for the *currently active* cluster. A
     ``Callable[[], dict[str, str]]`` (the zero-arg seam every cargo call binds),
     reading the active cluster from an injected :class:`ClusterScope` at call
-    time — so a mid-run cluster activation is reflected without a global."""
+    time — so a mid-run cluster activation is reflected without a global.
+    Delegates to :func:`cluster_cargo_env` so the overlay rule has one owner."""
 
     def __init__(self, scope: ClusterScope) -> None:
         self._scope = scope
 
     def __call__(self) -> dict[str, str]:
-        env = base_cargo_env()
-        apply_cluster_env(env, self._scope.active)
-        return env
+        return cluster_cargo_env(self._scope.active)
 
 
 @dataclass(frozen=True, slots=True)

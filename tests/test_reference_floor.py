@@ -23,6 +23,7 @@ tests was classified `build`.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -42,6 +43,7 @@ from pipeline_core.domain.reference_floor import (  # noqa: E402
     normalize_pair,
     orphaned_stubs,
     pairs_of,
+    reference_floor_close_reason,
 )
 
 _UI = ("tests/compiletest.rs", "ui")
@@ -168,6 +170,64 @@ def test_a_failing_test_absent_from_the_reference_is_still_required() -> None:
     assert verdict.met is False
     assert verdict.unexcused_failures == frozenset({_GEN})
     assert _UI not in verdict.unexcused_failures
+
+
+def test_tdd_closes_when_failures_are_the_recorded_nightly_neutral() -> None:
+    """t2a done is the reference floor once nothing reachable remains.
+
+    Fixture: the recorded nightly `failed` row in
+    tmp/.reference_anyhow/reference.json is compiletest ui. A FAIL sweep
+    whose failed pairs are that set, with an intact oracle and a compiling
+    tree, is the original crate's leftover. A generated name the reference
+    never had is not. Negative control: today's t2a close is rc==0 only,
+    so this helper returns empty for a green rc.
+    """
+    from pipeline_core.domain.test_results import split_reachable_failures
+
+    path = REPO / "tmp" / ".reference_anyhow" / "reference.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    nightly = raw["clusters"]["nightly"]
+    failed = frozenset(tuple(p) for p in nightly["failed"])
+    assert failed == frozenset({_UI})
+    ref = ClusterReference(
+        cluster="nightly",
+        passed=frozenset(tuple(p) for p in nightly["passed"]),
+        failed=failed,
+        ignored=frozenset(tuple(p) for p in nightly.get("ignored") or []),
+        announced=int(nightly["announced"]),
+        reported=int(nightly["reported"]),
+    )
+    ours_pass = ref.passed
+    ours_fail = failed
+    verdict = judge_against_reference(ref, ours_pass, ours_fail)
+    assert verdict.met is True
+    reachable, _out = split_reachable_failures(
+        [n for _, n in ours_fail],
+        excused=[n for _, n in ref.neutral])
+    assert reachable == frozenset()
+    assert reference_floor_close_reason(
+        rc=101, fail_count=1, compile_broke=False, oracle_intact=True,
+        verdict=verdict) == verdict.reason
+    extra = judge_against_reference(ref, ours_pass, ours_fail | {_GEN})
+    assert extra.met is False
+    assert extra.unexcused_failures == frozenset({_GEN})
+    reachable_extra, _out = split_reachable_failures(
+        [n for _, n in (ours_fail | {_GEN})],
+        excused=[n for _, n in ref.neutral])
+    assert reachable_extra
+    assert reference_floor_close_reason(
+        rc=101, fail_count=2, compile_broke=False, oracle_intact=True,
+        verdict=extra) == ""
+    # Negative control: today's t2a close is rc==0 and an intact oracle.
+    assert reference_floor_close_reason(
+        rc=0, fail_count=0, compile_broke=False, oracle_intact=True,
+        verdict=verdict) == ""
+    assert reference_floor_close_reason(
+        rc=101, fail_count=1, compile_broke=True, oracle_intact=True,
+        verdict=verdict) == ""
+    assert reference_floor_close_reason(
+        rc=101, fail_count=1, compile_broke=False, oracle_intact=False,
+        verdict=verdict) == ""
 
 
 def test_losing_a_test_the_original_passes_fails_the_floor() -> None:

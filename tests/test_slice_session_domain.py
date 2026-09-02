@@ -18,6 +18,8 @@ from pipeline_core.domain.slice_session import (
     render_compile_turn,
     render_test_turn,
     route_change_set,
+    session_slices_for_failing,
+    slices_with_pair_hops,
 )
 
 _FMT = FnLocator("src/lib.rs", "fmt")
@@ -46,6 +48,35 @@ def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:
     big = {FnLocator("src/x.rs", f"f{i}") for i in range(5)}
     assert plan_slices({"t": big}, max_units=4) == []
     assert len(plan_slices({"t": big}, max_units=5)) == 1
+
+
+def test_an_empty_owner_map_plans_no_session() -> None:
+    """Negative control of iterating coverage keys: ui with 0 units is
+    dropped, so a failing set that coverage listed only as that empty
+    key yields no session (the live nightly iters 4-9 log line)."""
+    assert plan_slices({"ui": frozenset()}) == []
+
+
+def test_a_failing_test_absent_from_owners_still_gets_a_session() -> None:
+    """The failing set is the input, not the coverage-key subset. A
+    cfg-gated test coverage omitted still forms a session when
+    attribution already owns the format pair; an empty-owner leftover
+    does not."""
+    t_cfg = "t_cfg"
+    slices = session_slices_for_failing(
+        {t_cfg, "ui"},
+        owners={"ui": frozenset()},
+        units_by_test={t_cfg: {_FMT, _RENDER}},
+        pairs=[(_FMT, _RENDER)],
+    )
+    plans = plan_slices(slices)
+    assert [p.tests for p in plans] == [(t_cfg,)]
+    assert set(plans[0].units) == {_FMT, _RENDER}
+    # Today's loop over owners.items() on the same map.
+    today: dict[str, frozenset[FnLocator]] = {}
+    for name, units in {"ui": frozenset()}.items():
+        today[name] = frozenset(units) | frozenset()
+    assert plan_slices(slices_with_pair_hops(today, [(_FMT, _RENDER)])) == []
 
 
 def _records() -> dict[FnLocator, FnRecord]:

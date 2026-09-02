@@ -2993,10 +2993,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     if getattr(_c, "toolchain", ""):
                         _c_parts.append(f"+{_c.toolchain}")
                     _c_parts += ["test", "--no-fail-fast"]
-                    _c_env = self.cargo.env()
-                    _c_env.update(_c.env_extra or {})
                     _rc_c, _out_c = self.cargo.run(
-                        shlex.join(_c_parts), project_dir, _c_env,
+                        shlex.join(_c_parts), project_dir, self._cluster_env(_c),
                         timeout=test_timeout)
                     if _rc_c != 0:
                         _p_c, _f_c, _ = parse_test_counts(_out_c)
@@ -3372,7 +3370,19 @@ class StaticSkeletonTask2Generator(Task2Generator):
         return shlex.join(parts)
 
     def _cluster_env(self, cluster: BuildCluster) -> dict[str, str]:
-        """Cargo env with cluster's env_extra merged in."""
-        env = self.cargo.env()
-        env.update(cluster.env_extra or {})
-        return env
+        """The full cargo env for `cluster` — the mapping handed to the TDD
+        loop, the fill engine, the assert probe and the coverage instrument.
+
+        This used to be `self.cargo.env()` (the ACTIVE scope's env, which
+        task2 never activates, so base only) with `env_extra` merged by
+        `dict.update`: RUSTFLAGS was REPLACED by the cluster's `--cfg`
+        (dropping `-A warnings`) and RUSTUP_TOOLCHAIN was never set. The
+        sweep did not notice because its command line carries
+        `cargo +nightly`; every cargo the loop composes from the env alone
+        ran on stable with the nightly cfg on and failed E0554 — the assert
+        probe printed `produced no observation (rc=101)` on every nightly
+        sweep of run 216855-03b2a21b (2026-09-02), and the coverage
+        instrument would have failed the same way once it inherited the
+        env. The port's `cluster_env` appends and sets the toolchain.
+        """
+        return self.cargo.cluster_env(cluster)

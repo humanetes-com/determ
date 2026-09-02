@@ -41,7 +41,7 @@ _OWNER = FnLocator("src/b.rs", "owner_fmt")
 _OWNERS = {t: frozenset({_ACC, _ACC2, _OWNER}) for t in _REDS}
 
 
-def _coverage(_pd: Path, _cl: str, failing_tests=frozenset()):
+def _coverage(_pd: Path, _cl: str, failing_tests=frozenset(), **_k):
     return CoverageSlice(owners=dict(_OWNERS), failing=frozenset(failing_tests))
 
 

@@ -7,8 +7,8 @@ Until 2026-08-26 there was no compile-and-run adapter in production:
 had no caller, so tier 3 could not exist. This runs a probe as a cargo
 EXAMPLE: the program is written to `examples/__behaviour_probe_<name>.rs`,
 `cargo run --quiet --example …` builds it against the crate under the
-cluster's env/toolchain (`base_cargo_env` + `apply_cluster_env`, the same
-pair every other cargo call here goes through), stdout is captured, and the
+cluster's env/toolchain (`cluster_cargo_env`, the same mapping every other
+cargo call here goes through), stdout is captured, and the
 file is ALWAYS removed — `examples/` too when it did not exist before — so
 the pre-strip tree the bake reads is byte-identical to what it was. A crate
 with `autoexamples = false` will not discover the file; the run then fails
@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
-from pipeline_core.adapters.cargo import apply_cluster_env, base_cargo_env
+from pipeline_core.adapters.cargo import cluster_cargo_env
 from pipeline_core.domain.behaviour_probe import ProbeResult
 from pipeline_core.domain.models import BuildCluster
 
@@ -66,9 +66,7 @@ def safe_probe_name(name: str) -> str:
 
 
 def probe_env(cluster: BuildCluster | None) -> dict[str, str]:
-    env = base_cargo_env()
-    apply_cluster_env(env, cluster)
-    return env
+    return cluster_cargo_env(cluster)
 
 
 @contextmanager

@@ -47,6 +47,9 @@ class _Cargo:
     def env(self) -> dict[str, str]:
         return {}
 
+    def cluster_env(self, cluster: Any) -> dict[str, str]:
+        return {}
+
     def run(self, cmd: str, _cwd: Path, env: dict[str, str],
             timeout: int = 0) -> tuple[int, str]:
         self.calls.append((cmd, dict(env)))

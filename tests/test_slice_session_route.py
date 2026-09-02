@@ -342,7 +342,7 @@ def test_a_judged_turn_states_which_changed_units_the_targets_execute(
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(101, _RED))
     deps = _dc.replace(
         pipeline._APP.impl_fill_deps,
-        measure_coverage_slice=lambda pd, cl, failing_tests=frozenset(): CoverageSlice(
+        measure_coverage_slice=lambda pd, cl, failing_tests=frozenset(), **k: CoverageSlice(
             owners={"t_pair": frozenset({_DISP})}))
     monkeypatch.setattr(pipeline, "_APP", _dc.replace(pipeline._APP, impl_fill_deps=deps))
     monkeypatch.setattr(pipeline, "_phase_c_fill_impl_blocks",

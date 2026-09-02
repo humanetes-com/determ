@@ -311,6 +311,32 @@ def judge_against_reference(
     )
 
 
+def reference_floor_close_reason(
+    *,
+    rc: int,
+    fail_count: int,
+    compile_broke: bool,
+    oracle_intact: bool,
+    verdict: FloorVerdict | None,
+) -> str:
+    """Why a FAIL sweep may close the cluster as the reference floor, or "".
+
+    A green rc is still the primary close. This sibling is for a sweep
+    whose remaining failures are all in the reference's failed-or-ignored
+    set: the original crate's leftover is not a reconstruction hole. A
+    red build, a short oracle, and a failing test the reference never
+    had (generated behavioural tests) cannot take this path — t2a used
+    to require rc==0, so a trybuild leftover the original fails on this
+    rustc kept the cluster open (run 216855-03b2a21b, 2026-09-02,
+    nightly at 120/123 with ui the unowned leftover).
+    """
+    if rc == 0 or fail_count <= 0 or compile_broke or not oracle_intact:
+        return ""
+    if verdict is None or not verdict.met:
+        return ""
+    return verdict.reason
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceMeasurement:
     """A whole reference run: one :class:`ClusterReference` per baked cluster,

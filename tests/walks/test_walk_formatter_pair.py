@@ -53,7 +53,7 @@ def _replay(monkeypatch, tmp_path: Path, *, with_pairs: bool):
     engine_pairs: list[frozenset[FormatterPair]] = []
     measured: list[int] = []
 
-    def _coverage(_pd: Path, _cl: str, failing_tests=frozenset()):
+    def _coverage(_pd: Path, _cl: str, failing_tests=frozenset(), **_k):
         # Each sweep's measurement is identity-tagged by the iteration that
         # took it, so the binding-order assertion can say WHICH sweep's
         # reading the next attribution observed.

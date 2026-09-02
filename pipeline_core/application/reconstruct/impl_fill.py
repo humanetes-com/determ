@@ -4352,7 +4352,8 @@ def fill_impl_blocks(
             if not _coverage_on or _coverage_fn is None:
                 return {}
             cov = _coverage_fn(project_dir, cluster_name,
-                               failing_tests=frozenset(names))
+                               failing_tests=frozenset(names),
+                               cluster_env=cluster_env)
             owners = getattr(cov, "owners", None) or {}
             return {str(t).rsplit("::", 1)[-1]: frozenset(ks)
                     for t, ks in dict(owners).items()}

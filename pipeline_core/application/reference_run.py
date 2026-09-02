@@ -61,6 +61,10 @@ class ReferenceDeps:
     # doc comments, none of them a hollow body).
     enumerate_fns: Callable[[Path], list[dict[str, Any]] | None]
     test_timeout: int = 900
+    # Same contract as Task3Deps.cluster_env: the env for ONE named cluster.
+    # Bound to cluster_cargo_env in composition. None keeps cargo_env() +
+    # dict.update(env_extra) for tests that do not bind it.
+    cluster_env: Callable[..., dict[str, str]] | None = None
 
 
 def reference_dir(project_dir: Path) -> Path:
@@ -198,8 +202,9 @@ def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterRe
     if getattr(cluster, "toolchain", None):
         cmd_parts.append(f"+{cluster.toolchain}")
     cmd_parts += ["test", "--no-fail-fast"]
-    env = deps.cargo_env()
-    env.update(getattr(cluster, "env_extra", {}) or {})
+    env = deps.cluster_env(cluster) if deps.cluster_env is not None else deps.cargo_env()
+    if deps.cluster_env is None:
+        env.update(getattr(cluster, "env_extra", {}) or {})
     t0 = time.monotonic()
     try:
         res = subprocess.run(deps.parse_cmd(" ".join(cmd_parts)), cwd=tree,

@@ -85,6 +85,7 @@ from pipeline_core.adapters.body_ledger_store import (
     store_size as _body_ledger_size,
 )
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
+from pipeline_core.adapters.cargo import cluster_cargo_env
 from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.cluster_pruning import (
     prune_redundant_clusters as _prune_redundant_clusters,
@@ -1135,7 +1136,8 @@ def _tdd_measure_coverage(
     Must accept every keyword the driver passes. Run `2629191-02835a4c`
     (2026-08-30) aborted both clusters on the first dispatch ranking:
     composition had `lambda pd, cl: …` and the driver now passes
-    `failing_tests=` so pass C profiles the red set. A two-argument
+    `failing_tests=` so pass C profiles the red set, and `cluster_env=`
+    so the owner map inherits the sweep's cfg and toolchain. A two-argument
     lambda TypeErrors; functools.partial forwards keywords.
     """
     return functools.partial(_measure_coverage_slice, log=log)
@@ -1839,7 +1841,8 @@ def build_app(
                 project_dir, _load_baked_clusters(project_dir),
                 ReferenceDeps(cargo_env=ports.cargo_env, parse_cmd=_parse_cmd,
                               enumerate_fns=enumerate_fns,
-                              test_timeout=cfg.test_timeout))
+                              test_timeout=cfg.test_timeout,
+                              cluster_env=cluster_cargo_env))
         return _reference_cache[project_dir]
 
     def _reference_hollow(project_dir: Path) -> frozenset[tuple[str, str]]:
@@ -1893,6 +1896,7 @@ def build_app(
         write=write,
         test_timeout=cfg.test_timeout,
         reference=_reference,
+        cluster_env=cluster_cargo_env,
     )
 
     def _cluster_check_factory(project_dir: Path) -> Callable[[], tuple[bool, str]] | None:
@@ -1951,6 +1955,7 @@ def build_app(
         run_check_diag_fn=lambda cmd, cwd, env, timeout=180: helpers.run_cargo_check_diag(cmd, cwd, env, timeout),
         build_test_cmd_fn=_build_test_cmd,
         env_fn=ports.cargo_env,
+        cluster_env_fn=cluster_cargo_env,
         implicated_fns_from_check_fn=lambda diags, out, tsd: (
             _implicated_fns_from_check_impl(
                 diags, out, tsd, enumerate_fns=enumerate_fns)),
@@ -2578,6 +2583,7 @@ def build_app(
             # this is the uncached adapter.
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
             measure_coverage_slice=_tdd_measure_coverage(ports.log),
+            reference_measurement=_reference,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,
@@ -2853,6 +2859,7 @@ def build_app(
                 env=fill_roles.cargo.env,
                 run=fill_roles.cargo.run,
                 check_diag=helpers.run_cargo_check_diag,
+                cluster_env=cluster_cargo_env,
             ),
             attribution=Task3Attribution(
                 attribute_failures=_via("attribute_failures"),

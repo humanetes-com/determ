@@ -161,13 +161,21 @@ from pipeline_core.domain.reasoning_cap import (
     summarize_followup_salvage,
     units_all_replies_capped,
 )
+from pipeline_core.domain.reference_floor import (
+    ClusterReference,
+    FloorVerdict,
+    ReferenceMeasurement,
+    judge_against_reference,
+    pairs_of,
+    reference_floor_close_reason,
+)
 from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
 )
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
-from pipeline_core.domain.slice_session import slices_with_pair_hops
+from pipeline_core.domain.slice_session import session_slices_for_failing
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
@@ -393,6 +401,15 @@ class PhaseCTddDeps:
     # (the pre-loop gate in `fill_one_fn`, `screen_guidance`'s
     # `convictors_never_execute`); ranking then uses service/flat only.
     measure_coverage_slice: Callable[..., Any] | None = None
+    # The original crate's verdict vector for this project, so a FAIL
+    # sweep whose remaining failures are all ones the original also fails
+    # or skips can close the cluster. Task3 already judges this way; t2a
+    # used to require rc==0, so a trybuild leftover the original fails on
+    # this rustc kept the cluster open (run 216855-03b2a21b, 2026-09-02,
+    # nightly at 120/123). None disables — tests that construct
+    # PhaseCTddDeps and a REFERENCE_FLOOR=0 launch keep the absolute
+    # criterion.
+    reference_measurement: Callable[..., Any] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -2044,6 +2061,47 @@ def run_phase_c_tdd(
         # all above), so the compile verdict is read once and shared by every
         # consumer below rather than re-derived at each.
         _sweep_compile_broke = "could not compile" in (output or "")
+        # Reference-floor close: a FAIL sweep whose remaining failures are
+        # all in the original crate's failed-or-ignored set is the original's
+        # leftover, not a reconstruction hole. Task3 already promotes that
+        # to PASS; t2a used to require rc==0, so the same leftover kept the
+        # cluster open. A generated test the reference never had stays
+        # unexcused. A red build and a short oracle cannot take this path.
+        if (deps.reference_measurement is not None
+                and rc != 0 and fail_count > 0
+                and not _sweep_compile_broke and _oracle.intact):
+            _refm = deps.reference_measurement(project_dir)
+            _cref: ClusterReference | None = None
+            if isinstance(_refm, ReferenceMeasurement) and _refm.usable:
+                _cref = _refm.for_cluster(cluster.name)
+            _floor_verdict: FloorVerdict | None = None
+            if _cref is not None:
+                _op, _of, _, _ = pairs_of(parse_binary_results(output))
+                _floor_verdict = judge_against_reference(_cref, _op, _of)
+            _floor_why = reference_floor_close_reason(
+                rc=rc, fail_count=fail_count,
+                compile_broke=_sweep_compile_broke,
+                oracle_intact=_oracle.intact,
+                verdict=_floor_verdict)
+            if _floor_why:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: the {fail_count} "
+                    "remaining failure(s) are failures of the ORIGINAL crate "
+                    "on this machine, not of the reconstruction — floor met "
+                    f"({_floor_why}). Cluster done.")
+                deps.emit("phase_c.tdd.iter", data={
+                    **_prov,
+                    "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                    "frontier_size": 0, "kind": "reference_floor",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                })
+                deps.emit("phase_c.tdd.floor_met", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "reason": _floor_why,
+                    "fail_count": fail_count,
+                })
+                _cluster_done = True
+                break
         # Red-build budget: identical compile digest across three consecutive
         # sweeps means two full fill passes moved nothing about why the
         # cluster cannot compile — the failure is attempt-invariant, so it is
@@ -4002,7 +4060,8 @@ def run_phase_c_tdd(
             # per failing test on a staged copy.
             _cov = deps.measure_coverage_slice(
                 project_dir, cluster.name,
-                failing_tests=frozenset(cur_failed))
+                failing_tests=frozenset(cur_failed),
+                cluster_env=cluster_env)
         bind_coverage_slice(_cov)
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
@@ -4046,11 +4105,11 @@ def run_phase_c_tdd(
         # product and they do not re-admit permanently_exhausted.
         _owner_admits: dict[FnLocator, set[str]] = {}
         _units_for_owners: dict[str, set[FnLocator]] = {}
+        for _ok, _ots in eligible.items():
+            for _ot in _ots:
+                _units_for_owners.setdefault(
+                    bare_test_name(_ot), set()).add(_ok)
         if _cov is not None and _cov.owners:
-            for _ok, _ots in eligible.items():
-                for _ot in _ots:
-                    _units_for_owners.setdefault(
-                        bare_test_name(_ot), set()).add(_ok)
             _owner_admits = escalate_to_measured_owners(
                 owners={bare_test_name(t): ks for t, ks in _cov.owners.items()},
                 units_by_test=_units_for_owners,
@@ -4101,34 +4160,31 @@ def run_phase_c_tdd(
                     for t, ks in sorted(
                         (t, set(d)) for t, d in _by_test.items())},
             })
-        # RED-SLICE SESSIONS. The owner map is the unit of evidence — every
-        # crate fn a failing test executes — and the session route makes it
-        # the unit of work: one transcript over the whole slice instead of
-        # one prompt per unit. Run `3003-93e9a9bf` (2026-09-02) dispatched
-        # the same 20 owners as four per-file prompts and a two-fn pair per
-        # iteration, judged one at a time, and labelled 17 of them re-buys
-        # before opening them. The per-unit admission above still stands
-        # (the slice units are frontier, and a session that does not run
-        # leaves them to the other routes); the engine drops what a session
-        # served from the same call's other routes.
+        # RED-SLICE SESSIONS. The failing set is the unit of evidence, not
+        # the coverage-key subset: iterating owners.items() planned no
+        # session for cfg-gated tests an instrumented run omitted (run
+        # 216855-03b2a21b, 2026-09-02, nightly iters 4-9: owner map was ui
+        # with 0 units). Coverage owners union attributed units, then the
+        # formatter pair hop. plan_slices still drops empty and hollow.
+        # The per-unit admission above still stands (the slice units are
+        # frontier, and a session that does not run leaves them to the
+        # other routes); the engine drops what a session served from the
+        # same call's other routes.
         _session_slices: dict[str, frozenset[FnLocator]] = {}
         _session_owners: dict[str, frozenset[FnLocator]] = {}
-        if (_cov is not None and _cov.owners
-                and os.getenv("SLICE_SESSION", "1") != "0"):
-            for _ot, _oks in _cov.owners.items():
-                _otn = bare_test_name(_ot)
-                _session_owners[_otn] = frozenset(_oks)
-                _session_slices[_otn] = (
-                    frozenset(_oks)
-                    | frozenset(_units_for_owners.get(_otn, ())))
-            # A formatter dispatcher's implementer is not in the owner map
-            # until the dispatcher calls it; the hop the attribution resolved
-            # closes the slice over both halves.
-            _session_slices = slices_with_pair_hops(
-                _session_slices,
-                ((FnLocator(p.dispatcher.file, p.dispatcher.fn_name),
-                  FnLocator(p.implementer.file, p.implementer.fn_name))
-                 for p in _attr.pairs))
+        if os.getenv("SLICE_SESSION", "1") != "0":
+            _cov_owners = (
+                {bare_test_name(t): ks for t, ks in _cov.owners.items()}
+                if _cov is not None and _cov.owners else {})
+            _session_owners = {
+                t: frozenset(ks) for t, ks in _cov_owners.items()}
+            _session_slices = session_slices_for_failing(
+                cur_failed,
+                owners=_cov_owners,
+                units_by_test=_units_for_owners,
+                pairs=((FnLocator(p.dispatcher.file, p.dispatcher.fn_name),
+                        FnLocator(p.implementer.file, p.implementer.fn_name))
+                       for p in _attr.pairs))
         _before_svc = [k for k, _ in ordered]
         # The ranking reads the VERIFIED service view, not the fire's
         # inclusive `_served_at`: a floor stamp the route-scoped rule never
@@ -5250,10 +5306,12 @@ def run_phase_c_tdd(
         baseline_broken=_baseline_broken,
         failed_tests=last_failed,
         ran_tests=last_ran,
-        # Finishing with failing tests is EXHAUSTED, not done. The checkpoint
+        # Finishing with failing tests is EXHAUSTED, not done — except a
+        # reference-floor close, which still has last_failed (the original
+        # crate's leftover) but is the same success as rc==0. The checkpoint
         # marker is the same either way and a cluster is never re-opened, so
         # without this the distinction is lost at the boundary and whatever
         # repairs the merged tree starts from a bare failing-test name.
-        exhausted=bool(last_failed),
+        exhausted=bool(last_failed) and not _cluster_done,
         exhausted_fns=tuple(sorted(permanently_exhausted)),
     )

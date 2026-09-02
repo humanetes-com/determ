@@ -89,6 +89,49 @@ def test_run_clusters_strict_all_green_passes(tmp_path: Path) -> None:
     assert all(r["status"] == "pass" for r in results)
 
 
+def test_run_clusters_strict_uses_the_injected_cluster_env(tmp_path: Path) -> None:
+    """When cluster_env is bound, env_extra is not merged by dict.update on
+    cargo_env() — that overlay is what replaced RUSTFLAGS and skipped the
+    toolchain. cargo_env() here returns a failing FAKE_RESULT and env_extra
+    would too; only the injected mapping is green."""
+    from pipeline_core.application.tasks.task3 import Task3Deps, run_clusters_strict
+    seen: list[str] = []
+
+    def cluster_env(c: SimpleNamespace) -> dict[str, str]:
+        seen.append(c.name)
+        return {
+            "PATH": os.environ.get("PATH", ""),
+            "FAKE_RESULT": "ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+        }
+
+    deps = Task3Deps(
+        phase=None,
+        load_baked_clusters=lambda p: [],
+        task3_legacy_single=lambda *a, **k: (False, ""),
+        cargo_env=lambda: {
+            "PATH": os.environ.get("PATH", ""),
+            "FAKE_RESULT": "FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out",
+        },
+        parse_cmd=lambda cmd: ["sh", "-c", 'echo "test result: $FAKE_RESULT"'],
+        count_active_tests_for_cluster=lambda p, c: 5,
+        store_prompt_content=lambda s: "",
+        task3_inline_retry=lambda **k: (False, ""),
+        read=lambda p: "",
+        write=lambda p, s: None,
+        test_timeout=30,
+        cluster_env=cluster_env,
+    )
+    all_pass, _output, results = run_clusters_strict(
+        tmp_path,
+        [_cluster("stable", {"FAKE_RESULT":
+                  "FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out"})],
+        deps,
+    )
+    assert all_pass is True
+    assert seen == ["stable"]
+    assert results[0]["status"] == "pass"
+
+
 def test_generate_fix_loop_honors_check_fn_over_cmd(tmp_path: Path) -> None:
     """check_fn is the verdict authority: when it reports pass, the loop
     returns success WITHOUT running check_cmd (`false` here would fail rc=1

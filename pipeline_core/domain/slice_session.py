@@ -394,6 +394,47 @@ def coverage_note_for(
     return " ".join(parts)
 
 
+def _units_named(
+    name: str,
+    table: Mapping[str, Collection[FnLocator]] | None,
+) -> set[FnLocator]:
+    """Units keyed by a cargo-qualified name or its last `::` segment."""
+    if not table:
+        return set()
+    out: set[FnLocator] = set()
+    bare = name.rsplit("::", 1)[-1]
+    for key, units in table.items():
+        if key == name or key.rsplit("::", 1)[-1] == bare:
+            out.update(units)
+    return out
+
+
+def session_slices_for_failing(
+    failing: Iterable[str],
+    *,
+    owners: Mapping[str, Collection[FnLocator]] | None = None,
+    units_by_test: Mapping[str, Collection[FnLocator]] | None = None,
+    pairs: Iterable[tuple[FnLocator, FnLocator]] = (),
+) -> dict[str, frozenset[FnLocator]]:
+    """Per-failing-test unit sets for the red-slice session.
+
+    Coverage keys are not the failing set: an instrumented run that
+    dropped the cluster cfg never lists a cfg-gated test, so iterating
+    `owners.items()` planned no session for tests attribution already
+    owned (run 216855-03b2a21b, 2026-09-02, cluster nightly iters 4-9:
+    the owner map was ui with 0 units). Every failing name gets a
+    slice — measured owners union attributed units — then the formatter
+    pair hop. plan_slices still drops empty and hollow.
+    """
+    raw: dict[str, set[FnLocator]] = {}
+    for item in failing:
+        name = str(item)
+        bare = name.rsplit("::", 1)[-1]
+        raw.setdefault(bare, set()).update(
+            _units_named(name, owners) | _units_named(name, units_by_test))
+    return slices_with_pair_hops(raw, pairs)
+
+
 def slices_with_pair_hops(
     slices: Mapping[str, Collection[FnLocator]],
     pairs: Iterable[tuple[FnLocator, FnLocator]],
