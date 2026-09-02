@@ -1,7 +1,7 @@
 """Pins FixLoopCaps.from_env — the env→value mapping the pipeline.py fix/stall
 globals are now single-sourced from."""
 
-from pipeline_core.settings import FixLoopCaps
+from pipeline_core.settings import FixLoopCaps, Settings
 
 
 def test_fixloopcaps_defaults(monkeypatch):
@@ -55,3 +55,12 @@ def test_legacy_hard_cap_aliases(monkeypatch):
     c = FixLoopCaps.from_env(single_call_char_limit=100_000)
     assert c.per_fn_fix_hard_cap == 42
     assert c.per_pass_test_fix_hard_cap == 99
+
+
+def test_behaviour_pin_env_debug_defaults_on(monkeypatch):
+    monkeypatch.delenv("BEHAVIOUR_PIN_ENV_DEBUG", raising=False)
+    assert Settings.from_env().behaviour_pin_env_debug is True
+    monkeypatch.setenv("BEHAVIOUR_PIN_ENV_DEBUG", "0")
+    assert Settings.from_env().behaviour_pin_env_debug is False
+    monkeypatch.setenv("BEHAVIOUR_PIN_ENV_DEBUG", "1")
+    assert Settings.from_env().behaviour_pin_env_debug is True

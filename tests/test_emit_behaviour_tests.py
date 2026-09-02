@@ -45,6 +45,18 @@ _STEM = behaviour_test_stem("stable")
 Verify = Callable[[str, Mapping[str, str]], tuple[bool, str]]
 
 
+def _fn_sets_env(body: str, fn: str) -> bool:
+    """True when `fn`'s body writes `std::env::set_var` — the test pins its
+    own world and cargo extra must not convict it."""
+    marker = f"fn {fn}()"
+    at = body.find(marker)
+    if at < 0:
+        return False
+    nxt = body.find("\nfn ", at + len(marker))
+    chunk = body[at:] if nxt < 0 else body[at:nxt]
+    return "std::env::set_var" in chunk
+
+
 def _spec(name: str, when: str = "e.to_string()", stdout: str = "boom") -> BehaviourSpec:
     return captured_spec(
         cfg_cluster="stable",
@@ -82,7 +94,10 @@ def _verifier(tmp: Path, red: frozenset[str] = frozenset(), red_under_env: froze
     def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
         body = (tmp / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
         present = re.findall(r"fn (behaviour_\w+)\(\)", body)
-        bad = set(red) | (set(red_under_env) if extra else set())
+        # A test that writes set_var pins its own world; cargo extra must not
+        # convict it. That is the load-bearing half of required_env.
+        pinned = {n for n in present if _fn_sets_env(body, n)}
+        bad = set(red) | (set(red_under_env) - pinned if extra else set())
         failed = [n for n in present if n in bad]
         passed = [n for n in present if n not in bad]
         return not failed, _libtest(passed, failed)
@@ -94,7 +109,15 @@ def _emit(
     tmp: Path, specs: list[BehaviourSpec], verify: Verify, **kw: object
 ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]]]:
     (tmp / "tests").mkdir(parents=True, exist_ok=True)
-    return emit_behaviour_tests(tmp, "stable", specs, crate="anyhow", verify=verify, **kw)  # type: ignore[arg-type]
+    dest, dropped, misses, _emitted = emit_behaviour_tests(
+        tmp,
+        "stable",
+        specs,
+        crate="anyhow",
+        verify=verify,
+        **kw,  # type: ignore[arg-type]
+    )
+    return dest, dropped, misses
 
 
 def test_a_capture_whose_replay_disagrees_with_it_is_withdrawn(tmp_path: Path) -> None:
@@ -118,9 +141,10 @@ def test_a_capture_whose_replay_disagrees_with_it_is_withdrawn(tmp_path: Path) -
 
 
 def test_an_environment_dependent_capture_is_withdrawn(tmp_path: Path) -> None:
-    """Green under the capture env, red under the flip. Run-twice cannot see
-    this: `err.backtrace()` renders the same string on every run at a fixed
-    env and a different one under `RUST_BACKTRACE=1`."""
+    """Green under the capture env, red under the flip, and no recapture.
+    NEGATIVE CONTROL of the two-world contract: without a recapture that
+    prints a different Then, the mover is still withdrawn. That is what
+    shipped."""
     fixed, moving = _spec("stable_value"), _spec("backtrace", when="e.backtrace()")
     env_red = frozenset({replay_fn_name(moving)})
 
@@ -139,6 +163,47 @@ def test_an_environment_dependent_capture_is_withdrawn(tmp_path: Path) -> None:
     assert dropped2 == ()
     assert dest2 is not None
     assert replay_fn_name(moving) in dest2.read_text(encoding="utf-8")
+
+
+def test_an_environment_dependent_capture_is_emitted_as_two_worlds(tmp_path: Path) -> None:
+    """A recapture that prints a different Then is TWO tests, each pinning
+    its world with set_var, not a withdrawal. The original id stays; the
+    twin is `::env`."""
+    from dataclasses import replace as dc_replace
+
+    from pipeline_core.domain.behaviour_probe import env_twin_id
+
+    fixed, moving = _spec("stable_value"), _spec("backtrace", when="e.backtrace()")
+    env_red = frozenset({replay_fn_name(moving)})
+    perturb = {"RUST_BACKTRACE": "1"}
+
+    def recapture(spec: BehaviourSpec, extra: Mapping[str, str]) -> str | None:
+        assert extra == perturb
+        if spec.behaviour_id == moving.behaviour_id:
+            return "captured frames\n"
+        return None
+
+    dest, dropped, misses = _emit(
+        tmp_path,
+        [fixed, moving],
+        _verifier(tmp_path, red_under_env=env_red),
+        perturb_env=perturb,
+        recapture=recapture,
+    )
+    assert dropped == () and misses == []
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    twin_fn = replay_fn_name(dc_replace(moving, behaviour_id=env_twin_id(moving.behaviour_id)))
+    assert replay_fn_name(moving) in body
+    assert twin_fn in body
+    orig_at = body.index(f"fn {replay_fn_name(moving)}()")
+    twin_at = body.index(f"fn {twin_fn}()")
+    orig_chunk = body[orig_at:twin_at] if orig_at < twin_at else body[orig_at:]
+    twin_chunk = body[twin_at:] if twin_at > orig_at else body[twin_at:orig_at]
+    assert 'set_var("RUST_BACKTRACE", "0")' in orig_chunk
+    assert 'set_var("RUST_BACKTRACE", "1")' in twin_chunk
+    assert orig_chunk.index("set_var") < orig_chunk.index("let e = anyhow")
+    assert 'assert_eq!(format!("{}", e.backtrace()), "captured frames")' in twin_chunk
 
 
 def test_a_file_that_does_not_build_withdraws_everything_and_leaves_no_file(tmp_path: Path) -> None:

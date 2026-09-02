@@ -291,6 +291,13 @@ class BehaviourSpec:
     cfg_cluster: str = "default"  # nightly backtrace behaviour ≠ stable
     source_ref: str = ""  # where harvested (file:line / example name)
     klass: BehaviourClass = BehaviourClass.OTHER  # see classify_behaviour
+    # Env the replay must run under. Empty = the value does not move with
+    # OBSERVABLE_ENV_KEYS (verified under both the capture env and the
+    # perturb). Non-empty is load-bearing: render_replay_test writes set_var
+    # from it before given, and the emitter verifies that test only as a pin
+    # of that world. A previous capture_env field was write-only and caught
+    # nothing; this one is consumed at render and at verify.
+    required_env: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         # An OUTCOME-behaviour compares a captured observable to a golden Then,
@@ -318,7 +325,7 @@ class BehaviourSpec:
         return self.then is not None and self.then.is_runtime
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "behaviour_id": self.behaviour_id,
             "given": self.given,
             "when": self.when,
@@ -331,9 +338,17 @@ class BehaviourSpec:
             "source_ref": self.source_ref,
             "klass": self.klass.name,
         }
+        if self.required_env:
+            d["required_env"] = dict(self.required_env)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BehaviourSpec:
+        raw_env = d.get("required_env") or ()
+        if isinstance(raw_env, dict):
+            required_env = tuple(sorted((str(k), str(v)) for k, v in raw_env.items()))
+        else:
+            required_env = tuple((str(a), str(b)) for a, b in raw_env)
         return cls(
             behaviour_id=str(d["behaviour_id"]),
             given=str(d.get("given", "")),
@@ -346,6 +361,7 @@ class BehaviourSpec:
             cfg_cluster=str(d.get("cfg_cluster", "default")),
             source_ref=str(d.get("source_ref", "")),
             klass=BehaviourClass[str(d.get("klass", "OTHER"))],
+            required_env=required_env,
         )
 
 
@@ -579,9 +595,7 @@ def union_cluster_suites(
     for suite in suites:
         for spec in suite.specs:
             then = spec.then
-            tkey = (
-                None if then is None
-                else (then.kind.name, then.value, then.ok))
+            tkey = None if then is None else (then.kind.name, then.value, then.ok)
             key = (spec.behaviour_id, tkey)
             if spec.behaviour_id and key in seen:
                 continue

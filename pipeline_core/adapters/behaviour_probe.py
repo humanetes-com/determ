@@ -14,10 +14,11 @@ the pre-strip tree the bake reads is byte-identical to what it was. A crate
 with `autoexamples = false` will not discover the file; the run then fails
 and the probe is dropped, which is the correct (self-filtering) outcome.
 """
+
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
@@ -41,14 +42,16 @@ def _partial(captured: object) -> str:
 
 
 def subprocess_runner(
-    cmd: list[str], cwd: Path, env: dict[str, str], timeout: int,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
 ) -> tuple[int, str, str]:
     """The production :data:`Runner`: rc −1 on timeout / missing binary, with
     the partial output kept (it names what was running when the clock ran
     out)."""
     try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True,
-                           text=True, timeout=timeout)
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout or "", r.stderr or ""
     except subprocess.TimeoutExpired as e:
         return -1, _partial(e.stdout), _partial(e.stderr) + f"\nTIMEOUT after {timeout}s"
@@ -99,6 +102,7 @@ def run_probe(
     *,
     timeout: int = 180,
     run: Runner | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> ProbeResult:
     """Build + run `program` as a cargo example of the crate at `project_dir`
     under `cluster`'s env; `ok` iff the process exited 0. stdout is returned
@@ -106,7 +110,8 @@ def run_probe(
     recorded, so the raw text stays available for the log."""
     runner = run or subprocess_runner
     env = probe_env(cluster)
+    if extra_env:
+        env.update(extra_env)
     with materialized_probe(project_dir, program, name) as target:
-        rc, out, err = runner(["cargo", "run", "--quiet", "--example", target],
-                              Path(project_dir), env, timeout)
+        rc, out, err = runner(["cargo", "run", "--quiet", "--example", target], Path(project_dir), env, timeout)
     return ProbeResult(ok=(rc == 0), stdout=out, stderr=err)

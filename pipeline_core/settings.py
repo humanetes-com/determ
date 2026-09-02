@@ -134,6 +134,13 @@ class Settings:
     # predict; the capture route owns those. Off restores the pre-split
     # listing, so the split can be turned off without a code edit.
     behaviour_capture_split: bool = True
+    # Pin env-moving public Debug via two-world captures. On: a capture whose
+    # value moves under a perturb (RUST_BACKTRACE) is recaptured and emitted
+    # as two tests, the probe ask ranks EXACT_FORMAT by Debug probes, and a
+    # Display observe is a miss for that ask. Off restores the pre-2026-09-02
+    # contract: movers are withdrawn, harvest Display counts as exact-format
+    # coverage, and the ask is Display, Debug, or alternate.
+    behaviour_pin_env_debug: bool = True
 
     @classmethod
     def from_env(cls, model: str = "") -> Settings:
@@ -175,4 +182,5 @@ class Settings:
             task0d_classes_per_cluster=int(
                 os.getenv("TASK0D_CLASSES_PER_CLUSTER", "4")),
             behaviour_capture_split=os.getenv("BEHAVIOUR_CAPTURE_SPLIT", "1").strip() == "1",
+            behaviour_pin_env_debug=os.getenv("BEHAVIOUR_PIN_ENV_DEBUG", "1").strip() == "1",
         )

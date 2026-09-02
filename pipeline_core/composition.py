@@ -1729,6 +1729,7 @@ def build_app(
         PROBE_BLOCKS_PER_REPLY=settings.task0d_blocks_per_reply,
         PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,
         EXERCISES_ENABLED=settings.task0d_exercises,
+        PIN_ENV_DEBUG=settings.behaviour_pin_env_debug,
     )
 
     model_notes_store = FileModelNotesStore(

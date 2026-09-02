@@ -30,9 +30,12 @@ ways for a capture to land red with nothing to catch it:
     this, because the value is perfectly stable at any fixed env.
 
 So every emitted file is compiled and run twice: once under the capture env,
-once under a PERTURBED one. A capture that fails either is not a specification;
-it is dropped, recorded as a miss, and removed from the suite by the caller.
-There is no third state where it quietly stays.
+once under a PERTURBED one. A capture that fails the capture-env run is not a
+specification and is dropped. A capture whose value MOVES under the perturb
+is recaptured in that world and emitted as two tests (one per env), each
+carrying `required_env` so the reconstruction sweep is in the same world.
+A mover that cannot be recaptured is still withdrawn. There is no third
+state where an env-moving capture quietly stays as a single Then.
 
 WHY A PER-CLUSTER STEM, AND WHY THE FILE IS CFG-GATED. `tests/` is symlinked
 into every cluster's filled tree (`task2_generator`, `[skeleton-C]`), so an
@@ -58,7 +61,12 @@ from contextlib import suppress
 from pathlib import Path
 
 from pipeline_core.domain.behaviour import BehaviourSpec
-from pipeline_core.domain.behaviour_probe import is_probe_spec, render_replay_test
+from pipeline_core.domain.behaviour_probe import (
+    capture_moved,
+    is_probe_spec,
+    render_replay_test,
+    split_env_worlds,
+)
 from pipeline_core.domain.generation import (
     as_integration_test,
     gen_tests_integration_rel,
@@ -71,6 +79,9 @@ from pipeline_core.log import emit, log
 BEHAVIOUR_TEST_STEM = "behaviour"
 # (test binary stem, extra env) -> (process ok, combined stdout+stderr).
 Verify = Callable[[str, Mapping[str, str]], tuple[bool, str]]
+# Recapture Then under an extra env: raw stdout, or None if the program
+# failed to run. Injected so the emitter does not own cargo.
+Recapture = Callable[[BehaviourSpec, Mapping[str, str]], str | None]
 # How many times the file may be re-rendered after dropping what failed. Three
 # is a termination bound, not a budget: each round drops at least one capture,
 # so the loop ends either green or empty.
@@ -251,15 +262,22 @@ def emit_behaviour_tests(
     perturb_env: Mapping[str, str] = (),  # type: ignore[assignment]
     cfg_attr: str = "",
     balanced: Callable[[str], bool] = lambda _s: True,
-) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]]]:
+    recapture: Recapture | None = None,
+) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
     """Write the replayable captures as one `tests/<stem>_gen_1.rs`, verified.
 
-    Returns `(path or None, dropped behaviour ids, misses)`. The caller removes
-    the dropped ids from the suite and writes the misses to the sidecar: a
-    capture whose replay disagrees with its capture, or whose value moves with
-    the environment, is not a specification, and leaving it in the suite would
-    hand t1.5 a MUST that no tree can satisfy — the silent divergence this
-    whole route exists to remove, arriving from the other side.
+    Returns `(path or None, dropped behaviour ids, misses, emitted specs)`.
+    The caller removes the dropped ids from the suite, upserts the emitted
+    specs (capture-world originals with `required_env` set, plus perturb-world
+    twins), and writes the misses to the sidecar.
+
+    A capture whose replay disagrees with it at the capture env is not a
+    specification. A capture whose value moves under `perturb_env` is
+    recaptured in that world (`recapture`) and kept as two tests; without a
+    recapture that prints a different Then it is withdrawn — the contract
+    that shipped as drop-the-mover, now the fallback when the other world
+    cannot be read. Leaving a mover in the suite as a single Then would
+    hand t1.5 a MUST that no tree can satisfy.
 
     None with no drops is the expected state for a suite whose captures are all
     legacy free-form blobs. A delimiter-unbalanced render is refused rather
@@ -271,7 +289,7 @@ def emit_behaviour_tests(
     misses: list[dict[str, str]] = []
     dropped: list[str] = []
     if not keep:
-        return None, (), misses
+        return None, (), misses, ()
 
     def _drop(spec: BehaviourSpec, reason: str) -> None:
         dropped.append(spec.behaviour_id)
@@ -324,7 +342,7 @@ def emit_behaviour_tests(
                     dest.unlink()
                 for s in keep:
                     _drop(s, "replay refused: delimiters unbalanced")
-                return None, tuple(dropped), misses
+                return None, tuple(dropped), misses, ()
             dest.write_text(body, encoding="utf-8")
 
             ok, out = verify(dest.stem, {})
@@ -344,7 +362,7 @@ def emit_behaviour_tests(
                     dest.unlink()
                 for s in keep:
                     _drop(s, "replay did not build or reported no verdict")
-                return None, tuple(dropped), misses
+                return None, tuple(dropped), misses, ()
             if failed:
                 keep, went = _withdraw(keep, failed, _drop, "replay disagreed with the capture")
                 log(
@@ -361,10 +379,10 @@ def emit_behaviour_tests(
                         _drop(s, "replay red on a verdict naming no capture in the file")
                 with suppress(OSError):
                     dest.unlink()
-                return None, tuple(dropped), misses
+                return None, tuple(dropped), misses, ()
             if unrun := _unexecuted(keep, executed):
                 _withdraw_unrun(unrun, perturbed=False)
-                return None, tuple(dropped), misses
+                return None, tuple(dropped), misses, ()
 
             # Green under the capture env. Now the axis run-twice cannot see: the
             # same binary under a different environment. A capture whose value
@@ -390,26 +408,61 @@ def emit_behaviour_tests(
                         dest.unlink()
                     for s in keep:
                         _drop(s, "perturbed replay reported no verdict — environment-dependence not ruled out")
-                    return None, tuple(dropped), misses
+                    return None, tuple(dropped), misses, ()
                 if failed2:
-                    keep, went = _withdraw(
-                        keep, failed2, _drop, f"environment-dependent: the observed value moves under {dict(perturb_env)}"
-                    )
-                    log(
-                        f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) are "
-                        "environment-dependent and were withdrawn."
-                    )
-                    if keep and went:
+                    still: list[BehaviourSpec] = []
+                    env_went: list[BehaviourSpec] = []
+                    split = False
+                    env_reason = f"environment-dependent: the observed value moves under {dict(perturb_env)}"
+                    for spec in keep:
+                        if replay_fn_name(spec) not in failed2:
+                            still.append(spec)
+                            continue
+                        if spec.required_env:
+                            # Already pinned to one world. A red under this
+                            # extra is a replay disagreement in that world
+                            # only when the extra IS that world; otherwise
+                            # set_var should have isolated it.
+                            if dict(spec.required_env) == dict(perturb_env):
+                                env_went.append(spec)
+                                _drop(spec, "replay disagreed with the capture")
+                            else:
+                                still.append(spec)
+                            continue
+                        stdout = recapture(spec, perturb_env) if recapture is not None else None
+                        if stdout is None or not capture_moved(spec, stdout):
+                            env_went.append(spec)
+                            _drop(spec, env_reason)
+                            continue
+                        orig, twin = split_env_worlds(spec, stdout, perturb_env)
+                        still.append(orig)
+                        still.append(twin)
+                        split = True
+                    keep = still
+                    if split:
+                        log(
+                            f"  [task0d] cluster {cfg_cluster}: recaptured "
+                            f"{sum(1 for s in keep if s.behaviour_id.endswith('::env'))} "
+                            f"capture(s) under the perturbed environment as a second world."
+                        )
+                    if env_went:
+                        log(
+                            f"  [task0d] cluster {cfg_cluster}: {len(env_went)} capture(s) are "
+                            "environment-dependent and were withdrawn."
+                        )
+                    if split and keep:
+                        continue
+                    if keep and env_went:
                         continue
                     if keep:
                         for s in keep:
                             _drop(s, "perturbed replay red on a verdict naming no capture in the file")
                     with suppress(OSError):
                         dest.unlink()
-                    return None, tuple(dropped), misses
+                    return None, tuple(dropped), misses, ()
                 if unrun := _unexecuted(keep, executed2):
                     _withdraw_unrun(unrun, perturbed=True)
-                    return None, tuple(dropped), misses
+                    return None, tuple(dropped), misses, ()
 
             log(
                 f"  [task0d] cluster {cfg_cluster}: {len(keep)} captured behaviour(s) "
@@ -421,7 +474,7 @@ def emit_behaviour_tests(
                 "task0d.behaviour_tests_emitted",
                 data={"cluster": cfg_cluster, "captures": len(keep), "file": dest.name, "withdrawn": len(dropped)},
             )
-            return dest, tuple(dropped), misses
+            return dest, tuple(dropped), misses, tuple(keep)
 
         # Every round dropped something and the budget ran out with the file still
         # red: withdraw the rest rather than leave a failing test in the oracle.
@@ -433,7 +486,7 @@ def emit_behaviour_tests(
             dest.unlink()
         for s in keep:
             _drop(s, "replay still red after the verification budget")
-        return None, tuple(dropped), misses
+        return None, tuple(dropped), misses, ()
     except BaseException:
         with suppress(OSError):
             dest.unlink()

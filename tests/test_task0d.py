@@ -3,6 +3,7 @@ the suite, marks the phase, skips a done cluster, drops a failing probe
 (negative control), fills exercises, survives a probe-stage exception, and
 logs the one reading line with the three defect-observable flags computed by
 the same patterns the census uses."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -18,17 +19,29 @@ FIXTURES = Path(__file__).parent / "fixtures" / "behaviours"
 
 
 def _cluster(name: str = "stable", default: bool = True) -> BuildCluster:
-    return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],
-                        excluded_cfg=[], active_cfg=[], prompt_nightly_rule="",
-                        is_default=default)
+    return BuildCluster(
+        name=name,
+        env_extra={},
+        tarpaulin_exclude_files=[],
+        excluded_cfg=[],
+        active_cfg=[],
+        prompt_nightly_rule="",
+        is_default=default,
+    )
 
 
 class _World:
     """Recorded side effects of one run."""
 
-    def __init__(self, *, done: set[str] = frozenset(), probe_ok: bool = True,
-                 reply: str = "", exercises: dict[str, frozenset[str]] | None = None,
-                 probes_raise: bool = False):
+    def __init__(
+        self,
+        *,
+        done: set[str] = frozenset(),
+        probe_ok: bool = True,
+        reply: str = "",
+        exercises: dict[str, frozenset[str]] | None = None,
+        probes_raise: bool = False,
+    ):
         self.logs: list[str] = []
         self.events: list[tuple[str, dict[str, object]]] = []
         self.marked: list[tuple[str, str]] = []
@@ -44,15 +57,22 @@ class _World:
         self.probes_raise = probes_raise
 
     def deps(self, **over: object) -> Task0dDeps:
-        tests = [(f"tests/{n}", (FIXTURES / n).read_text(encoding="utf-8"))
-                 for n in ("test_fmt.rs", "test_ensure.rs", "test_downcast.rs")]
+        tests = [
+            (f"tests/{n}", (FIXTURES / n).read_text(encoding="utf-8"))
+            for n in ("test_fmt.rs", "test_ensure.rs", "test_downcast.rs")
+        ]
 
-        def run_probe(pd: Path, cl: BuildCluster | None, program: str, name: str) -> ProbeResult:
+        def run_probe(
+            pd: Path, cl: BuildCluster | None, program: str, name: str, extra_env: object = None, **_k: object
+        ) -> ProbeResult:
             if self.probes_raise:
                 raise RuntimeError("cargo exploded")
             self.probes_run.append((name, program))
-            return (ProbeResult(True, "printed 42\n", "") if self.probe_ok
-                    else ProbeResult(False, "", "error[E0599]: no method"))
+            return (
+                ProbeResult(True, "printed 42\n", "")
+                if self.probe_ok
+                else ProbeResult(False, "", "error[E0599]: no method")
+            )
 
         def ask(prompt: str) -> str:
             self.prompts.append(prompt)
@@ -63,10 +83,12 @@ class _World:
             "emit": lambda ev, **f: self.events.append((ev, f)),
             "mark_phase": lambda pd, key, status, detail="": self.marked.append((key, status)),
             "phase_valid": lambda pd, key: key in self.done,
-            "commit_and_mark": lambda pd, key, status, commit_message, detail="":
-                self.committed.append((key, status, commit_message)),
+            "commit_and_mark": lambda pd, key, status, commit_message, detail="": self.committed.append(
+                (key, status, commit_message)
+            ),
             "read_sources": lambda sd: [
-                ("lib.rs", "/// ```\n/// let e = anyhow!(\"x\");\n/// ```\npub fn anyhow() {}\n")],
+                ("lib.rs", '/// ```\n/// let e = anyhow!("x");\n/// ```\npub fn anyhow() {}\n')
+            ],
             "read_test_sources": lambda pd: tests,
             "harvest": harvest_behaviour_suite,
             "save_suite": lambda pd, suite: self.saved.__setitem__(suite.cfg_cluster, suite) or pd,
@@ -76,7 +98,8 @@ class _World:
             "symbol_inventory": lambda pd, c: "",
             "enumerate_fns": lambda sd: [
                 FnRecord(file="lib.rs", fn_name="unnamed_public", is_pub=True, is_exactly_pub=True),
-                FnRecord(file="lib.rs", fn_name="anyhow", is_pub=True, is_exactly_pub=True)],
+                FnRecord(file="lib.rs", fn_name="anyhow", is_pub=True, is_exactly_pub=True),
+            ],
             "enumerate_mods": lambda sd: [],
             "enumerate_types": lambda sd: [],
             "run_probe": run_probe,
@@ -90,18 +113,22 @@ class _World:
 # The constrained shape the synthesis prompt now asks for: setup statements, a
 # single expression, and the render kind. The harness prints the expression to
 # capture and asserts it to replay, from these same three parts.
-_REPLY = ('<BEHAVIOUR name="unnamed_public">\n'
-          '<GIVEN>\n    let v = crate_x::unnamed_public();\n</GIVEN>\n'
-          '<WHEN>v</WHEN>\n<OBSERVE>display</OBSERVE>\n</BEHAVIOUR>')
+_REPLY = (
+    '<BEHAVIOUR name="unnamed_public">\n'
+    "<GIVEN>\n    let v = crate_x::unnamed_public();\n</GIVEN>\n"
+    "<WHEN>v</WHEN>\n<OBSERVE>debug</OBSERVE>\n</BEHAVIOUR>"
+)
 
 
 def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_path: Path) -> None:
-    w = _World(reply=_REPLY, exercises={
-        "testassert::tests/test_fmt.rs::test_altdebug::0": frozenset({"src/fmt.rs::fmt"})})
+    w = _World(
+        reply=_REPLY, exercises={"testassert::tests/test_fmt.rs::test_altdebug::0": frozenset({"src/fmt.rs::fmt"})}
+    )
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     suite = w.saved["stable"]
     assert suite.specs and w.committed == [
-        ("task0d/stable", "done", f"pipeline: task0d/stable — {len(suite.specs)} behaviour(s)")]
+        ("task0d/stable", "done", f"pipeline: task0d/stable — {len(suite.specs)} behaviour(s)")
+    ]
     reading = [ln for ln in w.logs if ln.startswith("  [task0d] cluster stable:") and "behaviours —" in ln]
     assert len(reading) == 1
     line = reading[0]
@@ -122,7 +149,7 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     # The constrained capture stores a TYPED kind, not a stdout blob: that is
     # what keeps `classified()` from returning OTHER, which t1.5's cap discards
     # for ranking last and which no generated test can pin.
-    assert probe.then.kind is OutcomeKind.DISPLAY_STRING
+    assert probe.then.kind is OutcomeKind.DEBUG_STRING
     assert probe.then.value == "printed 42"
     filled = next(s for s in suite.specs if s.behaviour_id == "testassert::tests/test_fmt.rs::test_altdebug::0")
     assert filled.exercises == frozenset({"src/fmt.rs::fmt"})
@@ -163,8 +190,9 @@ def test_probe_exception_keeps_the_harvested_suite(tmp_path: Path) -> None:
 
 def test_exercises_disabled_and_no_probe_budget(tmp_path: Path) -> None:
     w = _World(reply=_REPLY, exercises={"x": frozenset({"y"})})
-    run_task0d(w.deps(EXERCISES_ENABLED=False, PROBE_MAX_PER_CLUSTER=0),
-               tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    run_task0d(
+        w.deps(EXERCISES_ENABLED=False, PROBE_MAX_PER_CLUSTER=0), tmp_path, "anyhow", [_cluster()], tmp_path / "src"
+    )
     line = next(ln for ln in w.logs if "behaviours —" in ln)
     assert "exercises filled: 0/" in line and "probes admitted 0 / proposed 0" in line
     assert not w.prompts
@@ -182,8 +210,7 @@ def test_harvest_failure_leaves_the_phase_open(tmp_path: Path) -> None:
 
 def test_each_cluster_gets_its_own_suite(tmp_path: Path) -> None:
     w = _World()
-    run_task0d(w.deps(), tmp_path, "anyhow",
-               [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
+    run_task0d(w.deps(), tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
     assert set(w.saved) == {"stable", "nightly"}
     assert [c[0] for c in w.committed] == ["task0d/stable", "task0d/nightly"]
     s = w.saved["nightly"].specs[0]
@@ -194,12 +221,12 @@ def test_each_cluster_gets_its_own_suite(tmp_path: Path) -> None:
 # The class axis is the REQUEST, and the unit axis is no longer the on-switch.
 # --------------------------------------------------------------------------
 
+
 def _named_fn(name: str) -> FnRecord:
     return FnRecord(file="lib.rs", fn_name=name, is_pub=True, is_exactly_pub=True)
 
 
-def test_probes_still_ask_by_class_when_no_public_unit_is_left_over(
-        tmp_path: Path) -> None:
+def test_probes_still_ask_by_class_when_no_public_unit_is_left_over(tmp_path: Path) -> None:
     """`probe_targets` keeps public fns no harvested spec names. Returning
     early when that set is empty left the UNIT axis as the on-switch of the
     mechanism built to leave it: a crate whose harvest already names every
@@ -207,8 +234,9 @@ def test_probes_still_ask_by_class_when_no_public_unit_is_left_over(
     w = _World(reply=_REPLY)
     # `anyhow` is named by the doc-test the fixture harvests, so nothing is
     # left over on the unit axis.
-    run_task0d(w.deps(enumerate_fns=lambda sd: [_named_fn("anyhow")]),
-               tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    run_task0d(
+        w.deps(enumerate_fns=lambda sd: [_named_fn("anyhow")]), tmp_path, "anyhow", [_cluster()], tmp_path / "src"
+    )
     assert len(w.prompts) == 1
     assert "write ONE behaviour for each of these classes" in w.prompts[0]
     assert w.saved["stable"].specs
@@ -218,9 +246,71 @@ def test_the_probe_budget_at_zero_is_still_the_kill_switch(tmp_path: Path) -> No
     """NEGATIVE CONTROL for the test above: `TASK0D_PROBE_MAX=0` documents
     "no probes", and asking by class must not smuggle a model call past it."""
     w = _World(reply=_REPLY)
-    run_task0d(w.deps(PROBE_MAX_PER_CLUSTER=0, enumerate_fns=lambda sd: [_named_fn("anyhow")]),
-               tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    run_task0d(
+        w.deps(PROBE_MAX_PER_CLUSTER=0, enumerate_fns=lambda sd: [_named_fn("anyhow")]),
+        tmp_path,
+        "anyhow",
+        [_cluster()],
+        tmp_path / "src",
+    )
     assert w.prompts == [] and w.probes_run == []
+
+
+_DISPLAY_REPLY = (
+    '<BEHAVIOUR name="unnamed_public">\n'
+    "<GIVEN>\n    let v = crate_x::unnamed_public();\n</GIVEN>\n"
+    "<WHEN>v</WHEN>\n<OBSERVE>display</OBSERVE>\n</BEHAVIOUR>"
+)
+
+
+def test_a_display_observe_is_a_miss_for_the_exact_format_ask(tmp_path: Path) -> None:
+    """EXACT_FORMAT is asked (harvest Display does not cover it). A Display
+    observe of a public value is not that pin and must not spend cargo."""
+    w = _World(reply=_DISPLAY_REPLY)
+    run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    reasons = [m["reason"] for _c, ms in w.misses for m in ms]
+    assert reasons and "EXACT_FORMAT ask requires observe debug" in reasons[0]
+    assert w.probes_run == []
+    assert not any(s.behaviour_id.startswith("probe::") for s in w.saved["stable"].specs)
+    assert "never Display" in w.prompts[0]
+
+
+def test_pin_env_debug_off_admits_display_and_does_not_recapture(tmp_path: Path) -> None:
+    """BEHAVIOUR_PIN_ENV_DEBUG=0 restores the pre-2026-09-02 contract: harvest
+    Display covers EXACT_FORMAT so the Debug-only miss does not fire, and the
+    emitter is not given a recapture so a mover is still withdrawn."""
+    seen: dict[str, object] = {}
+
+    def emit_tests(*_a: object, **kw: object) -> tuple[object, tuple[str, ...], list[dict[str, str]], tuple[object, ...]]:
+        seen.update(kw)
+        return None, (), [], ()
+
+    w = _World(reply=_DISPLAY_REPLY)
+    run_task0d(
+        w.deps(PIN_ENV_DEBUG=False, emit_tests=emit_tests),
+        tmp_path,
+        "anyhow",
+        [_cluster()],
+        tmp_path / "src",
+    )
+    assert seen.get("recapture") is None
+    assert w.probes_run  # Display was not refused before cargo
+    reasons = [m["reason"] for _c, ms in w.misses for m in ms]
+    assert not any("EXACT_FORMAT ask requires observe debug" in r for r in reasons)
+    assert "never Display" not in w.prompts[0]
+
+
+def test_pin_env_debug_on_passes_recapture(tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    def emit_tests(*_a: object, **kw: object) -> tuple[object, tuple[str, ...], list[dict[str, str]], tuple[object, ...]]:
+        seen.update(kw)
+        return None, (), [], ()
+
+    w = _World(reply=_REPLY)
+    run_task0d(w.deps(emit_tests=emit_tests), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    assert seen.get("recapture") is not None
+    assert callable(seen["recapture"])
 
 
 def test_the_class_asks_are_sent_once_not_once_per_unit_batch(tmp_path: Path) -> None:
@@ -228,13 +318,12 @@ def test_the_class_asks_are_sent_once_not_once_per_unit_batch(tmp_path: Path) ->
     cap of 12 and a batch of 6 that was two identical requests and twice the
     GPU for one cohort."""
     from pipeline_core.domain.behaviour_probe import PROBE_BATCH_SIZE, batches
+
     many = [_named_fn(f"public_{i}") for i in range(12)]
     w = _World(reply=_REPLY)
-    run_task0d(w.deps(enumerate_fns=lambda sd: many), tmp_path, "anyhow",
-               [_cluster()], tmp_path / "src")
-    assert len(list(batches(tuple(f"public_{i}" for i in range(12)),
-                            PROBE_BATCH_SIZE))) == 2      # what the old loop sent
-    assert len(w.prompts) == 1                            # what it sends now
+    run_task0d(w.deps(enumerate_fns=lambda sd: many), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    assert len(list(batches(tuple(f"public_{i}" for i in range(12)), PROBE_BATCH_SIZE))) == 2  # what the old loop sent
+    assert len(w.prompts) == 1  # what it sends now
     assert "public_0" in w.prompts[0] and "public_11" in w.prompts[0]
 
 
@@ -242,17 +331,17 @@ def test_the_class_asks_are_sent_once_not_once_per_unit_batch(tmp_path: Path) ->
 # A reply that produces nothing is a MISS, not silence.
 # --------------------------------------------------------------------------
 
-_LEGACY_REPLY = ('<BEHAVIOUR unit="unnamed_public">\n'
-                 'fn main() { println!("{}", crate_x::unnamed_public()); }\n'
-                 '</BEHAVIOUR>')
+_LEGACY_REPLY = (
+    '<BEHAVIOUR unit="unnamed_public">\nfn main() { println!("{}", crate_x::unnamed_public()); }\n</BEHAVIOUR>'
+)
 
 
-def test_a_reply_in_the_old_shape_is_recorded_rather_than_dropped(
-        tmp_path: Path) -> None:
+def test_a_reply_in_the_old_shape_is_recorded_rather_than_dropped(tmp_path: Path) -> None:
     """No <WHEN> means no block, and `proposed` simply stayed 0 — no log, no
     event, no miss. That is the answer-dropped class: the model did answer."""
     from pipeline_core.domain.behaviour_probe import parse_behaviour_specs
-    assert parse_behaviour_specs(_LEGACY_REPLY) == []      # nothing else notices
+
+    assert parse_behaviour_specs(_LEGACY_REPLY) == []  # nothing else notices
     w = _World(reply=_LEGACY_REPLY)
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     reasons = [m["reason"] for _c, ms in w.misses for m in ms]
@@ -267,8 +356,7 @@ def test_an_unparseable_reply_is_recorded_with_its_own_reason(tmp_path: Path) ->
     assert reasons == ["reply carried no parseable <BEHAVIOUR> block"]
 
 
-def test_the_miss_record_is_written_even_when_nothing_was_missed(
-        tmp_path: Path) -> None:
+def test_the_miss_record_is_written_even_when_nothing_was_missed(tmp_path: Path) -> None:
     """A miss file states what THIS pass could not capture. Writing it only
     when the list is non-empty leaves the previous pass's file standing as if
     it were current."""
@@ -277,8 +365,7 @@ def test_the_miss_record_is_written_even_when_nothing_was_missed(
     assert w.misses == [("stable", [])]
 
 
-def test_a_probe_that_fails_to_build_is_not_re_run_for_a_reproducibility_check(
-        tmp_path: Path) -> None:
+def test_a_probe_that_fails_to_build_is_not_re_run_for_a_reproducibility_check(tmp_path: Path) -> None:
     """Re-running a program that failed to COMPILE pays the most expensive
     cargo call there is for an answer already known."""
     w = _World(reply=_REPLY, probe_ok=False)
@@ -289,17 +376,17 @@ def test_a_probe_that_fails_to_build_is_not_re_run_for_a_reproducibility_check(
     assert [m["reason"][:6] for _c, ms in w.misses for m in ms] == ["failed"]
 
 
-def test_blocks_past_the_per_reply_cap_are_recorded_not_silently_sliced_off(
-        tmp_path: Path) -> None:
+def test_blocks_past_the_per_reply_cap_are_recorded_not_silently_sliced_off(tmp_path: Path) -> None:
     """The cap bounds the WORK — every block costs its own compile-and-run —
     but a block proposed and never run is still something the model offered
     and the pipeline dropped."""
-    block = ('<BEHAVIOUR name="b{i}">\n<GIVEN>\n    let v = 1;\n</GIVEN>\n'
-             '<WHEN>v</WHEN>\n<OBSERVE>display</OBSERVE>\n</BEHAVIOUR>')
+    block = (
+        '<BEHAVIOUR name="b{i}">\n<GIVEN>\n    let v = 1;\n</GIVEN>\n'
+        "<WHEN>v</WHEN>\n<OBSERVE>debug</OBSERVE>\n</BEHAVIOUR>"
+    )
     w = _World(reply="\n".join(block.format(i=i) for i in range(5)))
-    run_task0d(w.deps(PROBE_BLOCKS_PER_REPLY=2), tmp_path, "anyhow",
-               [_cluster()], tmp_path / "src")
-    assert len(w.probes_run) == 4                       # 2 blocks x (capture + confirm)
+    run_task0d(w.deps(PROBE_BLOCKS_PER_REPLY=2), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    assert len(w.probes_run) == 4  # 2 blocks x (capture + confirm)
     reasons = [m["reason"] for _c, ms in w.misses for m in ms]
     assert reasons == ["over the blocks-per-reply cap: 3 block(s) past 2 not run"]
 
@@ -312,18 +399,15 @@ def test_a_capture_the_emitter_withdraws_leaves_the_suite(tmp_path: Path) -> Non
 
     def emit_tests(pd, cl, specs, *, crate, **kw):
         probe = next(s for s in specs if s.behaviour_id.startswith("probe::"))
-        return None, (probe.behaviour_id,), [
-            {"unit": probe.behaviour_id, "reason": "environment-dependent"}]
+        return None, (probe.behaviour_id,), [{"unit": probe.behaviour_id, "reason": "environment-dependent"}], ()
 
-    run_task0d(w.deps(emit_tests=emit_tests), tmp_path, "anyhow",
-               [_cluster()], tmp_path / "src")
+    run_task0d(w.deps(emit_tests=emit_tests), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     assert not [s for s in w.saved["stable"].specs if s.behaviour_id.startswith("probe::")]
     assert dict(w.events)["task0d.harvest"]["probes_admitted"] == 0
     assert [m["reason"] for _c, ms in w.misses for m in ms] == ["environment-dependent"]
 
 
-def test_an_emitter_that_raises_is_non_fatal_and_the_suite_is_still_saved(
-        tmp_path: Path) -> None:
+def test_an_emitter_that_raises_is_non_fatal_and_the_suite_is_still_saved(tmp_path: Path) -> None:
     def boom(*_a: object, **_k: object) -> tuple[object, tuple[str, ...], list[object]]:
         raise RuntimeError("cargo exploded")
 

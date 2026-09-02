@@ -181,6 +181,60 @@ def test_the_selector_asks_for_the_scarcest_classes_first() -> None:
     assert class_targets(specs, behaviour_class_name, max_targets=0) == ()
 
 
+def test_display_probes_do_not_cover_exact_format_for_the_probe_ask() -> None:
+    """NEGATIVE CONTROL of ranking by harvest class: five Display probes make
+    `behaviour_class_name` treat EXACT_FORMAT as covered. The probe ask must
+    still request it — Display does not pin a render that moves with the env."""
+    from pipeline_core.domain.behaviour_probe import probe_coverage_class
+
+    displays = [captured_spec(cfg_cluster="s", probe=_probe(observe="display"), n=i, stdout="v") for i in range(5)]
+    names = [c for c, _ in class_targets(displays, probe_coverage_class, max_targets=3)]
+    assert "EXACT_FORMAT" in names
+
+
+def test_debug_probes_cover_exact_format_for_the_probe_ask() -> None:
+    from pipeline_core.domain.behaviour_probe import probe_coverage_class
+
+    dbgs = [captured_spec(cfg_cluster="s", probe=_probe(observe="debug"), n=i, stdout="v") for i in range(5)]
+    names = [c for c, _ in class_targets(dbgs, probe_coverage_class, max_targets=3)]
+    assert "EXACT_FORMAT" not in names
+
+
+def test_the_recorded_stable_suite_asks_exact_format_under_probe_coverage() -> None:
+    """Plan fixture, computed on the recorded suite (not a hand list of five
+    units). Today's `class_targets` + `behaviour_class_name` omits
+    EXACT_FORMAT; `probe_coverage_class` puts it in the first four."""
+    import json
+    from pathlib import Path
+
+    from pipeline_core.domain.behaviour import BehaviourSuite
+    from pipeline_core.domain.behaviour_probe import probe_coverage_class
+
+    path = Path(__file__).parent / "fixtures" / "behaviours" / "behaviours_stable_2026-08-27.json"
+    suite = BehaviourSuite.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    today = [c for c, _ in class_targets(suite.specs, behaviour_class_name, max_targets=4)]
+    assert today == [
+        "TRAIT_OBJECT_IDENTITY",
+        "OPTION_SEMANTICS",
+        "BOUNDED_RESOURCE",
+        "IDENTITY",
+    ]
+    asked = [c for c, _ in class_targets(suite.specs, probe_coverage_class, max_targets=4)]
+    assert "EXACT_FORMAT" in asked
+
+
+def test_class_prompts_off_restores_display_or_debug() -> None:
+    """BEHAVIOUR_PIN_ENV_DEBUG=0 is the pre-2026-09-02 ask. On is Debug-only."""
+    from pipeline_core.domain.behaviour_probe import class_prompts
+
+    on = class_prompts(pin_env_debug=True)
+    off = class_prompts(pin_env_debug=False)
+    assert "never Display" in on["EXACT_FORMAT"]
+    assert "Display, Debug, or the alternate" in off["EXACT_FORMAT"]
+    assert "never Display" not in off["EXACT_FORMAT"]
+    assert on["IDENTITY"] == off["IDENTITY"]
+
+
 # --- the env guard ----------------------------------------------------------
 
 
@@ -197,6 +251,34 @@ def test_a_legacy_capture_env_key_is_ignored_on_load() -> None:
     loaded = BehaviourSpec.from_dict(d)
     assert loaded.to_dict() == spec.to_dict()
     assert "capture_env" not in loaded.to_dict()
+
+
+def test_required_env_round_trips_and_is_omitted_when_empty() -> None:
+    from dataclasses import replace as dc_replace
+
+    from pipeline_core.domain.behaviour import BehaviourSpec
+
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="v")
+    assert "required_env" not in spec.to_dict()
+    pinned = dc_replace(spec, required_env=(("RUST_BACKTRACE", "1"),))
+    d = pinned.to_dict()
+    assert d["required_env"] == {"RUST_BACKTRACE": "1"}
+    loaded = BehaviourSpec.from_dict(d)
+    assert loaded.required_env == (("RUST_BACKTRACE", "1"),)
+    assert BehaviourSpec.from_dict(spec.to_dict()).required_env == ()
+
+
+def test_render_replay_writes_set_var_before_given() -> None:
+    from dataclasses import replace as dc_replace
+
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="v")
+    pinned = dc_replace(spec, required_env=(("RUST_BACKTRACE", "1"), ("RUST_LIB_BACKTRACE", "1")))
+    body = render_replay_test(pinned, fn_name="t")
+    assert body.index("set_var") < body.index('let e = anyhow!("x")')
+    assert 'set_var("RUST_BACKTRACE", "1")' in body
+    # NEGATIVE CONTROL: no required_env, no set_var — today's renderer.
+    plain = render_replay_test(spec, fn_name="t")
+    assert "set_var" not in plain
 
 
 # --- the emitter ------------------------------------------------------------
@@ -292,3 +374,18 @@ def test_the_perturbation_flips_the_observable_env_keys() -> None:
     assert perturbed_env({}) == {"RUST_BACKTRACE": "1", "RUST_LIB_BACKTRACE": "1"}
     assert perturbed_env({"RUST_BACKTRACE": "1"})["RUST_BACKTRACE"] == "0"
     assert perturbed_env({"RUST_BACKTRACE": "full"})["RUST_BACKTRACE"] == "0"
+
+
+def test_a_display_observe_is_rejected_for_an_exact_format_ask() -> None:
+    from pipeline_core.domain.behaviour_probe import (
+        CapturedProbe,
+        exact_format_ask_rejects,
+        fills_non_format_class,
+    )
+
+    display = CapturedProbe(name="x", given='let e = anyhow!("x");', when="e", observe="display")
+    debug = CapturedProbe(name="x", given='let e = anyhow!("x");', when="e", observe="debug")
+    ident = CapturedProbe(name="x", given="let e = Error::new(E);", when="e.is::<E>()", observe="display")
+    assert exact_format_ask_rejects(display) is not None
+    assert exact_format_ask_rejects(debug) is None
+    assert fills_non_format_class(ident) and exact_format_ask_rejects(ident) is None

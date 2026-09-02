@@ -17,7 +17,7 @@ example file and runs it.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pipeline_core.domain.behaviour import (
@@ -28,6 +28,7 @@ from pipeline_core.domain.behaviour import (
     ObservableOutcome,
     OutcomeKind,
     classified,
+    has_resource_boundary,
 )
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.models import FnRecord
@@ -378,14 +379,125 @@ def perturbed_env(env: Mapping[str, str]) -> dict[str, str]:
     Run-twice cannot see this axis: measured 2026-08-27 against a pristine
     copy, `err.backtrace()` renders `"disabled backtrace"` on every run at a
     fixed env and a captured backtrace under `RUST_BACKTRACE=1`. A capture
-    that changes verdict across this flip is not a specification of the crate
-    and must not enter the oracle. The flip is the guard; storing the capture
-    environment on the spec was write-only and caught nothing."""
+    that changes across this flip is TWO specifications of the crate — one
+    per world — not zero. The flip is how the other world is found; each
+    world is recaptured, stored with `required_env`, and emitted as its own
+    test. A previous capture_env field on the spec was write-only and caught
+    nothing."""
     out: dict[str, str] = {}
     for key in OBSERVABLE_ENV_KEYS:
         current = (env.get(key) or "").strip().lower()
         out[key] = "0" if current in ("1", "full") else "1"
     return out
+
+
+def unperturbed_env(perturb: Mapping[str, str]) -> dict[str, str]:
+    """The world the first capture ran in, given the flip that exposes the other.
+
+    `perturbed_env({})` is `{RUST_BACKTRACE: 1, …}`; the capture world is the
+    inverse (`0`)."""
+    out: dict[str, str] = {}
+    for key, val in perturb.items():
+        vv = (val or "").strip().lower()
+        out[key] = "0" if vv in ("1", "full") else "1"
+    return out
+
+
+def env_pairs(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((str(k), str(v)) for k, v in env.items() if k))
+
+
+def env_twin_id(behaviour_id: str) -> str:
+    """A second world of the same probe. Still a `probe::` id so replayable()
+    keeps it; a suffix rather than a new n so the capture-world id is stable."""
+    return behaviour_id if behaviour_id.endswith("::env") else f"{behaviour_id}::env"
+
+
+def outcome_from_stdout(spec: BehaviourSpec, stdout: str) -> ObservableOutcome:
+    """Re-read a probe's Then from a later run's stdout, keeping the original
+    kind (and, for identity, the original type name)."""
+    text = printed_value(stdout)
+    then = spec.then
+    if then is None:
+        return ObservableOutcome.display(text)
+    kind = then.kind
+    if kind is OutcomeKind.TYPE_IDENTITY:
+        return ObservableOutcome.type_identity(then.value, ok=text.strip() == "true")
+    if kind is OutcomeKind.DEBUG_STRING:
+        return ObservableOutcome.debug(text)
+    if kind is OutcomeKind.ALT_DEBUG_STRING:
+        return ObservableOutcome.alt_debug(text)
+    return ObservableOutcome.display(text)
+
+
+def capture_moved(spec: BehaviourSpec, stdout: str) -> bool:
+    """True when `stdout` is a different observable than spec.then — the
+    recapture found another env world, not a flaky re-print of the same one."""
+    new = outcome_from_stdout(spec, stdout)
+    old = spec.then
+    if old is None:
+        return True
+    if old.kind is OutcomeKind.TYPE_IDENTITY:
+        return bool(new.ok) != bool(old.ok)
+    return new.value != old.value
+
+
+def split_env_worlds(
+    spec: BehaviourSpec,
+    perturb_stdout: str,
+    perturb_env: Mapping[str, str],
+) -> tuple[BehaviourSpec, BehaviourSpec]:
+    """`(capture-world spec, perturb-world twin)` from a recapture whose Then
+    moved. The original keeps its id and Then; the twin is `::env`."""
+    orig = replace(spec, required_env=env_pairs(unperturbed_env(perturb_env)))
+    twin = replace(
+        spec,
+        behaviour_id=env_twin_id(spec.behaviour_id),
+        then=outcome_from_stdout(spec, perturb_stdout),
+        required_env=env_pairs(perturb_env),
+        source_ref=(f"{spec.source_ref}::env" if spec.source_ref else "env"),
+    )
+    return orig, classified(twin, default_cluster=spec.cfg_cluster)
+
+
+# Observe tags that pin an env-moving render. Display does not: a message
+# string is the same under RUST_BACKTRACE=0 and =1.
+_EXACT_FORMAT_OBSERVE = frozenset({"debug", "alt_debug"})
+_EXACT_FORMAT_PROBE_KINDS = frozenset(
+    {
+        OutcomeKind.DEBUG_STRING,
+        OutcomeKind.ALT_DEBUG_STRING,
+        OutcomeKind.CHAIN_SEQUENCE,
+    }
+)
+
+
+def fills_non_format_class(probe: CapturedProbe) -> bool:
+    """True when this block is answering IDENTITY / OPTION / BOUNDED_RESOURCE,
+    so a Display observe is legitimate even while EXACT_FORMAT is also asked."""
+    if identity_type_of(probe.when) is not None:
+        return True
+    if has_resource_boundary(probe.given):
+        return True
+    when = probe.when
+    return ".is_none()" in when or ".is_some()" in when
+
+
+def exact_format_ask_rejects(probe: CapturedProbe) -> str | None:
+    """Why this block may not stand in for an EXACT_FORMAT ask, else None.
+
+    A Display observe of a public error type pins the unperturbed world the
+    crate's own tests already run. The ask is for Debug / alternate-Debug."""
+    if fills_non_format_class(probe):
+        return None
+    obs = (probe.observe or "").strip().lower()
+    if obs in _EXACT_FORMAT_OBSERVE:
+        return None
+    return (
+        "EXACT_FORMAT ask requires observe debug or alt_debug; "
+        f"got {obs or 'empty'} — Display does not pin a render that moves "
+        "with the environment"
+    )
 
 
 def probe_unit_label(rec: FnRecord) -> str:
@@ -450,10 +562,25 @@ CLASS_PROMPTS: Mapping[str, str] = {
     "— the TypeId round-trip, named by type",
     "TRAIT_OBJECT_IDENTITY": "the type observed THROUGH a trait object (`&dyn std::error::Error`), "
     "which a wrapper representation can answer differently",
-    "EXACT_FORMAT": "an exact rendering — Display, Debug, or the alternate `{:#?}` Debug, which differ from each other",
+    "EXACT_FORMAT": "an exact Debug rendering (`{:?}` or the alternate `{:#?}`), never Display — Display does not pin a render that moves with the environment",
     "BOUNDED_RESOURCE": "what happens at a size or capacity boundary, and just past it",
     "OPTION_SEMANTICS": "when an optional observable is present and when it is absent",
 }
+
+# Pre-2026-09-02 EXACT_FORMAT ask. Harvest Display then covers the class, so
+# the probe never requests a Debug that would move with RUST_BACKTRACE.
+_EXACT_FORMAT_PROMPT_LEGACY = (
+    "an exact rendering — Display, Debug, or the alternate `{:#?}` Debug, which differ from each other"
+)
+
+
+def class_prompts(*, pin_env_debug: bool) -> dict[str, str]:
+    """The class-ask phrasing. Off restores Display-or-Debug; on asks Debug
+    only, because Display does not pin a render that moves with the env."""
+    out = dict(CLASS_PROMPTS)
+    if not pin_env_debug:
+        out["EXACT_FORMAT"] = _EXACT_FORMAT_PROMPT_LEGACY
+    return out
 
 
 def class_targets(
@@ -462,6 +589,7 @@ def class_targets(
     *,
     max_targets: int,
     classes: Sequence[str] = (),
+    prompts: Mapping[str, str] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """`(class, what to write)` pairs for the classes this suite is THINNEST in,
     scarcest first, capped at `max_targets`.
@@ -475,17 +603,20 @@ def class_targets(
     what is thin without asserting that a zero is a gap.
 
     `class_of` is injected so the domain does not import the selector that reads
-    a spec's class (`behaviour_select.behaviour_class_name`)."""
+    a spec's class (`behaviour_select.behaviour_class_name`). `prompts` is the
+    phrasing table; None uses :data:`CLASS_PROMPTS` (Debug-only EXACT_FORMAT).
+    Pass :func:`class_prompts` with pin_env_debug off to restore Display-or-Debug."""
     if max_targets <= 0:
         return ()
-    wanted = [c for c in (classes or tuple(CLASS_PROMPTS)) if c in CLASS_PROMPTS]
+    table = CLASS_PROMPTS if prompts is None else prompts
+    wanted = [c for c in (classes or tuple(table)) if c in table]
     counts = dict.fromkeys(wanted, 0)
     for spec in specs:
         name = class_of(spec)
         if name in counts:
             counts[name] += 1
     order = sorted(wanted, key=lambda c: (counts[c], wanted.index(c)))
-    return tuple((c, CLASS_PROMPTS[c]) for c in order[:max_targets])
+    return tuple((c, table[c]) for c in order[:max_targets])
 
 
 def probe_targets(
@@ -549,6 +680,27 @@ def probe_behaviour_id(cfg_cluster: str, unit: str, n: int) -> str:
 
 def is_probe_spec(spec: BehaviourSpec) -> bool:
     return spec.behaviour_id.startswith("probe::")
+
+
+def probe_coverage_class(spec: BehaviourSpec) -> str:
+    """Scarcity class for the probe ask.
+
+    Harvested tests do not count: they re-read checks cargo already runs, and
+    they pin the unperturbed world. A Display probe does not cover
+    EXACT_FORMAT: Display of a message does not move with `RUST_BACKTRACE`,
+    so a suite of them still has no Debug-under-captured-backtrace pin. Only
+    a probe whose Then is Debug, alternate-Debug, or a chain sequence covers
+    that class."""
+    if not is_probe_spec(spec):
+        return ""
+    name = spec.klass.name
+    if name == "OTHER":
+        return ""
+    if name == "EXACT_FORMAT":
+        kind = spec.then.kind if spec.then else None
+        if kind not in _EXACT_FORMAT_PROBE_KINDS:
+            return ""
+    return name
 
 
 def probe_spec(
@@ -647,10 +799,18 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
 
     This is the half that makes a capture part of the cargo-test oracle. The
     expected value is the OBSERVED one — never a model's guess — which is the
-    whole reason the capture route exists beside t0c's."""
+    whole reason the capture route exists beside t0c's.
+
+    `required_env` is written as `set_var` BEFORE `given` so construction-time
+    capture (`backtrace!()` in constructors) and format-time reads both see
+    it, and the reconstruction sweep's `cargo test` does not have to inherit
+    the host env."""
     then = spec.then
     if then is None or then.kind is OutcomeKind.NORMALIZED_STDOUT:
         return ""
+    env_lines = "".join(
+        f"    std::env::set_var({rust_string_literal(k)}, {rust_string_literal(v)});\n" for k, v in spec.required_env
+    )
     body = spec.given.rstrip()
     setup = (body + "\n") if body else ""
     if then.kind is OutcomeKind.TYPE_IDENTITY:
@@ -659,7 +819,7 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
         fmt = _KIND_TO_FMT.get(then.kind, "{}")
         lit = rust_string_literal(then.value)
         check = f'    assert_eq!(format!("{fmt}", {spec.when}), {lit});'
-    return f"#[test]\nfn {fn_name}() {{\n{setup}{check}\n}}\n"
+    return f"#[test]\nfn {fn_name}() {{\n{env_lines}{setup}{check}\n}}\n"
 
 
 def rust_string_literal(text: str) -> str:
