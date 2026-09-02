@@ -16,7 +16,7 @@ import os as _os
 import subprocess as _subprocess_mod
 import sys
 import time as _time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -386,6 +386,9 @@ from pipeline_core.application.reconstruct import source_view as _source_view
 from pipeline_core.application.reconstruct import splice as _splice_mod
 from pipeline_core.application.reconstruct import stub_scan as _stub_scan
 from pipeline_core.application.reconstruct import test_targets as _test_targets_mod
+from pipeline_core.application.reconstruct.assert_probe_runner import (
+    run_assert_probes,
+)
 from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
     escalate_frontier_to_producers,
@@ -2262,6 +2265,19 @@ def build_app(
             "tree_path": f"{rel}/src",
             "layout_path": f"{SKELETON_DIR}/{cluster}/src"})
 
+    def _assert_probe_for_tdd(
+        project_dir: Path, cluster_root: Path, cluster_name: str,
+        cluster_env: Mapping[str, str] | None,
+        tests_by_file: Mapping[Path, Sequence[str]],
+    ) -> Mapping[str, str]:
+        """The sweep's observed assertion values (`assert_probe_runner`),
+        rendered per failing test, on the tree as it stands."""
+        return run_assert_probes(
+            project_dir=project_dir, cluster_root=cluster_root,
+            cluster_name=cluster_name, cluster_env=cluster_env,
+            tests_by_file=tests_by_file, run_cargo=helpers.run_cargo,
+            log=ports.log).rendered
+
     def _test_file_index(
         project_dir: Path, cluster: Any, stems: Any = None, lib: bool = False,
     ) -> dict[str, str]:
@@ -2525,6 +2541,7 @@ def build_app(
             retrigger_layout=retrigger_layout,
             active_test_inventory=active_test_inventory_for_cluster,
             test_file_index=_test_file_index,
+            assert_probe=_assert_probe_for_tdd,
             localize_crashes=_localize_crashes,
             migrate_retro_evidence=_migrate_confounded_retros,
             migrate_retro_gate=_migrate_absolute_gate_retros,
@@ -2607,6 +2624,9 @@ def build_app(
             test_regression_baseline=helpers.test_regression_baseline,
             test_regression_gate=helpers.test_regression_gate,
             ask=ask_client.ask,
+            ask_turns=ask_client.ask_turns,
+            run_cargo=helpers.run_cargo,
+            measure_coverage_slice=_tdd_measure_coverage(ports.log),
             failed_body_cap=cfg.failed_body_cap,
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,

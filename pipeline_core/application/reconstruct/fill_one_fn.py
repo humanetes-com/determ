@@ -62,7 +62,10 @@ from pipeline_core.domain.model_notes import (
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
 from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
-from pipeline_core.domain.refill_evidence import pinned_observables_from_tests
+from pipeline_core.domain.refill_evidence import (
+    asserted_output_literals_from_tests,
+    pinned_observables_from_tests,
+)
 from pipeline_core.domain.refine import (
     CompilingSalvage,
     FixProgress,
@@ -84,6 +87,7 @@ from pipeline_core.domain.retro_gate import (
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
     judge_guidance,
+    pins_for_contradiction_guard,
     regressed_tests_from_excerpt,
     regression_scoped,
     retired_guidance_line,
@@ -425,11 +429,13 @@ class FillOneFn:
         _fn_leaves = tuple(dict.fromkeys(
             t.rsplit("::", 1)[-1]
             for t in sorted(_answers.tests)))[:_ATTRIBUTED_TEST_LEAF_CAP]
-        _fn_pins = pinned_observables_from_tests(
-            _fn_leaves,
-            (t for leaf in _fn_leaves
-             for _, t in self.tests.find_tests_for_fn(
-                 ctx.tests_dir_files, leaf)))
+        _fn_sources = tuple(
+            t for leaf in _fn_leaves
+            for _, t in self.tests.find_tests_for_fn(ctx.tests_dir_files, leaf))
+        _fn_pins = pinned_observables_from_tests(_fn_leaves, _fn_sources)
+        # The one-argument `assert!(s.contains(..))` literals, which the pins
+        # extraction does not read; the contradiction guard needs both.
+        _fn_observables = asserted_output_literals_from_tests(_fn_leaves, _fn_sources)
         # Crate idioms ranked by THIS fn's signature tokens.
         crate_idioms_section = self.prompt.extract_crate_idioms(
             ctx.idiom_blocks, rel_file, target_sig_text=sig_text,
@@ -517,7 +523,7 @@ class FillOneFn:
                     f"// {p}\n{t}" for p, t in self.tests.find_tests_for_fn(
                         ctx.tests_dir_files, name)),
                 type_def=lambda name: ("\n\n".join(
-                    format_type_for_prompt(r) for r in
+                    format_type_for_prompt(r, viewer_file=rel_file) for r in
                     types_referenced_in_text(
                         name, ctx.crate_type_records, visible_from=rel_file)[:3])
                     # Crate-local records win; well-known unstable std APIs
@@ -609,7 +615,8 @@ class FillOneFn:
                     _retro_rec, cur_text, evidence=_answers,
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
                     cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
-                    unit=screening_unit(rel_file, fn_name))
+                    unit=screening_unit(rel_file, fn_name),
+                    pins=_fn_pins, observables=_fn_observables)
                 _retro_guidance = _retro_verdict.text
                 # The line carries the STORE key (file::fn::container), not a
                 # display name: `fn new` exists under three containers, and
@@ -1242,7 +1249,8 @@ class FillOneFn:
                     _prior, snapshot, evidence=_answers,
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
                     cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
-                    unit=screening_unit(rel_file, fn_name))
+                    unit=screening_unit(rel_file, fn_name),
+                    pins=_fn_pins, observables=_fn_observables)
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,
@@ -1252,7 +1260,8 @@ class FillOneFn:
                     fix_attempts=fix_attempt,
                     prior_retrospective=_prior_guidance,
                     bound_methods_section=retro_bound_methods,
-                    pinned_observables=_fn_pins,
+                    pinned_observables=pins_for_contradiction_guard(
+                        _fn_pins, _fn_observables),
                 )
                 # Transient empties (llm_error / empty_response) don't
                 # update state — we never saw a real fix attempt's
@@ -1383,7 +1392,8 @@ class FillOneFn:
                         # From the FULL excerpt: the preview above cuts a
                         # regression's test list mid-name.
                         regressed=regressed_tests_from_excerpt(
-                            error_excerpt or first_error_excerpt or ""))
+                            error_excerpt or first_error_excerpt or ""),
+                        pins=pins_for_contradiction_guard(_fn_pins, _fn_observables))
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to

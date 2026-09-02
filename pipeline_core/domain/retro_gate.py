@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, NamedTuple
@@ -571,6 +571,172 @@ def prescription_sacrifices_tests(
     return recorded or stamped or live
 
 
+# Set on a record whose guidance PRESCRIBES REMOVING an observable the tests
+# the unit answers for PIN — a lesson that, obeyed, re-creates the failure it
+# was written to explain.
+#
+# Run `3003-93e9a9bf` (2026-09-02, cluster `stable`): the paired write of
+# `src/error.rs::fmt` + `src/fmt.rs::debug` (the Debug formatter and its
+# implementer) was reverted because printing a backtrace unconditionally
+# reddened ten previously-passing sibling tests (`test_debug`,
+# `debug_for_anyhow_literal`, `message_error_debug_with_string`, …). The
+# retrospective written from that revert reads, verbatim from the store
+# (`src/error.rs::*pair*::src/error.rs::fmt+src/fmt.rs::debug`): "In the
+# Debug impl for Error in src/error.rs::fmt, drop the manual
+# `self.chain().collect()` / numbered “Caused by” formatting and the trailing
+# `core::fmt::Debug::fmt(bt, formatter)` backtrace emission in the
+# non-alternate arm and replace the whole else block with a simple Display
+# delegation … with no backtrace or manual cause-chain handling." Its sibling
+# record (`src/fmt.rs::*impl*::ErrorImpl`) says "… remove the `while let
+# Some(e) = source` “Caused by” loop and the `Self::backtrace(this)` /
+# `format!("{:?}", bt)` printing entirely from the non-alternate path." The
+# two convicting tests of that unit (`test_debug_with_captured_backtrace_and_
+# cause`, `test_debug_with_captured_backtrace_simple`) pin `"\n\nCaused by:"`
+# and `"Stack backtrace"` in `format!("{:?}", err)` — the retrospective
+# prompt lists the pins under "The tests this unit answers for pin:" and the
+# diagnosis still prescribed removing exactly the emissions the target
+# requires. Honoured on the next pass as RETROSPECTIVE_GUIDANCE, the reply
+# obeyed it (the implementer stripped to a Display forward) and reddened the
+# same ten siblings again: the store had turned one revert into a standing
+# instruction to re-create it.
+#
+# No rule below sees the class. `prescription_sacrifices_tests` keys on
+# degenerate-body markers, and a Display forward is not one;
+# `regression_scoped` exempts a joint record read back by the transaction
+# that earned it (and the reddened siblings ARE tests the pair answers for at
+# its own gate); the premise rules (`no_tree_premise`,
+# `convictor_entry_moved`, `joint_premise_moved`, `stale_evidence`) judge
+# WHERE a lesson still applies, never WHETHER it contradicts the target it is
+# injected for. That question has two inputs — the guidance text and the
+# pins of the tests the unit answers for — and both are in hand at write
+# time (the same pins string the retrospective prompt carried) and at
+# prompt-build; the stamp records the write-time answer, and `screen_guidance`
+# re-judges live when a caller passes `pins`, so a record stored before the
+# stamp existed is screened too.
+CONTRADICTS_TARGET = "contradicts_target"
+
+# Words a pinned literal can carry that name nothing: they occur in almost
+# any sentence of guidance, so a removal sentence carrying one would fire on
+# prose, not on the observable.
+_PIN_STOPWORDS: frozenset[str] = frozenset({
+    "the", "this", "that", "with", "from", "into", "then", "else", "when",
+    "test", "tests", "error", "errors", "value", "string", "format",
+})
+# A quoted literal in a pins string: the double-quoted Rust source token
+# verbatim, escapes honoured (`"Condition failed: `b\"hmm\"[1] == b'c'`
+# (109 vs 99)"` is ONE token, apostrophes and all), or a single-quoted
+# literal. The single-quoted form may not span a line or carry `"`, `<`
+# or `>`: a lifetime (`+ 'static>>`, `&'a str>`) opens with the same
+# character and would otherwise swallow the pins list up to the next
+# apostrophe.
+_PIN_LITERAL = re.compile(
+    r'"((?:[^"\\]|\\.)*)"'
+    r"|'((?:[^'\"\\\n<>]|\\.)*)'")
+_PIN_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0"}
+_PIN_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+_WORD = re.compile(r"[A-Za-z0-9_]+")
+# The shortest word that names an observable rather than occurring in one:
+# `Stack`, `Caused`, `outer`, `inner` are words; `by`, `bt`, `vs` are not.
+_PIN_WORD_MIN_CHARS = 4
+# A guidance sentence is a removal instruction when it carries one of
+# these, case-insensitive and whole-word: the negated emission verbs
+# ("must not emit", "do not print", "don't emit", "never print"), the
+# removal verbs with their inflections ("remove", "drop the", "omit",
+# "strip", "delete"), and the absence phrases ("without", "no longer",
+# "entirely from", "with no backtrace"). `\bdrop\b` also matches the
+# `Drop` trait, and `without` matches a preserving "without changing"; a
+# false positive here withholds one lesson from one prompt, which is the
+# cheap side of this class.
+_REMOVAL_MARKER = re.compile(
+    r"\b(?:(?:must|do|does|did|should|will|would)\s*(?:not|n[’']t)|never)"
+    r"\s+(?:emit|print|write|output)\b"
+    r"|\bremov(?:e|es|ed|ing|al)\b"
+    r"|\bdrop(?:s|ped|ping)?\b"
+    r"|\bomit(?:s|ted|ting)?\b"
+    r"|\bstrip(?:s|ped|ping)?\b"
+    r"|\bdelet(?:e|es|ed|ing)\b"
+    r"|\bget rid of\b"
+    r"|\bwithout\b"
+    r"|\bno longer\b"
+    r"|\bentirely from\b"
+    r"|\bwith no\b",
+    re.IGNORECASE)
+# A sentence boundary: a newline, a `;`, or a `.` followed by whitespace or
+# the end of the text. The whitespace requirement is what keeps
+# `self.chain().collect()`, `src/error.rs::fmt` and `core::fmt::Debug::fmt`
+# inside their sentence — the live guidance quoted above holds its removal
+# verb and the pinned words on opposite sides of `self.chain()`, and a
+# split on every `.` would put them in different sentences. `e.g.` and
+# `i.e.` are not boundaries either.
+_SENTENCE_BREAK = re.compile(r"(?<!\be\.g)(?<!\bi\.e)[.;](?=\s|$)|\n+")
+
+
+def guidance_sentences(text: str) -> list[str]:
+    """`text` split at sentence boundaries (`_SENTENCE_BREAK`), each piece
+    stripped, empty pieces dropped."""
+    return [s.strip() for s in _SENTENCE_BREAK.split(text or "") if s.strip()]
+
+
+def pinned_words(pins: str) -> frozenset[str]:
+    """The words a pins string's quoted literals are made of, lower-cased,
+    at least `_PIN_WORD_MIN_CHARS` long and outside `_PIN_STOPWORDS`.
+
+    ``pins`` is the string `refill_evidence.pinned_observables` renders —
+    a comma-joined list of assertion forms (`downcast::<T>`, `is::<T>`,
+    `format!("{:#?}", …)`) and quoted source tokens (`"Stack backtrace"`,
+    `"\\n\\nCaused by:"`, `"inner"`). Only the quoted literals are read,
+    escapes unescaped first so `"\\n\\nCaused by:"` yields `caused`, and
+    only literals whose alphanumeric content is at least four characters:
+    `"msg"`, `"top"` and the `"{:#?}"` of a format form identify nothing.
+    A pins string with no literal, or one made only of turbofish forms,
+    yields the empty set."""
+    out: set[str] = set()
+    for m in _PIN_LITERAL.finditer(pins or ""):
+        raw = m.group(1) if m.group(1) is not None else (m.group(2) or "")
+        text = _PIN_ESCAPE.sub(
+            lambda e: _PIN_ESCAPES.get(e.group(1), e.group(1)), raw)
+        if sum(ch.isalnum() for ch in text) < 4:
+            continue
+        for word in _WORD.findall(text):
+            low = word.lower()
+            if len(low) >= _PIN_WORD_MIN_CHARS and low not in _PIN_STOPWORDS:
+                out.add(low)
+    return frozenset(out)
+
+
+def removal_sentence(guidance: str) -> str:
+    """The first sentence of ``guidance`` that carries a removal marker, or
+    "" — the sentence a retirement line quotes, since the prescription is
+    what was withheld and the record's opening premise is usually true."""
+    return next((s for s in guidance_sentences(guidance)
+                 if _REMOVAL_MARKER.search(s)), "")
+
+
+def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
+    """Whether ``guidance`` instructs the next attempt to remove an
+    observable that ``pins`` names: some sentence of it carries a removal
+    marker (`_REMOVAL_MARKER`) AND, as a whole word, a word of one of the
+    pinned literals (`pinned_words`). Sentence-scoped on purpose — "Remove
+    the unused import. Then write `Stack backtrace:` before the frames" is
+    a removal and a mention that never meet. Empty ``guidance`` or empty
+    ``pins`` is False: nothing to judge, or nothing to judge against.
+
+    Pure text against text: no record, no unit, no test name. The same
+    predicate fires for any crate whose retrospective prescribes away a
+    string its own tests assert."""
+    if not guidance or not pins:
+        return False
+    words = pinned_words(pins)
+    if not words:
+        return False
+    for sentence in guidance_sentences(guidance):
+        if not _REMOVAL_MARKER.search(sentence):
+            continue
+        if not words.isdisjoint(w.lower() for w in _WORD.findall(sentence)):
+            return True
+    return False
+
+
 # Set on a record whose lesson was written from a test outcome that hollow
 # siblings, not the attempted body, decided. `blocked_on` alone cannot carry
 # this: the caller narrows that set as blockers fill, so it empties out and the
@@ -773,6 +939,8 @@ def admissible_guidance(
     unit: FnLocator | None = None,
     joint_members: frozenset[str] = frozenset(),
     joint_body_sha: str = "",
+    pins: str = "",
+    observables: Iterable[str] = (),
 ) -> str:
     """The stored lesson a prompt may carry, or ``""`` — `screen_guidance`'s
     text half, for the callers that do not log the verdict."""
@@ -780,7 +948,8 @@ def admissible_guidance(
                           anchor_types=anchor_types, cluster=cluster,
                           cfg_dead=cfg_dead, unit=unit,
                           joint_members=joint_members,
-                          joint_body_sha=joint_body_sha).text
+                          joint_body_sha=joint_body_sha, pins=pins,
+                          observables=observables).text
 
 
 def screen_guidance(
@@ -792,8 +961,20 @@ def screen_guidance(
     unit: FnLocator | None = None,
     joint_members: frozenset[str] = frozenset(),
     joint_body_sha: str = "",
+    pins: str = "",
+    observables: Iterable[str] = (),
 ) -> GuidanceScreening:
     """The stored lesson a prompt may carry, or ``""``, with the retiring rule.
+
+    ``pins`` is the pinned-observables string of the tests the unit answers
+    for at THIS prompt-build (`refill_evidence.pinned_observables_from_tests`).
+    ``observables`` are the asserted-output literals of those same tests
+    (`asserted_output_literals_from_tests`) — the one-argument
+    `assert!(s.contains("…"))` shape puts its literals here and leaves
+    ``pins`` empty. The two are joined (`pins_for_contradiction_guard`)
+    before the live re-judgment, so a record stored before
+    `CONTRADICTS_TARGET` was stamped at write is screened too; both empty,
+    only the stamp decides.
 
     ``cfg_dead`` names the fns of ``file_text`` whose every stub occurrence
     is gated out of the cluster's build. They are textually `unimplemented!()`
@@ -840,6 +1021,18 @@ def screen_guidance(
         return GuidanceScreening("", "")
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
         return GuidanceScreening("", "hollow_tree")
+    # The eleventh way, judged before every rule below because none of them
+    # can see it: the lesson prescribes removing an observable the tests this
+    # unit answers for pin. Obeyed, it re-creates the failure it explains —
+    # the `3003-93e9a9bf` pair record (see `CONTRADICTS_TARGET`) was honoured
+    # here, passed `regression_scoped` as the same transaction, passed the
+    # premise rules on a live `convictor_entry`, and steered the next reply
+    # into the same ten-sibling regression. The stamp is the write-time
+    # answer; `pins` re-asks it against the target of THIS prompt-build.
+    if rec.get(CONTRADICTS_TARGET) or (
+            (guard_pins := pins_for_contradiction_guard(pins, observables))
+            and prescription_removes_pinned_observable(guidance, guard_pins)):
+        return GuidanceScreening("", CONTRADICTS_TARGET)
     # The fifth way: the futility escalation measured that rewrites of this
     # unit change nothing for the tests it answers for — the exact question
     # the guidance advises on. Scoped to the cluster the futility was
@@ -958,6 +1151,20 @@ def retired_guidance_line(
     retirements keep their existing silence (the per-batch tally counts
     them)."""
     rec = record or {}
+    if verdict.retired_by == CONTRADICTS_TARGET:
+        # The record stays on disk and was honoured with no signature but
+        # the honoured line on run `3003-93e9a9bf`; quote the sentence that
+        # removes, not the record's opening premise — the removal is what
+        # was withheld.
+        pinning = [str(t) for t in (rec.get("convicted_by") or [])]
+        flat = " ".join(str(rec.get("guidance") or "").split())
+        head = (removal_sentence(flat) or flat)[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} prescribes "
+                f"removing an observable the unit's own test(s) pin "
+                f"(convicted_by={pinning[:4]}) — NOT injected "
+                f"({CONTRADICTS_TARGET}): {head}")
     if verdict.retired_by == REGRESSION_SCOPED:
         # Same reason the class above gets a line: the record stays in the
         # store, its text is what was dropped, and the ensure instance
@@ -1077,6 +1284,25 @@ def honoured_guidance_line(
             f"guidance: {head}")
 
 
+def pins_for_contradiction_guard(pins: str, observables: Iterable[str]) -> str:
+    """The pinned-literal text the contradiction guard reads for a unit: the
+    pins extraction plus every asserted-output literal, each quoted.
+
+    `pinned_observables` reads helper-asserted literals (the last argument of
+    a two-plus-argument assertion) and is EMPTY for a test written as
+    `assert!(s.contains("Stack backtrace"))` — the one-argument shape the two
+    convicting tests of run `3003-93e9a9bf` use; those literals reach
+    `BlockEvidence.observables` instead. Handing the guard the pins alone
+    would leave it blind on exactly the instance that named the class."""
+    parts = [pins.strip()] if pins and pins.strip() else []
+    for lit in sorted(set(observables)):
+        if not lit:
+            continue
+        escaped = lit.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        parts.append(f'"{escaped}"')
+    return " ".join(parts)
+
+
 def stamp_conviction(
     record: dict[str, Any],
     provenance: RetroProvenance,
@@ -1084,12 +1310,14 @@ def stamp_conviction(
     blockers: BlockedOnStubs | None = None,
     *,
     regressed: tuple[str, ...] = (),
+    pins: str = "",
 ) -> dict[str, Any]:
     """Every half a later reader needs: the CONTEXT the verdict was earned in
     (equality-checked), the EVIDENCE it rests on (subset-checked), the hollow
-    siblings it ran against (`cleared_blockers`, difference-checked) and the
+    siblings it ran against (`cleared_blockers`, difference-checked), the
     tests the failed attempt REGRESSED (`regression_scoped`,
-    disjointness-checked).
+    disjointness-checked) and whether the lesson CONTRADICTS the target it
+    will be injected for (`CONTRADICTS_TARGET`, judged here against `pins`).
 
     `blockers` is optional so a caller with no file snapshot in hand still
     writes a well-formed record; such a record simply carries no tree claim and
@@ -1098,9 +1326,26 @@ def stamp_conviction(
     240-character preview the record also carries cuts a 13-test list
     mid-name); always written, so a record earned from a compile error
     carries `regressed: []` and reads as "not this class" rather than as a
-    legacy record."""
+    legacy record.
+
+    `pins` is the pinned-observables string of the tests the unit answers
+    for — the string the retrospective prompt itself carried under "The
+    tests this unit answers for pin:". Non-empty, the record's guidance is
+    judged against it (`prescription_removes_pinned_observable`) and a
+    lesson that prescribes removing a pinned observable is stamped
+    `contradicts_target: True`; otherwise the key is ABSENT — removed, not
+    left, because a record is re-stamped with new guidance every round and
+    a stamp from a previous round's text would withhold a lesson that no
+    longer contradicts anything. Empty `pins` (every caller before the
+    stamp existed, and a unit with no attributed test to pin) judges
+    nothing and writes the record exactly as before."""
     stamped = evidence.stamp(provenance.stamp(record))
     stamped["regressed"] = sorted(regressed)
+    if pins and prescription_removes_pinned_observable(
+            str(stamped.get("guidance") or ""), pins):
+        stamped[CONTRADICTS_TARGET] = True
+    else:
+        stamped.pop(CONTRADICTS_TARGET, None)
     # Behavioural records (learned from test outcomes, `error_count` 0) get
     # the entry premise: the bodies each convicting test measurably entered
     # at conviction time. This is what keeps such a lesson alive on a tree

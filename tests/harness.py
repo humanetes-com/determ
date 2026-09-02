@@ -133,7 +133,18 @@ def install_scripted_cargo(
             from pathlib import Path as _P
 
             from pipeline_core.domain.attribution import container_key
-            locs = fscript()
+            from pipeline_core.domain.models import FnLocator
+            raw = fscript()
+            # A lone locator is a 2-tuple: iterating it yields the file and
+            # name strings, not one locator. A Frontier dict iterates as keys.
+            if raw is None:
+                locs: list = []
+            elif isinstance(raw, dict):
+                locs = list(raw)
+            elif isinstance(raw, FnLocator):
+                locs = [raw]
+            else:
+                locs = list(raw)
             recs = pipeline._APP.structure.enumerate_fns(_P(src_dir)) or []
             return frozenset(
                 (loc.file, loc.fn_name,

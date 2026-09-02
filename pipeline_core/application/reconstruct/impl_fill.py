@@ -20,9 +20,13 @@ from types import SimpleNamespace
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.application.reconstruct.assert_probe_runner import (
+    run_assert_probes,
+)
 from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
 from pipeline_core.application.reconstruct.block_evidence import (
     assemble_block_evidence,
+    render_prior_regression,
 )
 from pipeline_core.application.reconstruct.cargo_errors import (
     ecodes_in_text,
@@ -48,7 +52,12 @@ from pipeline_core.application.reconstruct.peel_revert import (
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
     ask_with_pulls,
+    make_request_answerer,
     reconstruction_file_reader,
+)
+from pipeline_core.application.reconstruct.slice_session import (
+    SessionPorts,
+    run_slice_session,
 )
 from pipeline_core.application.reconstruct.test_locator import (
     attributed_test_blocks,
@@ -115,6 +124,7 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     DispatchFamily,
     FnLocator,
+    FnRecord,
     FnSite,
     Frontier,
     ImplBlock,
@@ -140,6 +150,7 @@ from pipeline_core.domain.refill_evidence import (
     history_for_block,
     inferred_refill_names,
     pinned_observables_from_tests,
+    quote_panic_site,
     render_refill_evidence,
     tuple_struct_names,
     wraps_crate_tuple_struct,
@@ -175,6 +186,8 @@ from pipeline_core.domain.retro_gate import (
     honoured_guidance_line,
     impossibility_claim_is_unfounded,
     judge_guidance,
+    pins_for_contradiction_guard,
+    prescription_removes_pinned_observable,
     regressed_tests_from_excerpt,
     regression_scoped,
     retired_guidance_line,
@@ -190,6 +203,9 @@ from pipeline_core.domain.rust_idents import (
 )
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.sibling_steer import sibling_steer
+from pipeline_core.domain.slice_session import (
+    plan_slices,
+)
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
     JointImprovement,
@@ -200,6 +216,7 @@ from pipeline_core.domain.test_report import (
     parse_test_output,
 )
 from pipeline_core.domain.test_results import (
+    REGRESSED_OUTPUT,
     RegressionComparison,
     TestStateReading,
     strip_ansi,
@@ -221,6 +238,7 @@ from pipeline_core.prompts.fix_prompts import (
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
+from pipeline_core.prompts.slice_session import build_slice_session_prompt
 
 # The escalated followup's thinking reserve. Default off: Muse@high finishes
 # at p90 73 718 reasoning chars against request_max = VLLM_THINKING_BUDGET +
@@ -366,6 +384,16 @@ class ImplFillDeps:
     # Mechanical note validation: (fr_path, error_text) -> retired count.
     # None disables (tests / minimal wiring).
     retire_contradicted_notes: Callable[..., int] | None = None
+    # The transcript model call (`AskClient.ask_turns`) the red-slice
+    # session runs on; None disables the session route.
+    ask_turns: Callable[..., str] | None = None
+    # (cmd, cwd, env, timeout) -> (rc, output): the plain cargo runner the
+    # assertion probe builds its scratch crate with; None disables the probe.
+    run_cargo: Callable[..., tuple[int, str]] | None = None
+    # (project_dir, cluster_name, failing_tests=) -> CoverageSlice | None:
+    # the owner-map probe, so a session can tell the model which of its
+    # changed units the still-failing targets execute; None disables it.
+    measure_coverage_slice: Callable[..., Any] | None = None
 
 
 def cluster_inactive_stub_names(
@@ -544,6 +572,14 @@ def fill_impl_blocks(
     # render.
     behaviour_specs: Sequence[BehaviourSpec] = (),
     dispatch_ranks: dict[FnLocator, int] | None = None,
+    # Failing test -> every crate fn it executes (the sweep's coverage owner
+    # map plus the attributed units). The red-slice session's editable set;
+    # None or empty runs no session.
+    session_slices: Mapping[str, frozenset[FnLocator]] | None = None,
+    # Failing test -> the units the sweep's coverage MEASURED it executes
+    # (the owner map alone, without attributed additions): the session's
+    # per-unit executed marks. None leaves the marks off.
+    session_owners: Mapping[str, frozenset[FnLocator]] | None = None,
 ) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -1514,7 +1550,9 @@ def fill_impl_blocks(
                     _answers_for_block(_blk) if _blk is not None else frozenset()),
                 anchor_types=anchor_types_for_container(_rcont),
                 cluster=cluster_name, cfg_dead=_cfg_dead_fns(_rf),
-                unit=screening_unit(_rf, _rfn))
+                unit=screening_unit(_rf, _rfn),
+                pins=_block_pins.get(_impl_block_id(_rf, _rcont), "") or _union_pins,
+                observables=_file_observables)
             if (_hline := honoured_guidance_line(_fk, _frec, _fverdict.text)):
                 _log(f"  {_hline}")
             if (_rline := retired_guidance_line(_fk, _frec, _fverdict)):
@@ -2483,17 +2521,17 @@ def fill_impl_blocks(
                     _seen.add(bid)
             dispatch_family_section = _build_dispatch_family_section(_family)
         # Route-only widening: bodies tagged for ANY real impl in
-        # the SAME FILE should splice there — an already-filled target is a
-        # safe no-op via the #42 freshness gate — rather than being dropped,
-        # even when that container isn't a formal trait/family match. Live
-        # evidence: `impl Error`/`impl ErrorImpl` in anyhow's error.rs are
-        # tightly coupled (one wraps the other) but share no trait, so
-        # neither `related_containers` nor the dispatch-family heuristic ever
-        # pairs them — the model still answers both together (it can see the
-        # whole file), and every such body was silently dropped. Kept
-        # SEPARATE from `related_blocks` (the curated PROMPT context) so
-        # widening the ROUTING match set doesn't bloat every per-block
-        # prompt with the rest of the file's unrelated impls.
+        # the SAME FILE should splice there — an already-filled target whose
+        # body is unchanged is a no-op splice via the freshness gate — rather
+        # than being dropped, even when that container isn't a formal
+        # trait/family match. Live evidence: `impl Error`/`impl ErrorImpl` in
+        # anyhow's error.rs are tightly coupled (one wraps the other) but
+        # share no trait, so neither `related_containers` nor the
+        # dispatch-family heuristic ever pairs them — the model still answers
+        # both together (it can see the whole file), and every such body was
+        # silently dropped. Kept SEPARATE from `related_blocks` (the curated
+        # PROMPT context) so widening the ROUTING match set doesn't bloat
+        # every per-block prompt with the rest of the file's unrelated impls.
         _route_candidates = list(related_blocks)
         _route_seen = {_impl_block_id(rb.file, rb.container) for rb in _route_candidates}
         _route_seen.add(_impl_block_id(block.file, block.container))
@@ -2594,7 +2632,8 @@ def fill_impl_blocks(
             _prior_rec, snapshot, evidence=_block_answers,
             anchor_types=anchor_types_for_container(block.container),
             cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
-            unit=screening_unit(block.file, "*impl*"))
+            unit=screening_unit(block.file, "*impl*"),
+            pins=_pins, observables=_block_ev.observables)
         prior_retro = _prior_verdict.text
         # The line carries the STORE key so the grep lands on the record.
         if (_hline := honoured_guidance_line(
@@ -3480,11 +3519,14 @@ def fill_impl_blocks(
                         anchor_types=anchor_types_for_container(block.container),
                         cluster=cluster_name,
                         cfg_dead=_cfg_dead_fns(block.file),
-                        unit=screening_unit(block.file, "*impl*")),
-                    # The pins of the tests this block answers for: the
-                    # diagnosis may not prescribe away an observable they
-                    # name (`build_phase_c_retro_prompt`).
-                    pinned_observables=_pins,
+                        unit=screening_unit(block.file, "*impl*"),
+                        pins=_pins, observables=_block_ev.observables),
+                    # The pins of the tests this block answers for, plus the
+                    # asserted literals a one-argument `contains` puts only
+                    # in observables: the diagnosis may not prescribe away
+                    # an observable they name.
+                    pinned_observables=pins_for_contradiction_guard(
+                        _pins, _block_ev.observables),
                 )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
@@ -3616,7 +3658,9 @@ def fill_impl_blocks(
                         # From the FULL excerpt: the 240-char preview above
                         # cuts a regression's test list mid-name.
                         regressed=regressed_tests_from_excerpt(
-                            last_error_excerpt))
+                            last_error_excerpt),
+                        pins=pins_for_contradiction_guard(
+                            _pins, _block_ev.observables))
                     _save_retrospectives(project_dir, retros_cache)
                 _verdict_row(
                     block_id,
@@ -3668,7 +3712,8 @@ def fill_impl_blocks(
                 _prior_rec, snapshot, evidence=_block_answers,
                 anchor_types=anchor_types_for_container(block.container),
                 cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
-                unit=screening_unit(block.file, "*impl*"))
+                unit=screening_unit(block.file, "*impl*"),
+                pins=_pins, observables=_block_ev.observables)
             prior_retro = _prior_verdict.text
             if (_hline := honoured_guidance_line(
                     _prior_key, _prior_rec, prior_retro)):
@@ -3835,6 +3880,9 @@ def fill_impl_blocks(
         _pair_rec = retros_cache.get(_pair_key, {}) or {}
         _prior_regressed = tuple(
             str(t) for t in (_pair_rec.get("regressed") or []))
+        _prior_regressed_output = {
+            str(k): str(v)
+            for k, v in dict(_pair_rec.get(REGRESSED_OUTPUT) or {}).items()}
         # The FULL evidence assembly, over both halves' members — the same
         # call the per-impl route makes (`block_evidence`): attributed test
         # SOURCE first, the failing tests' own words, the pins, then the
@@ -3856,6 +3904,7 @@ def fill_impl_blocks(
             ledger_entries=ledger_entries, oracle_fp=oracle_fp,
             tuple_structs=_tuple_structs,
             prior_regressed=_prior_regressed,
+            prior_regressed_output=_prior_regressed_output,
             joint_rewrite=True,
             leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
             file_cap=_ATTRIBUTED_TEST_FILE_CAP)
@@ -3900,7 +3949,8 @@ def fill_impl_blocks(
                       | _cfg_dead_fns(pd.implementer_block.file)),
             unit=None,
             joint_members=pd.member_scope(),
-            joint_body_sha=pd.member_body_sha())
+            joint_body_sha=pd.member_body_sha(),
+            pins=_pair_ev.pins, observables=_pair_ev.observables)
         _pair_retro = _pair_verdict.text
         if (_hline := honoured_guidance_line(
                 str(_pair_key), _pair_rec, _pair_retro)):
@@ -4028,7 +4078,8 @@ def fill_impl_blocks(
                         error_excerpt=_rdetail,
                         fix_attempts=1,
                         prior_retrospective=_pair_retro,
-                        pinned_observables=_pair_ev.pins)
+                        pinned_observables=pins_for_contradiction_guard(
+                            _pair_ev.pins, _pair_ev.observables))
                     _signal = retro.get("signal", "")
                     if _signal in ("llm_error", "empty_response"):
                         raise RuntimeError(f"transient retro signal: {_signal}")
@@ -4052,9 +4103,14 @@ def fill_impl_blocks(
                             "fully_exhausted": False,
                             "last_error_preview": _rdetail[:240],
                         }, _prov, _pair_answers, _blockers,
-                            regressed=tuple(sorted(_rcmp.newly_red)))
+                            regressed=tuple(sorted(_rcmp.newly_red)),
+                            pins=pins_for_contradiction_guard(
+                                _pair_ev.pins, _pair_ev.observables))
                         _rec[JOINT_MEMBERS] = sorted(pd.member_scope())
                         _rec[JOINT_BODY_SHA] = pd.member_body_sha()
+                        # What the reddened tests printed, beside their
+                        # names: the next prompt renders both.
+                        _rec[REGRESSED_OUTPUT] = dict(_rcmp.newly_red_output)
                         _rec["last_prompt_sha"] = _kept_sha
                         retros_cache[_pair_key] = _rec
                         _save_retrospectives(project_dir, retros_cache)
@@ -4264,10 +4320,325 @@ def fill_impl_blocks(
                     "passed": sorted(_pair_passed)})
                 return
 
+    # RED-SLICE SESSION — one transcript over every crate fn a failing test
+    # executes, before any per-unit route opens those units alone. The
+    # stateless routes rebuilt an 88K-char document per attempt and kept
+    # nothing between attempts: run `3003-93e9a9bf` (2026-09-02) tried the
+    # one pair that could move its two red tests six times — four times on
+    # the same private-field diagnostic — and dispatched the tests' 20-unit
+    # coverage slice as per-file prompts it had itself labelled re-buys.
+    # The session (`application/reconstruct/slice_session`) gives the model
+    # the slice as its editable set, the compiler's and the suite's answers
+    # as turns, and the probe's observed values beside every failing
+    # assertion; acceptance is one transaction over the whole suite.
+    def _run_slice_sessions() -> set[FnLocator]:
+        nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+        served: set[FnLocator] = set()
+        if (not session_slices or deps.ask_turns is None
+                or os.getenv("SLICE_SESSION", "1") == "0"):
+            return served
+        _ask_turns = deps.ask_turns
+        _max_turns = int(os.getenv("SLICE_SESSION_MAX_TURNS", "8"))
+        _max_minutes = float(os.getenv("SLICE_SESSION_MAX_MINUTES", "90"))
+        _max_units = int(os.getenv("SLICE_SESSION_MAX_UNITS", "32"))
+        _max_pulls_session = int(os.getenv("SLICE_SESSION_MAX_PULLS", "6"))
+        _probe_on = deps.run_cargo is not None and os.getenv("ASSERT_PROBE", "1") != "0"
+        _coverage_fn = deps.measure_coverage_slice
+        _coverage_on = (_coverage_fn is not None
+                        and os.getenv("SLICE_SESSION_COVERAGE", "1") != "0")
+        _stubs_now = frozenset(_scan_unimplemented_for_cluster(target_src_dir, cluster))
+
+        def _coverage(names: Sequence[str]) -> Mapping[str, frozenset[FnLocator]]:
+            if not _coverage_on or _coverage_fn is None:
+                return {}
+            cov = _coverage_fn(project_dir, cluster_name,
+                               failing_tests=frozenset(names))
+            owners = getattr(cov, "owners", None) or {}
+            return {str(t).rsplit("::", 1)[-1]: frozenset(ks)
+                    for t, ks in dict(owners).items()}
+
+        _executed_all: frozenset[FnLocator] | None = None
+        if session_owners is not None:
+            _executed_all = (frozenset().union(*session_owners.values())
+                             if session_owners else frozenset())
+
+        def _records_now() -> dict[FnLocator, FnRecord]:
+            """The tree's fn records keyed as the frontier keys them — the
+            record's own `file` (the loop enumerates from the cluster root,
+            so both read `src/x.rs`; `unit_bodies` compares the same way) —
+            with a prefix-insensitive alias so a slice key that lost or
+            gained the `src/` prefix still resolves."""
+            out: dict[FnLocator, FnRecord] = {}
+            alias: dict[FnLocator, FnRecord] = {}
+            for _raw in _enumerate_fns_via_extractor(target_src_dir) or []:
+                _r = FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
+                if _r.is_test or not _r.fn_name:
+                    continue
+                out.setdefault(FnLocator(_r.file, _r.fn_name), _r)
+                alias.setdefault(FnLocator(_norm_src_rel(_r.file), _r.fn_name), _r)
+            for _u in session_slices_units:
+                if _u not in out:
+                    _hit = alias.get(FnLocator(_norm_src_rel(_u.file), _u.fn_name))
+                    if _hit is not None:
+                        out[_u] = _hit
+            return out
+
+        session_slices_units: frozenset[FnLocator] = frozenset().union(
+            *session_slices.values())
+        _all_recs = _records_now()
+        _plans = plan_slices(session_slices, stubs=_stubs_now, max_units=_max_units)
+        if not _plans:
+            if session_slices:
+                _log(f"  [phase-c/session] no slice planned "
+                     f"({len(session_slices)} failing test(s) — hollow, empty, "
+                     f"or over SLICE_SESSION_MAX_UNITS={_max_units})")
+            return served
+        _run_cargo = deps.run_cargo
+
+        def _probe(names: Sequence[str]) -> Mapping[str, str]:
+            if not _probe_on or _run_cargo is None:
+                return {}
+            by_file: dict[Path, list[str]] = {}
+            for _n in names:
+                _leaf = _n.rsplit("::", 1)[-1]
+                for _p, _txt in _find_tests_referencing_fn(
+                        tests_dir_files, _leaf, max_blocks=1):
+                    if f"fn {_leaf}(" not in _txt:
+                        continue
+                    _fp = Path(_p)
+                    if not _fp.is_absolute():
+                        _fp = project_dir / _fp
+                    by_file.setdefault(_fp, []).append(_leaf)
+                    break
+            if not by_file:
+                return {}
+            return run_assert_probes(
+                project_dir=project_dir, cluster_root=target_src_dir,
+                cluster_name=cluster_name, cluster_env=cluster_env,
+                tests_by_file=by_file, run_cargo=_run_cargo, log=_log).rendered
+
+        for _sl in _plans:
+            _check_graceful_stop("slice-session dispatch")
+            _records = {u: _all_recs[u] for u in _sl.units if u in _all_recs}
+            _missing = [u for u in _sl.units if u not in _all_recs]
+            if _missing:
+                _log(f"  [phase-c/session] {_sl.label()}: {len(_missing)} unit(s) "
+                     "have no fn record on the tree and are left out: "
+                     + ", ".join(f"{u.file}::{u.fn_name}" for u in _missing[:6]))
+            if not _records:
+                continue
+            _units = tuple(sorted(_records, key=lambda u: (u.file, u.fn_name)))
+            _sl = type(_sl)(tests=_sl.tests, units=_units)
+            _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))
+            _tblocks = attributed_test_blocks(
+                _leaves,
+                lambda leaf: _find_tests_referencing_fn(tests_dir_files, leaf, max_blocks=1),
+                file_cap=_ATTRIBUTED_TEST_FILE_CAP, into=[])
+            _tsources = tuple(t for _, t in _tblocks)
+            _spins = pinned_observables_from_tests(_leaves, _tsources)
+            _sobs = asserted_output_literals_from_tests(_leaves, _tsources)
+            _file_texts = {
+                f: (target_src_dir / f).read_text(encoding="utf-8", errors="replace")
+                for f in _sl.files}
+            _types_parts: list[str] = []
+            _bound_parts: list[str] = []
+            for _f in _sl.files:
+                _frecs = [_records[u] for u in _sl.units if u.file == _f]
+                _tsec = _types_section_for_fix(
+                    " ".join(r.sig_text for r in _frecs), _file_texts[_f], "",
+                    " ".join(dict.fromkeys(r.container for r in _frecs)), "",
+                    _crate_type_records, file_rel=_f, observables=_sobs)
+                if _tsec and _tsec not in _types_parts:
+                    _types_parts.append(_tsec)
+                for _cont in dict.fromkeys(r.container for r in _frecs if r.container):
+                    _wc = _extract_impl_where_clause(_file_texts[_f], _cont)
+                    _bsec = _bound_methods_section_for(
+                        _wc, _crate_type_records, file_rel=_f) if _wc else ""
+                    if _bsec and _bsec not in _bound_parts:
+                        _bound_parts.append(_bsec)
+            _initial_obs = _probe(_sl.tests)
+            _evidence: dict[str, str] = {}
+            for _t in _sl.tests:
+                _ev = _frontier_tests.evidence_for(_t)
+                _said = quote_panic_site(_ev, _read_source) if _ev else ""
+                _obs = _initial_obs.get(_t) or _initial_obs.get(_t.rsplit("::", 1)[-1], "")
+                _evidence[_t] = "\n".join(x for x in (_said, _obs) if x)
+            _skey = _retro_key(_sl.files[0], "*session*",
+                               "+".join(sorted(_sl.member_scope())))
+            _srec = retros_cache.get(_skey, {}) or {}
+            _prior_notes = ""
+            _stored_scope = _srec.get(JOINT_MEMBERS)
+            if (isinstance(_stored_scope, list)
+                    and frozenset(str(x) for x in _stored_scope) == _sl.member_scope()):
+                _prior_notes = str(_srec.get("guidance") or "")
+                _guard = pins_for_contradiction_guard(_spins, _sobs)
+                if (_prior_notes and _guard
+                        and prescription_removes_pinned_observable(
+                            _prior_notes, _guard)):
+                    _log(f"  [phase-c/session] {_sl.label()}: previous notes "
+                         "prescribed removing a pinned observable — withheld")
+                    _prior_notes = ""
+            _prior_regr = render_prior_regression(
+                tuple(str(t) for t in (_srec.get("regressed") or [])),
+                _spins,
+                {str(k): str(v) for k, v in dict(
+                    _srec.get(REGRESSED_OUTPUT) or {}).items()})
+            _bp = ""
+            if not _blueprint.empty:
+                _bp = _blueprint.slice_for(
+                    frozenset(u.fn_name for u in _sl.units)
+                    | frozenset(tok for r in _records.values()
+                                for tok in _container_names(r.container)),
+                    cap=6000)
+            _turn0 = build_slice_session_prompt(
+                module_name=module_name, cluster_name=cluster_name,
+                slice_=_sl, records=_records,
+                all_records=list(_all_recs.values()),
+                file_texts=_file_texts, target_evidence=_evidence,
+                test_blocks=_tblocks,
+                types_section="\n\n".join(_types_parts),
+                bound_methods="\n\n".join(_bound_parts),
+                invariants=invariants_section, macros=macros_section,
+                notes=_prior_notes, prior_regression=_prior_regr,
+                blueprint=_bp, fr_path=fr_path,
+                max_turns=_max_turns, executed=_executed_all)
+            _pull_file.file = _sl.files[0]
+
+            def _check_now() -> tuple[int, str, list[Any]]:
+                rc, out, diags = _run_cargo_check_diag(
+                    check_cmd, target_src_dir, cluster_env)
+                _last_full_out[0] = out
+                return rc, out, list(diags)
+
+            def _bodies_now(_want: tuple[FnLocator, ...] = _units) -> Mapping[FnLocator, str]:
+                recs = _records_now()
+                return {u: recs[u].body_text for u in _want if u in recs}
+
+            _ports = SessionPorts(
+                ask_turns=lambda msgs: str(_ask_turns(
+                    msgs, model=_TASK2_MODEL,
+                    followup_think=followup_think_env_on())),
+                splice=_splice_fn_with_where,
+                check=_check_now,
+                focus_errors=lambda out, f: str(_focus_cargo_errors(out, f)),
+                blamed_type_api=lambda text: with_blamed_type_api(
+                    text, _crate_type_records),
+                measure_suite=lambda raw: _test_regression_baseline(
+                    tdd_test_cmd, target_src_dir, cluster_env, raw),
+                read_source=_read_source,
+                enumerate_bodies=_bodies_now,
+                answer_pulls=make_request_answerer(
+                    _pull_sources, log=_log, emit=_emit,
+                    max_pulls=_max_pulls_session),
+                log=_log, emit=_emit,
+                check_graceful_stop=_check_graceful_stop,
+                probe=_probe if _probe_on else None,
+                implicated=lambda diags: _implicated_keys_from_diags(
+                    list(diags), target_src_dir),
+                coverage=_coverage if _coverage_on else None)
+            _sid = "session:" + "+".join(_sl.tests)
+            with _splice_check_lock, serving_units(
+                    f"{u.file}::{u.fn_name}" for u in _sl.units):
+                _out = run_slice_session(
+                    _ports, target_src_dir=target_src_dir,
+                    cluster_name=cluster_name, slice_=_sl, records=_records,
+                    turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes)
+            with _counters_lock:
+                attempts_total += _out.model_calls
+                dispatched_keys.update(_out.dispatched | _out.kept)
+                reverted_keys.update(_out.reverted)
+                if _out.outcome == "accepted":
+                    impls_filled += 1
+                    fns_filled_total += len(_out.kept)
+                elif _out.outcome == "kept":
+                    fns_filled_total += len(_out.kept)
+                elif _out.outcome == "reverted":
+                    impls_failed += 1
+            # Only units whose bodies stayed. A no_change, compile-fail, or
+            # full-revert session spent GPU and left the tree as it was —
+            # the pair and per-fn routes still have a shot this call.
+            served |= set(_out.kept)
+            if _out.outcome == "accepted":
+                _cls(class_for_kept(passed=frozenset(_sl.tests), unreachable=False),
+                     _sid, "session")
+                _verdict_row(
+                    _sid, Disposition.ACCEPT,
+                    f"session accepted on turn {_out.turns} — every target test "
+                    "passes, no regression",
+                    outcome=GateOutcome.POSITIVE, attempt=_out.turns,
+                    evidence=tuple(_sl.tests), model_calls=_out.model_calls,
+                    validity=ValidityVector(binary_completed=True),
+                    route="session")
+                block_outcomes.append(UnitOutcome(landed=True))
+            elif _out.outcome == "kept":
+                _cls(FillOutcomeClass.WRONG_BODY, _sid, "session")
+                _verdict_row(
+                    _sid, Disposition.KEEP_DEFERRED,
+                    f"session kept {len(_out.kept)} body(ies) after {_out.turns} "
+                    "turn(s) — compiles, no regression, targets still red",
+                    outcome=GateOutcome.UNMEASURABLE, attempt=_out.turns,
+                    evidence=tuple(_out.newly_red), model_calls=_out.model_calls,
+                    route="session")
+                block_outcomes.append(UnitOutcome(landed=bool(_out.kept)))
+            elif _out.outcome == "reverted":
+                _cls(FillOutcomeClass.WRONG_BODY, _sid, "session")
+                _verdict_row(
+                    _sid, Disposition.REVERT,
+                    f"session reverted after {_out.turns} turn(s) — the last "
+                    f"change set regressed {len(_out.newly_red)} test(s) and no "
+                    "subset held",
+                    outcome=GateOutcome.NEGATIVE, attempt=_out.turns,
+                    evidence=tuple(_out.newly_red), model_calls=_out.model_calls,
+                    route="session")
+            else:
+                _cls(FillOutcomeClass.COMPILE_FAIL
+                     if _out.compile_failures and _out.compile_failures >= _out.turns
+                     else FillOutcomeClass.WRONG_BODY, _sid, "session")
+                _verdict_row(
+                    _sid, Disposition.REJECT,
+                    f"session ended without a kept change after {_out.turns} "
+                    f"turn(s) ({_out.compile_failures} compile failure(s))",
+                    outcome=GateOutcome.NEGATIVE, attempt=_out.turns,
+                    model_calls=_out.model_calls, route="session")
+            # The session's own memory: its notes (written by the context that
+            # saw both the targets and the regressions), the last reddened set
+            # with what it printed, and the member scope the next session on
+            # this slice reads it under. Replaces the cold retrospective call
+            # for this route.
+            with _counters_lock:
+                _new_rec = dict(_srec)
+                _new_rec.update({
+                    "category": "SESSION_NOTES",
+                    "guidance": _out.notes or str(_srec.get("guidance") or ""),
+                    "signal": "ok",
+                    "retrospective_count": int(_srec.get("retrospective_count", 0) or 0) + 1,
+                    "error_count": 0,
+                    "failing_test_count": sum(
+                        1 for t in (_out.final.targets if _out.final else ())
+                        if not t.passing),
+                    "fully_exhausted": False,
+                    "last_error_preview": "",
+                    "convicted_by": list(_sl.tests),
+                    "regressed": sorted(_out.newly_red),
+                    REGRESSED_OUTPUT: dict(_out.newly_red_output),
+                    JOINT_MEMBERS: sorted(_sl.member_scope()),
+                    "session_outcome": _out.outcome,
+                    "session_turns": _out.turns,
+                })
+                retros_cache[_skey] = _new_rec
+                _save_retrospectives(project_dir, retros_cache)
+        return served
+
     _pair_served: set[FnLocator] = set()
+    _session_served = _run_slice_sessions()
+    _pair_served |= _session_served
     _pair_jobs = pair_dispatches(
         _frontier_tests.pairs, tdd_frontier_keys, all_blocks)
     for _pd in _pair_jobs:
+        if _pd.member_locators() & _session_served:
+            # A session kept or accepted these members under one judgment
+            # this call; the next sweep judges that write.
+            continue
         try:
             _fill_pair(_pd)
         except Exception as _pfe:

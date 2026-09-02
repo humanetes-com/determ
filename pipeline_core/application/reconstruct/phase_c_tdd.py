@@ -167,6 +167,7 @@ from pipeline_core.domain.refine import (
     LoopState,
 )
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
+from pipeline_core.domain.slice_session import slices_with_pair_hops
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
@@ -176,6 +177,7 @@ from pipeline_core.domain.tdd_floor import (
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import (
     failure_evidence_by_test,
+    merge_observations,
     parse_test_output,
     stub_only_crash,
 )
@@ -323,6 +325,10 @@ class PhaseCTddDeps:
     # frontier at what the compiler names. None disables the narrowing — a red
     # sweep then dispatches from the behavioural frontier, as it used to.
     implicated_fns: Callable[..., list[FnLocator]] | None = None
+    # (project_dir, cluster_root, cluster_name, cluster_env, tests_by_file)
+    # -> rendered `observed:` lines per failing test, from the assertion
+    # probe (`assert_probe_runner`). None disables the observations.
+    assert_probe: Callable[..., Mapping[str, str]] | None = None
     # Every fn the tree declares, as extractor records (`file`, `fn_name`,
     # `body_text`, …): (src_dir) -> records | None. Read for ONE question — the
     # crate's own destruction family, when a crash reads as a double drop and
@@ -4095,6 +4101,34 @@ def run_phase_c_tdd(
                     for t, ks in sorted(
                         (t, set(d)) for t, d in _by_test.items())},
             })
+        # RED-SLICE SESSIONS. The owner map is the unit of evidence — every
+        # crate fn a failing test executes — and the session route makes it
+        # the unit of work: one transcript over the whole slice instead of
+        # one prompt per unit. Run `3003-93e9a9bf` (2026-09-02) dispatched
+        # the same 20 owners as four per-file prompts and a two-fn pair per
+        # iteration, judged one at a time, and labelled 17 of them re-buys
+        # before opening them. The per-unit admission above still stands
+        # (the slice units are frontier, and a session that does not run
+        # leaves them to the other routes); the engine drops what a session
+        # served from the same call's other routes.
+        _session_slices: dict[str, frozenset[FnLocator]] = {}
+        _session_owners: dict[str, frozenset[FnLocator]] = {}
+        if (_cov is not None and _cov.owners
+                and os.getenv("SLICE_SESSION", "1") != "0"):
+            for _ot, _oks in _cov.owners.items():
+                _otn = bare_test_name(_ot)
+                _session_owners[_otn] = frozenset(_oks)
+                _session_slices[_otn] = (
+                    frozenset(_oks)
+                    | frozenset(_units_for_owners.get(_otn, ())))
+            # A formatter dispatcher's implementer is not in the owner map
+            # until the dispatcher calls it; the hop the attribution resolved
+            # closes the slice over both halves.
+            _session_slices = slices_with_pair_hops(
+                _session_slices,
+                ((FnLocator(p.dispatcher.file, p.dispatcher.fn_name),
+                  FnLocator(p.implementer.file, p.implementer.fn_name))
+                 for p in _attr.pairs))
         _before_svc = [k for k, _ in ordered]
         # The ranking reads the VERIFIED service view, not the fire's
         # inclusive `_served_at`: a floor stamp the route-scoped rule never
@@ -4637,6 +4671,36 @@ def run_phase_c_tdd(
             _fill_phase_max,
             log=deps.log, emit=deps.emit,
             cluster=cluster.name, iter_n=iter_n)
+        # The failing tests' own words, with what the assertion probe
+        # OBSERVED beneath them when the probe is wired: a one-argument
+        # `assert!(s.contains(..))` panics without printing `s`, and six
+        # prompts of run `3003-93e9a9bf` carried that panic line while the
+        # string under test reached none of them.
+        _sweep_evidence = failure_evidence_by_test(output)
+        if (deps.assert_probe is not None and cur_failed
+                and os.getenv("ASSERT_PROBE", "1") != "0"):
+            _probe_by_file: dict[Path, list[str]] = {}
+            for _ft in sorted(cur_failed):
+                _fpath = _test_files.get(_ft) or _test_files.get(bare_test_name(_ft))
+                if not _fpath:
+                    continue
+                _fp = Path(_fpath)
+                if not _fp.is_absolute():
+                    _fp = project_dir / _fp
+                if _fp.is_file():
+                    _probe_by_file.setdefault(_fp, []).append(bare_test_name(_ft))
+            if _probe_by_file:
+                try:
+                    _observed = deps.assert_probe(
+                        project_dir, target_src_dir, cluster.name, cluster_env,
+                        _probe_by_file)
+                except Exception as _pe:  # noqa: BLE001 — never ends a sweep
+                    deps.log(f"  {tag} [probe] failed ({type(_pe).__name__}: {_pe})")
+                    _observed = {}
+                if _observed:
+                    _sweep_evidence = merge_observations(_sweep_evidence, _observed)
+                    deps.log(f"  {tag} [probe] observed values for "
+                             f"{len(_observed)} failing test(s).")
         _fill_meta: list[dict[str, Any]] = []
         try:
             with collect_stream_meta() as _fill_meta:
@@ -4666,7 +4730,7 @@ def run_phase_c_tdd(
                         # The sweep's own words per failing test (panic site +
                         # assertion), so a re-fill prompt can show WHY the test
                         # failed instead of asserting that it did.
-                        evidence=failure_evidence_by_test(output),
+                        evidence=_sweep_evidence,
                         # Test-own source: homonym scoring reads `{:?}` here,
                         # never from libtest evidence (run `463713-b7c666c8`).
                         sources=_attr.sources,
@@ -4686,6 +4750,8 @@ def run_phase_c_tdd(
                     dispatch_ranks=(
                         overlay_crash_on_ranks(_ranks, _crash_grades)
                         or None),
+                    session_slices=_session_slices or None,
+                    session_owners=_session_owners or None,
                 )
         except BaseException:
             _restore_abandoned_bet("stopped during the fill pass")
@@ -4705,9 +4771,14 @@ def run_phase_c_tdd(
         _sub_dispatched: set[FnLocator] | None = (
             None if sub.dispatched_fns is None
             else {FnLocator(*t) for t in sub.dispatched_fns})
+        # A session serves its whole slice, batch cut or not: the units it
+        # had in view are served, so they leave the never-served rank.
+        _session_units: frozenset[FnLocator] = (
+            frozenset().union(*_session_slices.values())
+            if _session_slices else frozenset())
         _attempted = (
             frontier_keys if _sub_dispatched is None
-            else _sub_dispatched & frontier_keys)
+            else _sub_dispatched & (frontier_keys | _session_units))
         # A lost answer is not an attempt. `dispatched_fns` is stamped
         # before the model call, so a file-first call that returned
         # nothing routable (LLM error, empty/no FN blocks, nothing

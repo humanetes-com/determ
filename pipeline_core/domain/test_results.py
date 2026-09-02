@@ -11,8 +11,8 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -1561,6 +1561,12 @@ class RegressionComparison:
     cur_executed: int
     crashed_all_red: tuple[str, ...] = ()
     crash_lost_pass: int = 0
+    # What each newly-red test PRINTED (bare name → the failing assertion
+    # with its `left` / `right` values), attached by the gate from the same
+    # capture the comparison was read from. Empty on a comparison built
+    # without a capture; `compare_readings` never fills it. See
+    # `test_report.regressed_test_outputs` for the instance.
+    newly_red_output: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def net_pass_delta(self) -> int:
@@ -1717,4 +1723,37 @@ def render_regression_detail(cmp: RegressionComparison) -> str:
                  "abort usually means a still-stubbed sibling (often Drop "
                  "machinery) is now reachable; those bodies are separate "
                  "work, not a fault of this change.)")
+    head += render_newly_red_outputs(cmp.newly_red, cmp.newly_red_output)
     return head
+
+
+# Retro-store record key: what the tests a reverted attempt reddened PRINTED
+# (bare name → assertion with `left` / `right`), stored beside `regressed` so
+# the next prompt for the same transaction can show the values and not only
+# the names.
+REGRESSED_OUTPUT = "regressed_output"
+
+
+def render_newly_red_outputs(
+    newly_red: Iterable[str], outputs: Mapping[str, str], *,
+    indent: str = "  ", max_lines: int = 8,
+) -> str:
+    """The per-test `said:` blocks for a regression verdict, or "" when no
+    reddened test has a captured section. Appended AFTER the historical head
+    so `regressed_tests_from_excerpt` (which reads the name list off the
+    `REGRESSED previously-passing test(s): [...]` line) still parses."""
+    names = sorted(n for n in newly_red if n)
+    blocks: list[str] = []
+    for name in names:
+        said = outputs.get(name) or outputs.get(name.rsplit("::", 1)[-1])
+        if not said:
+            continue
+        lines = [ln for ln in said.splitlines() if ln.strip()][:max_lines]
+        blocks.append(f"{indent}{name} said:\n"
+                      + "\n".join(f"{indent}  {ln}" for ln in lines))
+    if not blocks:
+        return ""
+    return ("\nWhat the reddened test(s) printed — the assertion that failed, "
+            "with the value the body NOW produces (`left`) against what the "
+            "test expects (`right`); the next body must keep producing the "
+            "expected value:\n" + "\n".join(blocks))

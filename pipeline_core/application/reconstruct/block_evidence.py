@@ -23,7 +23,7 @@ it renders edges the frontier already holds.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -94,9 +94,18 @@ class BlockEvidence:
 
 def render_prior_regression(
     regressed: Sequence[str], pins: str,
+    outputs: Mapping[str, str] | None = None,
 ) -> str:
     """The section a reverted joint write owes the next one: the tests the
-    previous attempt reddened, and what they assert.
+    previous attempt reddened, what they assert, and — when the record kept
+    it — what they PRINTED when that attempt reddened them.
+
+    `outputs` is the reverted attempt's `regressed_output` stamp (bare test
+    name → the failing assertion with its `left` / `right`). Without it the
+    section is names plus the pins extraction, which on run
+    `3003-93e9a9bf` (2026-09-02) read `they assert: "hello",
+    format!("{:#?}", …), "msg", "simple literal"` — a list from which the
+    model could not tell that its output had gained a `<disabled>` suffix.
 
     A measurement, never an attribution — after the revert the coverage
     binding describes the baseline tree, in which none of these tests enter
@@ -114,6 +123,20 @@ def render_prior_regression(
     ]
     if pins:
         lines.append(f"  they assert: {pins}")
+    if outputs:
+        shown: list[str] = []
+        for name in regressed:
+            said = outputs.get(name) or outputs.get(name.rsplit("::", 1)[-1])
+            if not said:
+                continue
+            body = [ln for ln in said.splitlines() if ln.strip()][:8]
+            shown.append(f"    {name} said:\n"
+                         + "\n".join(f"      {ln}" for ln in body))
+        if shown:
+            lines.append("  what they printed when that attempt reddened them "
+                         "(`left` is what the reverted body produced, `right` "
+                         "what the test expects):")
+            lines.extend(shown)
     return "\n".join(lines)
 
 
@@ -168,6 +191,7 @@ def assemble_block_evidence(
     oracle_fp: str = "",
     tuple_structs: Iterable[str] = (),
     prior_regressed: Sequence[str] = (),
+    prior_regressed_output: Mapping[str, str] | None = None,
     joint_rewrite: bool = False,
     leaf_cap: int = ATTRIBUTED_TEST_LEAF_CAP,
     file_cap: int = ATTRIBUTED_TEST_FILE_CAP,
@@ -243,7 +267,8 @@ def assemble_block_evidence(
             if path_str not in seen:
                 seen.add(path_str)
                 test_blocks.append((path_str, txt))
-        section = render_prior_regression(prior_leaves, prior_pins)
+        section = render_prior_regression(
+            prior_leaves, prior_pins, prior_regressed_output)
         rendered = f"{rendered}\n{section}" if rendered else section
     # Name-match fallback, after the attributed channel exactly as before.
     fill_target_names = [

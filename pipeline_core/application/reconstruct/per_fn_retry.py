@@ -761,7 +761,7 @@ def generate_one_body(
                 f"// {p}\n{t}" for p, t in deps.find_tests_for_fn(
                     ctx.tests_dir_files, name)),
             type_def=lambda name: ("\n\n".join(
-                format_type_for_prompt(r) for r in
+                format_type_for_prompt(r, viewer_file=rel_f) for r in
                 types_referenced_in_text(
                     name, ctx.type_recs, visible_from=rel_f)[:3])
                 # Crate-local records win; well-known unstable std APIs

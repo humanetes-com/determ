@@ -30,6 +30,14 @@ from pipeline_core.domain.rust_macros import (
 )
 from pipeline_core.ports import Extractor
 
+from .std_types import (
+    ExternalTypeSource,
+    StdTypeSource,
+    crate_root_of,
+    external_type_records,
+    external_type_records_enabled,
+)
+
 
 def collect_crate_macros(src_dir: Path, max_chars: int) -> str:
     """Read the crate's .rs files and render its macro_rules! section (pure
@@ -147,9 +155,25 @@ def load_baked_clusters(project_dir: Path) -> list[BuildCluster]:
 
 @dataclass(frozen=True, slots=True)
 class CliStructureReader:
-    """Structure reads via the syn extractor. Satisfies ports.structure.StructureReader."""
+    """Structure reads via the syn extractor. Satisfies ports.structure.StructureReader.
+
+    `enumerate_types` is the one composite read: the crate's own records
+    (the `Extractor` seam, one subcommand per method, untouched) followed by
+    records for the standard-library types the crate's `use` lines bind,
+    fetched from `rust-src` through `std_types` (default: a `StdTypeSource`
+    over the same extractor). This is the seam every fill route reaches —
+    the composition root's `enumerate_types` closure is `structure
+    .enumerate_types` — so a prompt's TYPES_IN_SCOPE can render
+    `std::backtrace::Backtrace` without a builder change, while the
+    pre-strip API-surface capture, which calls the extractor directly, keeps
+    seeing the crate alone."""
 
     extractor: Extractor
+    std_types: ExternalTypeSource | None = None
+
+    def __post_init__(self) -> None:
+        if self.std_types is None:
+            object.__setattr__(self, "std_types", StdTypeSource(self.extractor))
 
     def enumerate_fns(self, src_dir: Path) -> list[dict[str, Any]] | None:
         """Fn records as wire dicts (the per-fn/per-impl engine contract); None if the
@@ -162,7 +186,17 @@ class CliStructureReader:
         return None if recs is None else [r.to_dict() for r in recs]
 
     def enumerate_types(self, src_dir: Path) -> list[TypeRecord] | None:
-        return self.extractor.enumerate_types(src_dir)
+        recs = self.extractor.enumerate_types(src_dir)
+        if recs is None or self.std_types is None or not external_type_records_enabled():
+            return recs
+        if crate_root_of(src_dir) is None:
+            return recs  # not a cargo package: nothing binds `std` here
+        # `None` = a stale binary that cannot report `use` bindings; the crate's
+        # own records still answer, so return them rather than nothing.
+        uses = self.extractor.enumerate_uses(src_dir)
+        if uses is None:
+            return recs
+        return [*recs, *external_type_records(src_dir, recs, uses, self.std_types)]
 
     def enumerate_mods(self, src_dir: Path) -> list[ModRecord] | None:
         return self.extractor.enumerate_mods(src_dir)

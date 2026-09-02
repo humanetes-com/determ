@@ -18,7 +18,7 @@ import queue as _queue_mod
 import threading as _threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -277,6 +277,10 @@ class PhaseCFillEngine:
         # barriered level (run `155810-cbb3b9fc` iter 1: constructors in
         # the batch, dispatched last).
         dispatch_ranks: dict[FnLocator, int] | None = None,
+        # Failing test -> the crate fns it executes (the sweep's owner map
+        # plus its attributed units): the red-slice session's editable set.
+        session_slices: Mapping[str, frozenset[FnLocator]] | None = None,
+        session_owners: Mapping[str, frozenset[FnLocator]] | None = None,
     ) -> ClusterFillResult:
         """Phase C — Flavour B with full validation loops."""
         if cluster_env is None:
@@ -428,6 +432,8 @@ class PhaseCFillEngine:
                 crash_blocked=crash_blocked,
                 behaviour_specs=behaviour_specs,
                 dispatch_ranks=dispatch_ranks,
+                session_slices=session_slices,
+                session_owners=session_owners,
             )
             _impl_payoff = _impl_stats.payoff
             _fill_hist = _impl_stats.fill_classes or FillClassHistogram()

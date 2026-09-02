@@ -11,8 +11,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline_core.domain.models import DispatchFamily, ImplBlock, TypeRecord
+from pipeline_core.domain.models import (
+    DispatchFamily,
+    FieldRecord,
+    ImplBlock,
+    TypeRecord,
+)
 from pipeline_core.domain.refill_evidence import collapse_ws
+from pipeline_core.domain.type_refs import (
+    accessor_methods_for_field,
+    field_accessible_from,
+)
 
 # Standard library trait contracts. When a fn is being implemented
 # inside `impl Trait for X`, inject the trait's documented behavior so the
@@ -652,7 +661,9 @@ RUST_GOTCHAS: list[dict[str, Any]] = [
         "triggers": {"E0599", "no function or associated item", "no associated item named"},
         "detail": (
             "The type exists but has no such associated item — a struct literal is\n"
-            "ALWAYS available for an in-scope type, and sibling fns pin the form:\n"
+            "available for an in-scope type whose fields you can name (a field\n"
+            "private to another module makes the literal E0451 there: use the\n"
+            "constructor a sibling uses), and sibling fns pin the form:\n"
             "  WRONG:\n"
             "    ContextValue::new(ctx, err)      // E0599: no `new` on the struct\n"
             "  RIGHT (struct literal from the type's shown fields):\n"
@@ -1092,6 +1103,12 @@ def format_impl_block_for_prompt(
     return "\n".join(lines)
 
 
+def _tuple_struct_fields(fields: tuple[FieldRecord, ...]) -> bool:
+    """True iff `fields` are the positional fields of a tuple struct
+    (numeric or empty names) — `Quoted<D>(D)` records a single field `0`."""
+    return bool(fields) and all((not f.name) or f.name.isdigit() for f in fields)
+
+
 def _construct_hint(rec: TypeRecord) -> str | None:
     """A `construct:` line showing HOW to build `rec`, derived deterministically
     from the frozen definition/fields (a legitimate, always-correct input).
@@ -1108,7 +1125,7 @@ def _construct_hint(rec: TypeRecord) -> str | None:
     deff = rec.definition or ""
     # Tuple struct: positional fields (numeric/empty names), or a `Name( … )`
     # definition with no brace. Named struct: real field names / a `{ … }` def.
-    if fields and all((not f.name) or f.name.isdigit() for f in fields):
+    if _tuple_struct_fields(fields):
         args = ", ".join(f"<{f.ty}>" for f in fields)
         return (f"  construct: {name}({args})   "
                 f"// tuple struct — positional; NOT {name}::new(...)")
@@ -1378,8 +1395,58 @@ def _emit_layout_attr(attr_line: str, out: list[str]) -> None:
         out.append(f"#[{' '.join(inner.split())}]")
 
 
+def _trim_sig(sig: str) -> str:
+    """A method signature cut to the prompt's budget: keep up to 120 chars
+    (covers virtually all real fn sigs; verbose where-clauses are what goes)."""
+    sig = sig or ""
+    if len(sig) > 120:
+        sig = sig[:117] + "..."
+    return sig.strip()
+
+
+def _private_field_lines(
+    rec: TypeRecord, private: list[FieldRecord], viewer_file: str,
+) -> list[str]:
+    """The `private fields` block of a struct rendered for a body in ANOTHER
+    module: one header naming the declaring file and the viewer file, then
+    one line per field carrying the accessor that returns it — or the fact
+    that none is declared.
+
+    Run `3003-93e9a9bf` (2026-09-02, cluster `stable`): the pair prompt for
+    `src/error.rs::fmt` + `src/fmt.rs::debug` rendered `ErrorImpl` (declared
+    in `src/error.rs`; `vtable`, `backtrace`, `_object`, none `pub`) under
+    `fields (access with .name):` 15 times. The `src/fmt.rs` half read
+    `impl_ref.backtrace` directly — `error[E0616]: field backtrace of struct
+    ErrorImpl is private` on 3 of its 6 attempts (two on `backtrace`, one on
+    `vtable`), roughly 25 GPU-minutes each — while the record's own
+    `unsafe fn backtrace(this: Ref<Self>) -> &Backtrace` sat a few lines
+    below under methods. The rendering invited the error; this block states
+    the rule the compiler applies and puts the accessor on the field's line.
+    """
+    with_accessors = [(f, accessor_methods_for_field(rec, f)) for f in private]
+    reach = ("reach each one through the accessor on its line"
+             if any(ms for _, ms in with_accessors)
+             else "no method of this type returns them")
+    # The construction a body there cannot write: a named literal is E0451
+    # (private field in a struct literal); a tuple struct's constructor call
+    # `Name(..)` is E0603 (private tuple struct constructor).
+    literal = (f"the `{rec.name or '?'}(..)` constructor is E0603 there"
+               if _tuple_struct_fields(rec.fields)
+               else "a struct literal naming them is E0451 there")
+    lines = [
+        f"  private fields — declared in {rec.file}, NOT accessible from "
+        f"{viewer_file} (no .name access: E0616; {literal}; {reach}):",
+    ]
+    for f, ms in with_accessors:
+        via = (" / ".join(_trim_sig(m.sig) for m in ms) if ms
+               else "(no accessor declared here)")
+        lines.append(f"    {f.name}: {f.ty}   → {via}")
+    return lines
+
+
 def format_type_for_prompt(
     rec: TypeRecord, observables: frozenset[str] = frozenset(),
+    *, viewer_file: str = "",
 ) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
@@ -1401,6 +1468,15 @@ def format_type_for_prompt(
     assert appear in some rendering; a doc region of this type that STATES one
     of them survives the leading-lines cap. Default empty renders exactly as
     before the argument existed.
+
+    `viewer_file` is the file the prompt is writing. Given, a struct's fields
+    split by `field_accessible_from`: the accessible ones render under the
+    `fields (access with .name):` header as before, the ones private to
+    another file under a `private fields` header that names both files and
+    carries each field's accessor (`_private_field_lines`), and the
+    `construct:` hint is dropped — a struct literal from another module
+    cannot name a private field. Empty (every caller without a file) renders
+    byte-identically to before the argument existed.
     """
     kind = rec.kind or "?"
     name = rec.name or "?"
@@ -1412,18 +1488,28 @@ def format_type_for_prompt(
     lines = [*_type_doc_lines(definition, observables),
              *_type_layout_attrs(definition),
              f"{kind} {name}{generics}"]
+    private: list[FieldRecord] = []
     if fields:
-        lines.append("  fields (access with .name):")
+        accessible: list[FieldRecord] = []
         for f in fields:
-            pub = "pub " if f.is_pub else ""
-            lines.append(f"    {pub}{f.name}: {f.ty}")
+            (accessible if field_accessible_from(rec, f, viewer_file)
+             else private).append(f)
+        if accessible:
+            lines.append("  fields (access with .name):")
+            for f in accessible:
+                pub = "pub " if f.is_pub else ""
+                lines.append(f"    {pub}{f.name}: {f.ty}")
+        if private:
+            lines.extend(_private_field_lines(rec, private, viewer_file))
     if variants:
         lines.append("  variants:")
         for v in variants[:8]:
             lines.append(f"    {v}")
         if len(variants) > 8:
             lines.append(f"    ... ({len(variants) - 8} more)")
-    _ctor = _construct_hint(rec)
+    # A struct literal written in another module cannot name a private field
+    # (E0451), so the literal the hint shows is not writable there.
+    _ctor = None if private else _construct_hint(rec)
     if _ctor:
         lines.append(_ctor)
     if methods:
@@ -1435,15 +1521,11 @@ def format_type_for_prompt(
             mn = m.name
             if mn and mn not in seen:
                 seen.add(mn)
-                sig = m.sig or ""
-                # Trim verbose where-clauses to fit the prompt; keep up to
-                # 120 chars of the sig (covers virtually all real fn sigs).
-                if len(sig) > 120:
-                    sig = sig[:117] + "..."
                 # Conjunction: is_exactly_pub defaults True when absent (pre-
                 # field artifact / stale extractor) — alone it would render a
                 # PRIVATE method as `pub`; is_pub can only narrow.
-                sigs.append((mn, sig.strip(), bool(m.is_pub and m.is_exactly_pub)))
+                sigs.append((mn, _trim_sig(m.sig),
+                             bool(m.is_pub and m.is_exactly_pub)))
         if sigs:
             lines.append("  methods (sig shown; call with .name(args)):")
             # Cap to top 10 methods to keep prompts compact for types with

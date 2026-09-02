@@ -126,10 +126,16 @@ def cluster_filter_type_methods(
     if cluster is None:
         return records
     cfg_set = _cfg.cluster_cfg_set(cluster)
-    dead = cfg_dead_type_records(records, cluster)
     out: list[TypeRecord] = []
     for r in records:
-        if r.name in dead:
+        # Each record answers for its OWN leading cfg, never for its name:
+        # the shim's live twin is a `use`, and the structure reader now
+        # appends a record for what that `use` binds (`external struct
+        # Backtrace`, gated by the shim's complement). Dropping by name
+        # removed both arms at once and left the table with no `Backtrace`
+        # at all — the pre-existing absence, measured 2026-09-02.
+        preds = _cfg.cfg_inline_predicates(_leading_attr_text(r.definition))
+        if preds and any(cfg_set.evaluate(p) is False for p in preds):
             continue
         kept = tuple(
             m for m in r.methods
@@ -174,7 +180,7 @@ def cluster_gate_for_sibling(
     all_clusters: list[Any],
     cluster_specific_symbols: Callable[[], frozenset[str]],
 ) -> str:
-    """#26: the cfg gate to stamp on a gen_tests sibling. The default cluster
+    """The cfg gate to stamp on a gen_tests sibling. The default cluster
     shares a test UNGATED only when its target lines AND its body are both
     cluster-agnostic (so a later cluster sees those lines already covered);
     otherwise the gate stays. `cluster_specific_symbols` is a lazy provider —

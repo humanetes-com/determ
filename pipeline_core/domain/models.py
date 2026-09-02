@@ -169,6 +169,25 @@ class TypeRecord:
     # `pub trait` behind `mod ext` still reads `is_pub=True` — filtering on
     # `is_pub` alone cannot drop it from another file's TYPES_IN_SCOPE.
     mod_path: str = ""
+    # Nonempty ONLY on a record describing a type OUTSIDE the crate: the fully
+    # qualified path the crate binds with a `use` from `std`/`core`/`alloc`
+    # (`std::backtrace::Backtrace`). The extractor never emits it —
+    # `adapters/std_types.py` appends such records after the crate's own, so
+    # a fill prompt can render the API of a standard-library type the crate
+    # re-exports. Run `3003-93e9a9bf` (2026-09-02): the Debug formatter fill
+    # saw `backtrace: Option<Backtrace>` with no record behind the name and
+    # printed the backtrace without the `status()` check its tests require.
+    # `kind` on such a record carries the prefix `external ` ("external
+    # struct"), so every consumer that switches on the four crate kinds —
+    # the private-surface classifier, the pub-items manifest, the
+    # producible-type set — leaves it alone; a consumer that must tell the
+    # two apart keys on this field, never on `file`.
+    external_path: str = ""
+    # Traits the external type's own source file implements for it
+    # (`Display`, `Debug`), from a scan of `impl … Trait for Name` headers:
+    # `methods` holds inherent methods only, and whether a std type prints
+    # through Display or Debug is exactly what a formatter fill has to know.
+    external_trait_impls: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TypeRecord:
@@ -184,6 +203,8 @@ class TypeRecord:
             is_pub=bool(d.get("is_pub", False)),
             is_exactly_pub=bool(d.get("is_exactly_pub", True)),
             mod_path=d.get("mod_path", ""),
+            external_path=d.get("external_path", ""),
+            external_trait_impls=_strs(d.get("external_trait_impls")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -199,6 +220,11 @@ class TypeRecord:
             "is_pub": self.is_pub,
             "is_exactly_pub": self.is_exactly_pub,
             "mod_path": self.mod_path,
+            # Only an external record carries these keys: the Rust side never
+            # emits them, so a crate record round-trips to the exact wire shape.
+            **({"external_path": self.external_path,
+                "external_trait_impls": list(self.external_trait_impls)}
+               if self.external_path else {}),
         }
 
 

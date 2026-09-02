@@ -24,7 +24,7 @@ from typing import Any
 
 from pipeline_core.domain.llm_output import salvage_complete_blocks
 from pipeline_core.domain.reasoning_cap import record_followup_meta, record_stream_meta
-from pipeline_core.domain.text import PromptDigest
+from pipeline_core.domain.text import PromptDigest, turns_digest_text
 
 from .budget import BudgetSpec, BudgetState, Plan, request_max_tokens
 from .detect import StopDetector
@@ -176,13 +176,62 @@ class LLMController:
         thinking reserve; True gives it the same reserve, rung and cap as the
         main stream. Default False so every existing caller is byte-identical;
         the escalated grade opts in at its own call site."""
-        spec = transport.spec()
-        state = transport.budget_state()
-
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        return self._run_messages(
+            transport, messages, digest_text=prompt, model=model,
+            max_tokens=max_tokens, want_think=want_think,
+            temperature=temperature, followup_think=followup_think)
+
+    def run_turns(
+        self,
+        transport: Transport,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        max_tokens: int,
+        want_think: bool | None = None,
+        temperature: float | None = None,
+        followup_think: bool = False,
+    ) -> str:
+        """One model call over a caller-built TRANSCRIPT — system, then the
+        alternating user/assistant turns of a session — with the same budget,
+        capping, followup and provenance policy as :meth:`run`.
+
+        Why a second entry point rather than a prompt: the stateless fill
+        route rebuilt an 88K-char document for every attempt and the model
+        kept nothing of its own previous answer or the result it earned.
+        Run `3003-93e9a9bf` (2026-09-02, cluster `stable`): six attempts on
+        one two-fn write, four of them the same private-field diagnostic,
+        the fourth arriving one iteration after the third because the
+        accessor list a retry had carried lived in a per-call slot. A
+        transcript carries the model's own prior turns and the harness's
+        results as turns; chat templates drop earlier assistant turns'
+        reasoning blocks (measured 2026-08-09), so what persists is
+        answers and results, never raw reasoning. `messages` is copied;
+        the caller's list is not mutated by the followup path."""
+        turns = [dict(m) for m in messages]
+        return self._run_messages(
+            transport, turns, digest_text=turns_digest_text(turns),
+            model=model, max_tokens=max_tokens, want_think=want_think,
+            temperature=temperature, followup_think=followup_think)
+
+    def _run_messages(
+        self,
+        transport: Transport,
+        messages: list[dict[str, Any]],
+        *,
+        digest_text: str,
+        model: str,
+        max_tokens: int,
+        want_think: bool | None,
+        temperature: float | None,
+        followup_think: bool,
+    ) -> str:
+        spec = transport.spec()
+        state = transport.budget_state()
         msg_chars = sum(len(m.get("content") or "") for m in messages)
 
         enable_thinking = transport.resolve_thinking(model, want_think)
@@ -193,7 +242,7 @@ class LLMController:
             default_sentinel=self._sentinel,
             enable_thinking=enable_thinking,
         )
-        # debt#7: announce the adaptive token budget so the monitor's budget bar is
+        # Announce the adaptive token budget so the monitor's budget bar is
         # live during this call (not just after a cpt update lands).
         self._h.emit("vllm.budget", {"request_max": plan.request_max})
 
@@ -281,7 +330,7 @@ class LLMController:
         followup = (transport.supports_followup and reasoning_text
                     and (not result or meta.finish_reason == "length"
                          or cap.stop == "think_cap"))
-        prompt_sha = PromptDigest.of(prompt).sha256
+        prompt_sha = PromptDigest.of(digest_text).sha256
         fu = _FollowupOutcome()
         if followup:
             fu = self._followup(transport, messages, reasoning_text, model, max_tokens,

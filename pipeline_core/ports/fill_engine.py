@@ -16,7 +16,7 @@ import directly. Only I/O, the LLM call, the extractor, the retro store, and
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -268,4 +268,6 @@ class ImplFillPath(Protocol):
         crash_blocked: dict[str, str] | None = None,
         behaviour_specs: Sequence[BehaviourSpec] = ...,
         dispatch_ranks: dict[FnLocator, int] | None = ...,
+        session_slices: Mapping[str, frozenset[FnLocator]] | None = ...,
+        session_owners: Mapping[str, frozenset[FnLocator]] | None = ...,
     ) -> ClusterFillResult: ...

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from pipeline_core.domain.test_report import (
     external_stub_crash_sites,
     parse_test_output,
     partition_blame,
+    regressed_test_outputs,
     self_aborted_tests,
     stub_only_crash,
 )
@@ -221,6 +222,12 @@ def test_regression_gate(
     if after is None:
         return None  # crate not compiling now ⇒ can't judge; defer to TDD loop
     cmp = compare_readings(baseline, after)
+    # Attach what the reddened tests printed, from the same capture the
+    # comparison was read from — the detail used to name the tests and drop
+    # their `left` / `right` (`regressed_test_outputs` carries the instance).
+    if cmp.newly_red:
+        cmp = replace(cmp, newly_red_output=regressed_test_outputs(
+            _raw[-1] if _raw else "", cmp.newly_red))
     # PUBLISH THE READING. This full-suite measurement runs on every splice and
     # its numbers were discarded on every path — the gate reduced them to a
     # yes/no, so nothing in the event store carried a score between one

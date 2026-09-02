@@ -26,6 +26,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -53,6 +54,7 @@ __all__ = [
     "MODEL",
     "MAX_TOKENS",
     "ask",
+    "ask_turns",
     "main",
     "_parse_input_token_overflow",
     "_sock_open",
@@ -96,6 +98,18 @@ def ask(prompt: str, system: str | None = None, model: str | None = None,
     return _get_controller().run(
         _get_backend(), system=system, prompt=prompt, model=model,
         max_tokens=max_tokens, want_think=think, temperature=temperature, followup_think=followup_think,
+    )
+
+
+def ask_turns(messages: list[dict[str, Any]], model: str | None = None,
+              max_tokens: int = MAX_TOKENS, think: bool | None = None,
+              temperature: float | None = None, followup_think: bool = False) -> str:
+    """One call over a caller-built transcript (`LLMController.run_turns`)."""
+    if model is None:
+        model = MODEL
+    return _get_controller().run_turns(
+        _get_backend(), messages=messages, model=model, max_tokens=max_tokens,
+        want_think=think, temperature=temperature, followup_think=followup_think,
     )
 
 

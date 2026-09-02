@@ -10,6 +10,7 @@ each byte-equivalent to the pattern it replaced (pinned in tests/test_text_domai
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
@@ -461,3 +462,18 @@ def extract_markdown_rules(text: str, min_len: int = 0) -> list[str]:
         if len(content) > min_len:
             rules.append(content)
     return rules
+
+
+def turns_digest_text(messages: Sequence[Mapping[str, object]]) -> str:
+    """The one canonical text a multi-turn request is content-addressed by,
+    so `llm.request` (the ask client) and `llm.stream_meta` (the controller)
+    join on the same sha for a turn list exactly as they do on a single
+    prompt. Role and content per turn, in order; a turn list that differs
+    in any earlier turn digests differently, which is the property a
+    session transcript needs (every turn is a new request)."""
+    parts: list[str] = []
+    for m in messages:
+        role = str(m.get("role") or "")
+        content = m.get("content")
+        parts.append(f"<<{role}>>\n{content if isinstance(content, str) else ''}")
+    return "\n<<turn>>\n".join(parts)

@@ -15,7 +15,7 @@ structure reader), never approximated here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -204,6 +204,54 @@ def failure_evidence_by_test(output: str, *, per_test_cap: int = 480) -> dict[st
         if len(text) > per_test_cap:
             text = text[:per_test_cap].rstrip() + " …"
         out[f.test_name] = text
+    return out
+
+
+def merge_observations(
+    evidence: Mapping[str, str], observed: Mapping[str, str],
+) -> dict[str, str]:
+    """`evidence` (test -> its own words) with the probe's `observed:` lines
+    appended per test, matched on the bare name; tests with an observation
+    but no evidence entry gain one holding the observation alone."""
+    out = dict(evidence)
+    by_leaf = {k.rsplit("::", 1)[-1]: k for k in evidence}
+    for name, lines in observed.items():
+        if not lines:
+            continue
+        key = by_leaf.get(name.rsplit("::", 1)[-1], name)
+        out[key] = (out[key] + "\n" + lines) if out.get(key) else lines
+    return out
+
+
+def regressed_test_outputs(
+    output: str, names: Iterable[str], *, per_test_cap: int = 480,
+) -> dict[str, str]:
+    """What each of `names` PRINTED in `output` — the failing assertion with
+    its `left` / `right` values — keyed by the BARE test name.
+
+    The regression gate measures the whole suite after every splice, and its
+    detail named only the tests that went red. Run `3003-93e9a9bf`
+    (2026-09-02, cluster `stable`): a Debug formatter rewrite reddened ten
+    passing tests; the capture held `left: "hello<disabled>"` against
+    `right: "hello"` for `debug_for_anyhow_literal`, the detail said
+    `REGRESSED previously-passing test(s): ['debug_for_anyhow_literal', …]`,
+    and both the next fill prompt and the retrospective prompt written from
+    that detail carried 0 `left:` lines. The model was told WHICH tests it
+    broke and never WHAT they printed, and the next reply broke the same ten.
+
+    Same extraction as :func:`failure_evidence_by_test`; matched on the last
+    `::` segment because the comparison keys on bare names while libtest
+    prints the module path. A name with no captured section yields no entry.
+    """
+    wanted = {n.rsplit("::", 1)[-1] for n in names if n}
+    if not wanted:
+        return {}
+    out: dict[str, str] = {}
+    for printed, text in failure_evidence_by_test(
+            output, per_test_cap=per_test_cap).items():
+        leaf = printed.rsplit("::", 1)[-1]
+        if leaf in wanted and leaf not in out:
+            out[leaf] = text
     return out
 
 

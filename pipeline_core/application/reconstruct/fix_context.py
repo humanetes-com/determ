@@ -78,7 +78,11 @@ class FixContextAssembler:
 
         `file_rel` filters to types (and methods) nameable from that file:
         a `pub trait` behind `mod ext` in another file is not callable here,
-        however `is_pub` it reads.
+        however `is_pub` it reads. It is also the viewer the rendering is
+        for: a struct's fields private to another file render as NOT
+        accessible, each with its accessor, instead of under the
+        `access with .name` header that had `src/fmt.rs` reading
+        `ErrorImpl.backtrace` directly (E0616, run `3003-93e9a9bf`).
 
         `observables` are the literal texts the target's attributed failing
         tests assert appear in some rendering — a documented type that STATES
@@ -89,11 +93,38 @@ class FixContextAssembler:
             sig_text or "", container or "", impl_where or "",
             body_text or "", error_excerpt or "",
         ])
-        recs = types_referenced_in_text(
-            search, type_records, visible_from=file_rel,
-        )[:self.budgets.types_count]
+        # Ranked: the types the SIGNATURE, header and where-clause name come
+        # first, then everything the body and the diagnostic mention. The
+        # selection used to be in record order and the section is cut at a
+        # char cap, so a record appended late — the external std records —
+        # fell off the end whenever the body named many crate types: the
+        # session prompt built on run `3003-93e9a9bf`'s slice (2026-09-02)
+        # had `Backtrace` in a signature and `BacktraceStatus` in the
+        # records, and rendered neither.
+        # Within each tier, records the prompt cannot show any other way —
+        # external (standard-library) records and types declared in ANOTHER
+        # file — rank before the file's own declarations, which the model
+        # already reads in the file text. Under the char cap that is the
+        # difference between `Backtrace`/`BacktraceStatus` reaching a
+        # `src/error.rs` prompt and being cut behind `ErrorVTable`.
+        def _not_shown_elsewhere(rec: TypeRecord) -> int:
+            if getattr(rec, "external_path", ""):
+                return 0
+            return 1 if (file_rel and rec.file and rec.file == file_rel) else 0
+
+        head = sorted(types_referenced_in_text(
+            "\n".join([sig_text or "", container or "", impl_where or ""]),
+            type_records, visible_from=file_rel), key=_not_shown_elsewhere)
+        head_names = {r.name for r in head}
+        rest = sorted(
+            (r for r in types_referenced_in_text(
+                search, type_records, visible_from=file_rel)
+             if r.name not in head_names),
+            key=_not_shown_elsewhere)
+        recs = (head + rest)[:self.budgets.types_count]
         full = "\n\n".join(
-            format_type_for_prompt(r, observables) for r in recs)
+            format_type_for_prompt(r, observables, viewer_file=file_rel)
+            for r in recs)
         if len(full) > self.budgets.types_section:  # Plan 9 F5: surface starvation
             self.guard("phase-c/types_truncated",
                        f"{(container or sig_text)[:50]}: type context {len(full):,} > "
@@ -104,9 +135,9 @@ class FixContextAssembler:
         self, impl_where: str, type_records: list[TypeRecord],
         file_rel: str = "",
     ) -> str:
-        """Corrected R2/R3 (debt #28): name the methods the fn's FROZEN
-        where-bounds make callable, so the body uses a bound-provided trait
-        method instead of a mis-bound free constructor. "" when none."""
+        """Name the methods the fn's FROZEN where-bounds make callable, so
+        the body uses a bound-provided trait method instead of a mis-bound
+        free constructor. "" when none."""
         if not impl_where.strip() or not type_records:
             return ""
         referenced = types_referenced_in_text(
