@@ -9,17 +9,20 @@ functions read only the owner map shape, the reply and the measurement.
 from __future__ import annotations
 
 from pipeline_core.domain.attribution import locator_of
-from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.slice_session import (
     SessionSlice,
     TargetStatus,
     TurnReading,
+    attributed_units_for_session,
     extract_notes,
+    locator_only_expansions,
     plan_slices,
     render_compile_turn,
     render_test_turn,
     route_change_set,
     session_slices_for_failing,
+    slice_plan_gaps,
     slices_with_pair_hops,
 )
 
@@ -51,6 +54,22 @@ def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:
     big = {FnSite("src/x.rs", f"f{i}", f"impl X{i}") for i in range(5)}
     assert plan_slices({"t": big}, max_units=4) == []
     assert len(plan_slices({"t": big}, max_units=5)) == 1
+    gaps = slice_plan_gaps({"t": big, "ui": frozenset()}, max_units=4)
+    assert (gaps.empty, gaps.hollow, gaps.over_cap, gaps.over_cap_units) == (
+        1, 0, 1, 5)
+    assert gaps.log_clause() == (
+        "1 empty; 1 over SLICE_SESSION_MAX_UNITS=4 (5 unit(s))")
+
+
+def test_slice_plan_gaps_names_hollow_apart_from_over_cap() -> None:
+    gaps = slice_plan_gaps(
+        {"t_stub": {_DISP}, "t_ok": {_RENDER}},
+        stubs={locator_of(_DISP)}, max_units=32)
+    assert (gaps.empty, gaps.hollow, gaps.over_cap) == (0, 1, 0)
+    assert gaps.log_clause() == "1 hollow"
+    empty_only = slice_plan_gaps({"ui": frozenset()})
+    assert empty_only.log_clause() == "1 empty"
+    assert "over SLICE_SESSION_MAX_UNITS" not in empty_only.log_clause()
 
 
 def test_an_empty_owner_map_plans_no_session() -> None:
@@ -262,3 +281,30 @@ def test_the_verdict_turn_names_dropped_bodies_and_the_coverage_fact() -> None:
     assert text.startswith("COMPILER: 1 body(ies) did not compile and were DROPPED")
     assert "error[E0308]" in text and "Dropped: context" in text
     assert "do NOT execute: src/fmt.rs::debug" in text
+
+
+def test_attributed_units_eligible_without_frontier_is_not_a_locator_only_unit() -> None:
+    """Eligible locators that never entered the site frontier do not become
+    units. The 238.5 loop invented FnSite(file, fn, "") for those and the
+    expander then named every container of the name."""
+    loc = FnLocator("src/w.rs", "fmt")
+    assert attributed_units_for_session({loc: {"t_pay"}}, {}) == {}
+    dbg = FnSite("src/w.rs", "fmt", "impl Debug for W")
+    # Frontier site whose locator is not dispatchable this iter is omitted.
+    assert attributed_units_for_session({}, {dbg: {"t_pay"}}) == {}
+    # Frontier site for T whose locator is eligible is included.
+    assert attributed_units_for_session(
+        {loc: {"crate::t_pay"}}, {dbg: {"t_pay"}}) == {"t_pay": {dbg}}
+    # Empty-container frontier site still enters (classifier / reverse-map).
+    bare = FnSite("src/w.rs", "fmt", "")
+    assert attributed_units_for_session(
+        {loc: {"t_pay"}}, {bare: {"t_pay"}}) == {"t_pay": {bare}}
+
+
+def test_locator_only_expansions_names_the_fan_out() -> None:
+    disp = FnSite("src/w.rs", "fmt", "impl Display for W")
+    dbg = FnSite("src/w.rs", "fmt", "impl Debug for W")
+    assert locator_only_expansions(
+        {"t": {FnSite("src/w.rs", "fmt", "")}}, [disp, dbg]) == (
+        ("w.rs", "fmt", 2),)
+    assert locator_only_expansions({"t": {dbg}}, [disp, dbg]) == ()

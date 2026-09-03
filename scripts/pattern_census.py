@@ -126,7 +126,16 @@ UNSTAMPED is screened by nothing — every prompt for that unit whose tests are
 not the regressed ones is steered by a prescription about other tests until
 the unit's next retro round overwrites it; the per-run P16 rows say which
 runs it steered (SILENT: an honoured line on such a unit) and where the
-screen fired (REACTED: `retro guidance withheld (regression_scoped)`).
+        screen fired (REACTED: `retro guidance withheld (regression_scoped)`).
+  P18 locator-collapsed session slice — the session's attributed units
+     treated dispatch locators as a source, so a name with no site-frontier
+     container expanded to every tree container of that name; the merge
+     exceeded SLICE_SESSION_MAX_UNITS and plan_slices dropped the group
+     (or a locator-only unit fanned out in the log).  Run 110993-6efa23be
+     (2026-09-03): owner map named Debug, no phase_c.session.start, log
+     `no slice planned (3 failing test(s) — hollow, empty, or over …)`.
+     Distinct from an empty leftover (`ui`) which is not this class.
+
 The aggregate at the bottom counts, per class, total hits and how many were
 SILENT.  Decision rule: a class with recurring SILENT hits needs its detector
 and lever BEFORE any new bespoke mechanism is added; a class with only REACTED
@@ -361,6 +370,13 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # The screen firing IS the answer: the record stays in the store,
         # its text is what was dropped, and this line is the only trace.
         ("retro guidance withheld (regression_scoped)", "regression-scoped"),
+    ],
+    "P18": [
+        # A session that actually opens is the answer to an exploded or
+        # locator-only slice that used to prevent one. The over-cap / expand
+        # lines remain the HIT; this marker is the reaction on a later iter
+        # of the same log (or a later run of the same tree).
+        ("opening — targets", "session-opened"),
     ],
     "P14": [
         # The per-block loop's own stopper: it ends the SPEND after the
@@ -1247,12 +1263,55 @@ def detect_p17(run: Run, iters: list[dict]) -> list[dict]:
     }]
 
 
+RE_SESSION_OVER_CAP = re.compile(
+    r"\[phase-c/session\] no slice planned \((?P<detail>.*"
+    r"(?:hollow, empty, or over SLICE_SESSION_MAX_UNITS"
+    r"|over SLICE_SESSION_MAX_UNITS=).*)\)")
+RE_SESSION_LOCATOR_EXPAND = re.compile(
+    r"\[phase-c/session\] locator-only (?P<unit>\S+) expanded to "
+    r"(?P<n>\d+) tree site")
+
+
+def detect_p18(run: Run, iters: list[dict]) -> list[dict]:
+    """Locator-collapsed session slice — eligible treated as a unit source so
+    a name with no site-frontier container expanded to every tree container,
+    the merge exceeded the cap, and plan_slices dropped the group. Also the
+    locator-only expansion log after the join. An empty leftover (`ui` only)
+    is not this class. Run 110993-6efa23be (2026-09-03) is the positive
+    instance of the collapsed three-way log line.
+    """
+    hits: list[dict] = []
+    over = list(run.find(RE_SESSION_OVER_CAP))
+    if over:
+        hits.append({
+            "evidence": (
+                f"{len(over)} no-slice-planned line(s) naming an over-cap or "
+                f"the collapsed hollow/empty/over clause — "
+                f"{over[0][1]['detail']}"
+            ),
+            "refs": [r for r, _ in over[:4]],
+        })
+    expansions: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for ref, m in run.find(RE_SESSION_LOCATOR_EXPAND):
+        expansions[m["unit"]].append((ref, int(m["n"])))
+    for unit, rows in sorted(expansions.items()):
+        n = rows[0][1]
+        hits.append({
+            "evidence": (
+                f"{unit}: locator-only unit expanded to {n} tree site(s) "
+                f"({len(rows)} time(s))"
+            ),
+            "refs": [r for r, _ in rows[:4]],
+        })
+    return hits[:6]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
              "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
-             "P17": detect_p17}
+             "P17": detect_p17, "P18": detect_p18}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1265,7 +1324,8 @@ CLASS_NAMES = {
     "P14": "compliance over compiler (identical diagnostic across attempts)",
     "P15": "parked accessor (escalation deferred: unit-set unchanged, never dispatched)",
     "P16": "regression-derived prescription (retro written from a REGRESSED verdict)",
-    "P17": "fill-class histogram (dominant cashed/wrong/mis/unreachable/dropped/compile)"}
+    "P17": "fill-class histogram (dominant cashed/wrong/mis/unreachable/dropped/compile)",
+    "P18": "locator-collapsed session slice (eligible-as-source exploded past the cap)"}
 
 
 # -------------------------------------------------------------------- report

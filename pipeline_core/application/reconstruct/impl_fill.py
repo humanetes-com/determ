@@ -75,6 +75,7 @@ from pipeline_core.domain.attribution import (
     locator_of,
     records_by_site,
     site_label,
+    site_payload,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
@@ -212,7 +213,9 @@ from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.slice_session import (
     expand_locator_sites,
+    locator_only_expansions,
     plan_slices,
+    slice_plan_gaps,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
@@ -4015,10 +4018,8 @@ def fill_impl_blocks(
                      "pair not dispatched this pass.")
                 _emit("phase_c.pair.fill.resample_skipped", data={
                     "cluster": cluster_name,
-                    "dispatcher": (f"{pair.dispatcher.file}::"
-                                   f"{pair.dispatcher.fn_name}"),
-                    "implementer": (f"{pair.implementer.file}::"
-                                    f"{pair.implementer.fn_name}")})
+                    "dispatcher": site_payload(pair.dispatcher),
+                    "implementer": site_payload(pair.implementer)})
                 if _last_error:
                     with _counters_lock:
                         _crec = dict(retros_cache.get(_pair_key, {}) or {})
@@ -4031,9 +4032,8 @@ def fill_impl_blocks(
                  f"{len(halves)} files ({len(_pair_tests)} convicting test(s)).")
             _emit("phase_c.pair.fill.start", data={
                 "cluster": cluster_name,
-                "dispatcher": f"{pair.dispatcher.file}::{pair.dispatcher.fn_name}",
-                "implementer": (f"{pair.implementer.file}::"
-                                f"{pair.implementer.fn_name}"),
+                "dispatcher": site_payload(pair.dispatcher),
+                "implementer": site_payload(pair.implementer),
                 "convicting": sorted(_pair_tests)})
             with _counters_lock:
                 attempts_total += 1
@@ -4410,12 +4410,17 @@ def fill_impl_blocks(
 
         _all_recs = _tree_sites()
         _slices = expand_locator_sites(session_slices, _all_recs)
+        for _file, _fn, _n in locator_only_expansions(session_slices, _all_recs):
+            _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
+                 f"expanded to {_n} tree site(s)")
         _plans = plan_slices(_slices, stubs=_stubs_now, max_units=_max_units)
         if not _plans:
             if session_slices:
+                _gaps = slice_plan_gaps(
+                    _slices, stubs=_stubs_now, max_units=_max_units)
                 _log(f"  [phase-c/session] no slice planned "
-                     f"({len(session_slices)} failing test(s) — hollow, empty, "
-                     f"or over SLICE_SESSION_MAX_UNITS={_max_units})")
+                     f"({len(session_slices)} failing test(s) — "
+                     f"{_gaps.log_clause()})")
             return served
         _run_cargo = deps.run_cargo
 

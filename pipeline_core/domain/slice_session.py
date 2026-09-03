@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from pipeline_core.domain.attribution import container_key, locator_of, site_label
 from pipeline_core.domain.impl_routing import norm_src_rel
@@ -62,6 +63,162 @@ def _stub_blocks(units: Collection[FnSite], hollow: Collection[FnLocator]) -> bo
     return any(locator_of(u) in hollow_names for u in units)
 
 
+def _bare_test(name: object) -> str:
+    return str(name).rsplit("::", 1)[-1]
+
+
+def _as_locator(key: object) -> FnLocator | None:
+    if isinstance(key, FnLocator):
+        return FnLocator(norm_src_rel(key.file), key.fn_name)
+    if isinstance(key, FnSite):
+        return FnLocator(norm_src_rel(key.file), key.fn_name)
+    if isinstance(key, tuple) and len(key) >= 2:
+        return FnLocator(norm_src_rel(str(key[0])), str(key[1]))
+    return None
+
+
+def attributed_units_for_session(
+    eligible: Mapping[Any, Collection[Any]],
+    site_frontier: Mapping[FnSite, Collection[Any]],
+) -> dict[str, set[FnSite]]:
+    """Session units from the site frontier, filtered by dispatchable locators.
+
+    Eligible answers whether a locator may be dispatched this iter (exhausted
+    skip, test-target filter, red-build, blocked-consumer). It is not a source
+    of units: a locator with no frontier site used to enter as
+    ``FnSite(file, fn, "")``, and ``expand_locator_sites`` then named every
+    container of that name on the tree — coverage's Debug site re-admitted
+    Display and the merge exceeded the cap (run ``110993-6efa23be``,
+    2026-09-03). Classifier / reverse-map / ``lift_sites`` still put
+    locator-only sites *in* the frontier; those still expand. Coverage owners
+    are a separate argument to ``session_slices_for_failing``.
+    """
+    eligible_locs: dict[FnLocator, set[str]] = {}
+    for key, tests in eligible.items():
+        loc = _as_locator(key)
+        if loc is None:
+            continue
+        eligible_locs.setdefault(loc, set()).update(_bare_test(t) for t in tests)
+    out: dict[str, set[FnSite]] = {}
+    for site, tests in site_frontier.items():
+        allowed = eligible_locs.get(
+            FnLocator(norm_src_rel(site.file), site.fn_name))
+        if not allowed:
+            continue
+        for t in tests:
+            bn = _bare_test(t)
+            if bn not in allowed:
+                continue
+            out.setdefault(bn, set()).add(site)
+    return out
+
+
+def _pending_after_filters(
+    slices: Mapping[str, Collection[FnSite]],
+    hollow: Collection[FnLocator],
+) -> tuple[dict[str, frozenset[FnSite]], int, int]:
+    pending: dict[str, frozenset[FnSite]] = {}
+    n_empty = n_hollow = 0
+    for test in sorted(slices):
+        units = frozenset(slices[test])
+        if not units:
+            n_empty += 1
+            continue
+        if _stub_blocks(units, hollow):
+            n_hollow += 1
+            continue
+        pending[test] = units
+    return pending, n_empty, n_hollow
+
+
+def _merge_pending(
+    pending: Mapping[str, frozenset[FnSite]],
+) -> list[tuple[list[str], set[FnSite]]]:
+    groups: list[tuple[list[str], set[FnSite]]] = []
+    for test, units in pending.items():
+        merged_into: tuple[list[str], set[FnSite]] | None = None
+        for grp in groups:
+            if grp[1] & units:
+                if merged_into is None:
+                    grp[0].append(test)
+                    grp[1].update(units)
+                    merged_into = grp
+                else:
+                    merged_into[0].extend(grp[0])
+                    merged_into[1].update(grp[1])
+                    grp[0].clear()
+                    grp[1].clear()
+        if merged_into is None:
+            groups.append(([test], set(units)))
+    return groups
+
+
+@dataclass(frozen=True, slots=True)
+class SlicePlanGaps:
+    """Why ``plan_slices`` admitted nothing: empty slices, hollow (stub-blocked)
+    slices, and merged groups over the unit cap. The three used to share one
+    log clause, so a wake could not tell an empty leftover from an exploded
+    coverage slice (run ``110993-6efa23be``, 2026-09-03)."""
+
+    empty: int
+    hollow: int
+    over_cap: int
+    over_cap_units: int
+    max_units: int
+
+    def log_clause(self) -> str:
+        parts: list[str] = []
+        if self.empty:
+            parts.append(f"{self.empty} empty")
+        if self.hollow:
+            parts.append(f"{self.hollow} hollow")
+        if self.over_cap:
+            parts.append(
+                f"{self.over_cap} over SLICE_SESSION_MAX_UNITS={self.max_units}"
+                f" ({self.over_cap_units} unit(s))")
+        return "; ".join(parts) if parts else "no session"
+
+
+def slice_plan_gaps(
+    slices: Mapping[str, Collection[FnSite]],
+    *,
+    stubs: Collection[FnLocator] = (),
+    max_units: int = 32,
+) -> SlicePlanGaps:
+    """The drop reasons ``plan_slices`` applies, counted separately."""
+    pending, n_empty, n_hollow = _pending_after_filters(slices, frozenset(stubs))
+    n_over = 0
+    over_units = 0
+    for names, members in _merge_pending(pending):
+        if names and len(members) > max_units:
+            n_over += 1
+            over_units = max(over_units, len(members))
+    return SlicePlanGaps(n_empty, n_hollow, n_over, over_units, max_units)
+
+
+def locator_only_expansions(
+    slices: Mapping[str, Collection[FnSite]],
+    tree_sites: Iterable[FnSite],
+) -> tuple[tuple[str, str, int], ...]:
+    """Locator-only slice members that ``expand_locator_sites`` fans out to
+    more than one tree site. The log line this feeds is the census signature
+    for the plan-path collapse (one locator becoming every container)."""
+    by_name: dict[tuple[str, str], int] = {}
+    for site in tree_sites:
+        key = (norm_src_rel(site.file), site.fn_name)
+        by_name[key] = by_name.get(key, 0) + 1
+    seen: dict[tuple[str, str], int] = {}
+    for units in slices.values():
+        for u in units:
+            if u.container:
+                continue
+            key = (norm_src_rel(u.file), u.fn_name)
+            n = by_name.get(key, 0)
+            if n > 1:
+                seen[key] = n
+    return tuple(sorted((f, n, c) for (f, n), c in seen.items()))
+
+
 def plan_slices(
     slices: Mapping[str, Collection[FnSite]],
     *,
@@ -77,32 +234,9 @@ def plan_slices(
 
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
-    hollow = frozenset(stubs)
-    pending: dict[str, frozenset[FnSite]] = {}
-    for test in sorted(slices):
-        units = frozenset(slices[test])
-        if not units or _stub_blocks(units, hollow):
-            continue
-        pending[test] = units
-    groups: list[tuple[list[str], set[FnSite]]] = []
-    for test, units in pending.items():
-        merged_into: tuple[list[str], set[FnSite]] | None = None
-        for grp in groups:
-            if grp[1] & units:
-                if merged_into is None:
-                    grp[0].append(test)
-                    grp[1].update(units)
-                    merged_into = grp
-                else:
-                    # A test bridging two groups joins them.
-                    merged_into[0].extend(grp[0])
-                    merged_into[1].update(grp[1])
-                    grp[0].clear()
-                    grp[1].clear()
-        if merged_into is None:
-            groups.append(([test], set(units)))
+    pending, _, _ = _pending_after_filters(slices, frozenset(stubs))
     out: list[SessionSlice] = []
-    for names, members in groups:
+    for names, members in _merge_pending(pending):
         if not names or len(members) > max_units:
             continue
         out.append(SessionSlice(

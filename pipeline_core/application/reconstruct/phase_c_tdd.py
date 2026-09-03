@@ -178,7 +178,10 @@ from pipeline_core.domain.refine import (
     LoopState,
 )
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
-from pipeline_core.domain.slice_session import session_slices_for_failing
+from pipeline_core.domain.slice_session import (
+    attributed_units_for_session,
+    session_slices_for_failing,
+)
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
@@ -4183,27 +4186,16 @@ def run_phase_c_tdd(
                 if _cov is not None and _cov.owners else {})
             _session_owners = {
                 t: frozenset(ks) for t, ks in _cov_owners.items()}
-            # The session's attributed units are the DISPATCHABLE frontier
-            # (`eligible`: after the exhausted skip, the test-target
-            # filter, the red-build narrowing and the blocked-consumer
-            # deferral), carried as sites: each locator expands to the
-            # container-qualified sites attribution named for that test,
-            # and a locator attribution knew no container for (a
-            # classifier or reverse-map fallback, a vanished test's static
-            # candidates) enters as a locator-only site the session expands
-            # over the tree's records. Reading the raw site frontier here
-            # bypassed every one of those filters (2026-09-03).
-            _sites_by_loc: dict[FnLocator, list[FnSite]] = {}
-            for _site in _attr.site_frontier:
-                _sites_by_loc.setdefault(locator_of(_site), []).append(_site)
-            _units_for_session: dict[str, set[FnSite]] = {}
-            for _loc, _tests in eligible.items():
-                _named = _sites_by_loc.get(FnLocator(_loc[0], _loc[1]), ())
-                for _t in _tests:
-                    _hit = [s for s in _named if _t in _attr.site_frontier[s]]
-                    for _s in (_hit or [FnSite(str(_loc[0]), str(_loc[1]), "")]):
-                        _units_for_session.setdefault(
-                            bare_test_name(_t), set()).add(_s)
+            # Eligible is the filter, not the source. Walking eligible and
+            # inserting FnSite(file, fn, "") when the site frontier had no
+            # container made expand_locator_sites name every same-named
+            # body, so the coverage slice re-admitted Display and the
+            # merge exceeded the cap (run 110993-6efa23be, 2026-09-03).
+            # Classifier / reverse-map / lift_sites still put locator-only
+            # sites in the frontier; those still expand. Coverage owners
+            # stay a separate argument (executed path, already sites).
+            _units_for_session = attributed_units_for_session(
+                eligible, _attr.site_frontier)
             _session_slices = session_slices_for_failing(
                 cur_failed,
                 owners=_cov_owners,
