@@ -185,6 +185,10 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            retrigger=None, localize=None, escalate=None, reverse_map=None,
            fill=None, inventory: int | None = None,
            chronic_vanished: int = 0, gpu_guard: str = "0",
+           no_verdict: str = "0", flat_window: str = "5",
+           flat_require_traversal: str = "0", no_frontier_stop: str = "2",
+           reset_cap: str = "2", backstop: str = "10000",
+           fill_phase_minutes: str = "0",
            dispatch_cap: str = "0", floor: dict | None = None,
            frontier: dict | None = None, enumerate_fns=None,
            coverage=None, attribute=None) -> list[str]:
@@ -225,6 +229,29 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
     # reading and every assertion after that point would be about a decision the
     # recorded run never faced. A walk ABOUT the guard turns it on.
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", gpu_guard)
+    # ...and so is every OTHER stop the loop reads, for the same reason and
+    # because leaving one ambient makes a walk's decision sequence depend on an
+    # UNTRACKED file. `.env` on this box carries TDD_NO_VERDICT_SWEEPS=0, so
+    # every walk here ran with the no-verdict clock off; a bare checkout gets
+    # the production default 3, and on 2026-09-03 CI both assertions of the
+    # empty-frontier walk failed with the iteration-kind vector
+    # ["no_frontier", "no_frontier", "no_frontier_readmit", "no_frontier",
+    # "no_verdict_stop"] — the clock stopped the replay at iteration 5, before
+    # the second re-admission the walk exists to pin and long before the
+    # backstop its negative control asserts. Reproduced byte-identically here
+    # with `TDD_NO_VERDICT_SWEEPS=3 pytest tests/walks/`. The flat window and
+    # its traversal requirement are the same latency: inert while
+    # TDD_FLAT_SCORE_REPEATS is 0, and read from `.env` (window 10, not the
+    # default 5) the moment a walk turns the guard on. So the harness pins the
+    # whole set, and a walk ABOUT one of them passes it as an argument.
+    monkeypatch.setenv("TDD_NO_VERDICT_SWEEPS", no_verdict)
+    monkeypatch.setenv("TDD_FLAT_SCORE_WINDOW", flat_window)
+    monkeypatch.setenv("TDD_FLAT_SCORE_REQUIRE_TRAVERSAL",
+                       flat_require_traversal)
+    monkeypatch.setenv("TDD_NO_FRONTIER_STOP", no_frontier_stop)
+    monkeypatch.setenv("RETRO_RESET_MAX_ATTEMPTS", reset_cap)
+    monkeypatch.setenv("PHASE_C_TDD_BACKSTOP", backstop)
+    monkeypatch.setenv("TDD_FILL_PHASE_MAX_MINUTES", fill_phase_minutes)
     # The dispatch cap is OFF here for the identical reason, and leaving it at
     # its production default was an asymmetry rather than a decision: a walk is
     # a fixed observation sequence recorded from runs whose iterations spent the

@@ -29,8 +29,20 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+# The recorded reference vector lives in the WORKSPACE, and `.gitignore`
+# excludes `tmp` — present on an operator's box, absent from a bare checkout.
+# The test that reads it computes its fixture on the live record by design: a
+# hand-made pass/fail vector would assert the floor's own rule back at it. So
+# the guard is a skip, not a synthetic fixture. Without it the test raised
+# FileNotFoundError on tmp/.reference_anyhow/reference.json in CI on
+# 2026-09-03; the suite already carries the same guard for the live
+# tests/test_fmt.rs pin and for the untracked `.env`.
+_LIVE_REFERENCE = REPO / "tmp" / ".reference_anyhow" / "reference.json"
 
 from pipeline_core.domain.cfg import CfgSet  # noqa: E402
 from pipeline_core.domain.models import FnLocator  # noqa: E402
@@ -172,6 +184,9 @@ def test_a_failing_test_absent_from_the_reference_is_still_required() -> None:
     assert _UI not in verdict.unexcused_failures
 
 
+@pytest.mark.skipif(not _LIVE_REFERENCE.exists(),
+                    reason="live tmp/.reference_anyhow/reference.json "
+                           "not present (untracked workspace)")
 def test_tdd_closes_when_failures_are_the_recorded_nightly_neutral() -> None:
     """t2a done is the reference floor once nothing reachable remains.
 

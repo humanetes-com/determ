@@ -38,16 +38,17 @@ def _kinds(events: list[tuple[str, dict]]) -> list[str]:
 
 def _run(monkeypatch, tmp_path: Path, *, stop_after: str,
          events: list[tuple[str, dict]]) -> list[str]:
-    monkeypatch.setenv("TDD_NO_FRONTIER_STOP", stop_after)
-    # Bound the control: the recorded backstop is 10 000 iterations.
-    monkeypatch.setenv("PHASE_C_TDD_BACKSTOP", "60")
-    monkeypatch.setenv("RETRO_RESET_MAX_ATTEMPTS", "2")
     walk = load_walk("1246060-2339497b")
     # `refill_max=2` is what empties the one-fn frontier: after two behavioural
     # re-fills the unit is refill-capped into the loop-local exhausted set, the
-    # D3 filter holds it, and `eligible` is empty — the recorded state.
+    # D3 filter holds it, and `eligible` is empty — the recorded state. The
+    # stop under test and the control's bound are ARGUMENTS, not ambient env:
+    # the harness pins every stop knob, so nothing here depends on the
+    # operator's untracked `.env`. `backstop=60` bounds the control — the
+    # recorded backstop is 10 000 iterations.
     return replay(walk, monkeypatch, tmp_path, events=events,
-                  max_stalls="0", refill_max="2")
+                  max_stalls="0", refill_max="2",
+                  no_frontier_stop=stop_after, backstop="60", reset_cap="2")
 
 
 def test_the_held_unit_is_re_admitted_and_dispatched_then_the_loop_stops(
