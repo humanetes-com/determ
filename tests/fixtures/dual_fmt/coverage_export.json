@@ -1,0 +1,108 @@
+{
+ "version": "3.1.0",
+ "type": "llvm.coverage.json.export",
+ "data": [
+  {
+   "functions": [
+    {
+     "name": "_RNvXCsg4sd8BQBB4v_8dual_fmtNtB2_6WidgetNtNtCsgEmfK2I1SDS_4core3fmt7Display3fmt",
+     "count": 1,
+     "regions": [
+      [
+       8,
+       5,
+       8,
+       61,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       9,
+       9,
+       9,
+       15,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       9,
+       16,
+       9,
+       17,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       10,
+       5,
+       10,
+       6,
+       1,
+       0,
+       0,
+       0
+      ]
+     ],
+     "filenames": [
+      "/recorded/dual_fmt/src/lib.rs"
+     ]
+    },
+    {
+     "name": "_RNvXs_Csg4sd8BQBB4v_8dual_fmtNtB4_6WidgetNtNtCsgEmfK2I1SDS_4core3fmt5Debug3fmt",
+     "count": 1,
+     "regions": [
+      [
+       14,
+       5,
+       14,
+       61,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       15,
+       9,
+       15,
+       15,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       15,
+       16,
+       15,
+       17,
+       1,
+       0,
+       0,
+       0
+      ],
+      [
+       16,
+       5,
+       16,
+       6,
+       1,
+       0,
+       0,
+       0
+      ]
+     ],
+     "filenames": [
+      "/recorded/dual_fmt/src/lib.rs"
+     ]
+    }
+   ]
+  }
+ ]
+}
