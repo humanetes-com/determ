@@ -8,7 +8,8 @@ functions read only the owner map shape, the reply and the measurement.
 """
 from __future__ import annotations
 
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.attribution import locator_of
+from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import (
     SessionSlice,
     TargetStatus,
@@ -22,30 +23,32 @@ from pipeline_core.domain.slice_session import (
     slices_with_pair_hops,
 )
 
-_FMT = FnLocator("src/lib.rs", "fmt")
-_RENDER = FnLocator("src/render.rs", "render")
-_NEW = FnLocator("src/render.rs", "new")
-_OTHER = FnLocator("src/other.rs", "go")
+_DISP = FnSite("src/lib.rs", "fmt", "impl fmt::Display for Report")
+_RENDER = FnSite("src/render.rs", "render", "impl Renderer")
+_NEW = FnSite("src/render.rs", "new", "impl Renderer")
+_OTHER = FnSite("src/other.rs", "go", "free fn")
+_DEBUG_RENDER = FnSite("src/render.rs", "fmt", "impl fmt::Debug for Renderer")
 
 
 def test_tests_with_overlapping_slices_share_one_session() -> None:
     plans = plan_slices({
-        "t_a": {_FMT, _RENDER},
+        "t_a": {_DISP, _RENDER},
         "t_b": {_RENDER, _NEW},
         "t_c": {_OTHER},
     })
     assert [p.tests for p in plans] == [("t_a", "t_b"), ("t_c",)]
-    assert plans[0].units == (_FMT, _NEW, _RENDER)
+    assert plans[0].units == (_DISP, _NEW, _RENDER)
     assert plans[0].files == ("src/lib.rs", "src/render.rs")
 
 
 def test_a_slice_touching_a_stub_is_left_to_the_stub_routes() -> None:
-    plans = plan_slices({"t_a": {_FMT, _RENDER}}, stubs={_RENDER})
+    plans = plan_slices({"t_a": {_DISP, _RENDER}},
+                        stubs={locator_of(_RENDER)})
     assert plans == []
 
 
 def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:
-    big = {FnLocator("src/x.rs", f"f{i}") for i in range(5)}
+    big = {FnSite("src/x.rs", f"f{i}", f"impl X{i}") for i in range(5)}
     assert plan_slices({"t": big}, max_units=4) == []
     assert len(plan_slices({"t": big}, max_units=5)) == 1
 
@@ -66,27 +69,27 @@ def test_a_failing_test_absent_from_owners_still_gets_a_session() -> None:
     slices = session_slices_for_failing(
         {t_cfg, "ui"},
         owners={"ui": frozenset()},
-        units_by_test={t_cfg: {_FMT, _RENDER}},
-        pairs=[(_FMT, _RENDER)],
+        units_by_test={t_cfg: {_DISP, _RENDER}},
+        pairs=[(_DISP, _RENDER)],
     )
     plans = plan_slices(slices)
     assert [p.tests for p in plans] == [(t_cfg,)]
-    assert set(plans[0].units) == {_FMT, _RENDER}
+    assert set(plans[0].units) == {_DISP, _RENDER}
     # Today's loop over owners.items() on the same map.
-    today: dict[str, frozenset[FnLocator]] = {}
+    today: dict[str, frozenset[FnSite]] = {}
     for name, units in {"ui": frozenset()}.items():
         today[name] = frozenset(units) | frozenset()
-    assert plan_slices(slices_with_pair_hops(today, [(_FMT, _RENDER)])) == []
+    assert plan_slices(slices_with_pair_hops(today, [(_DISP, _RENDER)])) == []
 
 
-def _records() -> dict[FnLocator, FnRecord]:
+def _records() -> dict[FnSite, FnRecord]:
     return {
-        _FMT: FnRecord(file="src/lib.rs", fn_name="fmt",
+        _DISP: FnRecord(file="src/lib.rs", fn_name="fmt",
                        container="impl fmt::Display for Report",
                        sig_text="fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"),
         _RENDER: FnRecord(file="src/render.rs", fn_name="render",
                           container="impl Renderer", sig_text="pub fn render(&self) -> u32"),
-        FnLocator("src/render.rs", "fmt"): FnRecord(
+        _DEBUG_RENDER: FnRecord(
             file="src/render.rs", fn_name="fmt", container="impl fmt::Debug for Renderer",
             sig_text="fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result"),
     }
@@ -97,7 +100,7 @@ def test_bodies_route_by_name_and_block_to_the_slice_units() -> None:
         {"fn_name": "fmt", "block": "impl fmt::Display for Report", "body": "A", "where_clause": None},
         {"fn_name": "render", "block": "", "body": "B", "where_clause": None},
     ], _records())
-    assert [(r.unit, r.body) for r in cs.routed] == [(_FMT, "A"), (_RENDER, "B")]
+    assert [(r.unit, r.body) for r in cs.routed] == [(_DISP, "A"), (_RENDER, "B")]
     assert cs.rejected == ()
 
 
@@ -151,7 +154,9 @@ def test_the_compile_turn_says_the_tree_was_not_changed() -> None:
 # --- the branches the first fixture did not reach -----------------------------
 
 def test_a_test_bridging_two_groups_joins_them() -> None:
-    a, b, c = FnLocator("src/a.rs", "a"), FnLocator("src/b.rs", "b"), FnLocator("src/c.rs", "c")
+    a = FnSite("src/a.rs", "a", "impl A")
+    b = FnSite("src/b.rs", "b", "impl B")
+    c = FnSite("src/c.rs", "c", "impl C")
     plans = plan_slices({"t_1": {a}, "t_2": {b}, "t_3": {a, b, c}})
     assert len(plans) == 1
     assert plans[0].tests == ("t_1", "t_2", "t_3") and plans[0].units == (a, b, c)
@@ -186,16 +191,16 @@ def test_rejected_only_and_crash_turns_render() -> None:
     assert "CRASH: test binary ['tests/bin_a']" in text
     assert "Bodies not applied: `y`: splice refused" in text
     assert reading.regressed and not reading.clean
-    base = {_FMT: "a", _RENDER: "b"}
-    cur = {_FMT: "a", _RENDER: "c", _NEW: "n"}
+    base = {_DISP: "a", _RENDER: "b"}
+    cur = {_DISP: "a", _RENDER: "c", _NEW: "n"}
     assert kept_units(base, cur) == frozenset({_RENDER})
-    assert units_by_file([_FMT, _RENDER, _NEW]) == {
-        "src/lib.rs": [_FMT], "src/render.rs": [_RENDER, _NEW]}
+    assert units_by_file([_DISP, _RENDER, _NEW]) == {
+        "src/lib.rs": [_DISP], "src/render.rs": [_RENDER, _NEW]}
 
 
 def test_turn0_renders_prior_regression_and_omits_empty_notes() -> None:
     from pipeline_core.prompts.slice_session import build_slice_session_prompt
-    sl = SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER))
+    sl = SessionSlice(tests=("t_pair",), units=(_DISP, _RENDER))
     recs = _records()
     text = build_slice_session_prompt(
         module_name="m", cluster_name="t", slice_=sl, records=recs,
@@ -230,8 +235,8 @@ def test_a_body_carrying_another_fns_definition_is_rejected_before_cargo() -> No
 def test_coverage_note_names_reached_and_unreached_changed_units() -> None:
     from pipeline_core.domain.slice_session import coverage_note_for
     note = coverage_note_for(
-        changed=[_FMT, _RENDER], owners={"t_a": {_FMT, _NEW}},
-        editable=[_FMT, _RENDER, _NEW], unchanged_since_turn=3)
+        changed=[_DISP, _RENDER], owners={"t_a": {_DISP, _NEW}},
+        editable=[_DISP, _RENDER, _NEW], unchanged_since_turn=3)
     assert "changed units they EXECUTE: src/lib.rs::fmt" in note
     assert "do NOT execute: src/render.rs::render" in note
     assert "editable units the targets execute now: src/lib.rs::fmt, src/render.rs::new" in note
@@ -240,8 +245,8 @@ def test_coverage_note_names_reached_and_unreached_changed_units() -> None:
 
 def test_a_formatter_pair_closes_the_slice_over_both_halves() -> None:
     from pipeline_core.domain.slice_session import slices_with_pair_hops
-    out = slices_with_pair_hops({"t_a": {_FMT}, "t_b": {_OTHER}}, [(_FMT, _RENDER)])
-    assert out["t_a"] == frozenset({_FMT, _RENDER})
+    out = slices_with_pair_hops({"t_a": {_DISP}, "t_b": {_OTHER}}, [(_DISP, _RENDER)])
+    assert out["t_a"] == frozenset({_DISP, _RENDER})
     assert out["t_b"] == frozenset({_OTHER})
 
 

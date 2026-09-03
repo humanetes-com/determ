@@ -268,6 +268,6 @@ class ImplFillPath(Protocol):
         crash_blocked: dict[str, str] | None = None,
         behaviour_specs: Sequence[BehaviourSpec] = ...,
         dispatch_ranks: dict[FnLocator, int] | None = ...,
-        session_slices: Mapping[str, frozenset[FnLocator]] | None = ...,
-        session_owners: Mapping[str, frozenset[FnLocator]] | None = ...,
+        session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
+        session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
     ) -> ClusterFillResult: ...

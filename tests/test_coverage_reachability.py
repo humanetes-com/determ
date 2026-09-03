@@ -25,13 +25,14 @@ from __future__ import annotations
 import json
 import pathlib
 
+from pipeline_core.domain.attribution import locator_of
 from pipeline_core.domain.coverage_slice import (
     CoverageSlice,
     bind,
     convictors_never_enter,
     unreached_by,
 )
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.retro_gate import (
     CONVICTORS_NEVER_EXECUTE,
     NO_TREE_PREMISE,
@@ -55,9 +56,18 @@ def _loc(name: str) -> FnLocator:
     return FnLocator(file_rel, fn)
 
 
-def _owners() -> dict[str, frozenset[FnLocator]]:
-    return {t: frozenset(_loc(n) for n in names)
+def _loc_site(name: str) -> FnSite:
+    file_rel, fn = name.split("::", 1)
+    return FnSite(file_rel, fn, "")
+
+
+def _owners() -> dict[str, frozenset[FnSite]]:
+    return {t: frozenset(_loc_site(n) for n in names)
             for t, names in _FIXTURE["owners"].items()}
+
+
+def _entered_locators(test: str) -> set[FnLocator]:
+    return {locator_of(s) for s in _owners()[test]}
 
 
 def _unbind() -> None:
@@ -71,10 +81,10 @@ def test_trailer_does_not_enter_the_unit_it_convicted() -> None:
     not execute it. 4,550 s over five attempts and two retrospective rounds."""
     owners = _owners()
     assert _FIXTURE["retro_record"]["convicted_by"] == ["test_trailer"]
-    entered = owners["test_trailer"]
-    assert _OK not in entered
-    assert _loc("src/lib.rs::format_err") in entered
-    assert _loc("src/lib.rs::must_use") in entered
+    entered = _owners()["test_trailer"]
+    assert _OK not in {locator_of(s) for s in entered}
+    assert _loc("src/lib.rs::format_err") in _entered_locators("test_trailer")
+    assert _loc("src/lib.rs::must_use") in _entered_locators("test_trailer")
     assert convictors_never_enter(_OK, ["test_trailer"], owners) == frozenset(
         {"test_trailer"})
 
@@ -84,7 +94,8 @@ def test_no_failing_test_in_the_run_enters_the_unit() -> None:
     run's failing tests attribution happened to pick."""
     owners = _owners()
     assert len(owners) == 9
-    assert all(_OK not in entered for entered in owners.values())
+    assert all(_OK not in {locator_of(s) for s in entered}
+               for entered in owners.values())
     assert convictors_never_enter(
         _OK, sorted(owners), owners) == frozenset(owners)
 
@@ -109,7 +120,8 @@ def test_a_legitimately_owned_unit_is_not_refused() -> None:
     owners = _owners()
     convictors = ["test_deref_mut_through_error_mut",
                   "test_deref_mut_error_targets"]
-    assert all(_DEREF_MUT in owners[t] for t in convictors)
+    assert all(_DEREF_MUT in {locator_of(s) for s in owners[t]}
+               for t in convictors)
     assert convictors_never_enter(_DEREF_MUT, convictors, owners) is None
 
 

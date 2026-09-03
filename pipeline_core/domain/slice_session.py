@@ -29,8 +29,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from pipeline_core.domain.attribution import container_key
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.attribution import container_key, locator_of
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
 NOTES_OPEN = "<NOTES>"
 NOTES_CLOSE = "</NOTES>"
@@ -42,7 +42,7 @@ class SessionSlice:
     it may write, with the units grouped by file for rendering."""
 
     tests: tuple[str, ...]
-    units: tuple[FnLocator, ...]
+    units: tuple[FnSite, ...]
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -55,8 +55,14 @@ class SessionSlice:
         return frozenset(f"{u.file}::{u.fn_name}" for u in self.units)
 
 
+def _stub_blocks(units: Collection[FnSite], hollow: Collection[FnLocator]) -> bool:
+    """True when any slice site shares a dispatch name with a still-hollow body."""
+    hollow_names = frozenset(hollow)
+    return any(locator_of(u) in hollow_names for u in units)
+
+
 def plan_slices(
-    slices: Mapping[str, Collection[FnLocator]],
+    slices: Mapping[str, Collection[FnSite]],
     *,
     stubs: Collection[FnLocator] = (),
     max_units: int = 32,
@@ -71,15 +77,15 @@ def plan_slices(
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
     hollow = frozenset(stubs)
-    pending: dict[str, frozenset[FnLocator]] = {}
+    pending: dict[str, frozenset[FnSite]] = {}
     for test in sorted(slices):
         units = frozenset(slices[test])
-        if not units or units & hollow:
+        if not units or _stub_blocks(units, hollow):
             continue
         pending[test] = units
-    groups: list[tuple[list[str], set[FnLocator]]] = []
+    groups: list[tuple[list[str], set[FnSite]]] = []
     for test, units in pending.items():
-        merged_into: tuple[list[str], set[FnLocator]] | None = None
+        merged_into: tuple[list[str], set[FnSite]] | None = None
         for grp in groups:
             if grp[1] & units:
                 if merged_into is None:
@@ -100,13 +106,13 @@ def plan_slices(
             continue
         out.append(SessionSlice(
             tests=tuple(sorted(dict.fromkeys(names))),
-            units=tuple(sorted(members, key=lambda u: (u.file, u.fn_name)))))
+            units=tuple(sorted(members, key=lambda u: (u.file, u.fn_name, u.container)))))
     return out
 
 
 @dataclass(frozen=True, slots=True)
 class RoutedBody:
-    unit: FnLocator
+    unit: FnSite
     container: str
     sig_text: str
     body: str
@@ -119,7 +125,7 @@ class ChangeSet:
     rejected: tuple[str, ...]   # human-readable reasons, one per dropped body
 
     @property
-    def units(self) -> frozenset[FnLocator]:
+    def units(self) -> frozenset[FnSite]:
         return frozenset(r.unit for r in self.routed)
 
 
@@ -155,7 +161,7 @@ def declares_other_fn(body: str, own_name: str) -> str | None:
 
 def route_change_set(
     parsed: Sequence[Mapping[str, object]],
-    records: Mapping[FnLocator, FnRecord],
+    records: Mapping[FnSite, FnRecord],
 ) -> ChangeSet:
     """Match the reply's `<FN name block>` bodies to the slice's records.
 
@@ -166,12 +172,12 @@ def route_change_set(
     one; a name outside the slice is rejected as out of scope — the editable
     set is fixed at turn 0 and a body for a fn the session may not write is
     the one answer that must never reach the tree."""
-    by_name: dict[str, list[FnLocator]] = {}
-    for loc in records:
-        by_name.setdefault(loc.fn_name, []).append(loc)
+    by_name: dict[str, list[FnSite]] = {}
+    for site in records:
+        by_name.setdefault(site.fn_name, []).append(site)
     routed: list[RoutedBody] = []
     rejected: list[str] = []
-    seen: set[FnLocator] = set()
+    seen: set[FnSite] = set()
     for fd in parsed:
         name = str(fd.get("fn_name") or "")
         block = str(fd.get("block") or "")
@@ -197,9 +203,9 @@ def route_change_set(
                 f"`{name}`: ambiguous — name the impl header in block=; "
                 f"candidates: {opts}")
             continue
-        loc = matched[0]
-        if loc in seen:
-            rejected.append(f"`{name}` in {loc.file}: given twice; first kept")
+        site = matched[0]
+        if site in seen:
+            rejected.append(f"`{name}` in {site.file}: given twice; first kept")
             continue
         other = declares_other_fn(body, name)
         if other is not None:
@@ -207,10 +213,10 @@ def route_change_set(
                 f"`{name}`: the body carries a fn DEFINITION (`{other}`) — send "
                 f"the body of `{name}` only, no signatures, one <FN> per fn")
             continue
-        seen.add(loc)
-        rec = records[loc]
+        seen.add(site)
+        rec = records[site]
         routed.append(RoutedBody(
-            unit=loc, container=rec.container, sig_text=rec.sig_text,
+            unit=site, container=rec.container, sig_text=rec.sig_text,
             body=body, where_clause=str(where) if where else None))
     return ChangeSet(tuple(routed), tuple(rejected))
 
@@ -361,22 +367,22 @@ def render_test_turn(
 
 
 def coverage_note_for(
-    changed: Iterable[FnLocator],
-    owners: Mapping[str, Collection[FnLocator]],
-    editable: Iterable[FnLocator],
+    changed: Iterable[FnSite],
+    owners: Mapping[str, Collection[FnSite]],
+    editable: Iterable[FnSite],
     *,
     unchanged_since_turn: int | None = None,
 ) -> str:
     """The measured coverage statement after a judged turn whose targets
     still fail: which of the changed units the failing targets execute,
     which they do not, and which editable units they do execute now."""
-    executed: set[FnLocator] = set()
+    executed: set[FnSite] = set()
     for ks in owners.values():
         executed |= set(ks)
-    changed_l = sorted(changed, key=lambda u: (u.file, u.fn_name))
+    changed_l = sorted(changed, key=lambda u: (u.file, u.fn_name, u.container))
     reached = [u for u in changed_l if u in executed]
     missed = [u for u in changed_l if u not in executed]
-    def fmt(us: Iterable[FnLocator]) -> str:
+    def fmt(us: Iterable[FnSite]) -> str:
         return ", ".join(f"{u.file}::{u.fn_name}" for u in us) or "(none)"
 
     parts = ["COVERAGE of the still-failing target(s) on the tree as it now stands — "
@@ -386,7 +392,8 @@ def coverage_note_for(
         parts.append("(a body the targets never enter cannot change what they "
                      "observe; route execution into it or change a unit they do "
                      "execute)")
-    ed_exec = [u for u in sorted(editable, key=lambda u: (u.file, u.fn_name)) if u in executed]
+    ed_exec = [u for u in sorted(editable, key=lambda u: (u.file, u.fn_name, u.container))
+               if u in executed]
     parts.append(f"— editable units the targets execute now: {fmt(ed_exec)}.")
     if unchanged_since_turn is not None:
         parts.append(f"The observed values are byte-identical to turn "
@@ -396,12 +403,12 @@ def coverage_note_for(
 
 def _units_named(
     name: str,
-    table: Mapping[str, Collection[FnLocator]] | None,
-) -> set[FnLocator]:
+    table: Mapping[str, Collection[FnSite]] | None,
+) -> set[FnSite]:
     """Units keyed by a cargo-qualified name or its last `::` segment."""
     if not table:
         return set()
-    out: set[FnLocator] = set()
+    out: set[FnSite] = set()
     bare = name.rsplit("::", 1)[-1]
     for key, units in table.items():
         if key == name or key.rsplit("::", 1)[-1] == bare:
@@ -412,10 +419,10 @@ def _units_named(
 def session_slices_for_failing(
     failing: Iterable[str],
     *,
-    owners: Mapping[str, Collection[FnLocator]] | None = None,
-    units_by_test: Mapping[str, Collection[FnLocator]] | None = None,
-    pairs: Iterable[tuple[FnLocator, FnLocator]] = (),
-) -> dict[str, frozenset[FnLocator]]:
+    owners: Mapping[str, Collection[FnSite]] | None = None,
+    units_by_test: Mapping[str, Collection[FnSite]] | None = None,
+    pairs: Iterable[tuple[FnSite, FnSite]] = (),
+) -> dict[str, frozenset[FnSite]]:
     """Per-failing-test unit sets for the red-slice session.
 
     Coverage keys are not the failing set: an instrumented run that
@@ -426,7 +433,7 @@ def session_slices_for_failing(
     slice — measured owners union attributed units — then the formatter
     pair hop. plan_slices still drops empty and hollow.
     """
-    raw: dict[str, set[FnLocator]] = {}
+    raw: dict[str, set[FnSite]] = {}
     for item in failing:
         name = str(item)
         bare = name.rsplit("::", 1)[-1]
@@ -436,16 +443,16 @@ def session_slices_for_failing(
 
 
 def slices_with_pair_hops(
-    slices: Mapping[str, Collection[FnLocator]],
-    pairs: Iterable[tuple[FnLocator, FnLocator]],
-) -> dict[str, frozenset[FnLocator]]:
+    slices: Mapping[str, Collection[FnSite]],
+    pairs: Iterable[tuple[FnSite, FnSite]],
+) -> dict[str, frozenset[FnSite]]:
     """`slices` with every dispatcher/implementer hop closed: a slice holding
     one member of a formatter pair gains the other. The implementer a
     dispatcher does not yet call is by definition not in the coverage owner
     map — run `164454-8ec9c4d4` (2026-09-02) iter 2 opened a session that
     could edit the Debug dispatcher and not `ErrorImpl::debug`, and the
     model's first turn was a request for `src/fmt.rs`."""
-    out: dict[str, frozenset[FnLocator]] = {}
+    out: dict[str, frozenset[FnSite]] = {}
     hop = list(pairs)
     for test, units in slices.items():
         members = set(units)
@@ -465,17 +472,17 @@ def render_budget_turn(turns_left: int) -> str:
 
 
 def kept_units(
-    baseline_bodies: Mapping[FnLocator, str],
-    current_bodies: Mapping[FnLocator, str],
-) -> frozenset[FnLocator]:
+    baseline_bodies: Mapping[FnSite, str],
+    current_bodies: Mapping[FnSite, str],
+) -> frozenset[FnSite]:
     """The slice units whose body differs from the session baseline."""
     return frozenset(
         u for u, b in current_bodies.items()
         if baseline_bodies.get(u, b) != b)
 
 
-def units_by_file(units: Iterable[FnLocator]) -> dict[str, list[FnLocator]]:
-    out: dict[str, list[FnLocator]] = {}
+def units_by_file(units: Iterable[FnSite]) -> dict[str, list[FnSite]]:
+    out: dict[str, list[FnSite]] = {}
     for u in units:
         out.setdefault(u.file, []).append(u)
     return out

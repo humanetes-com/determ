@@ -24,15 +24,73 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.adapters.extractor import CliExtractor
+from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.coverage_slice import (
     CountedBody,
     CoverageSlice,
     slice_from_counts,
 )
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnRecord, FnSite
 
+_CFG_FLAG = re.compile(r"--cfg\s+(\S+)")
+
+
+def _extractor_bin() -> Path:
+    root = Path(__file__).resolve().parents[2]
+    return root / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
+
+
+def _cfg_true_from_env(env: Mapping[str, str]) -> tuple[str, ...]:
+    flags = env.get("RUSTFLAGS", "")
+    return tuple(m.group(1) for m in _CFG_FLAG.finditer(flags))
+
+
+def _load_fn_records(tree: Path, env: Mapping[str, str]) -> list[FnRecord]:
+    ext = CliExtractor(_extractor_bin())
+    rows = ext.enumerate_fns(tree, cfg_true=_cfg_true_from_env(env)) or []
+    return [r for r in rows if not r.is_test and r.fn_name]
+
+
+def _line_byte_offset(text: str, line: int) -> int:
+    if line < 1:
+        return 0
+    lines = text.splitlines(keepends=True)
+    if line > len(lines):
+        return len(text.encode("utf-8"))
+    return len("".join(lines[: line - 1]).encode("utf-8"))
+
+
+def _site_at(
+    records_by_file: Mapping[str, list[FnRecord]],
+    file_texts: Mapping[str, str],
+    rel: str,
+    line: int,
+) -> FnSite | None:
+    text = file_texts.get(rel)
+    if text is None:
+        return None
+    off = _line_byte_offset(text, line)
+    for rec in records_by_file.get(rel, ()):
+        if rec.sig_byte_start <= off < rec.body_byte_end:
+            return record_site(rec)
+    return None
 _FN_DECL = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
 _PROF_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _fn_at(tree: Path, rel: str, line: int) -> str:
+    """Legacy regex name resolver — negative control in site-resolution tests."""
+    p = tree / rel
+    try:
+        src = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "?"
+    for i in range(min(line, len(src)) - 1, max(-1, line - 40), -1):
+        m = _FN_DECL.search(src[i])
+        if m:
+            return m.group(1)
+    return "?"
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None,
@@ -178,34 +236,31 @@ def _region_counts(export: dict[str, Any], src_root: Path,
     return dict(best)
 
 
-def _fn_at(tree: Path, rel: str, line: int) -> str:
-    p = tree / rel
-    try:
-        src = p.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return "?"
-    for i in range(min(line, len(src)) - 1, max(-1, line - 40), -1):
-        m = _FN_DECL.search(src[i])
-        if m:
-            return m.group(1)
-    return "?"
-
-
-def _body_end(tree: Path, rel: str, start: int) -> int:
-    """Last source line of the body that starts at `start`, brace-heuristic."""
-    try:
-        src = (tree / rel).read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return start
-    end = start
-    for i in range(start, len(src) + 1):
-        if i > len(src):
-            break
-        stripped = src[i - 1].rstrip()
-        if stripped in ("    }", "}"):
-            end = i
-            break
-    return end
+def _counted_bodies(
+    records_by_file: Mapping[str, list[FnRecord]],
+    file_texts: Mapping[str, str],
+    bodies: Mapping[tuple[str, int], int],
+    lines: Mapping[tuple[str, int], int],
+) -> list[CountedBody]:
+    """Name each (file, first-line) body at the extractor site its span contains."""
+    out: list[CountedBody] = []
+    for (rel, start), count in bodies.items():
+        site = _site_at(records_by_file, file_texts, rel, start)
+        if site is None:
+            continue
+        end = _body_end_from_text(file_texts.get(rel, ""), start)
+        instrumented = [
+            ln for ln in range(start, end + 1) if (rel, ln) in lines]
+        zeros = tuple(
+            ln for ln in instrumented if lines[(rel, ln)] == 0)
+        out.append(CountedBody(
+            locator=site,
+            start=start,
+            count=count,
+            zero_lines=zeros,
+            span_lines=len(instrumented),
+        ))
+    return out
 
 
 def _prof_stem(name: str) -> str:
@@ -218,36 +273,26 @@ def _prof_stem(name: str) -> str:
     return _PROF_STEM.sub("_", name).strip("_") or "t"
 
 
-def _counted_bodies(
-    tree: Path,
-    bodies: Mapping[tuple[str, int], int],
-    lines: Mapping[tuple[str, int], int],
-) -> list[CountedBody]:
-    """Name each (file, first-line) body so `slice_from_counts` can collapse."""
-    out: list[CountedBody] = []
-    for (rel, start), count in bodies.items():
-        fn = _fn_at(tree, rel, start)
-        if fn == "?":
-            continue
-        end = _body_end(tree, rel, start)
-        instrumented = [
-            ln for ln in range(start, end + 1) if (rel, ln) in lines]
-        zeros = tuple(
-            ln for ln in instrumented if lines[(rel, ln)] == 0)
-        out.append(CountedBody(
-            locator=FnLocator(rel, fn),
-            start=start,
-            count=count,
-            zero_lines=zeros,
-            span_lines=len(instrumented),
-        ))
-    return out
+def _body_end_from_text(src: str, start: int) -> int:
+    """Last source line of the body that starts at `start`, brace-heuristic."""
+    lines = src.splitlines()
+    end = start
+    for i in range(start, len(lines) + 1):
+        if i > len(lines):
+            break
+        stripped = lines[i - 1].rstrip()
+        if stripped in ("    }", "}"):
+            end = i
+            break
+    return end
 
 
 def _owner_map(
     tree: Path, bins: list[Path], prof: Path, env: dict[str, str],
     tests: Iterable[str], profdata_bin: str, cov_bin: str,
-) -> dict[str, frozenset[FnLocator]]:
+    records_by_file: Mapping[str, list[FnRecord]],
+    file_texts: Mapping[str, str],
+) -> dict[str, frozenset[FnSite]]:
     """Which crate bodies does each named test enter, one profile per test.
 
     Pass C of `scripts/coverage_owner_probe.py`, promoted into the loop.
@@ -266,7 +311,7 @@ def _owner_map(
     uninstrumented build of the same suite, which is why this runs on the
     failing set only and never on the whole oracle.
     """
-    owners: dict[str, frozenset[FnLocator]] = {}
+    owners: dict[str, frozenset[FnSite]] = {}
     for name in dict.fromkeys(tests):
         stem = _prof_stem(name)
         raw = prof / f"one-{stem}.profraw"
@@ -287,12 +332,12 @@ def _owner_map(
         if export is None:
             continue
         entered = {
-            FnLocator(rel, _fn_at(tree, rel, start))
-            for (rel, start), count in _body_counts(export, tree).items()
+            site for (rel, start), count in _body_counts(export, tree).items()
             if count > 0
+            for site in [_site_at(records_by_file, file_texts, rel, start)]
+            if site is not None
         }
-        owners[name] = frozenset(
-            loc for loc in entered if loc.fn_name != "?")
+        owners[name] = frozenset(entered)
     return owners
 
 
@@ -359,11 +404,22 @@ def measure_coverage_slice(
             return None
         bodies = _body_counts(export, tree)
         lines = _region_counts(export, tree)
+        fn_records = _load_fn_records(tree, env)
+        records_by_file: dict[str, list[FnRecord]] = {}
+        for rec in fn_records:
+            records_by_file.setdefault(rec.file, []).append(rec)
+        file_texts: dict[str, str] = {}
+        for rel in {k[0] for k in bodies} | {k[0] for k in lines}:
+            try:
+                file_texts[rel] = (tree / rel).read_text(encoding="utf-8")
+            except OSError:
+                file_texts[rel] = ""
         asked = tuple(dict.fromkeys(failing_tests))
         owners = _owner_map(tree, bins, prof, env, asked,
-                            profdata_bin, cov_bin)
-        slice_ = slice_from_counts(_counted_bodies(tree, bodies, lines),
-                                   owners=owners, failing=asked)
+                            profdata_bin, cov_bin, records_by_file, file_texts)
+        slice_ = slice_from_counts(
+            _counted_bodies(records_by_file, file_texts, bodies, lines),
+            owners=owners, failing=asked)
         if log:
             log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
                 f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "

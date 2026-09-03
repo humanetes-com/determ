@@ -41,6 +41,7 @@ from pipeline_core.domain import fill_phase_clock
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureFrontier,
+    locator_of,
     union_unattributed_stubs,
 )
 from pipeline_core.domain.best_tree_mark import BestTreeMark
@@ -142,6 +143,7 @@ from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
     FnLocator,
+    FnSite,
     Frontier,
     SiteFrontier,
 )
@@ -4111,7 +4113,9 @@ def run_phase_c_tdd(
                     bare_test_name(_ot), set()).add(_ok)
         if _cov is not None and _cov.owners:
             _owner_admits = escalate_to_measured_owners(
-                owners={bare_test_name(t): ks for t, ks in _cov.owners.items()},
+                owners={bare_test_name(t): frozenset(
+                    FnLocator(s.file, s.fn_name) for s in ks)
+                    for t, ks in _cov.owners.items()},
                 units_by_test=_units_for_owners,
                 graded=_flat_keys | permanently_exhausted,
                 unable=_dead_keys | _red_dead,
@@ -4170,21 +4174,24 @@ def run_phase_c_tdd(
         # frontier, and a session that does not run leaves them to the
         # other routes); the engine drops what a session served from the
         # same call's other routes.
-        _session_slices: dict[str, frozenset[FnLocator]] = {}
-        _session_owners: dict[str, frozenset[FnLocator]] = {}
+        _session_slices: dict[str, frozenset[FnSite]] = {}
+        _session_owners: dict[str, frozenset[FnSite]] = {}
         if os.getenv("SLICE_SESSION", "1") != "0":
             _cov_owners = (
                 {bare_test_name(t): ks for t, ks in _cov.owners.items()}
                 if _cov is not None and _cov.owners else {})
             _session_owners = {
                 t: frozenset(ks) for t, ks in _cov_owners.items()}
+            _units_for_session: dict[str, set[FnSite]] = {}
+            for _site, _tests in _attr.site_frontier.items():
+                for _t in _tests:
+                    _units_for_session.setdefault(
+                        bare_test_name(_t), set()).add(_site)
             _session_slices = session_slices_for_failing(
                 cur_failed,
                 owners=_cov_owners,
-                units_by_test=_units_for_owners,
-                pairs=((FnLocator(p.dispatcher.file, p.dispatcher.fn_name),
-                        FnLocator(p.implementer.file, p.implementer.fn_name))
-                       for p in _attr.pairs))
+                units_by_test=_units_for_session,
+                pairs=((p.dispatcher, p.implementer) for p in _attr.pairs))
         _before_svc = [k for k, _ in ordered]
         # The ranking reads the VERIFIED service view, not the fire's
         # inclusive `_served_at`: a floor stamp the route-scoped rule never
@@ -4830,7 +4837,8 @@ def run_phase_c_tdd(
         # A session serves its whole slice, batch cut or not: the units it
         # had in view are served, so they leave the never-served rank.
         _session_units: frozenset[FnLocator] = (
-            frozenset().union(*_session_slices.values())
+            frozenset(locator_of(u) for units in _session_slices.values()
+                      for u in units)
             if _session_slices else frozenset())
         _attempted = (
             frontier_keys if _sub_dispatched is None

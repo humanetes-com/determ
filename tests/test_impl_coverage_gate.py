@@ -18,7 +18,7 @@ import pipeline
 from pipeline_core.domain import coverage_slice as cov
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.coverage_slice import CoverageSlice
-from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from tests.harness import (
     install_cluster_scan,
     install_fake_extractor,
@@ -39,7 +39,8 @@ impl Gauge {
 
 _LEVEL = FnLocator("lib.rs", "level")
 _PEAK = FnLocator("lib.rs", "peak")
-_ELSEWHERE = FnLocator("other.rs", "run")
+_ELSEWHERE = FnSite("other.rs", "run", "impl Runner")
+_PEAK_SITE = FnSite("lib.rs", "peak", "impl Gauge")
 
 
 def _block() -> ImplBlock:
@@ -115,7 +116,7 @@ def test_negative_control_one_entered_member_keeps_the_block(
     prompts: list[str] = []
     _install_model(monkeypatch, prompts)
     cov.bind(CoverageSlice(
-        owners={"t_red": frozenset({_ELSEWHERE, _PEAK})},
+        owners={"t_red": frozenset({_ELSEWHERE, _PEAK_SITE})},
         failing=frozenset({"t_red"})))
     try:
         _run(ws)

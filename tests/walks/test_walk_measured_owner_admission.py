@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from pipeline_core.domain.coverage_slice import CoverageSlice, bind
-from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.models import ClusterFillResult, FnLocator, FnSite
 from tests.walks.harness import load_walk, replay
 
 pytestmark = pytest.mark.walk
@@ -38,7 +38,11 @@ _ACC = FnLocator("src/a.rs", "fmt")
 _ACC2 = FnLocator("src/a.rs", "context")
 _OWNER = FnLocator("src/b.rs", "owner_fmt")
 
-_OWNERS = {t: frozenset({_ACC, _ACC2, _OWNER}) for t in _REDS}
+_ACC_SITE = FnSite("src/a.rs", "fmt", "impl Debug for Error")
+_ACC2_SITE = FnSite("src/a.rs", "context", "impl Error")
+_OWNER_SITE = FnSite("src/b.rs", "owner_fmt", "impl Debug for Error")
+
+_OWNERS = {t: frozenset({_ACC_SITE, _ACC2_SITE, _OWNER_SITE}) for t in _REDS}
 
 
 def _coverage(_pd: Path, _cl: str, failing_tests=frozenset(), **_k):

@@ -18,7 +18,7 @@ from pipeline_core.domain.coverage_slice import (
     bind,
     measured_entry_sets,
 )
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.retro_gate import (
     CONVICTOR_ENTRY,
     CONVICTOR_ENTRY_MOVED,
@@ -34,9 +34,9 @@ from pipeline_core.domain.retro_gate import (
     tree_premise_absent,
 )
 
-_A = FnLocator("src/alpha.rs", "build")
-_B = FnLocator("src/alpha.rs", "render")
-_C = FnLocator("src/beta.rs", "emit")
+_A = FnSite("src/alpha.rs", "build", "impl Widget")
+_B = FnSite("src/alpha.rs", "render", "impl Widget")
+_C = FnSite("src/beta.rs", "emit", "impl Emitter")
 
 _LAYOUT = "pub struct Widget { pub label: String }\n"
 

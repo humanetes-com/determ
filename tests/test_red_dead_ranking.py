@@ -32,7 +32,7 @@ from pipeline_core.domain.coverage_slice import (
     red_dead_units,
 )
 from pipeline_core.domain.dispatch_batch import promote_by_service, take_batch
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 
 _FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "coverage"
@@ -51,8 +51,13 @@ def _load() -> dict:
     return json.loads(_FIXTURE.read_text(encoding="utf-8"))
 
 
-def _owners(data: dict) -> dict[str, frozenset[FnLocator]]:
-    return {t: frozenset(_loc(u) for u in us)
+def _loc_site(s: str) -> FnSite:
+    file, fn = s.rsplit("::", 1)
+    return FnSite(file, fn, "")
+
+
+def _owners(data: dict) -> dict[str, frozenset[FnSite]]:
+    return {t: frozenset(_loc_site(u) for u in us)
             for t, us in data["owners"].items()}
 
 

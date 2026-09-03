@@ -20,7 +20,8 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.attribution import record_site
+from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import NOTES_CLOSE, NOTES_OPEN, SessionSlice
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
@@ -40,7 +41,7 @@ def render_slice_file(
     all_records: Sequence[FnRecord],
     *,
     file_chars: int = DEFAULT_FILE_CHARS,
-    executed: Collection[FnLocator] = (),
+    executed: Collection[FnSite] = (),
     coverage_known: bool = False,
 ) -> str:
     """One `<FILE>` section: the editable units named with their impl
@@ -57,7 +58,7 @@ def render_slice_file(
         if not coverage_known:
             return ""
         return (" [executed by the failing tests]"
-                if FnLocator(file_rel, r.fn_name) in executed
+                if record_site(r) in executed
                 else " [NOT executed by the failing tests on the current tree]")
     named = ", ".join(
         f"{r.fn_name} ({r.container or 'free fn'}){_mark(r)}" for r in editable)
@@ -87,7 +88,7 @@ def render_slice_file(
     return head + "\n".join(parts) + "\n</FILE>"
 
 
-def _protocol(slice_: SessionSlice, records: Mapping[FnLocator, FnRecord]) -> str:
+def _protocol(slice_: SessionSlice, records: Mapping[FnSite, FnRecord]) -> str:
     first = slice_.units[0] if slice_.units else None
     example_block = records[first].container if first is not None else ""
     example_name = first.fn_name if first is not None else "name"
@@ -127,7 +128,7 @@ def build_slice_session_prompt(
     module_name: str,
     cluster_name: str,
     slice_: SessionSlice,
-    records: Mapping[FnLocator, FnRecord],
+    records: Mapping[FnSite, FnRecord],
     all_records: Sequence[FnRecord],
     file_texts: Mapping[str, str],
     target_evidence: Mapping[str, str],
@@ -142,7 +143,7 @@ def build_slice_session_prompt(
     fr_path: Path | None = None,
     max_turns: int = 8,
     file_chars: int = DEFAULT_FILE_CHARS,
-    executed: Collection[FnLocator] | None = None,
+    executed: Collection[FnSite] | None = None,
 ) -> str:
     """Turn 0 of a session over `slice_`.
 

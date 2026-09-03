@@ -246,6 +246,9 @@ class AttributionResult(NamedTuple):
     # The formatter dispatcher/implementer pairs the behavior path's hop
     # resolved this sweep (`FormatterPair`). Empty when the hop did not fire.
     pairs: frozenset[FormatterPair] = frozenset()
+    # Every site the attribution paths named this sweep, container-qualified.
+    # The session route reads this; dispatch keeps the locator-keyed frontier.
+    site_frontier: SiteFrontier = {}
 
     def convicting_for(self, key: FnLocator) -> set[str]:
         """Union over sites with this file+name — the locator view tests
@@ -283,6 +286,22 @@ def canon_site(site: FnSite) -> FnSite:
     """Identity comparison form: container run through :func:`container_key`."""
     cont = site.container or ""
     return FnSite(site.file, site.fn_name, container_key(cont) if cont else "")
+
+
+def record_site(record: Any) -> FnSite:
+    """The :class:`FnSite` for an extractor :class:`~pipeline_core.domain.models.FnRecord`."""
+    if hasattr(record, "file"):
+        return canon_site(FnSite(record.file, record.fn_name, record.container or ""))
+    return canon_site(FnSite(
+        str(record.get("file", "")),
+        str(record.get("fn_name", "")),
+        str(record.get("container", "") or ""),
+    ))
+
+
+def locator_of(site: FnSite) -> FnLocator:
+    """Project a site to the dispatch key the outer loop uses."""
+    return FnLocator(site.file, site.fn_name)
 
 
 def lift_sites(dispatch: Frontier) -> SiteFrontier:

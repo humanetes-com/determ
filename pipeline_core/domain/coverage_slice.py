@@ -50,7 +50,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.attribution import locator_of
+from pipeline_core.domain.models import FnLocator, FnSite
 
 DEAD_BODY = (
     "This body is executed by no test in the suite; whatever is wrong is "
@@ -78,7 +79,7 @@ class CountedBody:
     locator is dead only when every such body has count 0.
     """
 
-    locator: FnLocator
+    locator: FnSite
     start: int
     count: int
     zero_lines: tuple[int, ...] = ()
@@ -97,7 +98,7 @@ class CoverageSlice:
     slice under-covers because the caller is wrong. Ambiguous locators
     get no region sentence until the site key lands.
 
-    `owners` maps a test name to the locators that test alone executed,
+    `owners` maps a test name to the sites that test alone executed,
     measured by running it under `--exact` on its own binary. A test the
     adapter was not asked to profile, or could not find a binary for, is
     ABSENT from the mapping — which is not the same as an empty owner set,
@@ -108,7 +109,7 @@ class CoverageSlice:
 
     dead: frozenset[FnLocator] = field(default_factory=frozenset)
     dead_regions: Mapping[FnLocator, str] = field(default_factory=dict)
-    owners: Mapping[str, frozenset[FnLocator]] = field(default_factory=dict)
+    owners: Mapping[str, frozenset[FnSite]] = field(default_factory=dict)
     # The red set the owner map was ASKED for, which is not the same as the
     # set it answered: a test with no matching binary is missing from
     # `owners`, and the difference is exactly the ignorance every consumer
@@ -162,7 +163,7 @@ def slice_from_counts(
     bodies: Iterable[CountedBody],
     *,
     dead_fraction: float = DEAD_FRACTION,
-    owners: Mapping[str, frozenset[FnLocator]] | None = None,
+    owners: Mapping[str, frozenset[FnSite]] | None = None,
     failing: Iterable[str] = (),
 ) -> CoverageSlice:
     """The contract that writes the dead set the ranking and prompts consume.
@@ -184,7 +185,7 @@ def slice_from_counts(
     """
     grouped: dict[FnLocator, list[CountedBody]] = {}
     for body in bodies:
-        grouped.setdefault(body.locator, []).append(body)
+        grouped.setdefault(locator_of(body.locator), []).append(body)
     dead: set[FnLocator] = set()
     regions: dict[FnLocator, str] = {}
     for loc, group in grouped.items():
@@ -276,7 +277,7 @@ def instruction_opener(file_rel: str, names: Iterable[str]) -> str:
 
 def convictors_never_enter(
     unit: FnLocator, tests: Iterable[str],
-    owners: Mapping[str, frozenset[FnLocator]],
+    owners: Mapping[str, frozenset[FnSite]],
 ) -> frozenset[str] | None:
     """The tests that PROVABLY do not execute `unit`, or None when the
     reading cannot decide — the measured counterpart of
@@ -315,7 +316,7 @@ def convictors_never_enter(
         entered = owners.get(t)
         if not entered:
             return None
-        if unit in entered:
+        if unit in {locator_of(s) for s in entered}:
             return None
     return frozenset(names)
 
@@ -323,7 +324,7 @@ def convictors_never_enter(
 def red_dead_units(
     units: Iterable[FnLocator],
     failing: Iterable[str],
-    owners: Mapping[str, frozenset[FnLocator]],
+    owners: Mapping[str, frozenset[FnSite]],
     *,
     exempt: Collection[FnLocator] = (),
 ) -> frozenset[FnLocator]:
@@ -425,5 +426,6 @@ def measured_entry_sets(tests: Iterable[str]) -> dict[str, tuple[str, ...]]:
     for t in dict.fromkeys(tests):
         entered = reading.owners.get(t)
         if entered:
-            out[t] = tuple(sorted(f"{u.file}::{u.fn_name}" for u in entered))
+            out[t] = tuple(sorted(f"{locator_of(u).file}::{locator_of(u).fn_name}"
+                                   for u in entered))
     return out

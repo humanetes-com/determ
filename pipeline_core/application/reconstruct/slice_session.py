@@ -36,7 +36,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
 )
 from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.llm_output import extract_fn_bodies
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import quote_panic_site
 from pipeline_core.domain.rust_idents import signature_fixed_by_trait
@@ -82,7 +82,7 @@ class SessionPorts:
     # crate-relative path -> text, for quoting a panic's source line.
     read_source: Callable[[str], str | None]
     # () -> current body text per slice unit.
-    enumerate_bodies: Callable[[], Mapping[FnLocator, str]]
+    enumerate_bodies: Callable[[], Mapping[FnSite, str]]
     # (reply) -> the follow-up text answering its requests, or None.
     answer_pulls: Callable[[str], str | None]
     log: Callable[[str], None]
@@ -96,7 +96,7 @@ class SessionPorts:
     implicated: Callable[[Sequence[Any]], frozenset[tuple[str, str, str]]] | None = None
     # (failing test names) -> test -> the units it executes on the tree as it
     # stands, measured; None disables the per-turn coverage statement.
-    coverage: Callable[[Sequence[str]], Mapping[str, frozenset[FnLocator]]] | None = None
+    coverage: Callable[[Sequence[str]], Mapping[str, frozenset[FnSite]]] | None = None
     now: Callable[[], float] = time.monotonic
 
 
@@ -105,9 +105,9 @@ class SessionOutcome:
     outcome: str                      # accepted | kept | reverted | no_change | stopped
     turns: int
     model_calls: int
-    kept: frozenset[FnLocator]
-    reverted: frozenset[FnLocator]
-    dispatched: frozenset[FnLocator]
+    kept: frozenset[FnSite]
+    reverted: frozenset[FnSite]
+    dispatched: frozenset[FnSite]
     notes: str
     final: TurnReading | None
     compile_failures: int
@@ -134,7 +134,7 @@ def run_slice_session(
     target_src_dir: Path,
     cluster_name: str,
     slice_: SessionSlice,
-    records: Mapping[FnLocator, FnRecord],
+    records: Mapping[FnSite, FnRecord],
     turn0: str,
     max_turns: int = 8,
     max_minutes: float = 90.0,
@@ -175,7 +175,7 @@ def run_slice_session(
     model_calls = 0
     compile_failures = 0
     notes = ""
-    dispatched: set[FnLocator] = set()
+    dispatched: set[FnSite] = set()
     accepted = False
     last_reading: TurnReading | None = None
     prev_observed: dict[str, str] = {}
@@ -382,8 +382,8 @@ def run_slice_session(
     changed = frozenset(u for u in slice_.units
                         if current.get(u, baseline_bodies.get(u)) != baseline_bodies.get(u))
     outcome = "no_change"
-    kept: frozenset[FnLocator] = frozenset()
-    reverted: frozenset[FnLocator] = frozenset()
+    kept: frozenset[FnSite] = frozenset()
+    reverted: frozenset[FnSite] = frozenset()
     newly_red: tuple[str, ...] = ()
     newly_red_output: Mapping[str, str] = {}
     if accepted:
@@ -472,23 +472,23 @@ def _peel(
     ports: SessionPorts,
     target_src_dir: Path,
     slice_: SessionSlice,
-    records: Mapping[FnLocator, FnRecord],
+    records: Mapping[FnSite, FnRecord],
     baseline: TestStateReading | None,
-    baseline_bodies: Mapping[FnLocator, str],
+    baseline_bodies: Mapping[FnSite, str],
     baseline_texts: Mapping[str, str],
-    changed: frozenset[FnLocator],
+    changed: frozenset[FnSite],
     *,
     peel_max: int,
     label: str,
-) -> tuple[frozenset[FnLocator], frozenset[FnLocator]]:
+) -> tuple[frozenset[FnSite], frozenset[FnSite]]:
     """Restore changed units one at a time until the suite holds; the rest
     are kept. Restores the whole baseline when the budget runs out or
     nothing holds — a previously-passing test going red never survives,
     even when net pass rose (acceptance is `TurnReading.clean`; peel is
     the same bar without requiring the targets green)."""
-    remaining = sorted(changed, key=lambda u: (u.file, u.fn_name))
-    reverted: list[FnLocator] = []
-    unrestored: list[FnLocator] = []
+    remaining = sorted(changed, key=lambda u: (u.file, u.fn_name, u.container))
+    reverted: list[FnSite] = []
+    unrestored: list[FnSite] = []
     steps = 0
     while remaining and steps < peel_max:
         u = remaining.pop()

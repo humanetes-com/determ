@@ -1128,10 +1128,10 @@ def _cov_ctx(ws: Path) -> PerFnPassCtx:
 def test_coverage_unreached_rejection_is_kept_with_one_call(
         tmp_path: Path) -> None:
     from pipeline_core.domain.coverage_slice import CoverageSlice, bind
-    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.models import FnSite
     ws = _mk_ws(tmp_path)
     bind(CoverageSlice(owners={
-        "t_hub": frozenset({FnLocator("lib.rs", "elsewhere")})}))
+        "t_hub": frozenset({FnSite("lib.rs", "elsewhere", "impl Hub")})}))
     try:
         fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
                              body=("Ok(())", "R"))
@@ -1168,11 +1168,11 @@ def test_a_unit_the_failing_test_does_execute_still_enters_the_fix_loop(
     """Over-refusal control: the live counterpart is `src/error.rs::deref_mut`,
     which both deref_mut tests do enter — the gate must decline there."""
     from pipeline_core.domain.coverage_slice import CoverageSlice, bind
-    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.models import FnSite
     ws = _mk_ws(tmp_path)
     bind(CoverageSlice(owners={
-        "t_hub": frozenset({FnLocator("lib.rs", "answer"),
-                            FnLocator("lib.rs", "elsewhere")})}))
+        "t_hub": frozenset({FnSite("lib.rs", "answer", "impl Hub"),
+                            FnSite("lib.rs", "elsewhere", "impl Hub")})}))
     try:
         fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
                              body=("Ok(())", "R"))
@@ -1197,7 +1197,7 @@ def test_a_conviction_is_refused_when_no_convictor_executes_the_body(
     from dataclasses import replace
 
     from pipeline_core.domain.coverage_slice import CoverageSlice, bind
-    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.models import FnLocator, FnSite
     ws = _mk_ws(tmp_path)
     frontier = FailureFrontier.of_direct({
         FnLocator("lib.rs", "answer"): {"t_hub"},
@@ -1205,7 +1205,7 @@ def test_a_conviction_is_refused_when_no_convictor_executes_the_body(
     ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
                   still_stubbed=frozenset())
     bind(CoverageSlice(owners={
-        "t_hub": frozenset({FnLocator("lib.rs", "elsewhere")})}))
+        "t_hub": frozenset({FnSite("lib.rs", "elsewhere", "impl Hub")})}))
     try:
         fake = RecordingFill(run=(1, "error[E0308]: mismatched types"),
                              body=("Ok(())", "R"))

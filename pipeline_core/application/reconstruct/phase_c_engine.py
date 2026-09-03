@@ -59,6 +59,7 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     FillResult,
     FnLocator,
+    FnSite,
     FnRecord,
     ImplBlock,
     Stub,
@@ -279,8 +280,8 @@ class PhaseCFillEngine:
         dispatch_ranks: dict[FnLocator, int] | None = None,
         # Failing test -> the crate fns it executes (the sweep's owner map
         # plus its attributed units): the red-slice session's editable set.
-        session_slices: Mapping[str, frozenset[FnLocator]] | None = None,
-        session_owners: Mapping[str, frozenset[FnLocator]] | None = None,
+        session_slices: Mapping[str, frozenset[FnSite]] | None = None,
+        session_owners: Mapping[str, frozenset[FnSite]] | None = None,
     ) -> ClusterFillResult:
         """Phase C — Flavour B with full validation loops."""
         if cluster_env is None:

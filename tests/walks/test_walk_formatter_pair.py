@@ -42,7 +42,8 @@ pytestmark = pytest.mark.walk
 _REDS = ("t136", "t137")
 _DISP = FnLocator("src/a.rs", "fmt")
 _IMPL = FnLocator("src/b.rs", "debug")
-_PAIR = FormatterPair(FnSite("src/a.rs", "fmt", "impl Debug for Error"),
+_DISP_SITE = FnSite("src/a.rs", "fmt", "impl Debug for Error")
+_PAIR = FormatterPair(_DISP_SITE,
                       FnSite("src/b.rs", "debug", "impl ErrorImpl"))
 
 
@@ -59,7 +60,7 @@ def _replay(monkeypatch, tmp_path: Path, *, with_pairs: bool):
         # reading the next attribution observed.
         measured.append(len(measured) + 1)
         return CoverageSlice(
-            owners={t: frozenset({_DISP}) for t in failing_tests},
+            owners={t: frozenset({_DISP_SITE}) for t in failing_tests},
             failing=frozenset(failing_tests),
             dead_regions={FnLocator("src/x.rs", f"iter{measured[-1]}"): "x"})
 

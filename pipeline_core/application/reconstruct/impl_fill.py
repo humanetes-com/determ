@@ -69,7 +69,7 @@ from pipeline_core.domain.attempt_loss import (
     invariance_refusal_note,
     may_escalate_to_last_resort,
 )
-from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.attribution import FailureFrontier, canon_site, locator_of, record_site
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
@@ -575,11 +575,11 @@ def fill_impl_blocks(
     # Failing test -> every crate fn it executes (the sweep's coverage owner
     # map plus the attributed units). The red-slice session's editable set;
     # None or empty runs no session.
-    session_slices: Mapping[str, frozenset[FnLocator]] | None = None,
+    session_slices: Mapping[str, frozenset[FnSite]] | None = None,
     # Failing test -> the units the sweep's coverage MEASURED it executes
     # (the owner map alone, without attributed additions): the session's
     # per-unit executed marks. None leaves the marks off.
-    session_owners: Mapping[str, frozenset[FnLocator]] | None = None,
+    session_owners: Mapping[str, frozenset[FnSite]] | None = None,
 ) -> ClusterFillResult:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -4348,7 +4348,7 @@ def fill_impl_blocks(
                         and os.getenv("SLICE_SESSION_COVERAGE", "1") != "0")
         _stubs_now = frozenset(_scan_unimplemented_for_cluster(target_src_dir, cluster))
 
-        def _coverage(names: Sequence[str]) -> Mapping[str, frozenset[FnLocator]]:
+        def _coverage(names: Sequence[str]) -> Mapping[str, frozenset[FnSite]]:
             if not _coverage_on or _coverage_fn is None:
                 return {}
             cov = _coverage_fn(project_dir, cluster_name,
@@ -4358,33 +4358,36 @@ def fill_impl_blocks(
             return {str(t).rsplit("::", 1)[-1]: frozenset(ks)
                     for t, ks in dict(owners).items()}
 
-        _executed_all: frozenset[FnLocator] | None = None
+        _executed_all: frozenset[FnSite] | None = None
         if session_owners is not None:
             _executed_all = (frozenset().union(*session_owners.values())
                              if session_owners else frozenset())
 
-        def _records_now() -> dict[FnLocator, FnRecord]:
-            """The tree's fn records keyed as the frontier keys them — the
-            record's own `file` (the loop enumerates from the cluster root,
-            so both read `src/x.rs`; `unit_bodies` compares the same way) —
-            with a prefix-insensitive alias so a slice key that lost or
-            gained the `src/` prefix still resolves."""
-            out: dict[FnLocator, FnRecord] = {}
-            alias: dict[FnLocator, FnRecord] = {}
+        def _records_now() -> dict[FnSite, FnRecord]:
+            """The tree's fn records keyed by site — one record per container."""
+            out: dict[FnSite, FnRecord] = {}
+            alias: dict[FnSite, FnRecord] = {}
             for _raw in _enumerate_fns_via_extractor(target_src_dir) or []:
                 _r = FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
                 if _r.is_test or not _r.fn_name:
                     continue
-                out.setdefault(FnLocator(_r.file, _r.fn_name), _r)
-                alias.setdefault(FnLocator(_norm_src_rel(_r.file), _r.fn_name), _r)
+                site = record_site(_r)
+                if site in out:
+                    raise ValueError(
+                        f"duplicate FnSite on tree: {site} "
+                        f"({out[site].container!r} vs {_r.container!r})")
+                out[site] = _r
+                norm = canon_site(FnSite(
+                    _norm_src_rel(_r.file), _r.fn_name, _r.container))
+                alias.setdefault(norm, _r)
             for _u in session_slices_units:
                 if _u not in out:
-                    _hit = alias.get(FnLocator(_norm_src_rel(_u.file), _u.fn_name))
+                    _hit = alias.get(canon_site(_u))
                     if _hit is not None:
                         out[_u] = _hit
             return out
 
-        session_slices_units: frozenset[FnLocator] = frozenset().union(
+        session_slices_units: frozenset[FnSite] = frozenset().union(
             *session_slices.values())
         _all_recs = _records_now()
         _plans = plan_slices(session_slices, stubs=_stubs_now, max_units=_max_units)
@@ -4428,7 +4431,7 @@ def fill_impl_blocks(
                      + ", ".join(f"{u.file}::{u.fn_name}" for u in _missing[:6]))
             if not _records:
                 continue
-            _units = tuple(sorted(_records, key=lambda u: (u.file, u.fn_name)))
+            _units = tuple(sorted(_records, key=lambda u: (u.file, u.fn_name, u.container)))
             _sl = type(_sl)(tests=_sl.tests, units=_units)
             _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))
             _tblocks = attributed_test_blocks(
@@ -4511,7 +4514,7 @@ def fill_impl_blocks(
                 _last_full_out[0] = out
                 return rc, out, list(diags)
 
-            def _bodies_now(_want: tuple[FnLocator, ...] = _units) -> Mapping[FnLocator, str]:
+            def _bodies_now(_want: tuple[FnSite, ...] = _units) -> Mapping[FnSite, str]:
                 recs = _records_now()
                 return {u: recs[u].body_text for u in _want if u in recs}
 
@@ -4546,8 +4549,9 @@ def fill_impl_blocks(
                     turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes)
             with _counters_lock:
                 attempts_total += _out.model_calls
-                dispatched_keys.update(_out.dispatched | _out.kept)
-                reverted_keys.update(_out.reverted)
+                dispatched_keys.update(
+                    locator_of(u) for u in (_out.dispatched | _out.kept))
+                reverted_keys.update(locator_of(u) for u in _out.reverted)
                 if _out.outcome == "accepted":
                     impls_filled += 1
                     fns_filled_total += len(_out.kept)
@@ -4558,7 +4562,7 @@ def fill_impl_blocks(
             # Only units whose bodies stayed. A no_change, compile-fail, or
             # full-revert session spent GPU and left the tree as it was —
             # the pair and per-fn routes still have a shot this call.
-            served |= set(_out.kept)
+            served |= {locator_of(u) for u in _out.kept}
             if _out.outcome == "accepted":
                 _cls(class_for_kept(passed=frozenset(_sl.tests), unreachable=False),
                      _sid, "session")

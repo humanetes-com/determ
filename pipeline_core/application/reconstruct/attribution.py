@@ -980,6 +980,7 @@ def attribute_failures(
 
     merged: Frontier = {}
     convicting: SiteFrontier = {}
+    merged_sites: SiteFrontier = {}
     # A test RUNTIME/COMPILE already located AT a site. BEHAVIOR may also
     # name that test on a different site (the four `from` impls share
     # `Error` with Debug asserts). Dispatch still unions both; conviction
@@ -1019,9 +1020,11 @@ def attribute_failures(
         contributors.append(kind)
         for k, v in add.items():
             merged.setdefault(k, set()).update(v)
+        site_map = sites if sites is not None else lift_sites(add)
+        for site, v in site_map.items():
+            merged_sites.setdefault(canon_site(site), set()).update(v)
         if not kind.convicts:
             return
-        site_map = sites if sites is not None else lift_sites(add)
         for site, v in site_map.items():
             site = canon_site(site)
             if kind is FailureKind.BEHAVIOR:
@@ -1072,7 +1075,7 @@ def attribute_failures(
         # MERGED so the union is visible in logs/events.
         kind = contributors[0] if len(contributors) == 1 else FailureKind.MERGED
         return AttributionResult(merged, kind, convicting, _src_map,
-                                 frozenset(_hop_pairs))
+                                 frozenset(_hop_pairs), merged_sites)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = _failing()

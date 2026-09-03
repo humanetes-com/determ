@@ -48,9 +48,9 @@ impl Renderer {
 
 _DISP = FnLocator("src/lib.rs", "fmt")
 _IMPL = FnLocator("src/render.rs", "render")
-_PAIR = FormatterPair(
-    FnSite("src/lib.rs", "fmt", "impl fmt::Display for Report"),
-    FnSite("src/render.rs", "render", "impl Renderer"))
+_DISP_SITE = FnSite("src/lib.rs", "fmt", "impl fmt::Display for Report")
+_IMPL_SITE = FnSite("src/render.rs", "render", "impl Renderer")
+_PAIR = FormatterPair(_DISP_SITE, _IMPL_SITE)
 
 FIRST_REPLY = (
     '<FN name="fmt" block="impl fmt::Display for Report">'
@@ -163,7 +163,7 @@ def test_a_session_carries_the_previous_reply_and_verdict_into_the_next_turn(
     install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
         run=[(101, _RED), (101, _RED), (0, _GREEN)])
-    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     lib = (ws / "src" / "lib.rs").read_text()
     ren = (ws / "src" / "render.rs").read_text()
     assert "rendered {}" in lib and "self.depth + 7" in ren
@@ -205,7 +205,7 @@ def test_a_non_compiling_change_set_is_restored_and_the_diagnostic_is_a_turn(
         check_diag=[(101, "error[E0616]: field `msg` of struct `Report` is private",
                      [diag("src/lib.rs", code="E0616")]), (0, "", [])],
         run=[(101, _RED), (0, _GREEN)])
-    _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     assert "rendered {}" in (ws / "src" / "lib.rs").read_text()
     assert len(transcripts) == 2
     result_turn = transcripts[1][3]["content"]
@@ -223,7 +223,7 @@ def test_a_session_that_ends_regressing_restores_the_baseline(monkeypatch, tmp_p
     install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
         run=[(101, base), (101, red_plus), (101, red_plus), (101, red_plus)])
-    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     assert (ws / "src" / "lib.rs").read_text() == DISPATCHER_LIB
     assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
     assert (_DISP.file, _DISP.fn_name) in (res.reverted_fns or ())
@@ -244,7 +244,7 @@ def test_negative_control_with_the_session_off_the_pair_route_rebuilds_a_prompt(
 
     monkeypatch.setattr(pipeline, "_ask_raw", _ask)
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, _GREEN))
-    _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     assert transcripts == []
     assert any("PAIRED WRITE" in p for p in prompts)
 
@@ -267,7 +267,7 @@ def test_a_session_that_lands_nothing_does_not_block_the_pair_route(
     install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
         run=[(101, _RED), (0, _GREEN)])
-    _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     assert transcripts  # the session ran
     assert any("PAIRED WRITE" in p for p in prompts)
     assert "rendered {}" in (ws / "src" / "lib.rs").read_text()
@@ -296,7 +296,7 @@ def test_a_compile_failure_peels_the_blamed_body_and_judges_the_rest(
                      [diag("src/render.rs", code="E0425")]), (0, "", [])],
         run=[(101, _RED), (0, _GREEN)],
         frontier={_IMPL: {"<compile>"}})
-    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     assert "rendered {}" in (ws / "src" / "lib.rs").read_text()
     assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
     assert len(transcripts) == 1
@@ -315,8 +315,8 @@ def test_turn_zero_marks_which_editable_units_the_failing_tests_execute(
         check_cmd="cargo check", cluster_env={}, fr_path=None,
         tdd_frontier_keys={_DISP}, tdd_frontier_tests=_frontier(),
         tdd_test_cmd="cargo test",
-        session_slices={"t_pair": frozenset({_DISP, _IMPL})},
-        session_owners={"t_pair": frozenset({_DISP})})
+        session_slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})},
+        session_owners={"t_pair": frozenset({_DISP_SITE})})
     turn0 = transcripts[0][1]["content"]
     headers = [ln for ln in turn0.splitlines() if ln.startswith("<FILE ")]
     # The container text is the extractor's (spaces around `::`); the claim
@@ -343,12 +343,12 @@ def test_a_judged_turn_states_which_changed_units_the_targets_execute(
     deps = _dc.replace(
         pipeline._APP.impl_fill_deps,
         measure_coverage_slice=lambda pd, cl, failing_tests=frozenset(), **k: CoverageSlice(
-            owners={"t_pair": frozenset({_DISP})}))
+            owners={"t_pair": frozenset({_DISP_SITE})}))
     monkeypatch.setattr(pipeline, "_APP", _dc.replace(pipeline._APP, impl_fill_deps=deps))
     monkeypatch.setattr(pipeline, "_phase_c_fill_impl_blocks",
                         __import__("functools").partial(
                             pipeline._impl_fill.fill_impl_blocks, deps))
-    _run(ws, tests, slices={"t_pair": frozenset({_DISP, _IMPL})})
+    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
     verdict = transcripts[1][3]["content"]
     assert "changed units they do NOT execute: src/render.rs::render" in verdict
     assert "editable units the targets execute now: src/lib.rs::fmt" in verdict

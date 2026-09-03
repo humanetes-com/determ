@@ -14,12 +14,12 @@ from pipeline_core.application.reconstruct.slice_session import (
     _peel,
     run_slice_session,
 )
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_results import BinaryResult, TestStateReading
 
-_FMT = FnLocator("src/lib.rs", "fmt")
-_RENDER = FnLocator("src/render.rs", "render")
+_FMT = FnSite("src/lib.rs", "fmt", "impl fmt::Display for Report")
+_RENDER = FnSite("src/render.rs", "render", "impl Renderer")
 _RECS = {
     _FMT: FnRecord(file="src/lib.rs", fn_name="fmt",
                    container="impl fmt::Display for Report",

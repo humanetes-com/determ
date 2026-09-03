@@ -36,7 +36,7 @@ from pipeline_core.application.reconstruct.attribution import (
 from pipeline_core.domain import coverage_slice as cov
 from pipeline_core.domain.attribution import FormatterPair
 from pipeline_core.domain.coverage_slice import CoverageSlice, unreached_by_test
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.rust_fn_headers import locate_fn
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -71,7 +71,7 @@ def _deps() -> tuple[AttributionDeps, list[str]]:
 
 
 def _slice_of(rec: dict[str, Any]) -> CoverageSlice:
-    owners = {t: frozenset(FnLocator(*u.rsplit("::", 1)) for u in us)
+    owners = {t: frozenset(FnSite(*u.rsplit("::", 1), "") for u in us)
               for t, us in rec["owners"].items()}
     return CoverageSlice(owners=owners, failing=frozenset(rec["failing"]))
 
