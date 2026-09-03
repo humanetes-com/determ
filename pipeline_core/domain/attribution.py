@@ -7,7 +7,7 @@ mapping, moved out of pipeline.py.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
@@ -304,9 +304,84 @@ def locator_of(site: FnSite) -> FnLocator:
     return FnLocator(site.file, site.fn_name)
 
 
+def site_label(site: FnSite) -> str:
+    """The log form of a site: `src/error.rs::fmt (impl Debug for Error)`;
+    a free fn renders as `src/lib.rs::run`."""
+    base = f"{site.file}::{site.fn_name}"
+    return f"{base} ({site.container})" if site.container else base
+
+
+def site_payload(site: FnSite) -> dict[str, str]:
+    """The event form of a site. Structured, never a `file::fn` string:
+    `::` occurs inside containers (`impl fmt::Display for Widget`), and the
+    flat form dropped the container from every session and owner-map event
+    the loop wrote, so the collapse of two `fmt` impls onto one key was not
+    detectable from `events.jsonl` (run `3026-8fb154bc`, 2026-09-03)."""
+    return {"file": site.file, "fn": site.fn_name, "container": site.container}
+
+
+def site_from_payload(obj: object) -> FnSite:
+    """Inverse of :func:`site_payload`. A legacy `file::fn` string reads as a
+    locator-only site (empty container) so events written before the
+    structured form stay loadable."""
+    if isinstance(obj, Mapping):
+        return canon_site(FnSite(
+            str(obj.get("file", "")), str(obj.get("fn", "")),
+            str(obj.get("container", "") or "")))
+    file_rel, _, fn = str(obj).rpartition("::")
+    return FnSite(file_rel, fn, "")
+
+
+@dataclass(frozen=True)
+class SiteRecords:
+    """A tree's fn records keyed by site, plus the sites the tree declares
+    more than once after cfg selection (each with its arms' cfg gates)."""
+
+    by_site: Mapping[FnSite, Any]
+    collisions: tuple[tuple[FnSite, tuple[str, ...]], ...] = ()
+
+
+def records_by_site(
+    records: Iterable[Any], *, compiled: Callable[[Any], bool],
+) -> SiteRecords:
+    """One record per `FnSite`, chosen the way the build chooses.
+
+    The extractor emits every declared variant of a fn: both arms of a
+    `#[cfg(x)]` / `#[cfg(not(x))]` twin in one impl carry the same
+    `(file, fn_name, container)` under every `--cfg-true` setting (probed
+    2026-09-03 on a two-arm inherent impl). `compiled` is the cluster's cfg
+    verdict on a record — `CfgSet.excludes_for_cargo` over its predicates —
+    and among colliding records only the compiled arms may key the site.
+    What still collides after that (an undecidable twin, two inline modules
+    declaring one free fn) keeps the first record in file order and is
+    reported in `collisions`, never raised: the ValueError this replaces
+    aborted the whole fill phase on a property of the tree, not a fault of
+    the call that noticed it, and the live anyhow trees carry no collision
+    while the first crate with a cfg twin would have died on iteration 1."""
+    groups: dict[FnSite, list[Any]] = {}
+    for rec in records:
+        groups.setdefault(record_site(rec), []).append(rec)
+    by_site: dict[FnSite, Any] = {}
+    collisions: list[tuple[FnSite, tuple[str, ...]]] = []
+    for site, group in groups.items():
+        kept = [r for r in group if compiled(r)] or group
+        by_site[site] = kept[0]
+        if len(kept) > 1:
+            collisions.append((site, tuple(
+                " && ".join(getattr(r, "cfg_predicates", ()) or ()) or "(no cfg)"
+                for r in kept)))
+    return SiteRecords(by_site, tuple(collisions))
+
+
 def lift_sites(dispatch: Frontier) -> SiteFrontier:
-    """Empty-container sites for a locator-only map (monkeypatches, fallbacks)."""
-    return {FnSite(k.file, k.fn_name, ""): set(v)
+    """Empty-container sites for a locator-only map (monkeypatches, fallbacks).
+
+    Keys are read positionally: a `Frontier` key is structurally a 2-tuple
+    (`FnLocator`'s own contract), and the classifier and reverse-map
+    fallbacks — and their test fixtures — build theirs as bare tuples. An
+    attribute read (`k.file`) raised on those the first time a
+    non-convicting kind was lifted into the site frontier (2026-09-03)."""
+    return {FnSite(str(k[0]), str(k[1]), ""): set(v)
             for k, v in dispatch.items() if v}
 
 

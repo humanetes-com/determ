@@ -1130,8 +1130,14 @@ class App:
 
 def _tdd_measure_coverage(
     log: Callable[[str], None],
+    enumerate_fns: Callable[[Path], Any],
 ) -> Callable[..., Any]:
     """The coverage probe bound into run_phase_c_tdd.
+
+    `enumerate_fns` is the same extractor port the fill routes key their
+    records with, so the coverage sites and the session's record map are
+    one enumeration of one tree; the adapter no longer locates the
+    extractor binary on its own.
 
     Must accept every keyword the driver passes. Run `2629191-02835a4c`
     (2026-08-30) aborted both clusters on the first dispatch ranking:
@@ -1140,7 +1146,8 @@ def _tdd_measure_coverage(
     so the owner map inherits the sweep's cfg and toolchain. A two-argument
     lambda TypeErrors; functools.partial forwards keywords.
     """
-    return functools.partial(_measure_coverage_slice, log=log)
+    return functools.partial(_measure_coverage_slice, log=log,
+                             enumerate_fns=enumerate_fns)
 
 
 def build_app(
@@ -2582,7 +2589,7 @@ def build_app(
             # caches it per iteration (`_oracle_fp` in `phase_c_tdd.py`);
             # this is the uncached adapter.
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
-            measure_coverage_slice=_tdd_measure_coverage(ports.log),
+            measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
             reference_measurement=_reference,
         ),
         impl_fill_deps=ImplFillDeps(
@@ -2633,7 +2640,7 @@ def build_app(
             ask=ask_client.ask,
             ask_turns=ask_client.ask_turns,
             run_cargo=helpers.run_cargo,
-            measure_coverage_slice=_tdd_measure_coverage(ports.log),
+            measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
             failed_body_cap=cfg.failed_body_cap,
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,

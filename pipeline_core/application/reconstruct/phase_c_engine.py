@@ -59,8 +59,8 @@ from pipeline_core.domain.models import (
     ClusterFillResult,
     FillResult,
     FnLocator,
-    FnSite,
     FnRecord,
+    FnSite,
     ImplBlock,
     Stub,
 )

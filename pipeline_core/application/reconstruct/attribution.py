@@ -32,6 +32,7 @@ from pipeline_core.domain.attribution import (
     container_key,
     lift_sites,
     line_to_fn_record,
+    record_site,
 )
 from pipeline_core.domain.coverage_slice import unreached_by_test
 from pipeline_core.domain.models import (
@@ -401,8 +402,13 @@ def _attribute_format_only_test(
                         and qual == (impl_self_type(icont) or "")):
                     implementers.append((FnLocator(irec["file"], method), irec))
         if implementers:
-            _disp_site = FnSite(rec["file"], "fmt",
-                                str(rec.get("container", "") or ""))
+            # Canonical from construction: the session's owner and site
+            # frontiers are `canon_site`d, and a raw extractor header
+            # (`impl Debug for ContextError < C , E >`) never equals its
+            # canonical form, so a pair built raw matched no slice member
+            # for any generic container (40 of the live nightly tree's
+            # containers differ under `container_key`, 2026-09-03).
+            _disp_site = record_site(rec)
             seen: set[FnLocator] = set()
             kept_impls: list[tuple[FnLocator, dict[str, Any]]] = []
             unentered: list[FnLocator] = []
@@ -411,10 +417,7 @@ def _attribute_format_only_test(
                     continue
                 seen.add(k)
                 if pairs_out is not None:
-                    pairs_out.add(FormatterPair(
-                        _disp_site,
-                        FnSite(k.file, k.fn_name,
-                               str(irec.get("container", "") or ""))))
+                    pairs_out.add(FormatterPair(_disp_site, record_site(irec)))
                 if unreached_by_test(k, tname):
                     unentered.append(k)
                 else:
@@ -1097,7 +1100,8 @@ def attribute_failures(
                         synth.setdefault(key, set()).add(tname)
             synth = _strip(synth)
             if synth:
-                return AttributionResult(synth, FailureKind.CLASSIFIER, {})
+                return AttributionResult(synth, FailureKind.CLASSIFIER, {},
+                                         site_frontier=lift_sites(synth))
     # 5. Recently-filled fallback. If new assertion failures appeared
     # after recent fills, the recent fills are the most likely cause.
     # Queue them in reverse-filled order (newest first).
@@ -1110,7 +1114,8 @@ def attribute_failures(
             recent_synth = _strip(recent_synth)
             if recent_synth:
                 return AttributionResult(
-                    recent_synth, FailureKind.RECENTLY_FILLED, {})
+                    recent_synth, FailureKind.RECENTLY_FILLED, {},
+                    site_frontier=lift_sites(recent_synth))
     # 6. Test-reverse-map. For each failing test, queue every fn it
     # could reach according to the static reverse map. Over-attribution
     # is tolerable here — per-fn splice guards reject overwriting
@@ -1128,7 +1133,8 @@ def attribute_failures(
             reverse_synth = _strip(reverse_synth)
             if reverse_synth:
                 return AttributionResult(
-                    reverse_synth, FailureKind.REVERSE_MAP, {})
+                    reverse_synth, FailureKind.REVERSE_MAP, {},
+                    site_frontier=lift_sites(reverse_synth))
     return AttributionResult({}, FailureKind.NO_FRONTIER, {})
 
 

@@ -29,7 +29,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from pipeline_core.domain.attribution import container_key, locator_of
+from pipeline_core.domain.attribution import container_key, locator_of, site_label
+from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
 NOTES_OPEN = "<NOTES>"
@@ -383,7 +384,9 @@ def coverage_note_for(
     reached = [u for u in changed_l if u in executed]
     missed = [u for u in changed_l if u not in executed]
     def fmt(us: Iterable[FnSite]) -> str:
-        return ", ".join(f"{u.file}::{u.fn_name}" for u in us) or "(none)"
+        # Site labels, not `file::fn`: two `fmt` impls in one file would
+        # otherwise read as the same unit named twice.
+        return ", ".join(site_label(u) for u in us) or "(none)"
 
     parts = ["COVERAGE of the still-failing target(s) on the tree as it now stands — "
              f"changed units they EXECUTE: {fmt(reached)}; changed units they do "
@@ -459,6 +462,39 @@ def slices_with_pair_hops(
         for a, b in hop:
             if a in members or b in members:
                 members |= {a, b}
+        out[test] = frozenset(members)
+    return out
+
+
+def expand_locator_sites(
+    slices: Mapping[str, Collection[FnSite]],
+    tree_sites: Iterable[FnSite],
+) -> dict[str, frozenset[FnSite]]:
+    """A locator-only unit (empty container) becomes every site of that name
+    on the tree.
+
+    Attribution paths that know no container — the classifier, the
+    reverse-map and recently-filled fallbacks, a lifted locator map, a
+    vanished test's static candidates — name a `(file, fn)`, and
+    `FnLocator`'s contract is that a fill route "expands the locator into
+    the containers it will actually write". The session is that route: the
+    model gets every same-named body, each with its own executed mark, and
+    `block=` chooses, instead of the first record in file order (the
+    collapse that hid `impl Debug for Error` behind the Display impl, run
+    `3026-8fb154bc`, 2026-09-03). A name the tree does not declare is kept
+    as given and reported missing downstream. Files compare under
+    `norm_src_rel`, the two rootings extractor records and loop keys carry."""
+    by_name: dict[tuple[str, str], list[FnSite]] = {}
+    for site in tree_sites:
+        by_name.setdefault((norm_src_rel(site.file), site.fn_name), []).append(site)
+    out: dict[str, frozenset[FnSite]] = {}
+    for test, units in slices.items():
+        members: set[FnSite] = set()
+        for u in units:
+            if u.container:
+                members.add(u)
+                continue
+            members.update(by_name.get((norm_src_rel(u.file), u.fn_name)) or (u,))
         out[test] = frozenset(members)
     return out
 

@@ -120,7 +120,7 @@ def main() -> int:
     import pipeline
     from pipeline_core.adapters.structure import load_baked_clusters
     from pipeline_core.domain.attribution import FailureFrontier
-    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.attribution import locator_of, site_from_payload
     from pipeline_core.domain.test_report import failure_evidence_by_test
 
     transcripts: list[list[dict]] = []
@@ -138,8 +138,12 @@ def main() -> int:
     rc, out = pipeline._run_cargo("cargo test --offline", root, env, 600)
     evidence = failure_evidence_by_test(out)
     tests = sorted(owners)
-    units = {t: frozenset(FnLocator(*u.split("::", 1)) for u in us) for t, us in owners.items()}
-    dispatch = {u: {t for t, us in units.items() if u in us} for us in units.values() for u in us}
+    # Owner-map events carry structured sites (`{"file","fn","container"}`);
+    # a legacy `file::fn` string reads as a locator-only site, which the
+    # session expands over the tree's containers exactly as the loop does.
+    units = {t: frozenset(site_from_payload(u) for u in us) for t, us in owners.items()}
+    dispatch = {locator_of(u): {t for t, us in units.items() if u in us}
+                for us in units.values() for u in us}
     sources = {}
     for t in tests:
         for p in (dst / "tests").glob("*.rs"):

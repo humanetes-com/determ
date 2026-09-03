@@ -233,13 +233,17 @@ def test_a_body_carrying_another_fns_definition_is_rejected_before_cargo() -> No
 
 
 def test_coverage_note_names_reached_and_unreached_changed_units() -> None:
+    from pipeline_core.domain.attribution import site_label
     from pipeline_core.domain.slice_session import coverage_note_for
     note = coverage_note_for(
         changed=[_DISP, _RENDER], owners={"t_a": {_DISP, _NEW}},
         editable=[_DISP, _RENDER, _NEW], unchanged_since_turn=3)
-    assert "changed units they EXECUTE: src/lib.rs::fmt" in note
-    assert "do NOT execute: src/render.rs::render" in note
-    assert "editable units the targets execute now: src/lib.rs::fmt, src/render.rs::new" in note
+    # Each unit is named as a SITE: two `fmt` impls in one file must not
+    # read as one unit named twice.
+    assert f"changed units they EXECUTE: {site_label(_DISP)}" in note
+    assert f"do NOT execute: {site_label(_RENDER)}" in note
+    assert (f"editable units the targets execute now: {site_label(_DISP)}, "
+            f"{site_label(_NEW)}") in note
     assert "byte-identical to turn 3's" in note
 
 

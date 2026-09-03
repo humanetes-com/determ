@@ -34,7 +34,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
     PeelResult,
     peel_to_compiling,
 )
-from pipeline_core.domain.attribution import container_key
+from pipeline_core.domain.attribution import container_key, site_payload
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.reconstruction import SpliceOutcome
@@ -152,7 +152,7 @@ def run_slice_session(
     baseline = ports.measure_suite(base_raw)
     ports.emit("phase_c.session.start", data={
         "cluster": cluster_name, "tests": list(slice_.tests),
-        "units": [f"{u.file}::{u.fn_name}" for u in slice_.units],
+        "units": [site_payload(u) for u in slice_.units],
         "files": list(files), "max_turns": max_turns,
         "baseline_pass": baseline.pass_count if baseline is not None else None})
     if baseline is None:
@@ -303,7 +303,7 @@ def run_slice_session(
                     diag = ports.blamed_type_api(focused or out[-4000:])
                     ports.emit("phase_c.session.turn", data={
                         "cluster": cluster_name, "turn": turns, "kind": "compile",
-                        "units": sorted(f"{u.file}::{u.fn_name}" for u in cs.units),
+                        "units": [site_payload(u) for u in sorted(cs.units)],
                         "rejected": rejected})
                     ports.log(f"  [phase-c/session] {label}: turn {turns} — change set of "
                               f"{len(cs.routed)} body(ies) did not compile; restored, "
@@ -326,7 +326,7 @@ def run_slice_session(
             failing = [t.test for t in reading.targets if not t.passing]
             ports.emit("phase_c.session.turn", data={
                 "cluster": cluster_name, "turn": turns, "kind": "judged",
-                "units": sorted(f"{u.file}::{u.fn_name}" for u in cs.units),
+                "units": [site_payload(u) for u in sorted(cs.units)],
                 "targets_failing": failing, "newly_red": list(reading.newly_red),
                 "crashed": list(reading.crashed), "pass_delta": reading.pass_delta,
                 "rejected": rejected})
@@ -401,8 +401,8 @@ def run_slice_session(
     ports.emit("phase_c.session.end", data={
         "cluster": cluster_name, "outcome": outcome, "turns": turns,
         "model_calls": model_calls, "compile_failures": compile_failures,
-        "kept": sorted(f"{u.file}::{u.fn_name}" for u in kept),
-        "reverted": sorted(f"{u.file}::{u.fn_name}" for u in reverted),
+        "kept": [site_payload(u) for u in sorted(kept)],
+        "reverted": [site_payload(u) for u in sorted(reverted)],
         "notes_chars": len(notes)})
     ports.log(f"  [phase-c/session] {label}: {outcome.upper()} after {turns} turn(s) "
               f"({model_calls} call(s), {compile_failures} compile failure(s)); "

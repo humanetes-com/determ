@@ -18,7 +18,7 @@ from pipeline_core.domain.coverage_slice import (
     bind,
     measured_entry_sets,
 )
-from pipeline_core.domain.models import FnLocator, FnSite
+from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.retro_gate import (
     CONVICTOR_ENTRY,
     CONVICTOR_ENTRY_MOVED,

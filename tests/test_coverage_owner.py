@@ -16,30 +16,39 @@ from pipeline_core.adapters import coverage_owner as cov
 from pipeline_core.adapters.coverage_owner import (
     _body_counts,
     _cov_env,
-    _fn_at,
     _merge_export,
     _region_counts,
     _stage,
     _test_binaries,
     measure_coverage_slice,
 )
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.adapters.extractor import CliExtractor
+from pipeline_core.domain.models import FnLocator, FnSite
+
+_BIN = (
+    Path(__file__).resolve().parents[1]
+    / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
+)
+
+
+def _enumerate(tree: Path) -> list:
+    """The real extractor over the staged tree — the enumerator the
+    composition root injects; skips when the release binary is absent."""
+    if not _BIN.exists():
+        pytest.skip("extractor release binary missing")
+    return CliExtractor(_BIN).enumerate_fns(tree) or []
+
+
+def _measure(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    """`measure_coverage_slice` with the enumerator the composition root
+    injects — every call site takes the reading the loop would."""
+    return measure_coverage_slice(*args, enumerate_fns=_enumerate, **kwargs)
 
 
 def test_measure_returns_none_when_llvm_tools_are_missing(
         monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cov.shutil, "which", lambda _: None)
-    assert measure_coverage_slice(tmp_path, "stable") is None
-
-
-def test_fn_at_walks_up_from_a_body_line_to_the_declaration(
-        tmp_path: Path) -> None:
-    src = tmp_path / "src" / "lib.rs"
-    src.parent.mkdir()
-    src.write_text("fn format_err() {\n    let x = 1;\n}\n", encoding="utf-8")
-    assert _fn_at(tmp_path, "src/lib.rs", 2) == "format_err"
-    assert _fn_at(tmp_path, "src/lib.rs", 1) == "format_err"
-    assert _fn_at(tmp_path, "src/missing.rs", 1) == "?"
+    assert _measure(tmp_path, "stable") is None
 
 
 def test_stage_copies_the_filled_tree_and_workspace_tests(tmp_path: Path) -> None:
@@ -229,7 +238,7 @@ def _filled_project(tmp_path: Path) -> Path:
 def test_measure_returns_none_when_the_filled_tree_is_missing(
         monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
-    assert measure_coverage_slice(tmp_path, "stable") is None
+    assert _measure(tmp_path, "stable") is None
 
 
 def test_measure_returns_none_when_the_staged_tree_does_not_build(
@@ -241,8 +250,7 @@ def test_measure_returns_none_when_the_staged_tree_does_not_build(
         lambda cmd, cwd, env=None: subprocess.CompletedProcess(
             cmd, 1, stdout="", stderr="error"))
     notes: list[str] = []
-    assert measure_coverage_slice(
-        project, "stable", log=notes.append) is None
+    assert _measure(project, "stable", log=notes.append) is None
     assert any("does not build" in n for n in notes)
 
 
@@ -255,7 +263,7 @@ def test_measure_returns_none_when_no_test_binaries_exist(
         lambda cmd, cwd, env=None: subprocess.CompletedProcess(
             cmd, 0, stdout="", stderr=""))
     monkeypatch.setattr(cov, "_test_binaries", lambda *_a, **_k: [])
-    assert measure_coverage_slice(project, "stable") is None
+    assert _measure(project, "stable") is None
 
 
 def test_measure_returns_none_when_the_export_is_empty(
@@ -270,8 +278,7 @@ def test_measure_returns_none_when_the_export_is_empty(
         cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
     monkeypatch.setattr(cov, "_merge_export", lambda *a, **k: None)
     notes: list[str] = []
-    assert measure_coverage_slice(
-        project, "stable", log=notes.append) is None
+    assert _measure(project, "stable", log=notes.append) is None
     assert any("no whole-suite export" in n for n in notes)
 
 
@@ -298,7 +305,7 @@ def test_measure_names_dead_bodies_and_unreachable_lines(
 
     monkeypatch.setattr(cov, "_merge_export", _fake_export)
     notes: list[str] = []
-    slice_ = measure_coverage_slice(project, "stable", log=notes.append)
+    slice_ = _measure(project, "stable", log=notes.append)
     assert slice_ is not None
     assert FnLocator("src/lib.rs", "dead") in slice_.dead
     assert FnLocator("src/lib.rs", "live") not in slice_.dead
@@ -325,6 +332,9 @@ def test_measure_does_not_mark_a_locator_dead_when_a_same_name_body_is_live(
         "    fn backtrace() {\n"
         "        let z = 0;\n"
         "    }\n"
+        "    fn other() {\n"
+        "        let q = 0;\n"
+        "    }\n"
         "}\n",
         encoding="utf-8")
     (filled / "Cargo.toml").write_text(
@@ -345,14 +355,20 @@ def test_measure_does_not_mark_a_locator_dead_when_a_same_name_body_is_live(
              "regions": [[2, 1, 4, 1, 8]]},
             {"filenames": [path], "count": 0,
              "regions": [[7, 1, 9, 1, 0]]},
+            {"filenames": [path], "count": 0,
+             "regions": [[10, 5, 12, 6, 0]]},
         ]}]}
 
     monkeypatch.setattr(cov, "_merge_export", _fake_export)
-    slice_ = measure_coverage_slice(project, "stable")
+    slice_ = _measure(project, "stable")
     assert slice_ is not None
     loc = FnLocator("src/error.rs", "backtrace")
     assert loc not in slice_.dead
     assert loc not in slice_.dead_regions
+    # Positive control that the indented bodies were resolved at all: the
+    # sibling nothing executes IS dead. Without it the assertion above held
+    # vacuously on a resolver that named no impl method (2026-09-03).
+    assert FnLocator("src/error.rs", "other") in slice_.dead
 
 
 def test_measure_logs_and_returns_none_on_oserror(
@@ -365,8 +381,7 @@ def test_measure_logs_and_returns_none_on_oserror(
 
     monkeypatch.setattr(cov, "_stage", _boom)
     notes: list[str] = []
-    assert measure_coverage_slice(
-        project, "stable", log=notes.append) is None
+    assert _measure(project, "stable", log=notes.append) is None
     assert any("probe failed" in n for n in notes)
 
 
@@ -415,11 +430,11 @@ def test_owner_map_names_the_bodies_one_test_enters(
 
     monkeypatch.setattr(cov, "_merge_export", _fake_export)
     notes: list[str] = []
-    slice_ = measure_coverage_slice(project, "stable",
+    slice_ = _measure(project, "stable",
                                     failing_tests=["t_one"], log=notes.append)
     assert slice_ is not None
     assert slice_.owners["t_one"] == frozenset(
-        {FnLocator("src/lib.rs", "entered")}), slice_.owners
+        {FnSite("src/lib.rs", "entered", "")}), slice_.owners
     assert any("owner set for 1/1" in n for n in notes), notes
 
 
@@ -433,7 +448,7 @@ def test_a_test_no_binary_claims_is_absent_not_empty(
     monkeypatch.setattr(
         cov, "_merge_export",
         lambda *a, **k: {"data": [{"functions": []}]})
-    slice_ = measure_coverage_slice(project, "stable",
+    slice_ = _measure(project, "stable",
                                     failing_tests=["t_missing"])
     assert slice_ is not None
     assert "t_missing" not in slice_.owners
@@ -447,7 +462,7 @@ def test_no_failing_tests_leaves_the_owner_map_empty(
     monkeypatch.setattr(
         cov, "_merge_export",
         lambda *a, **k: {"data": [{"functions": []}]})
-    slice_ = measure_coverage_slice(project, "stable")
+    slice_ = _measure(project, "stable")
     assert slice_ is not None
     assert dict(slice_.owners) == {}
 
@@ -481,8 +496,7 @@ def test_owner_map_filters_on_the_cargo_name_not_the_leaf(
         ]}]}
 
     monkeypatch.setattr(cov, "_merge_export", _fake_export)
-    slice_ = measure_coverage_slice(
-        project, "stable", failing_tests=["gen_tests_2::t_one"])
+    slice_ = _measure(project, "stable", failing_tests=["gen_tests_2::t_one"])
     assert slice_ is not None
     assert "gen_tests_2::t_one" in seen
     assert "t_one" not in seen
@@ -509,8 +523,7 @@ def test_two_tests_sharing_a_leaf_do_not_share_a_profile(
     monkeypatch.setattr(
         cov, "_merge_export",
         lambda *a, **k: {"data": [{"functions": []}]})
-    slice_ = measure_coverage_slice(
-        project, "stable", failing_tests=["a::t", "b::t"])
+    slice_ = _measure(project, "stable", failing_tests=["a::t", "b::t"])
     assert slice_ is not None
     stems = {p.rsplit("/", 1)[-1] for p in paths}
     assert stems == {"one-a_t.profraw", "one-b_t.profraw"}, stems
@@ -526,8 +539,7 @@ def test_a_generator_of_failing_tests_is_not_counted_as_zero(
         cov, "_merge_export",
         lambda *a, **k: {"data": [{"functions": []}]})
     notes: list[str] = []
-    slice_ = measure_coverage_slice(
-        project, "stable",
+    slice_ = _measure(project, "stable",
         failing_tests=(t for t in ["t_one"]), log=notes.append)
     assert slice_ is not None
     assert any("owner set for 1/1" in n for n in notes), notes
@@ -541,21 +553,26 @@ def test_the_composition_binding_accepts_failing_tests(
 
     seen: dict[str, object] = {}
 
-    def _fake(pd, cl, *, failing_tests=(), log=None, cluster_env=None):
+    def _fake(pd, cl, *, failing_tests=(), log=None, cluster_env=None,
+              enumerate_fns=None):
         seen["failing"] = failing_tests
         seen["log"] = log
         seen["cluster_env"] = cluster_env
+        seen["enumerate_fns"] = enumerate_fns
         return None
 
     monkeypatch.setattr(
         "pipeline_core.composition._measure_coverage_slice", _fake)
     notes: list[str] = []
     logger = notes.append
-    bound = _tdd_measure_coverage(logger)
+    bound = _tdd_measure_coverage(logger, _enumerate)
     cluster = {"RUSTUP_TOOLCHAIN": "nightly",
                "RUSTFLAGS": "-A warnings --cfg X"}
     assert bound(tmp_path, "stable", failing_tests=frozenset({"t"}),
                  cluster_env=cluster) is None
+    # The extractor port the fill routes use is the one the probe names
+    # bodies with — one enumeration, one identity, one cfg world.
+    assert seen["enumerate_fns"] is _enumerate
     assert seen["failing"] == frozenset({"t"})
     assert seen["log"] is logger
     assert seen["cluster_env"] == cluster

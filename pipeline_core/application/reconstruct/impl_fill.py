@@ -12,7 +12,7 @@ import os
 import queue as _queue_mod
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -69,11 +69,18 @@ from pipeline_core.domain.attempt_loss import (
     invariance_refusal_note,
     may_escalate_to_last_resort,
 )
-from pipeline_core.domain.attribution import FailureFrontier, canon_site, locator_of, record_site
+from pipeline_core.domain.attribution import (
+    FailureFrontier,
+    canon_site,
+    locator_of,
+    records_by_site,
+    site_label,
+)
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
+from pipeline_core.domain.cfg import cluster_cfg_set
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
 from pipeline_core.domain.crash_site import blame_outside_unit
@@ -204,6 +211,7 @@ from pipeline_core.domain.rust_idents import (
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.slice_session import (
+    expand_locator_sites,
     plan_slices,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
@@ -4363,34 +4371,46 @@ def fill_impl_blocks(
             _executed_all = (frozenset().union(*session_owners.values())
                              if session_owners else frozenset())
 
-        def _records_now() -> dict[FnSite, FnRecord]:
-            """The tree's fn records keyed by site — one record per container."""
-            out: dict[FnSite, FnRecord] = {}
-            alias: dict[FnSite, FnRecord] = {}
-            for _raw in _enumerate_fns_via_extractor(target_src_dir) or []:
-                _r = FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
-                if _r.is_test or not _r.fn_name:
+        _cfg_set = cluster_cfg_set(cluster)
+        _collisions_seen: set[FnSite] = set()
+
+        def _tree_sites() -> Mapping[FnSite, FnRecord]:
+            """The tree's fn records keyed by site, one per container. A
+            cfg twin resolves to the arm the cluster compiles; a residual
+            collision keeps the first declaration and is logged once."""
+            recs = [FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
+                    for _raw in _enumerate_fns_via_extractor(target_src_dir) or []]
+            found = records_by_site(
+                (r for r in recs if not r.is_test and r.fn_name),
+                compiled=lambda r: not any(
+                    _cfg_set.excludes_for_cargo(p) for p in r.cfg_predicates))
+            for _site, _arms in found.collisions:
+                if _site in _collisions_seen:
                     continue
-                site = record_site(_r)
-                if site in out:
-                    raise ValueError(
-                        f"duplicate FnSite on tree: {site} "
-                        f"({out[site].container!r} vs {_r.container!r})")
-                out[site] = _r
-                norm = canon_site(FnSite(
-                    _norm_src_rel(_r.file), _r.fn_name, _r.container))
-                alias.setdefault(norm, _r)
-            for _u in session_slices_units:
-                if _u not in out:
-                    _hit = alias.get(canon_site(_u))
-                    if _hit is not None:
-                        out[_u] = _hit
+                _collisions_seen.add(_site)
+                _log(f"  [phase-c/session] {site_label(_site)} is declared "
+                     f"{len(_arms)} times on the tree and the cluster cfg cannot "
+                     f"choose ({'; '.join(_arms)}) — the first declaration keys "
+                     "the site")
+            return found.by_site
+
+        def _resolve(units: Iterable[FnSite],
+                     recs: Mapping[FnSite, FnRecord]) -> dict[FnSite, FnRecord]:
+            """Slice units to records: the exact site first, then the same
+            site under the other rooting (`error.rs` vs `src/error.rs`)."""
+            def _norm(u: FnSite) -> FnSite:
+                return canon_site(FnSite(_norm_src_rel(u.file), u.fn_name, u.container))
+            alias = {_norm(site): rec for site, rec in recs.items()}
+            out: dict[FnSite, FnRecord] = {}
+            for u in units:
+                hit = recs.get(u) or alias.get(_norm(u))
+                if hit is not None:
+                    out[u] = hit
             return out
 
-        session_slices_units: frozenset[FnSite] = frozenset().union(
-            *session_slices.values())
-        _all_recs = _records_now()
-        _plans = plan_slices(session_slices, stubs=_stubs_now, max_units=_max_units)
+        _all_recs = _tree_sites()
+        _slices = expand_locator_sites(session_slices, _all_recs)
+        _plans = plan_slices(_slices, stubs=_stubs_now, max_units=_max_units)
         if not _plans:
             if session_slices:
                 _log(f"  [phase-c/session] no slice planned "
@@ -4423,12 +4443,12 @@ def fill_impl_blocks(
 
         for _sl in _plans:
             _check_graceful_stop("slice-session dispatch")
-            _records = {u: _all_recs[u] for u in _sl.units if u in _all_recs}
-            _missing = [u for u in _sl.units if u not in _all_recs]
+            _records = _resolve(_sl.units, _all_recs)
+            _missing = [u for u in _sl.units if u not in _records]
             if _missing:
                 _log(f"  [phase-c/session] {_sl.label()}: {len(_missing)} unit(s) "
                      "have no fn record on the tree and are left out: "
-                     + ", ".join(f"{u.file}::{u.fn_name}" for u in _missing[:6]))
+                     + ", ".join(site_label(u) for u in _missing[:6]))
             if not _records:
                 continue
             _units = tuple(sorted(_records, key=lambda u: (u.file, u.fn_name, u.container)))
@@ -4515,8 +4535,8 @@ def fill_impl_blocks(
                 return rc, out, list(diags)
 
             def _bodies_now(_want: tuple[FnSite, ...] = _units) -> Mapping[FnSite, str]:
-                recs = _records_now()
-                return {u: recs[u].body_text for u in _want if u in recs}
+                return {u: r.body_text
+                        for u, r in _resolve(_want, _tree_sites()).items()}
 
             _ports = SessionPorts(
                 ask_turns=lambda msgs: str(_ask_turns(

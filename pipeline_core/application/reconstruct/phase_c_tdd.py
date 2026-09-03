@@ -42,6 +42,7 @@ from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureFrontier,
     locator_of,
+    site_payload,
     union_unattributed_stubs,
 )
 from pipeline_core.domain.best_tree_mark import BestTreeMark
@@ -4077,7 +4078,7 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "failing": sorted(cur_failed),
                 "measured": sorted(_cov.owners),
-                "owners": {t: sorted(f"{k.file}::{k.fn_name}" for k in ks)
+                "owners": {t: [site_payload(k) for k in sorted(ks)]
                            for t, ks in sorted(_cov.owners.items())},
             })
         # RED-DEAD DEMOTION. `dead` above is a whole-suite merge and cannot
@@ -4182,11 +4183,27 @@ def run_phase_c_tdd(
                 if _cov is not None and _cov.owners else {})
             _session_owners = {
                 t: frozenset(ks) for t, ks in _cov_owners.items()}
+            # The session's attributed units are the DISPATCHABLE frontier
+            # (`eligible`: after the exhausted skip, the test-target
+            # filter, the red-build narrowing and the blocked-consumer
+            # deferral), carried as sites: each locator expands to the
+            # container-qualified sites attribution named for that test,
+            # and a locator attribution knew no container for (a
+            # classifier or reverse-map fallback, a vanished test's static
+            # candidates) enters as a locator-only site the session expands
+            # over the tree's records. Reading the raw site frontier here
+            # bypassed every one of those filters (2026-09-03).
+            _sites_by_loc: dict[FnLocator, list[FnSite]] = {}
+            for _site in _attr.site_frontier:
+                _sites_by_loc.setdefault(locator_of(_site), []).append(_site)
             _units_for_session: dict[str, set[FnSite]] = {}
-            for _site, _tests in _attr.site_frontier.items():
+            for _loc, _tests in eligible.items():
+                _named = _sites_by_loc.get(FnLocator(_loc[0], _loc[1]), ())
                 for _t in _tests:
-                    _units_for_session.setdefault(
-                        bare_test_name(_t), set()).add(_site)
+                    _hit = [s for s in _named if _t in _attr.site_frontier[s]]
+                    for _s in (_hit or [FnSite(str(_loc[0]), str(_loc[1]), "")]):
+                        _units_for_session.setdefault(
+                            bare_test_name(_t), set()).add(_s)
             _session_slices = session_slices_for_failing(
                 cur_failed,
                 owners=_cov_owners,

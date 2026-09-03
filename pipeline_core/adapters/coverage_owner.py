@@ -7,9 +7,15 @@ its own `CARGO_TARGET_DIR`, the same isolation `scripts/coverage_owner_probe.py`
 uses as a diagnostic CLI.
 
 Returns None on any failure (missing llvm tools, a tree that does not
-compile, an empty export). A crashing binary writes no profile, so a
-crash-only suite under-reports; the crash localizer stays the signal
-there. This is a re-fill-phase complement, not a replacement.
+compile, an empty export, no fn records). A crashing binary writes no
+profile, so a crash-only suite under-reports; the crash localizer stays the
+signal there. This is a re-fill-phase complement, not a replacement.
+
+Bodies are named at the extractor's `FnSite`, resolved by LINE against the
+records the caller's enumerator returns for the staged tree — the same
+enumerator the fill routes key their records with, so coverage and the
+session agree on one identity and one cfg world. The adapter does not
+locate the extractor binary itself.
 """
 from __future__ import annotations
 
@@ -20,11 +26,10 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from pipeline_core.adapters.extractor import CliExtractor
 from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.coverage_slice import (
     CountedBody,
@@ -33,64 +38,58 @@ from pipeline_core.domain.coverage_slice import (
 )
 from pipeline_core.domain.models import FnRecord, FnSite
 
-_CFG_FLAG = re.compile(r"--cfg\s+(\S+)")
-
-
-def _extractor_bin() -> Path:
-    root = Path(__file__).resolve().parents[2]
-    return root / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
-
-
-def _cfg_true_from_env(env: Mapping[str, str]) -> tuple[str, ...]:
-    flags = env.get("RUSTFLAGS", "")
-    return tuple(m.group(1) for m in _CFG_FLAG.finditer(flags))
-
-
-def _load_fn_records(tree: Path, env: Mapping[str, str]) -> list[FnRecord]:
-    ext = CliExtractor(_extractor_bin())
-    rows = ext.enumerate_fns(tree, cfg_true=_cfg_true_from_env(env)) or []
-    return [r for r in rows if not r.is_test and r.fn_name]
-
-
-def _line_byte_offset(text: str, line: int) -> int:
-    if line < 1:
-        return 0
-    lines = text.splitlines(keepends=True)
-    if line > len(lines):
-        return len(text.encode("utf-8"))
-    return len("".join(lines[: line - 1]).encode("utf-8"))
-
-
-def _site_at(
-    records_by_file: Mapping[str, list[FnRecord]],
-    file_texts: Mapping[str, str],
-    rel: str,
-    line: int,
-) -> FnSite | None:
-    text = file_texts.get(rel)
-    if text is None:
-        return None
-    off = _line_byte_offset(text, line)
-    for rec in records_by_file.get(rel, ()):
-        if rec.sig_byte_start <= off < rec.body_byte_end:
-            return record_site(rec)
-    return None
-_FN_DECL = re.compile(r"\bfn\s+([A-Za-z_]\w*)")
 _PROF_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-def _fn_at(tree: Path, rel: str, line: int) -> str:
-    """Legacy regex name resolver — negative control in site-resolution tests."""
-    p = tree / rel
-    try:
-        src = p.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return "?"
-    for i in range(min(line, len(src)) - 1, max(-1, line - 40), -1):
-        m = _FN_DECL.search(src[i])
-        if m:
-            return m.group(1)
-    return "?"
+class SiteIndex:
+    """Which extractor site a coverage line belongs to, per file.
+
+    An llvm-cov export names a function by its FIRST region, and for a Rust
+    fn that region starts on the SIGNATURE line at the `fn` keyword's column
+    (`[8, 5, 8, 61, …]` for `    fn fmt(` at line 8 of the `dual_fmt`
+    fixture, computed 2026-09-03), while the extractor's `sig_byte_start` is
+    the byte of that keyword. Resolving by byte containment of the line's
+    column-0 offset therefore missed every indented fn — every impl method —
+    and the first site resolver emptied the owner map for any test that
+    entered only methods, which silently disarmed `unreached_by_test` and
+    the dispatcher redirect built on it. Lines are the unit both sides
+    agree on: a record spans from the line of `sig_byte_start` to the line
+    of `body_byte_end`, and a coverage line resolves to the innermost record
+    spanning it (a `fn` nested in a body is the inner one)."""
+
+    def __init__(self, records: Iterable[FnRecord],
+                 file_texts: Mapping[str, str]) -> None:
+        self._spans: dict[str, list[tuple[int, int, FnSite]]] = {}
+        for rec in records:
+            text = file_texts.get(rec.file)
+            if text is None:
+                continue
+            first = text.count("\n", 0, rec.sig_byte_start) + 1
+            last = text.count("\n", 0, rec.body_byte_end) + 1
+            self._spans.setdefault(rec.file, []).append(
+                (first, last, record_site(rec)))
+
+    def resolve(self, rel: str, line: int) -> tuple[FnSite, int, int] | None:
+        """`(site, first_line, last_line)` of the innermost record spanning
+        `line` in `rel`, or None when no crate fn does (a generated test, a
+        doc-test shim, a file the enumerator did not see)."""
+        best: tuple[int, int, FnSite] | None = None
+        for first, last, site in self._spans.get(rel, ()):
+            if first <= line <= last and (
+                    best is None or last - first < best[1] - best[0]):
+                best = (first, last, site)
+        return None if best is None else (best[2], best[0], best[1])
+
+    def site_at(self, rel: str, line: int) -> FnSite | None:
+        hit = self.resolve(rel, line)
+        return None if hit is None else hit[0]
+
+
+def _fn_records(enumerate_fns: Callable[[Path], Sequence[Any] | None],
+                tree: Path) -> list[FnRecord]:
+    rows = enumerate_fns(tree) or []
+    recs = [FnRecord.from_dict(r) if isinstance(r, dict) else r for r in rows]
+    return [r for r in recs if not r.is_test and r.fn_name]
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None,
@@ -237,18 +236,18 @@ def _region_counts(export: dict[str, Any], src_root: Path,
 
 
 def _counted_bodies(
-    records_by_file: Mapping[str, list[FnRecord]],
-    file_texts: Mapping[str, str],
+    index: SiteIndex,
     bodies: Mapping[tuple[str, int], int],
     lines: Mapping[tuple[str, int], int],
 ) -> list[CountedBody]:
-    """Name each (file, first-line) body at the extractor site its span contains."""
+    """Name each (file, first-line) body at the extractor site spanning it;
+    the record's own last line bounds its instrumented lines."""
     out: list[CountedBody] = []
     for (rel, start), count in bodies.items():
-        site = _site_at(records_by_file, file_texts, rel, start)
-        if site is None:
+        hit = index.resolve(rel, start)
+        if hit is None:
             continue
-        end = _body_end_from_text(file_texts.get(rel, ""), start)
+        site, _first, end = hit
         instrumented = [
             ln for ln in range(start, end + 1) if (rel, ln) in lines]
         zeros = tuple(
@@ -273,25 +272,10 @@ def _prof_stem(name: str) -> str:
     return _PROF_STEM.sub("_", name).strip("_") or "t"
 
 
-def _body_end_from_text(src: str, start: int) -> int:
-    """Last source line of the body that starts at `start`, brace-heuristic."""
-    lines = src.splitlines()
-    end = start
-    for i in range(start, len(lines) + 1):
-        if i > len(lines):
-            break
-        stripped = lines[i - 1].rstrip()
-        if stripped in ("    }", "}"):
-            end = i
-            break
-    return end
-
-
 def _owner_map(
     tree: Path, bins: list[Path], prof: Path, env: dict[str, str],
     tests: Iterable[str], profdata_bin: str, cov_bin: str,
-    records_by_file: Mapping[str, list[FnRecord]],
-    file_texts: Mapping[str, str],
+    index: SiteIndex,
 ) -> dict[str, frozenset[FnSite]]:
     """Which crate bodies does each named test enter, one profile per test.
 
@@ -334,7 +318,7 @@ def _owner_map(
         entered = {
             site for (rel, start), count in _body_counts(export, tree).items()
             if count > 0
-            for site in [_site_at(records_by_file, file_texts, rel, start)]
+            for site in [index.site_at(rel, start)]
             if site is not None
         }
         owners[name] = frozenset(entered)
@@ -348,8 +332,14 @@ def measure_coverage_slice(
     failing_tests: Iterable[str] = (),
     log: Callable[[str], None] | None = None,
     cluster_env: Mapping[str, str] | None = None,
+    enumerate_fns: Callable[[Path], Sequence[Any] | None],
 ) -> CoverageSlice | None:
     """Pass A of the owner probe, plus pass C over `failing_tests`.
+
+    `enumerate_fns` is the loop's own fn enumerator (the extractor port the
+    composition root binds); it runs on the staged copy, so its records
+    carry `src/…` paths exactly as the export's do. Required: without
+    records no body can be named and the reading is not taken.
 
     Returns a slice of dead locators, dead-region sentences and the
     per-test owner sets, or None when the reading cannot be taken. Never
@@ -404,21 +394,24 @@ def measure_coverage_slice(
             return None
         bodies = _body_counts(export, tree)
         lines = _region_counts(export, tree)
-        fn_records = _load_fn_records(tree, env)
-        records_by_file: dict[str, list[FnRecord]] = {}
-        for rec in fn_records:
-            records_by_file.setdefault(rec.file, []).append(rec)
+        fn_records = _fn_records(enumerate_fns, tree)
+        if not fn_records:
+            if log:
+                log("  [coverage] the enumerator returned no fn record for "
+                    "the staged tree — no body can be named; reading skipped")
+            return None
         file_texts: dict[str, str] = {}
         for rel in {k[0] for k in bodies} | {k[0] for k in lines}:
             try:
                 file_texts[rel] = (tree / rel).read_text(encoding="utf-8")
             except OSError:
                 file_texts[rel] = ""
+        index = SiteIndex(fn_records, file_texts)
         asked = tuple(dict.fromkeys(failing_tests))
         owners = _owner_map(tree, bins, prof, env, asked,
-                            profdata_bin, cov_bin, records_by_file, file_texts)
+                            profdata_bin, cov_bin, index)
         slice_ = slice_from_counts(
-            _counted_bodies(records_by_file, file_texts, bodies, lines),
+            _counted_bodies(index, bodies, lines),
             owners=owners, failing=asked)
         if log:
             log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
