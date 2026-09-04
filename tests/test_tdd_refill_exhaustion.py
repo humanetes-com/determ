@@ -21,6 +21,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 from pipeline_core.application.retrigger_layout import RetriggerResult
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _WRONG = FnLocator("src/a.rs", "wrongfn")
 
@@ -63,8 +64,8 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
             "test a ... ok\ntest b ... ok\ntest c ... ok\n"
             "test t1 ... FAILED\n"
             "test result: FAILED. 3 passed; 1 failed"),
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],   # wrongfn is NOT a stub
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),   # wrongfn is NOT a stub
         task2_fill_fns_one_by_one=_fill,
     )
 

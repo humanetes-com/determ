@@ -20,13 +20,14 @@ from pipeline_core.application.reconstruct.fill_merge import (
 from pipeline_core.domain.llm_output import extract_files
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_scan import contains_word
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.prompts.cleanup_residuals import build_cleanup_residuals_prompt
 from pipeline_core.prompts.test_grouping import format_skeleton_for_prompt
 
 
 @dataclass(frozen=True)
 class CleanupResidualsDeps:
-    scan_unimplemented: Callable[[Path], list[FnLocator]]
+    scan_unimplemented: Callable[[Path], StubInventory]
     load_skeleton_files: Callable[[Path], list[tuple[str, str]]]
     ask: Callable[..., str]
     task2_model: str
@@ -58,13 +59,14 @@ def cleanup_residuals(
 
     Returns {'stubs_total', 'stubs_exercised', 'files_updated', 'stubs_remaining'}.
     """
-    stubs = deps.scan_unimplemented(target_src_dir)
+    inventory = deps.scan_unimplemented(target_src_dir)
+    stubs = inventory.unit_list()
     if not stubs:
         return {"stubs_total": 0, "stubs_exercised": 0,
                 "files_updated": 0, "stubs_remaining": 0}
 
     exercised = filter_test_exercised(stubs, test_files)
-    deps.log(f"  [phase-d] {len(stubs)} residual stub(s); "
+    deps.log(f"  [phase-d] {inventory.render_count()} residual; "
              f"{len(exercised)} reachable from tests.")
 
     if not exercised:
@@ -102,7 +104,7 @@ def cleanup_residuals(
             disk_path.write_text(merged, encoding="utf-8")
             files_updated += 1
 
-    remaining = deps.scan_unimplemented(target_src_dir)
+    remaining = deps.scan_unimplemented(target_src_dir).unit_list()
     return {
         "stubs_total": len(stubs),
         "stubs_exercised": len(exercised),

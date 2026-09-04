@@ -18,6 +18,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _LIB = FnLocator("src/error.rs", "construct")
 _OTHER = FnLocator("src/context.rs", "ext_context")
@@ -74,8 +75,8 @@ def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=lambda *a, **k: (101, red),
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=lambda **kw: ClusterFillResult(attempts=1),
         checkpoint_fill_tree=lambda *a, **k: None,
         active_test_inventory=lambda pd, cl, stems, lib=False: (

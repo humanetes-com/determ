@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline_core.application.reconstruct.tree_txn import ParseValidator, TreeTxn
 from pipeline_core.domain.import_repair import apply_import_fixes
 from pipeline_core.domain.models import Diagnostic
 
@@ -27,6 +28,8 @@ def repair_missing_imports(
     diagnostics: list[Diagnostic],
     log: Callable[[str], None],
     tag: str,
+    *,
+    validate_parse: ParseValidator | None = None,
 ) -> tuple[int, str, list[Diagnostic]] | None:
     """Try the deterministic import repair for `file_rel` and re-check.
 
@@ -46,9 +49,17 @@ def repair_missing_imports(
     patched = apply_import_fixes(source, fixes)
     if patched is None:
         return None
+    # A MECHANICAL write (rustc's own suggestion, no model in the loop):
+    # parse-verified through the transaction and undone by byte restore.
+    txn = TreeTxn(cwd, validate_parse=validate_parse)
     try:
-        path.write_text(patched, encoding="utf-8")
+        txn.write(file_rel, patched)
     except OSError:
+        return None
+    verdict = txn.close()
+    if not verdict.ok:
+        log(f"  {tag} {file_rel}: import repair left the file unparseable "
+            f"({verdict.reason}) — restored.")
         return None
     added = sorted({f.replacement.strip() for f in fixes})
     log(f"  {tag} {file_rel}: auto-imported {len(added)} use item(s) from "

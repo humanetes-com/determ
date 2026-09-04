@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 from tests.test_tdd_ratchet import _driver_deps
 
 _KEY = FnLocator("src/a.rs", "f")
@@ -75,7 +76,7 @@ def _run(monkeypatch, tmp_path: Path, events, logs, *,
     deps = deps.__class__(**{
         **{f: getattr(deps, f) for f in deps.__dataclass_fields__},
         "scan_unimplemented_functions": (
-            lambda *a, **k: [_KEY] if as_stub else []),
+            lambda *a, **k: StubInventory.of_units([_KEY] if as_stub else [])),
     })
     run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path,

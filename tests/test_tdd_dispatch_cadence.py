@@ -28,6 +28,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _FRONTIER = [FnLocator("src/a.rs", f"fn{i}") for i in range(30)]
 
@@ -75,8 +76,8 @@ def _deps(*, logs: list[str], batches: list[tuple[FnLocator, ...]],
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=_cargo,
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=fill or _fill,
         **({} if floor is None else {
             "load_tdd_floor": lambda *a, **k: floor.get("row"),

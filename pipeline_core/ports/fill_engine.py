@@ -32,6 +32,7 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 
@@ -159,7 +160,7 @@ class WorkspaceModel(Protocol):
     ) -> list[dict[str, Any]] | None: ...
     def scan_stub_tuples(
         self, target_src_dir: Path, cluster: BuildCluster | None,
-    ) -> list[FnLocator]: ...
+    ) -> StubInventory: ...
     def enumerate_fns(
         self, src_dir: Path,
     ) -> list[dict[str, Any]] | None: ...

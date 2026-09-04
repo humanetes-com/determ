@@ -16,6 +16,7 @@ from pipeline_core.application.orchestrator import (
     run_phase_subcommand,
     with_example_usage_signal,
 )
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 def _lock_deps(log: list[str]) -> tuple[LockDeps, list[str]]:
@@ -31,7 +32,7 @@ def _lock_deps(log: list[str]) -> tuple[LockDeps, list[str]]:
         git_commit=lambda _pd, msg: events.append(f"git_commit:{msg}") or True,
         log=lambda m: log.append(m),
         sys_exit=exit_,
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
     )
     return deps, events
 

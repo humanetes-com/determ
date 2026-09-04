@@ -22,7 +22,6 @@ from pipeline_core.adapters.fn_reseed import (
     current_signatures,
     splice_bodies,
 )
-from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.application.reconstruct.body_reseed import (
     TreeWriter,
     reseed,
@@ -37,7 +36,7 @@ from pipeline_core.domain.body_ledger import (
 )
 from pipeline_core.domain.models import FnLocator
 
-_WRITER = TreeWriter(splice=splice_bodies, revert=revert_fns_to_stub,
+_WRITER = TreeWriter(splice=splice_bodies,
                      signatures=current_signatures, bodies=current_bodies)
 
 _ERROR_RS = """\
@@ -261,3 +260,128 @@ def test_a_proven_row_under_oracle_a_is_refused_on_a_tree_scored_by_oracle_b(
     control = _reseed(tmp_path, _entries(skeleton, oracle_fp="oracle-A"),
                       control_filled, skeleton, oracle_fp="oracle-A")
     assert len(control.seeded) == 3 and control.skipped == []
+
+
+# --- the transactional re-seed: the 2026-09-04 class, on synthetic shapes ----
+
+
+def _corrupting_writer() -> TreeWriter:
+    """A writer whose splice applies each body TWICE over one span — the
+    site-cardinality double splice of run `2973-66e50ad9`, as a writer defect
+    rather than a caller defect, so the rollback is tested against text no
+    name-keyed revert can undo."""
+    from pipeline_core.domain.rust_fn_headers import locate_all_fns
+
+    def _splice(units, txn):
+        spliced = []
+        for key, bodies in units.items():
+            text = txn.read(key.file)
+            edits = []
+            for (_s, _ss, b0, b1), body in zip(locate_all_fns(text, key.fn_name),
+                                                bodies, strict=True):
+                edits.append((b0, b1, body))
+                edits.append((b0, b1, body))
+            for s, e, b in sorted(edits, reverse=True):
+                text = text[:s] + b + text[e:]
+            txn.write(key.file, text)
+            spliced.append(key)
+        return spliced, []
+
+    return TreeWriter(splice=_splice, signatures=current_signatures,
+                      bodies=current_bodies)
+
+
+def _brace_parses(p: Path) -> bool:
+    t = p.read_text(encoding="utf-8")
+    return t.count("{") == t.count("}") and t.count("(") == t.count(")")
+
+
+def test_a_refused_re_seed_leaves_every_file_byte_identical_to_its_pre_image(
+        tmp_path: Path) -> None:
+    """The plan's sentence. Whatever the writer did to the text, rejection
+    restores the bytes — the name-keyed revert that used to be the rollback
+    is not consulted, so a wreck it could not locate a span in is undone all
+    the same."""
+    skeleton = _tree(tmp_path)
+    filled = _tree(tmp_path, filled=True)
+    before = {rel: (filled / "src" / rel).read_bytes() for rel in ("error.rs", "kind.rs")}
+    out = reseed(site="test", entries=_entries(skeleton), wanted=_stubs(),
+                 project="anyhow", cluster="stable", src_dir=filled,
+                 skeleton_root=skeleton, writer=_corrupting_writer(),
+                 oracle_fp=_ORACLE, check_builds=lambda: (False, "E0000"),
+                 validate_parse=_brace_parses)
+    assert out.seeded == [] and len(out.rejected) == 3
+    assert out.post_state == "restored"
+    for rel, data in before.items():
+        assert (filled / "src" / rel).read_bytes() == data, rel
+    assert "tree after: restored" in out.render()
+
+
+def test_a_bad_file_does_not_cost_the_file_after_it(tmp_path: Path) -> None:
+    """Isolation. `src/error.rs` holds a body that does not build and
+    `src/kind.rs` a body that does; the bisect restores error.rs BEFORE
+    trying kind.rs, so kind.rs is seeded. On the pre-fix code the second file
+    was checked on top of the first file's residual and rejected for the
+    first file's reason (`src/ensure.rs::render`, 2026-09-04)."""
+    skeleton = _tree(tmp_path)
+    filled = _tree(tmp_path, filled=True)
+
+    def _check() -> tuple[bool, str]:
+        text = (filled / "src" / "error.rs").read_text()
+        ok = "self.backtrace" not in text
+        return ok, "" if ok else "E0308"
+
+    out = _reseed(tmp_path, _entries(skeleton), filled, skeleton, check=_check)
+    assert {(k.file, k.fn_name) for k in out.seeded} == {("src/kind.rs", "tag")}
+    assert {(k.file, k.fn_name) for k in out.rejected} == {
+        ("src/error.rs", "depth"), ("src/error.rs", "width")}
+    assert out.post_state == "builds"
+    assert (filled / "src" / "error.rs").read_text().count("unimplemented!()") == 2
+
+
+def test_the_same_unit_handed_once_per_site_is_one_unit(tmp_path: Path) -> None:
+    """`wanted` as the pre-fix scan produced it — every locator once per impl
+    site — collapses to one key per unit before the ledger is asked, so the
+    writer receives each unit exactly once and the tree builds in one check."""
+    skeleton = _tree(tmp_path)
+    filled = _tree(tmp_path, filled=True)
+    checks: list[int] = []
+    multiset = _stubs() + _stubs() + [FnLocator("src/error.rs", "depth")]
+    out = reseed(site="test", entries=_entries(skeleton), wanted=multiset,
+                 project="anyhow", cluster="stable", src_dir=filled,
+                 skeleton_root=skeleton, writer=_WRITER, oracle_fp=_ORACLE,
+                 check_builds=lambda: (checks.append(1) or True, ""),
+                 validate_parse=_brace_parses)
+    assert len(out.seeded) == 3 and out.rejected == []
+    assert out.taken == 3 and checks == [1]
+    assert out.post_state == "builds"
+
+
+def test_the_outcome_line_never_blames_the_checker_for_an_empty_take(
+        tmp_path: Path) -> None:
+    """Run `330242-0be2c3e1` iter 3 printed `NOT build-checked (no checker
+    wired)` about a re-seed that took nothing. The line now says so."""
+    skeleton = _tree(tmp_path)
+    filled = _tree(tmp_path, filled=True)
+    out = _reseed(tmp_path, _entries(skeleton, oracle_fp="oracle-A"), filled,
+                  skeleton, oracle_fp="oracle-B")
+    assert out.taken == 0
+    assert "nothing to build-check" in out.render()
+    assert "no checker wired" not in out.render()
+
+
+def test_without_a_build_checker_the_parse_invariant_still_holds(
+        tmp_path: Path) -> None:
+    """A site whose caller wired no build check is still a mechanical write:
+    a touched file that no longer parses puts every pre-image back."""
+    skeleton = _tree(tmp_path)
+    filled = _tree(tmp_path, filled=True)
+    before = (filled / "src" / "error.rs").read_bytes()
+    out = reseed(site="test", entries=_entries(skeleton), wanted=_stubs(),
+                 project="anyhow", cluster="stable", src_dir=filled,
+                 skeleton_root=skeleton, writer=_corrupting_writer(),
+                 oracle_fp=_ORACLE, check_builds=None,
+                 validate_parse=_brace_parses)
+    assert out.seeded == [] and len(out.rejected) == 3 and not out.checked
+    assert out.post_state == "restored"
+    assert (filled / "src" / "error.rs").read_bytes() == before

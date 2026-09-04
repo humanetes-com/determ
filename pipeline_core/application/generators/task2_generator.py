@@ -19,7 +19,7 @@ import shlex
 import shutil
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +38,7 @@ from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...application.reconstruct.import_repair import repair_missing_imports
+from ...application.reconstruct.tree_txn import TreeTxn
 from ...application.workspace_lifecycle import (
     MERGED_BEST,
     merged_best_pass_count,
@@ -1181,14 +1182,24 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _check = self._cluster_check_cmd(cluster)
         _env = self._cluster_env(cluster)
         _rc_before, _, _ = self.cargo.run_check_diag(_check, filled_dir, _env, 180)
-        _before: dict[Path, str] = {}
-        for _rel in plan:
-            _fp = src / _rel
-            try:
-                _before[_fp] = _fp.read_text(encoding="utf-8")
-            except Exception:
-                continue
-        written, err = apply_to_tree(plan, src)
+        # A MECHANICAL write: pre-imaged, parse-verified, and undone by byte
+        # restore — the hand-kept `_before` dict this replaces was the
+        # same idea written once for this caller only.
+        _structure = getattr(self, "structure", None)
+        _txn = TreeTxn(src, validate_parse=(
+            _structure.parse_ok if _structure is not None else None))
+        written, err = apply_to_tree(plan, _txn)
+        _pv = _txn.verify()
+        if not _pv.ok:
+            _txn.rollback()
+            self.tel.log(f"  {tag} [layout-sync] REVERTED: the reinstall left "
+                         f"a file unparseable ({_pv.reason}) — every "
+                         "pre-image restored.")
+            self.tel.emit("phase_c.entry.step_reverted", data={
+                "cluster": getattr(cluster, "name", ""),
+                "step": "layout-sync", "files": list(_txn.touched),
+                "reason": _pv.reason})
+            return
         self.tel.log(
             f"  {tag} [layout-sync] reinstalled "
             f"{sum(len(v) for v in plan.values())} authored definition(s) into "
@@ -1197,6 +1208,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         _rc_after, _out_after, _diags_after = self.cargo.run_check_diag(
             _check, filled_dir, _env, 180)
         if _rc_after == 0:
+            _txn.commit()
             # The reinstall LANDED — whatever divergence the streak was
             # counting is resolved.
             if _streak.green_reverts:
@@ -1221,15 +1233,16 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # reversion. Scoped to src/ — errors in tests/ and in generated
             # test files are the oracle (never rewritten) and, for a lib that
             # does not build, cascades that repairing the lib removes.
+            _txn.commit()
             self._restub_after_reinstall(
                 tag, filled_dir, skeleton_dir, project_dir, cluster,
                 _check, _env, _rc_after, _out_after, _diags_after)
             return
-        for _fp, _text in _before.items():
-            try:
-                _fp.write_text(_text, encoding="utf-8")
-            except Exception:
-                continue
+        _txn.rollback()
+        self.tel.emit("phase_c.entry.step_reverted", data={
+            "cluster": getattr(cluster, "name", ""),
+            "step": "layout-sync", "files": list(_txn.touched),
+            "reason": "a compiling tree stopped compiling"})
         # A green-tree rollback is a measurement of the REGISTRY, and it
         # accumulates: enough consecutive ones and the sync stops re-adopting
         # (the staleness branch above), so a later red-at-entry tree is not
@@ -1246,7 +1259,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         if "error" in line)[:300])
         self.tel.emit("phase_c.layout_sync.reverted", data={
             "cluster": getattr(cluster, "name", ""),
-            "files": sorted(str(p.name) for p in _before),
+            "files": sorted(Path(p).name for p in _txn.touched),
             "definitions": sum(len(v) for v in plan.values()),
             "green_reverts": _streak.green_reverts,
         })
@@ -1618,7 +1631,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
             _by_name = {c.name: c for c in clusters}
             for _tree in _ok_trees:
                 _backfilled += self._backfill_tree(
-                    _tree, [d for d in _ok_trees if d != _tree], _by_name)
+                    _tree, [d for d in _ok_trees if d != _tree], _by_name,
+                    build_check=self._build_check_for(
+                        _by_name.get(_tree.name), _tree))
             if _backfilled:
                 self.tel.log(f"  [ownership] pre-merge backfill: {_backfilled} "
                              "stub body(ies) adopted from sibling clusters.")
@@ -1834,7 +1849,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # cluster's phase C then only fills its cluster-specific remainder and
         # rewrites a seeded body only when its own compile/tests reject it.
         if donor_dirs:
-            _seeded = self._backfill_tree(filled_dir, donor_dirs, donor_clusters)
+            _seeded = self._backfill_tree(
+                filled_dir, donor_dirs, donor_clusters,
+                build_check=self._build_check_for(cluster, filled_dir))
             if _seeded:
                 self.tel.log(f"  {tag} [ownership] seeded {_seeded} shared fn "
                              f"body(ies) from {len(donor_dirs)} prior "
@@ -1916,7 +1933,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _imp = repair_missing_imports(
                     self.cargo.run_check_diag, _heal_cmd, filled_dir,
                     self._cluster_env(cluster), _imp_file, _diags0,
-                    self.tel.log, f"{tag} [pre-pass-heal]")
+                    self.tel.log, f"{tag} [pre-pass-heal]",
+                    validate_parse=_parse_ok)
                 if _imp is not None:
                     _rc0, _rendered0, _diags0 = _imp
             if _rc0 == 0:
@@ -2172,6 +2190,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     test_cmd_builder=lambda stems, include_lib=False: (
                         self.cargo.build_test_cmd(stems, cluster, include_lib=include_lib)),
                     tag=tag,
+                    heal_file=lambda rel: self._heal_rel(
+                        project_dir, filled_dir, skeleton_dir, cluster.name, rel),
                 )
             else:
                 c_result = self.fill.fill_fns_one_by_one(
@@ -2482,7 +2502,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         for rel_f, fn in implicated:
             fp = filled_dir / rel_f
             try:
-                text = orig = fp.read_text(encoding="utf-8")
+                text = fp.read_text(encoding="utf-8")
             except Exception:
                 continue
             locs = locate_all_fns(text, fn)
@@ -2505,14 +2525,16 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 here += 1
             if not here:
                 continue
-            fp.write_text(text, encoding="utf-8")
             # A revert that leaves the file unparseable is worse than the broken
             # body it replaced: it kills the whole cluster's compile, so every
             # unit of the coming pass fails for a reason none of them caused and
-            # the run reads 0 passing with no localizable culprit. Roll the file
-            # back and hand it to the heal hierarchy instead.
-            if heal_deps is not None and not heal_deps.parse_ok(fp):
-                fp.write_text(orig, encoding="utf-8")
+            # the run reads 0 passing with no localizable culprit. The
+            # transaction restores the pre-image and the file goes to the
+            # heal hierarchy instead.
+            _rt = TreeTxn(filled_dir, validate_parse=(
+                heal_deps.parse_ok if heal_deps is not None else None))
+            _rt.write(rel_f, text)
+            if not _rt.close().ok:
                 unparseable.add(rel_f)
                 self.tel.log(f"  {tag} [revert] {rel_f}: reverting '{fn}' left the "
                              "file unparseable — rolled back, escalating to heal.")
@@ -2559,8 +2581,31 @@ class StaticSkeletonTask2Generator(Task2Generator):
             return None
         return cluster_cfg_set(cluster)
 
+    def _build_check_for(self, cluster: Any, crate_dir: Path,
+                         ) -> Callable[[], bool] | None:
+        """`() -> builds?` for one cluster tree, or None when the cluster
+        is unknown (a tree whose env nobody can name is not judged on a
+        build it might not be able to run)."""
+        if cluster is None:
+            return None
+        _cmd = self._cluster_check_cmd(cluster)
+        _env = self._cluster_env(cluster)
+        return lambda: self.cargo.run_check_diag(_cmd, crate_dir, _env, 180)[0] == 0
+
+    def _heal_rel(self, project_dir: Path, filled_dir: Path,
+                  skeleton_dir: Path, cluster_name: str, rel: str) -> bool:
+        """The heal hierarchy on one file of the filled tree, for the TDD
+        driver's boundary invariant. True when some restore point held."""
+        deps = self._heal_deps(project_dir, filled_dir, skeleton_dir,
+                               cluster_name)
+        if deps is None:
+            return False
+        return heal_file(filled_dir, rel, cluster_name,
+                         deps).point is not RestorePoint.NONE
+
     def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path],
-                       donor_clusters: dict[str, Any] | None = None) -> int:
+                       donor_clusters: dict[str, Any] | None = None, *,
+                       build_check: Callable[[], bool] | None = None) -> int:
         """Fill remaining `unimplemented!()` stubs in `tree_dir/src` with the
         bodies the same rel-file carries in `donor_dirs` (earlier donor wins).
         gen_tests siblings are skipped — they are cluster-owned test specs, not
@@ -2579,6 +2624,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
         src_root = tree_dir / "src"
         if not src_root.exists():
             return 0
+        # A MECHANICAL write at cluster entry: donor bodies carry no new
+        # information, so the tree may not leave this step unparseable, nor
+        # unbuildable when it built before. Verified below; undone by byte
+        # restore.
+        _built_before = build_check() if build_check is not None else None
+        _structure = getattr(self, "structure", None)
+        _txn = TreeTxn(tree_dir, validate_parse=(
+            _structure.parse_ok if _structure is not None else None))
         adopted = 0
         refused = 0
         layout_skipped = 0
@@ -2616,7 +2669,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             layout_skipped += _bf.layout_skipped
             cfg_skipped += _bf.cfg_skipped
             if _bf.filled:
-                dst.write_text(_bf.text, encoding="utf-8")
+                _txn.write(str(rel), _bf.text)
                 adopted += _bf.filled
                 imported += _bf.uses_added
         if imported:
@@ -2640,6 +2693,23 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 "donor's own cfg-set never compiles them, so no compiler has "
                 "ever checked them; a body cannot be inherited as verified by "
                 "a cluster that does build it.")
+        if not adopted:
+            _txn.commit()
+            return 0
+        _pv = _txn.verify()
+        _why = _pv.reason
+        if _pv.ok and _built_before and build_check is not None and not build_check():
+            _why = "a compiling tree stopped compiling"
+        if _why:
+            _txn.rollback()
+            self.tel.log(f"  [ownership] backfill of {tree_dir.name} REVERTED: "
+                         f"{_why} — every pre-image restored; the fill loop "
+                         "owns those stubs.")
+            self.tel.emit("phase_c.entry.step_reverted", data={
+                "cluster": tree_dir.name, "step": "ownership-backfill",
+                "files": list(_txn.touched), "reason": _why})
+            return 0
+        _txn.commit()
         return adopted
 
     def _merge_and_verify(self, *, project_dir: Path, module: str,
@@ -3245,7 +3315,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _pass_cohort = None
             _prev_pass_completed = _batch.completes_pass
             _dispatched_ever |= _batch_keys
-            cur_stubs = set(self.fill.scan_unimplemented_functions(project_dir / "src"))
+            cur_stubs = self.fill.scan_unimplemented_functions(project_dir / "src").units
             # Both loops below are scoped to the BATCH: a unit the cap
             # withheld this iteration was neither filled nor refused.
             newly_filled: list[FnLocator] = [

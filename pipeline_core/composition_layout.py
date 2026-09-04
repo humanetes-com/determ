@@ -43,6 +43,7 @@ from pipeline_core.adapters.skeleton_compile import (
 )
 from pipeline_core.application.author_layout import AuthorLayoutDeps
 from pipeline_core.application.author_layout_phase import make_layout_phase_runner
+from pipeline_core.application.reconstruct.tree_txn import TreeTxn
 from pipeline_core.application.retrigger_layout import (
     RetriggerLayoutDeps,
     RetriggerResult,
@@ -100,6 +101,7 @@ def build_retrigger_layout(
     git_commit: Callable[[Path, str], bool],
     log: Callable[[str], None],
     max_attempts: int,
+    parse_ok: Callable[[Path], bool] | None = None,
 ) -> Callable[[Path, str, str, Path, str], RetriggerResult]:
     """The F11 M3 layout re-trigger action, bound to the resident adapters —
     same building blocks `build_layout_phase_runner` uses (this IS t1.5,
@@ -110,6 +112,31 @@ def build_retrigger_layout(
     # it. (`run_phase_c_tdd` re-reads its own copy per entry on purpose — that
     # one labels a measurement, which a mid-run edit really does invalidate.)
     code_id = code_identity(Path.cwd())
+
+    # Both live-tree writes of the retrigger are MECHANICAL — no new
+    # information enters the tree — so each runs as a parse-verified
+    # transaction and is undone by byte restore when it breaks a file.
+    def _apply_layout_in_txn(plan: dict[str, list[Any]], src_dir: Path,
+                             ) -> tuple[int, str]:
+        txn = TreeTxn(src_dir, validate_parse=parse_ok)
+        written, reason = apply_layout_to_tree(plan, txn)
+        if reason:
+            txn.rollback()
+            return 0, reason
+        verdict = txn.close()
+        if not verdict.ok:
+            log(f"  [layout-retrigger] propagation REVERTED: {verdict.reason}")
+            return 0, verdict.reason
+        return written, ""
+
+    def _revert_fns_in_txn(fns: list[Any], src_dir: Path) -> int:
+        txn = TreeTxn(src_dir, validate_parse=parse_ok)
+        n = revert_fns_to_stub(fns, txn)
+        verdict = txn.close()
+        if not verdict.ok:
+            log(f"  [layout-retrigger] surgical revert REVERTED: {verdict.reason}")
+            return 0
+        return n
 
     def _run(project_dir: Path, module_name: str, cfg_cluster: str,
               target_src_dir: Path, error_text: str,
@@ -168,8 +195,8 @@ def build_retrigger_layout(
             author_deps_for=_author_deps_for,
             enumerate_fns=enumerate_fns,
             read_tree_file=lambda sd, rel: _read_tree_file(sd, rel),
-            revert_fns=revert_fns_to_stub,
-            apply_layout_to_tree=apply_layout_to_tree,
+            revert_fns=_revert_fns_in_txn,
+            apply_layout_to_tree=_apply_layout_in_txn,
             git_commit=git_commit,
             load_attempts=load_retrigger_attempts,
             save_attempts=save_retrigger_attempts,

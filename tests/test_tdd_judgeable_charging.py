@@ -20,6 +20,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _WRONG = FnLocator("src/a.rs", "wrongfn")
 
@@ -73,8 +74,8 @@ def _deps(fill_calls: list[frozenset[FnLocator]], *, logs: list[str],
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=reset,
         run_cargo=run_cargo,
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
     )
 

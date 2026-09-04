@@ -37,6 +37,9 @@ PID_FIXTURES=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/check_identity_contract.py \
     > "$GATE_TMP/identity.out" 2>&1 &
 PID_IDENTITY=$!
+"$SCRIPT_DIR/.venv/bin/python" tools/check_tree_writes.py \
+    > "$GATE_TMP/tree_writes.out" 2>&1 &
+PID_TREE_WRITES=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/loc_ratchet.py \
     > "$GATE_TMP/loc.out" 2>&1 &
 PID_LOC=$!
@@ -93,6 +96,7 @@ gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$
 gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
 gate "fixture ambiguity" "$PID_FIXTURES" "$GATE_TMP/fixtures.out"
 gate "identity contract" "$PID_IDENTITY" "$GATE_TMP/identity.out"
+gate "tree writes (every write into a fill tree goes through tree_txn)" "$PID_TREE_WRITES" "$GATE_TMP/tree_writes.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
 gate "skeleton-extractor cargo fmt --check (rust $RUST_GATE_TOOLCHAIN)" "$PID_RUSTFMT" "$GATE_TMP/rustfmt.out"
 gate "skeleton-extractor cargo clippy + test + doc (rust $RUST_GATE_TOOLCHAIN)" "$PID_CARGO" "$GATE_TMP/cargo.out"

@@ -81,9 +81,11 @@ def _gen(cargo: _Cargo, tel: _Tel, plan_file: str) -> _Gen:
     def _load_records(_p: Path, _c: str) -> list[Any]:
         return []
 
-    def _apply(plan: dict[str, list[Any]], src: Path) -> tuple[int, str]:
+    def _apply(plan: dict[str, list[Any]], txn: Any) -> tuple[int, str]:
+        # The propagation writes THROUGH the transaction the sync opened:
+        # that is how the sync pre-images and rolls back.
         for rel in plan:
-            (src / rel).write_text("REINSTALLED\n", encoding="utf-8")
+            txn.write(rel, "REINSTALLED\n")
         return len(plan), ""
 
     gen = _Gen.__new__(_Gen)

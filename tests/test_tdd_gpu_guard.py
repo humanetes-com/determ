@@ -26,6 +26,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 from pipeline_core.domain import graceful_stop
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _TARGET = FnLocator("src/a.rs", "producer")
 
@@ -107,9 +108,10 @@ def _run(tmp_path: Path, monkeypatch, sweeps: list[str],
         last[0] = next(seq, last[0])
         return (101, last[0])
 
-    def _scan(*a: Any, **k: Any) -> list[FnLocator]:
+    def _scan(*a: Any, **k: Any) -> StubInventory:
         stub_last[0] = next(stub_seq, stub_last[0])
-        return [FnLocator("src/a.rs", f"stub{i}") for i in range(stub_last[0])]
+        return StubInventory.of_units(
+            [FnLocator("src/a.rs", f"stub{i}") for i in range(stub_last[0])])
 
     _front = {FnLocator("src/a.rs", f"producer{i}"): {"t0"}
               for i in range(targets)} if targets > 1 else {_TARGET: {"t0"}}
@@ -131,7 +133,7 @@ def _run(tmp_path: Path, monkeypatch, sweeps: list[str],
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=_cargo,
         scan_unimplemented_for_cluster=_scan,
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         # Fills LAND and buy nothing — the recorded shape. Reporting zero fills
         # instead would let the driver's re-entry filter retire the frontier
         # after two dispatches, and the loop would idle rather than spend.

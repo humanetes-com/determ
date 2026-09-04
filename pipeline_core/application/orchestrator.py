@@ -28,6 +28,7 @@ from pipeline_core.domain.measurement import code_identity
 from pipeline_core.domain.models import BuildCluster, FnLocator
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.workspace_layout import PRE_AUGMENT_TAG_PREFIX, plan_pre_augment_tags
 
 
@@ -520,14 +521,13 @@ class LockDeps:
     git_commit: Callable[[Path, str], bool]
     log: Callable[[str], None]
     sys_exit: Callable[[int], None]
-    scan_unimplemented_functions: Callable[..., list[FnLocator]]
-    # The cfg-aware scan + the baked cfg-sets + what the ORIGINAL leaves hollow.
-    # Defaulted so the many test fixtures that build a LockDeps keep working;
-    # with no cfg-sets nothing is provably unreachable and with no reference
-    # nothing is provably hollow-upstream, so the defaults degrade to exactly
-    # the cfg-blind absolute this gate used to be.
-    scan_unimplemented_with_cfg: Callable[
-        ..., list[tuple[FnLocator, tuple[str, ...] | None]]] | None = None
+    # The stub inventory (sites with their cfg predicates, and units) + the
+    # baked cfg-sets + what the ORIGINAL leaves hollow. The last two are
+    # defaulted so the many test fixtures that build a LockDeps keep
+    # working; with no cfg-sets nothing is provably unreachable and with no
+    # reference nothing is provably hollow-upstream, so the defaults degrade
+    # to exactly the cfg-blind absolute this gate used to be.
+    scan_unimplemented_functions: Callable[..., StubInventory]
     load_baked_clusters: Callable[[Path], list[Any]] = lambda _p: []
     reference_hollow: Callable[[Path], frozenset[tuple[str, str]]] = (
         lambda _p: frozenset())
@@ -578,18 +578,15 @@ def lock_or_complete(
         # A fully green `anyhow` therefore still exited 1 on the three
         # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs` — two of which
         # are byte-identical to the `unimplemented!()` upstream writes there.
-        if deps.scan_unimplemented_with_cfg is not None:
-            _clusters = deps.load_baked_clusters(project_dir) or []
-            _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
-                         for c in _clusters]
-            _verdict = classify_remaining_stubs(
-                deps.scan_unimplemented_with_cfg(project_dir), _cfg_sets,
-                deps.reference_hollow(project_dir))
-            _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
-        else:
-            _stubs = deps.scan_unimplemented_functions(project_dir)
-            _clean = report_stub_verdict(
-                StubVerdict(orphaned=tuple(_stubs)), deps.log, 0)
+        _clusters = deps.load_baked_clusters(project_dir) or []
+        _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+                     for c in _clusters]
+        # One pair PER SITE: at completion every hollow site is its own
+        # finding, and the inventory names that choice.
+        _verdict = classify_remaining_stubs(
+            deps.scan_unimplemented_functions(project_dir).site_pairs(),
+            _cfg_sets, deps.reference_hollow(project_dir))
+        _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
         if not _clean:
             if complete_commit_msg is not None:
                 deps.git_commit(project_dir, complete_commit_msg)
@@ -695,12 +692,10 @@ class RunDeps:
     write_workspace_stub: Callable[..., Path]
     collect_examples: Callable[..., list[tuple[str, str]]]
     task3: Callable[..., tuple[bool, str]]
-    scan_unimplemented_functions: Callable[..., list[FnLocator]]
-    # Same stubs, each paired with the cfg predicates the extractor attributes
-    # to it, so the final scan can tell "never attempted" from "unreachable
-    # under every baked cfg-set". See the FINAL block for why that matters.
-    scan_unimplemented_with_cfg: Callable[
-        ..., list[tuple[FnLocator, tuple[str, ...] | None]]]
+    # The stub inventory: every site with the cfg predicates the extractor
+    # attributes to it, so the final scan can tell "never attempted" from
+    # "unreachable under every baked cfg-set". See the FINAL block.
+    scan_unimplemented_functions: Callable[..., StubInventory]
     # `(file, fn_name)` the pristine tree leaves hollow. Empty when no reference
     # could be measured, which degrades this gate to the reachability-only form.
     reference_hollow: Callable[[Path], frozenset[tuple[str, str]]] = (
@@ -1286,7 +1281,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
                      for c in (deps.load_baked_clusters(project_dir) or [])]
         _verdict = classify_remaining_stubs(
-            deps.scan_unimplemented_with_cfg(project_dir), _cfg_sets,
+            deps.scan_unimplemented_functions(project_dir).site_pairs(), _cfg_sets,
             deps.reference_hollow(project_dir))
         if not report_stub_verdict(_verdict, deps.log, len(_cfg_sets)):
             sys.exit(1)

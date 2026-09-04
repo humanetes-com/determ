@@ -33,6 +33,7 @@ from pipeline_core.domain.models import (
     FnSite,
 )
 from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 from pipeline_core.ports.structure import StructureReader
@@ -304,7 +305,7 @@ class PromptContextAdapter:
 class WorkspaceModelAdapter:
     structure: StructureReader
     scan_stub_records_fn: Callable[[Path, Any], list[dict[str, Any]] | None]
-    scan_stub_tuples_fn: Callable[[Path, Any], list[FnLocator]]
+    scan_stub_tuples_fn: Callable[[Path, Any], StubInventory]
     collect_impl_blocks_fn: Callable[[Path], list[Any] | None]
     collect_impl_blocks_for_cluster_fn: Callable[..., list[Any] | None]
     fn_container_index_fn: Callable[[Path], dict[FnLocator, str]]
@@ -318,7 +319,7 @@ class WorkspaceModelAdapter:
         return self.scan_stub_records_fn(target_src_dir, cluster)
 
     def scan_stub_tuples(self, target_src_dir: Path,
-                         cluster: Any) -> list[FnLocator]:
+                         cluster: Any) -> StubInventory:
         return self.scan_stub_tuples_fn(target_src_dir, cluster)
 
     def enumerate_fns(self, src_dir: Path) -> list[dict[str, Any]] | None:

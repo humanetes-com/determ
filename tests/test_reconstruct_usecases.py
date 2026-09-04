@@ -17,6 +17,7 @@ from pipeline_core.application.reconstruct.reconstruction_step import (
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.domain.reconstruction import IterationState
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 class FakeAdapter:
@@ -115,7 +116,7 @@ def _lock_deps() -> orchestrator.LockDeps:
         commit_and_mark=lambda *a, **k: None, set_current=lambda *a: None,
         lock_module=lambda *a: 0, git_commit=lambda *a: True, log=lambda *a: None,
         sys_exit=lambda c: (_ for _ in ()).throw(SystemExit(c)),
-        scan_unimplemented_functions=lambda *a, **k: [])
+        scan_unimplemented_functions=lambda *a, **k: StubInventory())
 
 
 def _reattach_deps() -> ReattachDeps:

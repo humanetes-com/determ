@@ -22,6 +22,7 @@ from pipeline_core.application.generators.task2_generator import (
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.generation import GenerationRequest, SkeletonConfig
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 @dataclass
@@ -174,8 +175,8 @@ class FakeAdapter:
     def cleanup_residuals(self, *a: Any, **kw: Any) -> dict[str, Any]:
         return dict(_D_RESULT)
 
-    def scan_unimplemented_functions(self, src_dir: Path) -> list[tuple[str, str]]:
-        return []
+    def scan_unimplemented_functions(self, src_dir: Path) -> StubInventory:
+        return StubInventory()
 
     def merge_cluster_outputs(self, **kw: Any) -> dict[str, Any]:
         return {"files_written": 1, "cfg_gated_fns": 0}

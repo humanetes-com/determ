@@ -8,6 +8,14 @@ scanning fn-header walk when the extractor is unavailable (test-fixture path,
 partial setup) — that fallback reads source text but parses it structurally
 (`fn_headers` + brace counting), never by regex.
 
+The result is a :class:`StubInventory`, never a bare list of locators: the
+extractor reports one record per implementation SITE, several sites share one
+dispatch locator (`fmt` in every Debug/Display impl), and a list that repeated
+the locator once per site made every consumer decide the cardinality for
+itself — the cluster-entry re-seed of run `2973-66e50ad9` (2026-09-04) iterated
+that list, handed the splicer `src/context.rs::ext_context` twice, and left the
+file unparseable. The inventory carries both cardinalities by name.
+
 A stub in an ORACLE file is never returned, by either route. A stub is a fill
 target by definition, and no fill may rewrite a test; a stub that appears there
 means something already damaged the oracle, so handing it back would ask the
@@ -18,7 +26,7 @@ which this scan would then have offered as ordinary work.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -26,66 +34,38 @@ from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_bo
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_fn_headers import fn_headers
+from pipeline_core.domain.stub_inventory import StubInventory
+
+EnumerateFns = Callable[[Path], "list[dict[str, Any]] | None"]
 
 
-def scan_unimplemented_with_cfg(
-    src_dir: Path,
-    *,
-    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
-) -> list[tuple[FnLocator, tuple[str, ...] | None]]:
-    """Same stubs as :func:`scan_unimplemented_functions`, each paired with the
-    cfg predicates the AST extractor attributes to THAT fn.
+def is_stub_record(r: Mapping[str, Any]) -> bool:
+    """The extractor's syntactic flag widened by the body rule.
 
-    ``None`` means "no authoritative list" (extractor unavailable) and is the
-    only case where a caller may fall back to reading predicates out of the
-    surrounding source text. An empty tuple means the extractor positively
-    determined the fn is ungated — very different from ``None``, and the
-    distinction is why this returns an optional rather than ``()`` for both.
-
-    Exists because reconstructing a fn's cfg gates from source text cannot be
-    done reliably: attributes are not delimited from the preceding item by
-    anything a text walk can see, so a fn sitting directly below a cfg-gated
-    struct field or sibling inherits that gate and is then judged inactive in
-    the cluster and never filled. The extractor already knows the true owner of
-    every attribute; this keeps that knowledge instead of re-deriving it.
-    """
-    recs = enumerate_fns(src_dir)
-    if recs is None:
-        return [(loc, None) for loc in
-                scan_unimplemented_functions(src_dir, enumerate_fns=lambda _d: None)]
-    return [(FnLocator(r["file"], r["fn_name"]),
-             tuple(str(c) for c in (r.get("cfg_predicates") or ())))
-            for r in recs
-            if not is_oracle_path(str(r.get("file", "")))
-            and (r.get("has_unimplemented_body")
-                 or is_unimplemented_body(str(r.get("body_text", "")),
-                                          str(r.get("fn_name", ""))))]
+    `has_unimplemented_body` only sees a literal stub. A body that is nothing
+    but a nested copy of its own fn contains no `unimplemented!()`, so the
+    extractor calls it filled while the fn does nothing at all — re-check it
+    here so an already-corrupted tree is re-attempted instead of staying
+    invisible. Oracle files are refused before either test."""
+    if is_oracle_path(str(r.get("file", ""))):
+        return False
+    return bool(r.get("has_unimplemented_body")) or is_unimplemented_body(
+        str(r.get("body_text", "")), str(r.get("fn_name", "")))
 
 
-def scan_unimplemented_functions(
-    src_dir: Path,
-    *,
-    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
-) -> list[FnLocator]:
-    """Return [(file_rel_path, fn_name), ...] for every fn whose body is still
-    `unimplemented!()` (or an annotated stub).
+def scan_stub_inventory(
+    src_dir: Path, *, enumerate_fns: EnumerateFns,
+) -> StubInventory:
+    """Every stub site under `src_dir`, as the extractor names them.
 
-    This is the LEGACY name-only return form. New code should use the
-    extractor records directly to also get container + signature, which are
-    needed to disambiguate same-named fns within a single file.
-    """
+    Files are keyed relative to `src_dir` — pass the crate root and they read
+    `src/error.rs`, which is how cargo prints them and how every identity in
+    the loop is spelled. With the extractor unavailable the text walk yields
+    sites with no container and `cfg_predicates=None` (no authoritative list;
+    the only case a caller may read gates out of the surrounding text)."""
     recs = enumerate_fns(src_dir)
     if recs is not None:
-        # `has_unimplemented_body` is the extractor's syntactic test and only
-        # sees a literal stub. A body that is nothing but a nested copy of its
-        # own fn contains no `unimplemented!()`, so the extractor calls it
-        # filled while the fn does nothing at all — re-check it here so an
-        # already-corrupted tree is re-attempted instead of staying invisible.
-        return [FnLocator(r["file"], r["fn_name"]) for r in recs
-                if not is_oracle_path(str(r.get("file", "")))
-                and (r.get("has_unimplemented_body")
-                     or is_unimplemented_body(str(r.get("body_text", "")),
-                                              str(r.get("fn_name", ""))))]
+        return StubInventory.from_records(recs, keep=is_stub_record)
     out: list[FnLocator] = []
     for p in sorted(src_dir.rglob("*.rs")):
         try:
@@ -109,4 +89,7 @@ def scan_unimplemented_functions(
             rel = str(p.relative_to(src_dir))
             if is_unimplemented_body(body) and not is_oracle_path(rel):
                 out.append(FnLocator(rel, fn_name))
-    return out
+    # The text walk cannot see containers, so same-named fns in one file
+    # collapse to one site here; that is a limitation of the fallback, not
+    # of the type, and `cfg_predicates=None` marks every site it produced.
+    return StubInventory.of_units(out, cfg_predicates=None)

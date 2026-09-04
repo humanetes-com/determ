@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.adapters.layout_tree_splice import apply_layout_to_tree
+from pipeline_core.application.reconstruct.tree_txn import TreeTxn
 from pipeline_core.domain.scaffold_rewrite import DefReplacement
 
 _OLD_TYPE = "pub struct Error {\n    ptr: NonNull<ErrorImpl>,\n}"
@@ -28,7 +29,7 @@ def _tree(tmp_path: Path, body: str) -> Path:
 def test_type_definition_lands_on_a_tree_whose_bodies_are_filled(tmp_path: Path):
     src = _tree(tmp_path, "{ self.ptr.as_ptr() as u8 }")
     n, err = apply_layout_to_tree(
-        {"lib.rs": [DefReplacement(_OLD_TYPE, _NEW_TYPE)]}, src)
+        {"lib.rs": [DefReplacement(_OLD_TYPE, _NEW_TYPE)]}, TreeTxn(src))
     assert (n, err) == (1, "")
     text = (src / "lib.rs").read_text()
     assert "unsafe impl Send for Error {}" in text
@@ -42,7 +43,7 @@ def test_fn_item_is_located_by_signature_despite_a_filled_body(tmp_path: Path):
     src = _tree(tmp_path, "{ self.ptr.as_ptr() as u8 }")
     n, err = apply_layout_to_tree(
         {"lib.rs": [DefReplacement("fn erase(self) -> u8",
-                                   "fn erase(self) -> u16 { 0 }", "erase")]}, src)
+                                   "fn erase(self) -> u16 { 0 }", "erase")]}, TreeTxn(src))
     assert (n, err) == (1, "")
     text = (src / "lib.rs").read_text()
     assert "fn erase(self) -> u16 { 0 }" in text
@@ -57,7 +58,7 @@ def test_a_miss_writes_nothing_at_all(tmp_path: Path):
     n, err = apply_layout_to_tree({
         "lib.rs": [DefReplacement(_OLD_TYPE, _NEW_TYPE)],
         "missing.rs": [DefReplacement(_OLD_TYPE, _NEW_TYPE)],
-    }, src)
+    }, TreeTxn(src))
     assert n == 0 and "unreadable" in err
     assert (src / "lib.rs").read_text() == before
 
@@ -66,11 +67,11 @@ def test_unlocatable_definition_is_reported_not_silently_skipped(tmp_path: Path)
     src = _tree(tmp_path, "{ 0 }")
     n, err = apply_layout_to_tree(
         {"lib.rs": [DefReplacement("struct Absent {}", "struct Absent { x: u8 }")]},
-        src)
+        TreeTxn(src))
     assert n == 0 and "could not locate a definition in lib.rs" in err
 
 
 def test_empty_plan_is_an_error_not_a_silent_success(tmp_path: Path):
     # A component that produced no replacements means the plan builder failed;
     # reporting 0 files written as success would hide it.
-    assert apply_layout_to_tree({}, tmp_path)[1] == "empty replacement plan"
+    assert apply_layout_to_tree({}, TreeTxn(tmp_path))[1] == "empty replacement plan"

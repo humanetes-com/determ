@@ -31,6 +31,7 @@ from pipeline_core.domain.landed_change import (
     unit_bodies,
 )
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator, FnSite
+from pipeline_core.domain.stub_inventory import StubInventory
 
 # ---------------------------------------------------------------------------
 # Domain
@@ -204,8 +205,8 @@ def _run_audited(tmp_path: Path, monkeypatch, *, cap: str,
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=lambda *a, **k: (101, _FLAT),
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
         enumerate_fns=_enumerate,
         load_tdd_floor=lambda *a, **k: None,
@@ -277,8 +278,8 @@ def test_audit_is_skipped_never_guessed_without_the_extractor(
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=lambda *a, **k: (101, _FLAT),
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=lambda **kw: ClusterFillResult(attempts=1),
     )
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")

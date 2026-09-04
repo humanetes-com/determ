@@ -218,6 +218,7 @@ from pipeline_core.domain.slice_session import (
     slice_plan_gaps,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_report import (
     JointImprovement,
     U2Decision,
@@ -378,7 +379,7 @@ class ImplFillDeps:
     retro_key: Callable[..., RetroKey]
     run_cargo_check_diag: Callable[..., tuple[int, str, list[Any]]]
     save_retrospectives: Callable[..., None]
-    scan_unimplemented_for_cluster: Callable[..., list[FnLocator]]
+    scan_unimplemented_for_cluster: Callable[..., StubInventory]
     scan_unimplemented_records_for_cluster: Callable[..., list[dict[str, Any]] | None]
     splice_fn_with_where: Callable[..., SpliceOutcome]
     splice_lock_for: Callable[..., threading.Lock]
@@ -4354,7 +4355,7 @@ def fill_impl_blocks(
         _coverage_fn = deps.measure_coverage_slice
         _coverage_on = (_coverage_fn is not None
                         and os.getenv("SLICE_SESSION_COVERAGE", "1") != "0")
-        _stubs_now = frozenset(_scan_unimplemented_for_cluster(target_src_dir, cluster))
+        _stubs_now = _scan_unimplemented_for_cluster(target_src_dir, cluster).units
 
         def _coverage(names: Sequence[str]) -> Mapping[str, frozenset[FnSite]]:
             if not _coverage_on or _coverage_fn is None:
@@ -4852,8 +4853,12 @@ def fill_impl_blocks(
     remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
     # None = extractor absent → text-scan fallback; 0 here would make the
     # caller skip the per-fn cleanup pass entirely.
-    remaining_n = (len(remaining_records) if remaining_records is not None
-                   else len(_scan_unimplemented_for_cluster(target_src_dir, cluster)))
+    # UNITS on both branches: a record list is one row per impl site, and
+    # `remaining` is read as "how many fns are still stubs".
+    remaining_n = (len({(r["file"], r["fn_name"]) for r in remaining_records})
+                   if remaining_records is not None
+                   else _scan_unimplemented_for_cluster(
+                       target_src_dir, cluster).unit_count)
     return ClusterFillResult(
         fns_filled=fns_filled_total,
         bytes_filled=max(0, bytes_after - bytes_before),

@@ -9,46 +9,56 @@ entry whose occurrence count does not match the tree's is REFUSED rather than
 partially applied — a shape mismatch means the file is not the file the body
 was proven in, whatever the fingerprint said.
 
+`units` is a MAPPING keyed by locator, not a sequence: the same unit handed
+twice was how run `2973-66e50ad9` (2026-09-04) corrupted `src/context.rs` —
+two identical body spans applied to one text are not disjoint, and the second
+slice used an end measured on the pre-edit text. A mapping cannot carry the
+repeat, whatever the caller iterated to build it.
+
 `body_text` is the extractor's own contract — "verbatim contents between `{`
 and `}`, no braces" (`tools/skeleton_extractor/src/model.rs`) — which is the
-same span `locate_all_fns` reports, so the substitution is direct.
+same span `locate_all_fns` reports, so the substitution is direct. Every
+write goes through the caller's :class:`TreeTxn`, so the caller — never this
+adapter — decides whether the result is verified and kept.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from pipeline_core.application.reconstruct.tree_txn import TreeTxn
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
-SpliceUnit = tuple[FnLocator, Sequence[str]]
+SpliceUnits = Mapping[FnLocator, Sequence[str]]
 
 
-def splice_bodies(units: Sequence[SpliceUnit], src_dir: Path,
+def splice_bodies(units: SpliceUnits, txn: TreeTxn,
                   ) -> tuple[list[FnLocator], list[tuple[FnLocator, str]]]:
-    """Write each unit's stored bodies over its occurrences.
+    """Write each unit's stored bodies over its occurrences, through `txn`.
 
     Returns `(spliced, refused)`, where a refusal carries its reason. Rewrites
     last-to-first within a file so earlier byte offsets stay valid across
     several splices in one file — the same ordering rule the revert uses, for
     the same reason.
     """
-    by_file: dict[str, list[SpliceUnit]] = {}
-    for key, bodies in units:
+    by_file: dict[str, list[tuple[FnLocator, Sequence[str]]]] = {}
+    for key, bodies in units.items():
         by_file.setdefault(key.file, []).append((key, bodies))
 
     spliced: list[FnLocator] = []
     refused: list[tuple[FnLocator, str]] = []
     for rel_file, entries in by_file.items():
-        fp = Path(src_dir) / rel_file
         try:
-            text = fp.read_text(encoding="utf-8")
+            text = txn.read(rel_file)
         except OSError:
             refused.extend((k, "file unreadable") for k, _ in entries)
             continue
         # Collect every (span, replacement) first, then apply them right-to-left
         # in ONE pass: two units in the same file must not each re-locate on a
-        # text the other has already rewritten.
+        # text the other has already rewritten. Spans of DIFFERENT units are
+        # disjoint by construction (one fn body each); the mapping above is
+        # what guarantees no unit appears twice.
         edits: list[tuple[int, int, str]] = []
         for key, bodies in entries:
             locs = locate_all_fns(text, key.fn_name)
@@ -68,7 +78,7 @@ def splice_bodies(units: Sequence[SpliceUnit], src_dir: Path,
             text = text[:start] + body + text[end:]
         if edits:
             try:
-                fp.write_text(text, encoding="utf-8")
+                txn.write(rel_file, text)
             except OSError:
                 for key, _ in entries:
                     if key in spliced:

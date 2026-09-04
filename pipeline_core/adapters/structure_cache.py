@@ -17,7 +17,8 @@ from typing import Any
 from pipeline_core.application.reconstruct import cluster_membership as _membership
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.cfg import cluster_specific_symbol_names
-from pipeline_core.domain.models import FnLocator, ImplBlock, ModRecord
+from pipeline_core.domain.models import ImplBlock, ModRecord
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 class StructureCache:
@@ -116,7 +117,7 @@ class StructureCache:
 
     def scan_unimplemented_for_cluster(
         self, target_src_dir: Path, cluster: Any,
-    ) -> list[FnLocator]:
+    ) -> StubInventory:
         return _membership.scan_unimplemented_for_cluster(
             target_src_dir, cluster,
             enumerate_fns=self._enumerate_fns,

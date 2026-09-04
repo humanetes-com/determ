@@ -32,6 +32,7 @@ from pipeline_core.domain.retro_gate import (
     RetroProvenance,
     stamp_conviction,
 )
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_results import RegressionComparison
 
 
@@ -103,8 +104,8 @@ class FakeFill:
 
     # WorkspaceModel
     def scan_stub_records(self, *a: Any) -> Any: return self.s.get("stub_records")
-    def scan_stub_tuples(self, *a: Any) -> list[tuple[str, str]]:
-        return self.s.get("stub_tuples", [])
+    def scan_stub_tuples(self, *a: Any) -> StubInventory:
+        return StubInventory.of_units(self.s.get("stub_tuples", []))
     def enumerate_fns(self, *a: Any) -> Any: return self.s.get("fns", [])
     def enumerate_types(self, *a: Any) -> Any: return []
     def collect_impl_blocks(self, *a: Any) -> Any: return []

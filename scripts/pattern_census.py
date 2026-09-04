@@ -378,6 +378,17 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # of the same log (or a later run of the same tree).
         ("opening — targets", "session-opened"),
     ],
+    "P19": [
+        # The boundary invariant heals before the sweep (or on the sweep's
+        # own uncoded diagnostic); the older reaction is the abort-time heal.
+        ("TREE UNPARSEABLE", "boundary-heal"),
+        ("[heal] ", "heal"),
+    ],
+    "P20": [
+        # A re-seed line that reports its post-state came from the
+        # transactional re-seed, which collapses wanted to units.
+        ("tree after:", "txn-reseed"),
+    ],
     "P14": [
         # The per-block loop's own stopper: it ends the SPEND after the
         # repeat, which is damage control, not an answer to what keeps
@@ -1271,6 +1282,27 @@ RE_SESSION_LOCATOR_EXPAND = re.compile(
     r"\[phase-c/session\] locator-only (?P<unit>\S+) expanded to "
     r"(?P<n>\d+) tree site")
 
+# P19 — a sweep (or the red-build refusal) whose rustc diagnostic carries NO
+# error code and sits under src/: rustc codes every type/borrow/resolution
+# error and none of its parse errors, so this is the sweep-side signature
+# of a file the extractor cannot enumerate — no fill route can open it.
+RE_UNCODED_SRC = re.compile(
+    r"(?P<file>src/[\w/.\-]+\.rs):(?P<line>\d+): error: (?P<msg>[^`;\]]*)")
+# The mechanical writers that run without a model in the loop; the last
+# one printed before an uncoded diagnostic is the writer the row names.
+RE_MECH_WRITE = re.compile(
+    r"(?P<writer>\[phase-c/ledger\] iter \d+: [^—]+— re-seeded"
+    r"|\[layout-sync\] reinstalled"
+    r"|\[ownership\] (?:seeded|carried|backfill)"
+    r"|\[layout-retrigger\] [^\n]*reverted \d+ referencing"
+    r"|\[heal\] [^\n]*restored"
+    r"|\[phase-c/entry\])")
+# How far back (in log lines) a writer line is attributed to the break.
+P19_WINDOW = 80
+# P20 reads the re-seed events: the multiset is only visible there (the
+# log line prints counts, the event prints keys).
+EVENTS_PATH = Path(__file__).resolve().parent.parent / "logs" / "events.jsonl"
+
 
 def detect_p18(run: Run, iters: list[dict]) -> list[dict]:
     """Locator-collapsed session slice — eligible treated as a unit source so
@@ -1306,12 +1338,94 @@ def detect_p18(run: Run, iters: list[dict]) -> list[dict]:
     return hits[:6]
 
 
+def detect_p19(run: Run, iters: list[dict]) -> list[dict]:
+    """Mechanical write left an unparseable tree — an uncoded rustc
+    diagnostic under src/ on a sweep or refusal line, attributed to the
+    last mechanical-writer line within P19_WINDOW lines before it (or
+    reported as an unnamed writer). Run 2973-66e50ad9 (2026-09-04) is the
+    positive instance: the cluster-entry re-seed, then three sweeps at
+    `src/context.rs:35: error: unexpected closing delimiter`.
+    """
+    hits: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, (ref, text) in enumerate(run.lines):
+        m = RE_UNCODED_SRC.search(text)
+        if not m:
+            continue
+        key = (m["file"], m["msg"].strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        writer = "writer not named in the preceding lines"
+        writer_ref = ""
+        for j in range(i - 1, max(-1, i - P19_WINDOW - 1), -1):
+            wm = RE_MECH_WRITE.search(run.lines[j][1])
+            if wm:
+                writer = wm["writer"].strip()
+                writer_ref = run.lines[j][0]
+                break
+        hits.append({
+            "evidence": (f"{m['file']}:{m['line']}: error: {m['msg'].strip()} "
+                         f"(uncoded = parse-level) after: {writer}"),
+            "refs": [r for r in (writer_ref, ref) if r],
+        })
+    return hits[:6]
+
+
+_RESEED_EVENTS: dict[str, list[dict]] | None = None
+
+
+def _reseed_events_by_run() -> dict[str, list[dict]]:
+    """`phase_c.ledger.reseed` events grouped by run id, read once."""
+    global _RESEED_EVENTS
+    if _RESEED_EVENTS is not None:
+        return _RESEED_EVENTS
+    out: dict[str, list[dict]] = defaultdict(list)
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "phase_c.ledger.reseed" not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                out[str(ev.get("run_id", ""))].append(ev.get("data") or {})
+    except OSError:
+        pass
+    _RESEED_EVENTS = dict(out)
+    return _RESEED_EVENTS
+
+
+def detect_p20(run: Run, iters: list[dict]) -> list[dict]:
+    """Site-cardinality leak into the re-seed — a `phase_c.ledger.reseed`
+    event whose seeded/rejected list repeats a key, i.e. the same unit was
+    handed to the writer once per impl site (`src/error.rs::from` x4 on
+    run 2973-66e50ad9). Skipped lists repeat legitimately (one row per
+    site the gate refused) and are not counted.
+    """
+    hits: list[dict] = []
+    for ev in _reseed_events_by_run().get(run.run_id, []):
+        for field in ("seeded", "rejected"):
+            keys = list(ev.get(field) or [])
+            dup = sorted({k for k in keys if keys.count(k) > 1})
+            if dup:
+                hits.append({
+                    "evidence": (f"{ev.get('site', '?')}: {field} repeats "
+                                 f"{', '.join(dup)} (" 
+                                 f"{len(keys)} element(s), {len(set(keys))} distinct)"),
+                    "refs": [run.start_ref],
+                })
+    return hits[:6]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
              "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
-             "P17": detect_p17, "P18": detect_p18}
+             "P17": detect_p17, "P18": detect_p18,
+             "P19": detect_p19, "P20": detect_p20}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1325,7 +1439,9 @@ CLASS_NAMES = {
     "P15": "parked accessor (escalation deferred: unit-set unchanged, never dispatched)",
     "P16": "regression-derived prescription (retro written from a REGRESSED verdict)",
     "P17": "fill-class histogram (dominant cashed/wrong/mis/unreachable/dropped/compile)",
-    "P18": "locator-collapsed session slice (eligible-as-source exploded past the cap)"}
+    "P18": "locator-collapsed session slice (eligible-as-source exploded past the cap)",
+    "P19": "mechanical write left an unparseable tree (uncoded src/ diagnostic on a sweep)",
+    "P20": "site-cardinality leak into the re-seed (a unit handed once per impl site)"}
 
 
 # -------------------------------------------------------------------- report

@@ -6,10 +6,11 @@ does not look like compiler output". Nothing read the result, so a rewrite that
 tripled the crate's diagnostics or introduced a duplicate definition was
 indistinguishable, on disk, from a repair.
 
-This use-case gives that write a verdict. Sequence: pre-image the target files,
-apply, probe, enumerate; hand the two readings to the domain rules
-(`domain/write_verdict.py`, `domain/associated_items.py`); restore every
-pre-image if they refuse.
+This use-case gives that write a verdict. Sequence: open a :class:`TreeTxn`
+over the target files (pre-images captured on first touch), apply, probe,
+enumerate; hand the two readings to the domain rules
+(`domain/write_verdict.py`, `domain/associated_items.py`); roll the
+transaction back if they refuse.
 
 Two properties worth stating because they were choices:
 
@@ -23,6 +24,9 @@ Two properties worth stating because they were choices:
   but blind to a cfg-gated cluster the write breaks alone. The per-cluster
   reading that sees those lives in the t3 repair path; this gate is deliberately
   the cheap one that runs on every write.
+
+The rollback is the transaction's byte restore, the same primitive every
+mechanical writer uses; this module owns only the verdict rule.
 """
 from __future__ import annotations
 
@@ -31,12 +35,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.tree_txn import ParseValidator, TreeTxn
 from pipeline_core.domain.associated_items import (
     AssociatedItem,
     introduced_duplicates,
     items_by_file,
 )
-from pipeline_core.domain.write_verdict import WriteVerdict, judge_write
+from pipeline_core.domain.write_verdict import (
+    WriteOutcome,
+    WriteVerdict,
+    judge_write,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +60,9 @@ class WriteGateDeps:
     enumerate_fn_records: Callable[[], list[dict[str, Any]]]
     log: Callable[[str], None]
     emit: Callable[..., None]
+    # The structure reader's parse check. An authored whole-file rewrite is
+    # allowed to be compile-red (the fix loop owns that), never unparseable.
+    validate_parse: ParseValidator | None = None
 
 
 def _items(deps: WriteGateDeps) -> dict[str, frozenset[AssociatedItem]]:
@@ -75,21 +87,25 @@ def guarded_write(
     if not writes:
         return judge_write(before=0, after=0)
 
-    pre_images: dict[str, str | None] = {}
-    for rel in writes:
-        path = project_dir / rel
-        try:
-            pre_images[rel] = path.read_text(encoding="utf-8")
-        except OSError:
-            pre_images[rel] = None
-
     before_count = deps.probe_diag_count()
     before_items = _items(deps)
 
+    txn = TreeTxn(project_dir, validate_parse=deps.validate_parse)
     for rel, content in writes.items():
-        path = project_dir / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        txn.write(rel, content)
+
+    parse = txn.verify()
+    if not parse.ok:
+        txn.rollback()
+        deps.log(f"  [fix loop/gate] REFUSED {', '.join(sorted(writes))}: "
+                 f"{parse.reason}")
+        deps.emit("fix.write_judged", data={
+            "outcome": "parse_broken", "files": sorted(writes),
+            "diags_before": before_count or 0, "diags_after": before_count or 0,
+            "duplicates": [], "broken": list(parse.broken),
+        })
+        return WriteVerdict(WriteOutcome.REFUSE_PARSE_BROKEN,
+                            before_count or 0, before_count or 0)
 
     after_count = deps.probe_diag_count()
     counted = before_count is not None and after_count is not None
@@ -99,14 +115,11 @@ def guarded_write(
         duplicates=introduced_duplicates(before_items, _items(deps)))
 
     if not verdict.kept:
-        for rel, pre in pre_images.items():
-            path = project_dir / rel
-            if pre is None:
-                path.unlink(missing_ok=True)
-            else:
-                path.write_text(pre, encoding="utf-8")
+        txn.rollback()
         deps.log(f"  [fix loop/gate] REFUSED {', '.join(sorted(writes))}: "
                  f"{verdict.render()}")
+    else:
+        txn.commit()
     deps.emit("fix.write_judged", data={
         "outcome": verdict.outcome.value,
         "files": sorted(writes),

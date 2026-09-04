@@ -23,6 +23,7 @@ from pipeline_core.domain.models import (
     FnLocator,
 )
 from pipeline_core.domain.oracle_ledger import reconcile_sweep
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 def test_reconcile_sweep_vanished_deficit_and_normalization() -> None:
@@ -127,8 +128,8 @@ def _run_driver(monkeypatch, tmp_path: Path, *, run_cargo, inventory,
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=run_cargo,
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=fill or (
             lambda **kw: ClusterFillResult(attempts=1)),
         checkpoint_fill_tree=lambda pd, cl, d, m: checkpoints.append(m.pass_count),

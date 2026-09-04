@@ -143,7 +143,6 @@ from pipeline_core.adapters.fn_reseed import (
     current_signatures,
     splice_bodies,
 )
-from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.adapters.gdb_backtrace import (
     localize_crashed_binary as _gdb_localize_crashed_binary,
 )
@@ -1295,10 +1294,10 @@ def build_app(
             where_clause, allow_nonstub, validate_parse=_validate_parse,
             sig_text=sig_text)
 
+    # ONE scan, returning the inventory (sites and units by name); every
+    # consumer picks the cardinality it means at its own call site.
     scan_unimplemented_functions = functools.partial(
-        _stub_scan.scan_unimplemented_functions, enumerate_fns=enumerate_fns)
-    scan_unimplemented_with_cfg = functools.partial(
-        _stub_scan.scan_unimplemented_with_cfg, enumerate_fns=enumerate_fns)
+        _stub_scan.scan_stub_inventory, enumerate_fns=enumerate_fns)
     source_hash = functools.partial(
         _structure_source_hash,
         is_gen_tests_sibling_name=_is_gen_tests_sibling_name,
@@ -1628,6 +1627,7 @@ def build_app(
         enumerate_types=enumerate_types,
         git_commit=git_commit, log=ports.log,
         max_attempts=cfg.layout_retrigger_max_attempts,
+        parse_ok=_validate_parse,
     )
     _preserve_inline_tests_deps = PreserveInlineTestsDeps(
         log=ports.log, emit=ports.emit,
@@ -2156,7 +2156,6 @@ def build_app(
         lock_module=lock_module, git_commit=git_commit, log=ports.log,
         sys_exit=sys.exit,
         scan_unimplemented_functions=scan_unimplemented_functions,
-        scan_unimplemented_with_cfg=scan_unimplemented_with_cfg,
         load_baked_clusters=_load_baked_clusters,
         reference_hollow=_reference_hollow,
     )
@@ -2470,7 +2469,6 @@ def build_app(
         collect_examples=_disc_collect_examples,
         task3=_via("task3"),
         scan_unimplemented_functions=scan_unimplemented_functions,
-        scan_unimplemented_with_cfg=scan_unimplemented_with_cfg,
         reference_hollow=_reference_hollow,
     )
 
@@ -2579,9 +2577,10 @@ def build_app(
                 name: (item.kind, item.definition)
                 for name, item in load_layout_registry(pd).items()},
             tree_writer=TreeWriter(
-                splice=splice_bodies, revert=revert_fns_to_stub,
+                splice=splice_bodies,
                 signatures=current_signatures, bodies=current_bodies),
             check_tree_builds=lambda pd, cl: compile_filled_check(pd, cl),
+            parse_ok=_validate_parse,
             run_id=_run_id,
             # The oracle scoring the cluster tree, `(src_dir, project_dir,
             # cluster) -> fingerprint`: the tree's gen_tests siblings, the

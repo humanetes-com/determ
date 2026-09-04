@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 from tests.test_tdd_ratchet import _driver_deps
 
 _ACC = FnLocator("src/a.rs", "fmt")       # the accessor
@@ -52,7 +53,7 @@ def _run(monkeypatch, tmp_path: Path, events, logs, *,
         events, None, frontier={_ACC: {"t2"}}, fill=_fill, logs=logs,
         stubs=cluster_stubs)
     _overrides: dict[str, Any] = {
-        "scan_unimplemented_functions": lambda *a, **k: list(fn_stubs),
+        "scan_unimplemented_functions": lambda *a, **k: StubInventory.of_units(fn_stubs),
         "escalate_to_producers": escalate,
     }
     if sources is not None:
@@ -178,7 +179,7 @@ def test_escalation_re_admits_an_exhausted_target(
         fill=lambda **kw: ClusterFillResult(attempts=1), logs=logs)
     deps = deps.__class__(**{
         **{f: getattr(deps, f) for f in deps.__dataclass_fields__},
-        "scan_unimplemented_functions": lambda *a, **k: [_PROD],
+        "scan_unimplemented_functions": lambda *a, **k: StubInventory.of_units([_PROD]),
         "escalate_to_producers": _escalate,
     })
     run_phase_c_tdd(
@@ -233,7 +234,7 @@ def test_escalation_releases_the_stored_verdict_on_its_target(
         fill=lambda **kw: ClusterFillResult(attempts=1), logs=logs)
     deps = deps.__class__(**{
         **{f: getattr(deps, f) for f in deps.__dataclass_fields__},
-        "scan_unimplemented_functions": lambda *a, **k: [_PROD],
+        "scan_unimplemented_functions": lambda *a, **k: StubInventory.of_units([_PROD]),
         "escalate_to_producers": _escalate,
         "release_escalated_convictions": _release,
     })

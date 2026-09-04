@@ -508,7 +508,8 @@ class PhaseCFillEngine:
                 stubs = [Stub.from_dict(r) for r in recs]
             else:
                 stubs = [Stub(file=f, fn_name=fn)
-                         for f, fn in self.ws.scan_stub_tuples(target_src_dir, cluster)]
+                         for f, fn in self.ws.scan_stub_tuples(
+                             target_src_dir, cluster).unit_list()]
             # True remaining stub count BEFORE the frontier filter.
             _all_stubs_count = len(stubs)
             # Pass-start stub keys, also pre-filter: the sibling-blocked U2
@@ -1122,7 +1123,7 @@ class PhaseCFillEngine:
 
             # P7.6: capture last-pass failure count for the pass-level floor.
             _pass_last_fail_count = pass_fail_floor
-            _remaining_pass = len(self.ws.scan_stub_tuples(target_src_dir, cluster))
+            _remaining_pass = self.ws.scan_stub_tuples(target_src_dir, cluster).unit_count
             _pass_metric = _remaining_pass + _pass_last_fail_count
             _pass_gauge.observe(_pass_metric)
             self.tel.emit("phase_c.pass.done", duration_ms=int(
@@ -1171,7 +1172,7 @@ class PhaseCFillEngine:
                 break
 
         bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
-        remaining = len(self.ws.scan_stub_tuples(target_src_dir, cluster))
+        remaining = self.ws.scan_stub_tuples(target_src_dir, cluster).unit_count
         self.tel.emit("phase_c.cluster.done", data={
             "cluster": cluster_name,
             "fns_filled": fns_filled,

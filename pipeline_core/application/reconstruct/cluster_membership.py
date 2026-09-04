@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.stub_scan import (
-    scan_unimplemented_with_cfg,
+    scan_stub_inventory,
 )
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.attribution import FailureFrontier
@@ -44,6 +44,7 @@ from pipeline_core.domain.rust_scan import (
     item_start,
     named_fn_decl_start,
 )
+from pipeline_core.domain.stub_inventory import StubInventory, StubSite
 from pipeline_core.domain.test_count import file_top_cfg_excluded
 
 
@@ -565,28 +566,33 @@ def scan_unimplemented_for_cluster(
     enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
     mod_records: Callable[[Path], list[ModRecord] | None],
     log: Callable[[str], None],
-) -> list[FnLocator]:
-    """Cluster-aware variant of `scan_unimplemented_functions`.
+) -> StubInventory:
+    """Cluster-aware variant of `scan_stub_inventory`.
 
-    Returns only stubs that belong to `cluster` per static cfg evaluation. When
-    `cluster` is None, behaves identically to the unfiltered scan.
+    Keeps only the stub SITES that belong to `cluster` per static cfg
+    evaluation. When `cluster` is None, behaves identically to the
+    unfiltered scan. The membership report's denominator is the site count
+    (one extractor record per impl site) and its names repeat a locator
+    once per skipped site — that is the report's contract, and the unit
+    view is what the returned inventory names `units`.
     """
-    raw = scan_unimplemented_with_cfg(target_src_dir, enumerate_fns=enumerate_fns)
+    inventory = scan_stub_inventory(target_src_dir, enumerate_fns=enumerate_fns)
     if cluster is None:
-        return [loc for loc, _ in raw]
-    out: list[FnLocator] = []
+        return inventory
+    kept: list[StubSite] = []
     skipped: list[str] = []
-    for (rel, fn), fn_cfg in raw:
-        # `fn_cfg` is the extractor's per-fn attribute list; passing it keeps
-        # `fn_belongs_to_cluster` off the text-walk fallback, which attributes a
-        # neighbouring item's `#[cfg]` to this fn and silently drops a fn that
-        # is in fact ungated.
-        if fn_belongs_to_cluster(target_src_dir, rel, fn, cluster, fn_cfg,
+    for s in inventory.sites:
+        # `cfg_predicates` is the extractor's per-fn attribute list; passing
+        # it keeps `fn_belongs_to_cluster` off the text-walk fallback, which
+        # attributes a neighbouring item's `#[cfg]` to this fn and silently
+        # drops a fn that is in fact ungated.
+        if fn_belongs_to_cluster(target_src_dir, s.site.file, s.site.fn_name,
+                                 cluster, s.cfg_predicates,
                                  mod_records=mod_records):
-            out.append(FnLocator(rel, fn))
+            kept.append(s)
         else:
-            skipped.append(f"{rel}::{fn}")
+            skipped.append(f"{s.site.file}::{s.site.fn_name}")
     if skipped:
         log(ClusterMembershipReport(
-            cluster.name, len(raw), tuple(skipped)).log_line())
-    return out
+            cluster.name, inventory.site_count, tuple(skipped)).log_line())
+    return StubInventory(tuple(kept))

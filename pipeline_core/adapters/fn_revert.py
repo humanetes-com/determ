@@ -1,22 +1,30 @@
 """Revert specific fns to ``unimplemented!()`` in a live (already-filled)
-source tree — the F11 M3 layout-retrigger action's surgical revert step.
+source tree — the layout retrigger's surgical revert step.
 
 Same mechanism as `task2_generator.py`'s corruption-recovery revert (every
 same-name occurrence, not just the first — `fmt` lives in each Debug/Display
 impl), extracted standalone so it needs no class/heal-deps context: this
 caller already knows exactly which fns to revert (they reference a just
 re-authored component's types), it isn't diagnosing corruption.
+
+Writes go through the caller's :class:`TreeTxn`. A revert re-locates spans by
+NAME on the text as it stands, so it is only sound on a file that parses; it
+was the rollback of the ledger re-seed's bisect until 2026-09-04, where it
+ran over a file the splice had already corrupted and left a residual `})`
+(run `2973-66e50ad9`). Undoing a write is the transaction's byte restore,
+never this function; this function is for turning a real body into a stub.
 """
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Iterable
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
+from pipeline_core.application.reconstruct.tree_txn import TreeTxn
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
 
-def revert_fns_to_stub(fns: list[FnLocator], src_dir: Path) -> int:
+def revert_fns_to_stub(fns: Iterable[FnLocator], txn: TreeTxn) -> int:
     """Revert every occurrence of each `(file, fn_name)` in `fns` to
     `unimplemented!()`. Returns how many bodies were actually changed
     (already-stub occurrences don't count). Rewrites last-to-first per file
@@ -27,13 +35,12 @@ def revert_fns_to_stub(fns: list[FnLocator], src_dir: Path) -> int:
 
     reverted = 0
     for rel_file, fn_names in by_file.items():
-        fp = Path(src_dir) / rel_file
         try:
-            text = fp.read_text(encoding="utf-8")
+            text = txn.read(rel_file)
         except OSError:
             continue
         changed = False
-        for fn_name in fn_names:
+        for fn_name in sorted(fn_names):
             locs = locate_all_fns(text, fn_name)
             for _sig, sig_start, body_start, body_end in reversed(locs):
                 cur_body = text[body_start:body_end]
@@ -52,5 +59,5 @@ def revert_fns_to_stub(fns: list[FnLocator], src_dir: Path) -> int:
                 changed = True
                 reverted += 1
         if changed:
-            fp.write_text(text, encoding="utf-8")
+            txn.write(rel_file, text)
     return reverted

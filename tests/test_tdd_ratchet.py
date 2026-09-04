@@ -20,6 +20,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.layout_retrigger import RefillGrace
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 def _mk_src(tmp_path: Path) -> Path:
@@ -249,9 +250,8 @@ def _ledger_writer():
         current_signatures,
         splice_bodies,
     )
-    from pipeline_core.adapters.fn_revert import revert_fns_to_stub
     from pipeline_core.application.reconstruct.body_reseed import TreeWriter
-    return TreeWriter(splice=splice_bodies, revert=revert_fns_to_stub,
+    return TreeWriter(splice=splice_bodies,
                       signatures=current_signatures, bodies=current_bodies)
 
 
@@ -315,12 +315,12 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=_reset,
         run_cargo=run_cargo,
-        scan_unimplemented_for_cluster=lambda *a, **k: list(stubs or []),
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory.of_units(stubs or []),
         # The whole-tree stub scan. `[]` is the pre-ledger default every other
         # test wants (it feeds `newly_filled`); `tree_stubs` is for the tests
         # that need the loop to SEE stubs — the re-seed asks this dep which
         # units it may put a body back into.
-        scan_unimplemented_functions=lambda *a, **k: list(tree_stubs or []),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory.of_units(tree_stubs or []),
         task2_fill_fns_one_by_one=fill or (lambda **kw: ClusterFillResult(
             attempts=1, fns_filled=fills_per_iter)),
         checkpoint_fill_tree=_checkpoint,

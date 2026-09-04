@@ -37,6 +37,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
+from pipeline_core.application.reconstruct.tree_txn import unparseable_files
 from pipeline_core.domain import fill_phase_clock
 from pipeline_core.domain.attribution import (
     AttributionResult,
@@ -182,6 +183,7 @@ from pipeline_core.domain.slice_session import (
     attributed_units_for_session,
     session_slices_for_failing,
 )
+from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.tdd_floor import (
     UNSET_PASS,
     TddFloor,
@@ -203,6 +205,7 @@ from pipeline_core.domain.test_results import (
     parse_failed_tests,
     parse_test_counts,
     summarize_test_binaries,
+    uncoded_src_diagnostics,
 )
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
@@ -251,8 +254,12 @@ class PhaseCTddDeps:
     record_tdd_regression: Callable[..., str]
     reset_exhaustion_flags: Callable[..., list[str]]
     run_cargo: Callable[..., tuple[int, str]]
-    scan_unimplemented_for_cluster: Callable[..., list[FnLocator]]
-    scan_unimplemented_functions: Callable[..., list[FnLocator]]
+    # Both scans return a `StubInventory` — sites AND units by name. A
+    # consumer that needs a count or a sequence says which cardinality
+    # it means; the bare list that repeated a locator once per impl site
+    # is what the cluster-entry re-seed iterated on 2026-09-04.
+    scan_unimplemented_for_cluster: Callable[..., StubInventory]
+    scan_unimplemented_functions: Callable[..., StubInventory]
     task2_fill_fns_one_by_one: Callable[..., ClusterFillResult]
     # Futility escalation: (src_dir, test, futile_units,
     # futile_containers) -> Frontier additions. None disables escalation.
@@ -380,6 +387,14 @@ class PhaseCTddDeps:
     # means the re-seed runs UNCHECKED and says so in its line — never
     # silently.
     check_tree_builds: Callable[..., tuple[bool, str]] | None = None
+    # The structure reader's parse check, `(path) -> parses?`. Two duties:
+    # the re-seed transaction parse-verifies every touched file with it,
+    # and the iteration boundary reads the whole `src/` tree through it
+    # before a sweep — a file the extractor cannot parse has no
+    # enumerable unit, so no fill route can open it, and run
+    # `2973-66e50ad9` spent three sweeps and a cluster abort on one
+    # (2026-09-04). None disables both readings.
+    parse_ok: Callable[[Path], bool] | None = None
     # `(rows, bytes)` for the cluster-entry size line.
     ledger_size: Callable[..., tuple[int, int]] | None = None
     # This process's run identity, stamped on every ledger append so a later
@@ -556,6 +571,10 @@ def run_phase_c_tdd(
     fr_path: Path | None,
     test_cmd_builder: Callable[..., str],  # (stems, *, include_lib=False) -> cmd
     tag: str,
+    # `(rel) -> healed?` over the filled crate — the heal hierarchy
+    # (excision, best tree, git ancestor, skeleton) for a file the
+    # boundary check finds unparseable. None: the boundary only reports.
+    heal_file: Callable[[str], bool] | None = None,
 ) -> ClusterFillResult:
     """TDD-scoped Phase C driver.
 
@@ -586,8 +605,8 @@ def run_phase_c_tdd(
     if not test_stems:
         deps.log(f"  {tag} [phase-c/tdd] no test stems in cluster; skipping TDD.")
         return ClusterFillResult(
-            remaining=len(deps.scan_unimplemented_for_cluster(
-                target_src_dir, cluster)))
+            remaining=deps.scan_unimplemented_for_cluster(
+                target_src_dir, cluster).unit_count)
     # --lib sweep: also run the crate unit-test binary (src-side `#[cfg(test)]`
     # + the gen_tests siblings the reconstruction preserves as its oracle).
     # Without it phase-c steers against only the tests/ binaries — a subset of
@@ -934,8 +953,10 @@ def run_phase_c_tdd(
         without the site having to describe its own damage."""
         if deps.ledger_append is None or deps.tree_writer is None:
             return None
-        stubs = [FnLocator(*k)
-                 for k in deps.scan_unimplemented_functions(target_src_dir)]
+        # UNITS, collapsed: the ledger key is `(file, fn_name)` with one
+        # body per occurrence, so a unit is one key however many sites
+        # carry its name.
+        stubs = deps.scan_unimplemented_functions(target_src_dir).unit_list()
         if not stubs:
             return None
         _checker = deps.check_tree_builds
@@ -946,7 +967,8 @@ def run_phase_c_tdd(
             project=project_dir.name, cluster=cluster.name,
             src_dir=target_src_dir, skeleton_root=_skeleton_root(),
             writer=deps.tree_writer, oracle_fp=_oracle_fp(iter_no),
-            check_builds=_check, log=deps.log)
+            check_builds=_check, validate_parse=deps.parse_ok,
+            log=deps.log)
         if not (out.seeded or out.rejected or out.skipped):
             return out
         deps.log(f"  {tag} [phase-c/ledger] iter {iter_no}: {site} — "
@@ -954,6 +976,41 @@ def run_phase_c_tdd(
         deps.emit("phase_c.ledger.reseed",
                   data={"cluster": cluster.name, "iter": iter_no, **out.data})
         return out
+    def _heal_unparseable(files: tuple[str, ...], when: str,
+                          iter_no: int) -> list[str]:
+        """The boundary invariant's reaction. A file the extractor cannot
+        parse has no enumerable unit: no fill route can open it, the
+        frontier cannot name it, and every sweep reads it as the same
+        parse error — so it goes to the heal hierarchy NOW, whichever
+        writer left it that way, instead of after three identical red
+        sweeps and a cluster abort (run `2973-66e50ad9`, 2026-09-04:
+        the ledger re-seed; the same reaction serves the next writer
+        nobody has found yet). Returns the files that were healed."""
+        action = ("healing now" if heal_file is not None
+                  else "NO heal wired — the sweep will read a red tree")
+        deps.log(f"  {tag} [phase-c/tdd] iter {iter_no}: TREE UNPARSEABLE "
+                 f"{when} — {', '.join(files)}; no fill route can rewrite "
+                 f"a file the extractor cannot enumerate; {action}.")
+        healed: list[str] = []
+        for rel in files:
+            if heal_file is not None and heal_file(rel):
+                healed.append(rel)
+        deps.emit("phase_c.tdd.unparseable_tree", data={
+            "cluster": cluster.name, "iter": iter_no, "when": when,
+            "files": list(files), "healed": healed})
+        return healed
+
+    def _tree_src_root() -> tuple[Path, str]:
+        """`(dir to scan, rel prefix)`: the crate's `src/` when the target
+        is a crate root, else the target itself. Never the crate root
+        whole — `rglob` there walks `target/`."""
+        sub = Path(target_src_dir) / "src"
+        return (sub, "src/") if sub.is_dir() else (Path(target_src_dir), "")
+
+    # Digests this process already healed on: a file that comes back
+    # unparseable with the SAME diagnostic after a heal is not healed
+    # again — the red-build streak owns that state.
+    _healed_digests: set[str] = set()
     # The fns each fill pass actually dispatched, most recent last — the
     # stall exit may convict only units that were dispatched AND judged
     # inside the stalled window, not everything left standing.
@@ -1669,6 +1726,16 @@ def run_phase_c_tdd(
         # iteration's sweep and after the high-water's own destruction
         # re-base, in `readmission_boundary` — order is that function's
         # documented contract.
+        # The boundary invariant: the tree a sweep scores must parse. Every
+        # mechanical writer verifies its own transaction, and this is the
+        # reading that does not depend on a writer having been migrated.
+        if deps.parse_ok is not None:
+            _scan_root, _scan_prefix = _tree_src_root()
+            _unparseable = tuple(
+                _scan_prefix + f
+                for f in unparseable_files(_scan_root, deps.parse_ok))
+            if _unparseable:
+                _heal_unparseable(_unparseable, "before the sweep", iter_n)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: running cargo test...")
         t0 = time.monotonic()
         rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
@@ -2067,6 +2134,27 @@ def run_phase_c_tdd(
         # all above), so the compile verdict is read once and shared by every
         # consumer below rather than re-derived at each.
         _sweep_compile_broke = "could not compile" in (output or "")
+        # A diagnostic rustc prints WITHOUT a code is parse-level (every
+        # type/borrow/resolution error carries `[E…]`; no parse error does).
+        # Confirmed against the extractor before acting — a lint denied
+        # to an error is uncoded too and is not a mechanical break — and
+        # once per digest: the heal restores an older file, and a second
+        # identical break after it belongs to the red-build streak below.
+        if (_sweep_compile_broke and heal_file is not None
+                and deps.parse_ok is not None):
+            _uncoded = tuple(
+                f for f in uncoded_src_diagnostics(output or "")
+                if (Path(target_src_dir) / f).exists()
+                and not deps.parse_ok(Path(target_src_dir) / f))
+            _uncoded_digest = "\n".join(compile_error_digest(output or "")[1])
+            if _uncoded and _uncoded_digest not in _healed_digests:
+                _healed_digests.add(_uncoded_digest)
+                if _heal_unparseable(_uncoded, "in the sweep's diagnostics",
+                                     iter_n):
+                    # Nothing charges on this sweep: it measured a
+                    # mechanical break, not the bodies. The next
+                    # iteration sweeps the healed tree.
+                    continue
         # Reference-floor close: a FAIL sweep whose remaining failures are
         # all in the original crate's failed-or-ignored set is the original's
         # leftover, not a reconstruction hole. Task3 already promotes that
@@ -2145,8 +2233,9 @@ def run_phase_c_tdd(
         # Read once here, not at the dispatch site further down: the plateau
         # check below needs it, and nothing between the two mutates the tree
         # (the ratchet's re-sweeps and every splice are outside this span).
-        _stub_list = deps.scan_unimplemented_for_cluster(target_src_dir, cluster)
-        _stub_keys = frozenset(_stub_list)
+        _stubs_now = deps.scan_unimplemented_for_cluster(target_src_dir, cluster)
+        _stub_list = _stubs_now.unit_list()
+        _stub_keys = _stubs_now.units
         # Release the disk convictions whose blockers have filled, HERE — the
         # authoritative stub set exists at this point and nowhere else in the
         # iteration, and releasing before the frontier is built makes a unit
@@ -2754,7 +2843,7 @@ def run_phase_c_tdd(
             # already carries the vanished tests via extra_failed above.
             if vanish_is_stub_confounded(
                     _oracle.vanished, test_reverse_map,
-                    deps.scan_unimplemented_functions(src_dir)):
+                    deps.scan_unimplemented_functions(src_dir).units):
                 deps.log(f"  {tag} [phase-c/crash] {len(_oracle.vanished)} "
                          "test(s) vanished — deferring localization (>=half "
                          "the fns they reach are still stubs; stub panics "
@@ -4708,7 +4797,7 @@ def run_phase_c_tdd(
 
         # Re-fill targets this iter = frontier fns already filled at iter start
         # (not stubs) → the engine will behaviorally re-fill them.
-        _stubs_before = set(deps.scan_unimplemented_functions(src_dir))
+        _stubs_before = deps.scan_unimplemented_functions(src_dir).units
         _refill_targets = frontier_keys - _stubs_before
         # Body snapshot of the dispatched units, taken now so the post-fill
         # reading below can say which of them actually TOOK a semantic change
@@ -4903,7 +4992,7 @@ def run_phase_c_tdd(
         # We don't have the exact list from the sub-result, so use the
         # frontier keys that are NO LONGER in the unimplemented set after
         # the pass — that's the set of fns that materially changed.
-        cur_stubs = set(deps.scan_unimplemented_functions(src_dir))
+        cur_stubs = deps.scan_unimplemented_functions(src_dir).units
         newly_filled = [k for k in frontier_keys if k not in cur_stubs]
         # The landed-change reading: which dispatched units' bodies MOVED.
         # This is the fact the refutation criterion needs and the cursor
@@ -5317,8 +5406,8 @@ def run_phase_c_tdd(
         fns_filled=total_filled,
         bytes_filled=total_bytes,
         attempts=total_attempts,
-        remaining=len(deps.scan_unimplemented_for_cluster(
-            target_src_dir, cluster)),
+        remaining=deps.scan_unimplemented_for_cluster(
+            target_src_dir, cluster).unit_count,
         errors=tuple(errors),
         baseline_broken=_baseline_broken,
         failed_tests=last_failed,

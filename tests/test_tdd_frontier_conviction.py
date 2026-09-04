@@ -20,6 +20,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _DIRECT = FnLocator("src/a.rs", "accessor")
 _ESCALATED = FnLocator("src/b.rs", "producer")
@@ -61,8 +62,8 @@ def _deps(handoffs: list[Any]) -> PhaseCTddDeps:
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=lambda *a, **k: (
             101, "test t1 ... FAILED\ntest result: FAILED. 3 passed; 1 failed"),
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
         escalate_to_producers=_escalate,
     )

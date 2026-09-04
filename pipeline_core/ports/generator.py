@@ -23,6 +23,7 @@ from ..domain.models import (
     Diagnostic,
     FnLocator,
 )
+from ..domain.stub_inventory import StubInventory
 
 
 @runtime_checkable
@@ -148,6 +149,7 @@ class FillEngine(Protocol):
         module: str, cluster: BuildCluster, check_cmd: str,
         cluster_env: dict[str, str], leaf_counts: dict[str, int] | None,
         fr_path: Path | None, test_cmd_builder: Any, tag: str,
+        heal_file: Any = ...,
     ) -> ClusterFillResult: ...
     def fill_fns_one_by_one(
         self, *, project_dir: Path, target_src_dir: Path,
@@ -175,7 +177,7 @@ class FillEngine(Protocol):
     ) -> dict[str, Any]: ...
     def scan_unimplemented_functions(
         self, src_dir: Path,
-    ) -> list[FnLocator]: ...
+    ) -> StubInventory: ...
     def merge_cluster_outputs(
         self, *, project_dir: Path, cluster_specs: dict[str, BuildCluster],
         successes: list[dict[str, Any]], prefer_cluster: str | None = ...,

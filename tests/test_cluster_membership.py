@@ -312,7 +312,7 @@ def test_scan_for_cluster_prefers_the_extractors_per_fn_cfg_over_the_text_walk(t
                                    "cfg_predicates": []}],
         mod_records=lambda _d: [],
         log=logged.append)
-    assert out == [FnLocator("error.rs", "object_drop")]
+    assert out.unit_list() == [FnLocator("error.rs", "object_drop")]
     assert not logged
 
 
@@ -328,7 +328,7 @@ def test_scan_for_cluster_names_the_skipped_stubs(tmp_path):
                                    "cfg_predicates": ["error_generic_member_access"]}],
         mod_records=lambda _d: [],
         log=logged.append)
-    assert out == []
+    assert not out and out.site_count == 0
     # the denominator and the identity must both be readable without a probe
     assert "1 of 1 stub(s)" in logged[0]
     assert "error.rs::provide" in logged[0]

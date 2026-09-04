@@ -880,6 +880,33 @@ def compile_error_digest(
     return len(seen), rendered
 
 
+def uncoded_src_diagnostics(cargo_output: str) -> tuple[str, ...]:
+    """Files under `src/` named by a diagnostic rustc printed WITHOUT an error
+    code, first-seen order, deduped.
+
+    rustc codes every type, borrow and resolution error (`error[E0308]`) and
+    codes NONE of its parse errors (`error: unexpected closing delimiter`,
+    `error: expected one of …`, `error: this file contains an unclosed
+    delimiter`). An uncoded diagnostic in the crate's own source is
+    therefore the sweep-side signature of a file no fill route can rewrite:
+    the extractor enumerates nothing from it, so the frontier cannot name a
+    unit in it and every later sweep prints the same line (run
+    `2973-66e50ad9`, 2026-09-04: `src/context.rs:35: error: unexpected
+    closing delimiter` three times, then a cluster abort). A lint denied to
+    an error is uncoded too, which is why the caller confirms each file
+    against the structure reader before treating it as a mechanical break.
+    Test targets are excluded on purpose: the oracle is never healed from a
+    sweep line."""
+    out: list[str] = []
+    for diag in parse_rustc_compile_errors(cargo_output):
+        f = diag.file.replace("\\", "/")
+        if diag.code or not (f.startswith("src/") or "/src/" in f):
+            continue
+        if f not in out:
+            out.append(f)
+    return tuple(out)
+
+
 def compile_failed_targets(cargo_output: str) -> tuple[str, ...]:
     """Cargo target descriptors from every `could not compile \\`crate\\` (<target>)`
     line, first-seen order, deduped — e.g. `("lib", 'test "test_autotrait"')`.

@@ -12,11 +12,14 @@ re-author was supposed to replace.
 Same locate keys, same domain primitive (`replace_surface_definitions`) as the
 skeleton splice — a type definition is byte-identical across the two trees, and
 a fn's key is its signature, which survives any body fill.
+
+Writes go through the caller's :class:`TreeTxn`: this is a mechanical write
+(no new information enters the tree), so the caller verifies parse — and
+build, where the tree built before — and rolls the bytes back on refusal.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
+from pipeline_core.application.reconstruct.tree_txn import TreeTxn
 from pipeline_core.domain.scaffold_rewrite import (
     DefReplacement,
     replace_surface_definitions,
@@ -24,19 +27,18 @@ from pipeline_core.domain.scaffold_rewrite import (
 
 
 def apply_layout_to_tree(
-    plan: dict[str, list[DefReplacement]], src_dir: Path,
+    plan: dict[str, list[DefReplacement]], txn: TreeTxn,
 ) -> tuple[int, str]:
-    """Apply `plan` (rel path → replacements) to the tree at `src_dir`.
+    """Apply `plan` (rel path → replacements) through `txn`.
     Returns `(files_written, reason)`; a non-empty reason means NOTHING was
     written — the splice is all-or-nothing, because a tree holding some of the
     new definitions and some of the old ones compiles as neither layout."""
     if not plan:
         return 0, "empty replacement plan"
-    edited: dict[Path, str] = {}
+    edited: dict[str, str] = {}
     for rel, reps in plan.items():
-        fp = Path(src_dir) / rel
         try:
-            current = fp.read_text(encoding="utf-8")
+            current = txn.read(rel)
         except OSError as e:
             return 0, f"live tree file unreadable: {rel} ({e})"
         res = replace_surface_definitions(current, reps)
@@ -44,7 +46,7 @@ def apply_layout_to_tree(
             where = ("" if res.miss_index is None
                      else f" (replacement #{res.miss_index})")
             return 0, f"could not locate a definition in {rel}{where}"
-        edited[fp] = res.text
-    for fp, text in edited.items():
-        fp.write_text(text, encoding="utf-8")
+        edited[rel] = res.text
+    for rel, text in edited.items():
+        txn.write(rel, text)
     return len(edited), ""

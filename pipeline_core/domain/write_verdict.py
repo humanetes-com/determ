@@ -38,6 +38,9 @@ class WriteOutcome(Enum):
     KEEP = "keep"
     REFUSE_DUPLICATE = "refuse_duplicate"
     REFUSE_DIAG_INCREASE = "refuse_diag_increase"
+    # A touched file no longer parses. Judged before the diagnostic count
+    # is even read: an unparseable file has no unit any route can rewrite.
+    REFUSE_PARSE_BROKEN = "refuse_parse_broken"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +59,8 @@ class WriteVerdict:
             what = "; ".join(d.render() for d in self.duplicates)
             return (f"duplicate definition introduced ({what}) — no body "
                     f"rewrite can reach it; restored")
+        if self.outcome is WriteOutcome.REFUSE_PARSE_BROKEN:
+            return "a written file no longer parses; restored"
         if self.outcome is WriteOutcome.REFUSE_DIAG_INCREASE:
             return (f"diagnostics {self.before} → {self.after} — a repair that "
                     f"breaks more than it fixes; restored")

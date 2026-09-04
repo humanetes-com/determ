@@ -24,6 +24,7 @@ from typing import Any
 
 from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 
 # --------------------------------------------------------------------------- #
@@ -224,7 +225,7 @@ class FillEngineAdapter:
     fill_groups_fn: Callable[..., dict[str, Any]]
     group_tests_fn: Callable[..., list[dict[str, Any]]]
     cleanup_residuals_fn: Callable[..., dict[str, Any]]
-    scan_unimplemented_fn: Callable[[Path], list[FnLocator]]
+    scan_unimplemented_fn: Callable[[Path], StubInventory]
     merge_cluster_outputs_fn: Callable[..., dict[str, Any]]
     generate_fix_loop_fn: Callable[..., tuple[bool, str]]
     reset_exhaustion_flags_fn: Callable[[Path, str], object]  # return discarded
@@ -251,7 +252,7 @@ class FillEngineAdapter:
         return self.cleanup_residuals_fn(target_src_dir, project_dir, functional_req,
                                          test_files, **kw)
 
-    def scan_unimplemented_functions(self, src_dir: Path) -> list[FnLocator]:
+    def scan_unimplemented_functions(self, src_dir: Path) -> StubInventory:
         return self.scan_unimplemented_fn(src_dir)
 
     def merge_cluster_outputs(self, **kw: Any) -> dict[str, Any]:

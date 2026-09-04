@@ -37,6 +37,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, LedgerKey
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.stub_inventory import StubInventory
 
 _ACC = FnLocator("src/a.rs", "fmt")        # the futile accessor (consumer)
 _PROD = FnLocator("src/b.rs", "producer")  # the escalation's addition
@@ -103,8 +104,8 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
         run_cargo=_cargo,
-        scan_unimplemented_for_cluster=lambda *a, **k: [],
-        scan_unimplemented_functions=lambda *a, **k: [],
+        scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
         escalate_to_producers=_escalate,
         suspend_futile_guidance=_suspend,

@@ -1564,7 +1564,10 @@ def find_fns_referencing(
         haystack = f.sig_text + " " + f.body_text
         if any(contains_word(haystack, n) for n in names):
             out.append(FnLocator(f.file, f.fn_name))
-    return out
+    # Records are per impl site and the revert is per locator (every
+    # occurrence): collapse here, in first-seen order, so the caller's
+    # count and the revert's input both speak in units.
+    return list(dict.fromkeys(out))
 
 
 def filled_body_text(fn_records: list[FnRecord]) -> str:

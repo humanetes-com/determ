@@ -233,14 +233,14 @@ def _hollow_fns(tree: Path, deps: ReferenceDeps) -> frozenset[tuple[str, str]]:
     reconstruction reproduces both byte-for-byte. A gate that cannot see this
     fails a run over two functions it got exactly right.
     """
-    from .reconstruct.stub_scan import scan_unimplemented_with_cfg
+    from .reconstruct.stub_scan import scan_stub_inventory
     src = tree / "src"
     if not src.is_dir():
         return frozenset()
     return frozenset(
         (loc.file, loc.fn_name)
-        for loc, _preds in scan_unimplemented_with_cfg(
-            src, enumerate_fns=deps.enumerate_fns))
+        for loc in scan_stub_inventory(
+            src, enumerate_fns=deps.enumerate_fns).units)
 
 
 def _store_path(project_dir: Path) -> Path:
