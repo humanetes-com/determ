@@ -1,11 +1,11 @@
-"""P18 — locator-collapsed session slice. The detector reads the no-slice
-log and the locator-only expansion line.
+"""P18 — locator-collapsed session slice. The detector reads the collapsed
+three-way no-slice log and the locator-only expansion line.
 
 Plan sentence: a run whose session was dropped because eligible-as-source
 exploded past the cap is a census row; an empty leftover (`ui` only) is
-not. Negative control: the old collapsed `hollow, empty, or over` line
-(run 110993-6efa23be) still matches; a split log that names only empty
-does not.
+not. Positive: the collapsed `hollow, empty, or over` line (run
+110993-6efa23be). Negative control: a split `N over SLICE_SESSION_MAX_UNITS=`
+refuse with no same-fill expansion is P21, not this class.
 """
 from __future__ import annotations
 
@@ -43,16 +43,30 @@ def test_p18_collapsed_three_way_line_is_the_positive_instance() -> None:
     assert census.RE_SESSION_OVER_CAP.search(line) is not None
 
 
-def test_p18_split_over_cap_line_is_the_class() -> None:
+def test_p18_split_over_cap_without_expansion_is_not_the_class() -> None:
+    """NEGATIVE CONTROL — the pre-split detector treated every over-cap
+    refuse as P18. Run 2965-453dd7a4's split line is P21."""
     line = (
         "  [phase-c/session] no slice planned "
         "(3 failing test(s) — 1 empty; 1 over SLICE_SESSION_MAX_UNITS=32 "
         "(38 unit(s)))"
     )
-    hits = census.detect_p18(_run(line), [])
-    assert len(hits) == 1
-    assert "over SLICE_SESSION_MAX_UNITS=32" in hits[0]["evidence"]
-    assert "38 unit(s)" in hits[0]["evidence"]
+    assert census.detect_p18(_run(line), []) == []
+    assert census.RE_SESSION_SPLIT_OVER_CAP.search(line) is not None
+    assert census.RE_SESSION_COLLAPSED.search(line) is None
+
+
+def test_p18_split_over_cap_in_the_same_fill_as_expansion_is_the_class() -> None:
+    service = ("  [stable] [phase-c/dispatch] service order: 7 never-served "
+               "unit(s) rank before served; 5 last-graded flat sink")
+    expand = ("  [phase-c/session] locator-only w.rs::fmt expanded to "
+              "4 tree site(s)")
+    refuse = ("  [phase-c/session] no slice planned "
+              "(3 failing test(s) — 1 over SLICE_SESSION_MAX_UNITS=32 "
+              "(38 unit(s)))")
+    hits = census.detect_p18(_run(service, expand, refuse), [])
+    assert any("over-cap refuse" in h["evidence"] for h in hits)
+    assert any("w.rs::fmt" in h["evidence"] for h in hits)
 
 
 def test_p18_empty_only_is_not_the_class() -> None:

@@ -539,3 +539,17 @@ def test_drop_standing_flat_removes_flats_and_keeps_exempt() -> None:
     batch = take_batch([k for k, _ in dropped], set(), 12)
     assert batch.keys == tuple(f"u{i}" for i in range(12))
     assert "u20" not in batch.keys
+
+
+def test_a_still_hollow_body_is_never_excluded_by_a_standing_grade() -> None:
+    """A stub's ledger grade is a claim about bytes that are not the body
+    the batch would write; first-fill ranks live-stub producers first, and
+    the exclusion must not undo that. The caller passes the stub inventory
+    as `exempt`, exactly as it passes crash-blamed units."""
+    ordered = [(f"u{i}", i) for i in range(6)]
+    flat = {"u1", "u4"}
+    stubs = {"u4"}
+    kept = [k for k, _ in drop_standing_flat(ordered, flat, exempt=stubs)]
+    assert "u4" in kept and "u1" not in kept
+    # Control: without the stub exemption the hollow constructor is gone.
+    assert "u4" not in {k for k, _ in drop_standing_flat(ordered, flat)}

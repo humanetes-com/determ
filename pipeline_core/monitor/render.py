@@ -637,6 +637,38 @@ def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:
             seg.append(dim(f"past this iter's {denom} {denom_unit}"))
         rows.append(f"           sweep    {'  '.join(seg)}")
 
+    # `remaining` — the same two counts above, restated as "how much is left"
+    # instead of "how much is done", so a reader does not have to subtract by
+    # hand: 20 - 9 for the per-fn route, 20 - 17 for the sweep. Both come from
+    # counters this function already trusts (`r.finished`/`r.denominator`,
+    # `units`/`denom` from the sweep block just above), so nothing new is
+    # measured or guessed here.
+    #
+    # Deliberately excludes `tdd_frontier`: that count is a different,
+    # whole-cluster pool (the `iter` row's `frontier N fn(s)`, unaffected by
+    # this sweep's dispatch), and `frontier - batch` would assume a
+    # relationship between two denominators this module has never verified —
+    # exactly the folding the sweep bar's own comment above warns against.
+    fill = state.get("fill")
+    if isinstance(fill, FillProgress) and fill:
+        route_bits: list[str] = []
+        for r in fill.routes:
+            rdenom = r.denominator
+            if rdenom is None:
+                continue
+            left = rdenom - r.finished
+            if left > 0:
+                route_bits.append(f"{r.id} {left}")
+        rem_seg: list[str] = []
+        if route_bits:
+            rem_seg.append("fill " + ", ".join(route_bits))
+        if denom > 0:
+            sweep_left = denom - units
+            if sweep_left > 0:
+                rem_seg.append(f"sweep {sweep_left} {denom_unit}")
+        if rem_seg:
+            rows.append(f"           remaining {'  ·  '.join(rem_seg)}")
+
     total = state.get("total_fns_in_cluster", 0) or 0
     filled_start = state.get("filled_count_at_pass_start", 0) or 0
     hollow_start = state.get("all_stubs_remaining_at_pass_start", 0) or 0

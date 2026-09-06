@@ -134,7 +134,23 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      (or a locator-only unit fanned out in the log).  Run 110993-6efa23be
      (2026-09-03): owner map named Debug, no phase_c.session.start, log
      `no slice planned (3 failing test(s) — hollow, empty, or over …)`.
-     Distinct from an empty leftover (`ui`) which is not this class.
+     The collapsed three-way clause is this class; a split
+     `N over SLICE_SESSION_MAX_UNITS=` refuse is not, unless the same fill
+     also expanded a locator.  Distinct from an empty leftover (`ui`).
+  P21 over-union session refusal — the failing tests' own slices each fit
+     under SLICE_SESSION_MAX_UNITS and only their UNION does not (a
+     coverage-complete leftover set sharing the construction spine), the
+     session route refused the whole group, and the same fill's dispatch
+     ranking still had never-served units it could not reach past the
+     re-buys in the cap.  Run 2965-453dd7a4 (2026-09-05): 32 tests of 8-23
+     sites, union 54, `no slice planned (32 failing test(s) — 1 over
+     SLICE_SESSION_MAX_UNITS=32 (60 unit(s)))` on every fill, zero
+     phase_c.session.start, `7 never-served unit(s)` on the same sweep.
+     Distinct from P18: the split `N over SLICE_SESSION_MAX_UNITS=`
+     line, not the three-way `hollow, empty, or over`; a locator-only
+     expansion in a prior fill does not reclassify the refuse (service-
+     order resets the fill's expansion flag).  Reaction: `session(s)
+     fitted under the cap` (plan_slices packs the group).
 
 The aggregate at the bottom counts, per class, total hits and how many were
 SILENT.  Decision rule: a class with recurring SILENT hits needs its detector
@@ -376,6 +392,12 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # locator-only slice that used to prevent one. The over-cap / expand
         # lines remain the HIT; this marker is the reaction on a later iter
         # of the same log (or a later run of the same tree).
+        ("opening — targets", "session-opened"),
+    ],
+    "P21": [
+        # The packing statement is the reaction: the over-union group was
+        # fitted into sessions under the cap instead of refused.
+        ("fitted under the cap", "session-fitted"),
         ("opening — targets", "session-opened"),
     ],
     "P19": [
@@ -1278,9 +1300,27 @@ RE_SESSION_OVER_CAP = re.compile(
     r"\[phase-c/session\] no slice planned \((?P<detail>.*"
     r"(?:hollow, empty, or over SLICE_SESSION_MAX_UNITS"
     r"|over SLICE_SESSION_MAX_UNITS=).*)\)")
+# The collapsed three-way is P18; `\d+ over` is the split over-cap clause
+# (P21 unless the same fill also expanded a locator). The three-way line
+# is `or over`, not `N over`, so the split regex does not match it.
+# Computed 2026-09-05 on the rotation: every P18 run also hit P21 while
+# both detectors keyed on RE_SESSION_OVER_CAP (5 overlap, 0 P18-only,
+# 0 P21-only). Canonical P18 instance 110993-6efa23be has expand_lines=0.
+RE_SESSION_COLLAPSED = re.compile(
+    r"\[phase-c/session\] no slice planned \((?P<detail>.*"
+    r"hollow, empty, or over SLICE_SESSION_MAX_UNITS.*)\)")
+RE_SESSION_SPLIT_OVER_CAP = re.compile(
+    r"\[phase-c/session\] no slice planned \((?P<detail>.*"
+    r"\d+ over SLICE_SESSION_MAX_UNITS=.*)\)")
 RE_SESSION_LOCATOR_EXPAND = re.compile(
     r"\[phase-c/session\] locator-only (?P<unit>\S+) expanded to "
     r"(?P<n>\d+) tree site")
+# P21 — the over-union refusal's two neighbours: the never-served count on
+# the same fill's service-order line, and the locator-expansion line whose
+# presence in the SAME fill (service-order resets it) separates this class
+# from P18.
+RE_SERVICE_NEVER_SERVED = re.compile(
+    r"\[phase-c/dispatch\] service order: (?P<never>\d+) never-served unit")
 
 # P19 — a sweep (or the red-build refusal) whose rustc diagnostic carries NO
 # error code and sits under src/: rustc codes every type/borrow/resolution
@@ -1304,24 +1344,71 @@ P19_WINDOW = 80
 EVENTS_PATH = Path(__file__).resolve().parent.parent / "logs" / "events.jsonl"
 
 
+def _session_refuse_walk(run: Run) -> list[dict]:
+    """Fill-scoped refuse walk: a service-order line starts a fill and
+    clears the expansion flag. Sticky-12-line windows taint a later fill's
+    split refuse with a prior fill's expansion (run 57079-a5f83827 expanded
+    at iter 5 and split-refused 405+ lines later after a new service-order).
+    """
+    out: list[dict] = []
+    never = 0
+    never_ref = ""
+    saw_expand = False
+    expand_ref = ""
+    for ref, text in run.lines:
+        if (m := RE_SERVICE_NEVER_SERVED.search(text)):
+            never = int(m["never"])
+            never_ref = ref
+            saw_expand = False
+            expand_ref = ""
+            continue
+        if RE_SESSION_LOCATOR_EXPAND.search(text):
+            saw_expand = True
+            expand_ref = ref
+            continue
+        collapsed = RE_SESSION_COLLAPSED.search(text)
+        split = RE_SESSION_SPLIT_OVER_CAP.search(text)
+        if not collapsed and not split:
+            continue
+        detail = (collapsed or split)["detail"]
+        out.append({
+            "ref": ref, "text": text, "detail": detail,
+            "never": never, "never_ref": never_ref,
+            "saw_expand": saw_expand, "expand_ref": expand_ref,
+            "collapsed": collapsed is not None, "split": split is not None,
+        })
+    return out
+
+
 def detect_p18(run: Run, iters: list[dict]) -> list[dict]:
     """Locator-collapsed session slice — eligible treated as a unit source so
     a name with no site-frontier container expanded to every tree container,
     the merge exceeded the cap, and plan_slices dropped the group. Also the
-    locator-only expansion log after the join. An empty leftover (`ui` only)
-    is not this class. Run 110993-6efa23be (2026-09-03) is the positive
-    instance of the collapsed three-way log line.
+    locator-only expansion log after the join, and a split over-cap refuse
+    in a fill that also expanded a locator. An empty leftover (`ui` only)
+    is not this class. A split `N over` refuse with no same-fill expansion
+    is P21. Run 110993-6efa23be (2026-09-03) is the positive instance of the
+    collapsed three-way log line.
     """
     hits: list[dict] = []
-    over = list(run.find(RE_SESSION_OVER_CAP))
-    if over:
+    refuses = _session_refuse_walk(run)
+    collapsed = [r for r in refuses if r["collapsed"]]
+    if collapsed:
         hits.append({
             "evidence": (
-                f"{len(over)} no-slice-planned line(s) naming an over-cap or "
-                f"the collapsed hollow/empty/over clause — "
-                f"{over[0][1]['detail']}"
+                f"{len(collapsed)} collapsed hollow/empty/over line(s) — "
+                f"{collapsed[0]['detail']}"
             ),
-            "refs": [r for r, _ in over[:4]],
+            "refs": [r["ref"] for r in collapsed[:4]],
+        })
+    split_exp = [r for r in refuses if r["split"] and r["saw_expand"]]
+    if split_exp:
+        hits.append({
+            "evidence": (
+                f"{len(split_exp)} over-cap refuse(s) in a fill that also "
+                f"expanded a locator — {split_exp[0]['detail']}"
+            ),
+            "refs": [r["ref"] for r in split_exp[:4]],
         })
     expansions: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for ref, m in run.find(RE_SESSION_LOCATOR_EXPAND):
@@ -1334,6 +1421,32 @@ def detect_p18(run: Run, iters: list[dict]) -> list[dict]:
                 f"({len(rows)} time(s))"
             ),
             "refs": [r for r, _ in rows[:4]],
+        })
+    return hits[:6]
+
+
+def detect_p21(run: Run, iters: list[dict]) -> list[dict]:
+    """Over-union session refusal with never-served units waiting.
+
+    HIT: a split `no slice planned … N over SLICE_SESSION_MAX_UNITS=` line
+    with no locator-only expansion in the same fill (service-order resets
+    the flag; that same-fill case is P18), on a sweep whose service-order
+    line counted at least one never-served unit. The collapsed three-way
+    (`hollow, empty, or over`) is P18, not this class. Run 2965-453dd7a4
+    (2026-09-05) is the positive instance: seven split refusals, never-
+    served 7 → 6 → 6 → 0.
+    """
+    hits: list[dict] = []
+    for r in _session_refuse_walk(run):
+        if not r["split"] or r["saw_expand"] or r["never"] <= 0:
+            continue
+        hits.append({
+            "evidence": (
+                f"session refused an over-cap group while the same sweep "
+                f"ranked {r['never']} never-served unit(s) — "
+                f"{r['text'].strip()[:120]}"
+            ),
+            "refs": [r["ref"], r["never_ref"]],
         })
     return hits[:6]
 
@@ -1425,7 +1538,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
              "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
              "P17": detect_p17, "P18": detect_p18,
-             "P19": detect_p19, "P20": detect_p20}
+             "P19": detect_p19, "P20": detect_p20, "P21": detect_p21}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1441,7 +1554,8 @@ CLASS_NAMES = {
     "P17": "fill-class histogram (dominant cashed/wrong/mis/unreachable/dropped/compile)",
     "P18": "locator-collapsed session slice (eligible-as-source exploded past the cap)",
     "P19": "mechanical write left an unparseable tree (uncoded src/ diagnostic on a sweep)",
-    "P20": "site-cardinality leak into the re-seed (a unit handed once per impl site)"}
+    "P20": "site-cardinality leak into the re-seed (a unit handed once per impl site)",
+    "P21": "over-union session refusal (every test fits the cap, the union does not, never-served units wait)"}
 
 
 # -------------------------------------------------------------------- report

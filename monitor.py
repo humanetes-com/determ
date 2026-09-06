@@ -1126,10 +1126,20 @@ def _render_all():
             _ln(row)
 
     elif _view == "stream":
-        # Box 2 compact; Box 3 expands
-        for row in box_lines("Pipeline", pipeline_rows):
+        # Box 2 compact; Box 3 expands. pipeline_rows is unbounded (files
+        # overview, per-cluster overview, ... grow with the run) unlike
+        # gen_rows, which is why the symmetric-looking "Box 2 full, Box 3
+        # log" here needs its own cap — the pipeline view's "Box 3 full"
+        # never needed one because gen_rows is inherently short.
+        PIPELINE_COMPACT_MAX = 8
+        compact_rows = pipeline_rows[:PIPELINE_COMPACT_MAX]
+        if len(pipeline_rows) > PIPELINE_COMPACT_MAX:
+            hidden = len(pipeline_rows) - PIPELINE_COMPACT_MAX
+            compact_rows = compact_rows + [dim(f"  … {hidden} more row(s) — see [1]Monitor")]
+        for row in box_lines("Pipeline", compact_rows):
             _ln(row)
-        inner = max(1, h - gpu_h - pipeline_h - 2 - BOTTOM_LINES)
+        compact_h = len(compact_rows) + 2
+        inner = max(1, h - gpu_h - compact_h - 2 - BOTTOM_LINES)
         _log_box(STREAM_LOG, "stream", "Stream Log", inner,
                  header=(gen_rows[:1]))
 

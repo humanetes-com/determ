@@ -308,3 +308,92 @@ def test_locator_only_expansions_names_the_fan_out() -> None:
         {"t": {FnSite("src/w.rs", "fmt", "")}}, [disp, dbg]) == (
         ("w.rs", "fmt", 2),)
     assert locator_only_expansions({"t": {dbg}}, [disp, dbg]) == ()
+
+
+# ---- packing an over-union group under the cap -----------------------------
+
+def _hub_and_unique(n: int) -> dict[str, set[FnSite]]:
+    """`n` tests that share one hub site and each execute one site of their
+    own — the shape of a coverage-complete leftover set whose tests all fit
+    the cap while their union does not."""
+    hub = FnSite("src/core.rs", "construct", "impl Core")
+    return {f"t_{i:02d}": {hub, FnSite(f"src/m{i}.rs", "go", f"impl M{i}")}
+            for i in range(n)}
+
+
+def test_an_over_union_leftover_set_whose_every_test_fits_is_packed_not_refused() -> None:
+    """The plan's sentence. Eight tests of two sites each, union nine, cap
+    four: every test fits, the union does not. Control: the pre-packing
+    rule (one merged group over the cap → nothing) is what `over_cap`
+    used to count; after, ≥2 sessions, each under the cap, each test in
+    exactly one, each test's slice a subset of its session, the hub in
+    every session that holds a test which executes it."""
+    slices = _hub_and_unique(8)
+    hub = FnSite("src/core.rs", "construct", "impl Core")
+    plans = plan_slices(slices, max_units=4)
+    assert len(plans) >= 2
+    placed = [t for p in plans for t in p.tests]
+    assert sorted(placed) == sorted(slices)
+    for p in plans:
+        assert len(p.units) <= 4
+        assert hub in p.units
+        for t in p.tests:
+            assert slices[t] <= set(p.units)
+    gaps = slice_plan_gaps(slices, max_units=4)
+    assert gaps.over_cap == 0
+    assert gaps.over_union == 1
+    assert gaps.fitted == len(plans)
+    assert gaps.fitted_from_units == 9
+    assert "fitted under the cap" in gaps.fitted_clause()
+    assert gaps.log_clause() == "no session"
+    # NEGATIVE CONTROL — the merged union alone is what the old rule dropped.
+    from pipeline_core.domain.slice_session import _merge_pending, _pending_after_filters
+    pending, _, _ = _pending_after_filters(slices, frozenset())
+    groups = [(n, m) for n, m in _merge_pending(pending) if n]
+    assert len(groups) == 1 and len(groups[0][1]) == 9 > 4
+
+
+def test_a_single_test_over_the_cap_is_still_dropped_not_truncated() -> None:
+    """One test executes five sites at cap four; a neighbour shares one of
+    them and fits. The oversized test is in no session; the neighbour
+    still plans on its own slice; the gap names one over-cap TEST."""
+    big = {FnSite("src/x.rs", f"f{i}", f"impl X{i}") for i in range(5)}
+    shared = next(iter(sorted(big, key=lambda u: u.fn_name)))
+    small = {shared, FnSite("src/y.rs", "g", "impl Y")}
+    plans = plan_slices({"t_big": big, "t_small": small}, max_units=4)
+    assert [p.tests for p in plans] == [("t_small",)]
+    assert set(plans[0].units) == small
+    gaps = slice_plan_gaps({"t_big": big, "t_small": small}, max_units=4)
+    assert (gaps.over_cap, gaps.over_cap_units) == (1, 5)
+    assert gaps.fitted == 1 and gaps.over_union == 1
+    assert gaps.log_clause() == "1 over SLICE_SESSION_MAX_UNITS=4 (5 unit(s))"
+
+
+def test_packing_is_deterministic_and_keeps_overlapping_tests_together() -> None:
+    """A test joins the session already holding the most of its path."""
+    a = {FnSite("src/a.rs", f"a{i}", "impl A") for i in range(3)}
+    b = {FnSite("src/b.rs", f"b{i}", "impl B") for i in range(3)}
+    hub = FnSite("src/core.rs", "construct", "impl Core")
+    slices = {
+        "t_a1": a | {hub}, "t_b1": b | {hub},
+        "t_a2": set(sorted(a, key=lambda u: u.fn_name)[:2]) | {hub},
+        "t_b2": set(sorted(b, key=lambda u: u.fn_name)[:2]) | {hub},
+    }
+    first = plan_slices(slices, max_units=5)
+    assert first == plan_slices(dict(reversed(list(slices.items()))), max_units=5)
+    by_test = {t: p for p in first for t in p.tests}
+    assert by_test["t_a1"] is by_test["t_a2"]
+    assert by_test["t_b1"] is by_test["t_b2"]
+    assert by_test["t_a1"] is not by_test["t_b1"]
+
+
+def test_slice_plan_payload_records_the_union_and_the_sessions() -> None:
+    from pipeline_core.domain.slice_session import slice_plan_payload
+    slices = _hub_and_unique(3)
+    plans = plan_slices(slices, max_units=4)
+    gaps = slice_plan_gaps(slices, max_units=4)
+    payload = slice_plan_payload(slices, plans, gaps)
+    assert payload["tests"] == 3 and payload["units_union"] == 4
+    assert payload["max_units"] == 4 and payload["over_union"] == 0
+    assert [s["tests"] for s in payload["sessions"]] == [list(p.tests) for p in plans]
+    assert set(payload["slices"]) == set(slices)

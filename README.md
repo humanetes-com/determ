@@ -70,6 +70,135 @@ python strip_to_tests.py <project_dir>
 python pipeline.py --project <project_dir>
 ```
 
+The live `anyhow` crate is not launched that way. Use the launchers in
+[Launch, resume, restart (anyhow)](#launch-resume-restart-anyhow).
+
+---
+
+## Launch, resume, restart (anyhow)
+
+The reconstruction lives in `tmp/anyhow`. `continue.sh` is the only launcher
+for that tree: it checks the pre-run stamp, refuses a second pipeline, starts
+the process under the death-watch, and must be passed `--no-tail` so aborting
+the terminal does not SIGTERM the run (2026-08-29, run `929966-abe13d11`,
+exit 143). Do not wrap a launch in `timeout` or background `continue.sh` with
+`&` instead of `--no-tail`. `wipe.sh` is not a wipe — it calls the removed
+`--wipe` flag and exits 2.
+
+Every launch through `continue.sh` (including `restart_from.sh` and `redo.sh`)
+goes through the stamp. If the pipeline code changed since the last gate,
+`continue.sh` exits 3 until `pre_run.sh` has run.
+
+### Gate
+
+```bash
+bash pre_run.sh                 # extractor release build + check.sh + walks, then stamp
+bash pre_run.sh --walks-only    # walks only; writes no stamp (fix-loop, not a launch)
+```
+
+`continue.sh --no-pre-run …` launches untested and prints that it did. Use it
+only as the escape hatch it is.
+
+### Stop without relaunch
+
+```bash
+touch /tmp/pipeline_graceful_stop    # exits at the next fill checkpoint
+```
+
+`continue.sh --y` and `restart_from.sh` / `redo.sh` stop **then relaunch**.
+If the ask is only to stop, touch the sentinel and wait.
+
+### Resume (keep the tree, keep the fills)
+
+```bash
+bash continue.sh --y --no-tail       # graceful stop if one is running, then resume
+bash continue.sh --force --no-tail   # SIGTERM then SIGKILL, then resume
+bash continue.sh --no-tail           # resume if nothing is running; refuses to kill
+```
+
+Resumes at the first phase `pipeline_state.md` does not mark done. Fills in
+`.skeleton-filled/` stay. A healthy vLLM container is left alone.
+
+Other `continue.sh` flags:
+
+| Flag | Effect |
+|---|---|
+| `--keep-augmented` | `git reset --hard` to `task0c-augmented-*`. Generated tests stay. Strip, bake, t1.5, task1, and t2a re-run on a stub tree. Mutually exclusive with `--restart-from-pre-augment`. |
+| `--restart-from-pre-augment` | Reset to `task0c-pre-*` (the commit before augmentation). Task0c itself re-runs. Needs that tag. |
+| `--no-pre-run` | Skip the stamp check. |
+| `--wipe` | Removed. Refuses. |
+
+`resume_from_t2.sh` is a shim for `restart_from.sh task2`.
+
+### Re-enter a phase (fills stay unless you delete them)
+
+```bash
+bash restart_from.sh <stage> [--force]
+```
+
+`--force` SIGKILLs a running pipeline; without it the stop is graceful. Always
+relaunches detached (`--no-tail`). The named stage and everything after it are
+cleared in `pipeline_state.md`. **Fills are not deleted** — cluster seed is
+`if not dst.exists()`, so t2a continues on the bodies already on disk.
+
+| Stage | What re-runs | What is kept |
+|---|---|---|
+| `task2` / `task2a` | per-cluster fill → merge → merged-fill → test → genesis | t0c tests, t1.5 layout (`.skeleton/`), existing fills |
+| `task2b` / `task2c` | merge onward (skips per-cluster fill) | the per-cluster trees |
+| `task3` / `task4` | test / genesis only | all fills |
+| `task1` | FR synthesis + the whole reconstruct loop | t0c tests, layout, fills (t2a still sees them) |
+| `task0c` | augmentation and everything after it | task0a/0b. Resets the workspace to `task0c-pre-*` |
+
+`task2a`…`task4` are visibility labels on one reconstruct phase, not separate
+resume points. `task2` and `task2a` clear the same keys.
+
+### Wipe fills and start the reconstruct loop from stubs
+
+```bash
+bash redo.sh              # graceful stop, wipe `.skeleton-filled/`, restore post-t0c tag
+bash redo.sh --force      # same, SIGKILL instead of graceful
+bash redo.sh --full --force
+```
+
+`redo.sh` always launches `continue.sh --y --keep-augmented --no-tail`. That
+**keeps task0c** (generated tests come back from the tag; sentinels skip
+augmentation). It does **not** keep the current t1.5 layout: `.skeleton/`,
+`.skeleton-filled/`, and `.best_tree/` are archived off the workspace, strip
+is cleared, and bake + t1.5 author a new layout before t2a. `--full` also
+deletes `.skeleton/` in `redo.sh` itself; the restore already takes the layout
+off the workspace, so `--full` is not what decides whether t1.5 re-runs.
+
+There is no anyhow launcher that wipes fills **and** keeps the current
+layout. That pair is:
+
+```bash
+bash pre_run.sh
+rm -rf tmp/anyhow/.skeleton-filled
+bash restart_from.sh task2a --force
+```
+
+t2a then seeds each missing filled tree from `.skeleton/`. The body ledger
+(`logs/body_ledger/anyhow/`) lives outside the workspace and survives every
+launcher above; cluster entry may splice prior proven or unmeasured bodies
+back onto those stubs. That is by design. Do not delete the ledger unless
+the reading is a crate that has never been tried.
+
+### Which launcher for which question
+
+| Question | Command |
+|---|---|
+| Resume a stopped run on the same code | `bash continue.sh --y --no-tail` |
+| Driver-half t2a fix; keep the filled tree | `bash pre_run.sh` then `bash restart_from.sh task2a --force` |
+| Cold t2a from stubs; keep t0c and the current t1.5 layout | `bash pre_run.sh`; `rm -rf tmp/anyhow/.skeleton-filled`; `bash restart_from.sh task2a --force` |
+| New layout, same generated tests (strip + task1 + t2a from stubs) | `bash pre_run.sh` then `bash redo.sh --force` |
+| Re-run task0c (test generator / admission change) | `bash pre_run.sh` then `bash restart_from.sh task0c --force` |
+| Stop only | `touch /tmp/pipeline_graceful_stop` |
+
+A loop-behaviour fix (dispatch, packing, judgment, charging) is validated on
+the tree the pathology needs, or on a stub seed of the **same** layout. Do
+not `redo.sh` that class: t1.5 re-authors, and the next score describes a
+different scaffold.
+
 ---
 
 ## Serving the model
@@ -292,6 +421,11 @@ After this step, the project will compile but all tests will fail -- there is no
 implementation. This is the correct starting state for the pipeline.
 
 ### Step 5 -- Run the pipeline
+
+For the live `anyhow` tree, use [Launch, resume, restart (anyhow)](#launch-resume-restart-anyhow)
+(`continue.sh` / `restart_from.sh` / `redo.sh`), not a bare `pipeline.py`.
+
+For a generic project folder next to `pipeline.py`:
 
     python pipeline.py --project <subfolder>
 

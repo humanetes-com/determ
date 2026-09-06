@@ -451,7 +451,13 @@ def test_rebuy_emits_at_dispatch_for_a_prior_process_empty_delta(
                run_id="this-process"),
          tmp_path, monkeypatch, guard="9")
     buys = [d for ev, d in events if ev == "phase_c.re_buy"]
-    assert buys and f"{_ACC.file}::{_ACC.fn_name}" in buys[0]["units"]
+    acc = f"{_ACC.file}::{_ACC.fn_name}"
+    assert buys and acc in buys[0]["units"]
+    # NEGATIVE CONTROL — a FLAT / not-FLAT cut put this PROVEN row in
+    # unmeasured ("tests did not run"). The standing grade is proven.
+    assert acc not in buys[0]["unmeasured"]
+    assert acc not in buys[0]["flat"]
+    assert buys[0]["grades"]["proven"] == [acc]
 
 
 def test_rebuy_does_not_fire_on_the_same_process_or_after_a_code_move(

@@ -12,7 +12,7 @@ import hashlib
 import os
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -56,7 +56,9 @@ from pipeline_core.domain.body_ledger import (
     body_sha,
     classify,
     flat_standing_unchanged,
+    judgment_attributed,
     latest_by_unit,
+    rebuy_by_grade,
     rebuy_hits,
     rows_for_units,
     standing_on_tree,
@@ -1982,9 +1984,14 @@ def run_phase_c_tdd(
             _judged: list[LedgerEntry] = []
             for _row in _ledger_rows:
                 _unit = FnLocator(_row.key.file, _row.key.fn_name)
-                _attributed = {
+                # The reverse map is attribution proper; an escalation-only
+                # unit (producer escalation, owner-map admission) is absent
+                # from it, and judging on it alone graded every such landing
+                # UNMEASURED with its premise erased (`judgment_attributed`
+                # carries the run). The row's own premise is joined in.
+                _attributed = judgment_attributed({
                     bare_test_name(_t) for _t, _units in test_reverse_map.items()
-                    if _unit in _units}
+                    if _unit in _units}, _row)
                 _now = (body_sha(deps.tree_writer.bodies(_unit, target_src_dir))
                         if deps.tree_writer is not None else "")
                 _state, _delta = classify(
@@ -4345,15 +4352,41 @@ def run_phase_c_tdd(
                 "rebuy": _rebuy_names,
             })
         if _rebuy:
+            # Split by the standing grade, not FLAT vs everything else: an
+            # UNMEASURED row says the tests did not run; a PROVEN empty-delta
+            # row does not. Run `2965-453dd7a4` iter 1's 16 hits were 4 FLAT
+            # and 12 UNMEASURED, so a not-FLAT cut happened to print the
+            # right sentence; the detector's own prior-process row is PROVEN.
+            _by_grade = rebuy_by_grade(_rebuy)
+            _rb_flat = _by_grade.get("flat", ())
+            _rb_unm = _by_grade.get("unmeasured", ())
+
+            def _names(locs: Sequence[FnLocator]) -> list[str]:
+                return [f"{u.file}::{u.fn_name}" for u in locs]
+
+            _grade_bits = []
+            if _rb_flat:
+                _grade_bits.append(f"{len(_rb_flat)} graded flat")
+            if _rb_unm:
+                _grade_bits.append(
+                    f"{len(_rb_unm)} unmeasured — tests did not run")
+            for _st, _locs in sorted(_by_grade.items()):
+                if _st in ("flat", "unmeasured"):
+                    continue
+                _grade_bits.append(f"{len(_locs)} {_st}")
+            _grade_clause = ", ".join(_grade_bits) if _grade_bits else "ungraded"
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: RE-BUY — "
-                f"{len(_rebuy)} unit(s) a prior process already graded "
-                "with an empty verdict delta: "
+                f"{len(_rebuy)} unit(s) a prior process already tried under "
+                f"this oracle with an empty verdict delta ({_grade_clause}): "
                 + ", ".join(f"{u.file}::{u.fn_name}" for u, _ in _rebuy[:8])
                 + (f" (+{len(_rebuy) - 8} more)" if len(_rebuy) > 8 else ""))
             deps.emit("phase_c.re_buy", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "units": _rebuy_names,
+                "flat": _names(_rb_flat),
+                "unmeasured": _names(_rb_unm),
+                "grades": {st: _names(locs) for st, locs in _by_grade.items()},
                 "prior_run_id": _rebuy[0][1].run_id})
         # Crash evidence outranks everything, including the producer order above.
         ordered = promote_crash_evidence(ordered, _crash_grades)
@@ -4364,8 +4397,12 @@ def run_phase_c_tdd(
         # same-process re-buy (the `9872` spend) is invisible to it.
         # Crash-blamed units stay — live evidence outranks a prior empty
         # delta.
+        # A still-hollow body is never excluded, whatever the ledger says
+        # about it: first-fill ranks the live-stub producers first for a
+        # reason (run `155810-cbb3b9fc`), and a stub's standing grade is a
+        # claim about bytes that are not the body the batch would write.
         ordered = drop_standing_flat(
-            ordered, _flat_keys, exempt=_crash_grades.keys())
+            ordered, _flat_keys, exempt=_crash_grades.keys() | _stub_keys)
         if _pass_cohort is None:
             _pass_cohort = tuple(key for key, _ in ordered)
         # The promotion above is worthless unless the cursor is told to let

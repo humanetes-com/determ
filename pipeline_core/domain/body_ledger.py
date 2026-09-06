@@ -607,6 +607,40 @@ class SweepView:
         return self.passed | self.failed
 
 
+def judgment_attributed(
+    attributed: Iterable[str], entry: LedgerEntry,
+) -> frozenset[str]:
+    """The tests a landed row is judged against: the reverse map's
+    attribution joined with the row's own dispatch premise.
+
+    The premise (`LedgerEntry.convicting`) is the tests whose failure bought
+    the dispatch — attributed-or-escalated and failing at the pre-fill
+    sweep — stamped on the LANDED row. The reverse map knows attribution
+    proper only. A unit on the frontier through a futility escalation or
+    the owner-map admission is absent from it, so a judgment read off the
+    reverse map alone graded every such landing UNMEASURED and re-stamped
+    its premise EMPTY, while the tests that convicted the dispatch had run
+    and stayed red. Run `2965-453dd7a4` (2026-09-05, cluster stable), iter
+    2: `src/error.rs::construct_from_display`, `::object_ref`,
+    `src/lib.rs::must_use` and `src/fmt.rs::display` landed at iter 1 with
+    7-19 convicting tests each, the iter-2 sweep ran all 28 binaries with a
+    byte-identical verdict vector, and the four were judged `unmeasured`
+    with `convicting=()`. Three of them were re-admitted by the owner map
+    on every later iteration; a FLAT row would have excluded them
+    (`flat_standing_unchanged`), and the escalated re-buy the dispatch
+    ranking then spent its leftover cap slots on is the class that erasure
+    kept alive.
+
+    Joining the premise can only add outcomes on tests that were failing
+    before the landing (the premise is a subset of the pre-fill failing set
+    by construction), so it can mint FLAT or PROVEN where the reverse map
+    minted UNMEASURED — never REFUTED. A row without a premise (INFERRED
+    with nothing convicting it, or written before the field) judges exactly
+    as before.
+    """
+    return frozenset(attributed) | frozenset(entry.convicting)
+
+
 def classify(
     entry: LedgerEntry, *, attributed: Iterable[str],
     before: SweepView, after: SweepView, body_now_sha: str,
@@ -849,6 +883,25 @@ def rebuy_hits(
             continue
         hits.append((loc, entry))
     return tuple(hits)
+
+
+def rebuy_by_grade(
+    hits: Sequence[tuple[FnLocator, LedgerEntry]],
+) -> dict[str, tuple[FnLocator, ...]]:
+    """Split re-buy hits by the standing row's actual grade.
+
+    `unmeasured` means the tests did not run. A FLAT / not-FLAT cut puts any
+    other empty-delta grade in that bucket — the dispatch-time detector's
+    own test uses a PROVEN prior row, and printing that as "unmeasured —
+    tests did not run" is the wrong sentence. Computed on run
+    `2965-453dd7a4` (2026-09-05) iter 1's 16 hits against the prior
+    ledger: 4 FLAT, 12 UNMEASURED, 0 other, so the live line happened to
+    be right; the cut still has to name the grade.
+    """
+    by: dict[str, list[FnLocator]] = {}
+    for loc, entry in hits:
+        by.setdefault(str(entry.state), []).append(loc)
+    return {state: tuple(locs) for state, locs in by.items()}
 
 
 def plan_reseed(

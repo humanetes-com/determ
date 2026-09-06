@@ -28,6 +28,7 @@ from pipeline_core.domain.body_ledger import (
     latest_by_unit,
     oracle_fingerprint,
     plan_reseed,
+    rebuy_by_grade,
     rebuy_hits,
     reseed_allowed,
     rows_for_units,
@@ -393,6 +394,26 @@ def test_rebuy_hits_a_prior_process_empty_delta_and_skips_the_rest() -> None:
         run_id="this-process")] == [loc]
 
 
+def test_rebuy_by_grade_names_the_standing_state_not_flat_vs_rest() -> None:
+    """A proven empty-delta hit is not labeled unmeasured. The live
+    2965-453dd7a4 iter-1 cut was 4 FLAT / 12 UNMEASURED / 0 other, so a
+    not-FLAT bucket happened to print the right sentence; the detector's
+    own prior-process fixture is PROVEN."""
+    proven = (FnLocator("src/error.rs", "new"),
+              _entry(state=BodyState.PROVEN, run_id="349271-d876e4a9",
+                     verdict_delta=()))
+    unmeas = (FnLocator("src/error.rs", "construct"),
+              _entry(state=BodyState.UNMEASURED, run_id="57079-a5f83827",
+                     verdict_delta=()))
+    flat = (FnLocator("src/error.rs", "from"),
+            _entry(state=BodyState.FLAT, run_id="57079-a5f83827",
+                   verdict_delta=()))
+    by = rebuy_by_grade((proven, unmeas, flat))
+    assert [u.fn_name for u in by["proven"]] == ["new"]
+    assert [u.fn_name for u in by["unmeasured"]] == ["construct"]
+    assert [u.fn_name for u in by["flat"]] == ["from"]
+
+
 def test_ledger_helpers_the_index_and_fingerprint_actually_call() -> None:
     assert _KEY.as_str() == "anyhow/stable/src/error.rs::new"
     assert text_sha("Error::from(e)") == text_sha("  Error::from(e)\n")
@@ -726,3 +747,27 @@ def test_rows_for_units_builds_the_nine_flat_rows_of_the_recorded_audit() -> Non
         file_fp={"src/error.rs": "fp-e"}, run_id="82157-476ddc16",
         iteration=1, epoch=0, oracle_fp="oracle-A")
     assert [replace(r, state=BodyState.LANDED) for r in rows] == landed
+
+
+def test_judgment_attributed_joins_the_dispatch_premise_and_only_that() -> None:
+    """An escalation-only unit has no reverse-map attribution; its LANDED
+    row carries the tests whose failure bought the dispatch, and the
+    judgment must be scoped to them. A row without a premise judges on the
+    reverse map exactly as before."""
+    from pipeline_core.domain.body_ledger import judgment_attributed
+    row = _entry(state=BodyState.LANDED, convicting=("test_a", "test_b"))
+    assert judgment_attributed(frozenset(), row) == frozenset({"test_a", "test_b"})
+    assert judgment_attributed({"test_c"}, row) == frozenset({"test_a", "test_b", "test_c"})
+    bare = _entry(state=BodyState.LANDED, convicting=())
+    assert judgment_attributed({"test_c"}, bare) == frozenset({"test_c"})
+    assert judgment_attributed(frozenset(), bare) == frozenset()
+    # The premise is a subset of the pre-fill failing set by construction,
+    # so the join can only add FLAT / PROVEN outcomes, never REFUTED.
+    before = SweepView(passed=frozenset({"test_c"}), failed=frozenset({"test_a", "test_b"}))
+    after = SweepView(passed=frozenset({"test_c"}), failed=frozenset({"test_a", "test_b"}))
+    state, delta = classify(row, attributed=judgment_attributed(frozenset(), row),
+                            before=before, after=after, body_now_sha=row.body_sha)
+    assert state is BodyState.FLAT and delta == ()
+    state, _ = classify(row, attributed=frozenset(), before=before, after=after,
+                        body_now_sha=row.body_sha)
+    assert state is BodyState.UNMEASURED

@@ -596,8 +596,19 @@ def test_a_landed_passenger_is_not_reported_as_unattempted(
     assert row["esc_unchanged"] == ["src/a.rs::width"]
     assert not any("no route attempted" in ln and "height" in ln
                    for ln in logs)
+    # Two FLAT writers, one claim each: the audit arm grades `width`
+    # (attempted, escalated, returned unchanged); the promotion pass grades
+    # `height` — its body LANDED, and the test whose failure bought the
+    # dispatch (the row's premise, joined by `judgment_attributed`) ran at
+    # the next sweep and stayed red. Before the premise join the passenger
+    # was `unmeasured` with its premise erased, which is how escalation-only
+    # landings re-entered dispatch on run `2965-453dd7a4`.
     assert {r.key.fn_name for r in ledger["rows"]
-            if r.state is BodyState.FLAT} == {"width"}
+            if r.state is BodyState.FLAT} == {"width", "height"}
+    assert {r.key.fn_name for r in ledger["rows"]
+            if r.state is BodyState.LANDED} == {"height"}
+    assert all(r.convicting for r in ledger["rows"]
+               if r.key.fn_name == "height" and r.state is BodyState.FLAT)
 
     # NEGATIVE CONTROL: the pre-fix expression, injected at the same
     # call site. Height is in unattempted and the log names it, while

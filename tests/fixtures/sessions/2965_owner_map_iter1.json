@@ -1,0 +1,2740 @@
+{
+ "run_id": "2965-453dd7a4",
+ "date": "2026-09-05",
+ "cluster": "stable",
+ "iter": 1,
+ "claim": "every failing test's own coverage slice fits under SLICE_SESSION_MAX_UNITS=32 while the union does not; plan_slices used to refuse the merged group (0 sessions), packing yields 4 sessions each under 32 with every test in exactly one and no test's slice split",
+ "max_units": 32,
+ "packed_sessions": [[13, 31], [7, 32], [7, 32], [5, 32]],
+ "owners": {
+  "behaviour_probe_stable_exact_format_0": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "result_with_context_err_anyhow_error": [
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/context.rs",
+    "with_context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_altdebug": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_std",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "from",
+    "impl From<E>for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait TraitKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Trait"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_altdisplay": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_std",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "from",
+    "impl From<E>for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait TraitKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Trait"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_anyhow_from_anyhow": [
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait TraitKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Trait"
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_anyhow_interpolated_hits_format_err_else": [
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "is",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/wrapper.rs",
+    "fmt",
+    "impl Display for MessageError<M>"
+   ]
+  ],
+  "test_anyhow_interpolated_multiple_args": [
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "is",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/wrapper.rs",
+    "fmt",
+    "impl Display for MessageError<M>"
+   ]
+  ],
+  "test_boxed_anyhow": [
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait TraitKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Trait"
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_clone": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait AdhocKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Adhoc"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_debug": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_std",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "from",
+    "impl From<E>for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait TraitKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Trait"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_debug_backtrace_captured_simple": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/wrapper.rs",
+    "fmt",
+    "impl Display for MessageError<M>"
+   ]
+  ],
+  "test_debug_backtrace_captured_with_cause": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_debug_format_with_context": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_deref_mut_via_downcast_mut": [
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "downcast_mut",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_downcast",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "by_mut",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Mut<'a,T>"
+   ]
+  ],
+  "test_downcast": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "downcast",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/wrapper.rs",
+    "fmt",
+    "impl Display for MessageError<M>"
+   ]
+  ],
+  "test_downcast_high": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for E"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context_chain_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "downcast",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_downcast_low": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for E"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context_chain_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "context_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "downcast",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_downcast_mid": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for E"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context_chain_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "context_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "downcast",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_downcast_mut": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for E"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context_chain_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "context_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "downcast_mut",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "downcast_ref",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_mut",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Mut<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_downcast_ref": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for E"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context_chain_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "context_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "downcast_ref",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "is",
+    "impl Error"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_drop": [
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_std",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "downcast",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "new",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_downcast",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_chain_len_and_order": [
+   [
+    "src/chain.rs",
+    "len",
+    "impl ExactSizeIterator for Chain<'_>"
+   ],
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_context_display": [
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_debug_chain": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_fmt_alternate": [
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_impl_source_triggered_by_boxed_with_context": [
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for ErrorImpl<E>"
+   ],
+   [
+    "src/error.rs",
+    "into_boxed_dyn_error",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_boxed",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "source",
+    "impl StdError for ErrorImpl<E>"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_multi_context_chain": [
+   [
+    "src/chain.rs",
+    "len",
+    "impl ExactSizeIterator for Chain<'_>"
+   ],
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "size_hint",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_error_root_cause": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_display",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "root_cause",
+    "impl Error"
+   ],
+   [
+    "src/lib.rs",
+    "format_err",
+    "mod __private"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_iter": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next",
+    "impl Iterator for Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait AdhocKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Adhoc"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_len": [
+   [
+    "src/chain.rs",
+    "len",
+    "impl ExactSizeIterator for Chain<'_>"
+   ],
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait AdhocKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Adhoc"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_rev": [
+   [
+    "src/chain.rs",
+    "new",
+    "impl Chain<'a>"
+   ],
+   [
+    "src/chain.rs",
+    "next_back",
+    "impl DoubleEndedIterator for Chain<'_>"
+   ],
+   [
+    "src/context.rs",
+    "fmt",
+    "impl Display for ContextError<C,E>"
+   ],
+   [
+    "src/context.rs",
+    "source",
+    "impl StdError for ContextError<C,Error>"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "chain",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "deref",
+    "impl Deref for Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/kind.rs",
+    "anyhow_kind",
+    "trait AdhocKind"
+   ],
+   [
+    "src/kind.rs",
+    "new",
+    "impl Adhoc"
+   ],
+   [
+    "src/lib.rs",
+    "must_use",
+    "mod __private"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "deref",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ]
+  ],
+  "test_unsuccessful_downcast": [
+   [
+    "src/context.rs",
+    "context",
+    "impl Context<T,E>for Result<T,E>"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for E"
+   ],
+   [
+    "src/context.rs",
+    "ext_context",
+    "impl StdError for Error"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "context_chain_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "context_downcast",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "downcast",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ]
+  ]
+ }
+}

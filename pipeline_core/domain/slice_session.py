@@ -153,18 +153,72 @@ def _merge_pending(
     return groups
 
 
+def _fit_under_cap(
+    names: Sequence[str],
+    pending: Mapping[str, frozenset[FnSite]],
+    max_units: int,
+) -> tuple[list[tuple[list[str], set[FnSite]]], list[str]]:
+    """Pack one merged group whose UNION is over the cap into sessions that
+    are each under it, without truncating any test's slice.
+
+    Tests are placed in name order. A test whose own slice exceeds the cap
+    is returned in the second element and belongs to no session (the
+    drop-not-truncate contract, unchanged). Every other test joins the
+    session that already holds the most of its executed path — the fewest
+    new units, ties to the earliest session — when the union stays under
+    the cap, else it opens a session. Deterministic; the same inputs pack
+    the same way on every call.
+
+    A hub unit every test executes (the crate's construction spine) lands in
+    every session that needs it. Sessions run sequentially on one tree, so
+    the second sees the first's bodies; that is the same unit written twice
+    under two judgments, which file-first already does every pass.
+    """
+    bins: list[tuple[list[str], set[FnSite]]] = []
+    oversized: list[str] = []
+    for test in sorted(dict.fromkeys(names)):
+        units = pending[test]
+        if len(units) > max_units:
+            oversized.append(test)
+            continue
+        fits = [i for i, (_, held) in enumerate(bins)
+                if len(held | units) <= max_units]
+        if not fits:
+            bins.append(([test], set(units)))
+            continue
+        best = max(fits, key=lambda i: (len(bins[i][1] & units), -i))
+        bins[best][0].append(test)
+        bins[best][1].update(units)
+    return bins, oversized
+
+
 @dataclass(frozen=True, slots=True)
 class SlicePlanGaps:
-    """Why ``plan_slices`` admitted nothing: empty slices, hollow (stub-blocked)
-    slices, and merged groups over the unit cap. The three used to share one
-    log clause, so a wake could not tell an empty leftover from an exploded
-    coverage slice (run ``110993-6efa23be``, 2026-09-03)."""
+    """Why ``plan_slices`` admitted nothing, and what it packed: empty
+    slices, hollow (stub-blocked) slices, single tests over the unit cap,
+    and merged groups whose union was over the cap but whose tests were
+    fitted into sessions under it. The first three used to share one log
+    clause, so a wake could not tell an empty leftover from an exploded
+    coverage slice (run ``110993-6efa23be``, 2026-09-03).
+
+    ``over_cap`` counts TESTS whose own slice exceeds the cap — the only
+    drop left on this path. Before packing it counted merged GROUPS, and a
+    coverage-complete leftover set whose 32 tests each executed 8-23 sites
+    (union 54) was refused as one over-cap group on every fill of run
+    ``2965-453dd7a4`` (2026-09-05), so the session route never started.
+    """
 
     empty: int
     hollow: int
     over_cap: int
     over_cap_units: int
     max_units: int
+    #: Sessions produced by packing over-union groups.
+    fitted: int = 0
+    #: Over-union groups that were packed.
+    over_union: int = 0
+    #: The largest over-union group's unit count (what the old rule dropped).
+    fitted_from_units: int = 0
 
     def log_clause(self) -> str:
         parts: list[str] = []
@@ -178,6 +232,15 @@ class SlicePlanGaps:
                 f" ({self.over_cap_units} unit(s))")
         return "; ".join(parts) if parts else "no session"
 
+    def fitted_clause(self) -> str:
+        """The packing statement, empty when no over-union group existed."""
+        if not self.over_union:
+            return ""
+        return (f"{self.fitted} session(s) fitted under the cap from "
+                f"{self.over_union} over-union group(s) of up to "
+                f"{self.fitted_from_units} unit(s) "
+                f"(SLICE_SESSION_MAX_UNITS={self.max_units})")
+
 
 def slice_plan_gaps(
     slices: Mapping[str, Collection[FnSite]],
@@ -185,15 +248,28 @@ def slice_plan_gaps(
     stubs: Collection[FnLocator] = (),
     max_units: int = 32,
 ) -> SlicePlanGaps:
-    """The drop reasons ``plan_slices`` applies, counted separately."""
+    """The drop reasons ``plan_slices`` applies and the packing it did,
+    counted separately."""
     pending, n_empty, n_hollow = _pending_after_filters(slices, frozenset(stubs))
     n_over = 0
     over_units = 0
+    n_fitted = 0
+    n_over_union = 0
+    fitted_from = 0
     for names, members in _merge_pending(pending):
-        if names and len(members) > max_units:
-            n_over += 1
-            over_units = max(over_units, len(members))
-    return SlicePlanGaps(n_empty, n_hollow, n_over, over_units, max_units)
+        if not names or len(members) <= max_units:
+            continue
+        bins, oversized = _fit_under_cap(names, pending, max_units)
+        n_over += len(oversized)
+        for t in oversized:
+            over_units = max(over_units, len(pending[t]))
+        if bins:
+            n_over_union += 1
+            n_fitted += len(bins)
+            fitted_from = max(fitted_from, len(members))
+    return SlicePlanGaps(n_empty, n_hollow, n_over, over_units, max_units,
+                         fitted=n_fitted, over_union=n_over_union,
+                         fitted_from_units=fitted_from)
 
 
 def locator_only_expansions(
@@ -228,21 +304,72 @@ def plan_slices(
     """Group the failing tests into sessions: tests whose unit sets overlap
     share one session (the union). A test whose slice touches a still-hollow
     body is left to the stub routes — a session rewrites behaviour, and a
-    verdict behind a stub is not a behaviour verdict. A merged slice over
-    `max_units` is dropped rather than truncated: a session that may only
-    write half the executed path cannot be judged as one transaction.
+    verdict behind a stub is not a behaviour verdict. A single test whose
+    slice is over `max_units` is dropped rather than truncated: a session
+    that may only write half the executed path cannot be judged as one
+    transaction.
+
+    A merged group whose UNION is over the cap while every member test's
+    own slice fits is packed into sessions under the cap (`_fit_under_cap`),
+    never dropped. The drop contract is about one test's executed path; it
+    said nothing about a leftover set that merely shares a construction
+    spine. Run `2965-453dd7a4` (2026-09-05, cluster stable): 32 failing
+    tests, each executing 8-23 sites, union 54, `construct` and `drop` in
+    every map — refused as one over-cap group on every fill, zero sessions
+    started, while file-first re-bought the same producers for four
+    batches. Each packed session still holds every one of its tests' whole
+    slices; no test is split across sessions.
 
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
     pending, _, _ = _pending_after_filters(slices, frozenset(stubs))
     out: list[SessionSlice] = []
     for names, members in _merge_pending(pending):
-        if not names or len(members) > max_units:
+        if not names:
             continue
-        out.append(SessionSlice(
-            tests=tuple(sorted(dict.fromkeys(names))),
-            units=tuple(sorted(members, key=lambda u: (u.file, u.fn_name, u.container)))))
+        groups: list[tuple[list[str], set[FnSite]]]
+        if len(members) <= max_units:
+            groups = [(list(names), set(members))]
+        else:
+            groups, _oversized = _fit_under_cap(names, pending, max_units)
+        for gnames, gmembers in groups:
+            out.append(SessionSlice(
+                tests=tuple(sorted(dict.fromkeys(gnames))),
+                units=tuple(sorted(gmembers,
+                                   key=lambda u: (u.file, u.fn_name, u.container)))))
     return out
+
+
+def slice_plan_payload(
+    slices: Mapping[str, Collection[FnSite]],
+    plans: Sequence[SessionSlice],
+    gaps: SlicePlanGaps,
+) -> dict[str, Any]:
+    """The `phase_c.session.plan` event: what the engine handed
+    `plan_slices` and what came back, emitted on every fill — a refusal
+    included. Before this the refusal was one log line and the union it
+    refused was not in `events.jsonl`, so the packing fixture for run
+    `2965-453dd7a4` had to be computed from the owner-map event instead of
+    the engine's actual argument (hops and locator expansion included)."""
+    union: set[FnSite] = set()
+    for units in slices.values():
+        union.update(units)
+    return {
+        "tests": len(slices),
+        "units_union": len(union),
+        "max_units": gaps.max_units,
+        "empty": gaps.empty,
+        "hollow": gaps.hollow,
+        "over_cap": gaps.over_cap,
+        "over_cap_units": gaps.over_cap_units,
+        "over_union": gaps.over_union,
+        "fitted": gaps.fitted,
+        "fitted_from_units": gaps.fitted_from_units,
+        "slices": {t: sorted(site_label(u) for u in us)
+                   for t, us in sorted(slices.items())},
+        "sessions": [{"tests": list(p.tests), "units": len(p.units)}
+                     for p in plans],
+    }
 
 
 @dataclass(frozen=True, slots=True)

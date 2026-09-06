@@ -354,3 +354,48 @@ def test_site_payload_round_trips_and_legacy_strings_read_as_locators() -> None:
                        "container": "impl fmt::Debug for Error"}
     assert site_from_payload(payload) == canon_site(site)
     assert site_from_payload("src/error.rs::fmt") == FnSite("src/error.rs", "fmt", "")
+
+
+def test_packing_an_over_union_set_does_not_readmit_a_site_the_join_excluded() -> None:
+    """The over-union variant of the join: many coverage-Debug tests, each
+    fitting the cap, whose union does not; eligible would explode Display.
+    Packed sessions still contain no Display site — packing does not
+    invent units, it only groups the slices the join already produced."""
+    hop = FnSite("src/w.rs", "debug", "impl W")
+    tree = [hop]
+    owners: dict[str, set[FnSite]] = {}
+    eligible: dict[FnLocator, set[str]] = {}
+    display_sites: set[FnSite] = set()
+    hub = FnSite("src/hub.rs", "construct", "impl Hub")
+    tree.append(hub)
+    for i in range(6):
+        path = f"src/m{i}.rs"
+        disp = FnSite(path, "fmt", f"impl Display for T{i}")
+        dbg = FnSite(path, "fmt", f"impl Debug for T{i}")
+        tree.extend((disp, dbg))
+        display_sites.add(disp)
+        t = f"t_pay_{i}"
+        owners[t] = {dbg, hub}
+        eligible[FnLocator(path, "fmt")] = {t}
+    pairs = [(next(iter(owners["t_pay_0"] - {hub})), hop)]
+    new_units = attributed_units_for_session(eligible, {})
+    new_slices = session_slices_for_failing(
+        list(owners), owners=owners, units_by_test=new_units, pairs=pairs)
+    new_exp = expand_locator_sites(new_slices, tree)
+    # Every test fits a cap of 4 (hub + its Debug site, + the hop for one);
+    # the union (hub + 6 Debug + hop = 8) does not.
+    assert all(len(u) <= 4 for u in new_exp.values())
+    assert len(frozenset().union(*new_exp.values())) > 4
+    plans = plan_slices(new_exp, max_units=4)
+    assert len(plans) >= 2
+    assert sorted(t for p in plans for t in p.tests) == sorted(owners)
+    for p in plans:
+        assert not (display_sites & set(p.units))
+        assert hub in p.units
+    # Control: the eligible-as-source loop still explodes and is still refused
+    # — a single test over the cap is not packable.
+    old_units = _eligible_as_source(eligible, {})
+    old_slices = session_slices_for_failing(
+        list(owners), owners=owners, units_by_test=old_units, pairs=pairs)
+    old_exp = expand_locator_sites(old_slices, tree)
+    assert any(display_sites & u for u in old_exp.values())

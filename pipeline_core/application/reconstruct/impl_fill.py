@@ -216,6 +216,7 @@ from pipeline_core.domain.slice_session import (
     locator_only_expansions,
     plan_slices,
     slice_plan_gaps,
+    slice_plan_payload,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -4415,10 +4416,20 @@ def fill_impl_blocks(
             _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
                  f"expanded to {_n} tree site(s)")
         _plans = plan_slices(_slices, stubs=_stubs_now, max_units=_max_units)
+        # The plan is a record on every fill, refusal included: the union
+        # the engine actually handed `plan_slices` (owners plus hops plus
+        # locator expansion) was in no event before, so the over-union
+        # refusals of run `2965-453dd7a4` could only be reconstructed from
+        # the owner-map event.
+        _gaps = slice_plan_gaps(_slices, stubs=_stubs_now, max_units=_max_units)
+        if session_slices:
+            _emit("phase_c.session.plan", data={
+                "cluster": cluster_name,
+                **slice_plan_payload(_slices, _plans, _gaps)})
+        if _gaps.fitted_clause():
+            _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
         if not _plans:
             if session_slices:
-                _gaps = slice_plan_gaps(
-                    _slices, stubs=_stubs_now, max_units=_max_units)
                 _log(f"  [phase-c/session] no slice planned "
                      f"({len(session_slices)} failing test(s) — "
                      f"{_gaps.log_clause()})")
@@ -4449,6 +4460,12 @@ def fill_impl_blocks(
 
         for _sl in _plans:
             _check_graceful_stop("slice-session dispatch")
+            if served:
+                # A previous session of this fill kept bodies; a packed
+                # sibling sharing a hub unit must open on the tree as it
+                # now stands, not on the records enumerated before the
+                # loop.
+                _all_recs = _tree_sites()
             _records = _resolve(_sl.units, _all_recs)
             _missing = [u for u in _sl.units if u not in _records]
             if _missing:
