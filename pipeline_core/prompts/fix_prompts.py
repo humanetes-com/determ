@@ -475,6 +475,7 @@ def build_file_fill_prompt(
     types_section: str = "",
     invariants_section: str = "",
     refill_evidence: str = "",
+    prior_regression: str = "",
 ) -> str:
     """File-first fill: everything one file needs in ONE prompt, so the
     model designs the file's impls together (the coherence a fresh reply
@@ -502,6 +503,13 @@ def build_file_fill_prompt(
     `error_generic_member_access` is active"; the file-first traces reason from
     assumptions instead.
 
+    `prior_regression` is what the previous KEPT landing in this file turned
+    red — a net-positive keep forgives a newly-red test at the gate (the
+    sweep's rule), so the next prompt for these units must carry it or the
+    loss is a silent leftover (`render_prior_regression`; the session and
+    pair routes already carried theirs, this route and the per-impl route
+    did not).
+
     Kept PURE per this module's contract: every section arrives rendered."""
     # `in <header> -> fn, fn`, never `<header>: fn, fn`: a model mirroring the
     # colon shape answers name="Error: root_cause", which resolves to no fn at
@@ -526,6 +534,9 @@ def build_file_fill_prompt(
                      f"re-check above — what the failing tests actually "
                      f"establish:\n{refill_evidence}\n</REFILL_EVIDENCE>\n"
                      if refill_evidence.strip() else "")
+    regression_part = (f"\n<PRIOR_REGRESSION>\n{prior_regression}\n"
+                       "</PRIOR_REGRESSION>\n"
+                       if prior_regression.strip() else "")
     error_part = (f"\nYour last attempt at this file failed:\n{prior_error}\n"
                   "Fix the WHOLE file again, keeping every impl mutually "
                   "consistent.\n" if prior_error.strip() else "")
@@ -559,7 +570,7 @@ Functions to write (by impl block):
 ```rust
 {file_text}
 ```
-{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{retro_part}{evidence_part}{tests_part}{error_part}
+{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{retro_part}{evidence_part}{regression_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
 in `block` and NOWHERE else:

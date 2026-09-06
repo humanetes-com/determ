@@ -1,0 +1,2660 @@
+{
+ "cluster": "stable",
+ "file_runs": [],
+ "fitted_recorded": 5,
+ "hollow_recorded": 0,
+ "iter": 1,
+ "ledger_rows": [],
+ "run_id": "285948-b038af72",
+ "sessions": [
+  {
+   "tests": [
+    "behaviour_probe_stable_exact_format_0",
+    "result_with_context_err_anyhow_error",
+    "test_altdisplay",
+    "test_anyhow_from_anyhow",
+    "test_boxed_anyhow",
+    "test_debug",
+    "test_debug_backtrace_captured_with_cause",
+    "test_debug_format_with_context",
+    "test_error_context_display",
+    "test_error_debug_chain",
+    "test_error_fmt_alternate"
+   ],
+   "units": 32
+  },
+  {
+   "tests": [
+    "test_altdebug",
+    "test_clone",
+    "test_iter",
+    "test_rev"
+   ],
+   "units": 32
+  },
+  {
+   "tests": [
+    "test_debug_backtrace_captured_simple",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_drop",
+    "test_unsuccessful_downcast"
+   ],
+   "units": 31
+  },
+  {
+   "tests": [
+    "test_error_chain_len_and_order",
+    "test_error_impl_source_triggered_by_boxed_with_context",
+    "test_error_multi_context_chain",
+    "test_error_root_cause"
+   ],
+   "units": 31
+  },
+  {
+   "tests": [
+    "test_len"
+   ],
+   "units": 25
+  }
+ ],
+ "stubs": [],
+ "stubs_source": "argument",
+ "tests": {
+  "behaviour_probe_stable_exact_format_0": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "result_with_context_err_anyhow_error": [
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "with_context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "with_context"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_altdebug": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl From<E>for Error",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "trait TraitKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_altdisplay": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl From<E>for Error",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "trait TraitKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_anyhow_from_anyhow": [
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "trait TraitKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_boxed_anyhow": [
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "trait TraitKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_clone": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl DoubleEndedIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "next_back"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "trait AdhocKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_debug": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl From<E>for Error",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "trait TraitKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_debug_backtrace_captured_simple": [
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_debug_backtrace_captured_with_cause": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_debug_format_with_context": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_downcast_high": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_drop_rest"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_downcast_low": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_drop_rest"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_downcast_mid": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_drop_rest"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_downcast_mut": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_downcast_ref": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_drop": [
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop_front"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_chain_len_and_order": [
+   {
+    "container": "impl ExactSizeIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "len"
+   },
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl DoubleEndedIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "next_back"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_context_display": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_debug_chain": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_fmt_alternate": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_impl_source_triggered_by_boxed_with_context": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "into_boxed_dyn_error"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_boxed"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_multi_context_chain": [
+   {
+    "container": "impl ExactSizeIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "len"
+   },
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "size_hint"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_error_root_cause": [
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_display"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "root_cause"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_iter": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl DoubleEndedIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "next_back"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "trait AdhocKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_len": [
+   {
+    "container": "impl ExactSizeIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "len"
+   },
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl DoubleEndedIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "next_back"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "size_hint"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "trait AdhocKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_rev": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl DoubleEndedIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "next_back"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "trait AdhocKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   }
+  ],
+  "test_unsuccessful_downcast": [
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   }
+  ]
+ },
+ "ts": "2026-09-05T14:33:00.823+00:00"
+}

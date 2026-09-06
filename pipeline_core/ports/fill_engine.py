@@ -112,7 +112,7 @@ class Cargo(Protocol):
     def test_regression_gate(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
         baseline: TestStateReading | None, *, stub_free: bool = False,
-        introduced_stubs: bool = False,
+        introduced_stubs: bool = False, hollow_before: int | None = None,
     ) -> tuple[RegressionComparison, str] | None: ...
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = ...) -> str: ...
@@ -249,8 +249,12 @@ class StallPolicy(Protocol):
 
 @runtime_checkable
 class ImplFillPath(Protocol):
-    """The alternate per-impl-block fill path the engine delegates to when
-    `PHASE_C_FILL_UNIT=impl` (default). Returns the impl-pass stats dict."""
+    """The per-impl-block fill path the engine delegates to when
+    `PHASE_C_FILL_UNIT=impl` (default). `prepare_impl_fill` returns the
+    four impl-path routes for the fill schedule; `fill_impl_blocks` is the
+    legacy single call (prepare, execute under the schedule, finish)."""
+
+    def prepare_impl_fill(self, **kw: Any) -> Any: ...
 
     def fill_impl_blocks(
         self, *, project_dir: Path, target_src_dir: Path,

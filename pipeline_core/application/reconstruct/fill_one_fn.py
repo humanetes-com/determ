@@ -32,6 +32,10 @@ from pipeline_core.application.reconstruct.context import (
     crash_block_stands,
     fill_skip,
 )
+from pipeline_core.application.reconstruct.fill_reading import (
+    last_comparison,
+    note_kept_comparison,
+)
 from pipeline_core.application.reconstruct.fill_rules import (
     is_unimplemented_body,
     make_failed_attempt_body,
@@ -45,12 +49,17 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     make_request_answerer,
     reconstruction_file_reader,
 )
+from pipeline_core.application.reconstruct.tdd_ratchet import (
+    hollow_count,
+    snapshot_src_tree,
+)
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.coverage_slice import (
     unreached_by as coverage_unreached_by,
 )
 from pipeline_core.domain.crash_site import blame_outside_unit
+from pipeline_core.domain.declined import declined_guidance
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.fill_class import FillOutcomeClass, class_for_kept
 from pipeline_core.domain.impl_routing import norm_src_rel
@@ -174,6 +183,7 @@ class FillOneFn:
             return False
         _base = self.cargo.test_regression_baseline(
             ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
+        _hollow_before = hollow_count(snapshot_src_tree(ctx.target_src_dir))
         _sp = self.mut.splice_body_scoped(
             file_path, fn_name, container, sig_text, best.body,
             cfg_predicates=rec.cfg_predicates, allow_nonstub=True)
@@ -184,7 +194,7 @@ class FillOneFn:
         _rc, _ = self.cargo.run(ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
         _regr = (self.cargo.test_regression_gate(
             ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base,
-            stub_free=ctx.stub_free)
+            stub_free=ctx.stub_free, hollow_before=_hollow_before)
             if _rc == 0 else None)
         if _rc != 0 or _regr is not None:
             _why = ("no longer compiles here" if _regr is None
@@ -618,6 +628,9 @@ class FillOneFn:
                     unit=screening_unit(rel_file, fn_name),
                     pins=_fn_pins, observables=_fn_observables)
                 _retro_guidance = _retro_verdict.text
+                if (_dg := declined_guidance(fn_name, _retro_rec)):
+                    _retro_guidance = "\n".join(
+                        p for p in (_retro_guidance, _dg) if p)
                 # The line carries the STORE key (file::fn::container), not a
                 # display name: `fn new` exists under three containers, and
                 # the whole point is that the grep lands on the one record
@@ -708,6 +721,8 @@ class FillOneFn:
             # ahead regressions to this fn.
             _attempt_baseline_test = self.cargo.test_regression_baseline(
                 ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
+            _attempt_hollow_before = hollow_count(
+                snapshot_src_tree(ctx.target_src_dir))
             def _locate_and_splice() -> SpliceOutcome:
                 _loc = self.mut.locate_fn_by_record(
                     file_path, fn_name, container, sig_text, rec.cfg_predicates)
@@ -982,7 +997,8 @@ class FillOneFn:
             if rc == 0 and _u2_fail_sig is None:
                 _regr = self.cargo.test_regression_gate(
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
-                    _attempt_baseline_test, stub_free=ctx.stub_free)
+                    _attempt_baseline_test, stub_free=ctx.stub_free,
+                    hollow_before=_attempt_hollow_before)
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
                     _u2_fail_sig = _cmp.signature
@@ -1618,6 +1634,7 @@ class FillOneFn:
                               attempts=attempts, error=exhaust_error,
                               fill_class=_ex_cls.value)
 
+        note_kept_comparison(last_comparison() if ctx.tdd_test_cmd else None)
         _ok = class_for_kept(
             passed=_observed_passed[0], unreachable=bool(_blocked_by))
         self.tel.emit("phase_c.fill.class", data={

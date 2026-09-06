@@ -254,6 +254,7 @@ from pipeline_core.adapters.retros import (
 from pipeline_core.adapters.retros import (
     suspend_futile_guidance as _suspend_futile_guidance,
 )
+from pipeline_core.adapters.route_ledger_store import RouteLedgerStore
 from pipeline_core.adapters.skeleton_compile import compile_filled_check
 from pipeline_core.adapters.state import (
     log_state_summary as _state_log_state_summary,
@@ -462,6 +463,9 @@ from pipeline_core.application.reconstruct.impl_fill import (
 )
 from pipeline_core.application.reconstruct.impl_fill import (
     fill_impl_blocks as _fill_impl_blocks,
+)
+from pipeline_core.application.reconstruct.impl_fill import (
+    prepare_impl_fill as _prepare_impl_fill,
 )
 from pipeline_core.application.reconstruct.macro_invariants import (
     compute_cluster_macro_invariants as _compute_cluster_macro_invariants,
@@ -982,6 +986,8 @@ class FillRoles:
     tests: TestLinkerAdapter
     stall: StallPolicyAdapter
     impl: ImplFillPathAdapter
+    # Where the fill schedule's route runs are recorded and ranked from.
+    route_ledger: RouteLedgerStore
 
 
 @dataclass(frozen=True)
@@ -1825,7 +1831,9 @@ def build_app(
         ),
         impl=ImplFillPathAdapter(
             fill_impl_blocks_fn=lambda **kw: _fill_impl_blocks(_via_deps_impl_fill(), **kw),
+            prepare_impl_fill_fn=lambda **kw: _prepare_impl_fill(_via_deps_impl_fill(), **kw),
         ),
+        route_ledger=RouteLedgerStore(),
     )
 
     # ---- the reference floor -------------------------------------------------
@@ -2644,6 +2652,7 @@ def build_app(
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,
             task2_model=settings.task_models.task2,
+            single_call_char_limit=cfg.single_call_char_limit,
         ),
         phase_subcommand_deps=phase_subcommand_deps,
         task0c_deps=Task0cDeps(

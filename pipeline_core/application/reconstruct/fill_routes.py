@@ -1,0 +1,113 @@
+"""The port every fill route answers to, so the fill can be scheduled.
+
+Before this port the five routes — slice sessions, formatter pairs,
+file-first, per-impl, per-fn — were a fixed sequence of closures inside one
+function and one method, each knowing its own preconditions and nothing
+about the others' payoff; the order could only be changed by adding a
+precondition to a route. A route that implements :class:`FillRoute` says
+what it WOULD do this fill (`plan`) as :class:`RouteRun` values the
+schedule can order, and does one of them (`run`) under a :class:`RunClock`
+that gates its next claim.
+
+`RouteRunReport` is what a route knows about its own run; the executor
+(`fill_scheduler.execute_fill`) completes it into a `RouteLedgerRow` with
+the wall clock and the suite reading it measures around the run, so every
+route's payoff is read by the same instrument.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
+
+from pipeline_core.domain.fill_schedule import (
+    RouteKind,
+    RouteLedgerRow,
+    RouteRun,
+    RunClock,
+)
+from pipeline_core.domain.models import ClusterFillResult, FnLocator
+
+__all__ = [
+    "FillRoute",
+    "PreparedFill",
+    "RouteLedger",
+    "RouteRunReport",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RouteRunReport:
+    """What a route reports about one of its runs."""
+
+    model_calls: int = 0
+    kept: frozenset[FnLocator] = frozenset()
+    reverted: frozenset[FnLocator] = frozenset()
+    dispatched: frozenset[FnLocator] = frozenset()
+    classes: Mapping[str, int] = field(default_factory=dict)
+    #: The route found nothing to do when it opened (the targets were
+    #: served by an earlier run, or the plan was stale).
+    empty: bool = False
+    #: The route declined every target (empty bodies), nothing landed.
+    declined: bool = False
+    #: A graceful stop ended the run before it finished.
+    stopped: bool = False
+    #: The route's own verdict-delta reading, when it has one (a session's
+    #: last judged turn); None means "let the executor's reading decide".
+    own_delta: int | None = None
+
+
+@runtime_checkable
+class FillRoute(Protocol):
+    """One fill route as the schedule sees it."""
+
+    @property
+    def kind(self) -> RouteKind: ...
+
+    @property
+    def parallel(self) -> bool:
+        """True when CONSECUTIVE runs of this route in the schedule may
+        execute concurrently (they touch disjoint files and their shared
+        state is already serialised by the splice and counter locks): the
+        file-first and per-impl routes. False for the session (one tree,
+        one transcript) and the pair route."""
+        ...
+
+    def plan(self) -> Sequence[RouteRun]:
+        """The runs this route would do on this fill's batch, in the route's
+        own order. Computed once at fill start; a run whose targets an
+        earlier run served is `empty` when it opens."""
+        ...
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        """Execute one planned run. Must poll `clock.may_claim()` before
+        every unit / turn / session it opens and never interrupt one in
+        flight; must return, never raise, on a route-internal failure."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedFill:
+    """What `prepare_impl_fill` hands the engine: the four impl-path routes
+    over one shared fill context, the hollow relation of this fill's
+    leftover tests, and the result the context yields once every run has
+    executed."""
+
+    routes: tuple[FillRoute, ...]
+    hollow: Mapping[str, frozenset[FnLocator]]
+    finish: Callable[[], ClusterFillResult]
+    #: Body identity for a set of targets on the tree as it stands NOW
+    #: (re-read per call, so a run planned after another landed keys on the
+    #: new bodies).
+    bodies_sha: Callable[[frozenset[FnLocator]], str]
+    #: How many bodies the four routes have landed so far this fill.
+    landed: Callable[[], int] = lambda: 0
+
+
+@runtime_checkable
+class RouteLedger(Protocol):
+    """Where route rows live (`adapters/route_ledger_store.py`)."""
+
+    def load(self, project: str, cluster: str) -> list[RouteLedgerRow]: ...
+
+    def append(self, project: str, rows: Sequence[RouteLedgerRow]) -> int: ...

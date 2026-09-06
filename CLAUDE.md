@@ -623,6 +623,24 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   is measured. `0` disables. Minutes are read once at cluster entry
   (same as the other five) and passed to `fill_phase_clock.arm` each
   fill — not re-read from the env per iteration.
+- `TDD_FILL_BUDGET_MINUTES` (default 0) — NOT a stop: the fill schedule's
+  wall-clock budget (`domain/fill_schedule.py`), the minutes one fill's
+  route runs share by weight (never-served and paying runs 2, served 1,
+  re-buys 0 and deferred). It can prevent no reading: the sweep runs at
+  every iteration boundary regardless, a deferred run is recorded
+  `deferred` in `logs/route_ledger/` and is the NEXT fill's never-served
+  candidate (a re-buy deferred twice is re-admitted with weight 1), and a
+  unit, turn or session in flight always completes, so a fill overruns
+  the budget by at most one unit. `0` = order only (blockers first,
+  never-served before re-buys, no shares, nothing deferred).
+  `PHASE_C_FILL_SCHEDULE=0` restores the fixed pre-schedule walk
+  (sessions → pairs → file-first → per-impl → per-fn) for an A/B, and is
+  the negative control of the schedule's walk tests. Read once at cluster
+  entry beside the six stops; confirmed on the `[phase-c/schedule] fill
+  N:` line of every fill, which prints the order, each run's reason and
+  share, and the deferred list. `TDD_FILL_PHASE_MAX_MINUTES` stays the
+  process STOP and must be `0` or `>= budget + the longest healthy single
+  unit`.
 - `POST_MERGE_MAX_STALLS` — the same clock for the post-merge wave (task2c),
   whose traversal is `ceil(frontier / POST_MERGE_MAX_DISPATCH)` iterations;
   same arithmetic, same `0`. Its empty-frontier branch

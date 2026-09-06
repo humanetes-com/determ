@@ -214,17 +214,21 @@ def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
     assert "self.tag" in text and "unimplemented!()" not in text
 
 
-def test_impl_b3_does_not_credit_green_but_test_failing_fill(monkeypatch, tmp_path):
-    # When the crate COMPILES (rc==0) but the block's own U2 test fails, B3 must
-    # not CREDIT the green-but-wrong body as a fill — the block stays unfilled so
-    # the behavioral re-fill route retries it. B3 keeps only while rc!=0.
+def test_impl_green_but_test_failing_fill_is_kept_deferred_not_cashed(monkeypatch, tmp_path):
+    # When the crate COMPILES (rc==0) but the block's own U2 test fails and
+    # none of its tests was passing at baseline, the body is KEPT on
+    # non-regression and judged at the next sweep — the one bar every route
+    # applies (the file route always did; this route used to require crash
+    # evidence and otherwise reverted, then salvaged the same body without
+    # crediting it). It is a landing (`impls_filled`), never a CASH: the
+    # fill class is `unreachable`, the disposition KEEP_DEFERRED, and the
+    # behavioral re-fill route retries the block off the sweep's verdict.
     #
-    # What the exhausted loop LEAVES IN THE TREE is a separate question, and the
-    # answer is not the stub: `unimplemented!()` panics, which aborts the whole
-    # test binary and leaves every sibling test in it without a verdict, so the
-    # compiling body is the strictly better end state as long as it reddens
-    # nothing (checked by the regression gate before it is kept). The re-fill
-    # route reaches a compiling-but-wrong body just as well as a stub — see
+    # What stays IN THE TREE is the compiling body, not the stub:
+    # `unimplemented!()` panics, which aborts the whole test binary and
+    # leaves every sibling test in it without a verdict, so the compiling
+    # body is the strictly better end state as long as it reddens nothing
+    # (checked by the regression gate before it is kept). See
     # IMPL_LIB_WRONG_KIND below.
     from pipeline_core.domain.models import FnLocator
     ws = _setup(monkeypatch, tmp_path)
@@ -253,8 +257,10 @@ def test_impl_b3_does_not_credit_green_but_test_failing_fill(monkeypatch, tmp_pa
         tdd_frontier_tests=FailureFrontier.of_direct({FnLocator("lib.rs", "kind"): {"kind_works"},
                             FnLocator("lib.rs", "name"): {"kind_works"}}))
     text = (ws / "src" / "lib.rs").read_text()
-    assert res.impls_filled == 0            # NOT credited as a fill
-    # Salvaged, not re-stubbed: the compiling body survives so the binary runs.
+    assert res.impls_filled == 1            # landed and kept, deferred
+    assert res.fill_classes is not None
+    assert res.fill_classes.cashed == 0 and res.fill_classes.unreachable == 1
+    # Kept, not re-stubbed: the compiling body survives so the binary runs.
     assert "unimplemented!()" not in text
     assert "self.tag" in text
 

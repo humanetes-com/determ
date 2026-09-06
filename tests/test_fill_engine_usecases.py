@@ -140,6 +140,12 @@ class FakeFill:
     def fill_impl_blocks(self, **k: Any) -> ClusterFillResult:
         return self.s.get("impl_stats", ClusterFillResult())
 
+    def prepare_impl_fill(self, **k: Any) -> Any:
+        from pipeline_core.application.reconstruct.fill_routes import PreparedFill
+        stats = self.s.get("impl_stats", ClusterFillResult())
+        return PreparedFill(routes=(), hollow={}, finish=lambda: stats,
+                            bodies_sha=lambda _t: "", landed=lambda: stats.fns_filled)
+
 
 _CAPS = FillCaps(per_fn_fix_hard_cap=8, per_fn_fix_max_stalls=2, fix_err_cap=2000)
 
@@ -737,10 +743,11 @@ def test_cfg_dead_stub_is_refused_at_dispatch(tmp_path: Path) -> None:
             "sig_text": "fn cap_limit()"}
     fake = FakeFill(stub_tuples=[])
     # Call sequence: cluster_inactive_stub_names scans (every, then active —
-    # the verdict says cap_limit is inactive), then the pass scan returns the
-    # record anyway (the observed record-source drift that produced the live
-    # fill). The dispatch filter must refuse it.
-    seq: list[list[dict[str, Any]]] = [[dead], [], [dead]]
+    # the verdict says cap_limit is inactive), then the per-fn route's plan
+    # scan and the pass scan both return the record anyway (the observed
+    # record-source drift that produced the live fill). The dispatch filter
+    # must refuse it.
+    seq: list[list[dict[str, Any]]] = [[dead], [], [dead], [dead]]
     fake.scan_stub_records = (  # type: ignore[method-assign]
         lambda d, c: list(seq.pop(0)) if seq else [])
     out = _engine(fake, FillUnit.FN).run(

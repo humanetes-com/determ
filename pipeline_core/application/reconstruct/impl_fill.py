@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import queue as _queue_mod
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -40,6 +39,21 @@ from pipeline_core.application.reconstruct.context import (
     crash_block_mark,
     crash_block_stands,
 )
+from pipeline_core.application.reconstruct.fill_reading import (
+    last_comparison,
+    note_kept,
+    note_kept_comparison,
+)
+from pipeline_core.application.reconstruct.fill_routes import (
+    FillRoute,
+    PreparedFill,
+    RouteLedger,
+    RouteRunReport,
+)
+from pipeline_core.application.reconstruct.fill_scheduler import (
+    FillExecutionDeps,
+    execute_fill,
+)
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
 )
@@ -59,10 +73,13 @@ from pipeline_core.application.reconstruct.slice_session import (
     SessionPorts,
     run_slice_session,
 )
+from pipeline_core.application.reconstruct.tdd_ratchet import (
+    hollow_count,
+    snapshot_src_tree,
+)
 from pipeline_core.application.reconstruct.test_locator import (
     attributed_test_blocks,
 )
-from pipeline_core.application.reconstruct.unit_pool import run_units_concurrently
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
     escalation_refusal_note,
@@ -85,6 +102,7 @@ from pipeline_core.domain.cfg import cluster_cfg_set
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
 from pipeline_core.domain.crash_site import blame_outside_unit
+from pipeline_core.domain.declined import declined_guidance, note_declined
 from pipeline_core.domain.dispatch import (
     file_route_units,
     impl_route_covers,
@@ -97,11 +115,19 @@ from pipeline_core.domain.failure_signature import (
 )
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
+    FillClassHistogram,
     FillOutcomeClass,
     class_for_kept,
     note_fill_class,
 )
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
+from pipeline_core.domain.fill_schedule import (
+    RouteKind,
+    RouteRun,
+    RunClock,
+    bodies_sha_of,
+    hollow_by_test,
+)
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.impl_routing import (
     containers_in_file,
@@ -121,10 +147,11 @@ from pipeline_core.domain.installable_fns import (
     producer_bypasses,
 )
 from pipeline_core.domain.llm_output import (
+    ReplyAudit,
     bind_headerless_names,
     extract_fn_bodies,
     fn_tag_occurrences,
-    reader_loss,
+    reply_audit,
 )
 from pipeline_core.domain.model_defaults import resolve_route_order
 from pipeline_core.domain.models import (
@@ -212,10 +239,11 @@ from pipeline_core.domain.rust_idents import (
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.slice_session import (
+    SessionSlice,
+    SliceCosts,
     expand_locator_sites,
     locator_only_expansions,
     plan_slices,
-    sessions_this_fill,
     slice_plan_gaps,
     slice_plan_payload,
 )
@@ -252,6 +280,9 @@ from pipeline_core.prompts.fix_prompts import (
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
+from pipeline_core.prompts.slice_session import (
+    DEFAULT_FILE_CHARS as SESSION_FILE_CHARS,
+)
 from pipeline_core.prompts.slice_session import build_slice_session_prompt
 
 # The escalated followup's thinking reserve. Default off: Muse@high finishes
@@ -296,39 +327,56 @@ def _panic_sites_of(raw: Sequence[str]) -> dict[str, tuple[str, int]]:
             for f in report.failures
             if f.panic_file and f.panic_line is not None}
 
-def _note_reader_loss(
+def _audit_reply(
     log: Any, emit: Any, *, cluster: str, unit: str, route: str,
     reply: str, parsed: Sequence[Any],
-) -> None:
-    """Report a reply whose FN tags outnumber the records the reader produced.
+) -> ReplyAudit | None:
+    """Report what a reply's FN tags became when they outnumber the records.
 
-    This is the fourth per-fill class — the model answered and the pipeline
-    lost it — and it is always a pipeline defect, never a reason to spend
-    another call on the unit. The signal it replaces existed and was never
-    read: `empty/no FN blocks (N FN tag(s) in reply)` printed 37 times with a
-    nonzero N across the retained logs, on `context.rs::StdErrorforContextError
-    <C,Error>`, `error.rs::Error`, `chain.rs::ExactSizeIteratorforChain` and
-    `kind.rs::Trait` — the units the record keeps re-convicting — while the
-    sweeps that contained it were being read as flat scores.
+    Two classes, counted apart because they have different owners:
 
-    Three things it does that the old line did not. It fires on PARTIAL loss,
-    because every drop site asked only `if not parsed` and a 7-tag reply
-    yielding 1 record scored as a success. It carries the response sha, so the
-    next reader shape is a lookup in the content-addressed store rather than an
-    investigation — the cost of the previous six. And it emits an EVENT, which
-    is what lets a run's own record be queried without grepping prose."""
-    loss = reader_loss(reply, parsed)
-    if loss is None:
-        return
-    log(f"  HEALTH ‼ [reader_loss] {route} {unit}: {loss.tags} FN tag(s) in "
-        f"the reply, {loss.records} record(s) out — {loss.lost} answered "
-        f"body(ies) discarded by the READER. Reply sha "
-        f"{loss.response_sha[:12]}… (logs/prompts/{loss.response_sha}.txt); "
-        "this is a parser defect, NOT a model failure.")
-    emit("phase_c.fill.reader_loss", data={
-        "cluster": cluster, "unit": unit, "route": route,
-        "tags": loss.tags, "records": loss.records, "lost": loss.lost,
-        "response_sha": loss.response_sha})
+    DECLINED — a tag whose body slot was empty. The model answered the unit
+    with nothing; the reader had nothing to lose. Owner: the prompt (what it
+    failed to give the model) or the model. Logged by name, emitted as
+    `phase_c.fill.declined`, and stamped on each unit's retrospective record
+    by the caller so the unit's next prompt carries the fact.
+
+    READER LOSS — a tag with a body that the reader turned into no record.
+    Always a pipeline defect, never a reason to spend another call on the
+    unit. Logged as HEALTH with the response sha, emitted as
+    `phase_c.fill.reader_loss`. It fires on PARTIAL loss, because every drop
+    site asked only `if not parsed` and a 7-tag reply yielding 1 record scored
+    as a success.
+
+    Run `959654-1e96b403` (2026-09-06) is why the two are separate: a
+    file-first reply carried three EMPTY tags for the vtable drop helpers and
+    the single reader-loss line called it "a parser defect, NOT a model
+    failure" — an accusation the artefact itself refuted."""
+    audit = reply_audit(reply, parsed)
+    if audit is None:
+        return None
+    if audit.empty:
+        log(f"  [phase-c/declined] {route} {unit}: declined {len(audit.empty)} "
+            f"unit(s) — the model answered an empty body: "
+            f"{', '.join(audit.empty)} (reply sha {audit.response_sha[:12]}…, "
+            f"logs/prompts/{audit.response_sha}.txt)")
+        emit("phase_c.fill.declined", data={
+            "cluster": cluster, "unit": unit, "route": route,
+            "names": list(audit.empty), "response_sha": audit.response_sha})
+    if audit.lost > 0:
+        log(f"  HEALTH ‼ [reader_loss] {route} {unit}: {audit.tags} FN tag(s) in "
+            f"the reply, {audit.records} record(s) out"
+            + (f", {len(audit.empty)} declined" if audit.empty else "")
+            + f" — {audit.lost} answered body(ies) discarded by the READER. "
+            f"Reply sha {audit.response_sha[:12]}… "
+            f"(logs/prompts/{audit.response_sha}.txt); this is a parser "
+            "defect, NOT a model failure.")
+        emit("phase_c.fill.reader_loss", data={
+            "cluster": cluster, "unit": unit, "route": route,
+            "tags": audit.tags, "records": audit.records, "lost": audit.lost,
+            "declined": list(audit.empty),
+            "response_sha": audit.response_sha})
+    return audit
 
 
 #: How many DISTINCT test files the attributed-test lookup may put in a prompt,
@@ -398,6 +446,10 @@ class ImplFillDeps:
     # Mechanical note validation: (fr_path, error_text) -> retired count.
     # None disables (tests / minimal wiring).
     retire_contradicted_notes: Callable[..., int] | None = None
+    # The single-call character limit the session's turn-0 prompt is sized
+    # against (`SliceCosts.max_chars` = `SLICE_SESSION_TURN0_CHARS` or 45%
+    # of it). 0 disables the char capacity (unit-count packing only).
+    single_call_char_limit: int = 0
     # The transcript model call (`AskClient.ask_turns`) the red-slice
     # session runs on; None disables the session route.
     ask_turns: Callable[..., str] | None = None
@@ -536,7 +588,7 @@ def file_first_guidance_keys(
     return tuple(out)
 
 
-def fill_impl_blocks(
+def prepare_impl_fill(
     deps: ImplFillDeps,
     project_dir: Path,
     target_src_dir: Path,
@@ -594,7 +646,7 @@ def fill_impl_blocks(
     # (the owner map alone, without attributed additions): the session's
     # per-unit executed marks. None leaves the marks off.
     session_owners: Mapping[str, frozenset[FnSite]] | None = None,
-) -> ClusterFillResult:
+) -> PreparedFill:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
     Collects impl blocks active in this cluster, optionally narrows to
@@ -679,6 +731,56 @@ def fill_impl_blocks(
         with _counters_lock:
             note_fill_class(_emit, _fill_classes, kind,
                             cluster=cluster_name, unit=unit, route=route)
+
+    def _record_regression_evidence(keys: Iterable[RetroKey]) -> None:
+        """A kept landing whose gate reading forgave newly-red tests (the
+        sweep's rule: strict net gain) stamps those tests and what they
+        printed on every record the next prompt for these units reads —
+        the session and pair routes already did this on their own records;
+        the file and impl routes did not, so their forgiven losses were
+        silent leftovers."""
+        cmp = last_comparison()
+        if cmp is None or not cmp.newly_red:
+            return
+        with _counters_lock:
+            for key in keys:
+                rec = dict(retros_cache.get(key, {}) or {})
+                rec["regressed"] = sorted(cmp.newly_red)
+                rec[REGRESSED_OUTPUT] = dict(cmp.newly_red_output)
+                retros_cache[key] = rec
+            _save_retrospectives(project_dir, retros_cache)
+
+    def _prior_regression_for(keys: Iterable[RetroKey], pins: str) -> str:
+        """The rendered PRIOR_REGRESSION section for a prompt over `keys`:
+        the union of what those records say went red, with what it printed."""
+        names: list[str] = []
+        outputs: dict[str, str] = {}
+        for key in keys:
+            rec = retros_cache.get(key, {}) or {}
+            for n in (rec.get("regressed") or []):
+                if str(n) not in names:
+                    names.append(str(n))
+            outputs.update({str(k): str(v) for k, v in dict(
+                rec.get(REGRESSED_OUTPUT) or {}).items()})
+        return render_prior_regression(tuple(names), pins, outputs) if names else ""
+
+    def _note_declined_units(
+        file_rel: str, names: Sequence[str],
+        container_of: Callable[[str], str], *,
+        response_sha: str, route: str,
+    ) -> None:
+        """A declined unit is classified DECLINED and its retrospective
+        record is stamped, so the next prompt for it (any route) carries
+        the fact that its previous reply was an empty body."""
+        with _counters_lock:
+            for _dn in names:
+                note_declined(
+                    retros_cache,
+                    _retro_key(file_rel, _dn, container_of(_dn) or ""),
+                    response_sha=response_sha)
+            _save_retrospectives(project_dir, retros_cache)
+        for _dn in names:
+            _cls(FillOutcomeClass.DECLINED, f"{file_rel}::{_dn}", route)
 
     def _site_locator() -> Callable[[str, int], FnSite | None]:
         """Locator from the tree as it is NOW — not a fill-phase snapshot.
@@ -862,9 +964,11 @@ def fill_impl_blocks(
 
     blocks = _collect_impl_blocks_for_cluster(target_src_dir, cluster) or []
     if not blocks:
-        return ClusterFillResult(
-            dispatched_fns=(),
-            fill_classes=_fill_classes.histogram())
+        return PreparedFill(
+            routes=(), hollow={},
+            finish=lambda: ClusterFillResult(
+                dispatched_fns=(), fill_classes=_fill_classes.histogram()),
+            bodies_sha=lambda _t: "")
 
     # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
@@ -1062,7 +1166,8 @@ def fill_impl_blocks(
     # round at the end of the TDD iteration.
     _FILE_FIRST_MAX_ATTEMPTS = int(os.getenv("PHASE_C_FILE_MAX_ATTEMPTS", "3"))
 
-    def _fill_file_first(file_rel: str, fblocks: list[ImplBlock]) -> None:
+    def _fill_file_first(file_rel: str, fblocks: list[ImplBlock],
+                         may_claim: Callable[[], bool] | None = None) -> None:
         """File-first pass: ONE prompt fills every stub of a multi-block
         file so the impls are designed together (run-187469 evidence: the
         Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
@@ -1149,6 +1254,11 @@ def fill_impl_blocks(
              f"other route covers) (+{_solo} uncoupled block(s) → "
              "per-block loop).")
         for _gi, _g in enumerate(_joint, 1):
+            if _gi > 1 and may_claim is not None and not may_claim():
+                _log(f"  [phase-c/file] {file_rel}: fill share spent after "
+                     f"{_gi - 1} of {len(_joint)} group(s) and the last landed "
+                     "nothing — the remaining groups are left to the next fill.")
+                break
             _fill_block_group(file_rel, [fblocks[i] for i in _g],
                               f"{file_rel}[group {_gi}/{len(_joint)}]")
 
@@ -1575,6 +1685,12 @@ def fill_impl_blocks(
             if _text and _text not in _seen_retro:
                 _seen_retro.add(_text)
                 _file_retro_parts.append(_fverdict.text)
+            # A declined unit's sentence rides the same section: the
+            # instruction is generic and the record is the unit's own.
+            _dtext = declined_guidance(_rfn, _frec)
+            if _dtext and _dtext not in _seen_retro:
+                _seen_retro.add(_dtext)
+                _file_retro_parts.append(_dtext)
         _file_retro = "\n\n".join(_file_retro_parts)
         prior_error = ""
         _prev_prompt: str | None = None
@@ -1613,7 +1729,12 @@ def fill_impl_blocks(
                 retrospective_guidance=_file_retro,
                 module_name=module_name, cluster_name=cluster_name,
                 gotchas=_gotchas_summary(), types_section=_file_types,
-                invariants_section=invariants_section)
+                invariants_section=invariants_section,
+                prior_regression=_prior_regression_for(
+                    (_retro_key(file_rel, m.fn_name, b.container)
+                     for b in fblocks
+                     for m in (*b.stub_members, *b.refill_members)),
+                    _union_pins))
             # A rebuilt prompt byte-identical to the previous attempt's is a
             # temperature resample, not a retry: every input — the snapshot,
             # the plan, and above all `prior_error` — came out the same, so no
@@ -1670,9 +1791,19 @@ def fill_impl_blocks(
                         for n in (_retry_names if _retry_names is not None
                                   else wanted))
                 return
-            _note_reader_loss(_log, _emit, cluster=cluster_name,
-                              unit=file_rel, route="file",
-                              reply=_file_reply, parsed=parsed)
+            _audit = _audit_reply(_log, _emit, cluster=cluster_name,
+                                  unit=file_rel, route="file",
+                                  reply=_file_reply, parsed=parsed)
+            if _audit is not None and _audit.empty:
+                _name_cont: dict[str, str] = {
+                    n: p.header for p in _plans for n in (*p.stubs, *p.refills)}
+
+                def _cont_of(n: str, _nc: dict[str, str] = _name_cont) -> str:
+                    return str(_nc.get(n, ""))
+
+                _note_declined_units(
+                    file_rel, _audit.empty, _cont_of,
+                    response_sha=_audit.response_sha, route="file")
             if not parsed:
                 _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
                      f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
@@ -1699,6 +1830,7 @@ def fill_impl_blocks(
                 _base_raw: list[str] = []
                 _baseline_test = _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env, _base_raw)
+                _hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 # The pre-fill panic SITES. The reading carries names only, and
                 # without a site the non-regression keep below cannot tell the
                 # correct body from the one that walks downhill — both are red
@@ -2058,15 +2190,13 @@ def fill_impl_blocks(
                 # crash-reverted beside it. Keep on NON-REGRESSION (no NEW
                 # failures against baseline; the regression gate below still
                 # holds) and let the next sweep judge the joint tree.
-                _crash_keep_file = (rc == 0 and _u2_reject
-                                    and bool(_file_crash)
-                                    and _joint is not None
-                                    and not _joint.new_failures)
-                if _crash_keep_file:
-                    _log(f"  [phase-c/file] GUARD {glabel}: crash-evidence "
-                         "re-fill KEPT on non-regression — judged for real "
-                         "at the next sweep, in the joint tree.")
-                # The same keep WITHOUT crash evidence: a REJECT whose every
+                # ONE non-regression keep, crash evidence or not — the bar
+                # the per-impl and pair routes apply too. A crash-evidenced
+                # refill used to skip the panic-site check below; it does
+                # not any more: an earlier panic is fewer assertions passed
+                # whatever named the unit.
+                _crash_keep_file = False
+                # The non-regression keep: a REJECT whose every
                 # self-failure was already failing at baseline is not
                 # implicating — the attempt regressed nothing and the old
                 # bodies fail the same tests, so reverting to them buys
@@ -2087,7 +2217,6 @@ def fill_impl_blocks(
                 # the same test is strictly fewer assertions passed, which is a
                 # regression the name set cannot see.
                 _nonregr_keep_file = (rc == 0 and _u2_reject
-                                      and not _crash_keep_file
                                       and _joint is not None
                                       and not _joint.new_failures
                                       and not _joint.regressed_sites)
@@ -2095,9 +2224,10 @@ def fill_impl_blocks(
                     _log(f"  [phase-c/file] GUARD {glabel}: re-fill KEPT on "
                          "non-regression — no self-failure is newly red "
                          "(all were failing at baseline) and no attributed "
-                         "test panics earlier than it did; judged at the "
-                         "next sweep in the joint tree.")
-                elif (rc == 0 and _u2_reject and not _crash_keep_file
+                         "test panics earlier than it did"
+                         + (" (crash-evidenced)" if _file_crash else "")
+                         + "; judged at the next sweep in the joint tree.")
+                elif (rc == 0 and _u2_reject
                         and _joint is not None and not _joint.new_failures
                         and _joint.regressed_sites):
                     _log(f"  [phase-c/file] GUARD {glabel}: re-fill REVERTED "
@@ -2126,7 +2256,8 @@ def fill_impl_blocks(
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
                     stub_free=stub_free,
-                    introduced_stubs=bool(_peel_reverted))
+                    introduced_stubs=bool(_peel_reverted),
+                    hollow_before=_hollow_before)
                     if rc == 0 else None)
                 if (rc == 0 and not _peel_refuse_keep
                         and (not _u2_reject or _bank is not None
@@ -2138,6 +2269,12 @@ def fill_impl_blocks(
                     # whose call landed nothing keeps the per-block fallback
                     # its early-return log line promises.
                     ff_produced_files.add(file_rel)
+                    note_kept_comparison(last_comparison() if _regr_file is None
+                                         and tdd_test_cmd else None)
+                    _record_regression_evidence(
+                        _retro_key(file_rel, m.fn_name, b.container)
+                        for b in fblocks
+                        for m in (*b.stub_members, *b.refill_members))
                     _log(f"  [phase-c/file] {glabel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass"
                          + (f" — banked improvement: {_bank.summary}."
@@ -2586,6 +2723,11 @@ def fill_impl_blocks(
             read_source=_read_source,
             ledger_entries=ledger_entries, oracle_fp=oracle_fp,
             tuple_structs=_tuple_structs,
+            prior_regressed=tuple(
+                str(n) for n in (_retro_rec.get("regressed") or [])),
+            prior_regressed_output={
+                str(k): str(v) for k, v in dict(
+                    _retro_rec.get(REGRESSED_OUTPUT) or {}).items()},
             leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
             file_cap=_ATTRIBUTED_TEST_FILE_CAP)
         _inferred_refill = _block_ev.inferred_names
@@ -2649,9 +2791,18 @@ def fill_impl_blocks(
             unit=screening_unit(block.file, "*impl*"),
             pins=_pins, observables=_block_ev.observables)
         prior_retro = _prior_verdict.text
+        _declined_parts = [
+            _dg for _m in (*block.stub_members, *block.refill_members)
+            if (_dg := declined_guidance(
+                _m.fn_name,
+                retros_cache.get(_retro_key(block.file, _m.fn_name,
+                                            block.container), {})))]
+        if _declined_parts:
+            prior_retro = "\n".join(
+                p for p in (prior_retro, *_declined_parts) if p)
         # The line carries the STORE key so the grep lands on the record.
         if (_hline := honoured_guidance_line(
-                _prior_key, _prior_rec, prior_retro)):
+                _prior_key, _prior_rec, _prior_verdict.text)):
             _log(f"  {_hline}")
         if (_rline := retired_guidance_line(
                 _prior_key, _prior_rec, _prior_verdict)):
@@ -2827,9 +2978,13 @@ def fill_impl_blocks(
             last_response = response
             parsed = bind_headerless_names(
                 extract_fn_bodies(response), _block_target_names)
-            _note_reader_loss(_log, _emit, cluster=cluster_name,
-                              unit=str(block_id), route="impl",
-                              reply=response, parsed=parsed)
+            _audit = _audit_reply(_log, _emit, cluster=cluster_name,
+                                  unit=str(block_id), route="impl",
+                                  reply=response, parsed=parsed)
+            if _audit is not None and _audit.empty:
+                _note_declined_units(
+                    block.file, _audit.empty, lambda _n: block.container,
+                    response_sha=_audit.response_sha, route="impl")
             if not parsed:
                 _log(f"  [phase-c/impl] {block_id}: empty/no FN blocks "
                      f"(attempt {fix_attempt}; "
@@ -2862,6 +3017,7 @@ def fill_impl_blocks(
                 _impl_base_raw: list[str] = []
                 _baseline_test = _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env, _impl_base_raw)
+                _hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 _impl_base_sites = _panic_sites_of(_impl_base_raw)
                 # Splice each parsed body into the impl indicated by its
                 # `block` attribute. Match against TARGET container OR any
@@ -3048,7 +3204,7 @@ def fill_impl_blocks(
                 # attempts skip it (tests can't run; deferred to the TDD loop).
                 _regr = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
-                    stub_free=stub_free)
+                    stub_free=stub_free, hollow_before=_hollow_before)
                     if rc == 0 else None)
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
@@ -3113,19 +3269,32 @@ def fill_impl_blocks(
                 # NON-REGRESSION — no self-failure that was passing in a
                 # completed binary at baseline; the regression gate above
                 # already held — and let the next sweep judge the joint tree.
+                # The same bar as the file route's non-regression keep: a
+                # compiling landed set whose attributed tests still fail is
+                # KEPT (deferred to the sweep) when none of them was passing
+                # at baseline — crash evidence or not. It used to require
+                # crash evidence here, so the same body was kept by the file
+                # route and reverted by this one.
                 _crash_keep = (
-                    rc == 0 and _u2_impl_reject and bool(_block_crash_evidence)
+                    rc == 0 and _u2_impl_reject
                     and _u2_impl is not None and _baseline_test is not None
                     and not (_u2_impl.self_failures
                              & _baseline_test.passed_names))
                 if _crash_keep and _u2_impl is not None:
-                    _log(f"  [phase-c/impl] GUARD {block_id}: crash-evidence "
-                         "re-fill KEPT on non-regression "
+                    _log(f"  [phase-c/impl] GUARD {block_id}: re-fill KEPT on "
+                         "non-regression "
                          f"({len(_u2_impl.self_failures)} self-failure(s), "
-                         "none passing at baseline) — judged for real at the "
-                         "next sweep, in the joint tree.")
+                         "none passing at baseline"
+                         + (", crash-evidenced" if _block_crash_evidence else "")
+                         + ") — judged for real at the next sweep, in the "
+                         "joint tree.")
                 if rc == 0 and (not _u2_impl_reject or _bank_impl is not None
                                 or _crash_keep):
+                    note_kept_comparison(last_comparison() if tdd_test_cmd else None)
+                    _record_regression_evidence(
+                        [_retro_key(block.file, "*impl*", block.container),
+                         *(_retro_key(block.file, m.fn_name, block.container)
+                           for m in (*block.stub_members, *block.refill_members))])
                     if _u2_external_only and _u2_impl is not None:
                         _emit("phase_c.u2.external_only", data={
                             "cluster": cluster_name, "file": block.file,
@@ -3489,10 +3658,16 @@ def fill_impl_blocks(
                             _max_reply = _ask_fill(_max_prompt)
                         _max_parsed = bind_headerless_names(
                             extract_fn_bodies(_max_reply), _max_target_names)
-                        _note_reader_loss(
+                        _max_audit = _audit_reply(
                             _log, _emit, cluster=cluster_name,
                             unit=str(block_id), route="impl-maximal",
                             reply=_max_reply, parsed=_max_parsed)
+                        if _max_audit is not None and _max_audit.empty:
+                            _note_declined_units(
+                                block.file, _max_audit.empty,
+                                lambda _n: block.container,
+                                response_sha=_max_audit.response_sha,
+                                route="impl-maximal")
                         if _max_parsed:
                             _splice_and_verify(_max_parsed, fix_attempt + 1)
                         else:
@@ -4140,6 +4315,7 @@ def fill_impl_blocks(
                 _pair_base_raw: list[str] = []
                 _pair_baseline = _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
+                _pair_hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 _spliced_by_file: dict[str, list[str]] = {}
                 for b, _htxt, _hwc in _half_ctx:
                     _routing = route_fn_bodies(
@@ -4250,7 +4426,7 @@ def fill_impl_blocks(
                                          target_src_dir, cluster_env)
                 _pair_regr = _test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
-                    stub_free=stub_free)
+                    stub_free=stub_free, hollow_before=_pair_hollow_before)
                 if _pair_regr is not None:
                     _rcmp, _rdetail = _pair_regr
                     _revert_pair()
@@ -4275,8 +4451,24 @@ def fill_impl_blocks(
                     # precedes the file-first dispatch).
                     _record_pair_regression(_rcmp, _rdetail)
                     return
+                _pair_nonregr = (
+                    _pair_u2 is not None
+                    and _pair_u2.decision is U2Decision.REJECT
+                    and _pair_baseline is not None
+                    and not (_pair_u2.self_failures
+                             & _pair_baseline.passed_names))
+                if _pair_nonregr and _pair_u2 is not None:
+                    # The same bar as the file and impl routes: convicting
+                    # tests still failing, none newly red — KEPT, deferred
+                    # to the sweep (the pair used to be the one route that
+                    # reverted here).
+                    _log(f"  [phase-c/pair] GUARD {pair_id}: joint re-fill "
+                         f"KEPT on non-regression ({len(_pair_u2.self_failures)} "
+                         "convicting test(s) still failing, none passing at "
+                         "baseline) — judged at the next sweep.")
                 if (_pair_u2 is not None
-                        and _pair_u2.decision is U2Decision.REJECT):
+                        and _pair_u2.decision is U2Decision.REJECT
+                        and not _pair_nonregr):
                     _revert_pair()
                     _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
                          f"{len(_pair_u2.self_failures)} convicting test(s) "
@@ -4298,12 +4490,15 @@ def fill_impl_blocks(
                 with _counters_lock:
                     fns_filled_total += _n_spliced
                     impls_filled += 1
+                note_kept_comparison(last_comparison() if tdd_test_cmd else None)
+                _record_regression_evidence([_pair_key])
                 block_outcomes.append(UnitOutcome(landed=True))
                 _pair_passed = (_pair_u2.self_passed
                                 if _pair_u2 is not None else frozenset())
                 _pair_kept_unreachable = (
                     _pair_u2 is not None
-                    and _pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
+                    and (_pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
+                         or _pair_nonregr))
                 _cls(class_for_kept(passed=_pair_passed,
                                     unreachable=_pair_kept_unreachable),
                      pair_id, "pair")
@@ -4342,12 +4537,13 @@ def fill_impl_blocks(
     # the slice as its editable set, the compiler's and the suite's answers
     # as turns, and the probe's observed values beside every failing
     # assertion; acceptance is one transaction over the whole suite.
-    def _run_slice_sessions() -> set[FnLocator]:
-        nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+    def _make_session_route() -> _SessionRoute | None:
+        """Plan the packed sessions and return the route that runs them one
+        at a time under the fill schedule; None when nothing is planned."""
         served: set[FnLocator] = set()
         if (not session_slices or deps.ask_turns is None
                 or os.getenv("SLICE_SESSION", "1") == "0"):
-            return served
+            return None
         _ask_turns = deps.ask_turns
         _max_turns = int(os.getenv("SLICE_SESSION_MAX_TURNS", "8"))
         _max_minutes = float(os.getenv("SLICE_SESSION_MAX_MINUTES", "90"))
@@ -4411,36 +4607,106 @@ def fill_impl_blocks(
                     out[u] = hit
             return out
 
+        def _session_costs(
+                slices: Mapping[str, Collection[FnSite]]) -> SliceCosts | None:
+            """The turn-0 prompt's size as a function of the packing: each
+            file's rendered size (capped as the prompt caps it), each test's
+            quoted block, and the sections every session carries. Sized
+            against `SLICE_SESSION_TURN0_CHARS`, default 45% of the
+            single-call limit, so a session leaves its result turns room —
+            the 05:23 session of run `334902-2774708c` had 8%."""
+            limit = int(deps.single_call_char_limit or 0)
+            raw_cap = os.getenv("SLICE_SESSION_TURN0_CHARS", "")
+            try:
+                max_chars = int(raw_cap) if raw_cap else int(limit * 0.45)
+            except ValueError:
+                max_chars = int(limit * 0.45)
+            if max_chars <= 0:
+                return None
+            file_chars: dict[str, int] = {}
+            types_chars: dict[str, int] = {}
+            by_file: dict[str, list[FnSite]] = {}
+            for us in slices.values():
+                for u in us:
+                    by_file.setdefault(u.file, []).append(u)
+            for f, sites in by_file.items():
+                try:
+                    text = (target_src_dir / f).read_text(
+                        encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+                file_chars[f] = min(len(text), SESSION_FILE_CHARS)
+                # The TYPES_IN_SCOPE section this file's units pull in — the
+                # same call the session makes per file when it opens.
+                recs = [_all_recs[u] for u in dict.fromkeys(sites) if u in _all_recs]
+                if recs and text:
+                    types_chars[f] = len(_types_section_for_fix(
+                        " ".join(r.sig_text for r in recs), text, "",
+                        " ".join(dict.fromkeys(r.container for r in recs)), "",
+                        _crate_type_records, file_rel=f))
+            test_chars: dict[str, int] = {}
+            evidence_chars: dict[str, int] = {}
+            for t in slices:
+                leaf = t.rsplit("::", 1)[-1]
+                blocks = attributed_test_blocks(
+                    (leaf,),
+                    lambda lf: _find_tests_referencing_fn(
+                        tests_dir_files, lf, max_blocks=1),
+                    file_cap=_ATTRIBUTED_TEST_FILE_CAP, into=[])
+                test_chars[t] = sum(len(txt) for _, txt in blocks)
+                _ev = _frontier_tests.evidence_for(t)
+                evidence_chars[t] = len(quote_panic_site(_ev, _read_source)) if _ev else 0
+            fixed = len(build_slice_session_prompt(
+                module_name=module_name, cluster_name=cluster_name,
+                slice_=SessionSlice(tests=(), units=()), records={},
+                all_records=[], file_texts={}, target_evidence={},
+                test_blocks=[], types_section="",
+                invariants=invariants_section, macros=macros_section,
+                fr_path=fr_path, max_turns=_max_turns))
+            return SliceCosts(file_chars=file_chars, test_chars=test_chars,
+                              fixed_chars=fixed, max_chars=max_chars,
+                              types_chars=types_chars,
+                              evidence_chars=evidence_chars)
+
         _all_recs = _tree_sites()
         _slices = expand_locator_sites(session_slices, _all_recs)
         for _file, _fn, _n in locator_only_expansions(session_slices, _all_recs):
             _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
                  f"expanded to {_n} tree site(s)")
-        _planned = plan_slices(_slices, stubs=_stubs_now, max_units=_max_units)
+        _costs = _session_costs(_slices)
+        _plans = list(plan_slices(_slices, stubs=_stubs_now, max_units=_max_units,
+                                  costs=_costs))
         # The plan is a record on every fill, refusal included: the union
         # the engine actually handed `plan_slices` (owners plus hops plus
         # locator expansion) was in no event before, so the over-union
         # refusals of run `2965-453dd7a4` could only be reconstructed from
         # the owner-map event. `sessions` on the event is what packing
-        # produced; `opened` is what this fill actually runs — empty when
-        # leftover tests are still hollow, so the stub routes own the fill.
-        _gaps = slice_plan_gaps(_slices, stubs=_stubs_now, max_units=_max_units)
-        _plans, _withheld = sessions_this_fill(_planned, _gaps)
+        # produced; whether and when each opens is the fill schedule's call
+        # (`phase_c.fill.schedule`), never a withhold on the hollow count —
+        # run `334902-2774708c`'s 05:23 session was the only run of the night
+        # that moved a verdict, and a count-gated withhold would have skipped
+        # it while leaving the routes that burned the night untouched.
+        _gaps = slice_plan_gaps(_slices, stubs=_stubs_now, max_units=_max_units,
+                                costs=_costs)
         if session_slices:
             _emit("phase_c.session.plan", data={
                 "cluster": cluster_name,
-                **slice_plan_payload(_slices, _planned, _gaps),
+                **slice_plan_payload(_slices, _plans, _gaps, _costs),
                 "opened": len(_plans)})
+        if _costs is not None and _plans:
+            _log("  [phase-c/session] turn-0 size per session: "
+                 + ", ".join(
+                     f"{p.label()} {_costs.chars(p.tests, p.units):,} chars"
+                     for p in _plans)
+                 + f" (capacity {_costs.max_chars:,})")
         if _gaps.fitted_clause():
             _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
-        if _withheld:
-            _log(f"  [phase-c/session] {_withheld}")
         if not _plans:
-            if session_slices and not _withheld:
+            if session_slices:
                 _log(f"  [phase-c/session] no slice planned "
                      f"({len(session_slices)} failing test(s) — "
                      f"{_gaps.log_clause()})")
-            return served
+            return None
         _run_cargo = deps.run_cargo
 
         def _probe(names: Sequence[str]) -> Mapping[str, str]:
@@ -4465,13 +4731,15 @@ def fill_impl_blocks(
                 cluster_name=cluster_name, cluster_env=cluster_env,
                 tests_by_file=by_file, run_cargo=_run_cargo, log=_log).rendered
 
-        for _sl in _plans:
+        def _run_one_session(_sl: SessionSlice, clock: RunClock) -> RouteRunReport:
+            nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+            nonlocal _all_recs, served
             _check_graceful_stop("slice-session dispatch")
-            if served:
-                # A previous session of this fill kept bodies; a packed
+            if served or dispatched_keys:
+                # An earlier run of this fill (a session, or any route the
+                # schedule put before it) may have landed bodies; a packed
                 # sibling sharing a hub unit must open on the tree as it
-                # now stands, not on the records enumerated before the
-                # loop.
+                # now stands, not on the records enumerated at plan time.
                 _all_recs = _tree_sites()
             _records = _resolve(_sl.units, _all_recs)
             _missing = [u for u in _sl.units if u not in _records]
@@ -4480,7 +4748,7 @@ def fill_impl_blocks(
                      "have no fn record on the tree and are left out: "
                      + ", ".join(site_label(u) for u in _missing[:6]))
             if not _records:
-                continue
+                return RouteRunReport(empty=True)
             _units = tuple(sorted(_records, key=lambda u: (u.file, u.fn_name, u.container)))
             _sl = type(_sl)(tests=_sl.tests, units=_units)
             _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))
@@ -4589,7 +4857,8 @@ def fill_impl_blocks(
                 probe=_probe if _probe_on else None,
                 implicated=lambda diags: _implicated_keys_from_diags(
                     list(diags), target_src_dir),
-                coverage=_coverage if _coverage_on else None)
+                coverage=_coverage if _coverage_on else None,
+                may_claim=clock.may_claim, note_delta=clock.note_delta)
             _sid = "session:" + "+".join(_sl.tests)
             with _splice_check_lock, serving_units(
                     f"{u.file}::{u.fn_name}" for u in _sl.units):
@@ -4682,221 +4951,451 @@ def fill_impl_blocks(
                 })
                 retros_cache[_skey] = _new_rec
                 _save_retrospectives(project_dir, retros_cache)
-        return served
+            if _out.kept and _out.final is not None:
+                note_kept(_out.final.pass_delta,
+                          newly_red=tuple(sorted(_out.newly_red)),
+                          newly_crashed=tuple(_out.final.crashed))
+            return RouteRunReport(
+                model_calls=_out.model_calls,
+                kept=frozenset(locator_of(u) for u in _out.kept),
+                reverted=frozenset(locator_of(u) for u in _out.reverted),
+                dispatched=frozenset(locator_of(u) for u in _out.dispatched),
+                stopped=_out.outcome == "stopped")
 
+        return _SessionRoute(_plans, _run_one_session, served, log=_log)
+
+    _session_route = _make_session_route()
     _pair_served: set[FnLocator] = set()
-    _session_served = _run_slice_sessions()
-    _pair_served |= _session_served
     _pair_jobs = pair_dispatches(
         _frontier_tests.pairs, tdd_frontier_keys, all_blocks)
-    for _pd in _pair_jobs:
-        if _pd.member_locators() & _session_served:
-            # A session kept or accepted these members under one judgment
-            # this call; the next sweep judges that write.
-            continue
-        try:
-            _fill_pair(_pd)
-        except Exception as _pfe:
-            _log(f"  [phase-c/pair] worker error: {_pfe}")
-        _pair_served |= _pd.member_locators()
-    if _pair_served:
-        # A same-iteration re-open of a pair-served member is a re-buy —
-        # the next sweep is the first moment the joint write can be judged
-        # (same rule as `blocks_after_file_first` for produced files).
-        blocks, _pair_dropped = blocks_after_pair_fill(
-            blocks, frozenset(_pair_served))
-        viable_blocks, _pair_dropped_v = blocks_after_pair_fill(
-            viable_blocks, frozenset(_pair_served))
-        _dropped_all = sorted(set(_pair_dropped) | set(_pair_dropped_v))
-        if _dropped_all:
-            _log(f"  [phase-c/impl] dropped {len(_dropped_all)} pair-served "
-                 "refill target(s) from the remaining routes this call "
-                 "(next sweep judges the joint write): "
-                 + ", ".join(_dropped_all))
-            _emit("phase_c.impl.refill_deferred_after_pair", data={
-                "cluster": cluster_name, "dropped": _dropped_all})
+    _stubs_all: frozenset[FnLocator] = frozenset(
+        _scan_unimplemented_for_cluster(target_src_dir, cluster).units)
+    _hollow = hollow_by_test(session_slices or {}, _stubs_all)
+    _pair_trim_logged = [False]
+    _ff_trim_logged = [False]
 
-    # File-first pass — one prompt designs a file's frontier together;
-    # the per-block loop below handles the remainder (the freshness gate
-    # skips blocks the file pass completed). Unit selection is
-    # `file_route_units` (domain): the historical multi-block-only selection
-    # by default; every frontier file — free fns and single-block files
-    # included — under file_primary. Route order was resolved at the stamp
-    # above so the write list and the file pass cannot disagree.
-    if os.getenv("PHASE_C_FILE_FIRST", "1") != "0":
-        _ff_units = file_route_units(
-            blocks, max_stubs=_PER_IMPL_MAX_STUBS,
+    def _tests_for(locs: Iterable[FnLocator]) -> frozenset[str]:
+        out: set[str] = set()
+        for loc in locs:
+            for t in _frontier_tests.tests_for(loc):
+                out.add(str(t).rsplit("::", 1)[-1])
+        return frozenset(out)
+
+    def _snapshot() -> _RouteSnap:
+        with _counters_lock:
+            return _RouteSnap(
+                dispatched=frozenset(dispatched_keys),
+                reverted=frozenset(reverted_keys),
+                lost=frozenset(answer_lost_keys),
+                attempts=attempts_total,
+                classes=_fill_classes.histogram())
+
+    def _report_since(snap: _RouteSnap) -> RouteRunReport:
+        with _counters_lock:
+            now = _RouteSnap(
+                dispatched=frozenset(dispatched_keys),
+                reverted=frozenset(reverted_keys),
+                lost=frozenset(answer_lost_keys),
+                attempts=attempts_total,
+                classes=_fill_classes.histogram())
+        disp = now.dispatched - snap.dispatched
+        rev = now.reverted - snap.reverted
+        lost = now.lost - snap.lost
+        before = snap.classes.as_dict()
+        after = now.classes.as_dict()
+        classes = {k: after[k] - before.get(k, 0) for k in after
+                   if after[k] - before.get(k, 0)}
+        declined_only = bool(classes) and set(classes) == {"declined"}
+        return RouteRunReport(
+            model_calls=now.attempts - snap.attempts,
+            kept=frozenset(disp - rev - lost), reverted=frozenset(rev),
+            dispatched=frozenset(disp), classes=classes,
+            declined=declined_only and not (disp - rev - lost))
+
+    def _blocks_after_pair() -> list[ImplBlock]:
+        if not _pair_served:
+            return list(blocks)
+        trimmed, dropped = blocks_after_pair_fill(blocks, frozenset(_pair_served))
+        if dropped and not _pair_trim_logged[0]:
+            _pair_trim_logged[0] = True
+            _log(f"  [phase-c/impl] dropped {len(dropped)} pair-served "
+                 "refill target(s) from the remaining routes this call "
+                 "(next sweep judges the joint write): " + ", ".join(dropped))
+            _emit("phase_c.impl.refill_deferred_after_pair", data={
+                "cluster": cluster_name, "dropped": sorted(dropped)})
+        return trimmed
+
+    def _viable_now() -> list[ImplBlock]:
+        """The per-impl route's blocks as the tree stands: the viable set
+        minus pair-served refills minus refill-only blocks of files the
+        file route already designed this call."""
+        out = list(viable_blocks)
+        if _pair_served:
+            out, _d = blocks_after_pair_fill(out, frozenset(_pair_served))
+        served_files = set(ff_produced_files)
+        if served_files:
+            out, dropped_ff = blocks_after_file_first(out, served_files)
+            if dropped_ff and not _ff_trim_logged[0]:
+                _ff_trim_logged[0] = True
+                ids = [f"{b.file}::{b.container}" for b in dropped_ff]
+                _log(f"  [phase-c/impl] dropped {len(dropped_ff)} "
+                     "refill-only block(s) after file-first served their "
+                     "file this call (next sweep judges them): " + ", ".join(ids))
+                _emit("phase_c.impl.refill_deferred_after_file_first", data={
+                    "cluster": cluster_name, "dropped": ids, "kept": len(out)})
+        return out
+
+    def _file_units_now() -> list[tuple[str, list[ImplBlock]]]:
+        if os.getenv("PHASE_C_FILE_FIRST", "1") == "0":
+            return []
+        return file_route_units(
+            _blocks_after_pair(), max_stubs=_PER_IMPL_MAX_STUBS,
             file_primary=_file_primary)
-        if _file_primary and _ff_units:
+
+    def _file_plan_logged(units: list[tuple[str, list[ImplBlock]]]) -> None:
+        if _file_primary and units:
             _src = "env" if (_route_env or "").strip() else (
                 f"model default for {_TASK2_MODEL}")
             _log(f"  [phase-c/file] route order file_primary ({_src}): "
-                 f"{len(_ff_units)} file unit(s) dispatch first "
-                 f"({sum(len(bs) for _, bs in _ff_units)} block(s), "
+                 f"{len(units)} file unit(s) "
+                 f"({sum(len(bs) for _, bs in units)} block(s), "
                  "free fns and single-block files included).")
-        # Same reading for the file route (see the impl route's emit): the unit
-        # count the fill step is about to walk, published whichever route order
-        # is in force — the log line above prints only under file_primary, and
-        # an observer that could only see the primary route's denominator would
-        # go blind exactly when the order is switched.
         _emit("phase_c.fill.route_plan", data={
             "cluster": cluster_name, "route": "file",
-            "units": len(_ff_units),
-            "blocks": sum(len(bs) for _, bs in _ff_units),
+            "units": len(units),
+            "blocks": sum(len(bs) for _, bs in units),
             "order": str(_route_order)})
-        # One FILE is this route's unit, so independent files dispatch to a
-        # pool for exactly the reasons the per-block route below already
-        # states: `_splice_check_lock` and `_counters_lock` serialise
-        # everything touching shared state, and no two units name the same
-        # file, so their splices cannot collide.
-        #
-        # It ran serially on the MAIN THREAD until 2026-08-09, and that is
-        # where run `491052-1af6b4f4`'s wall clock went. Paired from
-        # `logs/events.jsonl`: 47 % of the run's 5-second slots had a
-        # MainThread call in flight, and across those slots mean concurrency
-        # was **1.03** — the worker pools sat idle behind it — against 2.85
-        # while MainThread was free. 20 of the run's 68 MainThread calls came
-        # from this loop, at a mean of 193 s each.
-        if _ff_units and min(max(1, parallelism), len(_ff_units)) > 1:
-            _log(f"  [phase-c/file] parallelism="
-                 f"{min(max(1, parallelism), len(_ff_units))} over "
-                 f"{len(_ff_units)} file(s) (one prompt per file, "
-                 "splice+cargo serialised per tree).")
-        run_units_concurrently(
-            _ff_units, workers=parallelism,
-            name_prefix=f"file-first-{cluster_name}",
-            run_unit=lambda u: _fill_file_first(u[0], u[1]),
-            describe=lambda u: u[0], log=_log,
-            check_stop=_check_graceful_stop,
+
+    _pair_route = _PairRoute(
+        _pair_jobs, fill_pair=_fill_pair, pair_served=_pair_served,
+        session_served=lambda: (_session_route.served
+                                if _session_route is not None else set()),
+        snapshot=_snapshot, report_since=_report_since,
+        tests_for=_tests_for, stubs=_stubs_all, log=_log)
+    _file_route = _FileRoute(
+        units_now=_file_units_now, fill_file=_fill_file_first,
+        snapshot=_snapshot, report_since=_report_since,
+        tests_for=_tests_for, stubs=_stubs_all,
+        on_plan=_file_plan_logged, log=_log)
+    _impl_route = _ImplRoute(
+        blocks_now=_viable_now, fill_block=_fill_one_block,
+        snapshot=_snapshot, report_since=_report_since,
+        tests_for=_tests_for, stubs=_stubs_all, log=_log)
+
+    def _bodies_sha(targets: frozenset[FnLocator]) -> str:
+        if not targets:
+            return ""
+        bodies: dict[FnLocator, list[str]] = {}
+        for _raw in _enumerate_fns_via_extractor(target_src_dir) or []:
+            r = FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
+            loc = FnLocator(_norm_src_rel(r.file), r.fn_name)
+            if loc in targets or FnLocator(r.file, r.fn_name) in targets:
+                bodies.setdefault(loc, []).append(r.body_text or "")
+        return bodies_sha_of(
+            (loc, "\n".join(texts)) for loc, texts in bodies.items())
+
+    def _finish() -> ClusterFillResult:
+        if _retro_gate.total:
+            _log(f"  [phase-c/impl] cluster {cluster_name}: {_retro_gate.render()}")
+        _payoff = assess_pass_payoff(block_outcomes)
+        if _payoff.unjudgeable_rate == 1.0:
+            _pay_data = {"cluster": cluster_name, "route": "impl",
+                         **_payoff.event_data()}
+            if _payoff.is_zero:
+                _log(f"  [phase-c/impl] cluster {cluster_name}: PAYOFF ZERO — "
+                     f"{_payoff.summary}.")
+                _emit("phase_c.pass.payoff_zero", data=_pay_data)
+            else:
+                _log(f"  [phase-c/impl] cluster {cluster_name}: UNJUDGEABLE — "
+                     f"{_payoff.rate_summary}.")
+                _emit("phase_c.pass.unjudgeable", data=_pay_data)
+        bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
+        remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
+        remaining_n = (len({(r["file"], r["fn_name"]) for r in remaining_records})
+                       if remaining_records is not None
+                       else _scan_unimplemented_for_cluster(
+                           target_src_dir, cluster).unit_count)
+        return ClusterFillResult(
+            fns_filled=fns_filled_total,
+            bytes_filled=max(0, bytes_after - bytes_before),
+            attempts=attempts_total,
+            errors=tuple(errors),
+            remaining=remaining_n,
+            impls_filled=impls_filled,
+            impls_failed=impls_failed,
+            dispatched_fns=tuple(sorted(dispatched_keys)),
+            reverted_fns=tuple(sorted(reverted_keys)),
+            answer_lost_fns=tuple(sorted(answer_lost_keys - reverted_keys)),
+            payoff=_payoff,
+            fill_classes=_fill_classes.histogram(),
         )
-        # File-first designed every file it LANDED bodies in this call. A
-        # refill-only block of those files is a same-iteration re-buy —
-        # the next TDD sweep is the first moment it can be judged. Stub-
-        # bearing blocks of a served file stay (file-first may have
-        # peeled them). Run `463713-b7c666c8` otherwise walked nine
-        # compiling refill-only impls after file-first had served their
-        # files, then serialised on `error.rs` overnight. The key is
-        # PRODUCTION, never the dispatch list: on every early return of
-        # the file route (LLM error, empty/no FN blocks, resample skip,
-        # nothing spliced, final-attempt revert) nothing was designed, so
-        # dropping that file's refill-only blocks suppresses the exact
-        # per-block fallback the early-return log line promises. Run
-        # `347397-01e2463b` iter 1 (2026-08-31): src/ensure.rs replied
-        # empty, its two `__dispatch_ensure` impls were dropped anyway,
-        # and the audit graded both units a FAILED try nobody made — of
-        # that call's 14 dropped blocks, 12 belonged to files that had
-        # produced (kept, correctly) and 2 were this defect.
-        _served_files = set(ff_produced_files)
-        if _served_files:
-            viable_blocks, _dropped_ff = blocks_after_file_first(
-                viable_blocks, _served_files)
-            if _dropped_ff:
-                _dropped_ids = [f"{b.file}::{b.container}" for b in _dropped_ff]
-                _log(f"  [phase-c/impl] dropped {len(_dropped_ff)} "
-                     f"refill-only block(s) after file-first served their "
-                     f"file this call (next sweep judges them): "
-                     + ", ".join(_dropped_ids))
-                _emit("phase_c.impl.refill_deferred_after_file_first", data={
-                    "cluster": cluster_name,
-                    "dropped": _dropped_ids,
-                    "kept": len(viable_blocks)})
-    # Independent FILES dispatch to a thread pool — the LLM call inside
-    # each block's fix loop is the slow part; `_splice_check_lock` +
-    # `_counters_lock` (above) already serialize everything that touches
-    # shared state, so concurrent files are safe the same way the per-fn
-    # engine's worker pool is (phase_c_engine.py). Blocks WITHIN a file are
-    # never split across workers — sibling impls on one type are frequently
-    # co-designed, so a worker processes its file's blocks one at a time.
-    _by_file_q: dict[str, list[ImplBlock]] = {}
-    for _b in viable_blocks:
-        _by_file_q.setdefault(_b.file, []).append(_b)
-    _file_units = list(_by_file_q.values())
-    _nw = min(max(1, parallelism), len(_file_units)) if _file_units else 0
-    if _nw > 1:
-        _log(f"  [phase-c/impl] parallelism={_nw} (LLM calls concurrent "
-             "across files, serial within a file; splice+cargo serialised per tree).")
-        _file_queue: _queue_mod.Queue[list[ImplBlock]] = _queue_mod.Queue()
-        for _fb in _file_units:
-            _file_queue.put(_fb)
 
-        def _impl_worker() -> None:
-            while True:
-                # Stop pulling NEW files once another worker (or the main
-                # thread) has seen a graceful-stop request — raises in THIS
-                # thread immediately, same as the per-block check inside
-                # `_fill_one_block` below; the main thread's own check (after
-                # the join below) is what actually ends the process.
-                _check_graceful_stop("impl-fill worker dispatch")
-                try:
-                    _fblocks = _file_queue.get_nowait()
-                except _queue_mod.Empty:
-                    return
-                for _blk in _fblocks:
-                    try:
-                        _fill_one_block(_blk)
-                    except Exception as _we:
-                        _log(f"  [phase-c/impl] worker error on "
-                             f"{_blk.file}::{_blk.container}: {_we}")
+    routes: list[FillRoute] = []
+    if _session_route is not None:
+        routes.append(_session_route)
+    routes.extend((_pair_route, _file_route, _impl_route))
+    return PreparedFill(routes=tuple(routes), hollow=_hollow, finish=_finish,
+                        bodies_sha=_bodies_sha, landed=lambda: fns_filled_total)
 
-        _impl_workers = [
-            threading.Thread(target=_impl_worker,
-                              name=f"impl-fill-{cluster_name}-w{i}")
-            for i in range(_nw)
-        ]
-        for _t in _impl_workers:
-            _t.start()
-        for _t in _impl_workers:
-            _t.join()
-        # Main-thread checkpoint: if a worker set the graceful-stop event,
-        # this is the only context where raising it actually ends the
-        # process (`sys.exit()` in a worker thread only kills that thread).
-        _check_graceful_stop("impl-fill pool joined")
-    else:
-        for block in viable_blocks:
-            _fill_one_block(block)
-    if _retro_gate.total:
-        _log(f"  [phase-c/impl] cluster {cluster_name}: {_retro_gate.render()}")
-    # Did this sweep move anything, or did every landed block stall behind the
-    # same stub? The route has no next pass to refuse, so this reports rather
-    # than stops — but it names the one fn the outer loop must reach, and the
-    # event is the counter-part of the 50 `u2.external_only` events that went
-    # out unread in run `2879-66905005`.
-    _payoff = assess_pass_payoff(block_outcomes)
-    if _payoff.unjudgeable_rate == 1.0:
-        _pay_data = {"cluster": cluster_name, "route": "impl",
-                     **_payoff.event_data()}
-        if _payoff.is_zero:
-            _log(f"  [phase-c/impl] cluster {cluster_name}: PAYOFF ZERO — "
-                 f"{_payoff.summary}.")
-            _emit("phase_c.pass.payoff_zero", data=_pay_data)
-        else:
-            _log(f"  [phase-c/impl] cluster {cluster_name}: UNJUDGEABLE — "
-                 f"{_payoff.rate_summary}.")
-            _emit("phase_c.pass.unjudgeable", data=_pay_data)
-    bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
-    remaining_records = _scan_unimplemented_records_for_cluster(target_src_dir, cluster)
-    # None = extractor absent → text-scan fallback; 0 here would make the
-    # caller skip the per-fn cleanup pass entirely.
-    # UNITS on both branches: a record list is one row per impl site, and
-    # `remaining` is read as "how many fns are still stubs".
-    remaining_n = (len({(r["file"], r["fn_name"]) for r in remaining_records})
-                   if remaining_records is not None
-                   else _scan_unimplemented_for_cluster(
-                       target_src_dir, cluster).unit_count)
-    return ClusterFillResult(
-        fns_filled=fns_filled_total,
-        bytes_filled=max(0, bytes_after - bytes_before),
-        attempts=attempts_total,
-        errors=tuple(errors),
-        remaining=remaining_n,
-        impls_filled=impls_filled,
-        impls_failed=impls_failed,
-        dispatched_fns=tuple(sorted(dispatched_keys)),
-        reverted_fns=tuple(sorted(reverted_keys)),
-        # A unit with a reverted try was genuinely attempted (an earlier
-        # attempt's reply reached the tree and was restored), so a later
-        # lost answer for its file does not un-attempt it.
-        answer_lost_fns=tuple(sorted(answer_lost_keys - reverted_keys)),
-        payoff=_payoff,
-        fill_classes=_fill_classes.histogram(),
-    )
+
+def fill_impl_blocks(
+    deps: ImplFillDeps,
+    *args: Any,
+    fill_budget_minutes: float = 0.0,
+    fill_iteration: int = 0,
+    run_id: str = "",
+    route_ledger: RouteLedger | None = None,
+    **kw: Any,
+) -> ClusterFillResult:
+    """Prepare the four impl-path routes, execute them under the fill
+    schedule, and return the result — the legacy single-call shape. The
+    engine (`phase_c_engine.PhaseCFillEngine.run`) calls `prepare_impl_fill`
+    itself so the per-fn route is scheduled beside these four."""
+    prepared = prepare_impl_fill(deps, *args, **kw)
+    if not prepared.routes:
+        return prepared.finish()
+    project_dir = kw.get("project_dir") or (args[0] if args else None)
+    execute_fill(
+        prepared.routes, hollow=prepared.hollow, bodies_sha=prepared.bodies_sha,
+        deps=FillExecutionDeps(
+            log=deps.log, emit=deps.emit, check_stop=deps.check_graceful_stop,
+            ledger=route_ledger,
+            project=(Path(project_dir).name if project_dir is not None else ""),
+            cluster=str(kw.get("cluster_name", "")), run_id=run_id,
+            iteration=fill_iteration, oracle_fp=str(kw.get("oracle_fp", "")),
+            budget_minutes=fill_budget_minutes,
+            scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
+            parallelism=int(kw.get("parallelism", 1) or 1)))
+    return prepared.finish()
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteSnap:
+    """The fill's shared counters at a run's start, so the run's own
+    landings can be read off the difference at its end."""
+
+    dispatched: frozenset[FnLocator]
+    reverted: frozenset[FnLocator]
+    lost: frozenset[FnLocator]
+    attempts: int
+    classes: FillClassHistogram
+
+
+def _bare(name: str) -> str:
+    return str(name).rsplit("::", 1)[-1]
+
+
+class _SessionRoute:
+    """The packed slice sessions, one run each."""
+
+    kind = RouteKind.SESSION
+    parallel = False
+
+    def __init__(self, plans: Sequence[SessionSlice],
+                 run_one: Callable[[SessionSlice, RunClock], RouteRunReport],
+                 served: set[FnLocator], *, log: Callable[[str], None]) -> None:
+        self._plans = list(plans)
+        self._run_one = run_one
+        self.served = served
+        self._log = log
+        self._by_label = {sl.label(): sl for sl in self._plans}
+
+    def plan(self) -> Sequence[RouteRun]:
+        return [RouteRun(
+            kind=self.kind, label=sl.label(),
+            targets=frozenset(locator_of(u) for u in sl.units),
+            target_tests=frozenset(_bare(t) for t in sl.tests),
+            files=tuple(sl.files), seq=i)
+            for i, sl in enumerate(self._plans)]
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        sl = self._by_label.get(run.label)
+        if sl is None:
+            return RouteRunReport(empty=True)
+        if not clock.may_claim():
+            self._log(f"  [phase-c/session] {sl.label()}: not opened — the "
+                      "fill share is spent.")
+            return RouteRunReport(empty=True)
+        return self._run_one(sl, clock)
+
+
+class _PairRoute:
+    """The formatter dispatcher/implementer pairs, one run each."""
+
+    kind = RouteKind.PAIR
+    parallel = False
+
+    def __init__(self, jobs: Sequence[PairDispatch], *,
+                 fill_pair: Callable[[PairDispatch], None],
+                 pair_served: set[FnLocator],
+                 session_served: Callable[[], set[FnLocator]],
+                 snapshot: Callable[[], _RouteSnap],
+                 report_since: Callable[[_RouteSnap], RouteRunReport],
+                 tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
+                 stubs: frozenset[FnLocator],
+                 log: Callable[[str], None]) -> None:
+        self._jobs = list(jobs)
+        self._fill_pair = fill_pair
+        self._pair_served = pair_served
+        self._session_served = session_served
+        self._snapshot = snapshot
+        self._report_since = report_since
+        self._tests_for = tests_for
+        self._stubs = stubs
+        self._log = log
+        self._by_label = {self._label(pd): pd for pd in self._jobs}
+
+    @staticmethod
+    def _label(pd: PairDispatch) -> str:
+        return "pair " + " + ".join(sorted(pd.member_scope()))
+
+    def plan(self) -> Sequence[RouteRun]:
+        out: list[RouteRun] = []
+        for i, pd in enumerate(self._jobs):
+            locs = pd.member_locators()
+            out.append(RouteRun(
+                kind=self.kind, label=self._label(pd), targets=locs,
+                target_tests=self._tests_for(locs),
+                stubs_in_targets=locs & self._stubs,
+                files=tuple(sorted({k.file for k in locs})), seq=i))
+        return out
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        pd = self._by_label.get(run.label)
+        if pd is None:
+            return RouteRunReport(empty=True)
+        if pd.member_locators() & self._session_served():
+            # A session kept or accepted these members under one judgment
+            # this call; the next sweep judges that write.
+            return RouteRunReport(empty=True)
+        if not clock.may_claim():
+            return RouteRunReport(empty=True)
+        snap = self._snapshot()
+        try:
+            self._fill_pair(pd)
+        except Exception as _pfe:  # noqa: BLE001 — a route reports, never dies
+            self._log(f"  [phase-c/pair] worker error: {_pfe}")
+        self._pair_served |= pd.member_locators()
+        return self._report_since(snap)
+
+
+class _FileRoute:
+    """File-first: one run per file of the frontier."""
+
+    kind = RouteKind.FILE
+    parallel = True
+
+    def __init__(self, *, units_now: Callable[[], list[tuple[str, list[ImplBlock]]]],
+                 fill_file: Callable[..., None],
+                 snapshot: Callable[[], _RouteSnap],
+                 report_since: Callable[[_RouteSnap], RouteRunReport],
+                 tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
+                 stubs: frozenset[FnLocator],
+                 on_plan: Callable[[list[tuple[str, list[ImplBlock]]]], None],
+                 log: Callable[[str], None]) -> None:
+        self._units_now = units_now
+        self._fill_file = fill_file
+        self._snapshot = snapshot
+        self._report_since = report_since
+        self._tests_for = tests_for
+        self._stubs = stubs
+        self._on_plan = on_plan
+        self._log = log
+
+    def plan(self) -> Sequence[RouteRun]:
+        units = self._units_now()
+        self._on_plan(units)
+        out: list[RouteRun] = []
+        for i, (file_rel, fblocks) in enumerate(units):
+            locs = frozenset(
+                FnLocator(file_rel, m.fn_name) for b in fblocks
+                for m in (*b.stub_members, *b.refill_members))
+            stub_locs = frozenset(
+                FnLocator(file_rel, m.fn_name) for b in fblocks
+                for m in b.stub_members) | (locs & self._stubs)
+            out.append(RouteRun(
+                kind=self.kind, label=f"file {file_rel}", targets=locs,
+                target_tests=self._tests_for(locs),
+                stubs_in_targets=stub_locs, files=(file_rel,), seq=i))
+        return out
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        file_rel = run.files[0] if run.files else ""
+        unit = next(((f, bs) for f, bs in self._units_now() if f == file_rel), None)
+        if unit is None:
+            return RouteRunReport(empty=True)
+        if not clock.may_claim():
+            return RouteRunReport(empty=True)
+        snap = self._snapshot()
+        try:
+            self._fill_file(unit[0], unit[1], may_claim=clock.may_claim)
+        except Exception as exc:  # noqa: BLE001 — a route reports, never dies
+            self._log(f"  [phase-c/file] worker error on {file_rel}: {exc}")
+        return self._report_since(snap)
+
+
+class _ImplRoute:
+    """Per-impl: one run per file of viable blocks, blocks serial within."""
+
+    kind = RouteKind.IMPL
+    parallel = True
+
+    def __init__(self, *, blocks_now: Callable[[], list[ImplBlock]],
+                 fill_block: Callable[[ImplBlock], None],
+                 snapshot: Callable[[], _RouteSnap],
+                 report_since: Callable[[_RouteSnap], RouteRunReport],
+                 tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
+                 stubs: frozenset[FnLocator],
+                 log: Callable[[str], None]) -> None:
+        self._blocks_now = blocks_now
+        self._fill_block = fill_block
+        self._snapshot = snapshot
+        self._report_since = report_since
+        self._tests_for = tests_for
+        self._stubs = stubs
+        self._log = log
+
+    @staticmethod
+    def _by_file(blocks: Sequence[ImplBlock]) -> dict[str, list[ImplBlock]]:
+        out: dict[str, list[ImplBlock]] = {}
+        for b in blocks:
+            out.setdefault(b.file, []).append(b)
+        return out
+
+    def plan(self) -> Sequence[RouteRun]:
+        out: list[RouteRun] = []
+        for i, (file_rel, fblocks) in enumerate(self._by_file(self._blocks_now()).items()):
+            locs = frozenset(
+                FnLocator(file_rel, m.fn_name) for b in fblocks
+                for m in (*b.stub_members, *b.refill_members))
+            stub_locs = frozenset(
+                FnLocator(file_rel, m.fn_name) for b in fblocks
+                for m in b.stub_members) | (locs & self._stubs)
+            out.append(RouteRun(
+                kind=self.kind, label=f"impl {file_rel}", targets=locs,
+                target_tests=self._tests_for(locs),
+                stubs_in_targets=stub_locs, files=(file_rel,), seq=i))
+        return out
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        file_rel = run.files[0] if run.files else ""
+        fblocks = self._by_file(self._blocks_now()).get(file_rel) or []
+        if not fblocks:
+            return RouteRunReport(empty=True)
+        snap = self._snapshot()
+        opened = 0
+        for blk in fblocks:
+            if not clock.may_claim():
+                self._log(f"  [phase-c/impl] {file_rel}: fill share spent after "
+                          f"{opened} of {len(fblocks)} block(s) — the rest are "
+                          "left to the next fill.")
+                break
+            opened += 1
+            try:
+                self._fill_block(blk)
+            except Exception as _we:  # noqa: BLE001 — a route reports, never dies
+                self._log(f"  [phase-c/impl] worker error on "
+                          f"{blk.file}::{blk.container}: {_we}")
+        if opened == 0:
+            return RouteRunReport(empty=True)
+        return self._report_since(snap)

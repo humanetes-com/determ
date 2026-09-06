@@ -1,4 +1,4 @@
-"""Pins for the per-fill class histogram — the six integers on the iter line."""
+"""Pins for the per-fill class histogram — the seven integers on the iter line."""
 from __future__ import annotations
 
 from pipeline_core.domain.fill_class import (
@@ -12,10 +12,11 @@ from pipeline_core.domain.fill_class import (
 
 def test_rendered_matches_iter_line_token() -> None:
     h = FillClassHistogram(cashed=2, wrong=3, mis=1, unreachable=4,
-                           dropped=0, compile=5)
+                           dropped=0, compile=5, declined=1)
     assert h.rendered() == (
-        "classes: cashed=2 wrong=3 mis=1 unreachable=4 dropped=0 compile=5")
-    assert h.total == 15
+        "classes: cashed=2 wrong=3 mis=1 unreachable=4 dropped=0 compile=5 "
+        "declined=1")
+    assert h.total == 16
     assert h
 
 

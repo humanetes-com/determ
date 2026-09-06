@@ -51,15 +51,101 @@ events to the splice results anyway.
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
+from pipeline_core.domain.fill_context import current_fill, current_route
+from pipeline_core.domain.reasoning_cap import current_units
 from pipeline_core.domain.test_results import RegressionComparison
 
 #: Log prefix, chosen to be greppable next to the `[phase-c/tdd] iter N:`
 #: lines it interleaves with. A reader tailing the log during a fill phase
 #: sees these and nothing else move.
 TAG = "[phase-c/fill-reading]"
+
+# The latest comparison any route measured, for the run clock's "budget
+# follows payoff" rule: a run's next claim is extended past its share only
+# while its last landed change set cashed. Runs execute sequentially per
+# cluster, so one latch per process is one latch per active run; a pooled
+# route's workers write it in whatever order their gates return, which is
+# the honest reading of "the last landed change set".
+_LAST_LOCK = threading.Lock()
+_LAST: list[RegressionComparison | None] = [None]
+
+
+def note_last_comparison(cmp: RegressionComparison) -> None:
+    with _LAST_LOCK:
+        _LAST[0] = cmp
+
+
+def last_net_delta() -> int:
+    """`net_pass_delta` of the latest comparison; 0 when none was taken."""
+    with _LAST_LOCK:
+        cmp = _LAST[0]
+    return cmp.net_pass_delta if cmp is not None else 0
+
+
+def last_comparison() -> RegressionComparison | None:
+    with _LAST_LOCK:
+        return _LAST[0]
+
+
+def reset_last_comparison() -> None:
+    with _LAST_LOCK:
+        _LAST[0] = None
+        _KEPT.clear()
+
+
+# What each route KEPT, with the comparison that judged it — the per-run
+# payoff the route ledger records. Every keep site (file-first, per-impl,
+# pair, session, per-fn) appends here right after its gate accepted, inside
+# the tree's splice lock, so a run's delta is the sum of what it kept and
+# never what it measured and reverted. Records carry the route/run label
+# bound by `fill_context.route_scope` in the thread that kept, so a wave of
+# concurrent runs is attributed per run.
+_KEPT: list[tuple[str, str, int, tuple[str, ...], tuple[str, ...]]] = []
+
+
+def note_kept(delta: int, *, newly_red: tuple[str, ...] = (),
+              newly_crashed: tuple[str, ...] = ()) -> None:
+    route, label = current_route()
+    with _LAST_LOCK:
+        _KEPT.append((route, label, int(delta), tuple(newly_red),
+                      tuple(newly_crashed)))
+
+
+def note_kept_comparison(cmp: RegressionComparison | None) -> None:
+    """Record the LAST comparison as a keep; None (no gate ran) counts 0."""
+    if cmp is None:
+        note_kept(0)
+        return
+    note_kept(cmp.net_pass_delta, newly_red=tuple(sorted(cmp.newly_red)),
+              newly_crashed=tuple(cmp.newly_crashed))
+
+
+def kept_mark() -> int:
+    with _LAST_LOCK:
+        return len(_KEPT)
+
+
+def kept_since(mark: int, label: str | None = None
+               ) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+    """(delta, newly red, newly crashed) summed over the keeps recorded
+    since `mark` — those whose label is `label`, or every unlabelled one
+    when `label` is None (a single run executing alone)."""
+    with _LAST_LOCK:
+        rows = list(_KEPT[mark:])
+    delta = 0
+    red: set[str] = set()
+    crashed: set[str] = set()
+    for _route, lab, d, r, c in rows:
+        if label is not None and lab and lab != label:
+            continue
+        delta += d
+        red.update(r)
+        crashed.update(c)
+    return delta, tuple(sorted(red)), tuple(sorted(crashed))
 
 
 def render_fill_reading(cmp: RegressionComparison) -> str:
@@ -87,7 +173,14 @@ def fill_reading_fields(cmp: RegressionComparison) -> dict[str, Any]:
     """The event payload. Named to match `phase_c.tdd.iter` where the meaning
     is the same (`pass_count`), so a reader can put a mid-fill reading and a
     sweep on one axis without a translation table."""
+    route, label = current_route()
+    cluster, iteration = current_fill()
     return {
+        "cluster": cluster,
+        "iter": iteration,
+        "route": route,
+        "run": label,
+        "units": sorted(current_units()),
         "pass_count": cmp.cur_pass,
         "base_pass": cmp.base_pass,
         "net_pass_delta": cmp.net_pass_delta,
@@ -114,6 +207,7 @@ def publish_fill_reading(
     raises into the gate: this is telemetry hung off a decision path, and a
     formatting bug here must not be able to revert a body."""
     try:
+        note_last_comparison(cmp)
         if log is not None:
             log(render_fill_reading(cmp))
         if emit is not None:

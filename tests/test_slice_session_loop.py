@@ -85,15 +85,17 @@ def test_an_inconclusive_opening_suite_does_not_run_or_keep(tmp_path):
     assert (root / "src" / "render.rs").read_text() == "SESSION_REN"
 
 
-def test_peel_does_not_keep_a_net_positive_state_that_still_reddened_a_sibling(
+def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_flat_one(
         tmp_path):
-    """`RegressionComparison.regressed` is false when net pass rose even
-    with newly-red tests. Peel must not treat that as a hold — that is a
-    session regression. Negative control: the pre-fix stop would have
-    kept the remaining unit."""
+    """The session's bar is the sweep's (`RegressionComparison.regressed`):
+    a strict net gain HOLDS even with a newly-red test — the +15/−1 body of
+    run 334902-2774708c's 05:39 turn (2026-09-06), which the old bar ("no
+    previously-passing test red, whatever the net") would have peeled while
+    the sweep one iteration later accepted it. Control: the same reddening
+    at net zero is a regression and the peel restores the baseline."""
     root = _tree(tmp_path)
     baseline = _reading({"t_keep"}, {"t_pair"})
-    # After peeling one unit: +1 pass, but t_keep went red.
+    # After peeling one unit: +1 pass, but t_keep went red — net positive.
     after = _reading({"t_pair", "t_bonus"}, {"t_keep"})
     assert after.pass_count - baseline.pass_count > 0
     from pipeline_core.domain.test_results import compare_readings
@@ -107,9 +109,27 @@ def test_peel_does_not_keep_a_net_positive_state_that_still_reddened_a_sibling(
         {_FMT: "BASE_LIB", _RENDER: "BASE_REN"},
         {"src/lib.rs": "BASE_LIB", "src/render.rs": "BASE_REN"},
         frozenset({_FMT, _RENDER}), peel_max=1, label="t")
-    assert kept == frozenset()
-    assert (root / "src" / "lib.rs").read_text() == "BASE_LIB"
+    # One unit peeled (sorted pop takes render), the other holds.
+    assert kept == frozenset({_FMT}) and reverted == frozenset({_RENDER})
     assert (root / "src" / "render.rs").read_text() == "BASE_REN"
+    # Control: the reddening at net ZERO is a regression — nothing holds
+    # within the one-step budget and the baseline is restored.
+    (tmp_path / "flat").mkdir()
+    root2 = _tree(tmp_path / "flat")
+    flat = _reading({"t_pair"}, {"t_keep"})
+    assert flat.pass_count == baseline.pass_count
+    assert compare_readings(baseline, flat).regressed
+    kept2, _reverted2 = _peel(
+        _ports(measure=lambda raw: flat),
+        root2,
+        SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
+        _RECS, baseline,
+        {_FMT: "BASE_LIB", _RENDER: "BASE_REN"},
+        {"src/lib.rs": "BASE_LIB", "src/render.rs": "BASE_REN"},
+        frozenset({_FMT, _RENDER}), peel_max=1, label="t")
+    assert kept2 == frozenset()
+    assert (root2 / "src" / "lib.rs").read_text() == "BASE_LIB"
+    assert (root2 / "src" / "render.rs").read_text() == "BASE_REN"
 
 
 def test_a_failed_peel_splice_leaves_the_unit_on_the_kept_side(tmp_path):

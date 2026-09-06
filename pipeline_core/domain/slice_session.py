@@ -153,10 +153,55 @@ def _merge_pending(
     return groups
 
 
+@dataclass(frozen=True, slots=True)
+class SliceCosts:
+    """What a session's turn-0 prompt costs, in characters, as a function
+    of the tests and files it packs — the second capacity of the packing.
+
+    Packing by UNIT COUNT alone sized run `334902-2774708c`'s 05:23 session
+    (2026-09-06) at 18 tests over 32 units in 9 files: the turn-0 prompt plus
+    the first reply put the transcript at 271,326 chars, 92% of the
+    single-call limit, with seven turns of budget left and 8% of headroom
+    for them. The prompt renders each file whole up to a per-file cap and
+    condenses above it, so a session's size is a function of the packing
+    and the packing did not know it.
+
+    ``file_chars`` is each file's rendered size (already capped);
+    ``types_chars`` the TYPES_IN_SCOPE section each file's units pull in
+    (the largest single section of the recorded prompt: 81,217 of 253,828
+    chars); ``test_chars`` each test's quoted block; ``evidence_chars``
+    each test's quoted failure (panic site plus observed values);
+    ``fixed_chars`` the sections every session carries (rendered once on
+    an empty slice — repository specifications, gotchas, macros,
+    invariants: ~50k on the recorded prompt); ``max_chars`` the capacity a
+    turn-0 prompt may reach — the caller's share of the single-call limit,
+    leaving the rest for the session's result turns.
+    """
+
+    file_chars: Mapping[str, int]
+    test_chars: Mapping[str, int]
+    fixed_chars: int
+    max_chars: int
+    types_chars: Mapping[str, int] = field(default_factory=dict)
+    evidence_chars: Mapping[str, int] = field(default_factory=dict)
+
+    def chars(self, tests: Collection[str], units: Collection[FnSite]) -> int:
+        files = {u.file for u in units}
+        return (self.fixed_chars
+                + sum(self.file_chars.get(f, 0) for f in files)
+                + sum(self.types_chars.get(f, 0) for f in files)
+                + sum(self.test_chars.get(t, 0) for t in tests)
+                + sum(self.evidence_chars.get(t, 0) for t in tests))
+
+    def fits(self, tests: Collection[str], units: Collection[FnSite]) -> bool:
+        return self.max_chars <= 0 or self.chars(tests, units) <= self.max_chars
+
+
 def _fit_under_cap(
     names: Sequence[str],
     pending: Mapping[str, frozenset[FnSite]],
     max_units: int,
+    costs: SliceCosts | None = None,
 ) -> tuple[list[tuple[list[str], set[FnSite]]], list[str]]:
     """Pack one merged group whose UNION is over the cap into sessions that
     are each under it, without truncating any test's slice.
@@ -168,6 +213,11 @@ def _fit_under_cap(
     new units, ties to the earliest session — when the union stays under
     the cap, else it opens a session. Deterministic; the same inputs pack
     the same way on every call.
+
+    With `costs`, a session has a second capacity: its turn-0 prompt in
+    characters (:class:`SliceCosts`). A test joins a session only when both
+    hold; a single test whose own prompt exceeds `max_chars` is oversized
+    for the same reason a single test over `max_units` is.
 
     A hub unit every test executes (the crate's construction spine) lands in
     every session that needs it. Sessions run sequentially on one tree, so
@@ -181,8 +231,13 @@ def _fit_under_cap(
         if len(units) > max_units:
             oversized.append(test)
             continue
-        fits = [i for i, (_, held) in enumerate(bins)
-                if len(held | units) <= max_units]
+        if costs is not None and not costs.fits((test,), units):
+            oversized.append(test)
+            continue
+        fits = [i for i, (held_tests, held) in enumerate(bins)
+                if len(held | units) <= max_units
+                and (costs is None
+                     or costs.fits([*held_tests, test], held | units))]
         if not fits:
             bins.append(([test], set(units)))
             continue
@@ -219,6 +274,9 @@ class SlicePlanGaps:
     over_union: int = 0
     #: The largest over-union group's unit count (what the old rule dropped).
     fitted_from_units: int = 0
+    #: Groups under the unit cap that were packed anyway because their
+    #: turn-0 prompt would have exceeded the char capacity.
+    over_chars: int = 0
 
     def log_clause(self) -> str:
         parts: list[str] = []
@@ -233,13 +291,31 @@ class SlicePlanGaps:
         return "; ".join(parts) if parts else "no session"
 
     def fitted_clause(self) -> str:
-        """The packing statement, empty when no over-union group existed."""
-        if not self.over_union:
+        """The packing statement, empty when nothing was packed."""
+        if not self.over_union and not self.over_chars:
             return ""
-        return (f"{self.fitted} session(s) fitted under the cap from "
+        parts: list[str] = []
+        if self.over_union:
+            parts.append(
                 f"{self.over_union} over-union group(s) of up to "
                 f"{self.fitted_from_units} unit(s) "
                 f"(SLICE_SESSION_MAX_UNITS={self.max_units})")
+        if self.over_chars:
+            parts.append(
+                f"{self.over_chars} group(s) whose turn-0 prompt was over "
+                "the char capacity (SLICE_SESSION_TURN0_CHARS)")
+        return (f"{self.fitted} session(s) fitted under the cap from "
+                + " and ".join(parts))
+
+
+def _group_needs_packing(
+    names: Sequence[str], members: Collection[FnSite], max_units: int,
+    costs: SliceCosts | None,
+) -> tuple[bool, bool]:
+    """(over the unit cap, over the char capacity) for one merged group."""
+    over_units = len(members) > max_units
+    over_chars = costs is not None and not costs.fits(names, members)
+    return over_units, over_chars
 
 
 def slice_plan_gaps(
@@ -247,6 +323,7 @@ def slice_plan_gaps(
     *,
     stubs: Collection[FnLocator] = (),
     max_units: int = 32,
+    costs: SliceCosts | None = None,
 ) -> SlicePlanGaps:
     """The drop reasons ``plan_slices`` applies and the packing it did,
     counted separately."""
@@ -256,20 +333,27 @@ def slice_plan_gaps(
     n_fitted = 0
     n_over_union = 0
     fitted_from = 0
+    n_over_chars = 0
     for names, members in _merge_pending(pending):
-        if not names or len(members) <= max_units:
+        if not names:
             continue
-        bins, oversized = _fit_under_cap(names, pending, max_units)
+        over_u, over_c = _group_needs_packing(names, members, max_units, costs)
+        if not over_u and not over_c:
+            continue
+        bins, oversized = _fit_under_cap(names, pending, max_units, costs)
         n_over += len(oversized)
         for t in oversized:
             over_units = max(over_units, len(pending[t]))
         if bins:
-            n_over_union += 1
+            if over_u:
+                n_over_union += 1
+                fitted_from = max(fitted_from, len(members))
+            else:
+                n_over_chars += 1
             n_fitted += len(bins)
-            fitted_from = max(fitted_from, len(members))
     return SlicePlanGaps(n_empty, n_hollow, n_over, over_units, max_units,
                          fitted=n_fitted, over_union=n_over_union,
-                         fitted_from_units=fitted_from)
+                         fitted_from_units=fitted_from, over_chars=n_over_chars)
 
 
 def locator_only_expansions(
@@ -300,6 +384,7 @@ def plan_slices(
     *,
     stubs: Collection[FnLocator] = (),
     max_units: int = 32,
+    costs: SliceCosts | None = None,
 ) -> list[SessionSlice]:
     """Group the failing tests into sessions: tests whose unit sets overlap
     share one session (the union). A test whose slice touches a still-hollow
@@ -320,6 +405,11 @@ def plan_slices(
     batches. Each packed session still holds every one of its tests' whole
     slices; no test is split across sessions.
 
+    With `costs` (:class:`SliceCosts`) a group under the unit cap whose
+    turn-0 prompt would exceed the char capacity is packed too — by the
+    same first-fit — so a session is sized to leave its turns headroom
+    under the single-call limit.
+
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
     pending, _, _ = _pending_after_filters(slices, frozenset(stubs))
@@ -328,10 +418,11 @@ def plan_slices(
         if not names:
             continue
         groups: list[tuple[list[str], set[FnSite]]]
-        if len(members) <= max_units:
+        over_u, over_c = _group_needs_packing(names, members, max_units, costs)
+        if not over_u and not over_c:
             groups = [(list(names), set(members))]
         else:
-            groups, _oversized = _fit_under_cap(names, pending, max_units)
+            groups, _oversized = _fit_under_cap(names, pending, max_units, costs)
         for gnames, gmembers in groups:
             out.append(SessionSlice(
                 tests=tuple(sorted(dict.fromkeys(gnames))),
@@ -340,39 +431,11 @@ def plan_slices(
     return out
 
 
-def sessions_this_fill(
-    plans: Sequence[SessionSlice],
-    gaps: SlicePlanGaps,
-) -> tuple[tuple[SessionSlice, ...], str]:
-    """Which packed sessions this fill actually opens.
-
-    ``plan_slices`` already drops every hollow test and may still pack the
-    remainder. Opening that remainder while other leftover tests are still
-    hollow spends the fill on units whose tests already run, and the stub
-    routes that can un-hollow the rest wait for the session budget to drain.
-
-    Run ``334902-2774708c`` (2026-09-05/06, wipe restart): fitted was 0
-    while hollow was 106 then 99 then 94; at pass 74 hollow=24 fitted=3 and
-    the fill opened an 18-test format session (turn 1 already 92% of the
-    single-call char limit) instead of the still-stubbed vtable units.
-    The same leftover set with hollow=0 still opens — that is the 91-plateau
-    packing this route was written for, and the per-fn Display lump-cash
-    (pass 35→69) never used this route.
-    """
-    opened = tuple(plans)
-    if gaps.hollow and opened:
-        note = (
-            f"{len(opened)} session(s) fitted under the cap not opened — "
-            f"{gaps.hollow} failing test(s) still hollow"
-        )
-        return (), note
-    return opened, ""
-
-
 def slice_plan_payload(
     slices: Mapping[str, Collection[FnSite]],
     plans: Sequence[SessionSlice],
     gaps: SlicePlanGaps,
+    costs: SliceCosts | None = None,
 ) -> dict[str, Any]:
     """The `phase_c.session.plan` event: what the engine handed
     `plan_slices` and what came back, emitted on every fill — a refusal
@@ -394,9 +457,13 @@ def slice_plan_payload(
         "over_union": gaps.over_union,
         "fitted": gaps.fitted,
         "fitted_from_units": gaps.fitted_from_units,
+        "over_chars": gaps.over_chars,
+        "max_chars": costs.max_chars if costs is not None else 0,
         "slices": {t: sorted(site_label(u) for u in us)
                    for t, us in sorted(slices.items())},
-        "sessions": [{"tests": list(p.tests), "units": len(p.units)}
+        "sessions": [{"tests": list(p.tests), "units": len(p.units),
+                      "chars": (costs.chars(p.tests, p.units)
+                                if costs is not None else None)}
                      for p in plans],
     }
 
@@ -545,6 +612,9 @@ class TurnReading:
     newly_red_observed: Mapping[str, str] = field(default_factory=dict)
     crashed: tuple[str, ...] = ()
     pass_delta: int = 0
+    #: A completed binary reported fewer verdicts than at baseline — oracle
+    #: corruption, never traded away at any price (the sweep's rule).
+    executed_shrank: bool = False
 
     @property
     def targets_green(self) -> bool:
@@ -556,7 +626,18 @@ class TurnReading:
 
     @property
     def regressed(self) -> bool:
-        return bool(self.newly_red or self.crashed)
+        """The sweep's rule, applied to one turn: a strict net gain forgives
+        a newly-red test or a crashed binary (its lost passes are already
+        charged in `pass_delta`); at or below zero any loss convicts; a
+        shrunken verdict set always convicts. This used to be "any newly-red
+        test, whatever the net" — the bar that would have peeled the +15/−1
+        body of run `334902-2774708c`'s 05:39 turn while the sweep it never
+        reached would have accepted it."""
+        if self.executed_shrank:
+            return True
+        if self.pass_delta > 0:
+            return False
+        return bool(self.pass_delta < 0 or self.newly_red or self.crashed)
 
 
 def render_compile_turn(diagnostics: str, rejected: Sequence[str] = ()) -> str:

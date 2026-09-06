@@ -19,6 +19,10 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
+from pipeline_core.application.reconstruct.tdd_ratchet import (
+    hollow_count,
+    snapshot_src_tree,
+)
 from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_report import (
@@ -176,6 +180,7 @@ def test_regression_gate(
     stub_free: bool = False,
     introduced_stubs: bool = False,
     observe: Callable[[RegressionComparison], None] | None = None,
+    hollow_before: int | None = None,
 ) -> tuple[RegressionComparison, str] | None:
     """Global non-regression gate (the monotone ratchet). A fill is a REGRESSION
     if it turns a previously-passing test red, crashes a previously-completing
@@ -209,6 +214,22 @@ def test_regression_gate(
     `construct_from_boxed` and `context` back to `unimplemented!()`, kept
     ten rewrites, and those two panics withheld 60 vanished passes. A caller
     that introduced the panicking stubs must revert, not keep.
+
+    ``hollow_before`` — how many hollow bodies the cluster tree held when
+    the caller took its baseline. It is the one input of the ONLY keep this
+    gate still grants a crash-only reading: the sweep's own closure
+    exemption (`tdd_ratchet.closure_withheld`) — every lost test vanished
+    with a crashed binary, the capture's panics are exclusively stub panics,
+    and the hollow set strictly SHRANK since the baseline. Under exactly that
+    evidence the batch ratchet withholds the breach one sweep later, so the
+    fill and the sweep agree. Every other crash-only reading is a REVERT
+    here, not a keep "with cost withheld": run `959654-1e96b403`
+    (2026-09-06) kept a `src/error.rs` file-first that crashed five binaries
+    (six baseline passes lost, no panic located), the next sweep counted the
+    vanished tests as failing and the ratchet restored the snapshot — the
+    same cycle the night before at iters 9→10 of `334902-2774708c`. Two
+    judges, two rules, one iteration lost per cycle. None (a caller that did
+    not measure) means the exemption cannot apply.
     """
     if not (enabled and test_cmd and baseline is not None):
         return None
@@ -276,76 +297,65 @@ def test_regression_gate(
     if (cmp.newly_crashed and not cmp.newly_red
             and cmp.cur_pass >= cmp.base_pass
             and cmp.cur_executed >= cmp.base_executed):
+        # A crash-only reading: every COMPLETED binary held and the only
+        # loss is a binary that produced no verdicts. The sweep judges this
+        # shape by ONE rule — the oracle counts the vanished tests as failing
+        # and the batch ratchet restores the snapshot — with ONE exemption,
+        # `closure_withheld`: stub-only panics while the hollow set shrank.
+        # This gate applies the same rule and the same exemption, so a fill
+        # keep is never a sweep breach one iteration later. It used to keep
+        # "with cost withheld" here (a still-hollow sibling might be the one
+        # speaking; a crash implicates no unit by itself) and let the sweep
+        # claw the keep back: a full iteration per cycle, and every later
+        # unit of the batch judged with the crashed binaries excluded.
         _stub_sites = stub_only_crash(_raw[-1] if _raw else "")
+        _plural = 'ies' if len(cmp.newly_crashed) > 1 else 'y'
         if _stub_sites:
             _locs = sorted(f"{f}:{ln}" for f, ln in _stub_sites)
             if introduced_stubs:
                 guard("phase-c/crash_introduced_stub_reverted",
-                      f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
-                      f"{list(cmp.newly_crashed)} crashed, and the capture's "
-                      f"only panic(s) are stub panics at {_locs} — this fill "
-                      "put those stub(s) back, so the panic is its own; "
-                      "REVERTED rather than kept (cost: "
+                      f"binar{_plural} {list(cmp.newly_crashed)} crashed, and "
+                      f"the capture's only panic(s) are stub panics at {_locs} "
+                      "— this fill put those stub(s) back, so the panic is "
+                      "its own; REVERTED rather than kept (cost: "
                       f"{cmp.crash_lost_pass} baseline pass(es))")
                 return cmp, render_regression_detail(cmp)
-            guard("phase-c/crash_blocked_kept",
-                  f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
-                  f"{list(cmp.newly_crashed)} crashed, and the capture's only "
-                  f"panic(s) are stub panics at {_locs} — a still-hollow "
-                  "sibling speaking, not this fill's fault; fill KEPT, its "
-                  "scoring deferred until the stub(s) fill (cost withheld: "
+            hollow_now = hollow_count(snapshot_src_tree(cwd))
+            if hollow_before is not None and hollow_now < hollow_before:
+                guard("phase-c/crash_closure_kept",
+                      f"binar{_plural} {list(cmp.newly_crashed)} crashed, the "
+                      f"capture's only panic(s) are stub panics at {_locs}, "
+                      f"and the hollow set shrank {hollow_before} → "
+                      f"{hollow_now} — a coupled component closing (the "
+                      "sweep's own closure exemption); fill KEPT (cost: "
+                      f"{cmp.crash_lost_pass} baseline pass(es) until the "
+                      "stub(s) fill)")
+                return None
+            guard("phase-c/crash_stub_panic_reverted",
+                  f"binar{_plural} {list(cmp.newly_crashed)} crashed on stub "
+                  f"panic(s) at {_locs} with the hollow set not shrinking "
+                  f"({hollow_before} → {hollow_now}) — not a closure; "
+                  "REVERTED, as the sweep would charge it (cost: "
                   f"{cmp.crash_lost_pass} baseline pass(es))")
-            return None
-        # No stub panic in the capture, but the shape is the same: every
-        # COMPLETED binary held, and the only loss is a binary that produced
-        # no verdicts at all. A crash is not a newly-red verdict from an
-        # attributed test in a completed binary — it implicates nothing this
-        # gate can name, and charging it here is how one latent fault taxed
-        # every sibling: four `src/context.rs::StdErrorforE` re-fills were
-        # reverted `net -6, binary crashed` in run `1824387` (2026-08-10)
-        # for a crash the localizer could not attribute at all ("no native
-        # fault under gdb, no ASAN report"). Keep the fill; the sweep-level
-        # machinery owns crashes — the oracle counts the vanished tests as
-        # failing, the localizer/retrigger aim at the fault with stack
-        # evidence this gate never sees, and a fill that itself introduced
-        # the crash drops the next sweep's pass count, which the batch
-        # ratchet confirms and claws back from its pre-fill snapshot. The
-        # stub-restore NOTE above applies here identically.
-        #
-        # Unless the tree holds no stub at all. Then the "hollow sibling"
-        # the keep is written for does not exist, the crash appeared between
-        # a baseline where these binaries completed and a reading where they
-        # did not, and the fill is the only change in between. Keeping it
-        # costs more than the pass count the ratchet claws back a sweep
-        # later: every later unit in the SAME batch is judged with the
-        # crashed binaries excluded (`u2_missing_verdict`), accepted
-        # `unmeasurable`, and credited to the traversal cursor as dispatched.
-        # Run `626784-4b7c38ba` (2026-08-20): `src/error.rs::
-        # StdErrorforErrorImpl<E>` attempt 3 crashed 7 binaries in a 0-stub
-        # tree and was kept (`cost withheld: 50 baseline pass(es)`); the
-        # batch's remaining units — among them the two bodies that own 19 of
-        # the cluster's 21 failing tests — were then accepted blind, the
-        # sweep read 33, the ratchet reverted 3 files, and the pass closed
-        # with both owners recorded as dispatched and unchanged.
+            return cmp, render_regression_detail(cmp)
         if stub_free:
             guard("phase-c/crash_stub_free_reverted",
-                  f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
-                  f"{list(cmp.newly_crashed)} crashed after the fill and the "
-                  "tree holds no stub — no hollow sibling can be the one "
-                  "speaking, so the crash is this fill's; REVERTED now "
-                  "rather than kept for the next sweep's ratchet, so the "
+                  f"binar{_plural} {list(cmp.newly_crashed)} crashed after the "
+                  "fill and the tree holds no stub — no hollow sibling can be "
+                  "the one speaking, so the crash is this fill's; REVERTED "
+                  "now rather than kept for the next sweep's ratchet, so the "
                   "rest of the batch is judged against a live baseline "
                   f"(cost: {cmp.crash_lost_pass} baseline pass(es))")
             return cmp, render_regression_detail(cmp)
-        guard("phase-c/crash_only_unmeasurable_kept",
-              f"binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
-              f"{list(cmp.newly_crashed)} crashed with no newly-red verdict "
-              "in any completed binary and no panic the capture can locate — "
-              "a crash implicates no unit by itself; fill KEPT on "
-              "non-regression of the measured scope, judged at the next "
-              "sweep in the joint tree (cost withheld: "
-              f"{cmp.crash_lost_pass} baseline pass(es))")
-        return None
+        guard("phase-c/crash_only_reverted",
+              f"binar{_plural} {list(cmp.newly_crashed)} crashed with no "
+              "newly-red verdict in any completed binary and no panic the "
+              "capture can locate — the sweep would count the vanished tests "
+              "as failing and the ratchet would restore the snapshot; "
+              "REVERTED here instead, so the rest of the fill is judged "
+              f"against a live baseline (cost: {cmp.crash_lost_pass} "
+              "baseline pass(es))")
+        return cmp, render_regression_detail(cmp)
     return cmp, render_regression_detail(cmp)
 
 

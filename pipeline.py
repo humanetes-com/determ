@@ -1231,7 +1231,7 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
     return PhaseCFillEngine(tel=roles.tel, mut=roles.mut, cargo=roles.cargo, prompt=roles.prompt,
                             ws=ws, retros=roles.retros, tests=roles.tests, stall=roles.stall,
                             impl_path=roles.impl, fill_one=fill_one, config=cfg,
-                            behaviour_loader=lambda pd, c: load_behaviour_suite(pd, c).specs)
+                            behaviour_loader=lambda pd, c: load_behaviour_suite(pd, c).specs, route_ledger=roles.route_ledger)
 
 
 def _task2_fill_fns_one_by_one(

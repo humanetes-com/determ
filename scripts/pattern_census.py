@@ -252,6 +252,26 @@ RE_READER_LOSS = re.compile(
     r"HEALTH ‼ \[reader_loss\] (?P<route>\S+) (?P<unit>\S+?): "
     r"(?P<tags>\d+) FN tag\(s\) in the reply, (?P<records>\d+) record\(s\) out"
     r"[^\n]*?Reply sha (?P<sha>[0-9a-f]+)")
+# P23 — a declined unit: the model answered an empty body. Post-fix the
+# route names it; pre-fix the only trace is a reader-loss line whose reply
+# artefact (logs/prompts/<sha>.txt) holds empty `<FN>` tags.
+RE_DECLINED = re.compile(
+    r"\[phase-c/declined\] (?P<route>\S+) (?P<unit>\S+?): declined "
+    r"(?P<n>\d+) unit\(s\) — the model answered an empty body: "
+    r"(?P<names>[^(]+)\(reply sha (?P<sha>[0-9a-f]+)")
+# P22 — the fill schedule's own line (the reaction to route starvation).
+RE_SCHEDULE = re.compile(
+    r"\[phase-c/schedule\] fill (?P<iter>\d+): (?P<n>\d+) run\(s\) — "
+    r"1\. (?P<first>[^(]+)\((?P<reason>[^;)]+)")
+RE_SESSION_OPENING = re.compile(
+    r"\[phase-c/session\] session\[(?P<tests>\d+) test\(s\), (?P<units>\d+) "
+    r"unit\(s\)\]: opening")
+RE_STUB_ROUTE_LANDED = re.compile(
+    r"\[phase-c/file\] (?P<file>src/\S+): FILE FILLED"
+    r"|\[phase-c/per-fn\] pass \d+/\d+: \d+ stub\(s\) remaining")
+# The reader-loss line prints a 12-char sha prefix and the full sha in the
+# artefact path; the path is what opens the reply.
+RE_READER_LOSS_PATH = re.compile(r"logs/prompts/(?P<full>[0-9a-f]{64})\.txt")
 RE_INSTALLABLE_OFFERED = re.compile(
     r"\[phase-c/file\] (?P<file>src/\S+): (?P<n>\d+) declared fn\(s\) an "
     r"escalated producer could install are writable")
@@ -399,6 +419,14 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # fitted into sessions under the cap instead of refused.
         ("fitted under the cap", "session-fitted"),
         ("opening — targets", "session-opened"),
+    ],
+    "P22": [
+        # The schedule put a stub-holding run ahead of the session.
+        ("[phase-c/schedule] fill", "scheduled"),
+    ],
+    "P23": [
+        # The route named the decline (and the unit's next prompt carries it).
+        ("[phase-c/declined]", "declined-named"),
     ],
     "P19": [
         # The boundary invariant heals before the sweep (or on the sweep's
@@ -1256,7 +1284,7 @@ def detect_p16(run: Run, iters: list[dict]) -> list[dict]:
 RE_FILL_CLASSES = re.compile(
     r"iter \d+: cargo test .*classes: cashed=(?P<cashed>\d+) wrong=(?P<wrong>\d+) "
     r"mis=(?P<mis>\d+) unreachable=(?P<unr>\d+) "
-    r"dropped=(?P<drop>\d+) compile=(?P<comp>\d+)")
+    r"dropped=(?P<drop>\d+) compile=(?P<comp>\d+)(?: declined=(?P<decl>\d+))?")
 
 
 def detect_p17(run: Run, iters: list[dict]) -> list[dict]:
@@ -1266,7 +1294,7 @@ def detect_p17(run: Run, iters: list[dict]) -> list[dict]:
     code_id; the row exists so the next gate has a measured distribution.
     """
     totals = {"cashed": 0, "wrong": 0, "mis": 0,
-              "unreachable": 0, "dropped": 0, "compile": 0}
+              "unreachable": 0, "dropped": 0, "compile": 0, "declined": 0}
     refs: list[str] = []
     n_lines = 0
     for ref, m in run.find(RE_FILL_CLASSES):
@@ -1277,6 +1305,7 @@ def detect_p17(run: Run, iters: list[dict]) -> list[dict]:
         totals["unreachable"] += int(m["unr"])
         totals["dropped"] += int(m["drop"])
         totals["compile"] += int(m["comp"])
+        totals["declined"] += int(m["decl"] or 0)
         if len(refs) < 4:
             refs.append(ref)
     total = sum(totals.values())
@@ -1290,6 +1319,7 @@ def detect_p17(run: Run, iters: list[dict]) -> list[dict]:
             f"cashed={totals['cashed']} wrong={totals['wrong']} "
             f"mis={totals['mis']} unreachable={totals['unreachable']} "
             f"dropped={totals['dropped']} compile={totals['compile']} "
+            f"declined={totals['declined']} "
             f"— dominant {dominant} ({pct:.0f}%)"
         ),
         "refs": refs,
@@ -1451,6 +1481,119 @@ def detect_p21(run: Run, iters: list[dict]) -> list[dict]:
     return hits[:6]
 
 
+_SESSION_PLAN_EVENTS: dict[str, list[dict]] | None = None
+
+
+def _session_plan_events_by_run() -> dict[str, list[dict]]:
+    """`phase_c.session.plan` events by run — the only record of how many
+    leftover tests were hollow on a fill that still opened a session."""
+    global _SESSION_PLAN_EVENTS
+    if _SESSION_PLAN_EVENTS is not None:
+        return _SESSION_PLAN_EVENTS
+    out: dict[str, list[dict]] = defaultdict(list)
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "phase_c.session.plan" not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                d = dict(ev.get("data") or {})
+                d["ts"] = str(ev.get("ts", ""))
+                out[str(ev.get("run_id", ""))].append(d)
+    except OSError:
+        pass
+    _SESSION_PLAN_EVENTS = dict(out)
+    return _SESSION_PLAN_EVENTS
+
+
+def detect_p22(run: Run, iters: list[dict]) -> list[dict]:
+    """Route starvation — a fill whose session opened FIRST while a stub
+    held leftover tests hollow (the plan event's `hollow > 0`) and no stub
+    route (file-first / per-fn) had landed anything in that fill. Run
+    334902-2774708c iter 11 (2026-09-06 05:23 UTC) is the positive
+    instance: hollow=24, three sessions fitted, the 18-test session opened
+    at once, the per-fn route never ran before the process was killed.
+    Reaction: the schedule line putting a stub-holding run first.
+    """
+    plans = _session_plan_events_by_run().get(run.run_id, [])
+    hollow_plans = [p for p in plans if int(p.get("hollow", 0) or 0) > 0
+                    and (int(p.get("fitted", 0) or 0) > 0
+                         or p.get("sessions"))]
+    if not hollow_plans:
+        return []
+    hits: list[dict] = []
+    # Fill-scoped walk: a service-order line opens a fill; a session
+    # opening before any stub-route landing in that fill is the hit.
+    stub_landed = False
+    fill_ref = ""
+    n_plans = 0
+    for ref, text in run.lines:
+        if RE_SERVICE_NEVER_SERVED.search(text):
+            stub_landed = False
+            fill_ref = ref
+            continue
+        if RE_STUB_ROUTE_LANDED.search(text):
+            stub_landed = True
+            continue
+        if RE_SCHEDULE.search(text):
+            # The reaction is present on this fill: its order is decided.
+            stub_landed = True
+            continue
+        m = RE_SESSION_OPENING.search(text)
+        if not m or stub_landed:
+            continue
+        if n_plans >= len(hollow_plans):
+            break
+        plan = hollow_plans[n_plans]
+        n_plans += 1
+        hits.append({
+            "evidence": (
+                f"session[{m['tests']} test(s)] opened first while "
+                f"{plan.get('hollow')} leftover test(s) were hollow and no "
+                "stub route had landed in this fill"),
+            "refs": [ref, fill_ref] if fill_ref else [ref],
+        })
+    return hits[:6]
+
+
+def detect_p23(run: Run, iters: list[dict]) -> list[dict]:
+    """Declined units — the model answered an empty `<FN>` body. Post-fix
+    the route prints `[phase-c/declined] …`; pre-fix the only trace is a
+    reader-loss line whose reply artefact holds empty tags, which this
+    detector opens (run 959654-1e96b403, 2026-09-06: three vtable drop
+    helpers, logged as a parser defect).
+    """
+    hits: list[dict] = []
+    for ref, m in run.find(RE_DECLINED):
+        hits.append({
+            "evidence": (f"{m['route']} {m['unit']}: declined {m['n']} — "
+                         f"{m['names'].strip()}"),
+            "refs": [ref],
+        })
+    prompts_dir = EVENTS_PATH.parent / "prompts"
+    for ref, m in run.find(RE_READER_LOSS):
+        text_line = next((t for r, t in run.lines if r == ref), "")
+        pm = RE_READER_LOSS_PATH.search(text_line)
+        reply_path = prompts_dir / f"{pm['full'] if pm else m['sha']}.txt"
+        try:
+            text = reply_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        empty = re.findall(r'<FN name="([^"]+)"[^>]*>\s*</FN>', text)
+        if not empty:
+            continue
+        hits.append({
+            "evidence": (f"{m['route']} {m['unit']}: reader-loss line, but "
+                         f"{len(empty)} of the {m['tags']} tag(s) were EMPTY "
+                         f"({', '.join(empty[:4])}) — declined, not lost"),
+            "refs": [ref],
+        })
+    return hits[:6]
+
+
 def detect_p19(run: Run, iters: list[dict]) -> list[dict]:
     """Mechanical write left an unparseable tree — an uncoded rustc
     diagnostic under src/ on a sweep or refusal line, attributed to the
@@ -1538,7 +1681,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P10": detect_p10, "P11": detect_p11, "P12": detect_p12,
              "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
              "P17": detect_p17, "P18": detect_p18,
-             "P19": detect_p19, "P20": detect_p20, "P21": detect_p21}
+             "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
+             "P22": detect_p22, "P23": detect_p23}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1555,7 +1699,9 @@ CLASS_NAMES = {
     "P18": "locator-collapsed session slice (eligible-as-source exploded past the cap)",
     "P19": "mechanical write left an unparseable tree (uncoded src/ diagnostic on a sweep)",
     "P20": "site-cardinality leak into the re-seed (a unit handed once per impl site)",
-    "P21": "over-union session refusal (every test fits the cap, the union does not, never-served units wait)"}
+    "P21": "over-union session refusal (every test fits the cap, the union does not, never-served units wait)",
+    "P22": "route starvation (a session opened first while a stub held leftover tests hollow and no stub route had run this fill)",
+    "P23": "declined unit (the model answered an empty body; pre-fix logged as a reader loss)"}
 
 
 # -------------------------------------------------------------------- report

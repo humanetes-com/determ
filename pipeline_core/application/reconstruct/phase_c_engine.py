@@ -14,6 +14,7 @@ per the project's no-regex rule (R7 migrate-on-touch).
 """
 from __future__ import annotations
 
+import os
 import queue as _queue_mod
 import threading as _threading
 import time
@@ -30,6 +31,16 @@ from pipeline_core.application.reconstruct.cluster_membership import (
 )
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillOneFn
+from pipeline_core.application.reconstruct.fill_routes import (
+    FillRoute,
+    PreparedFill,
+    RouteLedger,
+    RouteRunReport,
+)
+from pipeline_core.application.reconstruct.fill_scheduler import (
+    FillExecutionDeps,
+    execute_fill,
+)
 from pipeline_core.application.reconstruct.impl_fill import (
     cluster_inactive_stub_names,
 )
@@ -53,6 +64,7 @@ from pipeline_core.domain.fill_class import (
     FillClassHistogram,
     FillOutcomeClass,
 )
+from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, RunClock
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -133,6 +145,10 @@ class PhaseCFillEngine:
     # store); default returns none so the engine stays additive without it.
     behaviour_loader: Callable[[Path, str], tuple[BehaviourSpec, ...]] = (
         lambda _project_dir, _cluster: ())
+    # Where route runs are recorded and ranked from (`adapters/
+    # route_ledger_store.py`); None keeps the schedule evidence-free (every
+    # run never-served, today's order on ties) and writes nothing.
+    route_ledger: RouteLedger | None = None
 
     def _leaf_first_records(
         self, records: list[Stub],
@@ -282,8 +298,17 @@ class PhaseCFillEngine:
         # plus its attributed units): the red-slice session's editable set.
         session_slices: Mapping[str, frozenset[FnSite]] | None = None,
         session_owners: Mapping[str, frozenset[FnSite]] | None = None,
+        # The fill schedule's inputs: its wall-clock budget in minutes
+        # (`TDD_FILL_BUDGET_MINUTES`; 0 = order only), the iteration the
+        # rows are stamped with, and the run id.
+        fill_budget_minutes: float = 0.0,
+        fill_iteration: int = 0,
+        run_id: str = "",
     ) -> ClusterFillResult:
-        """Phase C — Flavour B with full validation loops."""
+        """Phase C — every route of one fill, ordered and budgeted by
+        `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
+        per-impl routes come from `prepare_impl_fill`; the per-fn route is
+        this engine's own)."""
         if cluster_env is None:
             cluster_env = self.cargo.env()
         # One load for the pass. The test-fix loop used to re-read the 493 KB
@@ -349,6 +374,8 @@ class PhaseCFillEngine:
                 if not _is_cfg_dead(k))
         _impl_payoff = None
         _fill_hist = FillClassHistogram()
+        _prepared_fill: PreparedFill | None = None
+        _carryover: dict[str, Any] = {}
         if impl_route_deferral_applies(
                 _impl_deferred_stubs, _has_refill_targets,
                 file_primary=self.config.route_order is RouteOrder.FILE_PRIMARY):
@@ -408,9 +435,9 @@ class PhaseCFillEngine:
                 "stubs": sorted(f"{f}::{fn}" for f, fn in _impl_deferred_stubs),
                 "kept_stubs": sorted(f"{f}::{fn}" for f, fn in _also_stubs)})
             tdd_frontier_keys = set(_impl_deferred_stubs) | set(_also_stubs)
-            _carryover: dict[str, Any] = {}
+            _carryover = {}
         elif self.config.fill_unit is FillUnit.IMPL:
-            _impl_stats = self.impl_path.fill_impl_blocks(
+            _prepared_fill = self.impl_path.prepare_impl_fill(
                 project_dir=project_dir,
                 target_src_dir=target_src_dir,
                 tests_dir_files=tests_dir_files,
@@ -436,6 +463,44 @@ class PhaseCFillEngine:
                 session_slices=session_slices,
                 session_owners=session_owners,
             )
+        _per_fn_route = _PerFnRoute(
+            self,
+            project_dir=project_dir, target_src_dir=target_src_dir,
+            tests_dir_files=tests_dir_files, module_name=module_name,
+            cluster_name=cluster_name, cluster=cluster, check_cmd=check_cmd,
+            cluster_env=cluster_env, max_passes=max_passes,
+            leaf_name_counts=leaf_name_counts, fr_path=fr_path,
+            tdd_frontier_keys=tdd_frontier_keys,
+            skip_end_pass_test=skip_end_pass_test,
+            tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
+            crash_evidence=crash_evidence, crash_blamed=crash_blamed,
+            crash_blocked=crash_blocked, dispatch_ranks=dispatch_ranks,
+            behaviour_specs=behaviour_specs, cfg_dead=_cfg_dead,
+            is_cfg_dead=_is_cfg_dead, dispatched=_dispatched,
+            reverted=_reverted, answer_lost=_answer_lost,
+            landed_before=(_prepared_fill.landed if _prepared_fill is not None
+                           else (lambda: 0)))
+        routes: list[FillRoute] = []
+        if _prepared_fill is not None:
+            routes.extend(_prepared_fill.routes)
+        routes.append(_per_fn_route)
+        execute_fill(
+            routes,
+            hollow=_prepared_fill.hollow if _prepared_fill is not None else {},
+            bodies_sha=(_prepared_fill.bodies_sha if _prepared_fill is not None
+                        else (lambda _t: "")),
+            deps=FillExecutionDeps(
+                log=self.tel.log, emit=self.tel.emit,
+                check_stop=self.tel.check_stop,
+                ledger=self.route_ledger, project=project_dir.name,
+                cluster=cluster_name, run_id=run_id, iteration=fill_iteration,
+                oracle_fp=oracle_fp, budget_minutes=fill_budget_minutes,
+                scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
+                parallelism=self.config.parallelism))
+        _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
+                       else None)
+        _per_fn = _per_fn_route.result
+        if _impl_stats is not None:
             _impl_payoff = _impl_stats.payoff
             _fill_hist = _impl_stats.fill_classes or FillClassHistogram()
             if _impl_stats.dispatched_fns is not None:
@@ -444,17 +509,93 @@ class PhaseCFillEngine:
             _reverted.update(FnLocator(*t) for t in _impl_stats.reverted_fns)
             _answer_lost.update(
                 FnLocator(*t) for t in _impl_stats.answer_lost_fns)
-            # If there are still stub members the per-impl path didn't cover
-            # (free fns or oversized blocks), fall through to the per-fn path.
-            if _impl_stats.remaining == 0:
-                return _impl_stats
             _carryover = {
                 "impls_filled": _impl_stats.impls_filled,
                 "impls_failed": _impl_stats.impls_failed,
                 "fns_filled_via_impl": _impl_stats.fns_filled,
+                "bytes": _impl_stats.bytes_filled,
+                "attempts": _impl_stats.attempts,
+                "errors": list(_impl_stats.errors),
             }
-        else:
-            _carryover = {}
+        if _per_fn is None and _impl_stats is not None:
+            # The per-fn route never opened (deferred, or nothing planned):
+            # the impl path's result IS the fill's — returned as-is, the way
+            # the impl-only early return always did — and the cluster-done
+            # event still closes the fill.
+            self.tel.emit("phase_c.cluster.done", data={
+                "cluster": cluster_name,
+                "fns_filled": _impl_stats.fns_filled,
+                "bytes_filled": _impl_stats.bytes_filled,
+                "llm_calls": _impl_stats.attempts,
+                "remaining_stubs": _impl_stats.remaining,
+                "errors": len(_impl_stats.errors),
+            })
+            return _impl_stats
+        if _per_fn is None:
+            _per_fn = ClusterFillResult(
+                remaining=self.ws.scan_stub_tuples(target_src_dir, cluster).unit_count)
+        _fill_hist = _fill_hist.combined_with(_per_fn.fill_classes)
+        _result = ClusterFillResult(
+            fns_filled=_per_fn.fns_filled + int(_carryover.get("fns_filled_via_impl", 0)),
+            bytes_filled=_per_fn.bytes_filled + int(_carryover.get("bytes", 0)),
+            attempts=_per_fn.attempts + int(_carryover.get("attempts", 0)),
+            errors=(*_carryover.get("errors", []), *_per_fn.errors),
+            remaining=_per_fn.remaining,
+            impls_filled=int(_carryover.get("impls_filled", 0)),
+            impls_failed=int(_carryover.get("impls_failed", 0)),
+            dispatched_fns=tuple(sorted(_dispatched)),
+            reverted_fns=tuple(sorted(_reverted)),
+            answer_lost_fns=tuple(sorted(_answer_lost - _reverted)),
+            payoff=combine_payoffs(_impl_payoff, _per_fn.payoff),
+            fill_classes=_fill_hist,
+        )
+        self.tel.emit("phase_c.cluster.done", data={
+            "cluster": cluster_name,
+            "fns_filled": _result.fns_filled,
+            "bytes_filled": _result.bytes_filled,
+            "llm_calls": _result.attempts,
+            "remaining_stubs": _result.remaining,
+            "errors": len(_result.errors),
+        })
+        return _result
+
+    def _per_fn_passes(
+        self,
+        *,
+        project_dir: Path,
+        target_src_dir: Path,
+        tests_dir_files: list[Path],
+        module_name: str,
+        cluster_name: str,
+        cluster: BuildCluster | None,
+        check_cmd: str,
+        cluster_env: dict[str, str],
+        max_passes: int,
+        leaf_name_counts: dict[str, int] | None,
+        fr_path: Path | None,
+        tdd_frontier_keys: set[FnLocator] | None,
+        skip_end_pass_test: bool,
+        tdd_frontier_tests: FailureFrontier | None,
+        tdd_test_cmd: str | None,
+        crash_evidence: dict[FnLocator, str] | None,
+        crash_blamed: frozenset[FnLocator] | None,
+        crash_blocked: dict[str, str] | None,
+        dispatch_ranks: dict[FnLocator, int] | None,
+        behaviour_specs: tuple[BehaviourSpec, ...],
+        _cfg_dead: frozenset[tuple[str, str]],
+        _is_cfg_dead: Callable[[FnLocator], bool],
+        _dispatched: set[FnLocator],
+        _reverted: set[FnLocator],
+        _answer_lost: set[FnLocator],
+        landed_before: Callable[[], int],
+        claim: Callable[[], bool],
+    ) -> ClusterFillResult:
+        """The per-fn route: passes of priority levels over the frontier's
+        stubs and re-fill targets. `claim` is the fill schedule's gate on
+        the next unit; `landed_before` is what earlier runs of this fill
+        landed (the stale-refill probe's premise)."""
+        _fill_hist = FillClassHistogram()
+        _last_payoff = None
         target_src_dir.mkdir(parents=True, exist_ok=True)
         bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
         fns_filled = 0
@@ -500,6 +641,11 @@ class PhaseCFillEngine:
 
         for pass_n in range(1, max_passes + 1):
             self.tel.check_stop(f"per-fn pass {pass_n}")
+            if pass_n > 1 and not claim():
+                self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: fill share "
+                             "spent and the last pass moved no verdict — "
+                             "no further pass opened.")
+                break
             # Every pass scans for stubs fresh. Cluster-aware: prefer record-based
             # scan (syn enumerator gives container + sig_text). Falls back to
             # name-only tuples when the extractor isn't available.
@@ -556,8 +702,7 @@ class PhaseCFillEngine:
             # `checked_div` behind a file-route fill of the same fn). One
             # cargo test (0.0-0.2 s on the fixtures) is the cheap probe: drop
             # every target whose attributed tests all pass now.
-            _landed_before = (_carryover.get("fns_filled_via_impl", 0)
-                              + fns_filled)
+            _landed_before = landed_before() + fns_filled
             if (_refill_recs and _landed_before > 0
                     and tdd_test_cmd and tdd_frontier_tests is not None):
                 _, _out_probe = self.cargo.run(
@@ -732,6 +877,11 @@ class PhaseCFillEngine:
                     # `fill_one.run` below; the main thread's own check (after
                     # the join below) is what actually ends the process.
                     self.tel.check_stop(f"per-fn pass {pass_n} worker dispatch")
+                    # The fill schedule's share: no NEW unit is claimed once
+                    # it is spent and the last landing moved no verdict; a
+                    # unit in flight always completes.
+                    if not claim():
+                        return
                     try:
                         idx, rec = work_queue.get_nowait()
                     except _queue_mod.Empty:
@@ -1173,25 +1323,100 @@ class PhaseCFillEngine:
 
         bytes_after = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
         remaining = self.ws.scan_stub_tuples(target_src_dir, cluster).unit_count
-        self.tel.emit("phase_c.cluster.done", data={
-            "cluster": cluster_name,
-            "fns_filled": fns_filled,
-            "bytes_filled": bytes_after - bytes_before,
-            "llm_calls": attempts,
-            "remaining_stubs": remaining,
-            "errors": len(errors),
-        })
         return ClusterFillResult(
-            fns_filled=fns_filled + _carryover.get("fns_filled_via_impl", 0),
+            fns_filled=fns_filled,
             bytes_filled=bytes_after - bytes_before,
             attempts=attempts,
             errors=tuple(errors),
             remaining=remaining,
-            impls_filled=_carryover.get("impls_filled", 0),
-            impls_failed=_carryover.get("impls_failed", 0),
             dispatched_fns=tuple(sorted(_dispatched)),
             reverted_fns=tuple(sorted(_reverted)),
             answer_lost_fns=tuple(sorted(_answer_lost - _reverted)),
-            payoff=combine_payoffs(_impl_payoff, _last_payoff),
+            payoff=_last_payoff,
             fill_classes=_fill_hist,
         )
+
+
+class _PerFnRoute:
+    """The engine's own route: the per-fn passes, as ONE run of the fill
+    schedule (its levels are a compile-order barrier inside the route, not
+    a scheduling unit, and their composition is only known once the earlier
+    runs have landed)."""
+
+    kind = RouteKind.PER_FN
+    parallel = False
+
+    def __init__(self, engine: PhaseCFillEngine, **kw: Any) -> None:
+        self._engine = engine
+        self._kw = kw
+        self.result: ClusterFillResult | None = None
+
+    def plan(self) -> Sequence[RouteRun]:
+        eng = self._engine
+        kw = self._kw
+        keys: set[FnLocator] | None = kw["tdd_frontier_keys"]
+        recs = eng.ws.scan_stub_records(kw["target_src_dir"], kw["cluster"])
+        if recs is not None:
+            stubs = [Stub.from_dict(r) for r in recs]
+        else:
+            stubs = [Stub(file=f, fn_name=fn)
+                     for f, fn in eng.ws.scan_stub_tuples(
+                         kw["target_src_dir"], kw["cluster"]).unit_list()]
+        if keys is not None:
+            stubs = [st for st in stubs if st.key in keys]
+        # A cfg-dead stub is refused by the pass itself, with its own event
+        # (`phase_c.dispatch.cfg_dead_refused`): it stays a reason to open
+        # the run and never a target the run may write.
+        live = [st for st in stubs if not kw["is_cfg_dead"](st.key)]
+        refills = eng._collect_refill_targets(
+            kw["target_src_dir"], live, keys, kw["tdd_frontier_tests"],
+            crash_blamed=kw["crash_blamed"] or frozenset())
+        stub_locs = frozenset(st.key for st in live)
+        targets = stub_locs | frozenset(r.key for r in refills)
+        if not targets and not stubs:
+            return []
+        tests: set[str] = set()
+        frontier: FailureFrontier | None = kw["tdd_frontier_tests"]
+        if frontier is not None:
+            for loc in targets:
+                for t in frontier.tests_for(loc):
+                    tests.add(str(t).rsplit("::", 1)[-1])
+        return [RouteRun(
+            kind=self.kind,
+            label=f"per-fn {len(stub_locs)} stub(s), {len(refills)} re-fill(s)",
+            targets=targets, target_tests=frozenset(tests),
+            stubs_in_targets=stub_locs,
+            files=tuple(sorted({k.file for k in targets})))]
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        if not clock.may_claim():
+            return RouteRunReport(empty=True)
+        eng = self._engine
+        kw = dict(self._kw)
+        before_disp = frozenset(kw["dispatched"])
+        before_rev = frozenset(kw["reverted"])
+        self.result = eng._per_fn_passes(
+            project_dir=kw["project_dir"], target_src_dir=kw["target_src_dir"],
+            tests_dir_files=kw["tests_dir_files"], module_name=kw["module_name"],
+            cluster_name=kw["cluster_name"], cluster=kw["cluster"],
+            check_cmd=kw["check_cmd"], cluster_env=kw["cluster_env"],
+            max_passes=kw["max_passes"], leaf_name_counts=kw["leaf_name_counts"],
+            fr_path=kw["fr_path"], tdd_frontier_keys=kw["tdd_frontier_keys"],
+            skip_end_pass_test=kw["skip_end_pass_test"],
+            tdd_frontier_tests=kw["tdd_frontier_tests"],
+            tdd_test_cmd=kw["tdd_test_cmd"], crash_evidence=kw["crash_evidence"],
+            crash_blamed=kw["crash_blamed"], crash_blocked=kw["crash_blocked"],
+            dispatch_ranks=kw["dispatch_ranks"],
+            behaviour_specs=kw["behaviour_specs"], _cfg_dead=kw["cfg_dead"],
+            _is_cfg_dead=kw["is_cfg_dead"], _dispatched=kw["dispatched"],
+            _reverted=kw["reverted"], _answer_lost=kw["answer_lost"],
+            landed_before=kw["landed_before"], claim=clock.may_claim)
+        res = self.result
+        disp = frozenset(kw["dispatched"]) - before_disp
+        rev = frozenset(kw["reverted"]) - before_rev
+        return RouteRunReport(
+            model_calls=res.attempts, kept=frozenset(disp - rev),
+            reverted=frozenset(rev), dispatched=frozenset(disp),
+            classes={k: v for k, v in (res.fill_classes or FillClassHistogram()
+                                       ).as_dict().items() if v},
+            empty=(res.attempts == 0 and not disp))

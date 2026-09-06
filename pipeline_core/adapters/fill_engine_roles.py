@@ -234,12 +234,14 @@ class CargoFillAdapter:
                              baseline: TestStateReading | None,
                              *, stub_free: bool = False,
                              introduced_stubs: bool = False,
+                             hollow_before: int | None = None,
                              ) -> tuple[RegressionComparison, str] | None:
         if self.test_regression_gate_fn is None:
             return None
         return self.test_regression_gate_fn(test_cmd, cwd, env, baseline,
                                             stub_free=stub_free,
-                                            introduced_stubs=introduced_stubs)
+                                            introduced_stubs=introduced_stubs,
+                                            hollow_before=hollow_before)
 
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = None) -> str:
@@ -469,6 +471,12 @@ class StallPolicyAdapter:
 @dataclass(frozen=True, slots=True)
 class ImplFillPathAdapter:
     fill_impl_blocks_fn: Callable[..., ClusterFillResult]
+    prepare_impl_fill_fn: Callable[..., Any] | None = None
 
     def fill_impl_blocks(self, **kw: Any) -> ClusterFillResult:
         return self.fill_impl_blocks_fn(**kw)
+
+    def prepare_impl_fill(self, **kw: Any) -> Any:
+        if self.prepare_impl_fill_fn is None:
+            raise RuntimeError("prepare_impl_fill is not wired")
+        return self.prepare_impl_fill_fn(**kw)

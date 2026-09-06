@@ -67,6 +67,7 @@ def gate(
     stub_free: bool = False,
     introduced_stubs: bool = False,
     observe: Callable[[RegressionComparison], None] | None = None,
+    hollow_before: int | None = None,
 ) -> tuple[RegressionComparison, str] | None:
     """``observe`` receives the comparison the gate measures, on every path.
 
@@ -79,4 +80,4 @@ def gate(
         run_cargo, test_cmd, cwd, env, base,
         enabled=unified_on and _guard_on(), timeout=timeout, guard=guard,
         stub_free=stub_free, introduced_stubs=introduced_stubs,
-        observe=observe)
+        observe=observe, hollow_before=hollow_before)

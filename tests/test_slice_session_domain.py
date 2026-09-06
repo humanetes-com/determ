@@ -22,7 +22,6 @@ from pipeline_core.domain.slice_session import (
     render_test_turn,
     route_change_set,
     session_slices_for_failing,
-    sessions_this_fill,
     slice_plan_gaps,
     slices_with_pair_hops,
 )
@@ -49,32 +48,6 @@ def test_a_slice_touching_a_stub_is_left_to_the_stub_routes() -> None:
     plans = plan_slices({"t_a": {_DISP, _RENDER}},
                         stubs={locator_of(_RENDER)})
     assert plans == []
-
-
-def test_fitted_sessions_do_not_open_while_a_leftover_test_is_still_hollow() -> None:
-    """plan_slices packs the non-hollow remainder. Opening those sessions
-    while another leftover test is still hollow spends the fill on units
-    whose tests already run. Control: the same remainder with hollow=0
-    still opens (the packing this route was written for)."""
-    leftover = {
-        "t_fmt_a": {_DISP, _RENDER},
-        "t_fmt_b": {_RENDER, _NEW},
-        "t_path": {_OTHER},
-    }
-    plans = plan_slices(leftover, stubs={locator_of(_OTHER)})
-    assert [p.tests for p in plans] == [("t_fmt_a", "t_fmt_b")]
-    gaps = slice_plan_gaps(leftover, stubs={locator_of(_OTHER)})
-    assert gaps.hollow == 1
-    opened, note = sessions_this_fill(plans, gaps)
-    assert opened == ()
-    assert "still hollow" in note and "1 failing" in note
-    ready = {"t_fmt_a": leftover["t_fmt_a"], "t_fmt_b": leftover["t_fmt_b"]}
-    ready_plans = plan_slices(ready)
-    ready_gaps = slice_plan_gaps(ready)
-    assert ready_gaps.hollow == 0
-    opened_ready, note_ready = sessions_this_fill(ready_plans, ready_gaps)
-    assert list(opened_ready) == ready_plans
-    assert note_ready == ""
 
 
 def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:
@@ -424,3 +397,36 @@ def test_slice_plan_payload_records_the_union_and_the_sessions() -> None:
     assert payload["max_units"] == 4 and payload["over_union"] == 0
     assert [s["tests"] for s in payload["sessions"]] == [list(p.tests) for p in plans]
     assert set(payload["slices"]) == set(slices)
+
+
+def test_a_group_under_the_unit_cap_is_packed_when_its_prompt_is_over_the_char_capacity() -> None:
+    """Plan sentence: a session is sized to leave its turns headroom. Two
+    tests whose union is 3 units (under the cap) but whose files render to
+    more than the capacity are split; the same tests with no char capacity
+    (the pre-fix packing) stay one session — the shape of the 05:23 session
+    of run 334902-2774708c (18 tests, 9 files, 92% of the call limit after
+    one turn)."""
+    from pipeline_core.domain.slice_session import SliceCosts
+    a = FnSite("src/a.rs", "f", "impl A")
+    b = FnSite("src/b.rs", "g", "impl B")
+    hub = FnSite("src/hub.rs", "construct", "impl Hub")
+    leftover = {"t_a": {a, hub}, "t_b": {b, hub}}
+    costs = SliceCosts(
+        file_chars={"src/a.rs": 30_000, "src/b.rs": 30_000, "src/hub.rs": 10_000},
+        test_chars={"t_a": 2_000, "t_b": 2_000}, fixed_chars=5_000,
+        max_chars=60_000)
+    packed = plan_slices(leftover, costs=costs)
+    assert [p.tests for p in packed] == [("t_a",), ("t_b",)]
+    assert all(costs.chars(p.tests, p.units) <= 60_000 for p in packed)
+    gaps = slice_plan_gaps(leftover, costs=costs)
+    assert gaps.over_chars == 1 and gaps.over_union == 0 and gaps.fitted == 2
+    assert "char capacity" in gaps.fitted_clause()
+    # Control: unit-count packing alone keeps them together (union 3 <= 32).
+    single = plan_slices(leftover)
+    assert [p.tests for p in single] == [("t_a", "t_b")]
+    # A single test whose own prompt is over the capacity is dropped, as a
+    # single test over the unit cap is — never truncated.
+    too_big = SliceCosts(file_chars={"src/a.rs": 70_000, "src/hub.rs": 10_000},
+                         test_chars={"t_a": 100}, fixed_chars=100, max_chars=60_000)
+    assert plan_slices({"t_a": {a, hub}}, costs=too_big) == []
+    assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_cap == 1

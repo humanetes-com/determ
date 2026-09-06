@@ -1,7 +1,7 @@
-"""Per-fill outcome class — CLAUDE.md's four causes, plus cashed/compile.
+"""Per-fill outcome class — the four causes the repo conventions name, plus cashed, compile and declined.
 
 AttemptLoss answers a different question (whether the last-resort whole-file
-prompt is justified). These six values classify what a dispatched fill
+prompt is justified). These seven values classify what a dispatched fill
 BOUGHT, so a flat sweep is readable fill-by-fill instead of as a score.
 
 Nothing is gated on the histogram in this code_id. The emitter and the
@@ -46,6 +46,14 @@ class FillOutcomeClass(StrEnum):
     """The fill stopped on a red crate — no U2 verdict, body reverted or
     the loop exhausted at the compile tier."""
 
+    DECLINED = "declined"
+    """The model answered the unit with an EMPTY body — a `<FN>` tag with
+    nothing in it. Not a reader loss (the reader had nothing to lose) and
+    not a wrong body (nothing landed): the prompt did not give the model
+    what it needed to write this unit, or the model decided not to. Run
+    `959654-1e96b403` (2026-09-06): three vtable drop helpers declined in
+    one file-first reply, logged as a parser defect for eight hours."""
+
 
 _FIELD = {
     FillOutcomeClass.CASHED: "cashed",
@@ -54,6 +62,7 @@ _FIELD = {
     FillOutcomeClass.UNREACHABLE_VERDICT: "unreachable",
     FillOutcomeClass.ANSWER_DROPPED: "dropped",
     FillOutcomeClass.COMPILE_FAIL: "compile",
+    FillOutcomeClass.DECLINED: "declined",
 }
 
 
@@ -86,25 +95,28 @@ class FillClassHistogram:
     unreachable: int = 0
     dropped: int = 0
     compile: int = 0
+    declined: int = 0
 
     def rendered(self) -> str:
         return (
             f"classes: cashed={self.cashed} wrong={self.wrong} "
             f"mis={self.mis} unreachable={self.unreachable} "
-            f"dropped={self.dropped} compile={self.compile}"
+            f"dropped={self.dropped} compile={self.compile} "
+            f"declined={self.declined}"
         )
 
     def as_dict(self) -> dict[str, int]:
         return {
             "cashed": self.cashed, "wrong": self.wrong, "mis": self.mis,
             "unreachable": self.unreachable, "dropped": self.dropped,
-            "compile": self.compile,
+            "compile": self.compile, "declined": self.declined,
         }
 
     @property
     def total(self) -> int:
         return (self.cashed + self.wrong + self.mis
-                + self.unreachable + self.dropped + self.compile)
+                + self.unreachable + self.dropped + self.compile
+                + self.declined)
 
     def __bool__(self) -> bool:
         return self.total > 0
@@ -119,6 +131,7 @@ class FillClassHistogram:
             unreachable=self.unreachable + other.unreachable,
             dropped=self.dropped + other.dropped,
             compile=self.compile + other.compile,
+            declined=self.declined + other.declined,
         )
 
 
@@ -132,6 +145,7 @@ class FillClassCounter:
     unreachable: int = 0
     dropped: int = 0
     compile: int = 0
+    declined: int = 0
 
     def add(self, cls: FillOutcomeClass) -> None:
         name = _FIELD[cls]
@@ -141,7 +155,7 @@ class FillClassCounter:
         return FillClassHistogram(
             cashed=self.cashed, wrong=self.wrong, mis=self.mis,
             unreachable=self.unreachable, dropped=self.dropped,
-            compile=self.compile,
+            compile=self.compile, declined=self.declined,
         )
 
 

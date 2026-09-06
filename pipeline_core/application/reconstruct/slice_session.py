@@ -98,6 +98,13 @@ class SessionPorts:
     # stands, measured; None disables the per-turn coverage statement.
     coverage: Callable[[Sequence[str]], Mapping[str, frozenset[FnSite]]] | None = None
     now: Callable[[], float] = time.monotonic
+    # () -> whether the fill schedule's clock lets this session open ANOTHER
+    # turn; None means unbounded. Polled before each turn beside the
+    # graceful-stop check; a turn in flight is never interrupted.
+    may_claim: Callable[[], bool] | None = None
+    # (net verdict delta of the turn just judged) -> None; what the clock's
+    # "budget follows payoff" rule reads.
+    note_delta: Callable[[int], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +253,8 @@ def run_slice_session(
             targets=tuple(targets), newly_red=tuple(red_names),
             newly_red_said=outputs,
             newly_red_observed={n: observed[n] for n in red_names if n in observed},
-            crashed=tuple(cmp.newly_crashed), pass_delta=cmp.net_pass_delta)
+            crashed=tuple(cmp.newly_crashed), pass_delta=cmp.net_pass_delta,
+            executed_shrank=cmp.cur_executed < cmp.base_executed)
         return reading, after
 
     try:
@@ -255,6 +263,11 @@ def run_slice_session(
             if (ports.now() - started) / 60.0 > max_minutes:
                 ports.log(f"  [phase-c/session] {label}: wall-clock budget "
                           f"({max_minutes:.0f} min) spent after {turns} turn(s).")
+                break
+            if ports.may_claim is not None and not ports.may_claim():
+                ports.log(f"  [phase-c/session] {label}: fill share spent "
+                          f"after {turns} turn(s) and the last turn moved no "
+                          "verdict — no further turn opened.")
                 break
             turns += 1
             try:
@@ -334,6 +347,8 @@ def run_slice_session(
                       f"body(ies) compiled; targets failing {len(failing)}/"
                       f"{len(slice_.tests)}, newly red {len(reading.newly_red)}, "
                       f"net {reading.pass_delta:+d}.")
+            if ports.note_delta is not None and after is not None:
+                ports.note_delta(reading.pass_delta)
             if after is None or baseline is None:
                 # Inconclusive suite: keep nothing from this turn.
                 _restore(pre)
@@ -389,9 +404,12 @@ def run_slice_session(
     if accepted:
         outcome, kept = "accepted", changed
     elif changed:
-        if last_reading is not None and last_reading.regressed:
+        if last_reading is not None:
+            # Carried whether the set is kept or peeled: a kept net-positive
+            # turn's newly-red tests are the next prompt's evidence.
             newly_red = last_reading.newly_red
             newly_red_output = dict(last_reading.newly_red_said)
+        if last_reading is not None and last_reading.regressed:
             kept, reverted = _peel(ports, target_src_dir, slice_, records, baseline,
                                    baseline_bodies, baseline_texts, changed,
                                    peel_max=peel_max, label=label)
@@ -483,9 +501,11 @@ def _peel(
 ) -> tuple[frozenset[FnSite], frozenset[FnSite]]:
     """Restore changed units one at a time until the suite holds; the rest
     are kept. Restores the whole baseline when the budget runs out or
-    nothing holds — a previously-passing test going red never survives,
-    even when net pass rose (acceptance is `TurnReading.clean`; peel is
-    the same bar without requiring the targets green)."""
+    nothing holds. The bar is the sweep's (`RegressionComparison.regressed`):
+    a strict net gain holds even with a newly-red test, at or below zero any
+    loss fails. It used to be "no previously-passing test red, whatever the
+    net" — stricter than the sweep that judges the same tree one iteration
+    later, so a session could revert what the ratchet would have kept."""
     remaining = sorted(changed, key=lambda u: (u.file, u.fn_name, u.container))
     reverted: list[FnSite] = []
     unrestored: list[FnSite] = []
@@ -513,10 +533,7 @@ def _peel(
         if after is None or baseline is None:
             continue
         cmp = compare_readings(baseline, after)
-        # Not `cmp.regressed`: that is false on a net-positive reading
-        # that still has newly-red tests, which is a session regression.
-        if (not cmp.newly_red and not cmp.newly_crashed
-                and cmp.cur_executed >= cmp.base_executed):
+        if not cmp.regressed:
             ports.log(f"  [phase-c/session] {label}: peeled {len(reverted)} unit(s) — "
                       f"the remaining {len(remaining) + len(unrestored)} hold "
                       "with no previously-passing test red.")

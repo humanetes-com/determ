@@ -558,6 +558,15 @@ def _clear_coverage_on_return(
     return wrapped
 
 
+def _read_fill_budget_minutes() -> float:
+    """`TDD_FILL_BUDGET_MINUTES`, 0 on unset or garbage."""
+    raw = os.getenv("TDD_FILL_BUDGET_MINUTES", "0")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
 @_clear_coverage_on_return
 def run_phase_c_tdd(
     deps: PhaseCTddDeps,
@@ -647,6 +656,13 @@ def run_phase_c_tdd(
     # Do not set below a healthy fill that must return a sweep (~2.5 h on
     # `463713-b7c666c8` after dropping same-iteration refill-only blocks).
     _fill_phase_max = fill_phase_clock.configured_minutes()
+    # The fill schedule's wall-clock budget (`domain/fill_schedule.py`): the
+    # minutes one fill's route runs share by weight. A DEFERRAL, not a stop —
+    # a run that would start past the budget is recorded deferred and is a
+    # never-served candidate of the next fill; a unit, turn or session in
+    # flight always completes, so a fill overruns by at most one unit. `0` =
+    # order only (no shares, nothing deferred). Read once, like the stops.
+    _fill_budget = _read_fill_budget_minutes()
 
     # The GPU protector (domain/flat_score.py). The plateau budget above charges
     # only on a COMPLETED frontier traversal, which under the dispatch cap is
@@ -4912,6 +4928,9 @@ def run_phase_c_tdd(
                     check_cmd=check_cmd,
                     cluster_env=cluster_env,
                     max_passes=1,
+                    fill_budget_minutes=_fill_budget,
+                    fill_iteration=iter_n,
+                    run_id=deps.run_id,
                     leaf_name_counts=leaf_counts,
                     fr_path=fr_path,
                     tdd_frontier_keys=frontier_keys,

@@ -122,6 +122,13 @@ def summarize_followup_salvage(rows: Sequence[Mapping[str, Any]]) -> tuple[int, 
     return truncated, salvaged
 
 
+def current_units() -> tuple[str, ...]:
+    """The `file::fn` labels bound by the innermost `serving_units`; empty
+    outside one. Read by the fill reading so a mid-fill measurement names
+    the unit(s) whose gate took it."""
+    return tuple(_units_var.get())
+
+
 @contextmanager
 def serving_units(units: Iterable[str]) -> Iterator[None]:
     """Bind the `file::fn` unit labels the enclosed model call(s) serve.

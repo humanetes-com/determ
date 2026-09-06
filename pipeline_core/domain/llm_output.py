@@ -1026,51 +1026,75 @@ def fn_tag_occurrences(text: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class ReaderLoss:
-    """A reply that carried more `<FN` tags than the reader turned into
-    records — the standing rule being that N tags in with 0 records out is
-    ALWAYS the reader, never the model.
+class ReplyAudit:
+    """What a reply's `<FN` tags became: records, DECLINED units, or loss.
+
+    ``empty`` names the tags whose body slot was empty and whose name slot
+    identified a fn the reader produced no record for — the model answered
+    the unit with NOTHING. That is a declined unit, not a reader defect: run
+    `959654-1e96b403` (2026-09-06) had a file-first reply for `src/error.rs`
+    carry 19 tags of which three (`context_chain_drop_rest`,
+    `context_drop_rest`, `object_drop_front`) were empty, the thinking said
+    "implement drop_rest as no-op", and the reader-loss line asserted "a
+    parser defect, NOT a model failure" — a false accusation on its own
+    artefact, because the count could not see that the tag was empty.
+
+    ``lost`` is what is left after the declined tags are subtracted: tags the
+    reader turned into nothing although they carried a body. THAT is always
+    the reader, never the model. The count is a tag count, so it is an upper
+    bound on two edges: a model that emits the same `<FN name=…>` twice is
+    reported as one lost, and prose that quotes the tag syntax reads as a
+    tag. Both are rare in a fill reply and both fail LOUD.
 
     `response_sha` is the key of the content-addressed reply store, computed
-    the same way the transport computes it, so a consumer of the event can open
-    the exact artefact instead of re-deriving it from a timestamp. That is the
-    whole point of carrying it: six reader shapes have been found since
-    2026-08-04 (the empty `block`, the `&lt;`-escaped header, the `&gt;`
-    terminator, the self-closed tag, the `)`-closed generic list, the
-    unterminated open tag) and each one cost an investigation because the reply
-    that would have named it was not identified in the log.
-
-    PARTIAL loss counts. Every drop site used to ask only `if not parsed`, so a
-    7-tag reply yielding 1 record was indistinguishable from a clean one — and
-    partial loss is most of the recorded instances.
+    the same way the transport computes it, so a consumer can open the exact
+    artefact instead of re-deriving it from a timestamp.
     """
 
     tags: int
     records: int
+    empty: tuple[str, ...]
     response_sha: str
 
     @property
     def lost(self) -> int:
-        return self.tags - self.records
+        return max(0, self.tags - self.records - len(self.empty))
 
 
-def reader_loss(text: str, records: Sequence[Any]) -> ReaderLoss | None:
-    """`ReaderLoss` when `text` carried more FN tags than `records` holds, else
-    None.
+# The name the previous reader-loss record was known by; kept as an alias so
+# a consumer that only needs the loss half reads the same object.
+ReaderLoss = ReplyAudit
 
-    The count is a tag count, not a body count, so it is an upper bound on two
-    edges: a model that emits the same `<FN name=…>` twice is reported as one
-    lost, and prose that quotes the tag syntax (a retrospective GUIDANCE string
-    naming `<FN ...>`) reads as a tag. Both are rare in a fill reply and both
-    fail LOUD — a false alarm names an artefact that can be opened and
-    dismissed in one command, while the silence it replaces cost 79 bodies."""
+
+def reply_audit(text: str, records: Sequence[Any]) -> ReplyAudit | None:
+    """`ReplyAudit` when `text` carried more FN tags than `records` holds,
+    else None — the declined tags and the lost tags counted apart."""
     tags = fn_tag_occurrences(text)
     if tags <= len(records):
         return None
-    return ReaderLoss(
-        tags=tags, records=len(records),
+    produced = {str(r.get("fn_name", "")) if isinstance(r, dict)
+                else str(getattr(r, "fn_name", "")) for r in records}
+    empty: list[str] = []
+    for fn_name, _block, body in _find_fn_blocks(text or ""):
+        name = canon_fn_name(fn_name)
+        if body.strip() or not _is_bare_ident(name) or name in produced:
+            continue
+        if name not in empty:
+            empty.append(name)
+    return ReplyAudit(
+        tags=tags, records=len(records), empty=tuple(empty),
         response_sha=hashlib.sha256(
             (text or "").encode("utf-8", "replace")).hexdigest())
+
+
+def reader_loss(text: str, records: Sequence[Any]) -> ReplyAudit | None:
+    """The reader-loss half of :func:`reply_audit`: None when every excess
+    tag was a declined (empty) unit rather than a body the reader lost."""
+    audit = reply_audit(text, records)
+    if audit is None or audit.lost <= 0:
+        return None
+    return audit
+
 
 def bind_headerless_names(records: list[dict[str, Any]],
                           member_names: list[str]) -> list[dict[str, Any]]:

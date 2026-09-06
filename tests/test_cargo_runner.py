@@ -416,14 +416,14 @@ def test_regression_gate_binary_scoped_crash_exclusion() -> None:
     assert "tests/b.rs" in fired[0][1]
 
 
-def test_regression_gate_detects_but_does_not_charge_a_bare_crash() -> None:
+def test_regression_gate_charges_a_bare_crash_as_the_sweep_would() -> None:
     # A binary COMPLETE at baseline that crashes after the fill, with no
-    # newly-red verdict in any completed binary: DETECTED (the comparison
-    # names the crash) but no longer CHARGED — a crash is not a verdict from
-    # an attributed test, so the gate keeps the fill and the sweep-level
-    # machinery (oracle accounting, localizer, batch ratchet) owns it. The
-    # rendering pins move to `compare_readings` directly, which still feeds
-    # the revert log lines on the paths that DO charge.
+    # newly-red verdict in any completed binary. The comparison names the
+    # crash, and the gate now CHARGES it: the sweep counts the vanished
+    # tests as failing and the ratchet restores the snapshot one iteration
+    # later, so keeping it here "with cost withheld" was a full iteration
+    # lost per cycle (run `959654-1e96b403`, 2026-09-06: error.rs kept with
+    # five crashed binaries, reverted by the next sweep's ratchet).
     from pipeline_core.application.reconstruct.cargo_runner import (
         compare_readings,
     )
@@ -446,9 +446,11 @@ def test_regression_gate_detects_but_does_not_charge_a_bare_crash() -> None:
     fired: list[tuple[str, str]] = []
     res = _regr(_const_run_cargo(101, cur_out), base,
                 guard=lambda loc, m: fired.append((loc, m)))
-    assert res is None
-    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
+    assert res is not None and res[0].newly_crashed == ("tests/a.rs",)
+    assert any(loc == "phase-c/crash_only_reverted"
                and "tests/a.rs" in m for loc, m in fired)
+    assert not any(loc == "phase-c/crash_only_unmeasurable_kept"
+                   for loc, _m in fired)
 
 
 def test_u2_gate_rc_zero_missing_test_is_a_filter_miss_not_an_abort() -> None:
@@ -542,10 +544,13 @@ def _completed_baseline() -> object:
     return TestStateReading(parse_binary_results(base_out))
 
 
-def test_regression_gate_keeps_fill_when_crash_is_stub_panic_only() -> None:
+def test_regression_gate_keeps_a_stub_panic_crash_only_while_the_hollow_set_shrinks(
+        tmp_path: Path) -> None:
     # A previously-completing binary crashes after the fill, and the capture's
-    # ONLY panic is `not implemented` in a stub: the crash is a still-hollow
-    # sibling speaking. Keep the fill (return None), surface via guard.
+    # ONLY panic is `not implemented` in a stub. The sweep's closure
+    # exemption (`tdd_ratchet.closure_withheld`) keeps such a reading only
+    # while the hollow set strictly SHRANK; the gate applies the same rule.
+    # `tmp_path` holds no `.rs` file, so the hollow count after is 0.
     fired: list[tuple[str, str]] = []
     from pipeline_core.application.reconstruct.cargo_runner import (
         test_regression_gate,
@@ -554,11 +559,27 @@ def test_regression_gate_keeps_fill_when_crash_is_stub_panic_only() -> None:
         _const_run_cargo(
             101, _crashed_after("thread 'x' panicked at src/error.rs:64:17:\n"
                                 "not implemented\n")),
-        "cargo test", Path("."), {}, _completed_baseline(),
+        "cargo test", tmp_path, {}, _completed_baseline(),
         enabled=True, timeout=120,
-        guard=lambda loc, m: fired.append((loc, m)))
+        guard=lambda loc, m: fired.append((loc, m)), hollow_before=1)
     assert res is None
-    assert any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired)
+    assert any(loc == "phase-c/crash_closure_kept" for loc, _m in fired)
+    # Control: the same capture with the hollow set NOT shrinking (run
+    # `1160135-7b10cdfa`'s shape: 15 → 15) is a revert, as the sweep would
+    # charge it — and so is a caller that did not measure the hollow set.
+    for before in (0, None):
+        fired2: list[tuple[str, str]] = []
+        res2 = test_regression_gate(
+            _const_run_cargo(
+                101, _crashed_after("thread 'x' panicked at src/error.rs:64:17:\n"
+                                    "not implemented\n")),
+            "cargo test", tmp_path, {}, _completed_baseline(),
+            enabled=True, timeout=120,
+            guard=lambda loc, m, _f=fired2: _f.append((loc, m)),
+            hollow_before=before)
+        assert res2 is not None
+        assert any(loc == "phase-c/crash_stub_panic_reverted" for loc, _m in fired2)
+        assert not any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired2)
 
 
 def test_regression_gate_reverts_stub_panic_when_this_fill_introduced_stubs() -> None:
@@ -584,15 +605,14 @@ def test_regression_gate_reverts_stub_panic_when_this_fill_introduced_stubs() ->
     assert not any(loc == "phase-c/crash_blocked_kept" for loc, _ in fired)
 
 
-def test_regression_gate_keeps_crash_without_stub_evidence_as_unmeasurable() -> None:
-    # The inversion at this gate: a crash-only regression with NO stub-panic
-    # attribution — a segfault, or an assertion panic beside a stub panic —
-    # is UNMEASURABLE, not chargeable. Four `src/context.rs::StdErrorforE`
-    # re-fills were reverted `net -6, binary crashed` (run `1824387`,
-    # 2026-08-10) for a crash the localizer attributed to nothing; the gate
-    # now keeps such fills under its own guard tag and the sweep-level
-    # machinery judges the joint tree. The stub-panic case keeps its more
-    # specific tag; everything crash-only lands in one of the two.
+def test_regression_gate_reverts_a_crash_without_stub_evidence() -> None:
+    # A crash-only regression with NO stub-panic attribution — a segfault,
+    # or an assertion panic beside a stub panic — is charged here exactly as
+    # the sweep would charge it (the oracle counts the vanished tests as
+    # failing; the ratchet restores the snapshot). It used to be kept as
+    # "unmeasurable, cost withheld", which made every such keep a breach
+    # one iteration later (runs `334902-2774708c` iters 9→10 and
+    # `959654-1e96b403` iter 1→2, 2026-09-06).
     from pipeline_core.application.reconstruct.cargo_runner import (
         test_regression_gate,
     )
@@ -602,9 +622,8 @@ def test_regression_gate_keeps_crash_without_stub_evidence_as_unmeasurable() -> 
         "cargo test", Path("."), {}, _completed_baseline(),
         enabled=True, timeout=120,
         guard=lambda loc, m: fired.append((loc, m)))
-    assert res is None
-    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
-               for loc, _m in fired)
+    assert res is not None and res[0].crash_lost_pass == 2
+    assert any(loc == "phase-c/crash_only_reverted" for loc, _m in fired)
     fired2: list[tuple[str, str]] = []
     res2 = test_regression_gate(
         _const_run_cargo(
@@ -616,9 +635,10 @@ def test_regression_gate_keeps_crash_without_stub_evidence_as_unmeasurable() -> 
         "cargo test", Path("."), {}, _completed_baseline(),
         enabled=True, timeout=120,
         guard=lambda loc, m: fired2.append((loc, m)))
-    assert res2 is None
-    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
-               for loc, _m in fired2)
+    assert res2 is not None
+    assert any(loc == "phase-c/crash_only_reverted" for loc, _m in fired2)
+    assert not any(loc == "phase-c/crash_only_unmeasurable_kept"
+                   for loc, _m in fired2)
 
 
 def test_regression_gate_still_reverts_on_newly_red_verdict() -> None:
@@ -687,23 +707,24 @@ def test_regression_gate_reverts_a_crash_in_a_stub_free_tree() -> None:
     assert not any(loc == "phase-c/crash_only_unmeasurable_kept"
                    for loc, _m in fired)
     assert "crash" in detail.lower()
-    # Negative control: the same capture without the stub-free statement is
-    # kept as unmeasurable, exactly as before.
+    # The same capture without the stub-free statement is now ALSO a revert
+    # (the crash-only keep is gone), under its own tag.
     fired2: list[tuple[str, str]] = []
     assert test_regression_gate(
         _const_run_cargo(101, _crashed_after("Segmentation fault\n")),
         "cargo test", Path("."), {}, _completed_baseline(),
         enabled=True, timeout=120,
-        guard=lambda loc, m: fired2.append((loc, m))) is None
-    assert any(loc == "phase-c/crash_only_unmeasurable_kept"
-               for loc, _m in fired2)
-    # A stub panic in the capture still outranks the stub-free statement: the
-    # caller's pass-start scan can lag a sibling's revert-to-stub.
+        guard=lambda loc, m: fired2.append((loc, m))) is not None
+    assert any(loc == "phase-c/crash_only_reverted" for loc, _m in fired2)
+    # A stub panic in the capture still outranks the stub-free statement (the
+    # caller's pass-start scan can lag a sibling's revert-to-stub), and it
+    # is judged by the closure rule: without a shrinking hollow set, revert.
     fired3: list[tuple[str, str]] = []
     assert test_regression_gate(
         _const_run_cargo(101, _crashed_after(
             "thread 'x' panicked at src/error.rs:64:17:\nnot implemented\n")),
         "cargo test", Path("."), {}, _completed_baseline(),
         enabled=True, timeout=120,
-        guard=lambda loc, m: fired3.append((loc, m)), stub_free=True) is None
-    assert any(loc == "phase-c/crash_blocked_kept" for loc, _m in fired3)
+        guard=lambda loc, m: fired3.append((loc, m)), stub_free=True) is not None
+    assert any(loc == "phase-c/crash_stub_panic_reverted" for loc, _m in fired3)
+    assert not any(loc == "phase-c/crash_stub_free_reverted" for loc, _m in fired3)
