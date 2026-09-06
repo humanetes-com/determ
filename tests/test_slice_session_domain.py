@@ -9,6 +9,7 @@ functions read only the owner map shape, the reply and the measurement.
 from __future__ import annotations
 
 from pipeline_core.domain.attribution import locator_of
+from pipeline_core.domain.fill_schedule import RouteKind, RouteRun
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.slice_session import (
     SessionSlice,
@@ -22,6 +23,7 @@ from pipeline_core.domain.slice_session import (
     render_test_turn,
     route_change_set,
     session_slices_for_failing,
+    slice_for_run,
     slice_plan_gaps,
     slices_with_pair_hops,
 )
@@ -308,6 +310,32 @@ def test_locator_only_expansions_names_the_fan_out() -> None:
         {"t": {FnSite("src/w.rs", "fmt", "")}}, [disp, dbg]) == (
         ("w.rs", "fmt", 2),)
     assert locator_only_expansions({"t": {dbg}}, [disp, dbg]) == ()
+
+
+def test_two_sessions_with_the_same_count_label_each_bind_their_own_slice() -> None:
+    """Plan sentence: two SessionSlice values with the same counts and
+    disjoint test sets bind by target_tests, not by label."""
+    a = SessionSlice(tests=("t_a", "t_b"), units=(_DISP, _RENDER))
+    b = SessionSlice(tests=("t_c", "t_d"), units=(_NEW, _OTHER))
+    assert a.label() == b.label()
+    plans = [a, b]
+    # Negative control: dict-by-label last-wins; both runs would bind b.
+    by_label = {sl.label(): sl for sl in plans}
+    assert by_label[a.label()] is b
+    run_a = RouteRun(
+        kind=RouteKind.SESSION, label=a.label(),
+        targets=frozenset(locator_of(u) for u in a.units),
+        target_tests=frozenset(a.tests), seq=0)
+    run_b = RouteRun(
+        kind=RouteKind.SESSION, label=b.label(),
+        targets=frozenset(locator_of(u) for u in b.units),
+        target_tests=frozenset(b.tests), seq=1)
+    assert slice_for_run(plans, run_a) is a
+    assert slice_for_run(plans, run_b) is b
+    miss = RouteRun(
+        kind=RouteKind.SESSION, label=a.label(),
+        targets=frozenset(), target_tests=frozenset({"t_z"}), seq=9)
+    assert slice_for_run(plans, miss) is None
 
 
 # ---- packing an over-union group under the cap -----------------------------

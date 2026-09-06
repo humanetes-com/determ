@@ -185,3 +185,39 @@ def test_a_wave_of_parallel_runs_attributes_its_own_keeps(tmp_path: Path) -> Non
     assert by_label["file a.rs"].net_pass_delta == 3
     assert by_label["file b.rs"].net_pass_delta == 3
     assert all(r.outcome is RunOutcome.CASHED for r in out.rows)
+
+
+def test_the_executor_opens_each_equal_count_session_once(tmp_path: Path) -> None:
+    """Plan sentence: execute_fill on a session route whose plan() returns
+    two equal-count slices calls run_one once per slice with that slice's
+    tests."""
+    from pipeline_core.application.reconstruct.impl_fill import _SessionRoute
+    from pipeline_core.domain.models import FnSite
+    from pipeline_core.domain.slice_session import SessionSlice
+
+    fill_reading.reset_last_comparison()
+    opened: list[tuple[str, ...]] = []
+
+    def run_one(sl: SessionSlice, clock: RunClock) -> RouteRunReport:
+        opened.append(sl.tests)
+        clock.may_claim()
+        return RouteRunReport(model_calls=1)
+
+    a = SessionSlice(
+        tests=("t_a", "t_b"),
+        units=(FnSite("src/lib.rs", "fmt", "impl Display"),
+               FnSite("src/render.rs", "render", "impl Renderer")))
+    b = SessionSlice(
+        tests=("t_c", "t_d"),
+        units=(FnSite("src/lib.rs", "fmt", "impl Display"),
+               FnSite("src/other.rs", "go", "free fn")))
+    assert a.label() == b.label()
+    # Negative control: dict-by-label last-wins; both runs would bind b.
+    assert {sl.label(): sl for sl in (a, b)}[a.label()] is b
+    route = _SessionRoute([a, b], run_one, served=set(), log=lambda _s: None)
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    execute_fill(
+        [route], hollow={}, bodies_sha=lambda _t: "b",
+        deps=_deps(tmp_path, log, events))
+    assert opened == [a.tests, b.tests]

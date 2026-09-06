@@ -30,10 +30,11 @@ test, unit or crate name is an input:
   a run whose own tests are hollow because of a stub another run holds goes
   after that run.
 - never-served before re-buys — a run with no ledger row on its identity (the
-  route, the targets, the targets' bodies, the oracle) ranks ahead of one
-  whose last identical try moved no verdict, which ranks ahead of one whose
-  last identical try was reverted. A run whose last identical try PAID keeps
-  the never-served rank. The service order applies the same rule to units.
+  route, the targets, the targets' bodies, the oracle, and for a session the
+  tests it aims at) ranks ahead of one whose last identical try moved no
+  verdict, which ranks ahead of one whose last identical try was reverted. A
+  run whose last identical try PAID keeps the never-served rank. The service
+  order applies the same rule to units.
 - budget follows payoff — shares are weights over the fill budget; a zero
   weight (a re-buy) is DEFERRED rather than run, unless every candidate is a
   re-buy or the run has been deferred `readmit_after` times already (the
@@ -115,7 +116,10 @@ class RouteRun:
     of a unit route's targets); ``stubs_in_targets`` the targets that are
     hollow bodies on the tree now. ``bodies_sha`` is the identity of the
     targets' bodies at plan time (:func:`bodies_sha_of`) — with the kind, the
-    targets and the oracle it is what makes two runs "the same try".
+    targets, the oracle, and for a session the aimed tests, it is what makes
+    two runs "the same try". ``label`` is a display string, not an id:
+    packed sessions can share a count-only label while aiming at disjoint
+    tests (run ``1092886-60870fdd``, 2026-09-06).
     """
 
     kind: RouteKind
@@ -129,7 +133,11 @@ class RouteRun:
 
     @property
     def key(self) -> str:
-        return f"{self.kind.value}:{self.label}"
+        """Unique per planned run. The display ``label`` is not sufficient:
+        two sessions of the same kind can share a count-only label."""
+        tests = ",".join(sorted(self.target_tests))
+        files = ",".join(self.files)
+        return f"{self.kind.value}:{self.seq}:{tests}:{files}:{self.label}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -157,10 +165,22 @@ def bodies_sha_of(bodies: Iterable[tuple[FnLocator, str]]) -> str:
 
 
 def rebuy_identity(kind: RouteKind, targets: Collection[FnLocator],
-                   bodies_sha: str, oracle_fp: str) -> str:
-    """The key under which a run is the SAME try as an earlier one."""
+                   bodies_sha: str, oracle_fp: str, *,
+                   target_tests: Collection[str] = ()) -> str:
+    """The key under which a run is the SAME try as an earlier one.
+
+    A session's work is the slice, so the aimed tests are part of the
+    identity; two sessions that write overlapping hubs for different tests
+    are different tries. A file / impl / per-fn run's ``target_tests`` are
+    the leftover attributed set and shrink as tests cash — putting those
+    names in the identity would make a flat file look never-served every
+    fill, so only ``SESSION`` includes them.
+    """
     names = ",".join(sorted(f"{f}::{fn}" for f, fn in targets))
-    return f"{kind.value}|{names}|{bodies_sha}|{oracle_fp}"
+    ident = f"{kind.value}|{names}|{bodies_sha}|{oracle_fp}"
+    if kind is RouteKind.SESSION:
+        ident = f"{ident}|{','.join(sorted(target_tests))}"
+    return ident
 
 
 def hollow_by_test(
@@ -239,7 +259,8 @@ class RouteLedgerRow:
     def identity(self) -> str:
         return rebuy_identity(
             self.kind, [FnLocator(f, fn) for f, fn in self.targets],
-            self.bodies_sha, self.oracle_fp)
+            self.bodies_sha, self.oracle_fp,
+            target_tests=self.target_tests)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -381,7 +402,9 @@ def _rank_of(run: RouteRun, oracle_fp: str,
 
     `served_targets` holds the (kind, targets) keys the ledger has ANY row
     for — the "served, but under another identity" class."""
-    ident = rebuy_identity(run.kind, run.targets, run.bodies_sha, oracle_fp)
+    ident = rebuy_identity(
+        run.kind, run.targets, run.bodies_sha, oracle_fp,
+        target_tests=run.target_tests)
     rows = history.get(ident) or []
     # Rows that RAN (not deferred): the latest decides the class. Deferrals
     # since it are counted for the bounded re-admission.
@@ -411,14 +434,25 @@ def _rank_of(run: RouteRun, oracle_fp: str,
     return rank, _REASON[rank], deferrals
 
 
+def _work_key(kind: RouteKind, targets: Iterable[FnLocator],
+              target_tests: Collection[str]) -> str:
+    """Served-under-another-identity key. Sessions include the aimed tests
+    so two slices that share hubs are not the same try."""
+    names = ",".join(sorted(f"{f}::{fn}" for f, fn in targets))
+    base = f"{kind.value}|{names}"
+    if kind is RouteKind.SESSION:
+        return base + "|" + ",".join(sorted(target_tests))
+    return base
+
+
 def _served_key(run: RouteRun) -> str:
-    return f"{run.kind.value}|" + ",".join(
-        sorted(f"{f}::{fn}" for f, fn in run.targets))
+    return _work_key(run.kind, run.targets, run.target_tests)
 
 
 def _served_key_of(row: RouteLedgerRow) -> str:
-    return f"{row.kind.value}|" + ",".join(
-        sorted(f"{f}::{fn}" for f, fn in row.targets))
+    return _work_key(
+        row.kind, [FnLocator(f, fn) for f, fn in row.targets],
+        row.target_tests)
 
 
 def schedule(

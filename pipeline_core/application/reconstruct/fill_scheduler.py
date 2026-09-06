@@ -151,11 +151,12 @@ def execute_fill(
     for route in routes:
         for seq, run in enumerate(route.plan()):
             if not run.bodies_sha:
-                run = RouteRun(
-                    kind=run.kind, label=run.label, targets=run.targets,
-                    target_tests=run.target_tests,
-                    stubs_in_targets=run.stubs_in_targets, files=run.files,
-                    seq=run.seq or seq, bodies_sha=bodies_sha(run.targets))
+                # plan() sets seq to its own enumerate, including 0; keep
+                # that. The loop index is the fallback for a route that
+                # left the default 0 on a later run (`0 or seq` is seq).
+                run = replace(
+                    run, seq=run.seq if run.seq else seq,
+                    bodies_sha=bodies_sha(run.targets))
             by_key[run.key] = route
             runs.append(run)
     prior: list[RouteLedgerRow] = []

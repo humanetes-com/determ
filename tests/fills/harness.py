@@ -87,7 +87,8 @@ def candidate_runs(fix: Mapping[str, Any]) -> dict[RouteKind, list[RouteRun]]:
             units.update(FnLocator(u.file, u.fn_name) for u in slices.get(t, ()))
         by_kind[RouteKind.SESSION].append(RouteRun(
             kind=RouteKind.SESSION,
-            label=f"session[{len(tests)} test(s), {int(s.get('units', len(units)))} unit(s)]",
+            label=(f"session[{len(tests)} test(s), "
+                   f"{int(s.get('units', len(units)))} unit(s)] #{i}"),
             targets=frozenset(units), target_tests=frozenset(tests),
             files=tuple(sorted({u.file for u in units})), seq=i, bodies_sha="s"))
     for i, fr in enumerate(fix.get("file_runs") or []):

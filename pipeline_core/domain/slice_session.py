@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pipeline_core.domain.attribution import container_key, locator_of, site_label
+from pipeline_core.domain.fill_schedule import RouteRun
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
@@ -50,11 +51,37 @@ class SessionSlice:
     def files(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(u.file for u in self.units))
 
-    def label(self) -> str:
-        return f"session[{len(self.tests)} test(s), {len(self.units)} unit(s)]"
+    def label(self, seq: int | None = None) -> str:
+        """Display string of the slice's counts. Optional ``seq`` is the plan
+        index, so two slices that share counts still print apart on the
+        schedule line. Not an identity: :func:`slice_for_run` binds on the
+        aimed tests."""
+        base = f"session[{len(self.tests)} test(s), {len(self.units)} unit(s)]"
+        if seq is None:
+            return base
+        return f"{base} #{seq}"
 
     def member_scope(self) -> frozenset[str]:
         return frozenset(f"{u.file}::{u.fn_name}" for u in self.units)
+
+
+def slice_for_run(
+    plans: Sequence[SessionSlice], run: RouteRun,
+) -> SessionSlice | None:
+    """The planned slice whose tests are this run's aimed tests.
+
+    Binding is the work, not the display label. Two packed sessions can
+    share a count-only label while aiming at disjoint tests (run
+    ``1092886-60870fdd``, 2026-09-06: two 3-test / 23-unit slices, the
+    second opened twice and the first never). Returns the first match;
+    packing does not emit duplicate test sets.
+    """
+    want = frozenset(_bare_test(t) for t in run.target_tests)
+    for sl in plans:
+        have = frozenset(_bare_test(t) for t in sl.tests)
+        if have == want:
+            return sl
+    return None
 
 
 def _stub_blocks(units: Collection[FnSite], hollow: Collection[FnLocator]) -> bool:

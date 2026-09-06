@@ -244,6 +244,7 @@ from pipeline_core.domain.slice_session import (
     expand_locator_sites,
     locator_only_expansions,
     plan_slices,
+    slice_for_run,
     slice_plan_gaps,
     slice_plan_payload,
 )
@@ -4696,8 +4697,8 @@ def prepare_impl_fill(
         if _costs is not None and _plans:
             _log("  [phase-c/session] turn-0 size per session: "
                  + ", ".join(
-                     f"{p.label()} {_costs.chars(p.tests, p.units):,} chars"
-                     for p in _plans)
+                     f"{p.label(seq=i)} {_costs.chars(p.tests, p.units):,} chars"
+                     for i, p in enumerate(_plans))
                  + f" (capacity {_costs.max_chars:,})")
         if _gaps.fitted_clause():
             _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
@@ -5198,22 +5199,21 @@ class _SessionRoute:
         self._run_one = run_one
         self.served = served
         self._log = log
-        self._by_label = {sl.label(): sl for sl in self._plans}
 
     def plan(self) -> Sequence[RouteRun]:
         return [RouteRun(
-            kind=self.kind, label=sl.label(),
+            kind=self.kind, label=sl.label(seq=i),
             targets=frozenset(locator_of(u) for u in sl.units),
             target_tests=frozenset(_bare(t) for t in sl.tests),
             files=tuple(sl.files), seq=i)
             for i, sl in enumerate(self._plans)]
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        sl = self._by_label.get(run.label)
+        sl = slice_for_run(self._plans, run)
         if sl is None:
             return RouteRunReport(empty=True)
         if not clock.may_claim():
-            self._log(f"  [phase-c/session] {sl.label()}: not opened — the "
+            self._log(f"  [phase-c/session] {run.label}: not opened — the "
                       "fill share is spent.")
             return RouteRunReport(empty=True)
         return self._run_one(sl, clock)
@@ -5243,7 +5243,6 @@ class _PairRoute:
         self._tests_for = tests_for
         self._stubs = stubs
         self._log = log
-        self._by_label = {self._label(pd): pd for pd in self._jobs}
 
     @staticmethod
     def _label(pd: PairDispatch) -> str:
@@ -5261,7 +5260,8 @@ class _PairRoute:
         return out
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        pd = self._by_label.get(run.label)
+        pd = next((j for j in self._jobs
+                   if j.member_locators() == run.targets), None)
         if pd is None:
             return RouteRunReport(empty=True)
         if pd.member_locators() & self._session_served():

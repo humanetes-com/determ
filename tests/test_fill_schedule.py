@@ -107,7 +107,8 @@ def _row(run: RouteRun, outcome: RunOutcome, delta: int = 0,
         kind=run.kind, label=run.label,
         targets=tuple(sorted((f, fn) for f, fn in run.targets)),
         bodies_sha=run.bodies_sha, oracle_fp=oracle, outcome=outcome,
-        net_pass_delta=delta)
+        net_pass_delta=delta,
+        target_tests=tuple(sorted(run.target_tests)))
 
 
 def test_a_flat_rebuy_sinks_below_a_never_served_run_and_is_deferred_under_a_budget() -> None:
@@ -247,3 +248,51 @@ def test_an_unbounded_clock_always_claims_and_shares_flow_forward() -> None:
     assert budget.share_for(0, 2) == 0.0
     unbounded = FillBudget(0, now=now)
     assert unbounded.share_for(2, 2) is None
+
+
+def test_two_sessions_that_share_a_count_label_both_appear_in_the_schedule() -> None:
+    """Plan sentence: two SESSION RouteRuns with the same label, different
+    seq and target_tests, both appear in schedule().ordered, and the set
+    of keys has two entries."""
+    a = _session("session[2 test(s), 2 unit(s)]", {"t_a", "t_b"}, {_FMT, _NEW}, seq=0)
+    b = _session("session[2 test(s), 2 unit(s)]", {"t_c", "t_d"}, {_FMT, _STUB}, seq=1)
+    # Negative control: today's kind:label key collides.
+    assert f"{a.kind.value}:{a.label}" == f"{b.kind.value}:{b.label}"
+    assert a.key != b.key
+    sched = schedule([a, b], [], oracle_fp="o", hollow={})
+    assert len(sched.ordered) == 2
+    assert {s.run.key for s in sched.ordered} == {a.key, b.key}
+
+
+def test_session_rebuy_is_the_slice_file_rebuy_is_the_bodies() -> None:
+    """Plan sentence: two SESSION runs with equal targets and bodies_sha
+    and different target_tests have different rebuy_identity. Two FILE
+    runs with equal targets and bodies_sha and different target_tests
+    have the same rebuy_identity."""
+    units = {_FMT, _NEW}
+    s1 = _session("session[2 test(s), 2 unit(s)]", {"t_a", "t_b"}, units, seq=0)
+    s2 = _session("session[2 test(s), 2 unit(s)]", {"t_c", "t_d"}, units, seq=1)
+    old = (
+        f"{s1.kind.value}|"
+        + ",".join(sorted(f"{f}::{fn}" for f, fn in s1.targets))
+        + f"|{s1.bodies_sha}|o")
+    assert old == (
+        f"{s2.kind.value}|"
+        + ",".join(sorted(f"{f}::{fn}" for f, fn in s2.targets))
+        + f"|{s2.bodies_sha}|o")
+    assert rebuy_identity(
+        s1.kind, s1.targets, s1.bodies_sha, "o",
+        target_tests=s1.target_tests) != rebuy_identity(
+        s2.kind, s2.targets, s2.bodies_sha, "o",
+        target_tests=s2.target_tests)
+    f1 = _file("file src/x.rs", {_STUB}, {_STUB},
+               tests={"t_hollow", "t_fmt"}, sha="f")
+    f2 = _file("file src/x.rs", {_STUB}, {_STUB}, tests={"t_other"}, sha="f")
+    assert rebuy_identity(
+        f1.kind, f1.targets, f1.bodies_sha, "o",
+        target_tests=f1.target_tests) == rebuy_identity(
+        f2.kind, f2.targets, f2.bodies_sha, "o",
+        target_tests=f2.target_tests)
+    sched = schedule([s2], [_row(s1, RunOutcome.FLAT, 0)],
+                     oracle_fp="o", hollow={})
+    assert sched.ordered[0].reason == "never_served"
