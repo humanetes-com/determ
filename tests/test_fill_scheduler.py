@@ -187,21 +187,24 @@ def test_a_wave_of_parallel_runs_attributes_its_own_keeps(tmp_path: Path) -> Non
     assert all(r.outcome is RunOutcome.CASHED for r in out.rows)
 
 
-def test_the_executor_opens_each_equal_count_session_once(tmp_path: Path) -> None:
+def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
+        tmp_path: Path) -> None:
     """Plan sentence: execute_fill on a session route whose plan() returns
     two equal-count slices calls run_one once per slice with that slice's
-    tests."""
+    tests, in the schedule's order rather than plan() list order.
+
+    Fill 1 opens the first slice alone and it goes FLAT; in fill 2 that
+    slice is a re-buy and the second is never-served, so the schedule puts
+    the second first — the reverse of plan() order — and the schedule line
+    tells the two count-labelled runs apart. Negative control, through the
+    same executor: the pre-fix route (the bare count label as the lookup
+    key, last write wins) opens the second slice twice in fill 2 and the
+    first never."""
+    from dataclasses import replace
+
     from pipeline_core.application.reconstruct.impl_fill import _SessionRoute
     from pipeline_core.domain.models import FnSite
     from pipeline_core.domain.slice_session import SessionSlice
-
-    fill_reading.reset_last_comparison()
-    opened: list[tuple[str, ...]] = []
-
-    def run_one(sl: SessionSlice, clock: RunClock) -> RouteRunReport:
-        opened.append(sl.tests)
-        clock.may_claim()
-        return RouteRunReport(model_calls=1)
 
     a = SessionSlice(
         tests=("t_a", "t_b"),
@@ -212,12 +215,47 @@ def test_the_executor_opens_each_equal_count_session_once(tmp_path: Path) -> Non
         units=(FnSite("src/lib.rs", "fmt", "impl Display"),
                FnSite("src/other.rs", "go", "free fn")))
     assert a.label() == b.label()
-    # Negative control: dict-by-label last-wins; both runs would bind b.
-    assert {sl.label(): sl for sl in (a, b)}[a.label()] is b
-    route = _SessionRoute([a, b], run_one, served=set(), log=lambda _s: None)
-    log: list[str] = []
-    events: list[tuple[str, dict]] = []
-    execute_fill(
-        [route], hollow={}, bodies_sha=lambda _t: "b",
-        deps=_deps(tmp_path, log, events))
-    assert opened == [a.tests, b.tests]
+
+    class _PreFixSessionRoute(_SessionRoute):
+        """The session route before binding moved to the aimed tests."""
+
+        def plan(self) -> Sequence[RouteRun]:
+            return [replace(run, label=sl.label())
+                    for run, sl in zip(super().plan(), self._plans, strict=True)]
+
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            sl = {p.label(): p for p in self._plans}.get(run.label)
+            if sl is None:
+                return RouteRunReport(empty=True)
+            return self._run_one(sl, clock)
+
+    def two_fills(route_cls: type[_SessionRoute], root: Path) -> tuple[
+            list[tuple[str, ...]], list[str], list[tuple[str, dict]]]:
+        root.mkdir()
+        opened: list[tuple[str, ...]] = []
+
+        def run_one(sl: SessionSlice, clock: RunClock) -> RouteRunReport:
+            opened.append(sl.tests)
+            clock.may_claim()
+            return RouteRunReport(model_calls=1)
+
+        log: list[str] = []
+        events: list[tuple[str, dict]] = []
+        for plans in ([a], [a, b]):
+            fill_reading.reset_last_comparison()
+            route = route_cls(plans, run_one, served=set(), log=lambda _s: None)
+            execute_fill([route], hollow={}, bodies_sha=lambda _t: "b",
+                         deps=_deps(root, log, events))
+        return opened, log, events
+
+    opened, log, events = two_fills(_SessionRoute, tmp_path / "shipped")
+    assert opened[0] == a.tests                       # fill 1: the seed
+    assert opened[1:] == [b.tests, a.tests]           # fill 2: schedule order
+    line = [ln for ln in log if ln.startswith("  [phase-c/schedule] fill 1: 2 run(s)")][-1]
+    assert line.index("#1 (never_served)") < line.index("#0 (rebuy_flat)")
+    rows = [d for ev, d in events if ev == "phase_c.route.run"][-2:]
+    assert [tuple(r["target_tests"]) for r in rows] == [b.tests, a.tests]
+
+    opened, _log, _events = two_fills(_PreFixSessionRoute, tmp_path / "prefix")
+    assert opened[0] == a.tests
+    assert opened[1:] == [b.tests, b.tests]

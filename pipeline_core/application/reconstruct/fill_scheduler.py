@@ -151,11 +151,14 @@ def execute_fill(
     for route in routes:
         for seq, run in enumerate(route.plan()):
             if not run.bodies_sha:
-                # plan() sets seq to its own enumerate, including 0; keep
-                # that. The loop index is the fallback for a route that
-                # left the default 0 on a later run (`0 or seq` is seq).
+                # `seq` is the run's index in plan() and part of `key`.
+                # Every route stamps it from the same enumerate this loop
+                # runs, so a stamped value and the loop index agree, 0
+                # included; a route that left the default gets the loop
+                # index. `run.seq or seq` therefore never changes a
+                # stamped 0 into anything but 0.
                 run = replace(
-                    run, seq=run.seq if run.seq else seq,
+                    run, seq=run.seq or seq,
                     bodies_sha=bodies_sha(run.targets))
             by_key[run.key] = route
             runs.append(run)
