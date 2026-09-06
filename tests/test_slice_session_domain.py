@@ -22,6 +22,7 @@ from pipeline_core.domain.slice_session import (
     render_test_turn,
     route_change_set,
     session_slices_for_failing,
+    sessions_this_fill,
     slice_plan_gaps,
     slices_with_pair_hops,
 )
@@ -48,6 +49,32 @@ def test_a_slice_touching_a_stub_is_left_to_the_stub_routes() -> None:
     plans = plan_slices({"t_a": {_DISP, _RENDER}},
                         stubs={locator_of(_RENDER)})
     assert plans == []
+
+
+def test_fitted_sessions_do_not_open_while_a_leftover_test_is_still_hollow() -> None:
+    """plan_slices packs the non-hollow remainder. Opening those sessions
+    while another leftover test is still hollow spends the fill on units
+    whose tests already run. Control: the same remainder with hollow=0
+    still opens (the packing this route was written for)."""
+    leftover = {
+        "t_fmt_a": {_DISP, _RENDER},
+        "t_fmt_b": {_RENDER, _NEW},
+        "t_path": {_OTHER},
+    }
+    plans = plan_slices(leftover, stubs={locator_of(_OTHER)})
+    assert [p.tests for p in plans] == [("t_fmt_a", "t_fmt_b")]
+    gaps = slice_plan_gaps(leftover, stubs={locator_of(_OTHER)})
+    assert gaps.hollow == 1
+    opened, note = sessions_this_fill(plans, gaps)
+    assert opened == ()
+    assert "still hollow" in note and "1 failing" in note
+    ready = {"t_fmt_a": leftover["t_fmt_a"], "t_fmt_b": leftover["t_fmt_b"]}
+    ready_plans = plan_slices(ready)
+    ready_gaps = slice_plan_gaps(ready)
+    assert ready_gaps.hollow == 0
+    opened_ready, note_ready = sessions_this_fill(ready_plans, ready_gaps)
+    assert list(opened_ready) == ready_plans
+    assert note_ready == ""
 
 
 def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:

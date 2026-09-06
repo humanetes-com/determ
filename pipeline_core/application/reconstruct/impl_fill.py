@@ -215,6 +215,7 @@ from pipeline_core.domain.slice_session import (
     expand_locator_sites,
     locator_only_expansions,
     plan_slices,
+    sessions_this_fill,
     slice_plan_gaps,
     slice_plan_payload,
 )
@@ -4415,21 +4416,27 @@ def fill_impl_blocks(
         for _file, _fn, _n in locator_only_expansions(session_slices, _all_recs):
             _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
                  f"expanded to {_n} tree site(s)")
-        _plans = plan_slices(_slices, stubs=_stubs_now, max_units=_max_units)
+        _planned = plan_slices(_slices, stubs=_stubs_now, max_units=_max_units)
         # The plan is a record on every fill, refusal included: the union
         # the engine actually handed `plan_slices` (owners plus hops plus
         # locator expansion) was in no event before, so the over-union
         # refusals of run `2965-453dd7a4` could only be reconstructed from
-        # the owner-map event.
+        # the owner-map event. `sessions` on the event is what packing
+        # produced; `opened` is what this fill actually runs — empty when
+        # leftover tests are still hollow, so the stub routes own the fill.
         _gaps = slice_plan_gaps(_slices, stubs=_stubs_now, max_units=_max_units)
+        _plans, _withheld = sessions_this_fill(_planned, _gaps)
         if session_slices:
             _emit("phase_c.session.plan", data={
                 "cluster": cluster_name,
-                **slice_plan_payload(_slices, _plans, _gaps)})
+                **slice_plan_payload(_slices, _planned, _gaps),
+                "opened": len(_plans)})
         if _gaps.fitted_clause():
             _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
+        if _withheld:
+            _log(f"  [phase-c/session] {_withheld}")
         if not _plans:
-            if session_slices:
+            if session_slices and not _withheld:
                 _log(f"  [phase-c/session] no slice planned "
                      f"({len(session_slices)} failing test(s) — "
                      f"{_gaps.log_clause()})")

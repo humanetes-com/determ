@@ -340,6 +340,35 @@ def plan_slices(
     return out
 
 
+def sessions_this_fill(
+    plans: Sequence[SessionSlice],
+    gaps: SlicePlanGaps,
+) -> tuple[tuple[SessionSlice, ...], str]:
+    """Which packed sessions this fill actually opens.
+
+    ``plan_slices`` already drops every hollow test and may still pack the
+    remainder. Opening that remainder while other leftover tests are still
+    hollow spends the fill on units whose tests already run, and the stub
+    routes that can un-hollow the rest wait for the session budget to drain.
+
+    Run ``334902-2774708c`` (2026-09-05/06, wipe restart): fitted was 0
+    while hollow was 106 then 99 then 94; at pass 74 hollow=24 fitted=3 and
+    the fill opened an 18-test format session (turn 1 already 92% of the
+    single-call char limit) instead of the still-stubbed vtable units.
+    The same leftover set with hollow=0 still opens — that is the 91-plateau
+    packing this route was written for, and the per-fn Display lump-cash
+    (pass 35→69) never used this route.
+    """
+    opened = tuple(plans)
+    if gaps.hollow and opened:
+        note = (
+            f"{len(opened)} session(s) fitted under the cap not opened — "
+            f"{gaps.hollow} failing test(s) still hollow"
+        )
+        return (), note
+    return opened, ""
+
+
 def slice_plan_payload(
     slices: Mapping[str, Collection[FnSite]],
     plans: Sequence[SessionSlice],
