@@ -1233,7 +1233,10 @@ def prepare_impl_fill(
         file_path = target_src_dir / file_rel
         if not file_path.exists():
             return
-        plan = _file_fill_plan(file_rel, fblocks)
+        plan = _file_fill_plan(
+            file_rel, fblocks,
+            frontier_tests=_frontier_tests,
+            per_impl_max_stubs=_PER_IMPL_MAX_STUBS)
         if plan.groups is None:
             if plan.wanted:
                 _fill_block_group(file_rel, fblocks, file_rel)
@@ -1258,99 +1261,6 @@ def prepare_impl_fill(
                 break
             _fill_block_group(file_rel, [fblocks[i] for i in _g],
                               f"{file_rel}[group {_gi}/{len(plan.groups)}]")
-
-    def _file_fill_plan(file_rel: str, fblocks: list[ImplBlock]) -> _FileFillPlan:
-        """What the file-first route would ask for `file_rel` — the ONE
-        reading of the fn bound, taken at plan time by `_file_route_admits`
-        and again by `_fill_file_first` when the run opens."""
-        wanted_all = [m.fn_name for b in fblocks
-                      for m in (*b.stub_members, *b.refill_members)]
-        # Bounds how many fns one prompt asks for; counts re-fills too — they
-        # are bodies the model must write. The stubs-era env var is still
-        # honoured so an existing .env keeps working.
-        max_fns = int(os.getenv("PHASE_C_FILE_MAX_FNS")
-                      or os.getenv("PHASE_C_FILE_MAX_STUBS") or "20")
-        if len(wanted_all) <= max_fns:
-            return _FileFillPlan(wanted=len(wanted_all), max_fns=max_fns,
-                                 groups=None, sizes=(), solo=0, stranded=())
-        # Welding is keyed on CONVICTING tests: the coupling claim is "one
-        # validation run judges both blocks", which only a test that can
-        # actually reject them supports. An inferred attribution welds
-        # unrelated blocks into one oversized joint prompt.
-        _binputs = [BlockGroupInput(
-            idx=_i,
-            fn_count=len(b.stub_members) + len(b.refill_members),
-            tests=frozenset(
-                t for m in (*b.stub_members, *b.refill_members)
-                for t in (_frontier_tests.convicting_for(
-                    FnLocator(file_rel, m.fn_name)))))
-            for _i, b in enumerate(fblocks)]
-        _packed = coupled_fill_groups(_binputs, max_fns)
-        # Blocks NO other route can take. "Handed to the per-block loop" is a
-        # real handoff for a block that loop iterates and a silent drop for one
-        # it does not: `viable_blocks` excludes free-fn and oversized blocks by
-        # construction, which is the whole reason those two shapes arrive here.
-        # Live anyhow/nightly 2026-08-04 12:12 UTC, with the frontier finally
-        # naming free fns again: src/error.rs packed 35 re-fill fns into one
-        # welded group of 20 and `+12 uncoupled block(s) → per-block loop`, and
-        # the free-fn block holding `object_downcast`, `object_ref`,
-        # `context_downcast` and `context_chain_downcast` — where the crate's
-        # heap-use-after-free lives — was one of the 12. A free-fn block cannot
-        # weld to anything either: welding is keyed on CONVICTING tests and an
-        # escalated producer is attributed by inference, so its test set is
-        # empty and it is always its own singleton component.
-        _orphans = {i for i, b in enumerate(fblocks)
-                    if not impl_route_covers(b, max_stubs=_PER_IMPL_MAX_STUBS)}
-        # A singleton group runs only when it is one of those. Otherwise it is
-        # exactly the per-block route's unit and running it in both routes
-        # doubles its attempts. A single block larger than the bound keeps the
-        # old skip semantics either way.
-        _joint = [g for g in _packed
-                  if (len(g) >= 2 or _orphans.intersection(g))
-                  and sum(_binputs[i].fn_count for i in g) <= max_fns]
-        _stranded = sorted(_orphans - {i for g in _joint for i in g})
-        return _FileFillPlan(
-            wanted=len(wanted_all), max_fns=max_fns, groups=_joint,
-            sizes=tuple(sum(_binputs[i].fn_count for i in g) for g in _joint),
-            solo=len(_packed) - len(_joint),
-            stranded=tuple(
-                f"{fblocks[i].container.splitlines()[0] if fblocks[i].container else 'free fns'}"
-                f" ({_binputs[i].fn_count} fn(s))" for i in _stranded))
-
-    def _file_route_admits(file_rel: str, fblocks: list[ImplBlock]) -> bool:
-        """Whether the file-first route can OPEN a run on `file_rel` now.
-
-        The fn bound used to be read only inside `_fill_file_first`, after
-        the schedule had already ranked the run: on the nightly tree of run
-        `2131920-86818224` (2026-09-07) `src/error.rs` held 21 fns against
-        `PHASE_C_FILE_MAX_FNS=20` with no test-welded group under it, so
-        every fill's schedule line opened with `1. file src/error.rs
-        (never_served; 14 stub(s))`, the route returned EMPTY at 0.0 min,
-        and `_rank_of` — which skips EMPTY rows by contract — ranked the
-        same identity never-served again on the next fill. A run the route
-        cannot open is not a candidate; the bound is a plan-time fact and
-        is read here, once per plan, so the schedule never sees it."""
-        if not (target_src_dir / file_rel).exists():
-            return False
-        plan = _file_fill_plan(file_rel, fblocks)
-        if not plan.wanted:
-            return False
-        if plan.stranded:
-            # Nothing downstream will attempt these; say so where it is read,
-            # rather than let the count above imply the per-block loop has them.
-            _log(f"  [phase-c/file] {file_rel}: {len(plan.stranded)} block(s) "
-                 "that NO route covers exceed the bound alone and are left "
-                 "unfilled: " + ", ".join(plan.stranded)
-                 + f" — raise PHASE_C_FILE_MAX_FNS (now {plan.max_fns}) to "
-                 "reach them.")
-        if plan.groups is not None and not plan.groups:
-            _log(f"  [phase-c/file] {file_rel}: skipped — {plan.wanted} "
-                 f"fn(s) exceeds PHASE_C_FILE_MAX_FNS={plan.max_fns} and no "
-                 "test-welded multi-block group fits the bound; not "
-                 "scheduled — per-block fills will handle the blocks that "
-                 "route covers.")
-            return False
-        return True
 
     def _fill_block_group(file_rel: str, fblocks: list[ImplBlock],
                           glabel: str) -> None:
@@ -5165,7 +5075,10 @@ def prepare_impl_fill(
         tests_for=_tests_for, stubs=_stubs_all, log=_log)
     _file_route = _FileRoute(
         units_now=_file_units_now, fill_file=_fill_file_first,
-        admits=_file_route_admits,
+        admits=lambda f, bs: _file_route_admits(
+            f, bs, target_src_dir=target_src_dir,
+            frontier_tests=_frontier_tests,
+            per_impl_max_stubs=_PER_IMPL_MAX_STUBS, log=_log),
         snapshot=_snapshot, report_since=_report_since,
         tests_for=_tests_for, stubs=_stubs_all,
         on_plan=_file_plan_logged, log=_log)
@@ -5279,6 +5192,110 @@ class _FileFillPlan(NamedTuple):
     sizes: tuple[int, ...]
     solo: int
     stranded: tuple[str, ...]
+
+
+def _file_fill_plan(
+    file_rel: str, fblocks: list[ImplBlock], *,
+    frontier_tests: FailureFrontier, per_impl_max_stubs: int,
+) -> _FileFillPlan:
+    """What the file-first route would ask for `file_rel` — the ONE
+    reading of the fn bound, taken at plan time by `_file_route_admits`
+    and again by `_fill_file_first` when the run opens."""
+    wanted_all = [m.fn_name for b in fblocks
+                  for m in (*b.stub_members, *b.refill_members)]
+    # Bounds how many fns one prompt asks for; counts re-fills too — they
+    # are bodies the model must write. The stubs-era env var is still
+    # honoured so an existing .env keeps working.
+    max_fns = int(os.getenv("PHASE_C_FILE_MAX_FNS")
+                  or os.getenv("PHASE_C_FILE_MAX_STUBS") or "20")
+    if len(wanted_all) <= max_fns:
+        return _FileFillPlan(wanted=len(wanted_all), max_fns=max_fns,
+                             groups=None, sizes=(), solo=0, stranded=())
+    # Welding is keyed on CONVICTING tests: the coupling claim is "one
+    # validation run judges both blocks", which only a test that can
+    # actually reject them supports. An inferred attribution welds
+    # unrelated blocks into one oversized joint prompt.
+    _binputs = [BlockGroupInput(
+        idx=_i,
+        fn_count=len(b.stub_members) + len(b.refill_members),
+        tests=frozenset(
+            t for m in (*b.stub_members, *b.refill_members)
+            for t in (frontier_tests.convicting_for(
+                FnLocator(file_rel, m.fn_name)))))
+        for _i, b in enumerate(fblocks)]
+    _packed = coupled_fill_groups(_binputs, max_fns)
+    # Blocks NO other route can take. "Handed to the per-block loop" is a
+    # real handoff for a block that loop iterates and a silent drop for one
+    # it does not: `viable_blocks` excludes free-fn and oversized blocks by
+    # construction, which is the whole reason those two shapes arrive here.
+    # Live anyhow/nightly 2026-08-04 12:12 UTC, with the frontier finally
+    # naming free fns again: src/error.rs packed 35 re-fill fns into one
+    # welded group of 20 and `+12 uncoupled block(s) → per-block loop`, and
+    # the free-fn block holding `object_downcast`, `object_ref`,
+    # `context_downcast` and `context_chain_downcast` — where the crate's
+    # heap-use-after-free lives — was one of the 12. A free-fn block cannot
+    # weld to anything either: welding is keyed on CONVICTING tests and an
+    # escalated producer is attributed by inference, so its test set is
+    # empty and it is always its own singleton component.
+    _orphans = {i for i, b in enumerate(fblocks)
+                if not impl_route_covers(b, max_stubs=per_impl_max_stubs)}
+    # A singleton group runs only when it is one of those. Otherwise it is
+    # exactly the per-block route's unit and running it in both routes
+    # doubles its attempts. A single block larger than the bound keeps the
+    # old skip semantics either way.
+    _joint = [g for g in _packed
+              if (len(g) >= 2 or _orphans.intersection(g))
+              and sum(_binputs[i].fn_count for i in g) <= max_fns]
+    _stranded = sorted(_orphans - {i for g in _joint for i in g})
+    return _FileFillPlan(
+        wanted=len(wanted_all), max_fns=max_fns, groups=_joint,
+        sizes=tuple(sum(_binputs[i].fn_count for i in g) for g in _joint),
+        solo=len(_packed) - len(_joint),
+        stranded=tuple(
+            f"{fblocks[i].container.splitlines()[0] if fblocks[i].container else 'free fns'}"
+            f" ({_binputs[i].fn_count} fn(s))" for i in _stranded))
+
+
+def _file_route_admits(
+    file_rel: str, fblocks: list[ImplBlock], *,
+    target_src_dir: Path, frontier_tests: FailureFrontier,
+    per_impl_max_stubs: int, log: Callable[[str], None],
+) -> bool:
+    """Whether the file-first route can OPEN a run on `file_rel` now.
+
+    The fn bound used to be read only inside `_fill_file_first`, after
+    the schedule had already ranked the run: on the nightly tree of run
+    `2131920-86818224` (2026-09-07) `src/error.rs` held 21 fns against
+    `PHASE_C_FILE_MAX_FNS=20` with no test-welded group under it, so
+    every fill's schedule line opened with `1. file src/error.rs
+    (never_served; 14 stub(s))`, the route returned EMPTY at 0.0 min,
+    and `_rank_of` — which skips EMPTY rows by contract — ranked the
+    same identity never-served again on the next fill. A run the route
+    cannot open is not a candidate; the bound is a plan-time fact and
+    is read here, once per plan, so the schedule never sees it."""
+    if not (target_src_dir / file_rel).exists():
+        return False
+    plan = _file_fill_plan(
+        file_rel, fblocks, frontier_tests=frontier_tests,
+        per_impl_max_stubs=per_impl_max_stubs)
+    if not plan.wanted:
+        return False
+    if plan.stranded:
+        # Nothing downstream will attempt these; say so where it is read,
+        # rather than let the count above imply the per-block loop has them.
+        log(f"  [phase-c/file] {file_rel}: {len(plan.stranded)} block(s) "
+            "that NO route covers exceed the bound alone and are left "
+            "unfilled: " + ", ".join(plan.stranded)
+            + f" — raise PHASE_C_FILE_MAX_FNS (now {plan.max_fns}) to "
+            "reach them.")
+    if plan.groups is not None and not plan.groups:
+        log(f"  [phase-c/file] {file_rel}: skipped — {plan.wanted} "
+            f"fn(s) exceeds PHASE_C_FILE_MAX_FNS={plan.max_fns} and no "
+            "test-welded multi-block group fits the bound; not "
+            "scheduled — per-block fills will handle the blocks that "
+            "route covers.")
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)

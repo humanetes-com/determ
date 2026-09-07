@@ -77,6 +77,7 @@ from ...domain.text import (
     strip_list_marker,
     trim_to_line,
 )
+from ...domain.workspace_layout import SKELETON_FILLED_DIR
 from ...ports.generator import (
     LLM,
     Cargo,
@@ -2612,11 +2613,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
         """The heal hierarchy on one file of the MERGED tree (`project_dir/
         src`), for the post-merge wave's boundary invariant. The restore
         tiers are the merged tree's own: the merged best-tree snapshot
-        (`.best_tree/_merged/`, rooted at `src/`), the workspace git
-        ancestors of the project-relative path, and — last, loud — the
-        first cluster skeleton that carries the file (the merged file came
-        from one cluster's filled tree, so a cluster's skeleton is its
-        stub-only shape). True when some restore point held."""
+        (`.best_tree/_merged/`, rooted at `src/`), git ancestors of the
+        filled-cluster path (`.skeleton-filled/<cluster>/<rel>` — the
+        reconstruction checkpoints, the same path cluster heal already
+        asks git for), and — last, loud — the first cluster skeleton that
+        carries the file. True when some restore point held.
+
+        The git tier must NOT walk the clone's `src/` history. `tmp/anyhow`
+        is the cloned crate: `src/lib.rs`'s newest parseable blob is the
+        task0c one-line stub, and a file deleted at strip (e.g.
+        `src/error.rs`) has its first successful `git show` at pre-strip
+        anyhow. `heal_file` tries git before the skeleton, and the first
+        post-merge iter often has no `.best_tree/_merged/` yet — which is
+        exactly when `guard_tree_boundary` first runs — so that path would
+        write original crate source into the reconstruction."""
         if self.structure is None:
             return False
         merged_best = project_dir / ".best_tree" / MERGED_BEST
@@ -2632,10 +2642,21 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     return sp.read_bytes()
             return None
 
+        def _reconstruction_git_blobs(r: str) -> list[bytes]:
+            blobs: list[bytes] = []
+            seen: set[bytes] = set()
+            for c in clusters:
+                repo_rel = f"{SKELETON_FILLED_DIR}/{c.name}/{r}"
+                for b in self._git_ancestor_blobs(project_dir, repo_rel):
+                    if b not in seen:
+                        seen.add(b)
+                        blobs.append(b)
+            return blobs
+
         deps = HealDeps(
             parse_ok=self.structure.parse_ok,
             best_tree_bytes=_best_tree_bytes,
-            git_ancestor_blobs=lambda r: self._git_ancestor_blobs(project_dir, r),
+            git_ancestor_blobs=_reconstruction_git_blobs,
             skeleton_bytes=_skeleton_bytes,
             log=self.tel.log, emit=self.tel.emit)
         return heal_file(project_dir, rel, "merged",

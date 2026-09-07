@@ -17,17 +17,26 @@ Plan sentences, each with its control in the same module:
 * the post-merge wave takes the same reading on the merged tree before its
   own sweep, healing through the merged best-tree snapshot — control: the
   wave composed without a structure reader sweeps the broken tree;
+* an unparseable merged file with no best-tree is restored from a
+  filled-cluster git checkpoint (or the cluster skeleton), never from the
+  clone's `src/` history — control: heal via `git log -- src/<file>` writes
+  the original crate into the reconstruction;
 * the legacy per-fn route takes the same reading before its per-pass test —
   control: with no heal wired it reports and the pass test reads the
   broken tree.
 """
 from __future__ import annotations
 
+import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from pipeline_core.application.reconstruct.heal import HealDeps, heal_file
+from pipeline_core.domain.heal import RestorePoint
 from pipeline_core.domain.models import BuildCluster, FnLocator
+from pipeline_core.domain.workspace_layout import SKELETON_FILLED_DIR
 from tests.test_tdd_ratchet import _driver_deps
 
 _LAYOUT = """\
@@ -237,6 +246,104 @@ def test_control_the_post_merge_wave_without_a_reader_sweeps_the_broken_tree(
     assert seen and seen[0] is False, "the pre-fix shape: no boundary, red sweep"
     assert lib.read_text(encoding="utf-8") == _BROKEN
     assert "phase_c.tdd.unparseable_tree" not in fake.events
+
+
+_ORIGINAL = "pub fn new() -> u8 {\n    1\n}\n"
+_CHECKPOINT = "pub fn depth(&self) -> usize {\n    7\n}\n"
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+
+def _merged_clone_src_history(tmp_path: Path, *, checkpoint: bytes | None):
+    """A clone with original `src/lib.rs` committed, the merged file
+    unparseable, no merged best-tree — the first post-merge iter's shape."""
+    from pipeline_core.application.generators.task2_generator import (
+        StaticSkeletonTask2Generator,
+    )
+    from tests.test_skeleton_task2_generator import (
+        FakeAdapter,
+        _cfg,
+        _cluster,
+        _make_project,
+    )
+    c = _cluster()
+    fake = FakeAdapter(clusters_list=[c], run_results=[(0, "ok")] * 4)
+    pd = _make_project(tmp_path, [c])
+    lib = pd / "src" / "lib.rs"
+    lib.write_text(_ORIGINAL, encoding="utf-8")
+    _git(pd, "init", "-q")
+    _git(pd, "config", "user.email", "t@t")
+    _git(pd, "config", "user.name", "t")
+    _git(pd, "add", "--", "src/lib.rs")
+    _git(pd, "commit", "-qm", "original crate")
+    if checkpoint is not None:
+        filled = pd / SKELETON_FILLED_DIR / c.name / "src"
+        filled.mkdir(parents=True)
+        (filled / "lib.rs").write_bytes(checkpoint)
+        _git(pd, "add", "--", f"{SKELETON_FILLED_DIR}/{c.name}/src/lib.rs")
+        _git(pd, "commit", "-qm", "cluster checkpoint")
+    lib.write_text(_BROKEN, encoding="utf-8")
+    gen = StaticSkeletonTask2Generator(
+        tel=fake, cargo=fake, fill=fake, clusters=fake, gentests=fake,
+        scan=fake, ws=fake, cfg=_cfg(per_fn=True, tdd=True),
+        structure=SimpleNamespace(parse_ok=_parses))
+    return pd, lib, c, gen, fake
+
+
+def test_post_merge_heal_without_best_tree_does_not_restore_clone_src(
+        tmp_path: Path) -> None:
+    pd, lib, c, gen, fake = _merged_clone_src_history(tmp_path, checkpoint=None)
+    assert gen._heal_merged_rel(pd, [c], "src/lib.rs")
+    text = lib.read_text(encoding="utf-8")
+    assert text != _ORIGINAL, "clone src/ is pre-strip anyhow, not a restore"
+    assert text != _BROKEN
+    assert "unimplemented!" in text, "fell through to the cluster skeleton"
+    assert any("restored whole file from skeleton" in ln for ln in fake.logs)
+
+
+def test_post_merge_heal_restores_a_filled_cluster_checkpoint_not_clone_src(
+        tmp_path: Path) -> None:
+    pd, lib, c, gen, fake = _merged_clone_src_history(
+        tmp_path, checkpoint=_CHECKPOINT.encode())
+    assert gen._heal_merged_rel(pd, [c], "src/lib.rs")
+    assert lib.read_text(encoding="utf-8") == _CHECKPOINT
+    assert any("restored from a git ancestor that parses" in ln for ln in fake.logs)
+
+
+def test_control_heal_via_clone_src_restores_the_original_crate(
+        tmp_path: Path) -> None:
+    """The pre-fix git tier: `git log -- src/lib.rs` on the clone."""
+    pd, lib, _c, gen, fake = _merged_clone_src_history(tmp_path, checkpoint=None)
+    skel = (pd / ".skeleton" / "default" / "src" / "lib.rs").read_bytes()
+    deps = HealDeps(
+        parse_ok=_parses,
+        best_tree_bytes=lambda _r: None,
+        git_ancestor_blobs=lambda r: gen._git_ancestor_blobs(pd, r),
+        skeleton_bytes=lambda _r: skel,
+        log=fake.log, emit=fake.emit)
+    out = heal_file(pd, "src/lib.rs", "merged", deps)
+    assert out.point is RestorePoint.GIT_ANCESTOR
+    assert lib.read_text(encoding="utf-8") == _ORIGINAL
+
+
+def test_the_post_merge_wave_without_a_best_tree_does_not_restore_clone_src(
+        tmp_path: Path) -> None:
+    pd, lib, c, gen, fake = _merged_clone_src_history(tmp_path, checkpoint=None)
+    seen_at_sweep: list[bool] = []
+    real_run = fake.run
+
+    def _run(cmd: str, cwd: Path, env: dict, timeout: int = 180):
+        seen_at_sweep.append(_parses(lib))
+        return real_run(cmd, cwd, env, timeout)
+
+    fake.run = _run  # type: ignore[method-assign]
+    gen._post_merge_fill_pass(project_dir=pd, clusters=[c], module="crate",
+                              functional_req="")
+    assert seen_at_sweep and seen_at_sweep[0] is True
+    assert lib.read_text(encoding="utf-8") != _ORIGINAL
+    assert "unimplemented!" in lib.read_text(encoding="utf-8")
 
 
 # --- the legacy per-fn route -----------------------------------------------
