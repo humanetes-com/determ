@@ -789,6 +789,53 @@ def test_a_fault_no_component_declares_still_reaches_the_ones_it_references():
         ev, records, frozenset({"Quoted"})) is BlameGrade.NONE
 
 
+def test_an_undeclared_origin_beside_a_declared_family_sibling_still_declines():
+    """The driver hands the retrigger origin_blamed_locators, never the
+    family-widened blamed_locators dispatch uses. When the origin frame
+    names a CONVERSION_FAMILY member the extractor has no record for,
+    while a same-file sibling is a declared member of some component,
+    the family-widened set grades that component OWNS on the sibling's
+    name alone. Declining is the intended trade: the origin locator is
+    present, the extractor has no record for it, and a component that
+    only declares a family sibling must not grade OWNS. Empty blamed_fns
+    (unattributed) is a different decline."""
+    from pipeline_core.domain.crash_site import (
+        CrashFrame,
+        CrashSite,
+        blamed_locators,
+        origin_blamed_locators,
+    )
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        CrashEvidence,
+        crash_candidate_grade,
+    )
+    conv = CrashFrame(
+        file_rel="src/error.rs", line=0,
+        fn_name="into_boxed_dyn_error",
+        symbol="into_boxed_dyn_error",
+        named_by=("tests/error_gen_3.rs", 32))
+    site = CrashSite(binary_label="tests/error_gen_3.rs", test_name="t",
+                     signal="AddressSanitizer: SEGV", frames=(),
+                     origin_frames=(conv,), origin_capable=True)
+    # Sibling declared; origin name has no FnRecord.
+    records = _stderr_collision_records()[:1]
+    vtable_comp = frozenset({"Error", "ErrorImpl", "ErrorVTable", "Own",
+                             "object_reallocate_boxed", "vtable"})
+    vanished = frozenset({"t"})
+    origin_ev = CrashEvidence(
+        vanished=vanished, suspect_fns=frozenset(),
+        blamed_fns=origin_blamed_locators((site,)))
+    union_ev = CrashEvidence(
+        vanished=vanished, suspect_fns=frozenset(),
+        blamed_fns=blamed_locators((site,)))
+    assert crash_candidate_grade(
+        origin_ev, records, vtable_comp) is BlameGrade.NONE
+    assert crash_candidate_grade(
+        union_ev, records, vtable_comp) is BlameGrade.OWNS, (
+        "negative control: the family union grades OWNS on the declared sibling")
+
+
 # --- cause C's own memory: signature refutation and signature payoff -----------
 # The recorded instance (run `58819-ee78a1d1`, 2026-08-13, iters 3-6):
 # `Quoted` landed attempt 1 against the deterministic `test_downcast` UAF, the

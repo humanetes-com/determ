@@ -1558,9 +1558,27 @@ def crash_evidence_by_locator(
     return out
 
 
+def origin_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
+    """Each site's origin-blamed locator, with no family union.
+
+    Dispatch and the MUST need the family (:func:`blamed_locators`). The
+    retrigger's filled-body gate and OWNS grade need the observed origin
+    only: a filled recovered conversion plus an undeclared sibling must
+    stay a fill, not a type re-author. Chain-derived sites contribute
+    nothing: `chain_derived_site` builds with `frames=()` and
+    `origin_frames=()`, so `CrashSite.blamed` — and therefore
+    `blamed_locator` — is None for every `PROVENANCE_CHAIN` site by
+    construction; a non-None locator here is always frame-derived, with
+    no need to re-check `provenance`."""
+    return frozenset(
+        loc for s in sites if (loc := s.blamed_locator) is not None)
+
+
 def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
-    """The ORIGIN blame only — one locator per site, where the localizer put
-    the fault (`CrashSite.blamed_locator`).
+    """The ORIGIN blame, widened to the whole :data:`CONVERSION_FAMILY` at a
+    site's file whenever the origin is a family member — built on
+    :func:`origin_blamed_locators`, which is one locator per site, where the
+    localizer put the fault (`CrashSite.blamed_locator`).
 
     Deliberately not the evidence keys: `crash_evidence_by_locator` keys by
     EVERY frame, access and origin, so the innocent caller that merely routes
@@ -1569,11 +1587,6 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     and never fires — live 2026-08-09/10, `ext_context` (src/context.rs) was
     an access frame of the very `object_drop` (src/error.rs) fault it was
     being charged for.
-
-    Chain-derived sites contribute NOTHING here, by construction (their
-    `blamed_locator` is None): this set carries a frame's authority — it
-    convicts, crash-blocks and immunizes other units — and a blame inferred
-    from test attribution must not acquire that authority.
 
     A frame-derived blame on a :data:`CONVERSION_FAMILY` member convicts
     the whole family at that file. The family is one ownership contract
@@ -1588,33 +1601,22 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     does not declare drop out of the frontier downstream, so a crate
     without those names is a no-op. Deliberately NOT applied to
     `crash_evidence_by_locator` (that set is every frame; widening it
-    re-opens the outside-the-unit trap) and not to chain-derived sites.
+    re-opens the outside-the-unit trap).
 
     The layout retrigger does not read this set. Its filled-body gate is
     true only when every blamed locator has a filled record, so the union
     re-opens a type re-author the moment any sibling is stubbed or
-    undeclared. That consumer takes :func:`origin_blamed_locators`."""
-    out: set[FnLocator] = set()
-    for s in sites:
-        loc = s.blamed_locator
-        if loc is None:
-            continue
-        out.add(loc)
-        if s.provenance == PROVENANCE_FRAME and loc.fn_name in CONVERSION_FAMILY:
+    undeclared; grading has the matching risk — a component that merely
+    shares a file with the true origin would grade OWNS by name proximity
+    alone, the same over-attribution class `crash_blame_grade` exists to
+    avoid (`self_type_names`'s docstring; the StdError/`Quoted` fires).
+    Both the filled-body gate and the OWNS grade take
+    :func:`origin_blamed_locators` instead."""
+    out: set[FnLocator] = set(origin_blamed_locators(sites))
+    for loc in list(out):
+        if loc.fn_name in CONVERSION_FAMILY:
             out |= {FnLocator(loc.file, n) for n in CONVERSION_FAMILY}
     return frozenset(out)
-
-
-def origin_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
-    """Each site's origin-blamed locator, with no family union.
-
-    Dispatch and the MUST need the family (:func:`blamed_locators`). The
-    retrigger's filled-body gate and OWNS grade need the observed origin
-    only: a filled recovered conversion plus an undeclared sibling must
-    stay a fill, not a type re-author. Chain-derived sites contribute
-    nothing (``blamed_locator`` is None)."""
-    return frozenset(
-        loc for s in sites if (loc := s.blamed_locator) is not None)
 
 
 def family_members_beside_a_crashed_conversion(
