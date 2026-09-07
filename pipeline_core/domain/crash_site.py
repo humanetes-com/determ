@@ -1588,7 +1588,12 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     does not declare drop out of the frontier downstream, so a crate
     without those names is a no-op. Deliberately NOT applied to
     `crash_evidence_by_locator` (that set is every frame; widening it
-    re-opens the outside-the-unit trap) and not to chain-derived sites."""
+    re-opens the outside-the-unit trap) and not to chain-derived sites.
+
+    The layout retrigger does not read this set. Its filled-body gate is
+    true only when every blamed locator has a filled record, so the union
+    re-opens a type re-author the moment any sibling is stubbed or
+    undeclared. That consumer takes :func:`origin_blamed_locators`."""
     out: set[FnLocator] = set()
     for s in sites:
         loc = s.blamed_locator
@@ -1598,6 +1603,18 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
         if s.provenance == PROVENANCE_FRAME and loc.fn_name in CONVERSION_FAMILY:
             out |= {FnLocator(loc.file, n) for n in CONVERSION_FAMILY}
     return frozenset(out)
+
+
+def origin_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
+    """Each site's origin-blamed locator, with no family union.
+
+    Dispatch and the MUST need the family (:func:`blamed_locators`). The
+    retrigger's filled-body gate and OWNS grade need the observed origin
+    only: a filled recovered conversion plus an undeclared sibling must
+    stay a fill, not a type re-author. Chain-derived sites contribute
+    nothing (``blamed_locator`` is None)."""
+    return frozenset(
+        loc for s in sites if (loc := s.blamed_locator) is not None)
 
 
 def family_members_beside_a_crashed_conversion(

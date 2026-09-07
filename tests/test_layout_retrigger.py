@@ -211,6 +211,45 @@ def test_crash_blame_is_filled_body_only_when_every_named_body_compiles():
     assert crash_blame_is_filled_body(ev, []) is False
 
 
+def test_a_filled_conversion_stays_filled_body_when_a_family_sibling_is_undeclared():
+    """Family union is for dispatch and the MUST. The retrigger reads
+    origin-blamed locators only. A filled recovered conversion plus an
+    undeclared sibling keeps filled-body True; the union of the same
+    evidence is False — the gate that would re-open cause C."""
+    from pipeline_core.domain.crash_site import (
+        CrashFrame,
+        CrashSite,
+        blamed_locators,
+        origin_blamed_locators,
+    )
+    from pipeline_core.domain.layout_retrigger import (
+        CrashEvidence,
+        crash_blame_is_filled_body,
+    )
+    conv = CrashFrame(
+        file_rel="src/error.rs", line=0,
+        fn_name="reallocate_into_boxed_dyn_error_without_backtrace",
+        symbol="reallocate_into_boxed_dyn_error_without_backtrace",
+        named_by=("tests/error_gen_3.rs", 32))
+    site = CrashSite(binary_label="tests/error_gen_3.rs", test_name="t",
+                     signal="AddressSanitizer: SEGV", frames=(),
+                     origin_frames=(conv,), origin_capable=True)
+    filled = [FnRecord(
+        file="src/error.rs",
+        fn_name="reallocate_into_boxed_dyn_error_without_backtrace",
+        body_text="let own = unsafe { ptr::read(&self.inner) }; mem::forget(self);")]
+    vanished = frozenset({"t"})
+    origin_ev = CrashEvidence(
+        vanished=vanished, suspect_fns=frozenset(),
+        blamed_fns=origin_blamed_locators((site,)))
+    union_ev = CrashEvidence(
+        vanished=vanished, suspect_fns=frozenset(),
+        blamed_fns=blamed_locators((site,)))
+    assert crash_blame_is_filled_body(origin_ev, filled) is True
+    assert crash_blame_is_filled_body(union_ev, filled) is False, (
+        "negative control: the family union is False on the same records")
+
+
 def test_crash_blame_decides_and_excludes_components_the_fault_never_touched():
     """The regression that pinned five sessions at ~111: a vanished test reaches
     most of the crate, so reverse-map suspects implicate several components at

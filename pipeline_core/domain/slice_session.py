@@ -140,6 +140,38 @@ def attributed_units_for_session(
     return out
 
 
+def recorded_locator_sites(
+    recorded: Mapping[str, Collection[FnLocator]],
+    tree_sites: Iterable[FnSite],
+) -> dict[str, frozenset[FnSite]]:
+    """Recorded executed locators as session sites, unique container only.
+
+    A recorded stamp is a (file, fn) with no container. Inserting
+    ``FnSite(file, fn, "")`` made ``expand_locator_sites`` name every
+    same-named body — coverage's Debug site re-admitted Display and the
+    merge exceeded the cap (run ``110993-6efa23be``, 2026-09-03). A
+    locator that names exactly one site with a container on the tree
+    keeps that site; a homonym is omitted (ranking already has the
+    locator); a name the tree does not declare, or that only exists as
+    an empty-container frontier site, is omitted, not invented."""
+    by_loc: dict[FnLocator, set[FnSite]] = {}
+    for site in tree_sites:
+        if not site.container:
+            continue
+        loc = FnLocator(norm_src_rel(site.file), site.fn_name)
+        by_loc.setdefault(loc, set()).add(site)
+    out: dict[str, frozenset[FnSite]] = {}
+    for test, units in recorded.items():
+        picked: set[FnSite] = set()
+        for u in units:
+            hits = by_loc.get(FnLocator(norm_src_rel(u.file), u.fn_name), set())
+            if len(hits) == 1:
+                picked.add(next(iter(hits)))
+        if picked:
+            out[test] = frozenset(picked)
+    return out
+
+
 def _pending_after_filters(
     slices: Mapping[str, Collection[FnSite]],
     hollow: Collection[FnLocator],

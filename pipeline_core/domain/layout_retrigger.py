@@ -913,8 +913,9 @@ class CrashEvidence:
     sweeps the shrink persisted.
 
     `blamed_fns` is a SECOND, stronger channel: the ORIGIN blame locators —
-    where the localizer placed the fault itself (`blamed_locators`: one
-    locator per site, gdb's faulting frame or ASAN's use-after-free origin).
+    where the localizer placed the fault itself (`origin_blamed_locators`:
+    one locator per site, gdb's faulting frame or ASAN's use-after-free
+    origin). Not the family union `blamed_locators` builds for dispatch.
     Not the crash EVIDENCE keys, which are a different set for a different
     purpose: `crash_evidence_by_locator` keys by every frame so that callers
     up the stack receive the report too, and a set built that way names the
@@ -1182,8 +1183,9 @@ def crash_candidate_grade(
     # The residue case this function used to fall through on — run
     # `263217-d41a5bb5` (2026-08-15), the crashing test's own two
     # `gen_tests` frames handed as `blamed_fns`, grading NONE everywhere —
-    # is closed at its cause: the driver hands `blamed_locators` (the origin
-    # blame), which for that class is empty. An empty aim declines, and the
+    # is closed at its cause: the driver hands `origin_blamed_locators`
+    # (the origin blame, no family union), which for that class is empty.
+    # An empty aim declines, and the
     # decline is loud (`retrigger_layout`'s declined-walk line prints the
     # tier and the evidence shape), which is the whole of what that
     # 308-minute silence needed.

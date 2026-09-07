@@ -77,6 +77,7 @@ from pipeline_core.domain.crash_site import (
     crash_evidence_by_locator,
     crash_signal_hint,
     destruction_path_subjects,
+    origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
     vanish_is_stub_confounded,
@@ -187,6 +188,7 @@ from pipeline_core.domain.refine import (
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
     attributed_units_for_session,
+    recorded_locator_sites,
     session_slices_for_failing,
 )
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -2862,6 +2864,7 @@ def run_phase_c_tdd(
         # routes execution into the fault is a key too — any "is the blame
         # outside this unit" test needs the blamed locators, not the keys.
         crash_blamed: frozenset[FnLocator] = frozenset()
+        _sites: tuple[Any, ...] = ()
         # Sites where an origin-capable detector looked and placed no frame
         # in-crate — the precondition for chain-derived blame synthesis at
         # the determinism gate below. Reset here: a stale list surviving a
@@ -2885,10 +2888,10 @@ def run_phase_c_tdd(
                          "the fns they reach are still stubs; stub panics "
                          "abort binaries too), fills run first.")
             else:
-                _sites = deps.localize_crashes(
-                    output, test_cmd, target_src_dir, cluster_env)
-                crash_texts = crash_evidence_by_locator(tuple(_sites))
-                crash_blamed = blamed_locators(tuple(_sites))
+                _sites = tuple(deps.localize_crashes(
+                    output, test_cmd, target_src_dir, cluster_env))
+                crash_texts = crash_evidence_by_locator(_sites)
+                crash_blamed = blamed_locators(_sites)
                 _unattributed_sites = [
                     s for s in _sites if s.origin_unattributed]
                 for _site in _sites:
@@ -3786,9 +3789,13 @@ def run_phase_c_tdd(
                     # 308 minutes — zero `[layout-retrigger]` lines — while
                     # the three loud consumers (prompt evidence, exhaustion
                     # void, frontier) kept firing on 67 chain-derived keys.
-                    # `blamed_locators` is the origin blame alone and is
-                    # what every "is the blame outside this unit" test in
-                    # this file already uses.
+                    # `origin_blamed_locators` is the origin blame alone
+                    # (no conversion-family union). `blamed_locators` still
+                    # convicts the family for dispatch and the MUST; the
+                    # retrigger's filled-body gate is true only when every
+                    # blamed locator has a filled record, so the union
+                    # re-opens a type re-author on a stub or undeclared
+                    # sibling.
                     #
                     # What each crash class hands the aim, all three
                     # deliberate: frame-derived with an in-crate origin
@@ -3819,7 +3826,7 @@ def run_phase_c_tdd(
                     # evidence; it is not an aim. The origin blame carries no
                     # chain key by construction, so no subtraction is needed
                     # to keep them out.
-                    blamed_fns=crash_blamed,
+                    blamed_fns=origin_blamed_locators(_sites),
                     chain_blamed=_chain_keys),
                 best_pass=best_pass)
             if _retrig_c.fired:
@@ -4251,16 +4258,24 @@ def run_phase_c_tdd(
         bind_coverage_slice(_cov)
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
-        # The owner sets the ranking, the admission and the sessions read:
-        # measured where the test completed, recorded where it did not.
+        # The owner sets the ranking and the admission read: measured
+        # where the test completed, recorded where it did not. Sessions
+        # take unique-container sites from the frontier, not this map.
         # The BOUND slice keeps the measured map only — a recorded set is
         # not a measurement and must not be re-stamped as one.
         _owners_read: dict[str, frozenset[FnSite]] = (
             dict(_cov.owners) if _cov is not None else {})
-        _recorded_sites: dict[str, frozenset[FnSite]] = {
+        # Ranking converts sites back to locators, so an empty container
+        # here is a (file, fn) stamp and does not fan out. Sessions do
+        # not read this map: they take unique-container sites below.
+        _recorded_failing = {
+            t: us for t, us in _recorded.items() if t in cur_failed}
+        _recorded_rank = {
             t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
-            for t, us in _recorded.items() if t in cur_failed}
-        _owners_read.update(_recorded_sites)
+            for t, us in _recorded_failing.items()}
+        _owners_read.update(_recorded_rank)
+        _recorded_sites = recorded_locator_sites(
+            _recorded_failing, _attr.site_frontier)
         # The owner map decided a refusal and reached no record: nothing in
         # `events.jsonl` carried it, so every later argument about whether a
         # demotion was right had to re-measure the tree to find out what the
@@ -4277,7 +4292,7 @@ def run_phase_c_tdd(
                 "unmeasured_binaries": sorted(_cov.unmeasured_binaries),
                 "recorded_owners": {
                     t: [site_payload(k) for k in sorted(ks)]
-                    for t, ks in sorted(_recorded_sites.items())},
+                    for t, ks in sorted(_recorded_rank.items())},
                 "dead_exempted": sorted(
                     f"{k.file}::{k.fn_name}" for k in _dead_exempt),
             })
@@ -4378,11 +4393,21 @@ def run_phase_c_tdd(
         _session_slices: dict[str, frozenset[FnSite]] = {}
         _session_owners: dict[str, frozenset[FnSite]] = {}
         if os.getenv("SLICE_SESSION", "1") != "0":
-            _cov_owners = (
-                {bare_test_name(t): ks for t, ks in _owners_read.items()}
-                if _cov is not None and _owners_read else {})
-            _session_owners = {
-                t: frozenset(ks) for t, ks in _cov_owners.items()}
+            # Measured owners already carry containers. Recorded locators
+            # join only when the site frontier names exactly one container;
+            # `_owners_read` still has the empty-container stamp for ranking
+            # and must not enter this map (expand_locator_sites would
+            # re-admit Display).
+            _session_from_cov: dict[str, set[FnSite]] = {}
+            if _cov is not None:
+                for t, ks in _cov.owners.items():
+                    _session_from_cov.setdefault(
+                        bare_test_name(t), set()).update(ks)
+            for t, ks in _recorded_sites.items():
+                _session_from_cov.setdefault(
+                    bare_test_name(t), set()).update(ks)
+            _cov_owners = {t: frozenset(ks) for t, ks in _session_from_cov.items()}
+            _session_owners = dict(_cov_owners)
             # Eligible is the filter, not the source. Walking eligible and
             # inserting FnSite(file, fn, "") when the site frontier had no
             # container made expand_locator_sites name every same-named

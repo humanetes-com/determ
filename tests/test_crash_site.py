@@ -1164,6 +1164,45 @@ def test_blamed_locators_convict_the_whole_family_beside_a_blamed_conversion() -
     assert blamed_locators((chain,)) == frozenset()
 
 
+def test_origin_blamed_locators_are_the_recovered_name_not_the_family() -> None:
+    """The retrigger reads one locator per site. A recovered conversion
+    stays that conversion; the family union is dispatch's. A drop site
+    and a chain-derived site are unchanged (drop is the origin; chain
+    contributes nothing)."""
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        CrashFrame,
+        CrashSite,
+        blamed_locators,
+        chain_derived_site,
+        origin_blamed_locators,
+    )
+    conv = CrashFrame(file_rel="src/error.rs", line=0,
+                      fn_name="reallocate_into_boxed_dyn_error_without_backtrace",
+                      symbol="reallocate_into_boxed_dyn_error_without_backtrace",
+                      named_by=("tests/error_gen_3.rs", 32))
+    site = CrashSite(binary_label="tests/error_gen_3.rs", test_name="t",
+                     signal="AddressSanitizer: SEGV", frames=(),
+                     origin_frames=(conv,), origin_capable=True)
+    origin = origin_blamed_locators((site,))
+    assert origin == frozenset({
+        FnLocator("src/error.rs",
+                  "reallocate_into_boxed_dyn_error_without_backtrace")})
+    assert origin != blamed_locators((site,))
+    assert len(blamed_locators((site,))) == len(CONVERSION_FAMILY)
+    drop = CrashFrame(file_rel="src/error.rs", line=630, fn_name="drop",
+                      symbol="<anyhow::Error as core::ops::drop::Drop>::drop")
+    drop_site = CrashSite(binary_label="tests/x.rs", test_name="t",
+                          signal="AddressSanitizer: heap-use-after-free",
+                          frames=(), origin_frames=(drop,), origin_capable=True)
+    assert origin_blamed_locators((drop_site,)) == frozenset(
+        {FnLocator("src/error.rs", "drop")})
+    chain = chain_derived_site(
+        "tests/x.rs", "t", "AddressSanitizer: SEGV",
+        [FnLocator("src/error.rs", "downcast")])
+    assert origin_blamed_locators((chain,)) == frozenset()
+
+
 def test_the_must_is_worded_for_the_copy_not_the_box() -> None:
     from pipeline_core.domain.crash_site import (
         OWNERSHIP_TRANSFER_MUST,

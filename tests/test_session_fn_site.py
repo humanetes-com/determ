@@ -42,6 +42,7 @@ from pipeline_core.domain.slice_session import (
     attributed_units_for_session,
     expand_locator_sites,
     plan_slices,
+    recorded_locator_sites,
     route_change_set,
     session_slices_for_failing,
     slice_plan_gaps,
@@ -246,6 +247,43 @@ def test_locator_only_unit_expands_to_every_container_of_the_name() -> None:
     assert out["v"] == frozenset({FnSite("src/w.rs", "gone", "")})
     # a locator-keyed map — the pre-fix shape — resolves the name to ONE record
     assert len({FnLocator(s.file, s.fn_name): s for s in (disp, dbg)}) == 1
+
+
+def test_recorded_fmt_locator_does_not_admit_display_into_the_session() -> None:
+    """A recorded owner is a (file, fn) with no container. Restamping it
+    as FnSite(file, fn, "") made expand_locator_sites name every same-named
+    body — Display re-entered and the merge exceeded the cap (run
+    110993-6efa23be). Unique-container resolution keeps a one-site name
+    and omits a homonym. Negative control: today's restamp still fans out."""
+    disp = FnSite("src/w.rs", "fmt", "impl Display for W")
+    dbg = FnSite("src/w.rs", "fmt", "impl Debug for W")
+    run = FnSite("src/w.rs", "run", "impl W")
+    tree = [disp, dbg, run]
+    recorded = {
+        "t_crash": {
+            FnLocator("src/w.rs", "fmt"),
+            FnLocator("src/w.rs", "run"),
+        }
+    }
+    got = recorded_locator_sites(recorded, tree)
+    assert got["t_crash"] == frozenset({run})
+    assert disp not in got["t_crash"] and dbg not in got["t_crash"]
+    slices = session_slices_for_failing(
+        ["t_crash"], owners=got, units_by_test={}, pairs=())
+    assert slices["t_crash"] == frozenset({run})
+    old = {"t_crash": frozenset({
+        FnSite("src/w.rs", "fmt", ""),
+        FnSite("src/w.rs", "run", ""),
+    })}
+    old_exp = expand_locator_sites(old, tree)
+    assert disp in old_exp["t_crash"] and dbg in old_exp["t_crash"], (
+        "negative control: the empty-container restamp fans out to Display")
+    assert recorded_locator_sites(
+        {"t": {FnLocator("src/w.rs", "gone")}}, tree) == {}
+    assert recorded_locator_sites(
+        {"t": {FnLocator("src/w.rs", "fmt")}},
+        [FnSite("src/w.rs", "fmt", "")]) == {}, (
+        "an empty-container frontier site is not a resolution")
 
 
 def _eligible_as_source(eligible: dict, site_frontier: dict) -> dict:
