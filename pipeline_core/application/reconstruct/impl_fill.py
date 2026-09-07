@@ -113,6 +113,7 @@ from pipeline_core.domain.failure_signature import (
     attempt_invariant,
     structural_group_note,
 )
+from pipeline_core.domain.fill_attempts import AttemptsSnapshot, FillAttempts
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillClassHistogram,
@@ -895,27 +896,20 @@ def prepare_impl_fill(
     fns_filled_total = 0
     attempts_total = 0
     errors: list[str] = []
-    # Fns a route genuinely attempted (recorded at the two points a unit is
-    # handed to a fill cycle, AFTER the skip gates) — the caller's exhaustion
-    # charging keys on this, so a member skipped by a refusal gate is spared
-    # the strike a member that was tried and failed earns.
-    dispatched_keys: set[FnLocator] = set()
-    # Units spliced then restored to the pre-fill snapshot (peel / compile /
-    # U2 / regression). The TDD audit's FLAT arm subtracts this set so a
-    # reverted fill is not recorded as "the model returned this body".
-    reverted_keys: set[FnLocator] = set()
-    # Units of a file-first call that ended with NO routable reply — the LLM
-    # errored, the parse found no FN blocks, or nothing spliced. The model
-    # was paid and the answer was lost, so grading these as "tried and
-    # failed" fabricates evidence: run `347397-01e2463b` (2026-08-31) graded
-    # src/ensure.rs::__dispatch_ensure and ::render `flat` off an empty
-    # reply, and `render` — an owner of the still-failing test_trailer —
-    # entered the next iteration's flat-sink derank on that row. A later
-    # dispatch of the same unit by the per-impl route supersedes the loss
-    # (that route removes it at its own dispatch stamp), and units with a
-    # reverted try are subtracted at result build — a revert is a real
-    # attempt and `reverted_keys` already carries it.
-    answer_lost_keys: set[FnLocator] = set()
+    # Per-unit attempt bookkeeping (`domain/fill_attempts.py`): dispatched
+    # (stamped at the points a unit is handed to a fill cycle, AFTER the skip
+    # gates — the caller's exhaustion charging keys on this, so a member a
+    # refusal gate skipped is spared the strike a tried-and-failed member
+    # earns), and each unit's LAST outcome — kept, reverted (spliced then
+    # restored to the pre-fill snapshot: peel / compile / U2 / regression),
+    # or lost (the model was paid and no routable reply came back: run
+    # `347397-01e2463b`, 2026-08-31, graded src/ensure.rs::render `flat` off
+    # an empty reply and deranked it into the next iteration's flat sink).
+    # The route rows, the TDD audit's FLAT arm and the fill result all read
+    # these views, so a unit reverted on one attempt and kept on the next is
+    # kept everywhere (run `1577437-c93d5c26` iter 4 graded such a run
+    # REVERTED off a revert mark no keep ever cleared).
+    attempts = FillAttempts()
     # Files whose file-first call actually LANDED bodies this call (a kept
     # splice — peel survivors and non-regression keeps included). The
     # same-call refill-only drop below keys on this, never on the dispatch
@@ -925,8 +919,10 @@ def prepare_impl_fill(
     ff_produced_files: set[str] = set()
 
     def _note_reverted(file_rel: str, names: Sequence[str]) -> None:
-        with _counters_lock:
-            reverted_keys.update(FnLocator(file_rel, n) for n in names if n)
+        attempts.note_reverted(FnLocator(file_rel, n) for n in names if n)
+
+    def _note_kept(file_rel: str, names: Sequence[str]) -> None:
+        attempts.note_kept(FnLocator(file_rel, n) for n in names if n)
 
     # One entry per block that LANDED, carrying the still-stubbed sites that
     # held its tests (empty when the block was judged on its own merits). Read
@@ -1277,8 +1273,7 @@ def prepare_impl_fill(
         if not wanted:
             return
         _pull_file.file = file_rel
-        with _counters_lock:
-            dispatched_keys.update(FnLocator(file_rel, n) for n in wanted)
+        attempts.note_dispatched(FnLocator(file_rel, n) for n in wanted)
         snapshot = file_path.read_text(encoding="utf-8", errors="replace")
         # Locators in the crash-evidence dict that are not origin-blame:
         # callees of the faulting frame. `crash_blamed` convicts; this set
@@ -1780,17 +1775,15 @@ def prepare_impl_fill(
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
-                with _counters_lock:
-                    # Only the names THIS attempt pursued are lost: on a
-                    # peel retry the plan was restricted to the peeled
-                    # names, and the kept remainder of the earlier attempt
-                    # was landed and judged — marking it lost would strip
-                    # its service and re-rank a just-landed body as
-                    # never-served.
-                    answer_lost_keys.update(
-                        FnLocator(file_rel, n)
-                        for n in (_retry_names if _retry_names is not None
-                                  else wanted))
+                # Only the names THIS attempt pursued are lost: on a peel
+                # retry the plan was restricted to the peeled names, and
+                # the kept remainder of the earlier attempt was landed and
+                # judged — marking it lost would strip its service and
+                # re-rank a just-landed body as never-served.
+                attempts.note_lost(
+                    FnLocator(file_rel, n)
+                    for n in (_retry_names if _retry_names is not None
+                              else wanted))
                 return
             _audit = _audit_reply(_log, _emit, cluster=cluster_name,
                                   unit=file_rel, route="file",
@@ -1810,12 +1803,11 @@ def prepare_impl_fill(
                      f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
                      "falling back to per-block fills.")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
-                with _counters_lock:
-                    # Attempt-scoped, as at the LLM-error return above.
-                    answer_lost_keys.update(
-                        FnLocator(file_rel, n)
-                        for n in (_retry_names if _retry_names is not None
-                                  else wanted))
+                # Attempt-scoped, as at the LLM-error return above.
+                attempts.note_lost(
+                    FnLocator(file_rel, n)
+                    for n in (_retry_names if _retry_names is not None
+                              else wanted))
                 return
             with _splice_check_lock:
                 # Runtime test state for the monotone ratchet, captured NOW
@@ -2019,12 +2011,11 @@ def prepare_impl_fill(
                     _log(f"  [phase-c/file] {glabel}: nothing spliced — "
                          "falling back to per-block fills.")
                     _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
-                    with _counters_lock:
-                        # Attempt-scoped, as at the LLM-error return above.
-                        answer_lost_keys.update(
-                            FnLocator(file_rel, n)
-                            for n in (_retry_names if _retry_names is not None
-                                      else wanted))
+                    # Attempt-scoped, as at the LLM-error return above.
+                    attempts.note_lost(
+                        FnLocator(file_rel, n)
+                        for n in (_retry_names if _retry_names is not None
+                                  else wanted))
                     return
                 _attempted_names = [b.fn_name for b in _landed]
                 _peel_reverted: tuple[str, ...] = ()
@@ -2270,6 +2261,9 @@ def prepare_impl_fill(
                     # whose call landed nothing keeps the per-block fallback
                     # its early-return log line promises.
                     ff_produced_files.add(file_rel)
+                    # The peel survivors, not `_attempted_names`: a peeled
+                    # name was restored and stays reverted.
+                    _note_kept(file_rel, [b.fn_name for b in _landed])
                     note_kept_comparison(last_comparison() if _regr_file is None
                                          and tdd_test_cmd else None)
                     _record_regression_evidence(
@@ -2637,15 +2631,12 @@ def prepare_impl_fill(
                 block = replace(block, stub_members=_fresh_members)
         # Past every skip gate — this block's members are now genuinely being
         # attempted, so they are chargeable if they end the pass still stubs.
-        with _counters_lock:
-            _now_attempted = {
-                FnLocator(block.file, m.fn_name)
-                for m in (*block.stub_members, *block.refill_members)}
-            dispatched_keys.update(_now_attempted)
-            # A real per-block attempt supersedes a lost file-first answer
-            # for the same unit — the released fallback running is exactly
-            # what makes the unit attempted after all.
-            answer_lost_keys.difference_update(_now_attempted)
+        # A real per-block attempt supersedes a lost file-first answer for
+        # the same unit — the released fallback running is exactly what
+        # makes the unit attempted after all (the dispatch stamp clears it).
+        attempts.note_dispatched(
+            FnLocator(block.file, m.fn_name)
+            for m in (*block.stub_members, *block.refill_members))
         # Related blocks (same trait, different generic) for the prompt.
         all_blocks_by_id = {_impl_block_id(b.file, b.container): b for b in blocks}
         related_blocks: list[ImplBlock] = []
@@ -3291,6 +3282,7 @@ def prepare_impl_fill(
                          "joint tree.")
                 if rc == 0 and (not _u2_impl_reject or _bank_impl is not None
                                 or _crash_keep):
+                    _note_kept(block.file, _impl_spliced)
                     note_kept_comparison(last_comparison() if tdd_test_cmd else None)
                     _record_regression_evidence(
                         [_retro_key(block.file, "*impl*", block.container),
@@ -4214,9 +4206,9 @@ def prepare_impl_fill(
                 "dispatcher": site_payload(pair.dispatcher),
                 "implementer": site_payload(pair.implementer),
                 "convicting": sorted(_pair_tests)})
+            attempts.note_dispatched(_pair_locs)
             with _counters_lock:
                 attempts_total += 1
-                dispatched_keys.update(_pair_locs)
                 # The sha of what is being SENT, persisted before the reply can
                 # arrive — the refusal above compares against the last prompt
                 # sent, not the last one that produced a revert.
@@ -4230,15 +4222,13 @@ def prepare_impl_fill(
                     _pair_reply = _ask_fill(prompt)
             except Exception as _pe:
                 _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
-                with _counters_lock:
-                    answer_lost_keys.update(_pair_locs)
+                attempts.note_lost(_pair_locs)
                 return
             _pair_parsed = extract_fn_bodies(_pair_reply)
             if not _pair_parsed:
                 _log(f"  [phase-c/pair] {pair_id}: empty/no FN blocks "
                      f"({fn_tag_occurrences(_pair_reply)} FN tag(s) in reply).")
-                with _counters_lock:
-                    answer_lost_keys.update(_pair_locs)
+                attempts.note_lost(_pair_locs)
                 return
 
             def _record_pair_regression(_rcmp: RegressionComparison,
@@ -4491,6 +4481,8 @@ def prepare_impl_fill(
                 with _counters_lock:
                     fns_filled_total += _n_spliced
                     impls_filled += 1
+                for _pf, _pnames in _spliced_by_file.items():
+                    _note_kept(_pf, _pnames)
                 note_kept_comparison(last_comparison() if tdd_test_cmd else None)
                 _record_regression_evidence([_pair_key])
                 block_outcomes.append(UnitOutcome(landed=True))
@@ -4736,7 +4728,7 @@ def prepare_impl_fill(
             nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
             nonlocal _all_recs, served
             _check_graceful_stop("slice-session dispatch")
-            if served or dispatched_keys:
+            if served or attempts.dispatched:
                 # An earlier run of this fill (a session, or any route the
                 # schedule put before it) may have landed bodies; a packed
                 # sibling sharing a hub unit must open on the tree as it
@@ -4867,11 +4859,12 @@ def prepare_impl_fill(
                     _ports, target_src_dir=target_src_dir,
                     cluster_name=cluster_name, slice_=_sl, records=_records,
                     turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes)
+            attempts.note_dispatched(
+                locator_of(u) for u in (_out.dispatched | _out.kept))
+            attempts.note_reverted(locator_of(u) for u in _out.reverted)
+            attempts.note_kept(locator_of(u) for u in _out.kept)
             with _counters_lock:
                 attempts_total += _out.model_calls
-                dispatched_keys.update(
-                    locator_of(u) for u in (_out.dispatched | _out.kept))
-                reverted_keys.update(locator_of(u) for u in _out.reverted)
                 if _out.outcome == "accepted":
                     impls_filled += 1
                     fns_filled_total += len(_out.kept)
@@ -4985,33 +4978,22 @@ def prepare_impl_fill(
     def _snapshot() -> _RouteSnap:
         with _counters_lock:
             return _RouteSnap(
-                dispatched=frozenset(dispatched_keys),
-                reverted=frozenset(reverted_keys),
-                lost=frozenset(answer_lost_keys),
-                attempts=attempts_total,
+                units=attempts.snapshot(), calls=attempts_total,
                 classes=_fill_classes.histogram())
 
     def _report_since(snap: _RouteSnap) -> RouteRunReport:
-        with _counters_lock:
-            now = _RouteSnap(
-                dispatched=frozenset(dispatched_keys),
-                reverted=frozenset(reverted_keys),
-                lost=frozenset(answer_lost_keys),
-                attempts=attempts_total,
-                classes=_fill_classes.histogram())
-        disp = now.dispatched - snap.dispatched
-        rev = now.reverted - snap.reverted
-        lost = now.lost - snap.lost
+        now = _snapshot()
+        delta = FillAttempts.since(snap.units, now.units)
         before = snap.classes.as_dict()
         after = now.classes.as_dict()
         classes = {k: after[k] - before.get(k, 0) for k in after
                    if after[k] - before.get(k, 0)}
         declined_only = bool(classes) and set(classes) == {"declined"}
         return RouteRunReport(
-            model_calls=now.attempts - snap.attempts,
-            kept=frozenset(disp - rev - lost), reverted=frozenset(rev),
-            dispatched=frozenset(disp), classes=classes,
-            declined=declined_only and not (disp - rev - lost))
+            model_calls=now.calls - snap.calls,
+            kept=delta.kept, reverted=delta.reverted,
+            dispatched=delta.dispatched, classes=classes,
+            declined=declined_only and not delta.kept)
 
     def _blocks_after_pair() -> list[ImplBlock]:
         if not _pair_served:
@@ -5124,9 +5106,9 @@ def prepare_impl_fill(
             remaining=remaining_n,
             impls_filled=impls_filled,
             impls_failed=impls_failed,
-            dispatched_fns=tuple(sorted(dispatched_keys)),
-            reverted_fns=tuple(sorted(reverted_keys)),
-            answer_lost_fns=tuple(sorted(answer_lost_keys - reverted_keys)),
+            dispatched_fns=tuple(sorted(attempts.dispatched)),
+            reverted_fns=tuple(sorted(attempts.reverted)),
+            answer_lost_fns=tuple(sorted(attempts.lost)),
             payoff=_payoff,
             fill_classes=_fill_classes.histogram(),
         )
@@ -5166,7 +5148,9 @@ def fill_impl_blocks(
             iteration=fill_iteration, oracle_fp=str(kw.get("oracle_fp", "")),
             budget_minutes=fill_budget_minutes,
             scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
-            parallelism=int(kw.get("parallelism", 1) or 1)))
+            parallelism=int(kw.get("parallelism", 1) or 1),
+            unmeasurable_tests=frozenset(kw.get("unmeasurable_tests") or ()),
+            crash_blamed=frozenset(kw.get("crash_blamed") or ())))
     return prepared.finish()
 
 
@@ -5175,10 +5159,8 @@ class _RouteSnap:
     """The fill's shared counters at a run's start, so the run's own
     landings can be read off the difference at its end."""
 
-    dispatched: frozenset[FnLocator]
-    reverted: frozenset[FnLocator]
-    lost: frozenset[FnLocator]
-    attempts: int
+    units: AttemptsSnapshot
+    calls: int
     classes: FillClassHistogram
 
 

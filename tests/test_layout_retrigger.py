@@ -139,7 +139,13 @@ def test_find_fns_referencing_empty_when_no_match():
     assert find_fns_referencing(records, frozenset({"ErrorImpl"})) == []
 
 
-def test_crash_retrigger_fires_on_member_or_referencing_suspect():
+def test_crash_retrigger_admits_on_an_observed_frame_never_on_a_suspect():
+    """Reachability (`suspect_fns`) is an inference and admits nothing; the
+    SAME locators handed as an observed frame admit by membership or by
+    reference. The reachability aim this replaced is the one that fired at
+    `Quoted` and `ChainState` in registry order for five sessions, and the
+    2026-09-06 fixture below shows it grading `Quoted` OWNS again on the
+    live records the moment the chain was withheld."""
     from pipeline_core.domain.layout_retrigger import (
         CrashEvidence,
         classify_crash_retrigger,
@@ -152,19 +158,27 @@ def test_crash_retrigger_fires_on_member_or_referencing_suspect():
                  sig_text="fn next(&mut self) -> Option<u8>", body_text="None"),
     ]
     comp = frozenset({"ErrorVTable", "object_downcast", "vtable"})
-    # Suspect fn is a component MEMBER by name → fires.
-    ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
-                       suspect_fns=frozenset({FnLocator("src/error.rs", "object_downcast")}))
-    assert classify_crash_retrigger(ev, records, comp) is LayoutRetriggerCause.RUNTIME_CRASH
-    # Suspect fn merely REFERENCES a component name in its body → fires.
-    ev2 = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
-                        suspect_fns=frozenset({FnLocator("src/error.rs", "downcast_ref")}))
-    assert classify_crash_retrigger(ev2, records, comp) is LayoutRetriggerCause.RUNTIME_CRASH
-    # Suspect unrelated to the component → no fire.
+    member = frozenset({FnLocator("src/error.rs", "object_downcast")})
+    referrer = frozenset({FnLocator("src/error.rs", "downcast_ref")})
+    # As suspects: a component MEMBER by name, and a fn that REFERENCES the
+    # component — neither admits.
+    for fns in (member, referrer):
+        ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
+                           suspect_fns=fns)
+        assert classify_crash_retrigger(
+            ev, records, comp) is LayoutRetriggerCause.NONE
+    # The same locators as an observed frame admit — membership and reference.
+    for fns in (member, referrer):
+        ev = CrashEvidence(vanished=frozenset({"test_boxed_str"}),
+                           suspect_fns=frozenset(), blamed_fns=fns)
+        assert classify_crash_retrigger(
+            ev, records, comp) is LayoutRetriggerCause.RUNTIME_CRASH
+    # A frame unrelated to the component → no fire.
     ev3 = CrashEvidence(vanished=frozenset({"test_iter"}),
-                        suspect_fns=frozenset({FnLocator("src/chain.rs", "next")}))
+                        suspect_fns=frozenset(),
+                        blamed_fns=frozenset({FnLocator("src/chain.rs", "next")}))
     assert classify_crash_retrigger(ev3, records, comp) is LayoutRetriggerCause.NONE
-    # No vanished tests / no suspects → never fires.
+    # No vanished tests / no evidence → never fires.
     assert classify_crash_retrigger(
         CrashEvidence(frozenset(), frozenset()), records, comp,
     ) is LayoutRetriggerCause.NONE
@@ -222,14 +236,14 @@ def test_crash_blame_decides_and_excludes_components_the_fault_never_touched():
     vtable_comp = frozenset({"ErrorVTable", "object_downcast", "vtable"})
     quoted_comp = frozenset({"Quoted"})
 
-    # Reachability alone cannot separate them — BOTH classify, which is what let
-    # record order pick the wrong one.
+    # Reachability alone cannot separate them — and so admits NEITHER. (It
+    # used to admit both, which is what let record order pick the wrong one.)
     reach_only = CrashEvidence(vanished=frozenset({"test_downcast"}),
                                suspect_fns=reachable)
     assert classify_crash_retrigger(
-        reach_only, records, vtable_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+        reach_only, records, vtable_comp) is LayoutRetriggerCause.NONE
     assert classify_crash_retrigger(
-        reach_only, records, quoted_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+        reach_only, records, quoted_comp) is LayoutRetriggerCause.NONE
 
     # With blame, only the component the fault touches remains a candidate, so
     # the caller has nothing to fall through TO once that one is capped.
@@ -244,11 +258,12 @@ def test_crash_blame_decides_and_excludes_components_the_fault_never_touched():
     # `downcast` is not a member of the vtable component, it uses its names.
     assert "downcast" not in vtable_comp
 
-    # No blame (localization skipped, or no native fault found) → unchanged.
+    # No blame (localization skipped, or no native fault found) → nothing is
+    # admitted; the fill loop works the crash with its evidence pack.
     assert classify_crash_retrigger(
         CrashEvidence(vanished=frozenset({"test_downcast"}),
                       suspect_fns=reachable, blamed_fns=frozenset()),
-        records, quoted_comp) is LayoutRetriggerCause.RUNTIME_CRASH
+        records, quoted_comp) is LayoutRetriggerCause.NONE
     # Blame with no vanished test is not crash evidence at all.
     assert classify_crash_retrigger(
         CrashEvidence(vanished=frozenset(), suspect_fns=frozenset(),
@@ -1054,7 +1069,11 @@ def test_legacy_signatures_unchanged_by_the_chain_field() -> None:
     assert crash_signature(ev) == legacy
 
 
-def test_chain_blame_grades_above_suspects_and_below_frames() -> None:
+def test_chain_blame_grades_nothing_and_a_frame_decides_alone() -> None:
+    """The chain is prompt evidence and a signature marker, never an aim:
+    a chain naming a fn the component DECLARES grades NONE, and the same
+    locator handed as an observed frame grades OWNS — the negative control
+    is the grade this replaced, which read the chain and returned OWNS."""
     from pipeline_core.domain.layout_retrigger import (
         BlameGrade,
         crash_candidate_grade,
@@ -1065,20 +1084,19 @@ def test_chain_blame_grades_above_suspects_and_below_frames() -> None:
                  body_text="unsafe { vtable install }"),
     ]
     comp = frozenset({"ErrorVTable", "construct_from_std", "vtable"})
-    # Above suspects: the chain names the producer the mega component OWNS,
-    # which reachability alone (empty here) never admits.
     chain_ev = CrashEvidence(
         vanished=frozenset({"test_drop"}), suspect_fns=frozenset(),
         chain_blamed=frozenset({FnLocator("src/error.rs",
                                           "construct_from_std")}))
-    assert crash_candidate_grade(chain_ev, records, comp) is BlameGrade.OWNS
-    # Below frames: an observed frame that IMPLICATES this component decides
-    # ALONE — the chain is not consulted even where it would grade higher.
-    # (This pin used to use a frame implicating NOTHING and assert NONE; that
-    # case is the 2026-08-15 defect and now falls through to the chain, which
-    # `test_a_frame_that_implicates_nothing_no_longer_silences_the_chain`
-    # pins. What "a frame decides alone" means is unchanged wherever the
-    # frame has anything to say about this component.)
+    assert crash_candidate_grade(chain_ev, records, comp) is BlameGrade.NONE
+    assert _grade_until_2026_09_06(chain_ev, records, comp) is BlameGrade.OWNS
+    framed = CrashEvidence(
+        vanished=frozenset({"test_drop"}), suspect_fns=frozenset(),
+        blamed_fns=frozenset({FnLocator("src/error.rs",
+                                        "construct_from_std")}))
+    assert crash_candidate_grade(framed, records, comp) is BlameGrade.OWNS
+    # An observed frame that IMPLICATES this component decides ALONE — the
+    # chain beside it is not consulted even where it would grade higher.
     records = records + [
         FnRecord(file="src/fmt.rs", fn_name="fmt",
                  container="impl Display for Indented",
@@ -1277,36 +1295,133 @@ def _aim_evidence(blamed: frozenset[FnLocator],
         suspect_fns=suspects, blamed_fns=blamed, chain_blamed=chain)
 
 
-def test_a_frame_that_implicates_nothing_no_longer_silences_the_chain() -> None:
-    """Variant A→B of the 2026-08-15 probe. Same evidence, same records, same
-    component: with the gen_tests residue in `blamed_fns` the aim graded NONE
-    and emptied the candidate list; consulting the chain grades OWNS and puts
-    the construct/vtable component back in the walk."""
+def _grade_until_2026_09_06(evidence, fn_records, component_names):
+    """`crash_candidate_grade` as it stood from 2026-08-15 to 2026-09-06,
+    verbatim: a frame decides wherever it implicates something, a frame
+    implicating nothing falls through to the chain, and with no frame the
+    chain and then the suspects grade. The negative control of every pin
+    below — this is the grade that admitted `Quoted` off
+    `src/context.rs::fmt` on run `1577437-c93d5c26` iter 3."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_blame_grade,
+    )
+    if not evidence.vanished:
+        return BlameGrade.NONE
+    if evidence.blamed_fns:
+        frame_grade = crash_blame_grade(
+            evidence.blamed_fns, fn_records, component_names)
+        if frame_grade is not BlameGrade.NONE or not evidence.chain_blamed:
+            return frame_grade
+    if evidence.chain_blamed:
+        return crash_blame_grade(
+            evidence.chain_blamed, fn_records, component_names)
+    if not evidence.suspect_fns:
+        return BlameGrade.NONE
+    return crash_blame_grade(
+        evidence.suspect_fns, fn_records, component_names)
+
+
+def test_a_frame_that_implicates_nothing_decides_none_and_the_chain_is_never_read(
+) -> None:
+    """The 2026-08-15 probe, re-pinned to the contract that replaced the
+    fall-through. Same evidence, same records, same component: the gen_tests
+    residue in `blamed_fns` grades NONE, and the chain beside it is NOT
+    consulted — the walk declines and says so (`retrigger_layout`'s
+    declined-walk line), which is the diagnosis that run needed. Consulting
+    the chain here is what the negative control does, and on this fixture it
+    grades the mega component OWNS: the fall-through was the same aim-by-
+    inference that fired `Quoted` on 2026-09-06."""
     from pipeline_core.domain.layout_retrigger import (
         BlameGrade,
         classify_crash_retrigger,
-        crash_blame_grade,
         crash_candidate_grade,
         top_blame_tier,
     )
     records = _aim_records()
     ev = _aim_evidence(_RESIDUE, frozenset({_CHAIN_CONSTRUCT}))
-    assert crash_candidate_grade(ev, records, _MEGA_NAMES) is BlameGrade.OWNS
-    assert top_blame_tier([BlameGrade.OWNS]) is BlameGrade.OWNS
+    assert crash_candidate_grade(ev, records, _MEGA_NAMES) is BlameGrade.NONE
+    assert crash_candidate_grade(
+        ev, records, frozenset({"Indented", "Quoted"})) is BlameGrade.NONE
+    assert top_blame_tier([BlameGrade.NONE]) is BlameGrade.NONE
     assert classify_crash_retrigger(
-        ev, records, _MEGA_NAMES) is LayoutRetriggerCause.RUNTIME_CRASH
+        ev, records, _MEGA_NAMES) is LayoutRetriggerCause.NONE
+    # NEGATIVE CONTROL — the fall-through grade admitted the mega component.
+    assert _grade_until_2026_09_06(ev, records, _MEGA_NAMES) is BlameGrade.OWNS
 
-    # NEGATIVE CONTROL — the pre-fix decision, which was exactly
-    # `return crash_blame_grade(evidence.blamed_fns, …)` the moment
-    # `blamed_fns` was non-empty. On this fixture that is NONE, which is the
-    # 308-minute silence in one line: no candidate, no tier, no log.
-    assert crash_blame_grade(
-        ev.blamed_fns, records, _MEGA_NAMES) is BlameGrade.NONE
-    # …and it was NONE for every component, not just this one, which is why
-    # `top_blame_tier` came back NONE and the walk fell to its silent exit.
-    assert crash_blame_grade(
-        ev.blamed_fns, records,
-        frozenset({"Indented", "Quoted"})) is BlameGrade.NONE
+
+def _recorded_chain_blame_1577437() -> dict:
+    """The `phase_c.crash.chain_blame` event of run `1577437-c93d5c26` iter 3
+    (2026-09-06T22:14:42Z), the cluster's 17 component records, and the
+    extractor's records for the chain-blamed and reverse-map-suspect fns —
+    snapshotted from `logs/events.jsonl`, `.skeleton/_layout_outcomes_stable
+    .json` and `skeleton-extractor --enumerate-fns` over the filled tree, not
+    typed. The event caps its list at 50 of the 63 chain keys."""
+    import json
+    from pathlib import Path
+    path = (Path(__file__).resolve().parent / "fixtures" / "crash"
+            / "chain_blame_1577437-c93d5c26_2026-09-06_iter3.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _recorded_records(fx: dict) -> list[FnRecord]:
+    return [FnRecord(file=r["file"], fn_name=r["fn_name"],
+                     container=r["container"], sig_text=r["sig_text"],
+                     has_unimplemented_body=r["has_unimplemented_body"])
+            for r in fx["fn_records"]]
+
+
+def test_the_recorded_chain_of_1577437_admits_no_component() -> None:
+    """The live instance, replayed on the live records: `blamed_fns` empty,
+    the recorded chain (50 of 63 names, as the event capped it), the 16
+    non-GATED components of cluster `stable`. No component grades OWNS — or
+    anything — so the walk declines instead of re-authoring `Quoted`.
+
+    Negative control, the grade that ran that night: 7 of the 16 grade OWNS
+    off the recorded 50 (the log's 8 came off the full 63), `Quoted` among
+    them by `src/context.rs::fmt` and `::write_str` — methods whose self
+    type is `Quoted` — and attempt 2 fired on it.
+
+    Second control, the reason `suspect_fns` is withheld too: the recorded
+    reverse-map suspects (34 fns) alone, under that same grade, admit the
+    same `Quoted` by the same two methods. Withholding the chain and leaving
+    reachability would have re-opened the identical fire."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_candidate_grade,
+        top_blame_tier,
+    )
+    fx = _recorded_chain_blame_1577437()
+    data = fx["event"]["data"]
+    assert data["provenance"] == "chain_derived"
+    assert data["chain_count"] == 63 and len(data["blamed"]) == 50
+    records = _recorded_records(fx)
+    chain = frozenset(FnLocator(*n.split("::", 1)) for n in data["blamed"])
+    suspects = frozenset(FnLocator(*n.split("::", 1)) for n in fx["suspects"])
+    assert len(suspects) == data["suspect_count"] == 34
+    components = [frozenset(c["item_names"]) for c in fx["components"]
+                  if c["outcome"] != "GATED"]
+    assert len(components) == 16
+    quoted = next(c for c in components if c == frozenset({"Quoted"}))
+
+    live = CrashEvidence(vanished=frozenset(data["tests"]),
+                         suspect_fns=suspects, chain_blamed=chain)
+    grades = [crash_candidate_grade(live, records, c) for c in components]
+    assert top_blame_tier(grades) is BlameGrade.NONE
+    assert set(grades) == {BlameGrade.NONE}
+
+    # NEGATIVE CONTROL — the grade of 2026-09-06, on the same input.
+    old = {"|".join(sorted(c)): _grade_until_2026_09_06(live, records, c)
+           for c in components}
+    owns = sorted(k for k, g in old.items() if g is BlameGrade.OWNS)
+    assert "Quoted" in owns and len(owns) == 7, owns
+    assert _grade_until_2026_09_06(live, records, quoted) is BlameGrade.OWNS
+    # …and reachability alone, chain withheld, admits `Quoted` the same way.
+    reach_only = CrashEvidence(vanished=frozenset(data["tests"]),
+                               suspect_fns=suspects)
+    assert _grade_until_2026_09_06(
+        reach_only, records, quoted) is BlameGrade.OWNS
+    assert crash_candidate_grade(reach_only, records, quoted) is BlameGrade.NONE
 
 
 def test_an_observed_frame_still_decides_alone_when_it_implicates_anything(
@@ -1334,12 +1449,14 @@ def test_an_observed_frame_still_decides_alone_when_it_implicates_anything(
         owning_frame, records, _MEGA_NAMES) is BlameGrade.OWNS
 
 
-def test_a_frame_grading_none_with_no_chain_still_decides_and_skips_suspects(
+def test_a_frame_grading_none_decides_and_suspects_never_do(
 ) -> None:
-    """The fall-through is scoped to "a chain inference exists". With no
-    chain, a frame that implicates nothing keeps deciding — NONE, suspects
-    unread — which is the rule `classify_crash_retrigger` has always stated:
-    a component the observed fault does not touch is not a candidate."""
+    """A frame that implicates nothing decides — NONE, suspects unread —
+    which is the rule `classify_crash_retrigger` has always stated: a
+    component the observed fault does not touch is not a candidate. And
+    with no blame of any kind the suspects still do not decide: reachability
+    is the inference the OWNS tier was built to stop aiming by (control:
+    the pre-2026-09-06 grade admitted the mega component off it)."""
     from pipeline_core.domain.layout_retrigger import (
         BlameGrade,
         crash_candidate_grade,
@@ -1347,10 +1464,11 @@ def test_a_frame_grading_none_with_no_chain_still_decides_and_skips_suspects(
     ev = _aim_evidence(_RESIDUE, frozenset(),
                        suspects=frozenset({_CHAIN_CONSTRUCT}))
     assert crash_candidate_grade(ev, _aim_records(), _MEGA_NAMES) is BlameGrade.NONE
-    # The same suspects DO decide once no blame of any kind exists.
     bare = _aim_evidence(frozenset(), frozenset(),
                          suspects=frozenset({_CHAIN_CONSTRUCT}))
-    assert crash_candidate_grade(bare, _aim_records(), _MEGA_NAMES) is BlameGrade.OWNS
+    assert crash_candidate_grade(bare, _aim_records(), _MEGA_NAMES) is BlameGrade.NONE
+    assert _grade_until_2026_09_06(
+        bare, _aim_records(), _MEGA_NAMES) is BlameGrade.OWNS
 
 
 def test_the_cause_c_signature_migrates_once_and_only_where_the_payload_moved(

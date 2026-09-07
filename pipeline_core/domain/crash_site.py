@@ -14,10 +14,13 @@ test list.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from pipeline_core.domain.generation import is_gen_tests_sibling_name
+from pipeline_core.domain.generation import (
+    is_gen_tests_sibling_name,
+    parse_gen_tests_integration_filename,
+)
 from pipeline_core.domain.models import FnLocator
 
 
@@ -63,8 +66,14 @@ def is_memory_fault_signal(signal: str) -> bool:
 # fns on the construction chain the crashed test exercises, synthesized only
 # when an origin-capable detector looked and placed nothing in-crate. The two
 # must never be confusable, because they warrant different force: frame blame
-# may convict and crash-block; chain blame only prompts, voids exhaustion and
-# re-aims the layout walk. Measured case for the second kind: the
+# may convict, crash-block and aim the layout walk; chain blame only prompts
+# and voids exhaustion. It does NOT re-aim the layout walk: the retrigger
+# grades a component OWNS against frame provenance only. Letting it read
+# chain blame is measured — iter 3 of run `1577437-c93d5c26` (2026-09-06)
+# graded 8 components OWNS off 50 chain-blamed fns (`src/fmt.rs::write_str`
+# alone put `Quoted` in the tier), fired attempt 2 on `Quoted`, re-authored a
+# type 0 of 373 fns reference, and reset the stall budget and the pass
+# cursor. Measured case for the second kind: the
 # deterministic `test_downcast` heap-use-after-free (run `635043-5f7c61f5`,
 # 2026-08-14, `logs/asan/asan-20260814T025642115609.txt` report at line 3877)
 # — access, freed-by and allocated-by stacks all resolve to std/test frames
@@ -258,27 +267,53 @@ _POINTER_SENTINELS = ("dangling()", "::null()", "::null_mut()")
 # four are correct.
 _SENTINEL_EXCHANGE_CALLS = ("replace(", "swap(", "ptr::write")
 
-# Conversions that take Error by value and return Box<dyn Error + Send + Sync>.
-# A use-after-free whose READ stack is drop glue for that Box wrapping ErrorImpl
-# is this family's defect: the body copies the pointer, hands it to a Box, and
-# lets self drop. Named from the recorded READ stack of run `1618155-b60a8c4c`
-# (2026-08-30), fixture `tests/fixtures/crash/uaf_into_boxed_dyn_error_1618155_2026-08-30.txt`.
+# The by-value transfer of `Error.inner`: every fn that takes `self` (or the
+# owning pointer) by value, copies the inner pointer out, and must therefore
+# neutralise the original owner before returning. A use-after-free whose free
+# stack is `Error::drop` called from a test line that invoked one of these is
+# this family's defect: the body copied the pointer, handed it on, and let
+# self drop. The four Box conversions were named from the recorded READ stack
+# of run `1618155-b60a8c4c` (2026-08-30), fixture
+# `tests/fixtures/crash/uaf_into_boxed_dyn_error_1618155_2026-08-30.txt`.
+# `downcast` joined from run `1577437-c93d5c26` (2026-09-06, archives
+# `logs/asan/asan-20260906T204443251879.txt` and `…T221545829298.txt`): it
+# takes `self` by value, copies inner, and lets Drop run on the failure path
+# and on the success path after `object_drop_rest` — the same ownership
+# shape with a different return type. The reply of that run's iter-1
+# file-first fill wrote `let own = self.inner;` with no forget in `downcast`
+# while forgetting self correctly in `into_boxed_dyn_error`, which had the
+# MUST. `downcast_ref`, `is` and `drop` do not belong: they take `&self`, or
+# they are the destructor the skip exists to stop aiming at.
 CONVERSION_FAMILY: frozenset[str] = frozenset({
     "into_boxed_dyn_error",
     "object_boxed",
     "reallocate_into_boxed_dyn_error_without_backtrace",
     "object_reallocate_boxed",
+    "downcast",
 })
 _BOX_DYN_ERROR_MARKS = (
     "Box<dyn core::error::Error",
     "Box<dyn std::error::Error",
 )
-_ERROR_IMPL_MARK = "ErrorImpl<"
+# Type name in the demangled symbol, not the generic-open form. Live ASAN
+# on run `1212998-d61fbd2c` (2026-09-06) printed
+# `<anyhow::error::ErrorImpl>::error` with no `<E>` list; `ErrorImpl<` missed
+# it and recovery stayed off. `ErrorImpl<E>` still contains this mark.
+_ERROR_IMPL_MARK = "ErrorImpl"
+# A call of a family member: `.name(`, `::name(`, or the turbofish form
+# `.name::<T>(` — `err.downcast::<HighLevel>().unwrap()` on
+# `tests/test_context.rs:124` and `.downcast::<String>()` on
+# `tests/test_downcast.rs:21` (run `1577437-c93d5c26`). A `(`-only rule
+# matched neither, so a generic conversion was never a unique name. Nested
+# generics (`::<Vec<u8>>`) are accepted two levels deep. `downcast_ref::<T>(`
+# does not match: after `downcast` the next char must open the turbofish or
+# the call, never `_`.
+_TURBOFISH = r"(?:::<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?"
 _CONVERSION_CALL_RE = re.compile(
     r"(?:\.|::)\s*("
     + "|".join(sorted((re.escape(n) for n in CONVERSION_FAMILY),
                       key=len, reverse=True))
-    + r")\s*\("
+    + r")\s*" + _TURBOFISH + r"\s*\("
 )
 # The instruction a conversion-crash fill was missing. Run `1790133-2181e509`'s
 # error.rs file-first prompt (sha 667e2060fd67e07451e68f24bb4790186067bd541caa7ac22ffbe432dea50c15)
@@ -286,10 +321,16 @@ _CONVERSION_CALL_RE = re.compile(
 # still instructed `drop`. The live builder is `build_file_fill_prompt`; the
 # slot that would have converted that fill is `_plan_line`. Without this
 # sentence a correctly aimed conversion fill re-emits `let own = self.inner`.
+# Worded for the COPY, not for the Box: every family member copies inner out
+# of a by-value self, and only some hand it to a Box. Run `1577437-c93d5c26`'s
+# iter-1 reply forgot self in `into_boxed_dyn_error` (which carried the
+# Box-worded sentence) and wrote `let own = self.inner;` with no forget in
+# `downcast`, which returns `Result<T, Self>` and never sees a Box.
 OWNERSHIP_TRANSFER_MUST = (
-    "MUST: after the pointer is handed to a Box, self must not drop "
-    "(ManuallyDrop, or ptr::read plus mem::forget). A `let own = self.inner` "
-    "copy leaves two owners and the destructor frees what the Box holds."
+    "MUST: after inner is copied out of self, self must not drop "
+    "(ManuallyDrop, or ptr::read plus mem::forget, or replace inner with a "
+    "sentinel before returning). A `let own = self.inner` copy leaves two "
+    "owners and the destructor frees what the copy still points at."
 )
 
 
@@ -311,7 +352,7 @@ def _has_boxed_dyn_error(symbols: str) -> bool:
     `logs/asan/asan-20260830T083211573812.txt`, convert-test READ stack
     `drop_glue::<Box<dyn core::error::Error>>` wrapping `ErrorImpl`).
     `Box<dyn FnOnce + Send>` in thread start does not match these marks, so
-    an Arc double-drop still returns empty via the ErrorImpl gate.
+    an Arc double-drop still returns empty: that crash has neither mark.
     """
     return any(m in symbols for m in _BOX_DYN_ERROR_MARKS)
 
@@ -319,21 +360,52 @@ def _has_boxed_dyn_error(symbols: str) -> bool:
 def conversion_family_from_access(
     raw_frames: list[dict[str, object]],
 ) -> frozenset[str]:
-    """The conversion family iff the ACCESS (READ) stack's type chain is
-    `Box<dyn Error>` wrapping `ErrorImpl`.
+    """The conversion family iff the ACCESS (READ) stack names `ErrorImpl`
+    or `Box<dyn Error>`.
 
-    That type chain is the suspect filter so a mis-parse cannot promote an
-    unrelated fn. An Arc double-drop (`test_downcast::test_drop`, run
-    `1064759-0f23fb68`) has neither mark and returns empty — recovery stays
-    off, last-resort blame stays `drop`, and the walk that injects a
-    hardcoded drop site is untouched.
+    Either-not-both: the two live UAFs of run `1212998-d61fbd2c` (2026-09-06)
+    each carry one of the two types. Report 1's READ is
+    `<anyhow::error::ErrorImpl>::error` with no Box; report 2's READ is
+    `drop_glue::<Box<dyn Error + Sync + Send>>` with no ErrorImpl. Requiring
+    both left family empty, recovery off, and blame on `drop` four sweeps.
+    An Arc double-drop (`test_downcast::test_drop`, run `1064759-0f23fb68`)
+    has neither mark and still returns empty — recovery stays off,
+    last-resort blame stays `drop`, and the walk that injects a hardcoded
+    drop site is untouched. The source-line unique-name gate still has to
+    fire; a family here only licenses looking.
     """
     symbols = "\n".join(str(r.get("func") or "") for r in raw_frames)
-    if _ERROR_IMPL_MARK not in symbols:
-        return frozenset()
-    if not _has_boxed_dyn_error(symbols):
-        return frozenset()
-    return CONVERSION_FAMILY
+    if _ERROR_IMPL_MARK in symbols or _has_boxed_dyn_error(symbols):
+        return CONVERSION_FAMILY
+    return frozenset()
+
+
+def conversion_family_from_origin(
+    origin: list[dict[str, object]],
+) -> frozenset[str]:
+    """The conversion family iff the ORIGIN (free) stack has the shape the
+    destructor skip already recognises: its first in-crate frame is a
+    destructor and the next non-toolchain caller is a test line or an
+    in-crate non-family wrapper — the walk :func:`first_test_file_after_destructor`
+    does, reused here so the two licences cannot drift.
+
+    Why the READ marks alone are not enough: the surviving UAF of run
+    `1577437-c93d5c26` (iter 4, `logs/asan/asan-20260906T221545829298.txt`)
+    reads through `memcmp → <str as PartialEq>::eq → test_downcast.rs:19`
+    — neither `ErrorImpl` nor `Box<dyn Error>` on the READ stack — while
+    its free stack is `free → <anyhow::Error as Drop>::drop src/error.rs:630
+    → tests/test_downcast.rs:21`, and line 21 is
+    `bail_fmt().unwrap_err().downcast::<String>().unwrap()`. With the
+    family licensed by the READ marks only, recovery never read line 21 and
+    blame fell to `drop`. Negative control: the Arc double-drop of
+    `test_downcast::test_drop` (run `1064759-0f23fb68`) frees in the test's
+    own `Arc::drop` — no in-crate destructor in its origin — so this returns
+    empty and blame stays `drop`/nobody. The unique-name gate on the caller
+    line is unchanged and is the real filter.
+    """
+    if first_test_file_after_destructor(origin) is not None:
+        return CONVERSION_FAMILY
+    return frozenset()
 
 
 def crate_fn_named_on_source_line(
@@ -345,11 +417,121 @@ def crate_fn_named_on_source_line(
     Unique is the gate: a line that names two conversions is not a
     resolution, and a line that names none (`downcast_ref`, `drop`) is not
     one either. The recorded line is `let boxed = err.into_boxed_dyn_error();`.
+    A turbofish call (`err.downcast::<HighLevel>().unwrap()`) is a call.
     """
-    hits = [m.group(1) for m in _CONVERSION_CALL_RE.finditer(source_line)
-            if m.group(1) in family]
-    uniq = list(dict.fromkeys(hits))
-    return uniq[0] if len(uniq) == 1 else None
+    return crate_fn_named_in_source_window((source_line,), family)
+
+
+def crate_fn_named_in_source_window(
+    window: Sequence[str],
+    family: frozenset[str],
+) -> str | None:
+    """The unique family name called anywhere in ``window``, or None.
+
+    The bounded-window form of :func:`crate_fn_named_on_source_line`, for
+    the ACCESS-side recovery: the faulting line is where the returned value
+    is READ, and the conversion that produced it sits on an earlier line of
+    the same test fn. Live (run `1577437-c93d5c26`, `tests/error_gen_3.rs`):
+    the SEGV's access test frame is line 33, `assert_eq!(boxed.to_string(),
+    "io");`, which names nothing; line 32 is `let boxed =
+    err.reallocate_into_boxed_dyn_error_without_backtrace();`. The gate is
+    the same: exactly one family name across the window, else None — a fn
+    that calls two conversions is not a resolution.
+    """
+    hit = crate_fn_named_in_source_window_at(window, family)
+    return hit[0] if hit is not None else None
+
+
+def crate_fn_named_in_source_window_at(
+    window: Sequence[str],
+    family: frozenset[str],
+) -> tuple[str, int] | None:
+    """:func:`crate_fn_named_in_source_window` plus the 0-based index of the
+    window line that names it — the binding line, which is what the
+    recovered frame is ``named_by`` (`error_gen_3.rs:32`, not the access
+    at `:33`)."""
+    hits: list[tuple[str, int]] = [
+        (m.group(1), i)
+        for i, line in enumerate(window)
+        for m in _CONVERSION_CALL_RE.finditer(line)
+        if m.group(1) in family]
+    names = list(dict.fromkeys(n for n, _ in hits))
+    if len(names) != 1:
+        return None
+    return hits[0]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceWindow:
+    """A bounded slice of a test file, read by the localizer for the
+    access-side recovery: ``lines[i]`` is line ``first_line + i`` of
+    ``file_rel``. Carries its own coordinates so the recovered frame can
+    name the exact line that called the conversion."""
+
+    file_rel: str
+    first_line: int
+    lines: tuple[str, ...]
+
+    def line_no(self, index: int) -> int:
+        return self.first_line + index
+
+
+# The opening line of a Rust fn, for bounding the access-side window to the
+# enclosing test fn: `fn name(`, `pub fn`, `async fn`, `unsafe fn`, ...
+_FN_OPEN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+|extern\s+\"[^\"]*\"\s+)*fn\s+[A-Za-z_][A-Za-z0-9_]*")
+
+
+def enclosing_fn_window(
+    lines: Sequence[str],
+    line_no: int,
+    *,
+    max_lines: int = 40,
+) -> tuple[int, list[str]]:
+    """``(first_line_no, text_lines)`` of the window that ends at 1-based
+    ``line_no`` and starts at the enclosing fn's opening `fn ` line — or,
+    when no such line sits within ``max_lines`` above, at ``max_lines``
+    above. Empty when ``line_no`` is outside ``lines``.
+
+    Pure: the localizer reads the file; this decides how much of it the
+    unique-name gate may see. Bounded because an unbounded upward scan of a
+    test file would reach other tests' conversions and the gate would then
+    refuse on a count that has nothing to do with this crash.
+    """
+    if not (1 <= line_no <= len(lines)):
+        return line_no, []
+    start = max(1, line_no - max_lines)
+    for i in range(line_no, start - 1, -1):
+        if _FN_OPEN_RE.match(lines[i - 1]):
+            start = i
+            break
+    return start, list(lines[start - 1:line_no])
+
+
+def first_test_file_on_access(
+    access: list[dict[str, object]],
+) -> tuple[str, int] | None:
+    """The innermost ACCESS frame that is a test file with a line number:
+    ``(file_rel, line)``, or None.
+
+    The access-side sibling of :func:`first_test_file_after_destructor`,
+    for the report whose ORIGIN stack is empty — a SEGV carries no free or
+    allocation stack, so origin recovery has nothing to walk, yet the READ
+    stack still ends in the test line that dereferenced the conversion's
+    result (`error_gen_3.rs:33` under `Box<dyn Error>::to_string`, run
+    `1577437-c93d5c26`). A test file is one under `tests/` or one of the
+    pipeline's own `src/<stem>.gen_tests_<N>.rs` siblings.
+    """
+    for rec in access:
+        file_ = str(rec.get("file") or "")
+        raw_line = rec.get("line")
+        if not file_ or _raw_is_toolchain(file_):
+            continue
+        if not (isinstance(raw_line, int) and raw_line >= 1):
+            continue
+        if (file_.startswith("tests/")
+                or is_gen_tests_sibling_name(file_.rsplit("/", 1)[-1])):
+            return (file_, raw_line)
+    return None
 
 
 def first_test_file_after_destructor(
@@ -406,22 +588,50 @@ def first_test_file_after_destructor(
 def recover_owner_from_caller_source(
     origin_raw: list[dict[str, object]],
     access_raw: list[dict[str, object]],
-    source_line: str,
+    source_line: str | None,
     *,
     named_by: tuple[str, int] | None = None,
+    source_window: SourceWindow | None = None,
 ) -> CrashFrame | None:
-    """Name the conversion the caller line called, gated by the READ stack.
+    """Name the conversion the caller source called, gated by the family.
 
-    The destructor's file supplies :class:`CrashFrame`.file_rel so this does
-    not need an extractor map. ``line`` is 0: the conversion was inlined and
-    has no crate frame of its own. ``named_by`` is the (file, line) that
-    justified the recovery — render prints that instead of fabricating
-    ``:0``.
+    The family is licensed by EITHER stack — the READ marks
+    (:func:`conversion_family_from_access`) or the origin's
+    destructor-then-caller shape (:func:`conversion_family_from_origin`).
+    The unique-name gate runs over ``source_line`` (the origin's caller
+    line, located by ``named_by``) when given, else over ``source_window``
+    (the access-side window of the enclosing test fn, whose own
+    coordinates supply ``named_by`` — the binding line, not the faulting
+    access). Empty family or no unique name: None, and blame is unchanged.
+
+    ``file_rel`` of the recovered frame: the origin's in-crate destructor
+    file when the origin has one (the shape every recorded UAF has — the
+    conversion and `Error::drop` live in one file); otherwise the crate
+    file the crashing test file answers for, :func:`crate_file_for_test_file`
+    on the naming file — a SEGV has no origin stack at all, and its
+    access stack holds no crate frame either (`error_gen_3.rs:33` under
+    std's `to_string`, run `1577437-c93d5c26`), so the pipeline's own
+    `tests/<stem>_gen_<N>.rs` naming is the only anchor the report leaves.
+    An innermost access-stack `src/` frame was considered and rejected as
+    the fallback: it is where the READ ran (`src/fmt.rs::debug` on a Debug
+    path), not where the conversion is declared. When neither anchors,
+    None. ``line`` is 0: the conversion was inlined and has no crate frame
+    of its own; ``named_by`` is the (file, line) that justified the
+    recovery, and render prints that instead of fabricating ``:0``.
     """
-    family = conversion_family_from_access(access_raw)
+    family = (conversion_family_from_access(access_raw)
+              | conversion_family_from_origin(origin_raw))
     if not family:
         return None
-    name = crate_fn_named_on_source_line(source_line, family)
+    if source_line:
+        name = crate_fn_named_on_source_line(source_line, family)
+    elif source_window is not None and source_window.lines:
+        hit = crate_fn_named_in_source_window_at(source_window.lines, family)
+        name = hit[0] if hit is not None else None
+        if hit is not None:
+            named_by = (source_window.file_rel, source_window.line_no(hit[1]))
+    else:
+        return None
     if name is None:
         return None
     dest_file = ""
@@ -431,6 +641,8 @@ def recover_owner_from_caller_source(
         if file_.startswith("src/") and _raw_is_destructor(func):
             dest_file = file_
             break
+    if not dest_file and named_by is not None:
+        dest_file = crate_file_for_test_file(named_by[0]) or ""
     if not dest_file:
         return None
     return CrashFrame(file_rel=dest_file, line=0, fn_name=name, symbol=name,
@@ -814,7 +1026,12 @@ def chain_derived_site(
     None, so `blamed_locators()` — the set that convicts, crash-blocks and
     immunizes other units — never contains a chain-derived blame: an
     inference from attribution must rank below an observed frame and must
-    not acquire a frame's authority by riding its type."""
+    not acquire a frame's authority by riding its type. What chain blame
+    DOES: it prompts (the chain fns get the rendered evidence) and voids
+    exhaustion. What it does not do: re-aim the layout walk — the
+    retrigger's OWNS grade reads frame provenance only (see the
+    `PROVENANCE_*` note above for the `Quoted` fire that reading chain
+    blame produced)."""
     return CrashSite(
         binary_label=binary_label,
         test_name=test_name,
@@ -891,6 +1108,7 @@ def site_from_frames(
     origin_capable: bool = False,
     source_line: str | None = None,
     source_loc: tuple[str, int] | None = None,
+    source_window: SourceWindow | None = None,
 ) -> CrashSite:
     """Build a :class:`CrashSite` from debugger frame records
     (``{"file": …, "line": …, "func": …}``), keeping only frames whose file
@@ -901,20 +1119,23 @@ def site_from_frames(
 
     ``source_line`` is the caller line the free stack's next non-destructor
     frame points at (a test file, or an in-crate wrapper that is not
-    itself a conversion). Recovery prepends a synthetic origin frame for
-    the conversion that line uniquely names, gated by the ACCESS stack's
-    type chain. ``source_loc`` is that (file, line) so render can name it
-    instead of fabricating ``:0``. Omitted (the default) leaves blame
-    unchanged — destructor last resort when nothing else survives. That
-    default is what keeps the recorded walk
+    itself a conversion); ``source_window`` is the access-side alternative
+    — the enclosing test fn's lines up to the faulting access, for a report
+    whose origin stack is empty. Recovery prepends a synthetic origin frame
+    for the conversion the text uniquely names, gated by the family licence
+    of either stack. ``source_loc`` is the (file, line) that justified it
+    so render can name it instead of fabricating ``:0``. Both omitted (the
+    default) leaves blame unchanged — destructor last resort when nothing
+    else survives. That default is what keeps the recorded walk
     ``tests/walks/test_walk_mech_budget_lockout.py`` green: it injects a
     hardcoded drop site and never passes a source line.
     """
     origin_raw = origin_raw_frames or []
     origin = _crate_frames(origin_raw, crate_file_prefix, max_frames)
-    if source_line:
+    if source_line or source_window is not None:
         recovered = recover_owner_from_caller_source(
-            origin_raw, raw_frames, source_line, named_by=source_loc)
+            origin_raw, raw_frames, source_line, named_by=source_loc,
+            source_window=source_window)
         if recovered is not None:
             origin = (recovered,) + tuple(
                 f for f in origin if f.fn_name != recovered.fn_name)
@@ -1352,9 +1573,52 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     Chain-derived sites contribute NOTHING here, by construction (their
     `blamed_locator` is None): this set carries a frame's authority — it
     convicts, crash-blocks and immunizes other units — and a blame inferred
-    from test attribution must not acquire that authority."""
-    return frozenset(
-        s.blamed_locator for s in sites if s.blamed_locator is not None)
+    from test attribution must not acquire that authority.
+
+    A frame-derived blame on a :data:`CONVERSION_FAMILY` member convicts
+    the whole family at that file. The family is one ownership contract
+    (copy inner out of a by-value self, then neutralise self), and the
+    recorded fills show the model honouring it only where the sentence was
+    attached: run `1577437-c93d5c26`'s iter-1 reply forgot self in the
+    blamed `into_boxed_dyn_error` and copied inner without a forget in
+    `downcast` and in `reallocate_into_boxed_dyn_error_without_backtrace`,
+    which were AIMED callees or absent — and the next three sweeps aborted
+    in those siblings' binaries. Convicting the family puts every member
+    on the file-first CRASHED clause with the MUST. Locators the extractor
+    does not declare drop out of the frontier downstream, so a crate
+    without those names is a no-op. Deliberately NOT applied to
+    `crash_evidence_by_locator` (that set is every frame; widening it
+    re-opens the outside-the-unit trap) and not to chain-derived sites."""
+    out: set[FnLocator] = set()
+    for s in sites:
+        loc = s.blamed_locator
+        if loc is None:
+            continue
+        out.add(loc)
+        if s.provenance == PROVENANCE_FRAME and loc.fn_name in CONVERSION_FAMILY:
+            out |= {FnLocator(loc.file, n) for n in CONVERSION_FAMILY}
+    return frozenset(out)
+
+
+def family_members_beside_a_crashed_conversion(
+    crashed: Collection[str],
+    candidates: Collection[str],
+) -> frozenset[str]:
+    """The ``candidates`` that belong to :data:`CONVERSION_FAMILY` when
+    ``crashed`` already holds a family member; empty otherwise.
+
+    The prompt slot's half of the family contract. `_plan_line` grades a
+    unit CRASHED (rewrite, with the ownership MUST) or AIMED (a callee of
+    the faulting frame: re-derive the erased layout). Run
+    `1577437-c93d5c26`'s iter-1 `src/error.rs` file-first prompt (sha
+    `9cc1333b…`) listed `into_boxed_dyn_error` CRASHED with the MUST and
+    `object_boxed` AIMED with the layout sentence; the reply forgot self in
+    the first and moved the payload into a fresh `Box::new` in the second.
+    A family member beside a crashed family member is the same defect and
+    gets the same instruction."""
+    if not CONVERSION_FAMILY.intersection(crashed):
+        return frozenset()
+    return frozenset(c for c in candidates if c in CONVERSION_FAMILY)
 
 
 def blame_outside_unit(
@@ -1395,12 +1659,21 @@ def crate_file_for_test_file(test_file: str) -> str | None:
 
     `src/error.gen_tests_4.rs` -> `src/error.rs` (the pipeline's own generated
     sibling, which is where nearly every unit test lives); `src/error.rs` ->
-    itself (an in-source `#[cfg(test)] mod`); `tests/test_downcast.rs` -> None,
-    because an integration test answers for the crate's public surface and
-    anchors no single file."""
-    if not test_file.startswith("src/") or not test_file.endswith(".rs"):
+    itself (an in-source `#[cfg(test)] mod`); `tests/error_gen_3.rs` ->
+    `src/error.rs` (the pipeline's own generated INTEGRATION test, named
+    `tests/<stem>_gen_<N>.rs` by the writer — `parse_gen_tests_integration_filename`
+    is that convention read back; filename occupancy only, an authored
+    `tests/proc_gen_2.rs` anchors the same way); `tests/test_downcast.rs` ->
+    None, because an upstream integration test answers for the crate's
+    public surface and anchors no single file."""
+    if not test_file.endswith(".rs"):
         return None
     head, _, base = test_file.rpartition("/")
+    if test_file.startswith("tests/"):
+        parsed = parse_gen_tests_integration_filename(base)
+        return f"src/{parsed[0]}.rs" if parsed is not None else None
+    if not test_file.startswith("src/"):
+        return None
     if is_gen_tests_sibling_name(base):
         stem = base.split(".gen_tests_", 1)[0]
         return f"{head}/{stem}.rs" if head else f"{stem}.rs"
@@ -1465,54 +1738,112 @@ def _parse_asan_frame_line(line: str) -> dict[str, object] | None:
     return {"func": symbol, "file": file_, "line": line_no}
 
 
-def parse_asan_report(
-    output: str,
-) -> tuple[str, list[dict[str, object]], list[dict[str, object]]] | None:
-    """Extract ``(error_kind, access_frames, origin_frames)`` from the FIRST
-    AddressSanitizer error report in ``output``.
+@dataclass(frozen=True, slots=True)
+class AsanReport:
+    """One ``ERROR: AddressSanitizer:`` … ``SUMMARY:`` report of a sanitized
+    sweep, tagged with the cargo target it came from.
+
+    ``label`` is the nearest preceding ``Running <label> (<path>)`` line's
+    label — the same string :func:`test_results.parse_binary_results` gives
+    that binary, so a report joins its crashed binary (and that binary's
+    dangling test) by equality. ``text`` is the report's own lines, header
+    through ``SUMMARY:``, for the excerpt/origin-stack renderers, which
+    read "the first report" of whatever text they are handed.
+    ``origin_stack_lines`` counts the ``#N`` lines printed under the origin
+    introducer whether or not they symbolized: an origin of zero parsed
+    frames over zero lines is a report that carries NO origin stack (a
+    SEGV), and over N lines it is an origin whose frames have no file —
+    two different starvations the localizer's verdict line must not
+    conflate."""
+
+    label: str
+    kind: str
+    access: list[dict[str, object]]
+    origin: list[dict[str, object]]
+    text: str
+    origin_stack_lines: int = 0
+
+
+def parse_asan_reports(output: str) -> list[AsanReport]:
+    """Every AddressSanitizer error report in ``output``, in order, each
+    tagged with the test binary whose section it appeared in.
+
+    An ASAN sweep of `cargo test` is ONE PROCESS PER TEST BINARY.
+    `halt_on_error=1` aborts THAT process on its first error; cargo then
+    starts the next binary. The combined output therefore holds one
+    AddressSanitizer report per crashed binary, and LeakSanitizer reports
+    from the binaries that completed. Measured on run `1577437-c93d5c26`
+    (2026-09-06): `logs/asan/asan-20260906T204443251879.txt` (iter 2) holds
+    3 AddressSanitizer reports (`tests/error_gen_3.rs` SEGV,
+    `tests/test_context.rs` and `tests/test_downcast.rs` heap-use-after-free)
+    and 21 LeakSanitizer reports; `…T221545829298.txt` (iter 4) holds 2.
+    :func:`parse_asan_report` returned the SEGV alone — an empty origin —
+    and the two reports with crate frames in their free stacks were never
+    read, so the localizer blamed NOBODY and chain-derived synthesis armed
+    on an origin that report 2 had already placed in-crate.
 
     Frame lines are ``#N 0xADDR in SYMBOL FILE:LINE[:COL]``. The faulting
     ACCESS stack follows the ``ERROR:`` header; the ORIGIN of the invalid
     memory follows a ``freed by …here:`` / ``allocated by …here:`` /
-    ``is located in stack of…`` introducer.
-
-    Stacks are identified by their INTRODUCING LINE, never by position, and
-    collection stops at the report's ``SUMMARY:``. Taking ``stacks[0]`` and
-    ``stacks[1]`` blindly was wrong on real output for two reasons, both seen
-    live on `anyhow/nightly`:
-
-    * A sanitized run emits MORE than one report — LeakSanitizer runs at exit
-      and prints an allocation stack per leak regardless of ``halt_on_error``.
-      The positional read walked straight out of the use-after-free report and
-      into a leak's `malloc` stack, then labelled it "origin".
-    * It produced `access=[]` with `origin=[src/error.rs::downcast]` — the
-      reverse of what 93.2 inferred from the old event (which concatenated the
-      two into one `frames` list, so nobody could tell which was empty), and
-      the reason `downcast` has been blamed on every sweep since 07-30.
-
-    Returns None when no ASAN error is present.
+    ``is located in stack of…`` introducer. Stacks are identified by their
+    INTRODUCING LINE, never by position, and a report ends at its
+    ``SUMMARY:`` (or at the next ``ERROR:`` header). Taking ``stacks[0]``
+    and ``stacks[1]`` blindly was wrong on real output: LeakSanitizer runs
+    at exit and prints an allocation stack per leak regardless of
+    ``halt_on_error``, and the positional read walked out of the
+    use-after-free report and into a leak's `malloc` stack, then labelled
+    it "origin" — the reason `downcast` was blamed on every sweep from
+    07-30 (`anyhow/nightly`). ``ERROR: LeakSanitizer:`` headers open no
+    report here.
     """
-    kind: str | None = None
-    access: list[dict[str, object]] = []
-    origin: list[dict[str, object]] = []
-    # Which bucket the stack currently being read belongs to. None = discard
-    # (a stack under an introducer this parser does not recognise, or one
-    # belonging to a later report).
-    target: list[dict[str, object]] | None = None
-    in_stack = False
+    reports: list[AsanReport] = []
+    label = "?"
+    chunk: list[str] | None = None
     for raw in output.splitlines():
         line = raw.strip()
-        if kind is None:
-            if "ERROR: AddressSanitizer:" in line:
-                tail = line.split("ERROR: AddressSanitizer:", 1)[1].strip()
-                kind = "AddressSanitizer: " + (tail.split(" on ")[0].split(" at ")[0]
-                                               or "error")
-                target = access          # the header introduces the access stack
+        if line.startswith("Running "):
+            desc = line[len("Running "):].partition(" (")[0].strip()
+            label = desc or label
+            if chunk is not None:
+                reports.append(_parse_asan_chunk(chunk))
+                chunk = None
             continue
+        if "ERROR: AddressSanitizer:" in line:
+            if chunk is not None:
+                reports.append(_parse_asan_chunk(chunk))
+            chunk = [label, line]
+            continue
+        if chunk is None:
+            continue
+        chunk.append(line)
         if line.startswith("SUMMARY:"):
-            break                        # end of THIS report; leaks follow
+            reports.append(_parse_asan_chunk(chunk))
+            chunk = None
+    if chunk is not None:
+        reports.append(_parse_asan_chunk(chunk))
+    return reports
+
+
+def _parse_asan_chunk(chunk: list[str]) -> AsanReport:
+    """``chunk`` is ``[label, header, ...lines through SUMMARY:]``."""
+    label, header, *rest = chunk
+    tail = header.split("ERROR: AddressSanitizer:", 1)[1].strip()
+    kind = "AddressSanitizer: " + (tail.split(" on ")[0].split(" at ")[0]
+                                   or "error")
+    access: list[dict[str, object]] = []
+    origin: list[dict[str, object]] = []
+    origin_lines = 0
+    # Which bucket the stack currently being read belongs to. None = discard
+    # (a stack under an introducer this parser does not recognise).
+    target: list[dict[str, object]] | None = access
+    in_stack = False
+    for line in rest:
+        if line.startswith("SUMMARY:"):
+            break
         if line.startswith("#"):
             in_stack = True
+            if target is origin:
+                origin_lines += 1
             rec = _parse_asan_frame_line(line)
             if rec is not None and target is not None:
                 target.append(rec)
@@ -1526,10 +1857,28 @@ def parse_asan_report(
             # The origin is whichever of these appears first: for a
             # use-after-free that is `freed by`, for a use-after-return
             # `is located in stack of`, for a leak `allocated by`.
-            target = origin if not origin else None
-    if kind is None:
+            target = origin if not origin_lines else None
+    return AsanReport(label=label, kind=kind, access=access, origin=origin,
+                      text="\n".join([header, *rest]),
+                      origin_stack_lines=origin_lines)
+
+
+def parse_asan_report(
+    output: str,
+) -> tuple[str, list[dict[str, object]], list[dict[str, object]]] | None:
+    """``(error_kind, access_frames, origin_frames)`` of the FIRST
+    AddressSanitizer report in ``output`` — :func:`parse_asan_reports`'s
+    first element, kept as the single-report reader for callers that hold
+    one report's text (the checkpointed fixtures under
+    `tests/fixtures/crash/`). A multi-binary sweep is read with
+    :func:`parse_asan_reports`; taking the first report of one was the
+    defect that function's docstring records. Returns None when no
+    AddressSanitizer error is present."""
+    reports = parse_asan_reports(output)
+    if not reports:
         return None
-    return kind, access, origin
+    first = reports[0]
+    return first.kind, first.access, first.origin
 
 
 def relativize_frame_files(

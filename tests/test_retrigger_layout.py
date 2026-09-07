@@ -337,22 +337,34 @@ def test_reauthor_failure_is_fired_but_not_succeeded():
 
 def test_crash_evidence_fires_without_compile_text_and_adds_guidance():
     from pipeline_core.domain.layout_retrigger import CrashEvidence
-    f = _Fakes()
+    f = _Fakes(fn_records=_stub_fmt_records())
     # Output has NO layout-attributable compile error — only crash evidence
-    # (a vanished test whose reverse-map target references ErrorImpl).
+    # (a vanished test and an observed frame, `fmt`, a still-stubbed body
+    # that references ErrorImpl).
     ev = CrashEvidence(
         vanished=frozenset({"test_boxed_str"}),
-        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}),
+        blamed_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                            "test result: FAILED. 14 passed; 55 failed",
                            f.deps(), crash_evidence=ev)
     assert res.fired and res.succeeded and res.cause == "RUNTIME_CRASH"
     assert any("RUNTIME-CRASH GUIDANCE" in p for p in f.prompts)
     # Cap still applies to the crash channel.
-    f2 = _Fakes(attempts={"ErrorImpl": 2})
+    f2 = _Fakes(attempts={"ErrorImpl": 2}, fn_records=_stub_fmt_records())
     res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f2.deps(), crash_evidence=ev)
     assert not res2.fired
+    # Reachability alone — the same `fmt` as a suspect and no frame — is an
+    # inference and opens no re-author at all.
+    f3 = _Fakes(fn_records=_stub_fmt_records())
+    res3 = retrigger_layout(
+        Path("/x"), "anyhow", "stable", _CRATE, "", f3.deps(),
+        crash_evidence=CrashEvidence(
+            vanished=frozenset({"test_boxed_str"}),
+            suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")})))
+    assert not res3.fired and not f3.committed and f3.prompts == []
+    assert res3.reason == "no component matched the evidence"
 
 
 def test_crash_evidence_confounded_by_component_stubs_defers():
@@ -368,7 +380,8 @@ def test_crash_evidence_confounded_by_component_stubs_defers():
         frozenset({"ErrorImpl", "fmt"}), LayoutOutcome.FROZEN)]
     ev = CrashEvidence(
         vanished=frozenset({"test_boxed_str"}),
-        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}),
+        blamed_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                            "", f.deps(), crash_evidence=ev)
     assert not res.fired
@@ -1094,21 +1107,45 @@ def test_a_crash_no_component_declares_still_reaches_the_ones_it_mentions():
 # below are that cycle, replayed against the action.
 
 def _uaf_ev():
+    """A cause-C payload that ADMITS: an observed frame at `fmt`, a
+    still-stubbed body (`_stub_fmt_records`) that references ErrorImpl.
+    Reachability alone admitted this component until 2026-09-06; the cycle
+    below is about the walk's memory, not the aim, so the payload carries
+    the one evidence kind that still aims."""
     from pipeline_core.domain.layout_retrigger import CrashEvidence
     return CrashEvidence(
         vanished=frozenset({"test_boxed_str"}),
-        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+        suspect_fns=frozenset({FnLocator("src/error.rs", "fmt")}),
+        blamed_fns=frozenset({FnLocator("src/error.rs", "fmt")}))
+
+
+def _stub_fmt_and_source_records() -> list[FnRecord]:
+    """`_stub_fmt_records` plus a second stubbed ErrorImpl method, so a
+    test can hand the walk a blame the first fire never had."""
+    return _stub_fmt_records() + [
+        FnRecord(file="error.rs", fn_name="source",
+                 sig_text="fn source(&self) -> Option<&ErrorImpl>",
+                 body_text="unimplemented!()", has_unimplemented_body=True),
+    ]
+
+
+_NEW_BLAME = frozenset({FnLocator("src/error.rs", "fmt"),
+                        FnLocator("src/error.rs", "source")})
+
+
+def _uaf_fakes(**kw) -> _Fakes:
+    return _Fakes(fn_records=_stub_fmt_records(), **kw)
 
 
 def test_a_landed_fire_is_refuted_when_the_same_crash_comes_back():
     """Fire 1 lands; the identical crash survives it; fire 2 on the same
     component is REFUSED. On the pre-fix code this second call landed attempt
     2 of the destruction cap — the recorded limit cycle."""
-    f = _Fakes()
+    f = _uaf_fakes()
     res1 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f.deps(), crash_evidence=_uaf_ev())
     assert res1.fired and res1.succeeded
-    f2 = _Fakes(attempts=f.saved_attempts)
+    f2 = _uaf_fakes(attempts=f.saved_attempts)
     res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f2.deps(), crash_evidence=_uaf_ev())
     assert not res2.fired
@@ -1122,11 +1159,11 @@ def test_a_rejected_fire_does_not_immunize_its_component():
     (Run `58819-ee78a1d1` iter 1: the mega component's 3 authorings were all
     rejected — treating that as refutation would have retired the plausible
     owner of the drop-glue fault untested.)"""
-    f = _Fakes(compiles=False)
+    f = _uaf_fakes(compiles=False)
     res1 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f.deps(), crash_evidence=_uaf_ev())
     assert res1.fired and res1.rejected and not res1.succeeded
-    f2 = _Fakes(attempts=f.saved_attempts)
+    f2 = _uaf_fakes(attempts=f.saved_attempts)
     res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f2.deps(), crash_evidence=_uaf_ev())
     assert res2.fired and res2.succeeded
@@ -1138,12 +1175,12 @@ def test_a_new_localizer_blame_reopens_a_refuted_component():
     evidence, and the component may be re-authored on it (still bounded by
     the destruction cap)."""
     from dataclasses import replace as dc_replace
-    f = _Fakes()
+    f = _uaf_fakes()
     retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                      "", f.deps(), crash_evidence=_uaf_ev())
-    ev2 = dc_replace(_uaf_ev(), blamed_fns=frozenset(
-        {FnLocator("src/error.rs", "fmt")}))
-    f2 = _Fakes(attempts=f.saved_attempts, fn_records=_stub_fmt_records())
+    ev2 = dc_replace(_uaf_ev(), blamed_fns=_NEW_BLAME)
+    f2 = _Fakes(attempts=f.saved_attempts,
+                fn_records=_stub_fmt_and_source_records())
     res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f2.deps(), crash_evidence=ev2)
     assert res2.fired and res2.succeeded
@@ -1160,16 +1197,16 @@ def test_a_shrunken_vanished_set_does_not_reopen_the_rounds_budget():
     from dataclasses import replace as dc_replace
     ev_wide = dc_replace(_uaf_ev(),
                          vanished=frozenset({"test_boxed_str", "test_rev"}))
-    f = _Fakes(compiles=False)
+    f = _uaf_fakes(compiles=False)
     res1 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f.deps(), crash_evidence=ev_wide)
     assert res1.fired and res1.rejected
-    f2 = _Fakes(attempts=f.saved_attempts, compiles=False)
+    f2 = _uaf_fakes(attempts=f.saved_attempts, compiles=False)
     res2 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f2.deps(), crash_evidence=ev_wide)
     assert res2.fired and res2.rejected
     ev_shrunk = dc_replace(_uaf_ev(), vanished=frozenset({"test_boxed_str"}))
-    f3 = _Fakes(attempts=f2.saved_attempts, compiles=False)
+    f3 = _uaf_fakes(attempts=f2.saved_attempts, compiles=False)
     res3 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f3.deps(), crash_evidence=ev_shrunk)
     assert not res3.fired, (
@@ -1184,15 +1221,15 @@ def test_a_new_blame_opens_a_fresh_rounds_budget():
     localizer learning something new. Same two spent rounds; the third call
     arrives with an origin blame the first two never had."""
     from dataclasses import replace as dc_replace
-    f = _Fakes(compiles=False)
+    f = _uaf_fakes(compiles=False)
     retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                      "", f.deps(), crash_evidence=_uaf_ev())
-    f2 = _Fakes(attempts=f.saved_attempts, compiles=False)
+    f2 = _uaf_fakes(attempts=f.saved_attempts, compiles=False)
     retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                      "", f2.deps(), crash_evidence=_uaf_ev())
-    ev_blamed = dc_replace(_uaf_ev(), blamed_fns=frozenset(
-        {FnLocator("src/error.rs", "fmt")}))
-    f3 = _Fakes(attempts=f2.saved_attempts, fn_records=_stub_fmt_records())
+    ev_blamed = dc_replace(_uaf_ev(), blamed_fns=_NEW_BLAME)
+    f3 = _Fakes(attempts=f2.saved_attempts,
+                fn_records=_stub_fmt_and_source_records())
     res3 = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                             "", f3.deps(), crash_evidence=ev_blamed)
     assert res3.fired and res3.succeeded
@@ -1212,7 +1249,7 @@ def test_two_landed_fires_on_one_signature_close_the_whole_walk():
     attempts = settle_crash_payoff(record_crash_fire({}, sig, "Quoted"), sig)
     attempts = settle_crash_payoff(
         record_crash_fire(attempts, sig, "Backtrace|Error"), sig)
-    f = _Fakes(attempts=attempts)
+    f = _uaf_fakes(attempts=attempts)
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE,
                            "", f.deps(), crash_evidence=_uaf_ev())
     assert not res.fired
@@ -1392,35 +1429,76 @@ def test_a_walk_with_nothing_to_aim_at_says_how_many_records_were_gated():
                for ln in g.logs)
 
 
-def test_the_chain_aims_the_walk_at_the_mega_component_and_charges_attempt_1():
-    """The corrected live expectation for the first post-fix sweep whose
-    vanish streak reaches 2 (the original entry predicted a rejection-budget
-    refusal; that was wrong twice — the cap is 3, the store holds 2, and the
-    streak carries no `contract:` stamp so it reads as stale by design).
+def _grade_until_2026_09_06(evidence, fn_records, component_names):
+    """`crash_candidate_grade` as it stood from 2026-08-15 to 2026-09-06,
+    verbatim — the grade that consulted the chain when no frame implicated
+    anything. Kept here as the negative control of the aim tests."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_blame_grade,
+    )
+    if not evidence.vanished:
+        return BlameGrade.NONE
+    if evidence.blamed_fns:
+        frame_grade = crash_blame_grade(
+            evidence.blamed_fns, fn_records, component_names)
+        if frame_grade is not BlameGrade.NONE or not evidence.chain_blamed:
+            return frame_grade
+    if evidence.chain_blamed:
+        return crash_blame_grade(
+            evidence.chain_blamed, fn_records, component_names)
+    if not evidence.suspect_fns:
+        return BlameGrade.NONE
+    return crash_blame_grade(
+        evidence.suspect_fns, fn_records, component_names)
 
-    With `blamed_fns` empty and the chain naming `src/error.rs::construct`,
-    the mega component grades OWNS, no `sig:` key refutes it (the signature
-    moved), the destruction cap is at 0 of 2, and the stale-epoch release
-    admits it past the 2/3 rejection streak: the walk FIRES and charges
-    attempt 1. The authoring is stubbed to reject here, so what is pinned is
-    the aim reaching the component, not what the model then writes."""
+
+def test_the_chain_does_not_aim_the_walk_and_nothing_is_charged(monkeypatch):
+    """With `blamed_fns` empty and the chain naming `src/error.rs::construct`
+    — a fn the mega component DECLARES — the walk declines: no tier, no
+    attempt, no checkpoint, no authoring call, and the declined line names
+    the evidence shape. The chain keeps its prompt, exhaustion-void and
+    signature roles; it is not an aim.
+
+    Negative control: the grade that stood until 2026-09-06 admits the mega
+    component OWNS off that same chain and FIRES attempt 1 — the mechanism
+    that re-authored `Quoted` on run `1577437-c93d5c26` iter 3, a type 0 of
+    373 fns reference, on a fault the component never touched."""
     f = _mega_fakes(compiles=False,
                     attempts={f"rejected:{_MEGA_KEY}": 2})
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
                            f.deps(), crash_evidence=_chain_evidence())
-    assert res.fired and res.rejected
+    assert not res.fired
+    assert res.reason == "no component matched the evidence"
+    assert f.committed == [] and f.prompts == [] and f.reverted_calls == []
+    assert f.saved_attempts is None or \
+        f"contract:{_MEGA_KEY}" not in f.saved_attempts
+    declined = [ln for ln in f.logs if "no component matched the evidence" in ln]
+    assert len(declined) == 1
+    assert "blame tier NONE" in declined[0]
+    assert "0 blamed frame(s), 1 chain-blamed" in declined[0]
+    assert not any("the observed fault is inside code" in ln for ln in f.logs)
+
+    import pipeline_core.application.retrigger_layout as _rl
+    monkeypatch.setattr(_rl, "crash_candidate_grade", _grade_until_2026_09_06)
+    g = _mega_fakes(compiles=False,
+                    attempts={f"rejected:{_MEGA_KEY}": 2})
+    res_old = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
+                               g.deps(), crash_evidence=_chain_evidence())
+    assert res_old.fired and res_old.rejected
     assert any("the observed fault is inside code 1 component(s) declare" in ln
-               for ln in f.logs)
-    assert f.committed and "attempt 1" in f.committed[0]
-    # The stale streak was retired at this first rejection under the current
-    # constraint set and re-counted from 1, with the epoch now stamped.
-    assert f.saved_attempts is not None
-    assert f.saved_attempts[f"rejected:{_MEGA_KEY}"] == 1
-    assert (f.saved_attempts[f"contract:{_MEGA_KEY}"]
-            == REJECTION_CONTRACT_EPOCH)
-    assert any("retired" in ln for ln in f.logs)
-    # Nothing declined: the silent exit is not on this path at all.
-    assert not any("no component matched the evidence" in ln for ln in f.logs)
+               for ln in g.logs)
+    assert g.committed and "attempt 1" in g.committed[0]
+
+
+def _framed_mega_evidence():
+    """The one evidence kind that still aims: an observed frame at a fn the
+    mega component declares, with no record for it (so it cannot be shown
+    filled and the layout route stays open)."""
+    from dataclasses import replace as dc_replace
+    return dc_replace(_chain_evidence(),
+                      blamed_fns=frozenset({FnLocator("src/error.rs",
+                                                      "object_drop")}))
 
 
 def test_a_streak_stamped_at_this_epoch_is_the_red_lock_the_entry_predicted():
@@ -1432,7 +1510,7 @@ def test_a_streak_stamped_at_this_epoch_is_the_red_lock_the_entry_predicted():
         f"rejected:{_MEGA_KEY}": 3,
         f"contract:{_MEGA_KEY}": REJECTION_CONTRACT_EPOCH})
     res = retrigger_layout(Path("/x"), "anyhow", "stable", _CRATE, "",
-                           f.deps(), crash_evidence=_chain_evidence())
+                           f.deps(), crash_evidence=_framed_mega_evidence())
     assert not res.fired
     assert not f.committed and f.prompts == []
     assert any("REJECTED at validation" in ln for ln in f.logs)

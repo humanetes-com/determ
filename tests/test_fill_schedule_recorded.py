@@ -4,7 +4,13 @@
 2026-09-06 (pass 74, hollow 24, three sessions packed, the process killed
 twenty minutes into the first session). `285948-b038af72_iter1.json` is the
 first packed fill on the 91-plateau tree (2026-09-05, hollow 0, five
-sessions). Both distilled by `tools/distill_fill.py` from `logs/events.jsonl`.
+sessions). `1212998-d61fbd2c_iter3.json` is fill 3 of the 2026-09-06 run
+that scored 97 (13 never-served runs, packing fitted 0).
+`1577437-c93d5c26_iter4.json` is fill 4 of the 2026-09-06 22:15 UTC run,
+whose `file src/error.rs` run reverted on attempt 1 (`compile failed;
+codes=['E0596']`) and kept on attempt 2 (`FILE FILLED 14 fn(s)`) and was
+rowed `REVERTED … kept 0, reverted 11`. Distilled by
+`tools/distill_fill.py` from `logs/events.jsonl`.
 
 Sentences pinned here, with the fixed pre-schedule walk as the control:
 - on the 05:23 fill, the stub-holding runs (file src/error.rs, per-fn)
@@ -13,11 +19,31 @@ Sentences pinned here, with the fixed pre-schedule walk as the control:
 - on the 91-plateau fill, nothing is demoted: the sessions open first,
   exactly as the fixed walk would;
 - the fixture's stub assumption reproduces the plan event's hollow count
-  (the check that the fixture is the record, not a hand-made list).
+  (the check that the fixture is the record, not a hand-made list);
+- on the 22:15 fill, the `file src/error.rs` run whose attempt 1 reverted
+  and attempt 2 kept rows FLAT with every dispatched unit kept and none
+  reverted, and the next fill ranks it a flat re-buy, not `rebuy_reverted`;
+  under the pre-fix bookkeeping (a revert mark no keep clears) the same
+  recording rows REVERTED, kept 0, reverted 11.
 """
 from __future__ import annotations
 
-from tests.fills.harness import candidate_runs, hollow_of, load_fill, replay
+from pipeline_core.domain.fill_schedule import (
+    TODAY_ORDER,
+    RouteKind,
+    RunOutcome,
+    schedule,
+)
+from tests.fills.harness import (
+    candidate_runs,
+    crash_blamed_of,
+    hollow_of,
+    ledger_of,
+    load_fill,
+    replay,
+    route_attempts_of,
+    unmeasurable_of,
+)
 
 
 def test_the_0523_fill_opens_the_stub_runs_before_the_format_session() -> None:
@@ -61,3 +87,110 @@ def test_a_budget_on_the_0523_fill_defers_nothing_never_served_and_shares_by_wei
     assert all(sh is not None and sh > 0 for sh in shares)
     assert abs(sum(sh for sh in shares if sh) - 120) < 1e-6
     assert len(opened) == len(out.schedule.ordered)
+
+
+def _planned(fix: dict) -> list:
+    by = candidate_runs(fix)
+    return [r for kind in TODAY_ORDER for r in (by.get(kind) or [])]
+
+
+def test_fill_3_of_the_97_run_ranks_unmeasurable_runs_as_rebuy_flat() -> None:
+    """Plan sentence, computed on fill 3 of `1212998-d61fbd2c`.
+
+    Under today's schedule (no unmeasurable args, budget 0): 13 ordered,
+    every reason never_served. That is the negative control.
+
+    With unmeasurable = failed names whose binary did not complete, and
+    crash_blamed = the locator crash.localized carried: runs disjoint from
+    that locator rank rebuy_flat; under a budget they are deferred; runs
+    that contain it stay ordered. No pass_count.
+    """
+    fix = load_fill("1212998-d61fbd2c_iter3")
+    runs = _planned(fix)
+    rows = ledger_of(fix)
+    oracle = rows[0].oracle_fp if rows else "o"
+    assert len(runs) == 13
+    control = schedule(runs, rows, oracle_fp=oracle, hollow={})
+    assert len(control.ordered) == 13 and not control.deferred
+    assert {s.reason for s in control.ordered} == {"never_served"}
+
+    unmeas = unmeasurable_of(fix)
+    blamed = crash_blamed_of(fix)
+    assert blamed and unmeas
+    ranked = schedule(
+        runs, rows, oracle_fp=oracle, hollow={},
+        unmeasurable_tests=unmeas, crash_blamed=blamed)
+    staying = [s for s in ranked.ordered if s.run.targets & blamed]
+    flat = [s for s in ranked.ordered if not (s.run.targets & blamed)]
+    assert staying and all(s.reason == "never_served" for s in staying)
+    assert flat and all(s.reason == "rebuy_flat" and s.weight == 0 for s in flat)
+    # Computed on this fixture: error.rs file + impl + per-fn contain the
+    # blamed locator; the other ten (context/ensure/fmt/kind/ptr file+impl)
+    # do not.
+    assert len(staying) == 3 and len(flat) == 10
+
+    budgeted = schedule(
+        runs, rows, oracle_fp=oracle, hollow={}, budget_minutes=60,
+        unmeasurable_tests=unmeas, crash_blamed=blamed)
+    assert {s.run.label for s in budgeted.ordered} == {
+        s.run.label for s in staying}
+    assert {s.run.label for s in budgeted.deferred} == {
+        s.run.label for s in flat}
+
+    out, opened = replay(
+        fix, budget=60, rows=rows, oracle_fp=oracle,
+        unmeasurable_tests=unmeas, crash_blamed=blamed)
+    assert {s.run.label for s in out.schedule.deferred} == {
+        s.run.label for s in flat}
+    assert set(opened) == {s.run.label for s in staying}
+
+
+def test_fill_4_of_the_2215_run_rows_the_revert_then_keep_as_flat_and_kept() -> None:
+    """Plan sentence, computed on fill 4 of `1577437-c93d5c26`: the
+    `file src/error.rs` row is FLAT, kept = every unit the run dispatched
+    (11 locators — the log's `FILE FILLED 14 fn(s)` counts fn blocks, and
+    the four `impl From … for …` blocks share the locator `from`), reverted
+    empty; and on the next fill's ledger that row ranks the file
+    `rebuy_flat`, never `rebuy_reverted` (weight 0, deferred under any
+    budget). Negative control: the pre-fix bookkeeping on the same
+    recording rows REVERTED, kept 0, reverted 11, and ranks the next fill's
+    file run `rebuy_reverted`.
+    """
+    fix = load_fill("1577437-c93d5c26_iter4")
+    rec = route_attempts_of(fix)["file src/error.rs"]
+    # The fixture is the record: the dispatched set is the revert event's
+    # planned count, and attempt 1 reverted exactly that set.
+    assert len(rec.dispatched) == fix["route_attempts"][0]["planned_recorded"] == 11
+    assert [o for o, _u in rec.attempts] == ["reverted", "kept"]
+    assert rec.attempts[0][1] == rec.dispatched
+    raw = fix["route_attempts"][0]
+    assert (raw["recorded_outcome"], raw["recorded_kept"], raw["recorded_reverted"]) == (
+        "reverted", 0, 11)
+
+    def error_row(sticky: bool):  # noqa: ANN202 — the row type is the assertion
+        log: list[str] = []
+        out, _opened = replay(fix, rows=ledger_of(fix), log=log, sticky_reverts=sticky)
+        row = next(r for r in out.rows if r.label == "file src/error.rs")
+        line = next(ln for ln in log if ln.startswith("  [phase-c/route] file src/error.rs:"))
+        return out, row, line
+
+    out, row, line = error_row(False)
+    assert row.outcome is RunOutcome.FLAT
+    assert frozenset(row.kept) == frozenset((u.file, u.fn_name) for u in rec.dispatched)
+    assert row.reverted == () and row.model_calls == 2
+    assert "FLAT after" in line and "kept 11, reverted 0" in line
+    # The next fill reads this row: the same run under the same identity.
+    runs = [r for kind in TODAY_ORDER for r in (candidate_runs(fix).get(kind) or [])]
+    nxt = schedule(runs, [*ledger_of(fix), *out.rows], oracle_fp=row.oracle_fp, hollow={})
+    ranked = next(s for s in nxt.ordered + nxt.deferred
+                  if s.run.kind is RouteKind.FILE and s.run.label == "file src/error.rs")
+    assert ranked.reason == "rebuy_flat"
+
+    _out2, old_row, old_line = error_row(True)
+    assert old_row.outcome is RunOutcome.REVERTED
+    assert old_row.kept == () and len(old_row.reverted) == 11
+    assert "REVERTED after" in old_line and "kept 0, reverted 11" in old_line
+    nxt_old = schedule(runs, [*ledger_of(fix), *_out2.rows], oracle_fp=row.oracle_fp, hollow={})
+    ranked_old = next(s for s in nxt_old.ordered + nxt_old.deferred
+                      if s.run.kind is RouteKind.FILE and s.run.label == "file src/error.rs")
+    assert ranked_old.reason == "rebuy_reverted"

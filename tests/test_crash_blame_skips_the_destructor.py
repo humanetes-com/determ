@@ -35,13 +35,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.crash_site import (
+    CONVERSION_FAMILY,
+    AsanReport,
     CrashFrame,
     CrashSite,
+    SourceWindow,
     authorable_frames,
+    blamed_locators,
+    conversion_family_from_access,
     first_test_file_after_destructor,
+    first_test_file_on_access,
     non_destructor_frames,
     parse_asan_report,
+    parse_asan_reports,
     prefer_non_destructor,
+    recover_owner_from_caller_source,
     relativize_frame_files,
     site_from_frames,
 )
@@ -152,20 +160,29 @@ def test_the_recorded_report_blames_the_conversion_the_test_line_names() -> None
     assert "named by tests/behaviour_stable_gen_1.rs:27" in text
 
 
-def test_recovery_stays_off_without_the_box_errorimpl_type_chain() -> None:
-    """Rule 2: an Arc double-drop must not recover. Same source line, an
-    access stack that is not `Box<dyn Error>` wrapping `ErrorImpl`, last
-    resort stays `drop`."""
+def test_the_origin_shape_licenses_recovery_when_the_read_marks_are_absent() -> None:
+    """The family is licensed by EITHER stack. Same recorded origin
+    (`Error::drop` then the test line) and source line, an access stack
+    with neither `ErrorImpl` nor `Box<dyn Error>`: the origin's
+    destructor-then-caller shape licenses the family and blame is the
+    conversion. This used to be the "Rule 2" negative control — the READ
+    marks were the only licence — and that reading left the iter-4
+    `test_downcast` use-after-free of run `1577437-c93d5c26` (READ through
+    `memcmp`, no mark) on `drop`. The real negative control is an origin
+    with NO in-crate destructor — the Arc double-drop — pinned by
+    `test_the_arc_double_drop_report_still_recovers_nothing` below."""
     _, _, origin = _parsed_stacks()
+    access = [{"func": "core::ptr::drop_glue::<alloc::sync::Arc<bool>>",
+               "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 1}]
+    assert conversion_family_from_access(access) == frozenset(), (
+        "the READ marks alone license nothing here")
     site = site_from_frames(
         "tests/behaviour_stable_gen_1.rs",
         "behaviour_probe_stable_trait_object_identity_0",
-        "AddressSanitizer: heap-use-after-free",
-        [{"func": "core::ptr::drop_glue::<alloc::sync::Arc<bool>>",
-          "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 1}],
+        "AddressSanitizer: heap-use-after-free", access,
         origin_raw_frames=origin, origin_capable=True,
         source_line=RECORDED_SOURCE_LINE)
-    assert site.blamed_locator == FnLocator("src/error.rs", "drop")
+    assert site.blamed_locator == FnLocator("src/error.rs", "into_boxed_dyn_error")
 
 
 def test_recovery_stays_off_when_the_line_names_no_conversion() -> None:
@@ -318,3 +335,249 @@ def test_a_from_wrapper_source_line_names_the_conversion() -> None:
     text = site.render_evidence()
     assert "src/error.rs:0" not in text
     assert "named by src/error.rs:955" in text
+
+
+# Live UAFs of run `1212998-d61fbd2c` (2026-09-06). Each ACCESS stack has
+# ONE of the two types the old AND-gate required, so recovery stayed off
+# and `phase_c.crash.localized` blamed `src/error.rs::drop` four sweeps.
+# First error block of each report, driven through the real parser.
+_REPORT_ERRORIMPL = (Path(__file__).parent / "fixtures" / "crash"
+                     / "uaf_errorimpl_without_generics_1212998_2026-09-06.txt")
+_REPORT_BOX = (Path(__file__).parent / "fixtures" / "crash"
+               / "uaf_box_dyn_error_without_errorimpl_1212998_2026-09-06.txt")
+# Computed from first_test_file_after_destructor on those reports, then
+# the line at that loc in `.skeleton-filled/stable`.
+_SOURCE_ERRORIMPL = "    let boxed = err.into_boxed_dyn_error();"
+_SOURCE_BOX = "    let boxed_back = err.into_boxed_dyn_error();"
+
+
+def _live_stacks(
+    report: Path,
+) -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
+    parsed = parse_asan_report(report.read_text())
+    assert parsed is not None
+    kind, access, origin = parsed
+    return (
+        kind,
+        relativize_frame_files(access, WORKSPACE_ROOT),
+        relativize_frame_files(origin, WORKSPACE_ROOT),
+    )
+
+
+def _site_from_live_report(
+    report: Path, *, source_line: str | None,
+) -> CrashSite:
+    kind, access, origin = _live_stacks(report)
+    loc = (first_test_file_after_destructor(origin)
+           if source_line is not None else None)
+    return site_from_frames(
+        "tests/error_gen_1.rs", None, kind, access,
+        origin_raw_frames=origin, raw_report=report.read_text(),
+        origin_capable=True, source_line=source_line, source_loc=loc)
+
+
+def test_an_errorimpl_access_without_the_generic_mark_recovers_the_conversion() -> None:
+    """Report 1: ACCESS is `<ErrorImpl>::error` (no `<E>`), no Box. With
+    the source line, blamed is `into_boxed_dyn_error`. Without it, drop."""
+    _, _, origin = _live_stacks(_REPORT_ERRORIMPL)
+    assert first_test_file_after_destructor(origin) == (
+        "tests/error_gen_1.rs", 33)
+    without = _site_from_live_report(_REPORT_ERRORIMPL, source_line=None)
+    assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
+        "negative control: omitting the source line is last-resort drop")
+    site = _site_from_live_report(
+        _REPORT_ERRORIMPL, source_line=_SOURCE_ERRORIMPL)
+    assert site.blamed_locator == FnLocator(
+        "src/error.rs", "into_boxed_dyn_error")
+
+
+def test_a_box_dyn_error_access_without_errorimpl_recovers_the_conversion() -> None:
+    """Report 2: ACCESS is `drop_glue::<Box<dyn Error + Sync + Send>>`, no
+    ErrorImpl. Same pair of assertions as report 1."""
+    _, _, origin = _live_stacks(_REPORT_BOX)
+    assert first_test_file_after_destructor(origin) == (
+        "tests/error_gen_1.rs", 49)
+    without = _site_from_live_report(_REPORT_BOX, source_line=None)
+    assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
+        "negative control: omitting the source line is last-resort drop")
+    site = _site_from_live_report(_REPORT_BOX, source_line=_SOURCE_BOX)
+    assert site.blamed_locator == FnLocator(
+        "src/error.rs", "into_boxed_dyn_error")
+
+
+# ---- run 1577437-c93d5c26 (2026-09-06): the family is licensed by the ORIGIN
+# shape too, and an empty origin is recovered from the ACCESS side ----------
+# Live archives `logs/asan/asan-20260906T221545829298.txt` (iter 4, two
+# reports) and `…T204443251879.txt` (iter 2, three reports), distilled under
+# `tests/fixtures/crash/` and driven through the real multi-report parser.
+# The crashing tests' source lines are copied here from the filled tree at
+# the archives' time; the tests never read the tree.
+_SWEEP_ITER4 = (Path(__file__).parent / "fixtures" / "crash"
+                / "sweep_two_reports_segv_and_uaf_1577437_2026-09-06_iter4.txt")
+_SWEEP_ITER2 = (Path(__file__).parent / "fixtures" / "crash"
+                / "sweep_three_reports_1577437_2026-09-06_iter2.txt")
+# tests/test_downcast.rs:21 and tests/test_context.rs:124 (origin caller lines).
+_LINE_TEST_DOWNCAST_21 = "        bail_fmt().unwrap_err().downcast::<String>().unwrap(),"
+_LINE_TEST_CONTEXT_124 = "    let err = err.downcast::<HighLevel>().unwrap();"
+# tests/error_gen_3.rs 29-33: the enclosing test fn up to the SEGV's access line.
+_WINDOW_ERROR_GEN_3 = SourceWindow(
+    file_rel="tests/error_gen_3.rs", first_line=29, lines=(
+        "fn test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait() {",
+        "    use std::error::Error as StdError;",
+        '    let err = Error::new(std::io::Error::new(std::io::ErrorKind::Other, "io"));',
+        "    let boxed = err.reallocate_into_boxed_dyn_error_without_backtrace();",
+        '    assert_eq!(boxed.to_string(), "io");',
+    ))
+
+
+def _report(fixture: Path, label: str) -> AsanReport:
+    (rep,) = [r for r in parse_asan_reports(fixture.read_text()) if r.label == label]
+    return AsanReport(
+        label=rep.label, kind=rep.kind,
+        access=relativize_frame_files(rep.access, WORKSPACE_ROOT),
+        origin=relativize_frame_files(rep.origin, WORKSPACE_ROOT),
+        text=rep.text, origin_stack_lines=rep.origin_stack_lines)
+
+
+def test_a_uaf_read_without_either_type_mark_recovers_downcast_from_the_origin_shape() -> None:
+    """Iter-4 report 2 (`tests/test_downcast.rs`): READ is `memcmp → <str as
+    PartialEq>::eq → test line 19` — no `ErrorImpl`, no `Box<dyn Error>`;
+    origin is `free → Error::drop src/error.rs:630 → test line 21`, and
+    line 21 calls `downcast::<String>()`. Blame is `downcast`, named by
+    `tests/test_downcast.rs:21`. Pre-fix (family licensed by the READ marks
+    only): `src/error.rs::drop`."""
+    rep = _report(_SWEEP_ITER4, "tests/test_downcast.rs")
+    assert conversion_family_from_access(rep.access) == frozenset(), (
+        "the READ stack carries neither mark — the pre-fix licence is off")
+    loc = first_test_file_after_destructor(rep.origin)
+    assert loc == ("tests/test_downcast.rs", 21)
+    without = site_from_frames(
+        rep.label, "test_downcast", rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True)
+    assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
+        "negative control: without the source line blame is the destructor")
+    site = site_from_frames(
+        rep.label, "test_downcast", rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True,
+        source_line=_LINE_TEST_DOWNCAST_21, source_loc=loc)
+    assert site.blamed is not None
+    assert site.blamed.fn_name == "downcast"
+    assert site.blamed.file_rel == "src/error.rs"
+    assert site.blamed.named_by == ("tests/test_downcast.rs", 21)
+    assert site.origin_unattributed is False
+    assert "named by tests/test_downcast.rs:21" in site.render_evidence()
+
+
+def test_the_test_context_uaf_recovers_downcast_through_the_turbofish() -> None:
+    """Iter-2 report 2 (`tests/test_context.rs`): READ is
+    `<anyhow::error::ErrorImpl>::error` (the READ mark licenses the family),
+    origin `Error::drop src/error.rs:627 → tests/test_context.rs:124`, and
+    line 124 is `err.downcast::<HighLevel>().unwrap()`. Pre-fix the regex
+    required `downcast(` and `downcast` was not in the family: `drop`."""
+    rep = _report(_SWEEP_ITER2, "tests/test_context.rs")
+    assert conversion_family_from_access(rep.access)
+    loc = first_test_file_after_destructor(rep.origin)
+    assert loc == ("tests/test_context.rs", 124)
+    without = site_from_frames(
+        rep.label, "test_downcast_high", rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True,
+        source_line="    let _ = err.downcast_ref::<HighLevel>();", source_loc=loc)
+    assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
+        "negative control: a line naming no family member leaves the destructor")
+    site = site_from_frames(
+        rep.label, "test_downcast_high", rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True,
+        source_line=_LINE_TEST_CONTEXT_124, source_loc=loc)
+    assert site.blamed is not None
+    assert site.blamed.fn_name == "downcast"
+    assert site.blamed.named_by == ("tests/test_context.rs", 124)
+
+
+def test_a_segv_with_no_origin_stack_recovers_the_conversion_from_the_access_window() -> None:
+    """Iter-4 report 1 (`tests/error_gen_3.rs`): no free/alloc stack at all.
+    The READ stack is std's `Box<dyn Error>::to_string` under the test's
+    line 33. With the enclosing fn's window (lines 29-33) the unique family
+    name is `reallocate_into_boxed_dyn_error_without_backtrace` at line 32;
+    the frame's file is the crate file a `tests/<stem>_gen_<N>.rs` test was
+    written for. Pre-fix: origin recovery has nothing to walk, the site is
+    `origin_unattributed`, blame is NOBODY."""
+    rep = _report(_SWEEP_ITER4, "tests/error_gen_3.rs")
+    assert rep.origin == [] and rep.origin_stack_lines == 0
+    assert first_test_file_after_destructor(rep.origin) is None
+    assert conversion_family_from_access(rep.access), (
+        "`Box<dyn core::error::Error + Sync + Send>` on the READ stack")
+    assert first_test_file_on_access(rep.access) == ("tests/error_gen_3.rs", 33)
+    nobody = site_from_frames(
+        rep.label, None, rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True)
+    assert nobody.blamed_locator is None and nobody.origin_unattributed, (
+        "negative control: the shipped path had nothing to read")
+    site = site_from_frames(
+        rep.label, None, rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True,
+        source_window=_WINDOW_ERROR_GEN_3)
+    assert site.blamed is not None
+    assert site.blamed.fn_name == "reallocate_into_boxed_dyn_error_without_backtrace"
+    assert site.blamed.file_rel == "src/error.rs"
+    assert site.blamed.named_by == ("tests/error_gen_3.rs", 32)
+    assert site.origin_unattributed is False
+    assert "named by tests/error_gen_3.rs:32" in site.render_evidence()
+    assert "src/error.rs:0" not in site.render_evidence()
+
+
+def test_the_family_is_convicted_across_both_live_sites_and_drop_never_is() -> None:
+    """`blamed_locators` over the two iter-4 sites (recovered
+    `reallocate_…` and `downcast`) holds every family member at
+    `src/error.rs` and not `drop`, even though `drop` is a frame on the
+    UAF's origin stack."""
+    segv = _report(_SWEEP_ITER4, "tests/error_gen_3.rs")
+    uaf = _report(_SWEEP_ITER4, "tests/test_downcast.rs")
+    sites = (
+        site_from_frames(segv.label, None, segv.kind, segv.access,
+                         origin_raw_frames=segv.origin, origin_capable=True,
+                         source_window=_WINDOW_ERROR_GEN_3),
+        site_from_frames(uaf.label, "test_downcast", uaf.kind, uaf.access,
+                         origin_raw_frames=uaf.origin, origin_capable=True,
+                         source_line=_LINE_TEST_DOWNCAST_21,
+                         source_loc=("tests/test_downcast.rs", 21)),
+    )
+    assert [f.fn_name for f in sites[1].origin_frames] == ["downcast", "drop"], (
+        "the destructor stays on the evidence frames")
+    got = blamed_locators(sites)
+    assert got == frozenset(FnLocator("src/error.rs", n) for n in CONVERSION_FAMILY)
+    assert FnLocator("src/error.rs", "drop") not in got
+
+
+def test_the_arc_double_drop_report_still_recovers_nothing() -> None:
+    """Negative control for the origin licence, on the recorded shape of run
+    `1064759-0f23fb68`: the free is the test's own `Arc::drop`, no in-crate
+    destructor, so neither licence fires and the caller line is never
+    consulted — blame stays nobody."""
+    access = [
+        {"func": "core::sync::atomic::AtomicUsize::fetch_sub",
+         "file": "/rustc/x/library/core/src/sync/atomic.rs", "line": 3060},
+        {"func": "test_downcast::test_drop", "file": "tests/test_downcast.rs",
+         "line": 85},
+    ]
+    origin = [
+        {"func": "free", "file": "/rustc/llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp",
+         "line": 51},
+        {"func": "<alloc::sync::Arc<Atomic<bool>> as core::ops::drop::Drop>::drop",
+         "file": "/rustc/x/library/alloc/src/sync.rs", "line": 2874},
+        {"func": "test_downcast::test_drop", "file": "tests/test_downcast.rs",
+         "line": 83},
+    ]
+    assert recover_owner_from_caller_source(
+        origin, access, "    let b = err.into_boxed_dyn_error();",
+        named_by=("tests/test_downcast.rs", 83)) is None
+    assert recover_owner_from_caller_source(
+        origin, access, None, source_window=SourceWindow(
+            "tests/test_downcast.rs", 83,
+            ("    let b = err.into_boxed_dyn_error();", "    drop(b);"))) is None
+    site = site_from_frames(
+        "tests/test_downcast.rs", "test_drop",
+        "AddressSanitizer: heap-use-after-free", access,
+        origin_raw_frames=origin, origin_capable=True,
+        source_line="    let b = err.into_boxed_dyn_error();",
+        source_loc=("tests/test_downcast.rs", 83))
+    assert site.blamed_locator is None and site.origin_unattributed

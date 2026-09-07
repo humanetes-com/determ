@@ -1,0 +1,583 @@
+running 3 tests
+test fmt::gen_tests_3::no_digits ... ok
+test fmt::gen_tests_3::one_digit ... ok
+test fmt::gen_tests_3::two_digits ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test behaviour_probe_stable_exact_format_0 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test ui ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+running 4 tests
+test result_with_context_err_anyhow_error ... ok
+test result_with_context_err_lazy_closure ... ok
+test result_with_context_err_wraps ... ok
+test result_with_context_ok ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 4 tests
+test option_context_none_returns_error_with_message ... ok
+test option_context_some_returns_ok ... ok
+test option_with_context_lazy_is_evaluated_on_none ... ok
+test option_with_context_lazy_is_not_evaluated_on_some ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test test_ensure_not_both_debug_fallback ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test test_error_impl_source_triggered_by_boxed_with_context ... ok
+test test_from_boxed_basic ... ok
+test test_from_boxed_preserves_chain_and_source ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_backtrace_reachable ... ok
+test test_backtrace_with_std_error ... ok
+test test_debug_format_simple_message ... ok
+test test_debug_format_with_context ... ok
+test test_example ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_deref_mut_coercion ... ok
+test test_deref_mut_via_downcast_mut ... ok
+test test_reallocate_into_boxed_dyn_error_without_backtrace_basic ... ok
+test test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait ... 
+running 2 tests
+test test_debug_backtrace_captured_simple ... ok
+test test_debug_backtrace_captured_with_cause ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 9 tests
+test test_anyhow_interpolated_hits_format_err_else ... ok
+test test_anyhow_interpolated_multiple_args ... ok
+test test_anyhow_literal_display_and_debug ... ok
+test test_anyhow_literal_preserves_static_str ... ok
+test test_example ... ok
+test test_ok_preserves_type_through_result ... ok
+test test_ok_returns_ok_for_integer ... ok
+test test_ok_returns_ok_for_string ... ok
+test test_ok_returns_ok_for_unit ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 9 tests
+test test_error_anyhow_static_str ... ok
+test test_error_chain_len_and_order ... ok
+test test_error_context_display ... ok
+test test_error_debug_chain ... ok
+test test_error_downcast_is ... ok
+test test_error_fmt_alternate ... ok
+test test_error_msg_display ... ok
+test test_error_multi_context_chain ... ok
+test test_error_root_cause ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_ref_unwind_safe ... ok
+test test_send ... ok
+test test_sync ... ok
+test test_unpin ... ok
+test test_unwind_safe ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test test_backtrace ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test test_boxed_anyhow ... ok
+test test_boxed_str ... ok
+test test_boxed_thiserror ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_clone ... ok
+test test_default ... ok
+test test_iter ... ok
+test test_len ... ok
+test test_rev ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 8 tests
+test test_downcast_high ... 
+running 4 tests
+test test_convert ... ok
+test test_convert_send ... ok
+test test_convert_send_sync ... ok
+test test_question_mark ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 7 tests
+test test_as_ref ... ok
+test test_downcast ... 
+running 18 tests
+test test_as ... ok
+test test_atom ... ok
+test test_closure ... ok
+test test_high_precedence_binary_operator ... ok
+test test_if ... ok
+test test_loop ... ok
+test test_low_precedence_binary_operator ... ok
+test test_low_precedence_control_flow ... ok
+test test_macro ... ok
+test test_match ... ok
+test test_pat ... ok
+test test_path ... ok
+test test_raw_addr ... ok
+test test_recursion ... ok
+test test_too_long ... ok
+test test_trailer ... FAILED
+test test_unary ... ok
+test test_whitespace ... ok
+test result: FAILED. 17 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 4 tests
+test test_altdebug ... ok
+test test_altdisplay ... ok
+test test_debug ... ok
+test test_display ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_brace_escape ... ok
+test test_ensure ... ok
+test test_ensure_nonbool ... ok
+test test_messages ... ok
+test test_temporaries ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 4 tests
+test test_autotraits ... ok
+test test_drop ... ok
+test test_error_size ... ok
+test test_null_pointer_optimization ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_anyhow_from_anyhow ... ok
+test test_fmt_source ... ok
+test test_io_source ... ok
+test test_literal_source ... ok
+test test_variable_source ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 5 tests
+test test_message_error_display_forwards_empty_str ... ok
+test test_message_error_display_forwards_simple_str ... ok
+test test_message_error_display_via_anyhow_macro ... ok
+test test_message_error_display_with_custom_display_debug ... ok
+test test_message_error_display_with_owned_string ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 4 tests
+test test_anyhow_macro_display ... ok
+test test_error_msg_debug ... ok
+test test_error_msg_display ... ok
+test test_from_boxed_display ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 2 tests
+test boxed_error_source_none ... ok
+test boxed_error_source_some ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running unittests src/lib.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/anyhow-4d087a4aace7c01f)
+     Running tests/behaviour_stable_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/behaviour_stable_gen_1-2989edfc2632ca89)
+==1648830==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55fa76863af4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55fa76893467 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55fa76893467 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55fa76892e07 in behaviour_stable_gen_1::behaviour_probe_stable_exact_format_0 /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/behaviour_stable_gen_1.rs:10:30
+SUMMARY: AddressSanitizer: 112 byte(s) leaked in 2 allocation(s).
+     Running tests/compiletest.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/compiletest-60c829cedbb8989f)
+test [0m[1mtests/ui/chained-comparison.rs[0m ... [0m[32mok
+test [0m[1mtests/ui/temporary-value.rs[0m ... [0m[32mok
+     Running tests/context_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/context_gen_1-e0d1afdfe16eaa38)
+==1648907==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55e6953f1044 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55e695426377 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55e695426377 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55e6954247e8 in <anyhow::Error>::new::<anyhow::error::ContextError<&str, anyhow::Error>> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:36:9
+SUMMARY: AddressSanitizer: 224 byte(s) leaked in 4 allocation(s).
+     Running tests/context_gen_2.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/context_gen_2-84942ef0404dabf6)
+==1648915==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55594ed1d624 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55594ed4d707 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55594ed4d707 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55594ed4c0ff in <anyhow::Error>::construct_from_display::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:167:5
+SUMMARY: AddressSanitizer: 112 byte(s) leaked in 2 allocation(s).
+     Running tests/ensure_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/ensure_gen_1-e3f902944baefe61)
+==1648923==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55eef1bb25f4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55eef1be9ef7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55eef1be9ef7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55eef1be722f in <anyhow::Error>::construct_from_adhoc::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 56 byte(s) leaked in 1 allocation(s).
+     Running tests/error_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/error_gen_1-d40c0bf2328c7005)
+==1648928==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 80 byte(s) in 1 object(s) allocated from:
+    #0 0x56356f874114 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x56356f8a3427 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x56356f8a3427 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x56356f8a6704 in <anyhow::Error>::context::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:288:18
+SUMMARY: AddressSanitizer: 376 byte(s) leaked in 6 allocation(s).
+     Running tests/error_gen_2.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/error_gen_2-0271ceea45369928)
+==1648935==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55fee33992e4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55fee33ce8a7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55fee33ce8a7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55fee33c885a in <anyhow::Error>::new::<error_gen_2::test_backtrace_with_std_error::MyErr> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:36:9
+SUMMARY: AddressSanitizer: 280 byte(s) leaked in 5 allocation(s).
+     Running tests/error_gen_3.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/error_gen_3-d3271961ae0fa4e9)
+==1648944==ERROR: AddressSanitizer: SEGV on unknown address 0x000400000124 (pc 0x55e8e2680e63 bp 0x7b8ed99fe290 sp 0x7b8ed99fe138 T4)
+    #0 0x55e8e2680e63 in <alloc::raw_vec::RawVecInner>::non_null::<u8> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/raw_vec/mod.rs:614:9
+    #1 0x55e8e2680e63 in <alloc::raw_vec::RawVecInner>::ptr::<u8> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/raw_vec/mod.rs:609:14
+    #2 0x55e8e2680e63 in <alloc::raw_vec::RawVec<u8>>::ptr /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/raw_vec/mod.rs:296:20
+    #3 0x55e8e2680e63 in <alloc::vec::Vec<u8>>::as_ptr /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/vec/mod.rs:1968:18
+    #4 0x55e8e2680e63 in <alloc::vec::Vec<u8>>::as_slice /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/vec/mod.rs:1864:76
+    #5 0x55e8e2680e63 in <alloc::string::String>::as_str /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/string.rs:1064:52
+    #6 0x55e8e2680e63 in <alloc::string::String as core::ops::deref::Deref>::deref /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/string.rs:2836:14
+    #7 0x55e8e2680e63 in <alloc::string::String as core::fmt::Display>::fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/string.rs:2725:28
+    #8 0x55e8e2680e63 in <<alloc::boxed::Box<dyn core::error::Error + core::marker::Sync + core::marker::Send> as core::convert::From<alloc::string::String>>::from::StringError as core::fmt::Display>::fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed/convert.rs:584:17
+    #9 0x55e8e2637ad7 in <alloc::boxed::Box<dyn core::error::Error + core::marker::Sync + core::marker::Send> as core::fmt::Display>::fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2227:9
+    #10 0x55e8e25ed9a3 in <alloc::boxed::Box<dyn core::error::Error + core::marker::Sync + core::marker::Send> as alloc::string::SpecToString>::spec_to_string /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/string.rs:2928:9
+    #11 0x55e8e25ed7c5 in <alloc::boxed::Box<dyn core::error::Error + core::marker::Sync + core::marker::Send> as alloc::string::ToString>::to_string /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/string.rs:2907:9
+    #12 0x55e8e25eb2bf in error_gen_3::test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/error_gen_3.rs:33:22
+    #13 0x55e8e25f5866 in error_gen_3::test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/error_gen_3.rs:29:86
+    #14 0x55e8e25ed105 in <error_gen_3::test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait::{closure#0} as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #15 0x55e8e25f5e6a in <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #16 0x55e8e25f5e6a in test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:724:18
+    #17 0x55e8e26036e4 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #18 0x55e8e26036e4 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #19 0x55e8e26036e4 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #20 0x55e8e26036e4 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #21 0x55e8e26036e4 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #22 0x55e8e26036e4 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #23 0x55e8e26036e4 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #24 0x55e8e25fcff3 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #25 0x55e8e25fcff3 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #26 0x55e8e2606761 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #27 0x55e8e2606761 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #28 0x55e8e2606761 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #29 0x55e8e2606761 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #30 0x55e8e2606761 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #31 0x55e8e2606761 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #32 0x55e8e2606761 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #33 0x55e8e266fd4e in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #34 0x55e8e266fd4e in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #35 0x55e8e25b9156 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+    #36 0x7f8edceaba57  (/usr/lib/libc.so.6+0xaba57) (BuildId: e40d0fb39fa49848e0042984207f7c80fdbc8c7e)
+    #37 0x7f8edcf49fdb  (/usr/lib/libc.so.6+0x149fdb) (BuildId: e40d0fb39fa49848e0042984207f7c80fdbc8c7e)
+SUMMARY: AddressSanitizer: SEGV /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/raw_vec/mod.rs:614:9 in <alloc::raw_vec::RawVecInner>::non_null::<u8>
+     Running tests/fmt_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/fmt_gen_1-367790dce6cb1897)
+==1648950==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55b83571dd24 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55b835750c17 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55b835750c17 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55b8357563ff in <anyhow::Error>::construct_from_adhoc::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 168 byte(s) leaked in 3 allocation(s).
+     Running tests/lib_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/lib_gen_1-6f28404e650ee8f2)
+==1648956==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55f16f1fa9f4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55f16f22b177 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55f16f22b177 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55f16f22e36c in <anyhow::Error>::construct_from_adhoc::<alloc::string::String> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 224 byte(s) leaked in 4 allocation(s).
+     Running tests/ptr_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/ptr_gen_1-98e70f232df9a7b0)
+==1648969==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x555b85817994 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x555b85854de7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x555b85854de7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x555b8585aa4f in <anyhow::Error>::construct_from_adhoc::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 1008 byte(s) leaked in 18 allocation(s).
+     Running tests/test_autotrait.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_autotrait-a06b805c2afca2ad)
+     Running tests/test_backtrace.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_backtrace-e9a24e60ba259044)
+==1648990==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x557da5090ae4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x557da50c3a77 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x557da50c3a77 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x557da50c2f7f in <anyhow::Error>::construct_from_adhoc::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 56 byte(s) leaked in 1 allocation(s).
+     Running tests/test_boxed.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_boxed-02cabbcbeafc4243)
+==1648995==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55dd15aec544 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55dd15b20a87 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55dd15b20a87 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55dd15b1c1e5 in test_boxed::test_boxed_anyhow /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_boxed.rs:42:35
+SUMMARY: AddressSanitizer: 224 byte(s) leaked in 4 allocation(s).
+     Running tests/test_chain.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_chain-914da9cc59a87d92)
+==1649002==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x56521159cab4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x5652115ccae7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x5652115ccae7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x5652115ccda2 in test_chain::error /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_chain.rs:4:20
+SUMMARY: AddressSanitizer: 896 byte(s) leaked in 16 allocation(s).
+     Running tests/test_context.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_context-1002038c4a22f4f2)
+==1649011==ERROR: AddressSanitizer: heap-use-after-free on address 0x7c03bcbe4020 at pc 0x55fc1084e87e bp 0x7b83ba5fdc10 sp 0x7b83ba5fdc08
+READ of size 8 at 0x7c03bcbe4020 thread T1
+    #0 0x55fc1084e87d in <anyhow::error::ErrorImpl>::error /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:810:18
+    #1 0x55fc1084d954 in <anyhow::error::ErrorImpl>::debug /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/fmt.rs:18:33
+    #2 0x55fc1084ac66 in <anyhow::Error as core::fmt::Debug>::fmt /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:618:22
+    #3 0x55fc1089bd79 in <core::fmt::rt::Argument>::fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/fmt/rt.rs:152:76
+    #4 0x55fc1089bd79 in core::fmt::write /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/fmt/mod.rs
+    #5 0x55fc1088a578 in <core::fmt::Formatter>::write_fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/fmt/mod.rs:2132:13
+    #6 0x55fc1088a578 in <core::panic::panic_info::PanicMessage as core::fmt::Display>::fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/panic_info.rs:180:19
+    #7 0x55fc1088a578 in <&core::panic::panic_info::PanicMessage as core::fmt::Display>::fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/fmt/mod.rs:2872:62
+    #8 0x55fc1088a578 in <std::panicking::panic_handler::FormatStringPayload>::fill::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:635:28
+    #9 0x55fc1088a578 in <core::option::Option<alloc::string::String>>::get_or_insert_with::<<std::panicking::panic_handler::FormatStringPayload>::fill::{closure#0}> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/option.rs:1823:49
+    #10 0x55fc1088a578 in <std::panicking::panic_handler::FormatStringPayload>::fill /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:632:25
+    #11 0x55fc1088a578 in <std::panicking::panic_handler::FormatStringPayload as core::panic::PanicPayload>::get /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:651:18
+    #12 0x55fc1088061c in std::panicking::panic_with_hook /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:833:56
+    #13 0x55fc10866e41 in std::panicking::panic_handler::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:698:13
+    #14 0x55fc1085bef8 in std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:182:18
+    #15 0x55fc10867b6c in __rustc::rust_begin_unwind /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:689:5
+    #16 0x55fc1089c50b in core::panicking::panic_fmt /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:80:14
+    #17 0x55fc1089c281 in core::result::unwrap_failed /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/result.rs:1867:5
+    #18 0x55fc10806601 in <core::result::Result<test_context::HighLevel, anyhow::Error>>::unwrap /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/result.rs:1233:23
+    #19 0x55fc10806601 in test_context::test_downcast_high /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:124:43
+    #20 0x55fc10808fe6 in test_context::test_downcast_high::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:121:24
+    #21 0x55fc107ff545 in <test_context::test_downcast_high::{closure#0} as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #22 0x55fc10809dfa in <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #23 0x55fc10809dfa in test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:724:18
+    #24 0x55fc10817674 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #25 0x55fc10817674 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #26 0x55fc10817674 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #27 0x55fc10817674 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #28 0x55fc10817674 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #29 0x55fc10817674 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #30 0x55fc10817674 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #31 0x55fc10810f83 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #32 0x55fc10810f83 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #33 0x55fc1081a6f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #34 0x55fc1081a6f1 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #35 0x55fc1081a6f1 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #36 0x55fc1081a6f1 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #37 0x55fc1081a6f1 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #38 0x55fc1081a6f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #39 0x55fc1081a6f1 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #40 0x55fc108878ae in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #41 0x55fc108878ae in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #42 0x55fc107c6306 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+    #43 0x7f83bdaaba57  (/usr/lib/libc.so.6+0xaba57) (BuildId: e40d0fb39fa49848e0042984207f7c80fdbc8c7e)
+    #44 0x7f83bdb49fdb  (/usr/lib/libc.so.6+0x149fdb) (BuildId: e40d0fb39fa49848e0042984207f7c80fdbc8c7e)
+0x7c03bcbe4020 is located 0 bytes inside of 88-byte region [0x7c03bcbe4020,0x7c03bcbe4078)
+freed by thread T1 here:
+    #0 0x55fc107c81d6 in free /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #1 0x55fc107f82d4 in alloc::alloc::dealloc_nonnull /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:128:14
+    #2 0x55fc107f82d4 in <alloc::alloc::Global>::deallocate_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:229:22
+    #3 0x55fc107f82d4 in <alloc::alloc::Global>::deallocate_impl /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:344:9
+    #4 0x55fc107f82d4 in <alloc::alloc::Global as core::alloc::Allocator>::deallocate /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:462:23
+    #5 0x55fc1084c525 in <anyhow::Error as core::ops::drop::Drop>::drop /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:627:13
+    #6 0x55fc10806568 in test_context::test_downcast_high /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:124:19
+    #7 0x55fc10808fe6 in test_context::test_downcast_high::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:121:24
+    #8 0x55fc10817674 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #9 0x55fc10817674 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #10 0x55fc10817674 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #11 0x55fc10817674 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #12 0x55fc10817674 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #13 0x55fc10817674 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #14 0x55fc10817674 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #15 0x55fc10810f83 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #16 0x55fc10810f83 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #17 0x55fc1081a6f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #18 0x55fc1081a6f1 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #19 0x55fc1081a6f1 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #20 0x55fc1081a6f1 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #21 0x55fc1081a6f1 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #22 0x55fc1081a6f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #23 0x55fc1081a6f1 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #24 0x55fc108878ae in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #25 0x55fc108878ae in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #26 0x55fc107c6306 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+previously allocated by thread T1 here:
+    #0 0x55fc107c8474 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55fc107f8177 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55fc107f8177 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55fc107f9c91 in <anyhow::Error>::construct_from_std::<anyhow::error::ContextError<test_context::HighLevel, anyhow::Error>> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:157:18
+    #4 0x55fc107fae1b in <anyhow::Error>::new::<anyhow::error::ContextError<test_context::HighLevel, anyhow::Error>> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:36:9
+    #5 0x55fc107fd7b0 in <anyhow::Error as core::convert::From<anyhow::error::ContextError<test_context::HighLevel, anyhow::Error>>>::from /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:570:9
+    #6 0x55fc107fd550 in <anyhow::Error as anyhow::context::ext::StdError>::ext_context::<test_context::HighLevel> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/context.rs:33:13
+    #7 0x55fc10803f6c in test_context::make_chain /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:87:10
+    #8 0x55fc108064e0 in test_context::test_downcast_high /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:122:26
+    #9 0x55fc10808fe6 in test_context::test_downcast_high::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_context.rs:121:24
+    #10 0x55fc10817674 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #11 0x55fc10817674 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #12 0x55fc10817674 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #13 0x55fc10817674 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #14 0x55fc10817674 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #15 0x55fc10817674 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #16 0x55fc10817674 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #17 0x55fc10810f83 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #18 0x55fc10810f83 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #19 0x55fc1081a6f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #20 0x55fc1081a6f1 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #21 0x55fc1081a6f1 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #22 0x55fc1081a6f1 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #23 0x55fc1081a6f1 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #24 0x55fc1081a6f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #25 0x55fc1081a6f1 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #26 0x55fc108878ae in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #27 0x55fc108878ae in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #28 0x55fc107c6306 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+SUMMARY: AddressSanitizer: heap-use-after-free /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:810:18 in <anyhow::error::ErrorImpl>::error
+     Running tests/test_convert.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_convert-5f5e97a09f7a0c83)
+==1649014==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 64 byte(s) in 1 object(s) allocated from:
+    #0 0x561c50ed2044 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x561c50f03747 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x561c50f03747 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x561c50f00715 in <anyhow::Error>::construct_from_std::<test_convert::drop::DetectDrop> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:157:18
+SUMMARY: AddressSanitizer: 360 byte(s) leaked in 6 allocation(s).
+     Running tests/test_downcast.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_downcast-3fc98d4e55793d61)
+==1649022==ERROR: AddressSanitizer: heap-use-after-free on address 0x7bc51c7e4070 at pc 0x55d1c0d93c30 bp 0x7ba51a1fe0f0 sp 0x7ba51a1fd8a0
+READ of size 6 at 0x7bc51c7e4070 thread T2
+    #0 0x55d1c0d93c2f in MemcmpInterceptorCommon(void*, int (*)(void const*, void const*, unsigned long), void const*, void const*, unsigned long) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/../sanitizer_common/sanitizer_common_interceptors.inc:849:7
+    #1 0x55d1c0d93f0c in memcmp /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/../sanitizer_common/sanitizer_common_interceptors.inc:880:10
+    #2 0x55d1c0e379d6 in <u8 as core::slice::cmp::SlicePartialEq<u8>>::equal_same_length /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/slice/cmp.rs:157:13
+    #3 0x55d1c0e379d6 in <[u8] as core::cmp::PartialEq>::eq /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/slice/cmp.rs:24:22
+    #4 0x55d1c0e379d6 in <&[u8] as core::cmp::PartialEq>::eq /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/cmp.rs:2123:13
+    #5 0x55d1c0e379d6 in <str as core::cmp::PartialEq>::eq /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/str/traits.rs:30:9
+    #6 0x55d1c0e379d6 in <&str as core::cmp::PartialEq<alloc::string::String>>::eq /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/string.rs:2692:17
+    #7 0x55d1c0e4890a in test_downcast::test_downcast /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:19:5
+    #8 0x55d1c0e477e6 in test_downcast::test_downcast::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:14:19
+    #9 0x55d1c0e39505 in <test_downcast::test_downcast::{closure#0} as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #10 0x55d1c0e4b79a in <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #11 0x55d1c0e4b79a in test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:724:18
+    #12 0x55d1c0e59014 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #13 0x55d1c0e59014 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #14 0x55d1c0e59014 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #15 0x55d1c0e59014 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #16 0x55d1c0e59014 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #17 0x55d1c0e59014 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #18 0x55d1c0e59014 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #19 0x55d1c0e52923 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #20 0x55d1c0e52923 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #21 0x55d1c0e5c091 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #22 0x55d1c0e5c091 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #23 0x55d1c0e5c091 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #24 0x55d1c0e5c091 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #25 0x55d1c0e5c091 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #26 0x55d1c0e5c091 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #27 0x55d1c0e5c091 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #28 0x55d1c0ec92ce in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #29 0x55d1c0ec92ce in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #30 0x55d1c0e05fa6 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+    #31 0x7fa51d6aba57  (/usr/lib/libc.so.6+0xaba57) (BuildId: e40d0fb39fa49848e0042984207f7c80fdbc8c7e)
+    #32 0x7fa51d749fdb  (/usr/lib/libc.so.6+0x149fdb) (BuildId: e40d0fb39fa49848e0042984207f7c80fdbc8c7e)
+0x7bc51c7e4070 is located 0 bytes inside of 6-byte region [0x7bc51c7e4070,0x7bc51c7e4076)
+freed by thread T2 here:
+    #0 0x55d1c0e07e76 in free /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #1 0x55d1c0e8d4ba in core::ptr::drop_glue::<alloc::raw_vec::RawVec<u8>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ptr/mod.rs:825:1
+    #2 0x55d1c0e8dc55 in <anyhow::Error as core::ops::drop::Drop>::drop /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:627:13
+    #3 0x55d1c0e4879c in test_downcast::test_downcast /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:21:33
+    #4 0x55d1c0e477e6 in test_downcast::test_downcast::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:14:19
+    #5 0x55d1c0e59014 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #6 0x55d1c0e59014 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #7 0x55d1c0e59014 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #8 0x55d1c0e59014 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #9 0x55d1c0e59014 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #10 0x55d1c0e59014 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #11 0x55d1c0e59014 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #12 0x55d1c0e52923 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #13 0x55d1c0e52923 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #14 0x55d1c0e5c091 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #15 0x55d1c0e5c091 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #16 0x55d1c0e5c091 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #17 0x55d1c0e5c091 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #18 0x55d1c0e5c091 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #19 0x55d1c0e5c091 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #20 0x55d1c0e5c091 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #21 0x55d1c0ec92ce in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #22 0x55d1c0ec92ce in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #23 0x55d1c0e05fa6 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+previously allocated by thread T2 here:
+    #0 0x55d1c0e08114 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55d1c0ed08c6 in <alloc::raw_vec::RawVecInner>::try_allocate_in (/home/user/determ/tmp/anyhow/.skeleton-filled/stable/target-asan/x86_64-unknown-linux-gnu/debug/deps/test_downcast-3fc98d4e55793d61+0x1c78c6) (BuildId: 30278683fdc9072cd4591fab3bc610dfd8ce6e7e)
+    #2 0x55d1c0e4ace5 in <alloc::raw_vec::RawVecInner>::with_capacity_in /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/raw_vec/mod.rs:434:15
+    #3 0x55d1c0e3c73d in <alloc::raw_vec::RawVec<u8>>::with_capacity_in /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/raw_vec/mod.rs:177:20
+    #4 0x55d1c0e3c73d in <alloc::vec::Vec<u8>>::with_capacity_in /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/vec/mod.rs:977:20
+    #5 0x55d1c0e3c73d in <u8 as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/slice.rs:448:29
+    #6 0x55d1c0e39694 in <<str as alloc::borrow::ToOwned>::to_owned as core::ops::function::FnOnce<(&str,)>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #7 0x55d1c0e4b4c6 in test_downcast::common::bail_fmt /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/common/mod.rs:9:5
+    #8 0x55d1c0e48781 in test_downcast::test_downcast /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:21:9
+    #9 0x55d1c0e477e6 in test_downcast::test_downcast::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:14:19
+    #10 0x55d1c0e59014 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #11 0x55d1c0e59014 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #12 0x55d1c0e59014 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #13 0x55d1c0e59014 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #14 0x55d1c0e59014 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #15 0x55d1c0e59014 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #16 0x55d1c0e59014 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #17 0x55d1c0e52923 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #18 0x55d1c0e52923 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #19 0x55d1c0e5c091 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #20 0x55d1c0e5c091 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #21 0x55d1c0e5c091 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #22 0x55d1c0e5c091 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #23 0x55d1c0e5c091 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #24 0x55d1c0e5c091 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #25 0x55d1c0e5c091 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #26 0x55d1c0ec92ce in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #27 0x55d1c0ec92ce in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #28 0x55d1c0e05fa6 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+SUMMARY: AddressSanitizer: heap-use-after-free /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/slice/cmp.rs:157:13 in <u8 as core::slice::cmp::SlicePartialEq<u8>>::equal_same_length
+     Running tests/test_ensure.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_ensure-8ba8aebb99393a24)
+==1649026==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x56535b554864 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x56535b5bd047 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x56535b5bd047 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x56535b5aaf7c in <anyhow::Error>::construct_from_adhoc::<alloc::string::String> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 5712 byte(s) leaked in 102 allocation(s).
+     Running tests/test_ffi.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_ffi-7172f28c05ee9f9b)
+     Running tests/test_fmt.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_fmt-ca72c22b0ff5623e)
+==1649051==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 168 byte(s) in 3 object(s) allocated from:
+    #0 0x5611caee8584 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x5611caf189a7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x5611caf189a7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x5611caf17308 in <anyhow::Error>::new::<anyhow::error::ContextError<&str, anyhow::Error>> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:36:9
+SUMMARY: AddressSanitizer: 1176 byte(s) leaked in 21 allocation(s).
+     Running tests/test_macros.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_macros-49c9187d8732dd71)
+==1649059==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x561e435a56c4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x561e435d8ce7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x561e435d8ce7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x561e435deebc in <anyhow::Error>::construct_from_adhoc::<alloc::string::String> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 336 byte(s) leaked in 6 allocation(s).
+     Running tests/test_repr.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_repr-de55ca8f9096b9b0)
+==1649068==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x55d32df9eef4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55d32dfd1ed7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55d32dfd1ed7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55d32dfcf1cf in <anyhow::Error>::new::<test_repr::drop::DetectDrop> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:36:9
+SUMMARY: AddressSanitizer: 56 byte(s) leaked in 1 allocation(s).
+     Running tests/test_source.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_source-0f1d9aa234f82f45)
+==1649076==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x5633c7057144 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x5633c7088ca7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x5633c7088ca7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x5633c708a2f5 in test_source::test_anyhow_from_anyhow /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_source.rs:59:35
+SUMMARY: AddressSanitizer: 392 byte(s) leaked in 7 allocation(s).
+     Running tests/wrapper_gen_1.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/wrapper_gen_1-8386d85c380946c3)
+==1649085==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x559376b34dc4 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x559376b685e7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x559376b685e7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x559376b69b4f in <anyhow::Error>::construct_from_adhoc::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:5
+SUMMARY: AddressSanitizer: 280 byte(s) leaked in 5 allocation(s).
+     Running tests/wrapper_gen_2.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/wrapper_gen_2-6897c618403a8e17)
+==1649094==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x562a47cf7434 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x562a47d265e7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x562a47d265e7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x562a47d321fa in <anyhow::Error>::new::<wrapper_gen_2::InnerErr> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:36:9
+SUMMARY: AddressSanitizer: 336 byte(s) leaked in 6 allocation(s).
+     Running tests/wrapper_gen_3.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/wrapper_gen_3-3da677693f180533)
+==1649102==ERROR: LeakSanitizer: detected memory leaks
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x5584e4d5cc54 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x5584e4dd32d7 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x5584e4dd32d7 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x5584e4dcf94c in <anyhow::Error>::from_boxed /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:140:9
+SUMMARY: AddressSanitizer: 112 byte(s) leaked in 2 allocation(s).

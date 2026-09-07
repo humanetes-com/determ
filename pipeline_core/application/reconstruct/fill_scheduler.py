@@ -67,6 +67,12 @@ class FillExecutionDeps:
     #: Worker count for a wave of a parallel route's consecutive runs.
     parallelism: int = 1
     now: Callable[[], float] = time.monotonic
+    #: Bare names of leftover tests whose binary did not complete. A run
+    #: whose every aimed test is in this set, and whose targets miss
+    #: ``crash_blamed``, ranks as a flat re-buy. Empty (the default)
+    #: leaves every rank as the ledger would.
+    unmeasurable_tests: frozenset[str] = frozenset()
+    crash_blamed: frozenset[FnLocator] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +175,9 @@ def execute_fill(
         runs, prior, oracle_fp=deps.oracle_fp,
         hollow=hollow if deps.scheduled else {},
         budget_minutes=deps.budget_minutes if deps.scheduled else 0.0,
-        readmit_after=deps.readmit_after)
+        readmit_after=deps.readmit_after,
+        unmeasurable_tests=deps.unmeasurable_tests if deps.scheduled else (),
+        crash_blamed=deps.crash_blamed if deps.scheduled else ())
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"

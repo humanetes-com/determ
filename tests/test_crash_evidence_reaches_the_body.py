@@ -317,6 +317,50 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
     assert "self must not drop" in line
     assert "let own = self.inner" in line
 
+    # `downcast` is a by-value copy of inner too (run `1577437-c93d5c26`'s
+    # iter-1 reply wrote `let own = self.inner;` with no forget in it while
+    # the MUST sat on `into_boxed_dyn_error`): crashed on its own evidence,
+    # it carries the MUST.
+    dc = BlockFillPlan(header="impl Error {", refills=("downcast",),
+                       crashed=("downcast",))
+    dc_line = _plan_line(dc)
+    assert "A TEST BINARY CRASHED INSIDE THIS BODY" in dc_line
+    assert "self must not drop" in dc_line
+
+
+def test_a_family_member_aimed_beside_a_crashed_conversion_is_listed_crashed() -> None:
+    """Run `1577437-c93d5c26`'s iter-1 `src/error.rs` file-first prompt (sha
+    `9cc1333b…`): `into_boxed_dyn_error` CRASHED with the MUST, `object_boxed`
+    AIMED as "callee of the faulting frame — re-derive the erased layout".
+    The reply forgot self in the first and moved the payload into a fresh
+    `Box::new` in the second. A family member next to a crashed family
+    member is the same ownership defect: it is listed CRASHED with the MUST,
+    not AIMED. A non-family aimed callee (`vtable`) keeps the AIMED line,
+    and with no crashed family member nothing is promoted."""
+    plan = BlockFillPlan(
+        header="impl Error {",
+        refills=("reallocate_into_boxed_dyn_error_without_backtrace",
+                 "object_boxed", "vtable"),
+        crashed=("reallocate_into_boxed_dyn_error_without_backtrace",),
+        aimed=("object_boxed", "vtable"))
+    line = _plan_line(plan)
+    crash_part, _, rest = line.partition("; REWRITE — A TEST BINARY CRASHED and")
+    assert "A TEST BINARY CRASHED INSIDE THIS BODY" in crash_part
+    assert "object_boxed" in crash_part
+    assert "self must not drop" in crash_part
+    assert "object_boxed" not in rest, "one name, one instruction"
+    assert "callee of the faulting frame" in rest and "vtable" in rest
+
+    unpromoted = BlockFillPlan(
+        header="impl Error {", refills=("drop", "object_boxed"),
+        crashed=("drop",), aimed=("object_boxed",))
+    before = _plan_line(unpromoted)
+    _, _, aimed_part = before.partition("; REWRITE — A TEST BINARY CRASHED and")
+    assert "object_boxed" in aimed_part, (
+        "negative control: a `drop` crash promotes no family member — there "
+        "is no crashed conversion to share the contract with")
+    assert "self must not drop" not in before
+
 
 def test_a_re_offered_unit_does_not_hold_the_traversal_open() -> None:
     """The exemption buys a re-dispatch, not a second traversal credit.

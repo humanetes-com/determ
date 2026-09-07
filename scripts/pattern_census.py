@@ -151,6 +151,40 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      expansion in a prior fill does not reclassify the refuse (service-
      order resets the fill's expansion flag).  Reaction: `session(s)
      fitted under the cap` (plan_slices packs the group).
+  P24 crash-cohort lock — a sweep's crash-evidence cohort is larger than
+     the dispatch batch and every graded unit is exempt from the pass
+     cursor (`take_batch(exempt=_crash_grades.keys())` after
+     `promote_crash_evidence`), so the batch is the cohort's head on every
+     sweep and the tail is never dispatched.  The exemption's own contract
+     ("ends by itself the moment the fault does") holds for a frame blame
+     of a few units; over a chain-derived inference it is a lock.  Run
+     1577437-c93d5c26 (2026-09-06): iter 3 synthesized chain-derived blame
+     for 63 fn(s); iter 4's batch line read `63 unit(s) … 12 of them are in
+     this batch` (the five construct_* and their neighbours), and both
+     iter 2 and iter 4 read `(12/N this pass`, i.e. attempted_before=0; the
+     process was SIGTERMed inside that batch, so the repeat is unread and
+     the row grades ARMED rather than LOCKED.  P3 records the same run as
+     `blamed NOBODY x6` and stops there.
+
+P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
+with cohort K > batch M, whose later batch is a subset of the earlier one
+(nothing new dispatched); or `ARMED iter a` — the run's last dispatching
+sweep had K > M and its cursor at 0 and no later sweep exists, so the
+repeat could not be read.  Every row also carries the iters whose summary
+read attempted_before=0 (the cursor zeroed by the exemption; cross-checked
+against the `phase_c.tdd.iter` event) and the chain-derived blame lines with
+their fn counts, because an INFERRED cohort is what pushes K past the cap.
+The head is the schedule event's full batch when `phase_c.fill.schedule`
+carries the sweep (the log prints at most 8 names), else the log's names
+marked partial.  Decision rule: a cohort head repeated — or armed to repeat
+— while attempted_before=0 is the cursor exemption applied to an inferred
+cohort; the fix is a provenance-scoped exemption (frame-derived keys exempt,
+chain-derived keys walk the cursor), not more GPU on the same head.  A
+K <= M cohort re-dispatched identically is the exemption working and never
+a row; a K > M sweep followed by a batch with a new name is the cursor
+walking and never a row — that reading is the negative control for the fix.
+The cross-run chronic `cohort_head` lists the same head bought under the cap
+by more than one process.
 
 The aggregate at the bottom counts, per class, total hits and how many were
 SILENT.  Decision rule: a class with recurring SILENT hits needs its detector
@@ -438,6 +472,12 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # A re-seed line that reports its post-state came from the
         # transactional re-seed, which collapses wanted to units.
         ("tree after:", "txn-reseed"),
+    ],
+    "P24": [
+        # No printed reaction exists. The answer is a data reading — the next
+        # K > cap sweep's `(D/F this pass` with D - N > 0 and a batch carrying
+        # a name the previous one did not — and on that reading the detector
+        # does not fire at all rather than tag the hit REACTED.
     ],
     "P14": [
         # The per-block loop's own stopper: it ends the SPEND after the
@@ -1675,6 +1715,276 @@ def detect_p20(run: Run, iters: list[dict]) -> list[dict]:
     return hits[:6]
 
 
+# P24 — the crash-cohort lock. Three line shapes and two events. The batch
+# line is matched on its stable prefix only (`carry crash evidence this
+# sweep`); the wording around it is being extended with frame/chain counts,
+# so K, M, the iter and the name list are each pulled by their own search
+# and default to None when absent. The name list is capped at 8 by the
+# driver with no marker, which is why the full batch comes from events.
+RE_CRASH_BATCH_PREFIX = "carry crash evidence this sweep"
+RE_CRASH_BATCH_K = re.compile(r"(?P<k>\d+) unit\(s\) carry crash evidence this sweep")
+RE_CRASH_BATCH_M = re.compile(r"(?P<m>\d+) of them are in this batch")
+RE_CRASH_BATCH_NAMES = re.compile(r"of them are in this batch: (?P<names>src/.+?)\s*$")
+RE_CRASH_BATCH_ITER = re.compile(r"\[phase-c/tdd\] iter (?P<iter>\d+):")
+RE_CHAIN_DERIVED = re.compile(
+    r"\[phase-c/crash\] iter (?P<iter>\d+):.*?synthesized CHAIN-DERIVED blame"
+    r".*? for (?P<k>\d+) fn\(s\)")
+# The iter summary's dispatch suffix: `dispatching N of F (D/F this pass`.
+# D is attempted_before + N, so the cursor position the event records as
+# `attempted_before` is D - N and needs no event to read.
+RE_DISPATCHING = re.compile(
+    r"dispatching (?P<n>\d+) of (?P<of>\d+) \((?P<done>\d+)/\d+ this pass")
+
+_COHORT_EVENTS: dict[str, dict[str, dict[int, list]]] | None = None
+
+
+def _cohort_events_by_run() -> dict[str, dict[str, dict[int, list]]]:
+    """Per run: `batch[iter]` = the dispatched batch of that sweep as the
+    union of `phase_c.fill.schedule` `runs[*].targets` (one entry per
+    schedule event, in stream order), and `iter[iter]` = the
+    `phase_c.tdd.iter` readings (`attempted_before`, `dispatched`).
+
+    The schedule event is the batch source because it is emitted BEFORE
+    the fill runs, so a run killed mid-batch (`1577437-c93d5c26`, exit 143
+    inside iter 4's file route) still has it; `phase_c.route.run` is
+    written at route END and `phase_c.fn.fill.start` names per-fn units
+    only. `phase_c.tdd.iter` carries `dispatched` as a count. Iter numbers
+    can restart after a retrigger fire, so each iter keeps a list and the
+    detector consumes it in order."""
+    global _COHORT_EVENTS
+    if _COHORT_EVENTS is not None:
+        return _COHORT_EVENTS
+    out: dict[str, dict[str, dict[int, list]]] = {}
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if ("phase_c.fill.schedule" not in line
+                        and "phase_c.tdd.iter" not in line):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                d = ev.get("data") or {}
+                rid = str(ev.get("run_id", ""))
+                slot = out.setdefault(rid, {"batch": {}, "iter": {}})
+                it = d.get("iter")
+                if not isinstance(it, int):
+                    continue
+                if ev.get("event") == "phase_c.fill.schedule":
+                    names: set[str] = set()
+                    for r in d.get("runs") or []:
+                        names.update(str(t) for t in (r.get("targets") or []))
+                    slot["batch"].setdefault(it, []).append(names)
+                elif ev.get("event") == "phase_c.tdd.iter":
+                    slot["iter"].setdefault(it, []).append({
+                        "attempted_before": d.get("attempted_before"),
+                        "dispatched": d.get("dispatched")})
+    except OSError:
+        pass
+    _COHORT_EVENTS = out
+    return _COHORT_EVENTS
+
+
+def _parse_crash_batch(text: str) -> dict | None:
+    if RE_CRASH_BATCH_PREFIX not in text:
+        return None
+    mk = RE_CRASH_BATCH_K.search(text)
+    mm = RE_CRASH_BATCH_M.search(text)
+    mi = RE_CRASH_BATCH_ITER.search(text)
+    mn = RE_CRASH_BATCH_NAMES.search(text)
+    names = ([n.strip() for n in mn["names"].split(",") if n.strip()]
+             if mn else [])
+    return {"k": int(mk["k"]) if mk else None,
+            "m": int(mm["m"]) if mm else None,
+            "iter": int(mi["iter"]) if mi else None,
+            "names": names}
+
+
+def _cohort_sweeps(run: Run) -> tuple[list[dict], list[tuple[str, int | None, int]]]:
+    """Dispatching sweeps in log order, each with its crash batch line (if
+    any), the dispatch count and the cursor position; plus the chain-derived
+    blame lines as (ref, iter, count)."""
+    events = _cohort_events_by_run().get(run.run_id) or {"batch": {}, "iter": {}}
+    used_batch: dict[int, int] = defaultdict(int)
+    used_iter: dict[int, int] = defaultdict(int)
+    sweeps: list[dict] = []
+    chain: list[tuple[str, int | None, int]] = []
+    pending: dict | None = None
+    for ref, text in run.lines:
+        if (mc := RE_CHAIN_DERIVED.search(text)):
+            chain.append((ref, int(mc["iter"]), int(mc["k"])))
+            continue
+        if (pb := _parse_crash_batch(text)) is not None:
+            pb["ref"] = ref
+            pending = pb
+            continue
+        m = RE_ITER.search(text)
+        if not m:
+            continue
+        it = int(m["iter"])
+        md = RE_DISPATCHING.search(text)
+        sw: dict = {"iter": it, "ref": ref, "batch": None,
+              "dispatched": int(md["n"]) if md else None,
+              "attempted_before": (int(md["done"]) - int(md["n"])) if md else None,
+              "event_attempted_before": None}
+        evs = events["iter"].get(it) or []
+        if used_iter[it] < len(evs):
+            sw["event_attempted_before"] = evs[used_iter[it]]["attempted_before"]
+            used_iter[it] += 1
+        if pending is not None and pending["iter"] == it:
+            sw["batch"] = pending
+            full = events["batch"].get(it) or []
+            if used_batch[it] < len(full):
+                sw["batch"]["full"] = full[used_batch[it]]
+                used_batch[it] += 1
+        pending = None
+        sweeps.append(sw)
+    return sweeps, chain
+
+
+def _cohort_tail(sw: dict) -> bool:
+    """The sweep's crash cohort is larger than the batch it filled: K graded
+    units, M of them dispatched, M >= 1, K > M, and the batch held nothing
+    else (M >= dispatched when the summary says how many were dispatched).
+    K > M with M < dispatched is the `_off` shape — graded units absent from
+    the frontier — not a tail waiting under the cap."""
+    b = sw["batch"]
+    if not b or b["k"] is None or b["m"] is None or b["m"] < 1:
+        return False
+    if b["k"] <= b["m"]:
+        return False
+    return sw["dispatched"] is None or b["m"] >= sw["dispatched"]
+
+
+def _cohort_batch_set(sw: dict) -> tuple[set[str], bool]:
+    """The dispatched batch as a name set and whether it is complete: the
+    schedule event's union when the stream has it, else the log's names,
+    which are complete only when M <= 8 (the driver prints `_aimed[:8]`)."""
+    b = sw["batch"]
+    full = b.get("full")
+    if full:
+        return set(full), True
+    return set(b["names"]), len(b["names"]) >= (b["m"] or 0)
+
+
+def detect_p24(run: Run, iters: list[dict]) -> list[dict]:
+    """Crash-cohort lock: the crash-evidence cohort is larger than the
+    dispatch batch and every graded unit is exempt from the pass cursor,
+    so the same head is re-bought sweep after sweep and the tail is never
+    dispatched. `take_batch(exempt=_crash_grades.keys())` subtracts the
+    exempt keys from `attempted` before ranking, and `promote_crash_evidence`
+    puts the whole cohort at the front, so with K > cap the pending list
+    starts at slot 0 on every sweep — which is exactly what the iter line's
+    `(D/F this pass` reads as `attempted_before = D - N = 0` and the
+    `phase_c.tdd.iter` event records as `attempted_before: 0`.
+
+    Two grades. LOCKED: consecutive dispatching sweeps both with K > M whose
+    later batch is a subset of the earlier one (nothing new dispatched).
+    ARMED: the run's last dispatching sweep has K > M and its cursor at 0,
+    and no later judged sweep exists — the repeat is unread because the
+    process ended inside that batch. A K > M sweep followed by a batch that
+    carries a new name is the cursor walking the cohort and is not a hit; a
+    K <= M cohort re-dispatched identically (the frame-blame shape, 5 of 5
+    every sweep) is the exemption doing what its docstring says and is not
+    a hit either.
+
+    Sources, and why. The batch line is matched on the prefix `carry crash
+    evidence this sweep`; K, M, iter and names are each searched separately
+    so an extended wording (frame/chain counts) still parses. The driver
+    prints at most 8 names with no marker, so for M > 8 the batch is the
+    union of `phase_c.fill.schedule` `runs[*].targets` for the same run and
+    iter — emitted before the fill runs, so a killed run still carries it
+    (`phase_c.route.run` is written at route end; `phase_c.tdd.iter` has
+    `dispatched` as a count only). With no schedule event the log's names
+    stand and the row says the set is partial. The cursor reading comes
+    from the summary line and is cross-checked against the event's
+    `attempted_before`; the chain-derived line count and each line's fn
+    count come from the `synthesized CHAIN-DERIVED blame … for K fn(s)`
+    lines, because an inferred cohort is what makes K exceed the cap.
+
+    The recorded instance, run `1577437-c93d5c26` (2026-09-06): iter 2
+    `(12/67 this pass` and iter 4 `(12/68 this pass` both read
+    attempted_before=0; iter 3 synthesized chain-derived blame for 63 fn(s)
+    (the event lists 50 chain keys under `blamed`); iter 4's batch line read
+    `63 unit(s) … 12 of them are in this batch` naming 8, the schedule event
+    the 12; the process was SIGTERMed 14 minutes into that batch, so the run
+    has one K > cap sweep and grades ARMED. P3 records the same run as
+    `blamed NOBODY x6` and stops there.
+    """
+    sweeps, chain = _cohort_sweeps(run)
+    if not sweeps:
+        return []
+    resets = [s for s in sweeps
+              if s["attempted_before"] == 0 and (s["dispatched"] or 0) > 0]
+    reset_txt = ("cursor attempted_before=0 at iter(s) "
+                 + ", ".join(str(s["iter"]) for s in resets)
+                 if resets else "no dispatching sweep read attempted_before=0")
+    disagree = [s for s in resets if s["event_attempted_before"] not in (None, 0)]
+    if disagree:
+        reset_txt += (" (event disagrees at iter(s) "
+                      + ", ".join(str(s["iter"]) for s in disagree) + ")")
+    chain_txt = (f"{len(chain)} chain-derived blame line(s): "
+                 + "; ".join(f"iter {it} for {k} fn(s)" for _r, it, k in chain)
+                 if chain else "no chain-derived blame line")
+
+    def _head(sw: dict) -> str:
+        names, complete = _cohort_batch_set(sw)
+        shown = sorted(names)
+        txt = ", ".join(shown[:6]) + (" …" if len(shown) > 6 else "")
+        return (f"{len(names)} unit(s){'' if complete else ' (partial: log names only)'}"
+                f": {txt}")
+
+    hits: list[dict] = []
+    i = 0
+    while i < len(sweeps):
+        sw = sweeps[i]
+        if not _cohort_tail(sw):
+            i += 1
+            continue
+        base, _complete = _cohort_batch_set(sw)
+        run_chain = [sw]
+        j = i + 1
+        while j < len(sweeps) and _cohort_tail(sweeps[j]):
+            nxt, _c = _cohort_batch_set(sweeps[j])
+            if not nxt or not nxt <= base:
+                break
+            run_chain.append(sweeps[j])
+            base = nxt
+            j += 1
+        first, last = run_chain[0], run_chain[-1]
+        refs = [first["batch"]["ref"], first["ref"]]
+        if len(run_chain) >= 2:
+            refs += [last["batch"]["ref"], last["ref"]]
+            hits.append({
+                "grade": "LOCKED",
+                "head": sorted(base),
+                "evidence": (
+                    f"LOCKED iters {first['iter']}->{last['iter']}: crash cohort "
+                    f"{first['batch']['k']}/{last['batch']['k']} unit(s) > batch "
+                    f"{first['batch']['m']}, the head re-dispatched on "
+                    f"{len(run_chain)} consecutive sweep(s) (nothing new dispatched), "
+                    f"tail never reached — head {_head(last)}; {reset_txt}; "
+                    f"{chain_txt}"),
+                "refs": refs + [r for r, _i, _k in chain[:1]]})
+            i = j
+            continue
+        if j >= len(sweeps) and sw["attempted_before"] == 0:
+            hits.append({
+                "grade": "ARMED",
+                "head": sorted(base),
+                "evidence": (
+                    f"ARMED iter {sw['iter']}: crash cohort {sw['batch']['k']} "
+                    f"unit(s) > batch {sw['batch']['m']}, the batch is the cohort "
+                    f"head ({_head(sw)}) and the cursor read attempted_before=0 "
+                    f"(the exemption zeroed the pass cursor over the cohort); "
+                    f"{reset_txt}; {chain_txt}; no later judged sweep — the run "
+                    f"ended inside this batch, so the repeat is unread"),
+                "refs": refs + [r for r, _i, _k in chain[:1]]})
+        i = j if j > i else i + 1
+    return hits[:4]
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
@@ -1682,7 +1992,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
              "P17": detect_p17, "P18": detect_p18,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
-             "P22": detect_p22, "P23": detect_p23}
+             "P22": detect_p22, "P23": detect_p23, "P24": detect_p24}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -1701,7 +2011,8 @@ CLASS_NAMES = {
     "P20": "site-cardinality leak into the re-seed (a unit handed once per impl site)",
     "P21": "over-union session refusal (every test fits the cap, the union does not, never-served units wait)",
     "P22": "route starvation (a session opened first while a stub held leftover tests hollow and no stub route had run this fill)",
-    "P23": "declined unit (the model answered an empty body; pre-fix logged as a reader loss)"}
+    "P23": "declined unit (the model answered an empty body; pre-fix logged as a reader loss)",
+    "P24": "crash-cohort lock (cohort > batch and exempt from the cursor: head re-dispatched, tail never reached)"}
 
 
 # -------------------------------------------------------------------- report
@@ -1759,12 +2070,21 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
     fired: dict[str, list[str]] = defaultdict(list)
     nobody: dict[str, int] = defaultdict(int)
     compl: dict[tuple, list[str]] = defaultdict(list)
+    heads: dict[str, list[str]] = defaultdict(list)
     for run in runs:
         seen_e, seen_c, seen_f = set(), set(), set()
         for h in detect_p14(run, []):
             key = json.dumps(h["key"])
             if run.run_id not in compl[key]:
                 compl[key].append(run.run_id)
+        # The same cohort head bought under the cap by more than one process:
+        # a relaunch on the same tree re-derives the same inference and the
+        # same exemption, so the head recurs across run ids without any run
+        # ever reaching the tail.
+        for h in detect_p24(run, []):
+            key = ", ".join(h["head"])
+            if key and run.run_id not in heads[key]:
+                heads[key].append(run.run_id)
         for _ref, m in run.find(RE_ESCALATE):
             key = (m["test"], m["head"].strip())
             if key not in seen_e:
@@ -1806,6 +2126,10 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
         "compliance": [
             {"what": " ".join(str(x) for x in json.loads(k)), "runs": r}
             for k, r in sorted(compl.items(), key=lambda kv: -len(kv[1]))
+            if len(r) >= 2][:12],
+        "cohort_head": [
+            {"what": k[:110] + (" …" if len(k) > 110 else ""), "runs": r}
+            for k, r in sorted(heads.items(), key=lambda kv: -len(kv[1]))
             if len(r) >= 2][:12],
     }
 
@@ -1997,6 +2321,7 @@ def print_chronics(ch: dict) -> None:
         "frame_blind": "runs where the localizer blamed NOBODY",
         "compliance": "same identical-diagnostic repeat (unit code symbols)"
                       " in >=2 runs",
+        "cohort_head": "same crash-cohort head bought under the cap in >=2 runs",
     }
     for key, title in titles.items():
         entries = ch.get(key) or []

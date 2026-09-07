@@ -962,8 +962,9 @@ def retrigger_layout(
     # the line below would have read `tier NONE, 0 of 16 candidate(s); crash
     # evidence: 2 blamed frame(s), 67 chain-blamed, 36 suspect(s), 19
     # vanished` at iteration 1, which is the whole diagnosis: blame that
-    # implicates nobody, standing in front of a chain that implicates the
-    # construct/vtable component.
+    # implicates nobody, and a frame-blind crash that no inference is allowed
+    # to aim a re-author at (`crash_candidate_grade`) — the fill loop, not
+    # this walk, is where those 67 chain fns are worked.
     _route = ("compile" if compile_evidence is not None else
               "crash" if crash_evidence is not None else "plateau")
     _shape = ""

@@ -363,8 +363,25 @@ keep their own numbering; the code does not mirror it.
 
 When every point of a debt entry is implemented (or refuted / withdrawn),
 move the entry **verbatim** to `completed_tech_debt.md` — never reworded,
-never summarized, so its run ids and measurements stay quotable. An entry
-with ANY open remainder — an unshipped sub-item, an open question, a pending
+never summarized, so its run ids and measurements stay quotable.
+
+**The move is the rotate tool, in the same turn the last remainder closes.**
+Do not cut-and-paste the span by hand. Do not leave an IMPLEMENTED / SHIPPED /
+refuted / withdrawn heading in `technical_debt.md` as a standing note so a
+later session will "find it" — that is unfinished archival, and it is how the
+open file fills with work nobody can act on. The investigation grep for a
+closed class is `completed_tech_debt.md` (and `technical_debt_august.md` for
+ids 1–216).
+
+    python tools/rotate_technical_debt.py <entry-number> [<entry-number> ...] \
+        [--date YYYY-MM-DD] [--force]
+
+`<entry-number>` is the integer in the top-level `# <N> — ...` heading.
+Re-running an already-archived id prints `skip <N>: already archived` and
+touches neither file. Mechanics, the OPEN-marker refusal, range headings and
+`--force` are the next section ("Archiving a closed technical_debt.md entry").
+
+An entry with ANY open remainder — an unshipped sub-item, an open question, a pending
 live validation — stays in `technical_debt.md` until the remainder closes or
 is split into its own entry. A validation/amendment section moves with the
 entry it validates. Group headings whose children split (some shipped, some
@@ -419,6 +436,10 @@ discards task2c's merged-tree fills, which live only in the workspace `src/`)
 rather than reaching for an editor because the honest route is expensive.
 
 ## Archiving a closed technical_debt.md entry is `rotate_technical_debt.py`, never a hand cut-and-paste
+
+This is the mechanical how of the section above. When the entry is completed,
+run the tool — that is the archival. The judgment that every point is closed
+happens before the invocation, by reading the entry.
 
     python tools/rotate_technical_debt.py <entry-number> [<entry-number> ...] \
         [--date YYYY-MM-DD] [--force]
@@ -626,13 +647,19 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
 - `TDD_FILL_BUDGET_MINUTES` (default 0) — NOT a stop: the fill schedule's
   wall-clock budget (`domain/fill_schedule.py`), the minutes one fill's
   route runs share by weight (never-served and paying runs 2, served 1,
-  re-buys 0 and deferred). It can prevent no reading: the sweep runs at
-  every iteration boundary regardless, a deferred run is recorded
-  `deferred` in `logs/route_ledger/` and is the NEXT fill's never-served
-  candidate (a re-buy deferred twice is re-admitted with weight 1), and a
-  unit, turn or session in flight always completes, so a fill overruns
-  the budget by at most one unit. `0` = order only (blockers first,
-  never-served before re-buys, no shares, nothing deferred).
+  re-buys 0 and deferred). An unmeasurable run — every aimed test is one
+  whose binary did not complete, and no target is the crash-blamed
+  locator — ranks as a re-buy (weight 0) even with no ledger row, so a
+  positive budget defers it. Do not set a positive budget until a sweep
+  has printed conversion blame: deferring the conversion file before that
+  reading is a stop that fires too early. It can prevent no reading: the
+  sweep runs at every iteration boundary regardless, a deferred run is
+  recorded `deferred` in `logs/route_ledger/` and is the NEXT fill's
+  never-served candidate (a re-buy deferred twice is re-admitted with
+  weight 1), and a unit, turn or session in flight always completes, so a
+  fill overruns the budget by at most one unit. `0` = order only
+  (blockers first, never-served before re-buys, no shares, nothing
+  deferred; unmeasurable runs still execute).
   `PHASE_C_FILL_SCHEDULE=0` restores the fixed pre-schedule walk
   (sessions → pairs → file-first → per-impl → per-fn) for an A/B, and is
   the negative control of the schedule's walk tests. Read once at cluster

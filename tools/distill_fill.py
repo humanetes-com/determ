@@ -12,11 +12,32 @@ WHAT IT READS. For `--run RUN_ID --iter N`:
   - `phase_c.session.plan` of that fill: the leftover tests, each test's
     executed slice (site labels), the packed sessions, the hollow count;
   - `phase_c.fill.schedule` when the fill ran under the schedule (post-fix
-    logs) — its runs are the candidates verbatim;
+    logs) — its runs are the candidates verbatim (`schedule_runs`);
+  - `phase_c.tdd.iter` of that fill: `failed`, `failed_pairs`, `incomplete`
+    so a recorded test can derive the unmeasurable set (failed names
+    with no completed-binary pair);
+  - `phase_c.crash.localized` inside the fill: the blamed locators;
   - `phase_c.fill.route_plan` / `phase_c.file.fill.start` of that fill —
     which files the file route opened (pre-fix logs);
   - `phase_c.route.run` rows of EARLIER fills of the same cluster, as the
-    ledger the schedule would have read.
+    ledger the schedule would have read;
+  - for each file run of THIS fill: its `phase_c.file.fill.revert`
+    attempts (attempt number, `spliced`, `planned`, `retrying`), its
+    `phase_c.file.fill.done`, its `phase_c.file.installable_offered`
+    complement and its own `phase_c.route.run` row — the attempt sequence
+    one route run went through (`route_attempts`), so the harness can
+    replay a revert-then-keep through the fill's attempt bookkeeping.
+
+WHAT `route_attempts` DERIVES, named per run under `source`. Events carry
+counts, not names, for a file-first attempt: the row's `reverted` list is
+the names attempt 1 landed and reverted (pre-fix rows hold the union over
+every reverting attempt — one revert event means it is exact); the units
+the run DISPATCHED are the schedule run's targets plus the installable
+complement offered for that file (`planned` on the revert event checks the
+count); and the names a following keep landed are the row's `kept` list
+when the row records one, else the dispatched set — a compile revert does
+not restrict the retry's plan, and the retry's `fns_filled` equalled the
+reverted attempt's `spliced` on the fills distilled so far.
 
 WHAT IT CANNOT READ, and how the fixture says so. Pre-fix events carry no
 stub inventory. `--stubs a::b,c::d` names the stubs the fixture assumes;
@@ -36,9 +57,16 @@ HOW TO READ THE OUTPUT. The fixture is JSON: `run_id`, `iter`, `cluster`,
 `hollow_recorded` (the plan event's count), `stubs`, `stubs_source`,
 `file_runs` ([{file, targets, stubs}] — from the schedule event when present,
 else one per file that holds a stub, targets = that file's sites in the
-slices), `ledger_rows` (prior route rows for the cluster). The recorded test
-builds the candidate runs from it and asserts the plan's sentence about the
-order, with the fixed pre-schedule walk as the negative control.
+slices), `schedule_runs` (the schedule event's candidate runs, all kinds),
+`failed` / `failed_pairs` / `incomplete` (the iter event), `crash_blamed`
+([[file, fn], ...] from crash.localized), `ledger_rows` (prior route rows
+for the cluster), `route_attempts` ([{label, dispatched, planned_recorded,
+attempts: [{outcome, units}], recorded_outcome, source}] for this fill's
+file runs that went through more than one attempt or recorded a revert).
+The recorded test builds the candidate runs from it and asserts the plan's
+sentence about the order, with the fixed pre-schedule walk as the negative
+control; a run with `route_attempts` is replayed through the fill's attempt
+bookkeeping and its row's outcome, kept and reverted are the sentence.
 """
 from __future__ import annotations
 
@@ -77,6 +105,61 @@ def _site(label: str) -> dict[str, str]:
     head, _, cont = label.partition(" (")
     file, _, fn = head.partition("::")
     return {"file": file, "fn": fn, "container": cont.rstrip(")")}
+
+
+def _route_attempts(fill: list[dict[str, Any]], iter_n: int) -> list[dict[str, Any]]:
+    """The attempt sequence of each file run of this fill that reverted at
+    least once, from the fill's own events (see the module docstring for
+    what is derived and why)."""
+    reverts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    done: dict[str, dict[str, Any]] = {}
+    offered: dict[str, list[str]] = defaultdict(list)
+    for e in fill:
+        d = e.get("data") or {}
+        k = _kind(e)
+        if k == "phase_c.file.fill.revert":
+            reverts[str(d.get("file", ""))].append(d)
+        elif k == "phase_c.file.fill.done":
+            done[str(d.get("file", ""))] = d
+        elif k == "phase_c.file.installable_offered":
+            offered[str(d.get("file", ""))].extend(str(f) for f in d.get("fns") or [])
+    out: list[dict[str, Any]] = []
+    for e in fill:
+        if _kind(e) != "phase_c.route.run":
+            continue
+        row = e.get("data") or {}
+        if row.get("kind") != "file" or int(row.get("iteration", -1)) != iter_n:
+            continue
+        file = str((row.get("label") or "").removeprefix("file "))
+        if not reverts.get(file):
+            continue
+        targets = [f"{f}::{fn}" for f, fn in (row.get("targets") or [])]
+        dispatched = sorted(set(targets) | {f"{file}::{fn}" for fn in offered.get(file, [])})
+        reverted = sorted(f"{f}::{fn}" for f, fn in (row.get("reverted") or []))
+        kept_row = sorted(f"{f}::{fn}" for f, fn in (row.get("kept") or []))
+        attempts = [{"outcome": "reverted", "units": reverted,
+                     "attempt": int(r.get("attempt", 0)),
+                     "spliced": int(r.get("spliced", 0))}
+                    for r in reverts[file]]
+        landed = int(done.get(file, {}).get("fns_filled", 0) or 0)
+        source = ("row.reverted per revert event; dispatched = targets + "
+                  "installable_offered")
+        if landed and reverts[file][-1].get("retrying"):
+            attempts.append({"outcome": "kept",
+                             "units": kept_row or dispatched,
+                             "attempt": len(attempts) + 1, "spliced": landed})
+            source += ("; kept = row.kept" if kept_row
+                       else "; kept = dispatched (derived: unrestricted retry, "
+                            "fns_filled == spliced)")
+        out.append({
+            "label": str(row.get("label", "")), "dispatched": dispatched,
+            "planned_recorded": int(reverts[file][0].get("planned", 0) or 0),
+            "attempts": attempts,
+            "recorded_outcome": str(row.get("outcome", "")),
+            "recorded_kept": len(row.get("kept") or []),
+            "recorded_reverted": len(row.get("reverted") or []),
+            "source": source})
+    return out
 
 
 def distil(run_id: str, iter_n: int, stubs: list[str], *,
@@ -131,14 +214,38 @@ def distil(run_id: str, iter_n: int, stubs: list[str], *,
     ledger_rows = [e.get("data") or {} for e in evs[:start]
                    if _kind(e) == "phase_c.route.run"
                    and str((e.get("data") or {}).get("cluster", "")) == cluster]
+    idat = evs[start].get("data") or {}
+    schedule_runs: list[dict[str, Any]] = []
+    if sched is not None:
+        sd = sched.get("data") or {}
+        schedule_runs = list(sd.get("runs") or [])
+    crash_blamed: list[list[str]] = []
+    seen_blame: set[tuple[str, str]] = set()
+    for e in fill:
+        if _kind(e) != "phase_c.crash.localized":
+            continue
+        blamed = (e.get("data") or {}).get("blamed")
+        if not (isinstance(blamed, list) and len(blamed) == 2):
+            continue
+        pair = (str(blamed[0]), str(blamed[1]))
+        if pair in seen_blame:
+            continue
+        seen_blame.add(pair)
+        crash_blamed.append([pair[0], pair[1]])
     return {
         "run_id": run_id, "iter": iter_n, "cluster": cluster,
         "ts": str(plan.get("ts", "")),
+        "route_attempts": _route_attempts(fill, iter_n),
         "tests": tests, "sessions": sessions,
         "hollow_recorded": int(pd.get("hollow", 0) or 0),
         "fitted_recorded": int(pd.get("fitted", 0) or 0),
         "stubs": sorted(stub_set), "stubs_source": stubs_source,
         "file_runs": file_runs, "ledger_rows": ledger_rows,
+        "schedule_runs": schedule_runs,
+        "failed": list(idat.get("failed") or []),
+        "failed_pairs": [list(p) for p in (idat.get("failed_pairs") or [])],
+        "incomplete": list(idat.get("incomplete") or []),
+        "crash_blamed": crash_blamed,
     }
 
 
@@ -158,10 +265,12 @@ def main(argv: list[str] | None = None) -> int:
                         encoding="utf-8")
     print(f"wrote {args.out}: {len(fixture['tests'])} test(s), "
           f"{len(fixture['sessions'])} session(s), {len(fixture['file_runs'])} "
-          f"file run(s), {len(fixture['stubs'])} stub(s) "
+          f"file run(s), {len(fixture.get('schedule_runs') or [])} "
+          f"schedule run(s), {len(fixture['stubs'])} stub(s) "
           f"({fixture['stubs_source']}), hollow recorded "
           f"{fixture['hollow_recorded']}, {len(fixture['ledger_rows'])} "
-          "ledger row(s)")
+          f"ledger row(s), {len(fixture['route_attempts'])} run(s) with "
+          "recorded attempts")
     return 0
 
 

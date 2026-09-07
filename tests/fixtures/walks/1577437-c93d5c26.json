@@ -1,0 +1,54 @@
+{
+  "run_id": "1577437-c93d5c26",
+  "cluster": "stable",
+  "entry_best": 104,
+  "iterations": [
+    {
+      "iter": 1,
+      "passed": 97,
+      "failed": 24,
+      "oracle": 121,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 71,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 2,
+      "readmitted": 1,
+      "passed": 104,
+      "failed": 17,
+      "oracle": 121,
+      "improved": true,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 70,
+      "kind": "merged",
+      "exhausted": 0
+    },
+    {
+      "iter": 3,
+      "readmission_refused_against": 104,
+      "fills": 36,
+      "retrigger": {
+        "cause": "RUNTIME_CRASH",
+        "reverted": 0
+      },
+      "crash_passed": 104
+    },
+    {
+      "iter": 4,
+      "passed": 104,
+      "failed": 17,
+      "oracle": 121,
+      "improved": false,
+      "stall": 0,
+      "max_stall": 0,
+      "frontier": 70,
+      "kind": "merged",
+      "exhausted": 0
+    }
+  ]
+}

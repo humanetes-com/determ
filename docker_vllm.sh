@@ -271,7 +271,7 @@ CID=$(docker run -d \
     --port "$VLLM_PORT" \
     --tensor-parallel-size "$VLLM_TP" \
     --max-model-len "$VLLM_MAX_LEN" \
-    --gpu-memory-utilization 0.90 \
+    --gpu-memory-utilization 0.95 \
     --enable-prefix-caching \
     --max-num-seqs 4 \
     "${_parser_args[@]}")

@@ -1,0 +1,902 @@
+{
+ "run_id": "1577437-c93d5c26",
+ "cluster": "stable",
+ "iter": 4,
+ "measured": "2026-09-07",
+ "note": "Coverage reading of measure_coverage_slice on the tree run 1577437-c93d5c26 left at iter 4, failing_tests = that iteration's 13 red tests (its last phase_c.tdd.iter event). `control` is the SHIPPED adapter before the completion rule (pass A merges whatever profraws exist, pass C accepts any profraw on disk): both reallocate units in dead, six red tests with EMPTY owner sets, log 13/13. `process` is the per-process record of the same tree: the returncode of every whole-suite binary run and of every --exact run (negative = killed by a signal). `after` is the adapter with the completion rule: three binaries unmeasured, their tests re-run one per process, the still-dying ones absent from owners and listed unmeasured, the reallocate units no longer dead. `store_excerpt` is every record of the retrospectives store carrying a convictor_entry stamp for one of the 13 red tests, with the stamp restricted to those tests, verbatim.",
+ "failing": [
+  "test_downcast",
+  "test_downcast_high",
+  "test_downcast_low",
+  "test_downcast_mid",
+  "test_downcast_mut",
+  "test_downcast_ref",
+  "test_inference",
+  "test_large_alignment",
+  "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+  "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+  "test_root_cause",
+  "test_trailer",
+  "test_unsuccessful_downcast"
+ ],
+ "control": {
+  "log": [
+   "  [coverage] 25 dead body(ies), 2 body(ies) with unreachable lines, owner set for 13/13 failing test(s) (staged, own target dir)"
+  ],
+  "dead_n": 25,
+  "units_in_dead": {
+   "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace": true,
+   "src/error.rs::object_reallocate_boxed": true
+  },
+  "owners": {
+   "test_downcast": [],
+   "test_downcast_high": [],
+   "test_downcast_low": [],
+   "test_downcast_mid": [],
+   "test_downcast_mut": [
+    "src/context.rs::context",
+    "src/context.rs::ext_context",
+    "src/context.rs::ext_context",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::context",
+    "src/error.rs::context_chain_downcast",
+    "src/error.rs::downcast_mut",
+    "src/error.rs::downcast_ref",
+    "src/error.rs::drop",
+    "src/error.rs::new",
+    "src/error.rs::object_downcast",
+    "src/error.rs::object_drop",
+    "src/error.rs::vtable",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_mut",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ],
+   "test_downcast_ref": [
+    "src/context.rs::context",
+    "src/context.rs::ext_context",
+    "src/context.rs::ext_context",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::context",
+    "src/error.rs::context_chain_downcast",
+    "src/error.rs::drop",
+    "src/error.rs::is",
+    "src/error.rs::new",
+    "src/error.rs::object_downcast",
+    "src/error.rs::object_drop",
+    "src/error.rs::vtable",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ],
+   "test_inference": [
+    "src/context.rs::context"
+   ],
+   "test_large_alignment": [
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::downcast_ref",
+    "src/error.rs::drop",
+    "src/error.rs::new",
+    "src/error.rs::object_downcast",
+    "src/error.rs::object_drop",
+    "src/error.rs::vtable",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ],
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [],
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [],
+   "test_root_cause": [
+    "src/chain.rs::new",
+    "src/chain.rs::next",
+    "src/context.rs::context",
+    "src/context.rs::ext_context",
+    "src/context.rs::ext_context",
+    "src/context.rs::source",
+    "src/error.rs::chain",
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::context",
+    "src/error.rs::drop",
+    "src/error.rs::error",
+    "src/error.rs::new",
+    "src/error.rs::object_drop",
+    "src/error.rs::object_ref",
+    "src/error.rs::root_cause",
+    "src/error.rs::vtable",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw"
+   ],
+   "test_trailer": [
+    "src/ensure.rs::__dispatch_ensure",
+    "src/ensure.rs::as_str",
+    "src/ensure.rs::new",
+    "src/ensure.rs::write_str",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::drop",
+    "src/error.rs::error",
+    "src/error.rs::fmt",
+    "src/error.rs::is",
+    "src/error.rs::msg",
+    "src/error.rs::object_downcast",
+    "src/error.rs::object_drop",
+    "src/error.rs::object_ref",
+    "src/error.rs::vtable",
+    "src/fmt.rs::display",
+    "src/lib.rs::format_err",
+    "src/lib.rs::must_use",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw",
+    "src/wrapper.rs::fmt"
+   ],
+   "test_unsuccessful_downcast": []
+  },
+  "absent": [],
+  "dead": [
+   "src/backtrace.rs::_assert_send_sync",
+   "src/context.rs::write_str",
+   "src/ensure.rs::render",
+   "src/error.rs::as_ref",
+   "src/error.rs::construct_from_context",
+   "src/error.rs::context_backtrace",
+   "src/error.rs::context_chain_drop_rest",
+   "src/error.rs::context_downcast",
+   "src/error.rs::context_drop_rest",
+   "src/error.rs::deref_mut",
+   "src/error.rs::downcast_mut",
+   "src/error.rs::erase",
+   "src/error.rs::error_mut",
+   "src/error.rs::no_backtrace",
+   "src/error.rs::object_reallocate_boxed",
+   "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+   "src/error.rs::source",
+   "src/ptr.rs::boxed",
+   "src/ptr.rs::by_mut",
+   "src/ptr.rs::cast",
+   "src/ptr.rs::clone",
+   "src/ptr.rs::deref_mut",
+   "src/ptr.rs::extend",
+   "src/ptr.rs::new",
+   "src/ptr.rs::read"
+  ],
+  "dead_event_iter": 4
+ },
+ "process": {
+  "pass_a": {
+   "error_gen_3-1a679321963fec42": {
+    "rc": -11,
+    "profraws": 0
+   },
+   "test_context-109102c34b6cc2a8": {
+    "rc": -6,
+    "profraws": 0
+   },
+   "test_downcast-454774852ee40805": {
+    "rc": -6,
+    "profraws": 0
+   },
+   "test_ensure-36bdcb97a4f2c082": {
+    "rc": 101,
+    "profraws": 1
+   }
+  },
+  "pass_c": {
+   "test_downcast": {
+    "binary": "test_downcast-454774852ee40805",
+    "rc": -6,
+    "raw_exists": true,
+    "entered": 0
+   },
+   "test_downcast_high": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": -6,
+    "raw_exists": true,
+    "entered": 0
+   },
+   "test_downcast_low": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": -6,
+    "raw_exists": true,
+    "entered": 0
+   },
+   "test_downcast_mid": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": -6,
+    "raw_exists": true,
+    "entered": 0
+   },
+   "test_downcast_mut": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": 0,
+    "raw_exists": true,
+    "entered": 17
+   },
+   "test_downcast_ref": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": 101,
+    "raw_exists": true,
+    "entered": 15
+   },
+   "test_inference": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": 0,
+    "raw_exists": true,
+    "entered": 1
+   },
+   "test_large_alignment": {
+    "binary": "test_downcast-454774852ee40805",
+    "rc": 0,
+    "raw_exists": true,
+    "entered": 11
+   },
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": {
+    "binary": "error_gen_3-1a679321963fec42",
+    "rc": -11,
+    "raw_exists": true,
+    "entered": 0
+   },
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": {
+    "binary": "error_gen_3-1a679321963fec42",
+    "rc": -11,
+    "raw_exists": true,
+    "entered": 0
+   },
+   "test_root_cause": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": 0,
+    "raw_exists": true,
+    "entered": 20
+   },
+   "test_trailer": {
+    "binary": "test_ensure-36bdcb97a4f2c082",
+    "rc": 101,
+    "raw_exists": true,
+    "entered": 23
+   },
+   "test_unsuccessful_downcast": {
+    "binary": "test_context-109102c34b6cc2a8",
+    "rc": -11,
+    "raw_exists": true,
+    "entered": 0
+   }
+  }
+ },
+ "after": {
+  "log": [
+   "  [coverage] 3 binary(ies) did not complete (killed by a signal or no profile written): error_gen_3 (rc=-11), test_context (rc=-6), test_downcast (rc=-11); 17 test(s) re-run alone, 9 measured, 8 still unmeasured: test_downcast, test_downcast_high, test_downcast_low, test_downcast_mid, test_downcast_mut, test_drop, test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait, test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+   "  [coverage] 17 dead body(ies), 2 body(ies) with unreachable lines, owner set for 6/13 failing test(s), 7 unmeasured (binary did not complete) (staged, own target dir)"
+  ],
+  "dead_n": 17,
+  "units_in_dead": {
+   "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace": false,
+   "src/error.rs::object_reallocate_boxed": false
+  },
+  "absent": [
+   "test_downcast",
+   "test_downcast_high",
+   "test_downcast_low",
+   "test_downcast_mid",
+   "test_downcast_mut",
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context"
+  ],
+  "unmeasured_binaries": [
+   "error_gen_3",
+   "test_context",
+   "test_downcast"
+  ],
+  "unmeasured_tests": [
+   "test_downcast",
+   "test_downcast_high",
+   "test_downcast_low",
+   "test_downcast_mid",
+   "test_downcast_mut",
+   "test_drop",
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+   "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context"
+  ],
+  "owners_n": {
+   "test_downcast_ref": 17,
+   "test_inference": 1,
+   "test_large_alignment": 11,
+   "test_root_cause": 22,
+   "test_trailer": 23,
+   "test_unsuccessful_downcast": 14
+  }
+ },
+ "store_excerpt": {
+  "src/error.rs::construct::Error": {
+   "category": "WRONG_TYPE_CHOICE",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_large_alignment": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ]
+   }
+  },
+  "src/error.rs::fmt::DebugforErrorImpl<E>": {
+   "category": "WRONG_TYPE_CHOICE",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/lib.rs::format_err",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_large_alignment": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::downcast_ref",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ],
+    "test_trailer": [
+     "src/ensure.rs::__dispatch_ensure",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::deref",
+     "src/error.rs::drop",
+     "src/error.rs::error",
+     "src/error.rs::fmt",
+     "src/error.rs::is",
+     "src/error.rs::msg",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_ref",
+     "src/error.rs::vtable",
+     "src/lib.rs::format_err",
+     "src/lib.rs::must_use",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::deref",
+     "src/ptr.rs::new",
+     "src/wrapper.rs::fmt"
+    ]
+   }
+  },
+  "src/error.rs::context_chain_downcast::": {
+   "category": "WRONG_TYPE_CHOICE",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast_high": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_downcast_low": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_downcast_mid": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_downcast_mut": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast_mut",
+     "src/error.rs::drop",
+     "src/ptr.rs::by_mut",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_downcast_ref": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::drop",
+     "src/error.rs::is",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_unsuccessful_downcast": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/ptr.rs::by_ref"
+    ]
+   }
+  },
+  "src/error.rs::context::Error": {
+   "category": "WRONG_TYPE_CHOICE",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast_high": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::from_raw"
+    ],
+    "test_downcast_low": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::context_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::from_raw"
+    ],
+    "test_downcast_mid": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_context",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::context_downcast",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::from_raw"
+    ]
+   }
+  },
+  "src/error.rs::construct_from_std::Error": {
+   "category": "NEEDS_VTABLE_ACCESS",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast": [
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::msg",
+     "src/lib.rs::format_err"
+    ],
+    "test_downcast_high": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_downcast_low": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_downcast_mid": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_downcast_mut": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_downcast_ref": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_large_alignment": [
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::msg"
+    ],
+    "test_root_cause": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ],
+    "test_trailer": [
+     "src/ensure.rs::__dispatch_ensure",
+     "src/ensure.rs::new",
+     "src/ensure.rs::write_str",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::msg"
+    ],
+    "test_unsuccessful_downcast": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::new"
+    ]
+   }
+  },
+  "src/error.rs::object_ref::": {
+   "category": "WRONG_TYPE_CHOICE",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_root_cause": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::chain",
+     "src/error.rs::chain",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::drop",
+     "src/error.rs::error",
+     "src/error.rs::new",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_ref",
+     "src/error.rs::root_cause",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::deref"
+    ],
+    "test_trailer": [
+     "src/ensure.rs::__dispatch_ensure",
+     "src/ensure.rs::new",
+     "src/ensure.rs::write_str",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::deref",
+     "src/error.rs::drop",
+     "src/error.rs::error",
+     "src/error.rs::fmt",
+     "src/error.rs::msg",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_ref",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::deref"
+    ]
+   }
+  },
+  "src/error.rs::object_reallocate_boxed::": {
+   "category": "WRONG_TYPE_CHOICE",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ]
+   }
+  },
+  "src/error.rs::object_downcast::": {
+   "category": "WRONG_DEREF_PATTERN",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/lib.rs::format_err",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_large_alignment": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::downcast_ref",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::by_ref"
+    ]
+   }
+  },
+  "src/ptr.rs::*impl*::Ref<,T>": {
+   "category": "WRONG_DEREF_PATTERN",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast_mut": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::downcast_mut",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::by_mut",
+     "src/ptr.rs::by_ref"
+    ]
+   }
+  },
+  "src/error.rs::fmt::DisplayforErrorImpl<E>": {
+   "category": "NEEDS_VTABLE_ACCESS",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::downcast",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/lib.rs::format_err",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_large_alignment": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::downcast_ref",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::by_ref"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::drop",
+     "src/error.rs::new",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ],
+    "test_trailer": [
+     "src/ensure.rs::__dispatch_ensure",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::deref",
+     "src/error.rs::drop",
+     "src/error.rs::error",
+     "src/error.rs::fmt",
+     "src/error.rs::is",
+     "src/error.rs::msg",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_ref",
+     "src/error.rs::vtable",
+     "src/lib.rs::format_err",
+     "src/lib.rs::must_use",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::deref",
+     "src/ptr.rs::new",
+     "src/wrapper.rs::fmt"
+    ]
+   }
+  },
+  "src/error.rs::is::Error": {
+   "category": "WRONG_DEREF_PATTERN",
+   "error_count": 0,
+   "convictor_entry": {
+    "test_downcast_ref": [
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::context_chain_downcast",
+     "src/error.rs::drop",
+     "src/error.rs::is",
+     "src/error.rs::new",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::vtable",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::from_raw"
+    ],
+    "test_inference": [
+     "src/context.rs::context"
+    ],
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [
+     "src/context.rs::fmt",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::drop",
+     "src/error.rs::msg",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_reallocate_boxed",
+     "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+     "src/error.rs::vtable"
+    ],
+    "test_root_cause": [
+     "src/chain.rs::new",
+     "src/chain.rs::next",
+     "src/context.rs::context",
+     "src/context.rs::ext_context",
+     "src/context.rs::ext_context",
+     "src/context.rs::source",
+     "src/error.rs::chain",
+     "src/error.rs::chain",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::context",
+     "src/error.rs::drop",
+     "src/error.rs::error",
+     "src/error.rs::new",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_ref",
+     "src/error.rs::root_cause",
+     "src/error.rs::vtable",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::deref",
+     "src/ptr.rs::new"
+    ],
+    "test_trailer": [
+     "src/ensure.rs::__dispatch_ensure",
+     "src/ensure.rs::as_str",
+     "src/ensure.rs::new",
+     "src/ensure.rs::write_str",
+     "src/error.rs::construct",
+     "src/error.rs::construct_from_adhoc",
+     "src/error.rs::construct_from_std",
+     "src/error.rs::deref",
+     "src/error.rs::drop",
+     "src/error.rs::error",
+     "src/error.rs::fmt",
+     "src/error.rs::is",
+     "src/error.rs::msg",
+     "src/error.rs::object_downcast",
+     "src/error.rs::object_drop",
+     "src/error.rs::object_ref",
+     "src/error.rs::vtable",
+     "src/lib.rs::format_err",
+     "src/lib.rs::must_use",
+     "src/ptr.rs::as_ptr",
+     "src/ptr.rs::by_ref",
+     "src/ptr.rs::deref",
+     "src/ptr.rs::from_raw",
+     "src/ptr.rs::new",
+     "src/wrapper.rs::fmt"
+    ]
+   }
+  }
+ }
+}

@@ -1,0 +1,868 @@
+{
+ "source": "logs/events.jsonl phase_c.crash.chain_blame, run 1577437-c93d5c26, iter 3; tmp/anyhow/.skeleton/_layout_outcomes_stable.json (item_names, outcome); skeleton-extractor --enumerate-fns over tmp/anyhow/.skeleton-filled/stable, restricted to the chain-blamed and reverse-map-suspect fns; reverse map = build_test_reverse_map over the cluster's tests/*.rs for the 12 vanished tests",
+ "event": {
+  "ts": "2026-09-06T22:14:42.839+00:00",
+  "product": "anyhow",
+  "pipeline_sha": "22a4f111283e",
+  "run_id": "1577437-c93d5c26",
+  "event": "phase_c.crash.chain_blame",
+  "thread": "MainThread",
+  "tid": 139891094395840,
+  "data": {
+   "cluster": "stable",
+   "iter": 3,
+   "binaries": [
+    "tests/error_gen_3.rs"
+   ],
+   "tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "blamed": [
+    "src/chain.rs::default",
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next",
+    "src/chain.rs::next_back",
+    "src/context.rs::context",
+    "src/context.rs::ext_context",
+    "src/context.rs::fmt",
+    "src/context.rs::source",
+    "src/context.rs::with_context",
+    "src/context.rs::write_str",
+    "src/ensure.rs::__dispatch_ensure",
+    "src/ensure.rs::new",
+    "src/ensure.rs::render",
+    "src/ensure.rs::write_str",
+    "src/error.rs::as_ref",
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::construct_from_context",
+    "src/error.rs::construct_from_display",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::context",
+    "src/error.rs::context_chain_downcast",
+    "src/error.rs::context_downcast",
+    "src/error.rs::deref",
+    "src/error.rs::deref_mut",
+    "src/error.rs::downcast",
+    "src/error.rs::downcast_mut",
+    "src/error.rs::downcast_ref",
+    "src/error.rs::drop",
+    "src/error.rs::erase",
+    "src/error.rs::error",
+    "src/error.rs::fmt",
+    "src/error.rs::from",
+    "src/error.rs::from_boxed",
+    "src/error.rs::is",
+    "src/error.rs::msg",
+    "src/error.rs::new",
+    "src/error.rs::object_downcast",
+    "src/error.rs::object_ref",
+    "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+    "src/error.rs::root_cause",
+    "src/error.rs::source",
+    "src/fmt.rs::write_str",
+    "src/kind.rs::anyhow_kind",
+    "src/kind.rs::new",
+    "src/lib.rs::Ok",
+    "src/lib.rs::format_err"
+   ],
+   "provenance": "chain_derived",
+   "suspect_count": 34,
+   "chain_count": 63
+  }
+ },
+ "components": [
+  {
+   "item_names": [
+    "ChainState"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Quoted"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Sealed"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "StdError"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "BothDebug"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Buf"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "NotBothDebug"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "ContextError"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Indented"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Adhoc",
+    "AdhocKind"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Boxed",
+    "BoxedKind"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Trait",
+    "TraitKind"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "Chain"
+   ],
+   "outcome": "GATED"
+  },
+  {
+   "item_names": [
+    "Backtrace",
+    "CastTo",
+    "Error",
+    "ErrorImpl",
+    "ErrorVTable",
+    "Mut",
+    "Own",
+    "Ref",
+    "backtrace",
+    "chain",
+    "construct",
+    "construct_from_adhoc",
+    "construct_from_boxed",
+    "construct_from_context",
+    "construct_from_display",
+    "construct_from_std",
+    "context_backtrace",
+    "context_chain_downcast",
+    "context_chain_drop_rest",
+    "context_downcast",
+    "context_drop_rest",
+    "debug",
+    "display",
+    "erase",
+    "error",
+    "error_mut",
+    "no_backtrace",
+    "object_boxed",
+    "object_downcast",
+    "object_drop",
+    "object_drop_front",
+    "object_reallocate_boxed",
+    "object_ref",
+    "vtable"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "BoxedError"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "DisplayError"
+   ],
+   "outcome": "AUTHORED"
+  },
+  {
+   "item_names": [
+    "MessageError"
+   ],
+   "outcome": "AUTHORED"
+  }
+ ],
+ "suspects": [
+  "src/chain.rs::new",
+  "src/context.rs::context",
+  "src/context.rs::fmt",
+  "src/context.rs::source",
+  "src/context.rs::write_str",
+  "src/ensure.rs::new",
+  "src/ensure.rs::write_str",
+  "src/error.rs::as_ref",
+  "src/error.rs::context",
+  "src/error.rs::deref",
+  "src/error.rs::downcast",
+  "src/error.rs::downcast_mut",
+  "src/error.rs::downcast_ref",
+  "src/error.rs::drop",
+  "src/error.rs::error",
+  "src/error.rs::fmt",
+  "src/error.rs::from",
+  "src/error.rs::is",
+  "src/error.rs::msg",
+  "src/error.rs::new",
+  "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace",
+  "src/error.rs::root_cause",
+  "src/error.rs::source",
+  "src/fmt.rs::write_str",
+  "src/kind.rs::new",
+  "src/lib.rs::Ok",
+  "src/lib.rs::not",
+  "src/lib.rs::source",
+  "src/nightly.rs::fmt",
+  "src/ptr.rs::boxed",
+  "src/ptr.rs::deref",
+  "src/ptr.rs::new",
+  "src/wrapper.rs::fmt",
+  "src/wrapper.rs::source"
+ ],
+ "fn_records": [
+  {
+   "file": "src/chain.rs",
+   "fn_name": "default",
+   "container": "impl Default for Chain < '_ >",
+   "sig_text": "fn default() -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/chain.rs",
+   "fn_name": "len",
+   "container": "impl ExactSizeIterator for Chain < '_ >",
+   "sig_text": "fn len(&self) -> usize",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/chain.rs",
+   "fn_name": "new",
+   "container": "impl Chain < 'a >",
+   "sig_text": "fn new(head: &'a (dyn StdError + 'static)) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/chain.rs",
+   "fn_name": "next",
+   "container": "impl Iterator for Chain < 'a >",
+   "sig_text": "fn next(&mut self) -> Option<Self::Item>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/chain.rs",
+   "fn_name": "next_back",
+   "container": "impl DoubleEndedIterator for Chain < '_ >",
+   "sig_text": "fn next_back(&mut self) -> Option<Self::Item>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "context",
+   "container": "impl Context < T , E > for Result < T , E >",
+   "sig_text": "fn context<C>(self, context: C) -> Result<T, Error>\n    where\n        C: Display + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "context",
+   "container": "impl Context < T , Infallible > for Option < T >",
+   "sig_text": "fn context<C>(self, context: C) -> Result<T, Error>\n    where\n        C: Display + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "ext_context",
+   "container": "impl StdError for E",
+   "sig_text": "fn ext_context<C>(self, context: C) -> Error\n        where\n            C: Display + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "ext_context",
+   "container": "impl StdError for Error",
+   "sig_text": "fn ext_context<C>(self, context: C) -> Error\n        where\n            C: Display + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for ContextError < C , E >",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for ContextError < C , E >",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for Quoted < C >",
+   "sig_text": "fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "source",
+   "container": "impl StdError for ContextError < C , E >",
+   "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "source",
+   "container": "impl StdError for ContextError < C , Error >",
+   "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "with_context",
+   "container": "impl Context < T , E > for Result < T , E >",
+   "sig_text": "fn with_context<C, F>(self, context: F) -> Result<T, Error>\n    where\n        C: Display + Send + Sync + 'static,\n        F: FnOnce() -> C,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "with_context",
+   "container": "impl Context < T , Infallible > for Option < T >",
+   "sig_text": "fn with_context<C, F>(self, context: F) -> Result<T, Error>\n    where\n        C: Display + Send + Sync + 'static,\n        F: FnOnce() -> C,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/context.rs",
+   "fn_name": "write_str",
+   "container": "impl Write for Quoted < & mut fmt :: Formatter < '_ > >",
+   "sig_text": "fn write_str(&mut self, s: &str) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ensure.rs",
+   "fn_name": "__dispatch_ensure",
+   "container": "impl BothDebug for (A , B)",
+   "sig_text": "fn __dispatch_ensure(self, msg: &'static str) -> Error",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ensure.rs",
+   "fn_name": "__dispatch_ensure",
+   "container": "impl NotBothDebug for & (A , B)",
+   "sig_text": "fn __dispatch_ensure(self, msg: &'static str) -> Error",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ensure.rs",
+   "fn_name": "new",
+   "container": "impl Buf",
+   "sig_text": "fn new() -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ensure.rs",
+   "fn_name": "render",
+   "container": "",
+   "sig_text": "fn render(msg: &'static str, lhs: &dyn Debug, rhs: &dyn Debug) -> Error",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ensure.rs",
+   "fn_name": "write_str",
+   "container": "impl Write for Buf",
+   "sig_text": "fn write_str(&mut self, s: &str) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "as_ref",
+   "container": "impl AsRef < dyn StdError + Send + Sync > for Error",
+   "sig_text": "fn as_ref(&self) -> &(dyn StdError + Send + Sync + 'static)",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "as_ref",
+   "container": "impl AsRef < dyn StdError > for Error",
+   "sig_text": "fn as_ref(&self) -> &(dyn StdError + 'static)",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "chain",
+   "container": "impl Error",
+   "sig_text": "fn chain(&self) -> Chain",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "chain",
+   "container": "impl ErrorImpl",
+   "sig_text": "fn chain(this: Ref<Self>) -> Chain",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "construct",
+   "container": "impl Error",
+   "sig_text": "fn construct<E>(error: E, vtable: &'static ErrorVTable, backtrace: Option<Backtrace>) -> Self where E: StdError + Send + Sync + 'static",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "construct_from_adhoc",
+   "container": "impl Error",
+   "sig_text": "fn construct_from_adhoc<M>(message: M, backtrace: Option<Backtrace>) -> Self where M: Display + Debug + Send + Sync + 'static",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "construct_from_boxed",
+   "container": "impl Error",
+   "sig_text": "fn construct_from_boxed(error: Box<dyn StdError + Send + Sync>, backtrace: Option<Backtrace>) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "construct_from_context",
+   "container": "impl Error",
+   "sig_text": "fn construct_from_context<C, E>(context: C, error: E, backtrace: Option<Backtrace>) -> Self where C: Display + Send + Sync + 'static, E: StdError + Send + Sync + 'static",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "construct_from_display",
+   "container": "impl Error",
+   "sig_text": "fn construct_from_display<M>(message: M, backtrace: Option<Backtrace>) -> Self where M: Display + Send + Sync + 'static",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "construct_from_std",
+   "container": "impl Error",
+   "sig_text": "fn construct_from_std<E>(error: E, backtrace: Option<Backtrace>) -> Self where E: StdError + Send + Sync + 'static",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "context",
+   "container": "impl Error",
+   "sig_text": "fn context<C>(self, context: C) -> Self\n    where\n        C: Display + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "context_chain_downcast",
+   "container": "",
+   "sig_text": "fn context_chain_downcast<C>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>\nwhere\n    C: 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "context_downcast",
+   "container": "",
+   "sig_text": "fn context_downcast<C, E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>\nwhere\n    C: 'static,\n    E: 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "deref",
+   "container": "impl Deref for Error",
+   "sig_text": "fn deref(&self) -> &Self::Target",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "deref_mut",
+   "container": "impl DerefMut for Error",
+   "sig_text": "fn deref_mut(&mut self) -> &mut Self::Target",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "downcast",
+   "container": "impl Error",
+   "sig_text": "fn downcast<E>(mut self) -> Result<E, Self>\n    where\n        E: Display + Debug + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "downcast_mut",
+   "container": "impl Error",
+   "sig_text": "fn downcast_mut<E>(&mut self) -> Option<&mut E>\n    where\n        E: Display + Debug + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "downcast_ref",
+   "container": "impl Error",
+   "sig_text": "fn downcast_ref<E>(&self) -> Option<&E>\n    where\n        E: Display + Debug + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "drop",
+   "container": "impl Drop for Error",
+   "sig_text": "fn drop(&mut self)",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "erase",
+   "container": "impl ErrorImpl < E >",
+   "sig_text": "fn erase(&self) -> Ref<ErrorImpl>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "error",
+   "container": "impl ErrorImpl",
+   "sig_text": "fn error(this: Ref<Self>) -> &(dyn StdError + Send + Sync + 'static)",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for Error",
+   "sig_text": "fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for Error",
+   "sig_text": "fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for ErrorImpl < E >",
+   "sig_text": "fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for ErrorImpl < E >",
+   "sig_text": "fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "from",
+   "container": "impl From < E > for Error",
+   "sig_text": "fn from(error: E) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "from",
+   "container": "impl From < Error > for Box < dyn StdError + Send + Sync + 'static >",
+   "sig_text": "fn from(error: Error) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "from",
+   "container": "impl From < Error > for Box < dyn StdError + Send + 'static >",
+   "sig_text": "fn from(error: Error) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "from",
+   "container": "impl From < Error > for Box < dyn StdError + 'static >",
+   "sig_text": "fn from(error: Error) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "from_boxed",
+   "container": "impl Error",
+   "sig_text": "fn from_boxed(boxed_error: Box<dyn StdError + Send + Sync + 'static>) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "is",
+   "container": "impl Error",
+   "sig_text": "fn is<E>(&self) -> bool\n    where\n        E: Display + Debug + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "msg",
+   "container": "impl Error",
+   "sig_text": "fn msg<M>(message: M) -> Self\n    where\n        M: Display + Debug + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "new",
+   "container": "impl Error",
+   "sig_text": "fn new<E>(error: E) -> Self\n    where\n        E: StdError + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "object_downcast",
+   "container": "",
+   "sig_text": "fn object_downcast<E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>\nwhere\n    E: 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "object_ref",
+   "container": "",
+   "sig_text": "fn object_ref<E>(e: Ref<ErrorImpl>) -> Ref<dyn StdError + Send + Sync + 'static> where E: StdError + Send + Sync + 'static",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "reallocate_into_boxed_dyn_error_without_backtrace",
+   "container": "impl Error",
+   "sig_text": "fn reallocate_into_boxed_dyn_error_without_backtrace(\n        self,\n    ) -> Box<dyn StdError + Send + Sync + 'static>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "root_cause",
+   "container": "impl Error",
+   "sig_text": "fn root_cause(&self) -> &(dyn StdError + 'static)",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/error.rs",
+   "fn_name": "source",
+   "container": "impl StdError for ErrorImpl < E >",
+   "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/fmt.rs",
+   "fn_name": "write_str",
+   "container": "impl Write for Indented < '_ , T >",
+   "sig_text": "fn write_str(&mut self, s: &str) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/kind.rs",
+   "fn_name": "anyhow_kind",
+   "container": "trait AdhocKind",
+   "sig_text": "fn anyhow_kind(&self) -> Adhoc",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/kind.rs",
+   "fn_name": "anyhow_kind",
+   "container": "trait TraitKind",
+   "sig_text": "fn anyhow_kind(&self) -> Trait",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/kind.rs",
+   "fn_name": "anyhow_kind",
+   "container": "trait BoxedKind",
+   "sig_text": "fn anyhow_kind(&self) -> Boxed",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/kind.rs",
+   "fn_name": "new",
+   "container": "impl Adhoc",
+   "sig_text": "fn new<M>(self, message: M) -> Error\n    where\n        M: Display + Debug + Send + Sync + 'static,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/kind.rs",
+   "fn_name": "new",
+   "container": "impl Trait",
+   "sig_text": "fn new<E>(self, error: E) -> Error\n    where\n        E: Into<Error>,",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/kind.rs",
+   "fn_name": "new",
+   "container": "impl Boxed",
+   "sig_text": "fn new(self, error: Box<dyn StdError + Send + Sync>) -> Error",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/lib.rs",
+   "fn_name": "Ok",
+   "container": "",
+   "sig_text": "fn Ok<T>(value: T) -> Result<T>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/lib.rs",
+   "fn_name": "format_err",
+   "container": "mod __private",
+   "sig_text": "fn format_err(args: Arguments) -> Error",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/lib.rs",
+   "fn_name": "not",
+   "container": "mod __private",
+   "sig_text": "fn not(cond: impl Bool) -> bool",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/lib.rs",
+   "fn_name": "not",
+   "container": "impl Bool for bool",
+   "sig_text": "fn not(self) -> bool",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/lib.rs",
+   "fn_name": "not",
+   "container": "impl Bool for & bool",
+   "sig_text": "fn not(self) -> bool",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/lib.rs",
+   "fn_name": "source",
+   "container": "trait StdError",
+   "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/nightly.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for MyError",
+   "sig_text": "fn fmt(&self, _formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/nightly.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for MyError",
+   "sig_text": "fn fmt(&self, _formatter: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ptr.rs",
+   "fn_name": "boxed",
+   "container": "impl Own < T >",
+   "sig_text": "fn boxed(self) -> Box<T>",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ptr.rs",
+   "fn_name": "deref",
+   "container": "impl Ref < 'a , T >",
+   "sig_text": "fn deref(self) -> &'a T",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ptr.rs",
+   "fn_name": "new",
+   "container": "impl Own < T >",
+   "sig_text": "fn new(ptr: Box<T>) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/ptr.rs",
+   "fn_name": "new",
+   "container": "impl Ref < 'a , T >",
+   "sig_text": "fn new(ptr: &'a T) -> Self",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for MessageError < M >",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for MessageError < M >",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for DisplayError < M >",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for DisplayError < M >",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "fmt",
+   "container": "impl Debug for BoxedError",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "fmt",
+   "container": "impl Display for BoxedError",
+   "sig_text": "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+   "has_unimplemented_body": false
+  },
+  {
+   "file": "src/wrapper.rs",
+   "fn_name": "source",
+   "container": "impl StdError for BoxedError",
+   "sig_text": "fn source(&self) -> Option<&(dyn StdError + 'static)>",
+   "has_unimplemented_body": false
+  }
+ ]
+}

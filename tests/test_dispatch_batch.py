@@ -15,10 +15,12 @@ from __future__ import annotations
 
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    CrashCohort,
     drop_standing_flat,
     promote_crash_evidence,
     take_batch,
 )
+from pipeline_core.domain.models import FnLocator
 
 
 def test_batch_is_a_prefix_of_the_ranking_and_does_not_complete_the_pass():
@@ -553,3 +555,122 @@ def test_a_still_hollow_body_is_never_excluded_by_a_standing_grade() -> None:
     assert "u4" in kept and "u1" not in kept
     # Control: without the stub exemption the hollow constructor is gone.
     assert "u4" not in {k for k, _ in drop_standing_flat(ordered, flat)}
+
+
+# --- crash-evidence provenance and the pass cursor ---------------------------
+#
+# THE MEASUREMENT. Run `1577437-c93d5c26` (2026-09-06, cluster stable): the
+# frame-blind `AddressSanitizer: SEGV` in `tests/error_gen_3.rs` synthesized
+# 63 chain-derived fns at iter 3 (`phase_c.crash.chain_blame`, blamed capped
+# at 50 in the event, `chain_count: 63`). Every crash-graded key was exempt
+# from the pass cursor, so iter 4 read `attempted_before=0` under the cohort
+# fingerprint iter 2 had opened and dispatched the 12-unit head of the
+# cohort; the next sweep would have dispatched the same 12. The fixture is the
+# recorded event, read from the snapshot the retrigger tests share.
+
+def _recorded_chain_1577437() -> list[FnLocator]:
+    import json
+    from pathlib import Path
+    path = (Path(__file__).resolve().parent / "fixtures" / "crash"
+            / "chain_blame_1577437-c93d5c26_2026-09-06_iter3.json")
+    data = json.loads(path.read_text(encoding="utf-8"))["event"]["data"]
+    assert data["provenance"] == "chain_derived" and data["chain_count"] == 63
+    return [FnLocator(*n.split("::", 1)) for n in data["blamed"]]
+
+
+def _traverse(ordered, exempt, cap):
+    """Successive batches of one pass, feeding `attempted` back each time,
+    until the pass completes or a batch repeats a unit — whichever first."""
+    attempted: set = set()
+    batches = []
+    cohort = tuple(ordered)
+    for _ in range(len(ordered) + 1):
+        b = take_batch(ordered, attempted, cap, cohort=cohort, exempt=exempt)
+        batches.append(b)
+        attempted |= set(b.keys)
+        if b.completes_pass:
+            break
+    return batches
+
+
+def test_recorded_1577437_chain_cohort_is_offered_once_each_before_any_twice():
+    """The plan's sentence, on the recorded cohort under the live cap of 12:
+    over successive batches every chain unit is offered before any is
+    offered twice, and the pass completes in ceil(50/12) = 5 batches."""
+    chain = _recorded_chain_1577437()
+    assert len(chain) == 50
+    cohort = CrashCohort(blamed=frozenset(), sited=frozenset(),
+                         chain=frozenset(chain))
+    assert cohort.cursor_exempt == frozenset()
+    assert cohort.chain_only == frozenset(chain)
+    assert set(cohort.grades.values()) == {1}
+    batches = _traverse(chain, cohort.cursor_exempt, DEFAULT_MAX_DISPATCH)
+    offered = [k for b in batches for k in b.keys]
+    assert len(offered) == len(set(offered)) == 50
+    assert [len(b.keys) for b in batches] == [12, 12, 12, 12, 2]
+    assert [b.attempted_before for b in batches] == [0, 12, 24, 36, 48]
+    assert batches[-1].completes_pass and not batches[0].completes_pass
+    # The second batch is disjoint from the first: the cursor advanced past
+    # the head the recorded run re-bought.
+    assert not (set(batches[1].keys) & set(batches[0].keys))
+
+
+def test_negative_control_the_old_exemption_re_buys_the_cohort_head_forever():
+    """The recorded behaviour: `exempt=_crash_grades.keys()` — every crash
+    key, chain included. The same 12 come back on every batch,
+    `attempted_before` stays 0, the pass never completes, and the 38 units
+    below the head are never offered."""
+    chain = _recorded_chain_1577437()
+    cohort = CrashCohort(chain=frozenset(chain))
+    old_exempt = cohort.keys
+    batches = []
+    attempted: set = set()
+    for _ in range(6):
+        b = take_batch(chain, attempted, DEFAULT_MAX_DISPATCH,
+                       cohort=tuple(chain), exempt=old_exempt)
+        batches.append(b)
+        attempted |= set(b.keys)
+    assert all(b.keys == batches[0].keys for b in batches)
+    assert all(b.attempted_before == 0 for b in batches)
+    assert not any(b.completes_pass for b in batches)
+    assert len({k for b in batches for k in b.keys}) == 12
+    # (The event lists the chain sorted; the live iter-4 head began with the
+    # constructors because `promote_by_service` had sunk the dead units
+    # first. The re-buy is the same whichever 12 lead.)
+
+
+def test_site_evidence_stays_exempt_and_a_chain_key_that_is_also_a_frame_keeps_it():
+    """The split is by provenance, not by grade: a blamed frame and the
+    report's other frames are re-offered within the pass; a chain key no
+    site names is cursor-bounded; a key that is both a chain member and a
+    frame keeps its site standing (exempt) while ranking as the chain does
+    (grade 1, the pre-split rule)."""
+    drop = FnLocator("src/error.rs", "drop")
+    caller = FnLocator("src/context.rs", "source")
+    producer = FnLocator("src/error.rs", "object_drop")
+    chain_only = FnLocator("src/error.rs", "construct")
+    both = FnLocator("src/error.rs", "new")
+    cohort = CrashCohort(blamed=frozenset({drop}),
+                         sited=frozenset({drop, caller, producer, both}),
+                         chain=frozenset({chain_only, both}))
+    assert cohort.keys == frozenset({drop, caller, producer, both, chain_only})
+    assert cohort.cursor_exempt == frozenset({drop, caller, producer, both})
+    assert cohort.chain_only == frozenset({chain_only})
+    assert cohort.grades == {drop: 0, caller: 2, producer: 2, both: 1,
+                             chain_only: 1}
+    # The grades are byte-for-byte what the driver composed before the
+    # split (`crash_texts` 2, chain 1, blamed 0, later keys overriding).
+    texts = {drop, caller, producer, both, chain_only}
+    assert cohort.grades == {**dict.fromkeys(texts, 2),
+                             **dict.fromkeys({chain_only, both}, 1),
+                             **dict.fromkeys({drop}, 0)}
+    # Under a cap of 2 with all five already attempted: the site keys are
+    # re-offered, the chain-only key waits for the next pass.
+    ordered = [drop, both, chain_only, caller, producer]
+    b = take_batch(ordered, ordered, 2, cohort=tuple(ordered),
+                   exempt=cohort.cursor_exempt)
+    assert b.keys == (drop, both)
+    later = take_batch(ordered, ordered, 5, cohort=tuple(ordered),
+                       exempt=cohort.cursor_exempt)
+    assert chain_only not in later.keys
+    assert CrashCohort().keys == frozenset() and CrashCohort().grades == {}

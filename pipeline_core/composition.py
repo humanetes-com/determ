@@ -215,6 +215,9 @@ from pipeline_core.adapters.reconstruct_roles import (
     PhaseGateAdapter,
     RequirementsAdapter,
 )
+from pipeline_core.adapters.recorded_entry import (
+    recorded_entry_sets_for as _recorded_entry_sets_for,
+)
 from pipeline_core.adapters.repo_spec_docs import (
     make_repo_spec_section as _make_repo_spec_section,
 )
@@ -2597,6 +2600,7 @@ def build_app(
             # this is the uncached adapter.
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
             measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
+            recorded_entry_sets=_recorded_entry_sets_for,
             reference_measurement=_reference,
         ),
         impl_fill_deps=ImplFillDeps(

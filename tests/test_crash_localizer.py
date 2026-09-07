@@ -188,12 +188,18 @@ def test_max_binaries_caps_gdb_reruns() -> None:
     assert len(calls["gdb"]) == 2
 
 
-def test_origin_evidence_suppresses_downstream_reader_blame() -> None:
-    # One dangling pointer kills every binary that dereferences it. Once ASAN
-    # names the origin, the other memory-fault backtraces are readers of that
-    # same corruption — blaming their faulting frames would hand the model
-    # correct fns to "fix" (live: `fmt` and `as_ref` blamed alongside the real
-    # culprit `construct_from_std`).
+def test_a_sanitized_site_supersedes_only_the_gdb_site_of_its_own_binary() -> None:
+    """Each test binary is its own process and its own heap. The sanitized
+    site for `tests/test_source.rs` replaces gdb's backtrace of THAT binary
+    (it carries the origin gdb cannot see) and says nothing about
+    `tests/test_convert.rs`, which the sanitizer did not report: that gdb
+    site is kept with its own blame.
+
+    Negative control, the pre-fix consolidation: "once one origin is known,
+    the other memory-fault backtraces are downstream readers of the same
+    corruption" dropped every other binary's site — on run
+    `1577437-c93d5c26` that premise turned a sweep with three
+    AddressSanitizer reports into one nobody site."""
     sweep = _SWEEP_WITH_CRASH + (
         "    Running tests/test_convert.rs (target/debug/deps/test_convert-333)\n"
         "running 1 test\ntest test_convert ...\n")
@@ -202,9 +208,19 @@ def test_origin_evidence_suppresses_downstream_reader_blame() -> None:
                                 [{"func": "a::fmt", "file": "src/error.rs", "line": 572}]),
                     asan_result=(101, _ASAN_OUT), log=logged.append)
     sites = localize_crashes(deps, sweep, "cargo test", Path("/w"), {})
-    assert len(sites) == 1
-    assert sites[0].blamed_locator == FnLocator("src/error.rs", "construct_from_std")
-    assert any("not blamed" in m for m in logged)
+    by_label = {s.binary_label: s for s in sites}
+    assert set(by_label) == {"tests/test_source.rs", "tests/test_convert.rs"}
+    assert by_label["tests/test_source.rs"].blamed_locator == FnLocator(
+        "src/error.rs", "construct_from_std")
+    assert by_label["tests/test_source.rs"].origin_capable, (
+        "the sanitized site, not gdb's, stands for the reported binary")
+    assert by_label["tests/test_convert.rs"].blamed_locator == FnLocator(
+        "src/error.rs", "fmt")
+    assert not by_label["tests/test_convert.rs"].origin_capable
+    assert any("superseded by the sanitized site of the same binary" in m
+               for m in logged)
+    assert not any("same corruption read downstream" in m for m in logged), (
+        "negative control: the one-heap sentence is gone")
 
 
 def test_non_memory_crash_survives_alongside_origin_site() -> None:
@@ -357,3 +373,189 @@ def test_asan_uaf_blames_the_conversion_named_on_the_test_line(tmp_path: Path) -
     (site,) = _run(deps, root=tmp_path)
     assert site.blamed_locator == FnLocator("src/error.rs", "into_boxed_dyn_error")
 
+
+
+# ---- one site per crashed binary: the live sweeps of run 1577437-c93d5c26 ----
+# `logs/asan/asan-20260906T221545829298.txt` (iter 4) and
+# `…T204443251879.txt` (iter 2), distilled to the lines the two parsers read
+# (`Running` labels, per-test verdict lines and trailers, every `ERROR:`
+# header, the AddressSanitizer stacks, leak reports cut to header + four
+# frames + SUMMARY). `parse_asan_reports`, `parse_binary_results` and
+# `localize_crashes` were checked to return the same values on the excerpt
+# and on the archive before the excerpt was committed.
+_FIXTURES = Path(__file__).parent / "fixtures" / "crash"
+_SWEEP_ITER4 = _FIXTURES / "sweep_two_reports_segv_and_uaf_1577437_2026-09-06_iter4.txt"
+_SWEEP_ITER2 = _FIXTURES / "sweep_three_reports_1577437_2026-09-06_iter2.txt"
+_LIVE_ROOT = "/home/user/determ/tmp/anyhow/.skeleton-filled/stable"
+
+# The crashing tests' source, copied from the filled tree at the archive's
+# time so the test does not read the tree. Line numbers are the ones the
+# stacks cite: `tests/error_gen_3.rs` 29-33, `tests/test_downcast.rs`
+# 14-21, `tests/test_context.rs` 121-124.
+_ERROR_GEN_3 = "\n" * 28 + """\
+fn test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait() {
+    use std::error::Error as StdError;
+    let err = Error::new(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+    let boxed = err.reallocate_into_boxed_dyn_error_without_backtrace();
+    assert_eq!(boxed.to_string(), "io");
+    assert!(boxed.source().is_none());
+}
+"""
+_TEST_DOWNCAST = "\n" * 13 + """\
+fn test_downcast() {
+    assert_eq!(
+        "oh no!",
+        bail_literal().unwrap_err().downcast::<&str>().unwrap(),
+    );
+    assert_eq!(
+        "oh no!",
+        bail_fmt().unwrap_err().downcast::<String>().unwrap(),
+    );
+}
+"""
+_TEST_CONTEXT = "\n" * 120 + """\
+fn test_downcast_high() {
+    let (err, dropped) = make_chain();
+
+    let err = err.downcast::<HighLevel>().unwrap();
+    assert!(!dropped.high.get());
+}
+"""
+
+
+def _live_sweep(fixture: Path, root: Path, *, with_tests: bool) -> str:
+    text = fixture.read_text().replace(_LIVE_ROOT, str(root))
+    if with_tests:
+        tests = root / "tests"
+        tests.mkdir(exist_ok=True)
+        (tests / "error_gen_3.rs").write_text(_ERROR_GEN_3)
+        (tests / "test_downcast.rs").write_text(_TEST_DOWNCAST)
+        (tests / "test_context.rs").write_text(_TEST_CONTEXT)
+    return text
+
+
+def test_two_reports_become_two_sites_neither_of_them_nobody(tmp_path: Path) -> None:
+    """The plan's sentence on the iter-4 archive: two AddressSanitizer
+    reports, two sites. The SEGV site names
+    `reallocate_into_boxed_dyn_error_without_backtrace` by
+    `tests/error_gen_3.rs:32`; the use-after-free site names `downcast` by
+    `tests/test_downcast.rs:21`. Neither is `origin_unattributed`, so
+    chain-derived synthesis has no precondition to arm on.
+
+    Negative control: the same sweep against a workspace with no test
+    files. Report 1 is then NOBODY (an empty origin) and report 2 blames
+    `drop` — the two verdicts the shipped code produced, minus the first
+    of them being the sweep's ONLY site."""
+    sweep = _live_sweep(_SWEEP_ITER4, tmp_path, with_tests=False)
+    logged: list[str] = []
+    deps, calls = _deps(gdb_result=None, asan_result=(1, sweep),
+                        log=logged.append)
+    before = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    assert [(s.binary_label, s.blamed_locator) for s in before] == [
+        ("tests/error_gen_3.rs", None),
+        ("tests/test_downcast.rs", FnLocator("src/error.rs", "drop"))], (
+        "negative control: without the test source, report 1 is nobody and "
+        "report 2 is the destructor")
+    assert before[0].origin_unattributed
+    nobody = [m for m in logged if "blaming NOBODY" in m]
+    assert len(nobody) == 1
+    assert "carries no origin stack (AddressSanitizer: SEGV)" in nobody[0]
+    assert "llvm-symbolizer" not in nobody[0], (
+        "a SEGV prints no free/alloc stack; that is not a symbolizer fault")
+
+    sweep = _live_sweep(_SWEEP_ITER4, tmp_path, with_tests=True)
+    deps, calls = _deps(gdb_result=None, asan_result=(1, sweep))
+    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    assert calls["asan"] == ["cargo test"], "one sanitized sweep, read whole"
+    assert len(sites) == 2
+    segv, uaf = sites
+    assert segv.binary_label == "tests/error_gen_3.rs"
+    assert segv.test_name == (
+        "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait")
+    assert segv.blamed is not None
+    assert segv.blamed.fn_name == "reallocate_into_boxed_dyn_error_without_backtrace"
+    assert segv.blamed.file_rel == "src/error.rs"
+    assert segv.blamed.named_by == ("tests/error_gen_3.rs", 32)
+    assert uaf.binary_label == "tests/test_downcast.rs"
+    assert uaf.test_name == "test_downcast"
+    assert uaf.blamed is not None
+    assert uaf.blamed.fn_name == "downcast"
+    assert uaf.blamed.named_by == ("tests/test_downcast.rs", 21)
+    assert not any(s.origin_unattributed for s in sites)
+    assert "named by tests/error_gen_3.rs:32" in segv.render_evidence()
+
+
+def test_three_reports_become_three_sites(tmp_path: Path) -> None:
+    """The iter-2 archive: `tests/error_gen_3.rs` SEGV, `tests/test_context.rs`
+    and `tests/test_downcast.rs` heap-use-after-free — three sites, each
+    joined to its own binary's in-flight test by label. The test_context
+    site recovers `downcast` from `err.downcast::<HighLevel>().unwrap()` at
+    line 124: the turbofish is a call."""
+    sweep = _live_sweep(_SWEEP_ITER2, tmp_path, with_tests=True)
+    deps, _ = _deps(gdb_result=None, asan_result=(1, sweep))
+    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    assert [(s.binary_label, s.test_name) for s in sites] == [
+        ("tests/error_gen_3.rs",
+         "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait"),
+        ("tests/test_context.rs", "test_downcast_high"),
+        ("tests/test_downcast.rs", "test_downcast")]
+    blamed = [s.blamed for s in sites]
+    assert all(b is not None for b in blamed)
+    assert [b.fn_name for b in blamed if b] == [
+        "reallocate_into_boxed_dyn_error_without_backtrace", "downcast", "downcast"]
+    assert blamed[1] is not None
+    assert blamed[1].named_by == ("tests/test_context.rs", 124)
+    assert not any(s.origin_unattributed for s in sites)
+
+
+def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: Path) -> None:
+    """The iter-4 shape exactly: three binaries crashed, two of them with an
+    AddressSanitizer report, and `tests/test_context.rs` aborted on a panic
+    in a destructor with no report at all. gdb's SIGSEGV for
+    `tests/error_gen_3.rs` is superseded by that label's sanitized site; its
+    SIGABRT for `tests/test_context.rs` survives as the third site — it is
+    not "a downstream reader" of a fault in another process."""
+    sweep = _live_sweep(_SWEEP_ITER4, tmp_path, with_tests=True)
+
+    def _gdb(exe, cwd, env, **kw):
+        if "error_gen_3" in str(exe):
+            return ("SIGSEGV", [
+                {"func": "drop", "file": "src/error.rs", "line": 630},
+                {"func": "reallocate_into_boxed_dyn_error_without_backtrace",
+                 "file": "src/error.rs", "line": 610}])
+        if "test_context" in str(exe):
+            return ("SIGABRT", [
+                {"func": "context_drop_rest", "file": "src/error.rs", "line": 900}])
+        return None
+
+    deps = CrashLocalizerDeps(gdb_localize=_gdb,
+                              asan_sweep=lambda *_a, **_k: (1, sweep),
+                              log=lambda _m: None)
+    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    by_label = {s.binary_label: s for s in sites}
+    assert set(by_label) == {
+        "tests/error_gen_3.rs", "tests/test_downcast.rs", "tests/test_context.rs"}
+    assert by_label["tests/error_gen_3.rs"].origin_capable, (
+        "the sanitized site replaced gdb's for the same binary")
+    assert by_label["tests/error_gen_3.rs"].blamed_locator == FnLocator(
+        "src/error.rs", "reallocate_into_boxed_dyn_error_without_backtrace")
+    kept = by_label["tests/test_context.rs"]
+    assert not kept.origin_capable and kept.signal == "SIGABRT"
+    assert kept.blamed_locator == FnLocator("src/error.rs", "context_drop_rest")
+
+
+def test_the_arc_double_drop_stays_nobody_with_the_test_source_on_disk(tmp_path: Path) -> None:
+    """Negative control for the access-side recovery: the family licence is
+    the gate. An Arc double-drop (run `1064759-0f23fb68`) has neither READ
+    mark and no in-crate destructor on its free stack, so the test file on
+    disk is never read even though it calls a family member."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_downcast.rs").write_text(
+        "\n" * 82 + "    let b = err.into_boxed_dyn_error();\n"
+        "    drop(flag);\n    assert!(dropped.all());\n")
+    out = _ASAN_OUT_NO_CRATE_FRAME.replace("/w/", str(tmp_path) + "/")
+    deps, _ = _deps(gdb_result=None, asan_result=(101, out))
+    (site,) = _run(deps, root=tmp_path)
+    assert site.origin_unattributed
+    assert site.blamed_locator is None

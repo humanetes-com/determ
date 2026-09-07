@@ -66,7 +66,10 @@ from pipeline_core.domain.body_ledger import (
 from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
 )
-from pipeline_core.domain.coverage_slice import red_dead_units
+from pipeline_core.domain.coverage_slice import (
+    exempt_recorded_executors,
+    red_dead_units,
+)
 from pipeline_core.domain.crash_site import (
     blamed_locators,
     callee_subjects,
@@ -91,6 +94,7 @@ from pipeline_core.domain.dispatch import (
 )
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
+    CrashCohort,
     drop_standing_flat,
     overlay_crash_on_ranks,
     promote_by_blocker_counts,
@@ -424,6 +428,15 @@ class PhaseCTddDeps:
     # (the pre-loop gate in `fill_one_fn`, `screen_guidance`'s
     # `convictors_never_execute`); ranking then uses service/flat only.
     measure_coverage_slice: Callable[..., Any] | None = None
+    # (project_dir, test names) -> the recorded executed set per test, from
+    # the retrospectives store's conviction-time entry stamps. Read for the
+    # red tests the coverage probe could NOT measure this sweep (their
+    # process did not complete): the recorded set exempts their bodies
+    # from `dead` and stands in as their owner set for ranking, admission
+    # and the red-slice sessions, tagged recorded in the owner-map event.
+    # None means no record is consulted; an unmeasured test then clears
+    # the dead set whole (`exempt_recorded_executors`).
+    recorded_entry_sets: Callable[..., Mapping[str, frozenset[FnLocator]]] | None = None
     # The original crate's verdict vector for this project, so a FAIL
     # sweep whose remaining failures are all ones the original also fails
     # or skips can close the cluster. Task3 already judges this way; t2a
@@ -3600,6 +3613,12 @@ def run_phase_c_tdd(
                        or test_reverse_map.get(_vt) or set()):
                 _suspects.add(FnLocator(*_k))
         _chain_keys: frozenset[FnLocator] = frozenset()
+        # The chain keys NO fault site names — the inferred cohort proper.
+        # Recorded beside `_chain_keys` because the batch cursor treats the
+        # two provenances differently (`CrashCohort.cursor_exempt`), and a
+        # key that is both a chain member and a frame of a localized report
+        # keeps its site standing.
+        _chain_only: frozenset[FnLocator] = frozenset()
         # `bodies_in_flight`, not `active`: the window suppresses a reading the
         # re-stub itself produced, and a fired-but-REJECTED attempt re-stubbed
         # nothing (`restubbed=0`), so its sweep measures the real tree. That is
@@ -3682,6 +3701,11 @@ def run_phase_c_tdd(
                 raw_report=s.raw_report) for s in _unattributed_sites]
             _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
             _chain_keys = frozenset(_chain_texts)
+            # Read BEFORE the merge below adds the chain keys to `crash_texts`:
+            # what is in the dict now is site evidence (frames, producer aim,
+            # the vanished test's subject), and only a chain key outside it
+            # is cursor-bounded.
+            _chain_only = _chain_keys - frozenset(crash_texts)
             for _loc, _text in _chain_texts.items():
                 # The full evidence pack, applied here because this
                 # branch runs AFTER the per-sweep evidence plumbing
@@ -3770,13 +3794,20 @@ def run_phase_c_tdd(
                     # deliberate: frame-derived with an in-crate origin
                     # narrows from access+origin frames to the origin
                     # locators (sharper aim, one component per fault);
-                    # frame-blind hands EMPTY, which is what makes the
-                    # `chain_blamed` branch of the grade reachable at all —
-                    # the fix's target; unlocalizable subject-synthesis
-                    # (~500 lines above) stops leaking its synthesized
-                    # subject fns into blame, as that branch's own comment
-                    # already promised ("as EVIDENCE …, not blame"), and
-                    # aims by `suspect_fns` reachability instead.
+                    # frame-blind hands EMPTY, and an empty `blamed_fns`
+                    # AIMS NOTHING — `crash_candidate_grade` grades against
+                    # observed frames only, so the walk declines (loudly,
+                    # with the evidence shape) instead of re-authoring a
+                    # component an inference merely reaches. Measured, run
+                    # `1577437-c93d5c26` iter 3 (2026-09-06): grading the
+                    # 63-fn chain put 8 components in the OWNS tier
+                    # (`src/fmt.rs::write_str` alone admitted `Quoted`),
+                    # attempt 2 fired on `Quoted`, re-authored a type 0 of
+                    # 373 fns reference, and reset the stall budget — for a
+                    # fault the component never touched. Unlocalizable
+                    # subject-synthesis (~500 lines above) likewise keeps its
+                    # synthesized subject fns out of blame, as that branch's
+                    # own comment promised ("as EVIDENCE …, not blame").
                     #
                     # Chain keys stay in their OWN field regardless: in
                     # `blamed_fns` they would enter the signature as a fn
@@ -3784,9 +3815,10 @@ def run_phase_c_tdd(
                     # live body text — every landed fill could then change
                     # the signature and re-open the walk on a crash that
                     # never changed. `chain_blamed` contributes a stable
-                    # marker instead (§ `crash_signature`), and the origin
-                    # blame carries no chain key by construction, so no
-                    # subtraction is needed to keep them out.
+                    # marker instead (§ `crash_signature`) and the prompt
+                    # evidence; it is not an aim. The origin blame carries no
+                    # chain key by construction, so no subtraction is needed
+                    # to keep them out.
                     blamed_fns=crash_blamed,
                     chain_blamed=_chain_keys),
                 best_pass=best_pass)
@@ -4045,11 +4077,19 @@ def run_phase_c_tdd(
         # four of the five are free fns. Grades keep an observed frame above an
         # inference: blamed frames first, then chain-derived, then any other
         # evidence key (producer aim, synthesized subject).
-        _crash_grades: dict[FnLocator, int] = {
-            **dict.fromkeys(crash_texts, 2),
-            **dict.fromkeys(_chain_keys, 1),
-            **dict.fromkeys(crash_blamed, 0),
-        }
+        #
+        # PROVENANCE IS DATA, not a grade integer read back in three places.
+        # `sited` is every evidence key a fault SITE produced — the keys
+        # `crash_texts` held before the chain merge (all frames, producer aim,
+        # synthesized subject); `chain` is the inference. The cohort's
+        # `grades` are the ranking above; its `cursor_exempt` is what the
+        # pass cursor may re-offer, and that is the site keys ONLY — see
+        # `CrashCohort.cursor_exempt` for the 63-unit measurement.
+        _crash_cohort: CrashCohort[FnLocator] = CrashCohort(
+            blamed=crash_blamed,
+            sited=frozenset(crash_texts) - _chain_only,
+            chain=_chain_keys)
+        _crash_grades: dict[FnLocator, int] = _crash_cohort.grades
         # A unit filed `declined` BEFORE the fault was localized is carrying a
         # record that now contradicts its instruction: `declined` asserts
         # "returning it unchanged was what we asked for", and this sweep is
@@ -4180,21 +4220,66 @@ def run_phase_c_tdd(
                 project_dir, cluster.name,
                 failing_tests=frozenset(cur_failed),
                 cluster_env=cluster_env)
+        # UNMEASURED TESTS. A red test whose process did not complete (a
+        # binary killed by a signal flushes no profile) has no live
+        # reading; the record of what it entered when it last ran to a
+        # verdict is the only evidence about its path. Its bodies leave
+        # `dead` (unmeasured is not "executed by no test"), and the
+        # recorded set stands in as its owner set below. Run
+        # `1577437-c93d5c26` iter 4: the SIGSEGV binary's two units were
+        # listed dead and demoted below the frontier while the store
+        # already recorded the crashing test entering both.
+        _recorded: dict[str, frozenset[FnLocator]] = {}
+        _dead_exempt: frozenset[FnLocator] = frozenset()
+        if _cov is not None and _cov.unmeasured_tests:
+            if deps.recorded_entry_sets is not None:
+                _recorded = dict(deps.recorded_entry_sets(
+                    project_dir, sorted(_cov.unmeasured_tests)))
+            _cov, _dead_exempt = exempt_recorded_executors(_cov, _recorded)
+            _no_record = sorted(
+                t for t in _cov.unmeasured_tests if t not in _recorded)
+            deps.log(
+                f"  {tag} [phase-c/coverage] {len(_cov.unmeasured_tests)} "
+                "unmeasured test(s) (binary did not complete: "
+                + ", ".join(sorted(_cov.unmeasured_binaries)) + "); "
+                f"recorded executed set for {len(_recorded)}; "
+                f"{len(_dead_exempt)} body(ies) exempted from dead"
+                + (" — no recorded set for "
+                   + ", ".join(_no_record[:6])
+                   + "; dead set cleared (unmeasurable this sweep)"
+                   if _no_record else ""))
         bind_coverage_slice(_cov)
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
+        # The owner sets the ranking, the admission and the sessions read:
+        # measured where the test completed, recorded where it did not.
+        # The BOUND slice keeps the measured map only — a recorded set is
+        # not a measurement and must not be re-stamped as one.
+        _owners_read: dict[str, frozenset[FnSite]] = (
+            dict(_cov.owners) if _cov is not None else {})
+        _recorded_sites: dict[str, frozenset[FnSite]] = {
+            t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
+            for t, us in _recorded.items() if t in cur_failed}
+        _owners_read.update(_recorded_sites)
         # The owner map decided a refusal and reached no record: nothing in
         # `events.jsonl` carried it, so every later argument about whether a
         # demotion was right had to re-measure the tree to find out what the
         # loop had read. Emit the reading that justifies the ranking, with
         # the ranking.
-        if _cov is not None and _cov.owners:
+        if _cov is not None and _owners_read:
             deps.emit("phase_c.coverage.owner_map", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "failing": sorted(cur_failed),
                 "measured": sorted(_cov.owners),
                 "owners": {t: [site_payload(k) for k in sorted(ks)]
-                           for t, ks in sorted(_cov.owners.items())},
+                           for t, ks in sorted(_owners_read.items())},
+                "unmeasured": sorted(_cov.unmeasured_tests),
+                "unmeasured_binaries": sorted(_cov.unmeasured_binaries),
+                "recorded_owners": {
+                    t: [site_payload(k) for k in sorted(ks)]
+                    for t, ks in sorted(_recorded_sites.items())},
+                "dead_exempted": sorted(
+                    f"{k.file}::{k.fn_name}" for k in _dead_exempt),
             })
         # RED-DEAD DEMOTION. `dead` above is a whole-suite merge and cannot
         # say "no FAILING test enters this body", which is the only question
@@ -4206,9 +4291,9 @@ def run_phase_c_tdd(
         # carries the computation). Crash promotion runs after this and
         # re-lifts anything a fault names.
         _red_dead: frozenset[FnLocator] = frozenset()
-        if _cov is not None and _cov.owners:
+        if _cov is not None and _owners_read:
             _red_dead = red_dead_units(
-                (k for k, _ in ordered), cur_failed, _cov.owners,
+                (k for k, _ in ordered), cur_failed, _owners_read,
                 exempt=_esc_keys | _product_keys | _crash_grades.keys())
         # OWNER-MAP ADMISSION. Ranking can promote a never-served owner but
         # cannot put `error.rs::fmt` on the frontier: run `451330-7e8a7ca9`
@@ -4227,11 +4312,11 @@ def run_phase_c_tdd(
             for _ot in _ots:
                 _units_for_owners.setdefault(
                     bare_test_name(_ot), set()).add(_ok)
-        if _cov is not None and _cov.owners:
+        if _cov is not None and _owners_read:
             _owner_admits = escalate_to_measured_owners(
                 owners={bare_test_name(t): frozenset(
                     FnLocator(s.file, s.fn_name) for s in ks)
-                    for t, ks in _cov.owners.items()},
+                    for t, ks in _owners_read.items()},
                 units_by_test=_units_for_owners,
                 graded=_flat_keys | permanently_exhausted,
                 unable=_dead_keys | _red_dead,
@@ -4294,8 +4379,8 @@ def run_phase_c_tdd(
         _session_owners: dict[str, frozenset[FnSite]] = {}
         if os.getenv("SLICE_SESSION", "1") != "0":
             _cov_owners = (
-                {bare_test_name(t): ks for t, ks in _cov.owners.items()}
-                if _cov is not None and _cov.owners else {})
+                {bare_test_name(t): ks for t, ks in _owners_read.items()}
+                if _cov is not None and _owners_read else {})
             _session_owners = {
                 t: frozenset(ks) for t, ks in _cov_owners.items()}
             # Eligible is the filter, not the source. Walking eligible and
@@ -4424,12 +4509,17 @@ def run_phase_c_tdd(
         # The promotion above is worthless unless the cursor is told to let
         # these through: `take_batch` subtracts `attempted` FIRST, so a graded
         # unit offered once earlier in the pass is dropped before its rank is
-        # ever consulted (see `take_batch`'s `exempt`).
+        # ever consulted (see `take_batch`'s `exempt`). SITE evidence only:
+        # the chain-only cohort keeps its rank at the head of `ordered` but
+        # walks the cursor, so a 63-unit inference is traversed across
+        # batches instead of its first 12 being re-bought every sweep.
         _batch = take_batch([key for key, _ in ordered], _pass_attempted,
                             _dispatch_cap, cohort=_pass_cohort,
-                            exempt=_crash_grades.keys())
+                            exempt=_crash_cohort.cursor_exempt)
         if _crash_grades:
             _aimed = [k for k in _batch.keys if k in _crash_grades]
+            _n_site = len(_crash_cohort.cursor_exempt)
+            _n_chain = len(_crash_cohort.chain_only)
             # When none are aimed the reason can no longer be rank — crash
             # promotion runs last and outranks everything above it, so there is
             # no such thing as "higher-graded evidence". Saying there was is
@@ -4441,7 +4531,9 @@ def run_phase_c_tdd(
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: "
                 f"{len(_crash_grades)} unit(s) carry crash evidence this "
-                f"sweep and rank ahead of the frontier; {len(_aimed)} of them "
+                f"sweep ({_n_site} frame-sited, re-offered within the pass; "
+                f"{_n_chain} chain-inferred, cursor-bounded) and rank ahead "
+                f"of the frontier; {len(_aimed)} of them "
                 "are in this batch"
                 + (": " + ", ".join(f"{k.file}::{k.fn_name}"
                                     for k in _aimed[:8]) if _aimed else
@@ -4964,6 +5056,14 @@ def run_phase_c_tdd(
                     crash_evidence=crash_texts or None,
                     crash_blamed=crash_blamed or None,
                     crash_blocked=crash_blocked_units,
+                    # Tests listed failed whose binary did not complete
+                    # (no pair in failed_pairs). The schedule ranks a run
+                    # whose every aimed test is in this set, and whose
+                    # targets miss crash_blamed, as a flat re-buy.
+                    unmeasurable_tests=frozenset(
+                        bare_test_name(t) for t in cur_failed
+                        if bare_test_name(t) not in {
+                            bare_test_name(n) for _b, n in _f_pairs}),
                     dispatch_ranks=(
                         overlay_crash_on_ranks(_ranks, _crash_grades)
                         or None),

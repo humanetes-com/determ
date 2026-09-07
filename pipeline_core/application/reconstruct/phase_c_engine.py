@@ -286,6 +286,10 @@ class PhaseCFillEngine:
         crash_evidence: dict[FnLocator, str] | None = None,
         crash_blamed: frozenset[FnLocator] | None = None,
         crash_blocked: dict[str, str] | None = None,
+        # Leftover tests whose binary did not complete. The fill schedule
+        # ranks a run whose every aimed test is in this set, and whose
+        # targets miss crash_blamed, as a flat re-buy (weight 0).
+        unmeasurable_tests: frozenset[str] = frozenset(),
         # Per-unit blocker counts from the TDD driver (post-fill histogram
         # or the pre-dispatch deferral map). When set, stubs are ordered and
         # grouped by these ranks instead of leaf-name frequency, so a
@@ -496,7 +500,9 @@ class PhaseCFillEngine:
                 cluster=cluster_name, run_id=run_id, iteration=fill_iteration,
                 oracle_fp=oracle_fp, budget_minutes=fill_budget_minutes,
                 scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
-                parallelism=self.config.parallelism))
+                parallelism=self.config.parallelism,
+                unmeasurable_tests=unmeasurable_tests,
+                crash_blamed=crash_blamed or frozenset()))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
                        else None)
         _per_fn = _per_fn_route.result

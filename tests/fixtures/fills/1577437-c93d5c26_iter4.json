@@ -1,0 +1,4192 @@
+{
+ "cluster": "stable",
+ "crash_blamed": [],
+ "failed": [
+  "test_downcast",
+  "test_downcast_high",
+  "test_downcast_low",
+  "test_downcast_mid",
+  "test_downcast_mut",
+  "test_downcast_ref",
+  "test_inference",
+  "test_large_alignment",
+  "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+  "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+  "test_root_cause",
+  "test_trailer",
+  "test_unsuccessful_downcast"
+ ],
+ "failed_pairs": [
+  [
+   "tests/test_ensure.rs",
+   "test_trailer"
+  ]
+ ],
+ "file_runs": [
+  {
+   "file": "src/error.rs",
+   "stubs": [],
+   "targets": [
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::construct_from_display",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::from",
+    "src/error.rs::is",
+    "src/error.rs::msg"
+   ]
+  },
+  {
+   "file": "src/context.rs",
+   "stubs": [],
+   "targets": [
+    "src/context.rs::context",
+    "src/context.rs::ext_context"
+   ]
+  },
+  {
+   "file": "src/ptr.rs",
+   "stubs": [],
+   "targets": [
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ]
+  }
+ ],
+ "fitted_recorded": 0,
+ "hollow_recorded": 0,
+ "incomplete": [
+  "tests/error_gen_3.rs",
+  "tests/test_context.rs",
+  "tests/test_downcast.rs"
+ ],
+ "iter": 4,
+ "ledger_rows": [
+  {
+   "bodies_sha": "601218cb2bc7cace",
+   "classes": {
+    "cashed": 1
+   },
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [
+    [
+     "src/error.rs",
+     "construct_from_context"
+    ],
+    [
+     "src/error.rs",
+     "downcast"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "into_boxed_dyn_error"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/error.rs",
+   "minutes": 9.49,
+   "model_calls": 1,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T19:32:11+00:00",
+   "target_tests": [
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_error_impl_source_triggered_by_boxed_with_context",
+    "test_from_boxed_basic",
+    "test_from_boxed_preserves_chain_and_source",
+    "test_inference",
+    "test_large_alignment",
+    "test_question_mark",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "construct_from_context"
+    ],
+    [
+     "src/error.rs",
+     "downcast"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "into_boxed_dyn_error"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "ed6c0aa195ed883e",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/error.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T19:41:41+00:00",
+   "target_tests": [
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_error_impl_source_triggered_by_boxed_with_context",
+    "test_from_boxed_basic",
+    "test_from_boxed_preserves_chain_and_source",
+    "test_inference",
+    "test_large_alignment",
+    "test_question_mark",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "construct_from_context"
+    ],
+    [
+     "src/error.rs",
+     "downcast"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "into_boxed_dyn_error"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "df7d11438b037bf5",
+   "classes": {
+    "compile": 1,
+    "unreachable": 12
+   },
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ],
+    [
+     "src/error.rs",
+     "downcast"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "into_boxed_dyn_error"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 0 stub(s), 14 re-fill(s)",
+   "minutes": 42.138,
+   "model_calls": 16,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T19:41:41+00:00",
+   "target_tests": [
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_error_impl_source_triggered_by_boxed_with_context",
+    "test_from_boxed_basic",
+    "test_from_boxed_preserves_chain_and_source",
+    "test_inference",
+    "test_large_alignment",
+    "test_question_mark",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_context"
+    ],
+    [
+     "src/error.rs",
+     "downcast"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "into_boxed_dyn_error"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "e10b2a8222c2c9c3",
+   "classes": {
+    "cashed": 3
+   },
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/context.rs",
+   "minutes": 20.648,
+   "model_calls": 4,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "rebuy_flat",
+   "reverted": [
+    [
+     "src/context.rs",
+     "source"
+    ]
+   ],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:23:49+00:00",
+   "target_tests": [
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_error_impl_source_triggered_by_boxed_with_context",
+    "test_from_boxed_basic",
+    "test_from_boxed_preserves_chain_and_source",
+    "test_inference",
+    "test_large_alignment",
+    "test_question_mark",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "01f947a089148071",
+   "classes": {
+    "cashed": 2
+   },
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/ptr.rs",
+   "minutes": 10.148,
+   "model_calls": 3,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "rebuy_flat",
+   "reverted": [
+    [
+     "src/context.rs",
+     "source"
+    ]
+   ],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:23:49+00:00",
+   "target_tests": [
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_inference",
+    "test_question_mark",
+    "test_root_cause"
+   ],
+   "targets": [
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "e10b2a8222c2c9c3",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/context.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "rebuy_flat",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:44:28+00:00",
+   "target_tests": [
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_error_impl_source_triggered_by_boxed_with_context",
+    "test_from_boxed_basic",
+    "test_from_boxed_preserves_chain_and_source",
+    "test_inference",
+    "test_large_alignment",
+    "test_question_mark",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "01f947a089148071",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 1,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/ptr.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "rebuy_flat",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:44:28+00:00",
+   "target_tests": [
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_inference",
+    "test_question_mark",
+    "test_root_cause"
+   ],
+   "targets": [
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "0b40b0716021d184",
+   "classes": {
+    "unreachable": 1
+   },
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "new"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/error.rs",
+   "minutes": 10.166,
+   "model_calls": 1,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:44:53+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_trailer",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "new"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "8eaafbf51190b1f5",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/error.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:55:03+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_trailer",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "new"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "eafc90024e6cdfcd",
+   "classes": {
+    "compile": 1,
+    "unreachable": 15
+   },
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "new"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 0 stub(s), 16 re-fill(s)",
+   "minutes": 57.949,
+   "model_calls": 20,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T20:55:03+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_trailer",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "new"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "6be36b10d6b6082e",
+   "classes": {
+    "unreachable": 4
+   },
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/context.rs",
+   "minutes": 21.587,
+   "model_calls": 4,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "rebuy_flat",
+   "reverted": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ]
+   ],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T21:53:00+00:00",
+   "target_tests": [
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "57dde976c0e3947a",
+   "classes": {
+    "unreachable": 1
+   },
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/fmt.rs",
+   "minutes": 10.308,
+   "model_calls": 3,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "rebuy_flat",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T21:53:00+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "cc84c366b5dd08e5",
+   "classes": {
+    "unreachable": 3
+   },
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "file",
+   "label": "file src/ptr.rs",
+   "minutes": 14.334,
+   "model_calls": 4,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "reason": "rebuy_flat",
+   "reverted": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ]
+   ],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T21:53:00+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "6be36b10d6b6082e",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/context.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "rebuy_flat",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T22:14:36+00:00",
+   "target_tests": [
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "ext_context"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "57dde976c0e3947a",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/fmt.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "rebuy_flat",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T22:14:36+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "cc84c366b5dd08e5",
+   "classes": {},
+   "cluster": "stable",
+   "iteration": 2,
+   "kept": [],
+   "kind": "impl",
+   "label": "impl src/ptr.rs",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_red": [],
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "empty",
+   "reason": "rebuy_flat",
+   "reverted": [],
+   "run_id": "1577437-c93d5c26",
+   "share_minutes": null,
+   "started": "2026-09-06T22:14:36+00:00",
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  }
+ ],
+ "route_attempts": [
+  {
+   "attempts": [
+    {
+     "attempt": 1,
+     "outcome": "reverted",
+     "spliced": 14,
+     "units": [
+      "src/error.rs::construct",
+      "src/error.rs::construct_from_adhoc",
+      "src/error.rs::construct_from_boxed",
+      "src/error.rs::construct_from_display",
+      "src/error.rs::construct_from_std",
+      "src/error.rs::context_backtrace",
+      "src/error.rs::from",
+      "src/error.rs::is",
+      "src/error.rs::msg",
+      "src/error.rs::no_backtrace",
+      "src/error.rs::object_drop"
+     ]
+    },
+    {
+     "attempt": 2,
+     "outcome": "kept",
+     "spliced": 14,
+     "units": [
+      "src/error.rs::construct",
+      "src/error.rs::construct_from_adhoc",
+      "src/error.rs::construct_from_boxed",
+      "src/error.rs::construct_from_display",
+      "src/error.rs::construct_from_std",
+      "src/error.rs::context_backtrace",
+      "src/error.rs::from",
+      "src/error.rs::is",
+      "src/error.rs::msg",
+      "src/error.rs::no_backtrace",
+      "src/error.rs::object_drop"
+     ]
+    }
+   ],
+   "dispatched": [
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::construct_from_display",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::context_backtrace",
+    "src/error.rs::from",
+    "src/error.rs::is",
+    "src/error.rs::msg",
+    "src/error.rs::no_backtrace",
+    "src/error.rs::object_drop"
+   ],
+   "label": "file src/error.rs",
+   "planned_recorded": 11,
+   "recorded_kept": 0,
+   "recorded_outcome": "reverted",
+   "recorded_reverted": 11,
+   "source": "row.reverted per revert event; dispatched = targets + installable_offered; kept = dispatched (derived: unrestricted retry, fns_filled == spliced)"
+  }
+ ],
+ "run_id": "1577437-c93d5c26",
+ "schedule_runs": [
+  {
+   "blocked_by": [],
+   "bodies_sha": "a91ba48ef76cb56b",
+   "deferred": false,
+   "files": [
+    "src/error.rs"
+   ],
+   "kind": "file",
+   "label": "file src/error.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 1,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_trailer",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::construct_from_display",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::from",
+    "src/error.rs::is",
+    "src/error.rs::msg"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "a91ba48ef76cb56b",
+   "deferred": false,
+   "files": [
+    "src/error.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/error.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 1,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_trailer",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::construct_from_display",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::from",
+    "src/error.rs::is",
+    "src/error.rs::msg"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "d43ba55d1ac1bdb8",
+   "deferred": false,
+   "files": [
+    "src/context.rs",
+    "src/error.rs",
+    "src/ptr.rs"
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 0 stub(s), 18 re-fill(s)",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 0,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_trailer",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/context.rs::context",
+    "src/context.rs::ext_context",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_boxed",
+    "src/error.rs::construct_from_display",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::from",
+    "src/error.rs::is",
+    "src/error.rs::msg",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "96d76cdd522dc134",
+   "deferred": false,
+   "files": [
+    "src/context.rs"
+   ],
+   "kind": "file",
+   "label": "file src/context.rs",
+   "level": 1,
+   "rank": 3,
+   "reason": "rebuy_flat",
+   "seq": 0,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/context.rs::context",
+    "src/context.rs::ext_context"
+   ],
+   "weight": 0
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "e4e008cdb68305da",
+   "deferred": false,
+   "files": [
+    "src/ptr.rs"
+   ],
+   "kind": "file",
+   "label": "file src/ptr.rs",
+   "level": 1,
+   "rank": 3,
+   "reason": "rebuy_flat",
+   "seq": 2,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ],
+   "weight": 0
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "96d76cdd522dc134",
+   "deferred": false,
+   "files": [
+    "src/context.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/context.rs",
+   "level": 1,
+   "rank": 3,
+   "reason": "rebuy_flat",
+   "seq": 0,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/context.rs::context",
+    "src/context.rs::ext_context"
+   ],
+   "weight": 0
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "e4e008cdb68305da",
+   "deferred": false,
+   "files": [
+    "src/ptr.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/ptr.rs",
+   "level": 1,
+   "rank": 3,
+   "reason": "rebuy_flat",
+   "seq": 2,
+   "share_minutes": null,
+   "stubs": [],
+   "target_tests": [
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_inference",
+    "test_large_alignment",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_root_cause",
+    "test_unsuccessful_downcast"
+   ],
+   "targets": [
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::from_raw"
+   ],
+   "weight": 0
+  }
+ ],
+ "sessions": [],
+ "stubs": [],
+ "stubs_source": "argument",
+ "tests": {
+  "test_downcast": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl AsRef<dyn StdError>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_downcast_high": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "root_cause"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/lib.rs",
+    "fn": "Ok"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_downcast_low": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "root_cause"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/lib.rs",
+    "fn": "Ok"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_downcast_mid": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "root_cause"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/lib.rs",
+    "fn": "Ok"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_downcast_mut": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl AsRef<dyn StdError>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_mut"
+   },
+   {
+    "container": "impl Mut<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_downcast_ref": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl AsRef<dyn StdError>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "context_chain_downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_inference": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "root_cause"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/lib.rs",
+    "fn": "Ok"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_large_alignment": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl AsRef<dyn StdError>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl From<E>for Error",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl From<Error>for Box<dyn StdError+'static>",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl From<Error>for Box<dyn StdError+Send+'static>",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl From<Error>for Box<dyn StdError+Send+Sync+'static>",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "reallocate_into_boxed_dyn_error_without_backtrace"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Bool for bool",
+    "file": "src/lib.rs",
+    "fn": "not"
+   },
+   {
+    "container": "impl Bool for&bool",
+    "file": "src/lib.rs",
+    "fn": "not"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "not"
+   },
+   {
+    "container": "trait StdError",
+    "file": "src/lib.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "source"
+   }
+  ],
+  "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Deref for Error",
+    "file": "src/error.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl From<E>for Error",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl From<Error>for Box<dyn StdError+'static>",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl From<Error>for Box<dyn StdError+Send+'static>",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl From<Error>for Box<dyn StdError+Send+Sync+'static>",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "reallocate_into_boxed_dyn_error_without_backtrace"
+   },
+   {
+    "container": "impl StdError for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Bool for bool",
+    "file": "src/lib.rs",
+    "fn": "not"
+   },
+   {
+    "container": "impl Bool for&bool",
+    "file": "src/lib.rs",
+    "fn": "not"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "not"
+   },
+   {
+    "container": "trait StdError",
+    "file": "src/lib.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "boxed"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "source"
+   }
+  ],
+  "test_root_cause": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl Context<T,E>for Result<T,E>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Context<T,Infallible>for Option<T>",
+    "file": "src/context.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl StdError for E",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl StdError for Error",
+    "file": "src/context.rs",
+    "fn": "ext_context"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "root_cause"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/lib.rs",
+    "fn": "Ok"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_trailer": [
+   {
+    "container": "impl BothDebug for(A,B",
+    "file": "src/ensure.rs",
+    "fn": "__dispatch_ensure"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "as_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "is"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_downcast"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "display"
+   },
+   {
+    "container": "",
+    "file": "src/lib.rs",
+    "fn": "Ok"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "format_err"
+   },
+   {
+    "container": "mod __private",
+    "file": "src/lib.rs",
+    "fn": "must_use"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_unsuccessful_downcast": [
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for Quoted<C>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Write for Quoted<&mut fmt::Formatter<'_>>",
+    "file": "src/context.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Buf",
+    "file": "src/ensure.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Buf",
+    "file": "src/ensure.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl AsRef<dyn StdError+Send+Sync>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl AsRef<dyn StdError>for Error",
+    "file": "src/error.rs",
+    "fn": "as_ref"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_mut"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "downcast_ref"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for ErrorImpl<E>",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Write for Indented<'_,T>",
+    "file": "src/fmt.rs",
+    "fn": "write_str"
+   },
+   {
+    "container": "impl Adhoc",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Boxed",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MyError",
+    "file": "src/nightly.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Debug for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Debug for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for BoxedError",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for DisplayError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ]
+ },
+ "ts": "2026-09-06T22:15:56.591+00:00"
+}

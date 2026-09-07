@@ -71,7 +71,7 @@ frontier), which is what every caller that does not track a pass does.
 from __future__ import annotations
 
 from collections.abc import Collection, Hashable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 #: Frontier units dispatched per iteration when the cap is left at its default.
 #: 12 against the live frontier of 55-69 puts a sweep roughly every 45 minutes
@@ -112,6 +112,82 @@ class DispatchBatch[K: Hashable]:
                 f"{'' if self.completes_pass else ', mid-pass'})")
 
 
+@dataclass(frozen=True, slots=True)
+class CrashCohort[K: Hashable]:
+    """The units one sweep's crash evidence names, split by PROVENANCE.
+
+    Three sets, each the output of a different mechanism in the driver, kept
+    apart because the force they warrant differs (see `cursor_exempt`):
+
+    `blamed` — the localizer's ORIGIN blame: the frame a detector placed the
+    fault at (`blamed_locators`). An observation.
+
+    `sited` — every key carrying evidence anchored on a fault SITE the sweep
+    produced: all frames of the localized reports (access and origin, so the
+    innocent caller that routes into the fault sees the report too), the
+    producer candidates one call from a blamed frame, and the vanished test's
+    own subject when nothing could be localized. Each is bounded by one fault:
+    a report has a handful of in-crate frames, a frame has a handful of
+    callees, a test has one subject. `blamed` is a subset of it.
+
+    `chain` — the CHAIN-DERIVED inference: the crashed tests' attributed fns
+    plus the producers of their types, synthesized when an origin-capable
+    detector looked and placed nothing in-crate. Bounded by the crate, not by
+    the fault: 63 fns on run `1577437-c93d5c26` iter 3 (2026-09-06), 67 on
+    `263217-d41a5bb5`, 50 on `1064759-0f23fb68`.
+
+    A key may sit in more than one set (a chain fn that is also a frame); the
+    grade and the exemption below resolve that per key.
+    """
+
+    blamed: frozenset[K] = field(default_factory=frozenset)
+    sited: frozenset[K] = field(default_factory=frozenset)
+    chain: frozenset[K] = field(default_factory=frozenset)
+
+    @property
+    def keys(self) -> frozenset[K]:
+        """Every unit carrying crash evidence this sweep, any provenance."""
+        return self.blamed | self.sited | self.chain
+
+    @property
+    def chain_only(self) -> frozenset[K]:
+        """The inferred cohort proper: chain keys no fault site names."""
+        return self.chain - self.sited - self.blamed
+
+    @property
+    def grades(self) -> dict[K, int]:
+        """`promote_crash_evidence`'s ranking: 0 an observed faulting frame,
+        1 chain-derived inference, 2 any other site evidence. A key in both
+        the chain and the sited set ranks as the chain does (1) — the
+        pre-split rule, kept: an inference beside a site key must not
+        outrank the origin blame, and must not sink below a producer aim."""
+        return {
+            **dict.fromkeys(self.sited, 2),
+            **dict.fromkeys(self.chain, 1),
+            **dict.fromkeys(self.blamed, 0),
+        }
+
+    @property
+    def cursor_exempt(self) -> frozenset[K]:
+        """The keys `take_batch` may re-offer within a pass: those whose
+        motivating evidence is a fault SITE observed on this sweep. The
+        chain-only cohort walks the cursor like any other unit.
+
+        WHY THE SPLIT. The exemption exists so a fault's frames are never
+        dropped by the cursor before their rank is consulted, and it is safe
+        for site evidence because that evidence is bounded by the fault and
+        ends with it. An inferred cohort is neither: it is the crate, and it
+        re-derives identically every sweep the crash persists. Exempting it
+        turned the cursor off for the whole cohort — run `1577437-c93d5c26`
+        iter 4 (2026-09-06) printed `63 unit(s) carry crash evidence … 12 of
+        them are in this batch` and `attempted_before=0` with the same cohort
+        fingerprint as iter 2: the same 12-unit head every iteration, the 51
+        below it (where the tail of the chain sits) never dispatched. With
+        the chain cursor-bounded the head is offered once per pass and the
+        traversal reaches the tail in ceil(63/12) batches."""
+        return self.blamed | self.sited
+
+
 def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
                             cap: int,
                             cohort: Iterable[K] | None = None,
@@ -125,13 +201,30 @@ def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
     behaviour — keep that available, because a small crate whose frontier is
     already under the cap should not pay for the machinery.
 
-    `exempt` is the units whose motivating evidence is LIVE ON THIS SWEEP, and
-    it is subtracted from `attempted` before anything else runs. Without it the
-    cursor silently voids every ranking applied above it: `promote_crash_evidence`
-    moves a fault's blamed frames to the front of `ordered`, and the very next
-    statement drops them again because an earlier batch of the same pass had
-    already offered them once. Priority applied to a list the filter has already
-    emptied is not priority.
+    `exempt` is the units whose motivating evidence is an OBSERVED fault site
+    on this sweep — the localizer's frames and what hangs off them
+    (`CrashCohort.cursor_exempt`) — and it is subtracted from `attempted`
+    before anything else runs. Without it the cursor silently voids every
+    ranking applied above it: `promote_crash_evidence` moves a fault's blamed
+    frames to the front of `ordered`, and the very next statement drops them
+    again because an earlier batch of the same pass had already offered them
+    once. Priority applied to a list the filter has already emptied is not
+    priority.
+
+    An INFERRED cohort is bounded by the cursor, never exempt. The rule is
+    about what ends the exemption: site evidence ends when the fault does and
+    is a few units wide, so re-offering it costs at most one batch slot per
+    frame; a chain-derived cohort is the crate's construction chain, re-derived
+    identically on every sweep the crash persists, and wider than the cap.
+    Measured, run `1577437-c93d5c26` (2026-09-06, cluster stable): the
+    frame-blind SEGV in `tests/error_gen_3.rs` synthesized 63 chain-blamed fns
+    at iter 3; with all 63 exempt, iter 4 read `attempted_before=0` under the
+    cohort fingerprint iter 2 had opened, dispatched the 12-unit head of the
+    cohort (`by_ref, construct, construct_from_adhoc, …`), and every later
+    sweep would have dispatched the same head — the 51 units below it,
+    where the crash's own producers sat, could never be reached. The
+    exemption's "ends by itself the moment the fault does" holds for a frame
+    blame and is false for an inference that names most of the crate.
 
     Measured, run `1519852-5d607329` (2026-08-30, cluster stable): five binaries
     dead of `AddressSanitizer: heap-use-after-free`, 13 tests reporting no
@@ -143,16 +236,19 @@ def take_batch[K: Hashable](ordered: Sequence[K], attempted: Iterable[K],
     stays in the fill frontier with its crash report instead". That fallback was
     unreachable by construction.
 
-    WHY THIS CANNOT SPIN, and why the bound is not another cap. The exemption is
-    recomputed from evidence the sweep re-derives, so it ends by itself the
-    moment the fault does — a right body produces no crash, no blame, no
+    WHY THE SITE EXEMPTION CANNOT SPIN, and why the bound is not another cap.
+    It is recomputed from evidence the sweep re-derives, so it ends by itself
+    the moment the fault does — a right body produces no crash, no blame, no
     exemption. What bounds a unit the model cannot fix is the machinery that
     already owns that question: conviction and exhaustion withhold it from
     `ordered` upstream, and an exempt unit that is not in `ordered` cannot be
     taken. The cursor is a per-pass FAIRNESS device — it exists so the head does
     not starve the tail — and fairness is the wrong instrument for a unit that
     is blocking 13 tests. A second cap here would rebuild the retrigger's own
-    failure: a budget that expires while the fault it was spent on is still live.
+    failure: a budget that expires while the fault it was spent on is still
+    live. The chain cohort is the case where fairness IS the instrument: no
+    frame says which of its 63 units is the fault, so the only way to find
+    out is to offer each of them once before any twice.
 
     `cohort` is the frontier the CURRENT pass opened over. The pass closes when
     every one of those units has been attempted or has left the frontier —

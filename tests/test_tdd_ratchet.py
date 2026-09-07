@@ -266,7 +266,7 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  retires=None, logs=None, reset_returns=None,
                  localize=None, escalate=None, reverse_map=None,
                  floor=None, enumerate_fns=None, ledger=None, tree_stubs=None,
-                 coverage=None, attribute=None):
+                 coverage=None, attribute=None, recorded=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -333,6 +333,10 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         retrigger_layout=retrigger,
         localize_crashes=localize,
         measure_coverage_slice=coverage,
+        # (project_dir, tests) -> recorded executed set per test, for the
+        # red tests the coverage stub reports unmeasured. None keeps the
+        # driver consulting no record.
+        recorded_entry_sets=recorded,
         escalate_to_producers=escalate,
         # The extractor's per-fn records, so a replay can model the
         # landed-change reading. None (the default) is the pre-existing walk

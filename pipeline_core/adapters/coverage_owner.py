@@ -7,9 +7,21 @@ its own `CARGO_TARGET_DIR`, the same isolation `scripts/coverage_owner_probe.py`
 uses as a diagnostic CLI.
 
 Returns None on any failure (missing llvm tools, a tree that does not
-compile, an empty export, no fn records). A crashing binary writes no
-profile, so a crash-only suite under-reports; the crash localizer stays the
-signal there. This is a re-fill-phase complement, not a replacement.
+compile, an empty export, no fn records).
+
+A binary killed by a signal flushes no profile. The runtime CREATES the
+profraw at process start and writes the counters at exit — measured
+2026-09-07 on run `1577437-c93d5c26`'s tree: a fixed-name
+`LLVM_PROFILE_FILE` exists 5 ms into a `--exact` run of the SIGSEGV test
+and is 0 bytes when the process dies, and `llvm-profdata merge` accepts
+that file and exports count 0 for every function. So a file on disk is not
+a completed measurement; the process's returncode (negative = killed by a
+signal) and a NON-EMPTY profile are. A binary that did not complete is
+re-run one test per process so the tests that do complete are measured;
+the ones that still die are reported as unmeasured, absent from the owner
+map, and their bodies are the caller's to exempt from `dead` on the
+recorded evidence (`coverage_slice.exempt_recorded_executors`). The crash
+localizer stays the signal for the fault itself.
 
 Bodies are named at the extractor's `FnSite`, resolved by LINE against the
 records the caller's enumerator returns for the staged tree — the same
@@ -27,6 +39,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,11 +47,13 @@ from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.coverage_slice import (
     CountedBody,
     CoverageSlice,
+    matching_test_key,
     slice_from_counts,
 )
 from pipeline_core.domain.models import FnRecord, FnSite
 
 _PROF_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
+_BIN_HASH = re.compile(r"-[0-9a-f]{16}$")
 
 
 class SiteIndex:
@@ -272,12 +287,96 @@ def _prof_stem(name: str) -> str:
     return _PROF_STEM.sub("_", name).strip("_") or "t"
 
 
+def _binary_label(binary: Path) -> str:
+    """`error_gen_3-1a679321963fec42` → `error_gen_3`: the cargo target
+    name, which is what the sweep's own log names a binary by."""
+    return _BIN_HASH.sub("", binary.name)
+
+
+def _completed(returncode: int, raws: Sequence[Path]) -> bool:
+    """A measurement was taken: the process was not killed by a signal
+    (POSIX reports that as a negative returncode; a failing test exits 101
+    and IS complete) and it left a non-empty profile. The 0-byte file the
+    runtime creates at start is not a profile."""
+    if returncode < 0:
+        return False
+    return any(r.exists() and r.stat().st_size > 0 for r in raws)
+
+
+@dataclass(frozen=True, slots=True)
+class ExactRun:
+    """One `--exact` process: which binary claimed the test, whether the
+    process completed, and the profile it left when it did."""
+
+    name: str
+    binary: Path
+    returncode: int
+    raw: Path
+    completed: bool
+
+
+def _exact_run(tree: Path, binary: Path, name: str, raw: Path,
+               env: dict[str, str]) -> ExactRun | None:
+    """Run `name` alone on `binary`; None when the binary does not claim it
+    (`running 1 test` is printed before the test starts, so a claim is
+    readable even when the process then dies)."""
+    raw.unlink(missing_ok=True)
+    e = dict(env)
+    e["LLVM_PROFILE_FILE"] = str(raw)
+    out = _run([str(binary), "--exact", name, "--test-threads=1"],
+               cwd=tree, env=e)
+    if "running 1 test" not in (out.stdout or ""):
+        return None
+    return ExactRun(name=name, binary=binary, returncode=out.returncode,
+                    raw=raw, completed=_completed(out.returncode, [raw]))
+
+
+def _listed_tests(tree: Path, binary: Path, env: dict[str, str],
+                  prof: Path) -> list[str]:
+    """The tests a binary carries, as it names them (`--list` prints
+    `name: test`, module-qualified for unit tests)."""
+    e = dict(env)
+    e["LLVM_PROFILE_FILE"] = str(prof / "list.profraw")
+    out = _run([str(binary), "--list"], cwd=tree, env=e)
+    suffix = ": test"
+    return [ln[:-len(suffix)] for ln in (out.stdout or "").splitlines()
+            if ln.endswith(suffix)]
+
+
+def _recover_binary(
+    tree: Path, binary: Path, env: dict[str, str], prof: Path,
+) -> dict[str, ExactRun]:
+    """A binary whose whole-suite process did not complete, re-run one
+    test per process. The runs that complete carry the counts the merge
+    lost with the crash; the ones that still die are the tests the reading
+    cannot measure. Keyed by the listed name."""
+    runs: dict[str, ExactRun] = {}
+    for name in _listed_tests(tree, binary, env, prof):
+        raw = prof / f"one-{_prof_stem(name)}.profraw"
+        run = _exact_run(tree, binary, name, raw, env)
+        if run is not None:
+            runs[name] = run
+    return runs
+
+
+def _entered_sites(export: dict[str, Any], tree: Path,
+                   index: SiteIndex) -> frozenset[FnSite]:
+    return frozenset(
+        site for (rel, start), count in _body_counts(export, tree).items()
+        if count > 0
+        for site in [index.site_at(rel, start)]
+        if site is not None)
+
+
 def _owner_map(
     tree: Path, bins: list[Path], prof: Path, env: dict[str, str],
     tests: Iterable[str], profdata_bin: str, cov_bin: str,
     index: SiteIndex,
-) -> dict[str, frozenset[FnSite]]:
-    """Which crate bodies does each named test enter, one profile per test.
+    prior: Mapping[str, ExactRun] | None = None,
+) -> tuple[dict[str, frozenset[FnSite]], frozenset[str]]:
+    """Which crate bodies does each named test enter, one profile per test
+    — and which named tests could not be measured because their process
+    did not complete.
 
     Pass C of `scripts/coverage_owner_probe.py`, promoted into the loop.
     The whole-suite merge cannot answer this: it says a body ran, not
@@ -289,6 +388,14 @@ def _owner_map(
     the mapping rather than mapped to the empty set, because unmeasured
     and measured-empty license different answers (`convictors_never_enter`).
 
+    A claimed test whose process did not complete is ALSO left out, and
+    returned in the second half: the file its runtime created at start is
+    0 bytes and exports as "entered nothing" (run `1577437-c93d5c26`, iter
+    4: 6 of 13 red tests read as empty owner sets and the log said
+    `owner set for 13/13`). `prior` holds runs the crashed-binary recovery
+    already made, reused here (exact name, then unique leaf) instead of
+    re-spending the process.
+
     Cost is one binary invocation per test per candidate binary until the
     owning one answers, plus a merge and an export. Measured on the
     2026-08-30 stable tree: sub-second per test against a 6 s
@@ -296,33 +403,29 @@ def _owner_map(
     failing set only and never on the whole oracle.
     """
     owners: dict[str, frozenset[FnSite]] = {}
+    unmeasured: set[str] = set()
+    prior = dict(prior or {})
     for name in dict.fromkeys(tests):
-        stem = _prof_stem(name)
-        raw = prof / f"one-{stem}.profraw"
-        hit: Path | None = None
-        for b in bins:
-            raw.unlink(missing_ok=True)
-            e = dict(env)
-            e["LLVM_PROFILE_FILE"] = str(raw)
-            out = _run([str(b), "--exact", name, "--test-threads=1"],
-                       cwd=tree, env=e)
-            if "running 1 test" in (out.stdout or ""):
-                hit = b
-                break
-        if hit is None or not raw.exists():
+        key = matching_test_key(name, prior)
+        run: ExactRun | None = prior[key] if key is not None else None
+        if run is None:
+            raw = prof / f"one-{_prof_stem(name)}.profraw"
+            for b in bins:
+                run = _exact_run(tree, b, name, raw, env)
+                if run is not None:
+                    break
+        if run is None:
             continue
-        export = _merge_export([raw], [hit], prof / f"one-{stem}.json",
+        if not run.completed:
+            unmeasured.add(name)
+            continue
+        export = _merge_export([run.raw], [run.binary],
+                               prof / f"one-{_prof_stem(name)}.json",
                                profdata_bin, cov_bin)
         if export is None:
             continue
-        entered = {
-            site for (rel, start), count in _body_counts(export, tree).items()
-            if count > 0
-            for site in [index.site_at(rel, start)]
-            if site is not None
-        }
-        owners[name] = frozenset(entered)
-    return owners
+        owners[name] = _entered_sites(export, tree, index)
+    return owners, frozenset(unmeasured)
 
 
 def measure_coverage_slice(
@@ -342,7 +445,12 @@ def measure_coverage_slice(
     records no body can be named and the reading is not taken.
 
     Returns a slice of dead locators, dead-region sentences and the
-    per-test owner sets, or None when the reading cannot be taken. Never
+    per-test owner sets, plus the binaries and tests whose process did not
+    complete (`unmeasured_binaries`, `unmeasured_tests`), or None when the
+    reading cannot be taken. `dead` is computed over the COMPLETED
+    processes only; the caller subtracts what an unmeasured test is
+    recorded to execute (`coverage_slice.exempt_recorded_executors`),
+    because this adapter measures the tree and holds no record. Never
     writes into the loop's target dir.
 
     `failing_tests` is the sweep's failing set. Empty leaves `owners`
@@ -381,11 +489,39 @@ def measure_coverage_slice(
             return None
         run_a = prof / "a"
         run_a.mkdir()
+        # Pass A, one process per binary. A profile is a measurement only
+        # when the process completed; a binary that did not is re-run one
+        # test per process below, so its completing tests still count.
+        completed_raws: list[Path] = []
+        unmeasured_bins: list[tuple[Path, int]] = []
         for b in bins:
+            d = run_a / b.name
+            d.mkdir()
             e = dict(env)
-            e["LLVM_PROFILE_FILE"] = str(run_a / "%p-%m.profraw")
-            _run([str(b), "--test-threads=1"], cwd=tree, env=e)
-        export = _merge_export(sorted(run_a.glob("*.profraw")), bins,
+            e["LLVM_PROFILE_FILE"] = str(d / "%p-%m.profraw")
+            ran = _run([str(b), "--test-threads=1"], cwd=tree, env=e)
+            raws = sorted(d.glob("*.profraw"))
+            if _completed(ran.returncode, raws):
+                completed_raws.extend(raws)
+            else:
+                unmeasured_bins.append((b, ran.returncode))
+        recovered: dict[str, ExactRun] = {}
+        for b, _rc in unmeasured_bins:
+            recovered.update(_recover_binary(tree, b, env, prof))
+        completed_raws.extend(
+            r.raw for r in recovered.values() if r.completed)
+        if unmeasured_bins and log:
+            still = sorted(n for n, r in recovered.items() if not r.completed)
+            log("  [coverage] "
+                f"{len(unmeasured_bins)} binary(ies) did not complete "
+                "(killed by a signal or no profile written): "
+                + ", ".join(f"{_binary_label(b)} (rc={rc})"
+                            for b, rc in unmeasured_bins)
+                + f"; {len(recovered)} test(s) re-run alone, "
+                f"{len(recovered) - len(still)} measured, "
+                f"{len(still)} still unmeasured"
+                + (": " + ", ".join(still[:8]) if still else ""))
+        export = _merge_export(completed_raws, bins,
                                prof / "all.json", profdata_bin, cov_bin)
         if export is None:
             if log:
@@ -408,15 +544,26 @@ def measure_coverage_slice(
                 file_texts[rel] = ""
         index = SiteIndex(fn_records, file_texts)
         asked = tuple(dict.fromkeys(failing_tests))
-        owners = _owner_map(tree, bins, prof, env, asked,
-                            profdata_bin, cov_bin, index)
+        owners, unmeasured_asked = _owner_map(
+            tree, bins, prof, env, asked, profdata_bin, cov_bin, index,
+            prior=recovered)
+        # The crashed binaries' tests that still died alone, under the name
+        # the binary lists, unless an asked name already covers them.
+        unmeasured_tests = set(unmeasured_asked)
+        for name, run in recovered.items():
+            if not run.completed and matching_test_key(
+                    name, unmeasured_asked) is None:
+                unmeasured_tests.add(name)
         slice_ = slice_from_counts(
             _counted_bodies(index, bodies, lines),
-            owners=owners, failing=asked)
+            owners=owners, failing=asked,
+            unmeasured_binaries=[_binary_label(b) for b, _ in unmeasured_bins],
+            unmeasured_tests=unmeasured_tests)
         if log:
             log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
                 f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "
-                f"owner set for {len(owners)}/{len(asked)} failing test(s) "
+                f"owner set for {len(owners)}/{len(asked)} failing test(s), "
+                f"{len(unmeasured_asked)} unmeasured (binary did not complete) "
                 "(staged, own target dir)")
         return slice_
     except (OSError, subprocess.SubprocessError) as exc:

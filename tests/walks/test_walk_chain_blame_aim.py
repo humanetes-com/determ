@@ -21,20 +21,27 @@ back NONE, the candidate list emptied, and every refusal that would have logged
 lives INSIDE the loop over that list. Control fell to the one exit in the
 module that printed nothing.
 
-What the fix makes REACHABLE (never a score): the aim receives the ORIGIN blame
-(`blamed_locators`), which for this crash class is EMPTY — so the chain is
-consulted, grades OWNS on the construct/vtable component (the chain holds
-`construct` and that component declares it), and the walk reaches a component
-with an attempt to spend.
+What the driver fix (2026-08-15) makes REACHABLE (never a score): the aim
+receives the ORIGIN blame (`blamed_locators`), which for this crash class is
+EMPTY — the crashing test's own frames are never handed as blame again.
 
-Negative control: the evidence object the PRE-FIX driver built — the two
-residue locators in `blamed_fns`, the same chain — driven through the same real
-`retrigger_layout`. The recorded decision must reproduce exactly: `fired=False`,
-`reason="no component matched the evidence"`, nothing charged, nothing
-committed, no authoring call. The one thing that does NOT reproduce is the
-silence, and deliberately: the declined-walk line now prints the tier and the
-evidence shape, which is what makes this outcome diagnosable at iteration 1
-instead of at hour five.
+What the aim does with it CHANGED on 2026-09-06. From 2026-08-15 the empty
+blame let the chain be consulted, grade OWNS on the construct/vtable component
+(the chain holds `construct` and that component declares it), and charge an
+attempt. That is aim-by-inference, and its next instance was measured: run
+`1577437-c93d5c26` iter 3 graded 8 components OWNS off 63 chain fns and fired
+attempt 2 on `Quoted`, a type 0 of 373 fns reference. So the walk now
+DECLINES a frame-blind crash — loudly, with the tier and the evidence shape —
+and the chain is worked by the fill loop it also arms. Reachability here is
+"the decline is reached and printed at iteration 1, and nothing is charged".
+
+Negative controls, two. The evidence object the PRE-FIX driver built — the two
+residue locators in `blamed_fns`, the same chain — under the 2026-08-15 grade
+reproduces the recorded silent decline exactly (`fired=False`, nothing charged,
+nothing committed, no authoring call; only the silence itself does not
+reproduce, because the declined-walk line now prints). And the CURRENT driver's
+evidence under the grade that stood from 2026-08-15 to 2026-09-06 fires
+attempt 1 at the mega component — the inference aim this walk no longer takes.
 """
 from __future__ import annotations
 
@@ -192,22 +199,70 @@ def test_the_aim_is_handed_the_origin_blame_and_the_chain(
     assert _CONSTRUCT in ev.chain_blamed
 
 
-def test_the_captured_evidence_reaches_the_construct_component(
+def test_the_captured_evidence_declines_loudly_and_charges_nothing(
         tmp_path: Path, monkeypatch) -> None:
     """Reachability, which is all a walk may assert: the evidence the driver
     now builds, handed to the real action over the real 16-row registry,
-    grades OWNS and charges an attempt at the component the chain implicates —
-    the one the run's 308 minutes never reached."""
+    reaches the declined-walk exit with its shape printed — 0 blamed frames,
+    the chain count, the suspects, the vanished — and spends nothing. The
+    chain names `construct`, the mega component declares it, and that is
+    still not an observation of a fault inside it."""
     _logs, _events, seen = _replay(monkeypatch, tmp_path)
     evidence = next(e for e in seen if e is not None)
 
     res, f = _aim(evidence)
-    assert res.fired, "the aim declined the evidence it was built for"
+    assert not res.fired
+    assert res.reason == "no component matched the evidence"
+    assert f.committed == [] and f.prompts == [] and f.reverted_calls == []
+    declined = [ln for ln in f.logs if "no component matched the evidence" in ln]
+    assert len(declined) == 1
+    assert "blame tier NONE" in declined[0]
+    assert "0 blamed frame(s)" in declined[0]
+    assert f"{len(_CHAIN)} chain-blamed" in declined[0]
+    assert not any("the observed fault is inside code" in ln for ln in f.logs)
+
+
+def _grade_until_2026_09_06(evidence, fn_records, component_names):
+    """`crash_candidate_grade` from 2026-08-15 to 2026-09-06, verbatim: a
+    frame implicating nothing fell through to the chain, and the chain
+    graded. The aim this walk's fix withdrew."""
+    from pipeline_core.domain.layout_retrigger import (
+        BlameGrade,
+        crash_blame_grade,
+    )
+    if not evidence.vanished:
+        return BlameGrade.NONE
+    if evidence.blamed_fns:
+        frame_grade = crash_blame_grade(
+            evidence.blamed_fns, fn_records, component_names)
+        if frame_grade is not BlameGrade.NONE or not evidence.chain_blamed:
+            return frame_grade
+    if evidence.chain_blamed:
+        return crash_blame_grade(
+            evidence.chain_blamed, fn_records, component_names)
+    if not evidence.suspect_fns:
+        return BlameGrade.NONE
+    return crash_blame_grade(
+        evidence.suspect_fns, fn_records, component_names)
+
+
+def test_negative_control_the_chain_consulting_grade_fires_at_the_mega_component(
+        tmp_path: Path, monkeypatch) -> None:
+    """The same evidence under the grade that consulted the chain: OWNS on
+    the construct/vtable component, attempt 1 charged, a checkpoint
+    committed — the `Quoted` fire of run `1577437-c93d5c26` in miniature,
+    aimed by an inference at a component no frame ever named."""
+    import pipeline_core.application.retrigger_layout as _rl
+    _logs, _events, seen = _replay(monkeypatch, tmp_path)
+    evidence = next(e for e in seen if e is not None)
+    monkeypatch.setattr(_rl, "crash_candidate_grade", _grade_until_2026_09_06)
+
+    res, f = _aim(evidence)
+    assert res.fired
     assert any("the observed fault is inside code 1 component(s) declare" in ln
                for ln in f.logs)
     assert f.committed and "attempt 1" in f.committed[0]
     assert "object_reallocate_boxed" in f.committed[0]   # the mega component
-    assert not any("no component matched the evidence" in ln for ln in f.logs)
 
 
 def _pre_fix_payload(seen) -> Any:
@@ -278,16 +333,17 @@ def test_negative_control_the_pre_fix_walk_reproduces_the_silent_decline(
     assert "2 blamed frame(s)" in declined[0]
 
 
-def test_the_domain_fall_through_alone_rescues_the_pre_fix_payload(
+def test_the_pre_fix_payload_under_the_current_grade_declines_the_same_way(
         tmp_path: Path, monkeypatch) -> None:
-    """The two halves are separable, and this is the seam-hardening one. Feed
-    the PRE-FIX payload to the CURRENT grade: a frame that implicates nothing
-    while a chain inference exists no longer decides, so the same evidence
-    that silenced the run for 308 minutes now reaches the component the chain
-    names. The driver fix removes the residue; this makes a residue harmless
-    if one ever returns."""
+    """Seam hardening: should a frame residue ever return in `blamed_fns`,
+    the current grade decides NONE on it and does not fall through to the
+    chain — the decline is identical to the origin-blame one, and it is
+    loud. The residue is harmless in both directions: it aims nothing, and
+    it cannot re-open the inference aim through the back door."""
     _logs, _events, seen = _replay(monkeypatch, tmp_path)
     res, f = _aim(_pre_fix_payload(seen))
-    assert res.fired
-    assert any("the observed fault is inside code 1 component(s) declare" in ln
-               for ln in f.logs)
+    assert not res.fired
+    assert res.reason == "no component matched the evidence"
+    assert f.committed == [] and f.prompts == []
+    declined = [ln for ln in f.logs if "no component matched the evidence" in ln]
+    assert len(declined) == 1 and "2 blamed frame(s)" in declined[0]

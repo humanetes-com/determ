@@ -927,16 +927,20 @@ class CrashEvidence:
     the same vanished test reaches, and that is precisely what cause C could
     not do while it aimed by record order.
 
-    `chain_blamed` is a THIRD channel between them: the construction chain of
-    the crashed tests (attributed fns plus the producers of their types),
-    synthesized by the TDD driver only when the crash is deterministic AND an
-    origin-capable detector looked and placed no frame in-crate — the
-    refcount-corruption class where every stack resolves to std/test code
-    (run `635043-5f7c61f5`, 2026-08-14). It ranks above `suspect_fns` (it
-    names the producers a vanished test's reachability cannot separate) and
-    below `blamed_fns` (no fault was observed in any of it); the two blame
-    channels never co-exist in one payload — the synthesis refuses to run
-    while a real frame exists."""
+    `chain_blamed` is a THIRD channel: the construction chain of the crashed
+    tests (attributed fns plus the producers of their types), synthesized by
+    the TDD driver only when the crash is deterministic AND an origin-capable
+    detector looked and placed no frame in-crate — the refcount-corruption
+    class where every stack resolves to std/test code (run
+    `635043-5f7c61f5`, 2026-08-14). The two blame channels never co-exist in
+    one payload — the synthesis refuses to run while a real frame exists.
+
+    Only `blamed_fns` AIMS the walk. `chain_blamed` and `suspect_fns` are
+    inferences and grade nothing (`crash_candidate_grade`); what the chain
+    contributes here is the signature marker (`crash_signature`) — the
+    transition that re-opens a walk closed under a blameless signature when
+    a real frame later arrives — and the evidence-shape line of a declined
+    walk. Its prompt/frontier/exhaustion roles live in the driver."""
     vanished: frozenset[str]
     suspect_fns: frozenset[FnLocator]
     consecutive_sweeps: int = 0
@@ -1074,14 +1078,12 @@ def classify_crash_retrigger(
     97, twice). A component the observed fault does not touch is not a cause-C
     candidate, so returning NONE here is what stops the caller falling through to
     it. Blame is absent (empty) whenever localization was skipped or found no
-    native fault, and then this is exactly the reachability rule it always was.
-
-    One qualification, from the 2026-08-15 defect: "the blame decides" holds
-    wherever the blame implicates SOMETHING. A frame set that implicates no
-    component at all decides nothing — it merely empties the tier — so when a
-    chain inference exists `crash_candidate_grade` reads that instead. The
-    replaced rule was: two locators in a generated test file silenced a 67-fn
-    chain for 308 minutes.
+    native fault, and then NOTHING is admitted: the reachability rule this
+    classifier started as, and the chain-derived rule that stood between
+    them from 2026-08-14 to 2026-09-06, both aimed a re-author by inference,
+    and every fire either bought was at a component the fault never touched
+    (`crash_candidate_grade` carries the measurements). A frame-blind crash
+    is worked by the fill loop, which receives the chain as prompt evidence.
 
     Admitting a component is NOT choosing it. This still returns RUNTIME_CRASH
     for every component the fault so much as mentions, and the caller walks them
@@ -1151,45 +1153,44 @@ def crash_candidate_grade(
     from 49 passing to 24."""
     if not evidence.vanished:
         return BlameGrade.NONE
-    if evidence.blamed_fns:
-        frame_grade = crash_blame_grade(
-            evidence.blamed_fns, fn_records, component_names)
-        # An observed frame decides ALONE wherever it implicates this
-        # component at any grade, and still decides — as NONE — when no
-        # chain inference exists. The one case that falls through is "a
-        # frame that implicates nothing at all, while a chain inference
-        # does": returning NONE there hands the caller an empty candidate
-        # list and silences a channel that had an answer.
-        #
-        # Live instance, run `263217-d41a5bb5` (2026-08-15): the driver
-        # handed the crashing test's OWN frames — two locators in the
-        # generated `src/error.gen_tests_4.rs` — as `blamed_fns`. Every one
-        # of the cluster's 16 non-GATED components graded NONE on them, the
-        # 67-fn chain (which grades OWNS on the construct/vtable component,
-        # since the chain holds `src/error.rs::construct` and that component
-        # declares `construct`) was never consulted, and the walk returned
-        # silently for 308 minutes.
-        #
-        # After the driver fix that supplies the ORIGIN blame here, this
-        # co-occurrence is unreachable from the live driver — the chain
-        # synthesis is guarded by `not crash_blamed`, so a non-empty
-        # `chain_blamed` implies an empty `blamed_fns` at the only
-        # construction site. This is seam hardening: the function is a
-        # public domain seam, the co-occurrence is one driver edit away from
-        # returning, and it is what makes the defect unit-pinnable.
-        if frame_grade is not BlameGrade.NONE or not evidence.chain_blamed:
-            return frame_grade
-    # Chain-derived blame outranks reachability but never a frame: it names
-    # the producers a vanished test's static reach cannot separate (that is
-    # what admits the construct/vtable component the suspects never touch),
-    # while an observed frame above decides alone whenever one exists.
-    if evidence.chain_blamed:
-        return crash_blame_grade(
-            evidence.chain_blamed, fn_records, component_names)
-    if not evidence.suspect_fns:
+    # THE AIM READS OBSERVED FRAMES ONLY. `chain_blamed` and `suspect_fns`
+    # are inferences — the construction chain of the crashed tests, and
+    # what those tests statically reach — and an inference cannot say the
+    # fault was observed INSIDE code a component declares, which is what
+    # the OWNS tier means and what the walk spends a re-author on. Grading
+    # an inference at the tier below is no answer either: every component
+    # the inference merely mentions becomes a REFERENCES candidate, and the
+    # walk takes the first in registry order — the pre-tier defect (five
+    # sessions firing at `ChainState` and `Quoted` while every ASAN sweep
+    # blamed `src/error.rs::downcast`). So without a frame nothing is
+    # admitted, and the walk's declined line names the evidence shape.
+    #
+    # Measured, run `1577437-c93d5c26` iter 3 (2026-09-06, cluster
+    # `stable`): `blamed_fns` empty, 63 chain-blamed fns. Grading the chain
+    # put 8 of 16 components in the OWNS tier — `src/context.rs::fmt` and
+    # `::write_str` are methods of `Quoted`, so `Quoted` was one — and
+    # attempt 2 fired on `Quoted`: re-authored a type 0 of 373 enumerated
+    # fns reference, reverted nothing, reset the stall budget, and left the
+    # crash exactly as it was. Computed on the same records, the recorded
+    # reverse-map suspects (34 fns) grade the same 8 components OWNS by the
+    # same methods, so withholding the chain alone would have re-opened the
+    # identical fire through reachability. Both channels keep every other
+    # role — prompt evidence, exhaustion void, frontier entry, and for the
+    # chain the signature marker (`crash_signature`) — none of which is an
+    # aim.
+    #
+    # The residue case this function used to fall through on — run
+    # `263217-d41a5bb5` (2026-08-15), the crashing test's own two
+    # `gen_tests` frames handed as `blamed_fns`, grading NONE everywhere —
+    # is closed at its cause: the driver hands `blamed_locators` (the origin
+    # blame), which for that class is empty. An empty aim declines, and the
+    # decline is loud (`retrigger_layout`'s declined-walk line prints the
+    # tier and the evidence shape), which is the whole of what that
+    # 308-minute silence needed.
+    if not evidence.blamed_fns:
         return BlameGrade.NONE
     return crash_blame_grade(
-        evidence.suspect_fns, fn_records, component_names)
+        evidence.blamed_fns, fn_records, component_names)
 
 
 def top_blame_tier(grades: Iterable[BlameGrade]) -> BlameGrade:

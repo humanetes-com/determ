@@ -197,6 +197,76 @@ def test_order_only_under_a_zero_budget_defers_nothing() -> None:
     assert all(s.share_minutes is None for s in sched.ordered)
 
 
+def test_an_unmeasurable_run_ranks_rebuy_flat_and_defers_under_a_budget() -> None:
+    """A run whose every aimed test is unmeasurable, and whose targets miss
+    the crash-blamed set, ranks rebuy_flat (weight 0) even with no ledger
+    row. Under a budget it defers behind a never-served neighbour.
+    Control: without the new arguments it ranks never_served and runs."""
+    fmt = _FMT
+    source = FnLocator("src/x.rs", "source")
+    drop = FnLocator("src/y.rs", "drop")
+    aimed = {"t_crash_a", "t_crash_b"}
+    file_run = RouteRun(
+        kind=RouteKind.FILE, label="file src/fmt.rs",
+        targets=frozenset({fmt, source}), target_tests=frozenset(aimed),
+        files=("src/x.rs",), bodies_sha="f")
+    neighbour = RouteRun(
+        kind=RouteKind.PER_FN, label="per-fn",
+        targets=frozenset({_NEW}), target_tests=frozenset({"t_ok"}),
+        bodies_sha="p")
+    unmeas = aimed
+    blamed = {drop}
+    control = schedule([file_run, neighbour], [], oracle_fp="o", hollow={})
+    assert {s.run.label: s.reason for s in control.ordered} == {
+        "file src/fmt.rs": "never_served", "per-fn": "never_served"}
+    assert not control.deferred
+    ranked = schedule(
+        [file_run, neighbour], [], oracle_fp="o", hollow={},
+        unmeasurable_tests=unmeas, crash_blamed=blamed)
+    by = {s.run.label: s for s in ranked.ordered}
+    assert by["file src/fmt.rs"].reason == "rebuy_flat"
+    assert by["file src/fmt.rs"].weight == 0
+    assert by["per-fn"].reason == "never_served"
+    budgeted = schedule(
+        [file_run, neighbour], [], oracle_fp="o", hollow={},
+        budget_minutes=60, unmeasurable_tests=unmeas, crash_blamed=blamed)
+    assert [s.run.label for s in budgeted.ordered] == ["per-fn"]
+    assert [s.run.label for s in budgeted.deferred] == ["file src/fmt.rs"]
+
+
+def test_a_crash_blamed_target_keeps_the_run_measurable() -> None:
+    """Same run as the unmeasurable case, but crash_blamed includes a
+    target: not unmeasurable, keeps never_served."""
+    fmt = _FMT
+    source = FnLocator("src/x.rs", "source")
+    file_run = RouteRun(
+        kind=RouteKind.FILE, label="file src/fmt.rs",
+        targets=frozenset({fmt, source}),
+        target_tests=frozenset({"t_crash_a", "t_crash_b"}),
+        files=("src/x.rs",), bodies_sha="f")
+    sched = schedule(
+        [file_run], [], oracle_fp="o", hollow={},
+        unmeasurable_tests={"t_crash_a", "t_crash_b"},
+        crash_blamed={fmt})
+    assert sched.ordered[0].reason == "never_served"
+    assert not sched.deferred
+
+
+def test_one_measurable_aimed_test_keeps_the_run_measurable() -> None:
+    """Same run, one aimed test not in unmeasurable_tests: not unmeasurable."""
+    fmt = _FMT
+    file_run = RouteRun(
+        kind=RouteKind.FILE, label="file src/fmt.rs",
+        targets=frozenset({fmt}),
+        target_tests=frozenset({"t_crash_a", "t_ok"}),
+        files=("src/x.rs",), bodies_sha="f")
+    sched = schedule(
+        [file_run], [], oracle_fp="o", hollow={},
+        unmeasurable_tests={"t_crash_a"},
+        crash_blamed={FnLocator("src/y.rs", "drop")})
+    assert sched.ordered[0].reason == "never_served"
+
+
 def test_bodies_sha_folds_whitespace_and_ignores_order() -> None:
     a = bodies_sha_of([(_STUB, "let x = 1;\n  y"), (_FMT, "z")])
     b = bodies_sha_of([(_FMT, "z"), (_STUB, "let x = 1; y")])

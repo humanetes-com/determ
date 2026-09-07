@@ -23,7 +23,10 @@ from pipeline_core.domain.construction_recipe import (
     construction_recipes_for,
 )
 from pipeline_core.domain.coverage_slice import instruction_opener
-from pipeline_core.domain.crash_site import ownership_transfer_must
+from pipeline_core.domain.crash_site import (
+    family_members_beside_a_crashed_conversion,
+    ownership_transfer_must,
+)
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
@@ -285,10 +288,18 @@ def _plan_line(p: BlockFillPlan) -> str:
         seen_recipe.add(name)
         parts.append(f"{recipes[name]}: {name}")
     bypass_names = frozenset(b.fn_name for b in p.bypass)
-    crashed = tuple(r for r in p.refills if r in p.crashed)
+    # A conversion-family member AIMED beside a CRASHED family member is
+    # graded CRASHED: the family is one ownership contract, and the aimed
+    # sentence ("re-derive the erased layout") is the wrong instruction for
+    # it — run `1577437-c93d5c26`'s iter-1 error.rs prompt sent
+    # `into_boxed_dyn_error` CRASHED with the MUST and `object_boxed` AIMED,
+    # and the reply forgot self in one and re-boxed the payload in the other.
+    promoted = family_members_beside_a_crashed_conversion(p.crashed, p.aimed)
+    crashed_names = frozenset(p.crashed) | promoted
+    crashed = tuple(r for r in p.refills if r in crashed_names)
     aimed = tuple(r for r in p.refills
                   if r in p.aimed and r not in recipe_names
-                  and r not in p.crashed)
+                  and r not in crashed_names)
     direct = tuple(r for r in p.refills
                    if r not in p.inferred and r not in p.escalated
                    and r not in p.installable and r not in bypass_names

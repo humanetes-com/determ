@@ -11,6 +11,11 @@ mid-run, produce typed :class:`CrashSite` evidence:
      faults deterministically and additionally reports the ORIGIN stack of
      the invalid memory (the fn that must actually change).
 
+The ASAN sweep is ONE PROCESS PER TEST BINARY: ``halt_on_error=1`` aborts a
+binary on its first error and cargo starts the next, so the combined output
+carries one AddressSanitizer report per crashed binary. Every report becomes
+its own site; nothing here treats the sweep as one heap.
+
 The result feeds three consumers: the frontier (crash-blamed fns outrank
 test-name attribution), the fill prompts (a CRASH_EVIDENCE section with the
 concrete frames), and the exhaustion gate (crash evidence voids a prior
@@ -24,11 +29,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.domain.crash_site import (
+    AsanReport,
     CrashSite,
+    SourceWindow,
     asan_stack_excerpt,
+    conversion_family_from_access,
+    conversion_family_from_origin,
+    enclosing_fn_window,
     first_test_file_after_destructor,
+    first_test_file_on_access,
     is_memory_fault_signal,
-    parse_asan_report,
+    parse_asan_reports,
     relativize_frame_files,
     site_from_frames,
 )
@@ -52,6 +63,14 @@ class CrashLocalizerDeps:
 _is_memory_fault = is_memory_fault_signal
 
 
+def _read_lines(workspace_root: Path, file_rel: str) -> list[str] | None:
+    path = workspace_root / file_rel
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+
 def _caller_source_line(
     origin: list[dict[str, object]],
     workspace_root: Path,
@@ -69,76 +88,105 @@ def _caller_source_line(
     if loc is None:
         return None, None
     file_rel, line_no = loc
-    path = workspace_root / file_rel
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None, None
-    lines = text.splitlines()
-    if not (1 <= line_no <= len(lines)):
+    lines = _read_lines(workspace_root, file_rel)
+    if lines is None or not (1 <= line_no <= len(lines)):
         return None, None
     return lines[line_no - 1], loc
 
 
-def _asan_site(
-    deps: CrashLocalizerDeps,
-    test_cmd: str,
+def _access_source_window(
+    access: list[dict[str, object]],
     workspace_root: Path,
-    env: dict[str, str],
+) -> SourceWindow | None:
+    """The enclosing test fn's lines up to the innermost ACCESS test frame,
+    with their coordinates, or None.
+
+    The access-side sibling of :func:`_caller_source_line`, read only when
+    origin recovery named nothing: a SEGV has no free/alloc stack, so the
+    origin walk has nothing to read, while the READ stack still ends in
+    the test line that dereferenced the conversion's result. The window
+    is :func:`enclosing_fn_window` — the same test fn, bounded — so the
+    unique-name gate sees the conversion on the line above the assert
+    (`error_gen_3.rs:32` under the access at `:33`, run
+    `1577437-c93d5c26`) and never another test's conversions.
+    """
+    loc = first_test_file_on_access(access)
+    if loc is None:
+        return None
+    file_rel, line_no = loc
+    lines = _read_lines(workspace_root, file_rel)
+    if lines is None:
+        return None
+    start, window = enclosing_fn_window(lines, line_no)
+    if not window:
+        return None
+    return SourceWindow(file_rel=file_rel, first_line=start, lines=tuple(window))
+
+
+def _site_for_report(
+    deps: CrashLocalizerDeps,
+    report: AsanReport,
+    dangling: str | None,
+    workspace_root: Path,
 ) -> CrashSite | None:
-    """Run the sanitized sweep and build the ORIGIN-bearing site, or None."""
-    if deps.asan_sweep is None:
-        return None
-    asan = deps.asan_sweep(test_cmd, workspace_root, env)
-    if asan is None:
-        return None
-    _rc, out = asan
-    rep = parse_asan_report(out)
-    if rep is None:
-        return None
-    kind, access, origin = rep
-    access = relativize_frame_files(access, str(workspace_root))
-    origin = relativize_frame_files(origin, str(workspace_root))
-    # binary label + in-flight test from the ASAN run's own cargo output.
-    a_crashed = [b for b in parse_binary_results(out) if not b.completed]
-    label = a_crashed[0].label if a_crashed else "?"
-    test = a_crashed[0].dangling if a_crashed else None
+    """One :class:`CrashSite` for one AddressSanitizer report."""
+    kind = report.kind
+    access = relativize_frame_files(report.access, str(workspace_root))
+    origin = relativize_frame_files(report.origin, str(workspace_root))
+    label = report.label
     source_line, source_loc = _caller_source_line(origin, workspace_root)
+    source_window: SourceWindow | None = None
+    if source_line is None and (conversion_family_from_access(access)
+                                or conversion_family_from_origin(origin)):
+        # Origin recovery has nothing to read; the family is licensed, so
+        # the access side may name the conversion. The licence is the same
+        # gate that keeps an Arc double-drop off this path.
+        source_window = _access_source_window(access, workspace_root)
     site = site_from_frames(
-        label, test, kind, access, origin_raw_frames=origin,
-        raw_report=asan_stack_excerpt(out), origin_capable=True,
-        source_line=source_line, source_loc=source_loc)
+        label, dangling, kind, access, origin_raw_frames=origin,
+        raw_report=asan_stack_excerpt(report.text), origin_capable=True,
+        source_line=source_line, source_loc=source_loc,
+        source_window=source_window)
     if site.origin_unattributed:
-        # The report HAD a free/alloc stack (that is what stacks[1] is); every
-        # frame in it was filtered out as non-crate. Say so, and say WHICH
-        # starvation this is — the verdict alone left "unsymbolized raw
-        # addresses" and "symbolized but genuinely foreign" indistinguishable,
-        # and telling them apart cost an archive dig per instance. Measured
-        # 2026-08-18 on `logs/asan/asan-20260816T194054947258.txt` (the
-        # deterministic `test_downcast::test_drop` heap-use-after-free): all
-        # 27 origin frames symbolize, and the only workspace frames are the
-        # TEST's own (`tests/test_downcast.rs:83` frees the Arc legitimately)
-        # — so no build flag can put a crate frame on that stack, and the
-        # culprit for this class lives on the ACCESS/retention side. The raw
-        # stacks stay on the site so the next reader sees who freed the
-        # memory without paying for another instrumented build.
+        # Say WHICH starvation this is — the verdict alone left "no origin
+        # stack at all", "unsymbolized raw addresses" and "symbolized but
+        # genuinely foreign" indistinguishable, and telling them apart cost
+        # an archive dig per instance. Measured 2026-08-18 on
+        # `logs/asan/asan-20260816T194054947258.txt` (the deterministic
+        # `test_downcast::test_drop` heap-use-after-free): all 27 origin
+        # frames symbolize, and the only workspace frames are the TEST's own
+        # (`tests/test_downcast.rs:83` frees the Arc legitimately) — so no
+        # build flag can put a crate frame on that stack, and the culprit for
+        # this class lives on the ACCESS/retention side. And a SEGV (run
+        # `1577437-c93d5c26`, `tests/error_gen_3.rs`) prints no free or
+        # allocation stack at all: zero origin lines is not a symbolizer
+        # fault, and telling the operator to check llvm-symbolizer there
+        # sent the diagnosis at the wrong tool. The raw stacks stay on the
+        # site so the next reader sees who freed the memory without paying
+        # for another instrumented build.
         _sym = [f for f in origin if str(f.get("file") or "")]
         _ws = [str(f.get("file") or "") for f in _sym
                if not str(f.get("file") or "").startswith("/")]
         _oracle = [f for f in _ws if is_oracle_path(f)]
+        if _sym:
+            detail = (f"{len(_sym)} of {len(origin)} frame(s) symbolized"
+                      + (f"; the only workspace frame(s) are {len(_oracle)} "
+                         "test-file frame(s) (oracle — not authorable, and a "
+                         "test's own free is usually the legitimate one: "
+                         "suspect the crate's access/retention path)"
+                         if _ws and len(_oracle) == len(_ws)
+                         else f"; {len(_ws)} workspace frame(s)"))
+        elif report.origin_stack_lines:
+            detail = (f"NO frame symbolized — {report.origin_stack_lines} raw "
+                      "address line(s); check llvm-symbolizer on the sweep's "
+                      "PATH")
+        else:
+            detail = (f"this report carries no origin stack ({kind}): the "
+                      "access path is recorded")
         deps.log("  [phase-c/crash-localizer] "
                  f"{kind} in {label}: no in-crate frame in the origin stack "
                  f"({len(origin)} raw frame(s)) — blaming NOBODY. "
-                 + ((f"{len(_sym)} of {len(origin)} frame(s) symbolized"
-                     + (f"; the only workspace frame(s) are {len(_oracle)} "
-                        "test-file frame(s) (oracle — not authorable, and a "
-                        "test's own free is usually the legitimate one: "
-                        "suspect the crate's access/retention path)"
-                        if _ws and len(_oracle) == len(_ws)
-                        else f"; {len(_ws)} workspace frame(s)"))
-                    if _sym else
-                    "NO frame symbolized — raw addresses; check "
-                    "llvm-symbolizer on the sweep's PATH")
+                 + detail
                  + ". The access path is recorded; the fn that invalidated "
                  "the memory is not identified. Raw report archived under "
                  "logs/asan/.")
@@ -156,6 +204,47 @@ def _asan_site(
     return site if (site.all_frames or site.origin_unattributed) else None
 
 
+def _asan_sites(
+    deps: CrashLocalizerDeps,
+    test_cmd: str,
+    workspace_root: Path,
+    env: dict[str, str],
+) -> tuple[CrashSite, ...]:
+    """Run the sanitized sweep once and build one ORIGIN-bearing site per
+    AddressSanitizer report — one per crashed binary.
+
+    Each report is joined to its binary by label: the report's label is the
+    nearest preceding `Running <label>` line, and `parse_binary_results`
+    gives the same label to the section that never printed its trailer, so
+    the in-flight (dangling) test is that binary's own. The pre-fix reader
+    took the FIRST report and the FIRST incomplete binary and called them
+    the sweep: on run `1577437-c93d5c26` (iter 2) that was the
+    `tests/error_gen_3.rs` SEGV with an empty origin, while the
+    `tests/test_context.rs` and `tests/test_downcast.rs` use-after-frees —
+    both with `Error::drop` in-crate on their free stacks — were never read.
+    """
+    if deps.asan_sweep is None:
+        return ()
+    asan = deps.asan_sweep(test_cmd, workspace_root, env)
+    if asan is None:
+        return ()
+    _rc, out = asan
+    reports = parse_asan_reports(out)
+    if not reports:
+        return ()
+    crashed_by_label = {b.label: b for b in parse_binary_results(out)
+                        if not b.completed}
+    sites: list[CrashSite] = []
+    for report in reports:
+        hit = crashed_by_label.get(report.label)
+        site = _site_for_report(
+            deps, report, hit.dangling if hit is not None else None,
+            workspace_root)
+        if site is not None:
+            sites.append(site)
+    return tuple(sites)
+
+
 def localize_crashes(
     deps: CrashLocalizerDeps,
     sweep_output: str,
@@ -170,9 +259,11 @@ def localize_crashes(
     gdb runs first because it is cheap and confirms WHICH binary/test dies,
     but its backtrace names only the faulting frame. For a memory fault that
     frame is usually not the fn to fix, so the sanitized sweep runs too and
-    its ORIGIN-bearing site supersedes gdb's for that binary. gdb's result is
-    kept when the sanitizer produces nothing (no nightly, sanitizer
-    unsupported, crash not reproducible under instrumentation).
+    its ORIGIN-bearing site supersedes gdb's FOR THAT BINARY. gdb's result is
+    kept for every binary the sanitizer did not report (no nightly, sanitizer
+    unsupported, crash not reproducible under instrumentation, or — live on
+    run `1577437-c93d5c26` iter 4 — `tests/test_context.rs` aborting on a
+    panic in a destructor with no AddressSanitizer report at all).
 
     Returns () when nothing crashed or nothing could be localized — callers
     must treat an empty result on a shrunken oracle as "unlocalized", never
@@ -218,31 +309,23 @@ def localize_crashes(
                 if unreproduced else
                 "backtrace names only the faulting frame")
              + " — running ASAN sweep for the memory's origin.")
-    asan = _asan_site(deps, test_cmd, workspace_root, env)
-    if asan is None:
+    asan = _asan_sites(deps, test_cmd, workspace_root, env)
+    if not asan:
         return tuple(sites)
-    # Once ONE origin is known, the other memory-fault backtraces of the same
-    # round are almost certainly downstream readers of that same corruption
-    # (one dangling pointer kills every binary that dereferences it). Blaming
-    # their faulting frames would hand the model correct fns to "fix" — the
-    # misattribution this localizer exists to end. Keep only origin-bearing
-    # blame plus crashes of a different class; the sanitizer halts on the
-    # first error, so the next sweep localizes the next origin once this one
-    # is fixed.
-    #
-    # That consolidation is conditional on an origin ACTUALLY being known.
-    # When the sanitizer named no in-crate origin the premise is absent —
-    # nothing was localized, so discarding the other backtraces would trade
-    # real evidence for a blame that does not exist.
-    if asan.origin_unattributed:
-        return (asan, *[s for s in sites if s.binary_label != asan.binary_label])
-    kept = [s for s in sites
-            if s.binary_label != asan.binary_label
-            and not (_is_memory_fault(s.signal) and not s.origin_frames)]
-    dropped = len(sites) - len(kept) - sum(
-        1 for s in sites if s.binary_label == asan.binary_label)
-    if dropped > 0:
-        deps.log(f"  [phase-c/crash-localizer] {dropped} further memory-fault "
-                 "backtrace(s) not blamed — same corruption read downstream; "
-                 f"blame stays on {asan.blamed_locator}.")
-    return (asan, *kept)
+    # Each test binary is its own process and its own heap. A sanitized site
+    # supersedes the gdb site of the SAME binary — same label — because it
+    # carries the origin gdb cannot see. It says nothing about any other
+    # binary: `halt_on_error` stops one process, cargo starts the next, and
+    # the three incomplete binaries of run `1577437-c93d5c26` were three
+    # separate faults. The previous consolidation dropped every other
+    # memory-fault backtrace as a "downstream reader of the same corruption"
+    # — a one-heap premise that is false across processes — and that is
+    # how a sweep with three reports produced one nobody site.
+    asan_labels = {s.binary_label for s in asan}
+    kept = [s for s in sites if s.binary_label not in asan_labels]
+    superseded = len(sites) - len(kept)
+    if superseded:
+        deps.log(f"  [phase-c/crash-localizer] {superseded} gdb backtrace(s) "
+                 "superseded by the sanitized site of the same binary; "
+                 f"{len(kept)} kept for binaries the sanitizer did not report.")
+    return (*asan, *kept)

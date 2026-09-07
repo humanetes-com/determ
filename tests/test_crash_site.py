@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pipeline_core.domain.crash_site import (
     asan_stack_excerpt,
     bare_fn_name,
@@ -892,3 +894,284 @@ def test_callee_subjects_obey_the_cap() -> None:
     blamed = FnLocator("src/a.rs", "caller")
     assert callee_subjects(blamed, recs) == frozenset()
     assert len(callee_subjects(blamed, recs, max_subjects=13)) == 13
+
+
+# ---- one AddressSanitizer report per crashed binary --------------------------
+# The ASAN sweep is one process per test binary: `halt_on_error=1` stops THAT
+# process, cargo starts the next. The archives of run `1577437-c93d5c26`
+# (2026-09-06), distilled under `tests/fixtures/crash/` to the lines the
+# parsers read, hold 2 (iter 4) and 3 (iter 2) AddressSanitizer reports each,
+# with LeakSanitizer reports between them.
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "crash"
+_SWEEP_ITER4 = _FIXTURES / "sweep_two_reports_segv_and_uaf_1577437_2026-09-06_iter4.txt"
+_SWEEP_ITER2 = _FIXTURES / "sweep_three_reports_1577437_2026-09-06_iter2.txt"
+
+
+def test_parse_asan_reports_returns_one_report_per_crashed_binary() -> None:
+    """Two reports on the iter-4 archive, three on iter 2, each tagged with
+    the `Running` label of the binary whose process printed it, and their
+    kinds are the two the archives hold. `parse_asan_report` on the same
+    text still returns the first — the SEGV — which is the pre-fix reading,
+    now explicitly the first-report wrapper."""
+    from pipeline_core.domain.crash_site import parse_asan_reports
+    two = parse_asan_reports(_SWEEP_ITER4.read_text())
+    assert [(r.label, r.kind) for r in two] == [
+        ("tests/error_gen_3.rs", "AddressSanitizer: SEGV"),
+        ("tests/test_downcast.rs", "AddressSanitizer: heap-use-after-free")]
+    three = parse_asan_reports(_SWEEP_ITER2.read_text())
+    assert [(r.label, r.kind) for r in three] == [
+        ("tests/error_gen_3.rs", "AddressSanitizer: SEGV"),
+        ("tests/test_context.rs", "AddressSanitizer: heap-use-after-free"),
+        ("tests/test_downcast.rs", "AddressSanitizer: heap-use-after-free")]
+    first = parse_asan_report(_SWEEP_ITER2.read_text())
+    assert first is not None and first[0] == "AddressSanitizer: SEGV"
+    assert first[2] == [], (
+        "negative control: the first report has an empty origin — the "
+        "reading that blamed NOBODY and armed chain synthesis")
+
+
+def test_leak_stacks_appear_in_no_report_and_a_segv_has_no_origin_stack() -> None:
+    """Twenty-one LeakSanitizer reports sit between the AddressSanitizer
+    reports; none of their `malloc` stacks reaches any report's access or
+    origin. A SEGV report has ZERO origin lines (no free/alloc stack was
+    printed), which is different from an origin stack whose frames did
+    not symbolize."""
+    from pipeline_core.domain.crash_site import parse_asan_reports
+    text = _SWEEP_ITER2.read_text()
+    assert text.count("ERROR: LeakSanitizer:") == 21
+    reports = parse_asan_reports(text)
+    for r in reports:
+        assert not any(str(f["func"]) == "malloc" for f in r.origin), r.label
+        assert not any("leak" in str(f["func"]).lower()
+                       for f in (*r.access, *r.origin)), r.label
+    segv, ctx, dc = reports
+    assert segv.origin == [] and segv.origin_stack_lines == 0
+    assert ctx.origin_stack_lines == 27 and len(ctx.origin) == 27
+    assert dc.origin_stack_lines == 24 and len(dc.origin) == 24
+    assert any("as core::ops::drop::Drop>::drop" in str(f["func"])
+               for f in ctx.origin)
+    assert any("as core::ops::drop::Drop>::drop" in str(f["func"])
+               for f in dc.origin)
+
+
+def test_a_report_without_a_summary_is_closed_by_the_next_report_or_label() -> None:
+    from pipeline_core.domain.crash_site import parse_asan_reports
+    text = (
+        "    Running tests/a.rs (target/debug/deps/a-1)\n"
+        "==1==ERROR: AddressSanitizer: SEGV on unknown address 0x4\n"
+        "    #0 0x1 in a::f /w/src/a.rs:1\n"
+        "    Running tests/b.rs (target/debug/deps/b-2)\n"
+        "==2==ERROR: AddressSanitizer: heap-use-after-free on address 0x8\n"
+        "    #0 0x2 in b::g /w/src/b.rs:2\n"
+        "freed by thread T0 here:\n"
+        "    #0 0x3 in free ../asan_malloc_linux.cpp:52\n"
+        "    #1 0x4 in b::h /w/src/b.rs:9\n"
+        "SUMMARY: AddressSanitizer: heap-use-after-free\n")
+    reports = parse_asan_reports(text)
+    assert [(r.label, [f["func"] for f in r.access], [f["func"] for f in r.origin])
+            for r in reports] == [
+        ("tests/a.rs", ["a::f"], []),
+        ("tests/b.rs", ["b::g"], ["free", "b::h"])]
+    assert parse_asan_reports("all tests passed") == []
+
+
+# ---- the conversion family: every by-value copy of inner ---------------------
+
+def test_a_turbofish_call_names_the_conversion_and_downcast_ref_does_not() -> None:
+    """`err.downcast::<HighLevel>().unwrap()` (tests/test_context.rs:124) and
+    `.downcast::<String>()` (tests/test_downcast.rs:21) name `downcast`.
+    `downcast_ref::<T>()` is not in the family and a line that only calls
+    it names nothing. Negative control: the `(`-only regex the family
+    shipped with, run on the same lines, names nothing."""
+    import re
+
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        crate_fn_named_on_source_line,
+    )
+    assert "downcast" in CONVERSION_FAMILY
+    assert "downcast_ref" not in CONVERSION_FAMILY
+    assert "drop" not in CONVERSION_FAMILY and "is" not in CONVERSION_FAMILY
+    line_ctx = "    let err = err.downcast::<HighLevel>().unwrap();"
+    line_dc = "        bail_fmt().unwrap_err().downcast::<String>().unwrap(),"
+    assert crate_fn_named_on_source_line(line_ctx, CONVERSION_FAMILY) == "downcast"
+    assert crate_fn_named_on_source_line(line_dc, CONVERSION_FAMILY) == "downcast"
+    assert crate_fn_named_on_source_line(
+        "    let v = err.downcast::<Vec<u8>>().unwrap();", CONVERSION_FAMILY
+    ) == "downcast", "nested generics are still one call"
+    assert crate_fn_named_on_source_line(
+        "    let _ = err.downcast_ref::<MyErr>();", CONVERSION_FAMILY) is None
+    pre_fix = re.compile(
+        r"(?:\.|::)\s*(" + "|".join(sorted(map(re.escape, CONVERSION_FAMILY),
+                                           key=len, reverse=True)) + r")\s*\(")
+    assert pre_fix.search(line_ctx) is None and pre_fix.search(line_dc) is None, (
+        "negative control: the `(`-only rule cannot see a turbofish call")
+
+
+def test_the_window_names_the_conversion_on_the_line_above_the_access() -> None:
+    """The SEGV's access test frame is `tests/error_gen_3.rs:33`
+    (`assert_eq!(boxed.to_string(), "io")`), which names nothing; the
+    window of the enclosing test fn includes line 32 and names
+    `reallocate_into_boxed_dyn_error_without_backtrace` once, at line 32.
+    A window naming two family members returns None (the unique gate)."""
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        crate_fn_named_in_source_window,
+        crate_fn_named_in_source_window_at,
+        crate_fn_named_on_source_line,
+        enclosing_fn_window,
+    )
+    lines = [""] * 28 + [
+        "fn test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait() {",
+        "    use std::error::Error as StdError;",
+        '    let err = Error::new(std::io::Error::new(std::io::ErrorKind::Other, "io"));',
+        "    let boxed = err.reallocate_into_boxed_dyn_error_without_backtrace();",
+        '    assert_eq!(boxed.to_string(), "io");',
+        "    assert!(boxed.source().is_none());",
+        "}",
+    ]
+    assert crate_fn_named_on_source_line(lines[32], CONVERSION_FAMILY) is None, (
+        "negative control: the access line alone names nothing")
+    start, window = enclosing_fn_window(lines, 33)
+    assert start == 29 and len(window) == 5
+    assert crate_fn_named_in_source_window(window, CONVERSION_FAMILY) == (
+        "reallocate_into_boxed_dyn_error_without_backtrace")
+    hit = crate_fn_named_in_source_window_at(window, CONVERSION_FAMILY)
+    assert hit is not None and start + hit[1] == 32
+    two = window + ["    let b2 = err2.into_boxed_dyn_error();"]
+    assert crate_fn_named_in_source_window(two, CONVERSION_FAMILY) is None
+    # A window with no `fn` line within the bound is the bound itself.
+    flat = ["x"] * 100
+    start, window = enclosing_fn_window(flat, 90, max_lines=10)
+    assert start == 80 and len(window) == 11
+    assert enclosing_fn_window(flat, 0) == (0, [])
+
+
+def test_first_test_file_on_access_is_the_innermost_test_frame_with_a_line() -> None:
+    from pipeline_core.domain.crash_site import first_test_file_on_access
+    access = [
+        {"func": "<alloc::string::String as core::fmt::Display>::fmt",
+         "file": "/rustc/x/library/alloc/src/string.rs", "line": 2725},
+        {"func": "error_gen_3::test_x", "file": "tests/error_gen_3.rs", "line": 33},
+        {"func": "error_gen_3::test_x::{closure#0}", "file": "tests/error_gen_3.rs",
+         "line": 29},
+    ]
+    assert first_test_file_on_access(access) == ("tests/error_gen_3.rs", 33)
+    assert first_test_file_on_access(access[:1]) is None
+    sibling = [{"func": "error::gen_tests_4::test_y",
+                "file": "src/error.gen_tests_4.rs", "line": 14}]
+    assert first_test_file_on_access(sibling) == ("src/error.gen_tests_4.rs", 14)
+    assert first_test_file_on_access(
+        [{"func": "anyhow::Error::downcast", "file": "src/error.rs", "line": 5}]
+    ) is None, "a crate frame is not a test file"
+
+
+def test_the_origin_shape_licenses_the_family_and_an_arc_drop_does_not() -> None:
+    """`conversion_family_from_origin`: a free stack whose first in-crate
+    frame is `Error::drop` and whose next caller is a test line licenses
+    the family — the iter-4 `test_downcast` UAF, whose READ stack carries
+    neither `ErrorImpl` nor `Box<dyn Error>`. The Arc double-drop of
+    `test_downcast::test_drop` frees in std's `Arc::drop` from the test's
+    own line: no in-crate destructor, family empty."""
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        conversion_family_from_access,
+        conversion_family_from_origin,
+    )
+    read = [
+        {"func": "memcmp", "file": "/rustc/llvm/sanitizer_common_interceptors.inc",
+         "line": 880},
+        {"func": "<str as core::cmp::PartialEq>::eq",
+         "file": "/rustc/x/library/core/src/str/traits.rs", "line": 30},
+        {"func": "test_downcast::test_downcast", "file": "tests/test_downcast.rs",
+         "line": 19},
+    ]
+    freed = [
+        {"func": "free", "file": "/rustc/llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp",
+         "line": 51},
+        {"func": "core::ptr::drop_glue::<alloc::raw_vec::RawVec<u8>>",
+         "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 825},
+        {"func": "<anyhow::Error as core::ops::drop::Drop>::drop",
+         "file": "src/error.rs", "line": 630},
+        {"func": "test_downcast::test_downcast", "file": "tests/test_downcast.rs",
+         "line": 21},
+    ]
+    assert conversion_family_from_access(read) == frozenset(), (
+        "negative control: the READ marks alone leave the family empty")
+    assert conversion_family_from_origin(freed) == CONVERSION_FAMILY
+    arc = [
+        {"func": "free", "file": "/rustc/llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp",
+         "line": 51},
+        {"func": "<alloc::sync::Arc<Atomic<bool>> as core::ops::drop::Drop>::drop",
+         "file": "/rustc/x/library/alloc/src/sync.rs", "line": 2874},
+        {"func": "test_downcast::test_drop", "file": "tests/test_downcast.rs", "line": 83},
+    ]
+    assert conversion_family_from_origin(arc) == frozenset()
+
+
+def test_a_generated_integration_test_anchors_the_file_it_was_written_for() -> None:
+    """`tests/<stem>_gen_<N>.rs` is the pipeline's own integration-test
+    naming; an upstream `tests/test_downcast.rs` still anchors nothing."""
+    assert crate_file_for_test_file("tests/error_gen_3.rs") == "src/error.rs"
+    assert crate_file_for_test_file("tests/behaviour_stable_gen_1.rs") == (
+        "src/behaviour_stable.rs")
+    assert crate_file_for_test_file("tests/test_downcast.rs") is None
+    assert crate_file_for_test_file("tests/common/mod.rs") is None
+
+
+def test_blamed_locators_convict_the_whole_family_beside_a_blamed_conversion() -> None:
+    """A frame-derived blame on `reallocate_into_boxed_dyn_error_without_backtrace`
+    at `src/error.rs` convicts the other family members at that file and
+    never `drop`. A site whose blame is `drop` is unchanged. A chain-derived
+    site still contributes nothing."""
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        CrashFrame,
+        CrashSite,
+        blamed_locators,
+        chain_derived_site,
+        crash_evidence_by_locator,
+    )
+    conv = CrashFrame(file_rel="src/error.rs", line=0,
+                      fn_name="reallocate_into_boxed_dyn_error_without_backtrace",
+                      symbol="reallocate_into_boxed_dyn_error_without_backtrace",
+                      named_by=("tests/error_gen_3.rs", 32))
+    site = CrashSite(binary_label="tests/error_gen_3.rs", test_name="t",
+                     signal="AddressSanitizer: SEGV", frames=(),
+                     origin_frames=(conv,), origin_capable=True)
+    got = blamed_locators((site,))
+    assert got == frozenset(FnLocator("src/error.rs", n) for n in CONVERSION_FAMILY)
+    assert FnLocator("src/error.rs", "downcast") in got
+    assert FnLocator("src/error.rs", "object_boxed") in got
+    assert FnLocator("src/error.rs", "drop") not in got
+    assert frozenset(crash_evidence_by_locator((site,))) == frozenset(
+        {FnLocator("src/error.rs", "reallocate_into_boxed_dyn_error_without_backtrace")}), (
+        "the evidence keys stay every frame and nothing more")
+
+    drop = CrashFrame(file_rel="src/error.rs", line=630, fn_name="drop",
+                      symbol="<anyhow::Error as core::ops::drop::Drop>::drop")
+    drop_site = CrashSite(binary_label="tests/x.rs", test_name="t",
+                          signal="AddressSanitizer: heap-use-after-free",
+                          frames=(), origin_frames=(drop,), origin_capable=True)
+    assert blamed_locators((drop_site,)) == frozenset(
+        {FnLocator("src/error.rs", "drop")})
+
+    chain = chain_derived_site(
+        "tests/x.rs", "t", "AddressSanitizer: SEGV",
+        [FnLocator("src/error.rs", "downcast"),
+         FnLocator("src/error.rs", "into_boxed_dyn_error")])
+    assert blamed_locators((chain,)) == frozenset()
+
+
+def test_the_must_is_worded_for_the_copy_not_the_box() -> None:
+    from pipeline_core.domain.crash_site import (
+        OWNERSHIP_TRANSFER_MUST,
+        ownership_transfer_must,
+    )
+    assert "inner is copied" in OWNERSHIP_TRANSFER_MUST
+    assert "self must not drop" in OWNERSHIP_TRANSFER_MUST
+    assert "let own = self.inner" in OWNERSHIP_TRANSFER_MUST
+    assert "sentinel" in OWNERSHIP_TRANSFER_MUST
+    assert ownership_transfer_must(("downcast",)) == OWNERSHIP_TRANSFER_MUST
+    assert ownership_transfer_must(("drop",)) == ""

@@ -35,7 +35,8 @@ stated here rather than hidden in the fixture:
   iteration REPORTED, which under-counts a run whose crash never heals: run
   `635043-5f7c61f5` reported 101 on every intact sweep because 5 of the
   106-test inventory vanished on EVERY sweep (the deterministic
-  `test_downcast` fault — debt 167's "capped at 101 by design"). Replaying
+  `test_downcast` fault, which an earlier reading had called "capped at
+  101 by design"). Replaying
   that run at inventory 101 serves sweeps with nothing vanished, so the
   crash machinery under test is never armed. A walk about that machinery
   passes `inventory=` (the true count) and `chronic_vanished=` (how many
@@ -191,7 +192,7 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            fill_phase_minutes: str = "0",
            dispatch_cap: str = "0", floor: dict | None = None,
            frontier: dict | None = None, enumerate_fns=None,
-           coverage=None, attribute=None) -> list[str]:
+           coverage=None, attribute=None, recorded=None) -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
     The cargo stub reads the loop's own `iter N: running cargo test` line to
@@ -285,6 +286,7 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
                      localize=localize, escalate=escalate,
                      reverse_map=reverse_map, fill=fill,
                      coverage=coverage, attribute=attribute,
+                     recorded=recorded,
                      # A shared mutable dict models the on-disk floor file: a
                      # walk about the process BOUNDARY replays two processes
                      # against the same dict (`tests/walks/

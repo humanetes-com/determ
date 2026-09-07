@@ -455,6 +455,27 @@ def _served_key_of(row: RouteLedgerRow) -> str:
         row.target_tests)
 
 
+def _run_is_unmeasurable(
+    run: RouteRun,
+    unmeasurable_tests: Collection[str],
+    crash_blamed: Collection[FnLocator],
+) -> bool:
+    """True when every aimed test is one whose binary did not complete,
+    and no target is the crash-blamed locator that can complete it.
+
+    Empty ``target_tests`` is not this class: the run named no test, so it
+    cannot be "every name is unmeasurable." Empty ``unmeasurable_tests``
+    (the default) preserves every existing rank. A crash-blamed target
+    keeps today's rank even when the aimed tests are all unmeasurable —
+    that unit is the one whose body can make the binary complete.
+    """
+    if not run.target_tests or not unmeasurable_tests:
+        return False
+    if crash_blamed and run.targets & frozenset(crash_blamed):
+        return False
+    return run.target_tests <= frozenset(unmeasurable_tests)
+
+
 def schedule(
     runs: Sequence[RouteRun],
     rows: Iterable[RouteLedgerRow],
@@ -464,6 +485,8 @@ def schedule(
     budget_minutes: float = 0.0,
     today_order: Sequence[RouteKind] = TODAY_ORDER,
     readmit_after: int = 2,
+    unmeasurable_tests: Collection[str] = (),
+    crash_blamed: Collection[FnLocator] = (),
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
 
@@ -472,6 +495,13 @@ def schedule(
     :func:`run_blocks` it (a stable topological order; a cycle falls back to
     rank order for its members). Ties break on rank class, then the
     caller's `today_order`, then the run's own sequence number.
+
+    ``unmeasurable_tests`` / ``crash_blamed`` are optional; empty (the
+    default) leaves every rank as the ledger would. A run whose every
+    aimed test is unmeasurable and whose targets miss the crash-blamed
+    set ranks as a flat re-buy (weight 0) even with no ledger row, so a
+    positive budget defers it. ``budget_minutes=0`` still runs weight-zero
+    (order only).
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
@@ -482,6 +512,8 @@ def schedule(
     for run in runs:
         rank, reason, deferrals = _rank_of(
             run, oracle_fp, history, served_targets, readmit_after=readmit_after)
+        if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
+            rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
         level = 0 if _blocking_stubs(run, hollow) else 1
         ranked.append((run, rank, reason, deferrals, level))
 
