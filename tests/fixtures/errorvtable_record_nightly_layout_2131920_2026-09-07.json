@@ -1,0 +1,62 @@
+{
+ "file": "src/error.rs",
+ "kind": "struct",
+ "name": "ErrorVTable",
+ "generics": "",
+ "definition": "struct ErrorVTable {\n    object_drop: unsafe fn(Own<ErrorImpl>),\n    object_ref: unsafe fn(Ref<ErrorImpl>) -> Ref<dyn StdError + Send + Sync + 'static>,\n    #[cfg(any(feature = \"std\", not(anyhow_no_core_error)))]\n    object_boxed: unsafe fn(Own<ErrorImpl>) -> Box<dyn StdError + Send + Sync + 'static>,\n    #[cfg(any(feature = \"std\", not(anyhow_no_core_error)))]\n    object_reallocate_boxed: unsafe fn(\n        Own<ErrorImpl>,\n    ) -> Box<dyn StdError + Send + Sync + 'static>,\n    object_downcast: unsafe fn(Ref<ErrorImpl>, TypeId) -> Option<Ref<()>>,\n    object_drop_rest: unsafe fn(Own<ErrorImpl>, TypeId),\n    #[cfg(all(not(error_generic_member_access), feature = \"std\"))]\n    object_backtrace: unsafe fn(Ref<ErrorImpl>) -> Option<&Backtrace>,\n}",
+ "fields": [
+  {
+   "name": "object_drop",
+   "ty": "unsafe fn (Own < ErrorImpl >)",
+   "is_pub": false,
+   "cfg_predicates": []
+  },
+  {
+   "name": "object_ref",
+   "ty": "unsafe fn (Ref < ErrorImpl >) -> Ref < dyn StdError + Send + Sync + 'static >",
+   "is_pub": false,
+   "cfg_predicates": []
+  },
+  {
+   "name": "object_boxed",
+   "ty": "unsafe fn (Own < ErrorImpl >) -> Box < dyn StdError + Send + Sync + 'static >",
+   "is_pub": false,
+   "cfg_predicates": [
+    "any (feature = \"std\" , not (anyhow_no_core_error))"
+   ]
+  },
+  {
+   "name": "object_reallocate_boxed",
+   "ty": "unsafe fn (Own < ErrorImpl > ,) -> Box < dyn StdError + Send + Sync + 'static >",
+   "is_pub": false,
+   "cfg_predicates": [
+    "any (feature = \"std\" , not (anyhow_no_core_error))"
+   ]
+  },
+  {
+   "name": "object_downcast",
+   "ty": "unsafe fn (Ref < ErrorImpl > , TypeId) -> Option < Ref < () > >",
+   "is_pub": false,
+   "cfg_predicates": []
+  },
+  {
+   "name": "object_drop_rest",
+   "ty": "unsafe fn (Own < ErrorImpl > , TypeId)",
+   "is_pub": false,
+   "cfg_predicates": []
+  },
+  {
+   "name": "object_backtrace",
+   "ty": "unsafe fn (Ref < ErrorImpl >) -> Option < & Backtrace >",
+   "is_pub": false,
+   "cfg_predicates": [
+    "all (not (error_generic_member_access) , feature = \"std\")"
+   ]
+  }
+ ],
+ "variants": [],
+ "methods": [],
+ "is_pub": false,
+ "is_exactly_pub": false,
+ "mod_path": ""
+}

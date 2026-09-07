@@ -12,7 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain import cfg as _cfg
+from pipeline_core.domain.item_attributes import outer_attributes_before
 from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.rust_macros import macro_definitions
 from pipeline_core.domain.text import collapse_blank_lines
 
@@ -21,11 +23,25 @@ def enumerate_macro_variants(src_dir: Path) -> list[tuple[str, str, str, str]]:
     """Scan all .rs files under `src_dir` for `macro_rules!` blocks and
     return a list of `(macro_name, cfg_pred, body, source_file)` tuples.
 
-    `cfg_pred` is the predicate of the `#[cfg(...)]` attribute immediately
-    preceding the macro (empty string if no cfg gate). `body` is the full
-    `macro_rules! NAME { ... }` text. Used by
+    `cfg_pred` is the gate of the macro's OWN outer-attribute block — the
+    `#[cfg(...)]` attribute(s) bound to that `macro_rules!` item, conjoined as
+    `all(...)` when there are several, `""` when the block carries none.
+    `body` is the full `macro_rules! NAME { ... }` text. Used by
     `compute_cluster_macro_invariants` to decide which variant of a
     multiply-defined macro is active under a given cluster.
+
+    The block is walked back from the `macro_rules!` keyword over contiguous
+    outer attributes only (comment/string aware, a wrapped attribute is one
+    span) and ends at the previous item's code, so a variant with no gate
+    yields `""` and never a neighbour's predicate. The predicate is captured
+    with a balanced-paren walk, so `all(not(a), feature = "std")` is read as
+    written. The scan this replaced — the LAST `#[cfg(...)]` line in an
+    800-char window, matched with a one-nested-level capture — tagged all
+    three `backtrace_if_absent!` arms of the live `stable` tree's
+    `src/backtrace.rs` with the first arm's `error_generic_member_access`
+    (2026-09-01): the second arm's two-level gate was no match at all, so the
+    last match in the window was the previous item's, and under `stable`
+    every arm evaluated False and the macro was silently omitted.
     """
     variants: list[tuple[str, str, str, str]] = []
     for p in sorted(src_dir.rglob("*.rs")):
@@ -33,18 +49,14 @@ def enumerate_macro_variants(src_dir: Path) -> list[tuple[str, str, str, str]]:
             text = p.read_text(encoding="utf-8")
         except Exception:
             continue
+        mask = code_mask(text)
         for md in macro_definitions(text):
             if not md.balanced:  # original `if depth != 0: continue`
                 continue
-            name = md.name
-            start = md.decl_start
-            # Walk backwards from the macro to find a leading #[cfg(...)]
-            # attribute on the same item. Stop at a blank line or another
-            # item — only attributes that immediately precede the macro
-            # gate it.
-            head = text[max(0, start - 800):start]
-            cfg_pred = _cfg.last_trailing_cfg_pred(head).strip()
-            variants.append((name, cfg_pred, text[start:md.body_close + 1], p.name))
+            _head, attrs = outer_attributes_before(text, mask, md.decl_start)
+            preds = [q for q in (_cfg.cfg_attr_predicate(a) for a in attrs) if q is not None]
+            cfg_pred = _cfg.conjoined_cfg_predicate(preds)
+            variants.append((md.name, cfg_pred, text[md.decl_start:md.body_close + 1], p.name))
     return variants
 
 

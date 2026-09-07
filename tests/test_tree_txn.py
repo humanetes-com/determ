@@ -21,8 +21,11 @@ from pathlib import Path
 
 from pipeline_core.adapters.fn_revert import revert_fns_to_stub
 from pipeline_core.application.reconstruct.tree_txn import (
+    UNPARSEABLE_TREE_EVENT,
+    BoundaryOutcome,
     TreeTxn,
     capture,
+    guard_tree_boundary,
     parse_guarded_write,
     restore,
     unparseable_files,
@@ -170,3 +173,79 @@ def test_negative_control_a_name_keyed_revert_cannot_undo_a_double_splice(
     after = (tmp_path / "a.rs").read_text(encoding="utf-8")
     assert after != text, "the name-keyed revert does not recover the pre-image"
     assert not _parses(tmp_path / "a.rs"), "and the file still does not parse"
+
+
+# --- the boundary read every sweep owner makes --------------------------------
+
+def _boundary(tmp_path: Path, *, heal, validate=_parses):
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    out = guard_tree_boundary(
+        tmp_path, validate_parse=validate, heal_file=heal,
+        log=logs.append,
+        emit=lambda ev, *, duration_ms=None, data=None: events.append((ev, dict(data or {}))),
+        tag="[t]", when="before the sweep", iter_no=3, cluster="c")
+    return out, logs, events
+
+
+def test_guard_tree_boundary_heals_the_broken_file_before_the_sweep(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.rs").write_text(_BAD, encoding="utf-8")
+    (src / "b.rs").write_text(_OK, encoding="utf-8")
+    healed: list[str] = []
+
+    def _heal(rel: str) -> bool:
+        healed.append(rel)
+        (tmp_path / rel).write_text(_OK, encoding="utf-8")
+        return True
+
+    out, logs, events = _boundary(tmp_path, heal=_heal)
+    assert out == BoundaryOutcome(("src/a.rs",), ("src/a.rs",)) and not out.clean
+    assert healed == ["src/a.rs"] and _parses(src / "a.rs")
+    assert any("[t] iter 3: TREE UNPARSEABLE before the sweep — src/a.rs" in ln
+               and "healing now" in ln for ln in logs)
+    assert events == [(UNPARSEABLE_TREE_EVENT, {
+        "cluster": "c", "iter": 3, "when": "before the sweep",
+        "files": ["src/a.rs"], "healed": ["src/a.rs"]})]
+
+
+def test_control_no_heal_wired_reports_and_leaves_the_tree_broken(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.rs").write_text(_BAD, encoding="utf-8")
+    out, logs, events = _boundary(tmp_path, heal=None)
+    assert out.files == ("src/a.rs",) and out.healed == ()
+    assert not _parses(src / "a.rs"), "the sweep will read the broken tree"
+    assert any("NO heal wired" in ln for ln in logs)
+    assert events and events[0][1]["healed"] == []
+
+
+def test_control_no_validator_is_no_reading(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.rs").write_text(_BAD, encoding="utf-8")
+    out, logs, events = _boundary(tmp_path, heal=None, validate=None)
+    assert out == BoundaryOutcome() and out.clean
+    assert logs == [] and events == []
+
+
+def test_a_clean_tree_is_a_silent_boundary(tmp_path: Path) -> None:
+    (tmp_path / "a.rs").write_text(_OK, encoding="utf-8")
+    out, logs, events = _boundary(tmp_path, heal=None)
+    assert out.clean and logs == [] and events == []
+
+
+def test_pre_image_text_keeps_the_bytes_a_text_round_trip_folds(tmp_path: Path) -> None:
+    """Why the restore is bytes and never text: `read_text` folds `\r\n`,
+    so a text captured that way and written back is not what was there."""
+    crlf = b"fn a() {\r\n    1\r\n}\r\n"
+    p = tmp_path / "a.rs"
+    p.write_bytes(crlf)
+    pre = capture(p, None)
+    assert pre.text() == crlf.decode()
+    assert p.read_text(encoding="utf-8") != crlf.decode(), "the text view folds"
+    p.write_bytes(b"corrupt")
+    restore(pre)
+    assert p.read_bytes() == crlf
+    assert capture(tmp_path / "none.rs", None).text() == ""

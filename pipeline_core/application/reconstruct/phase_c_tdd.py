@@ -37,7 +37,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
-from pipeline_core.application.reconstruct.tree_txn import unparseable_files
+from pipeline_core.application.reconstruct.tree_txn import guard_tree_boundary
 from pipeline_core.domain import fill_phase_clock
 from pipeline_core.domain.attribution import (
     AttributionResult,
@@ -198,6 +198,7 @@ from pipeline_core.domain.tdd_floor import (
     render_pass_floor,
     resume_floor,
 )
+from pipeline_core.domain.test_cmd import expected_target_labels
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import (
     failure_evidence_by_test,
@@ -207,12 +208,14 @@ from pipeline_core.domain.test_report import (
 )
 from pipeline_core.domain.test_results import (
     TestStateReading,
+    build_broke,
     compile_error_digest,
     lib_compile_clean,
     parse_binary_results,
     parse_failed_tests,
     parse_test_counts,
     summarize_test_binaries,
+    sweep_build,
     uncoded_src_diagnostics,
 )
 from pipeline_core.domain.zero_payoff import (
@@ -648,6 +651,10 @@ def run_phase_c_tdd(
     # gate, scoped u2 runs) via tdd_test_cmd.
     test_cmd = ensure_serial_harness(
         test_cmd_builder(test_stems, include_lib=_sweep_lib))
+    # The targets that command asks for, in the label vocabulary cargo prints
+    # on `Running <label>`: what `sweep_build` compares a capture's sections
+    # against, so the iteration event can name a target that never ran.
+    _expected_labels = expected_target_labels(test_stems, include_lib=_sweep_lib)
     test_timeout = int(os.getenv("PHASE_C_TEST_TIMEOUT", "120"))
     # max_iters is legacy — only the 10k backstop in the loop body honors it.
     # The real terminator is floor-stall on pass_count (max_stalls below).
@@ -1009,36 +1016,18 @@ def run_phase_c_tdd(
         deps.emit("phase_c.ledger.reseed",
                   data={"cluster": cluster.name, "iter": iter_no, **out.data})
         return out
-    def _heal_unparseable(files: tuple[str, ...], when: str,
-                          iter_no: int) -> list[str]:
-        """The boundary invariant's reaction. A file the extractor cannot
-        parse has no enumerable unit: no fill route can open it, the
-        frontier cannot name it, and every sweep reads it as the same
-        parse error — so it goes to the heal hierarchy NOW, whichever
-        writer left it that way, instead of after three identical red
-        sweeps and a cluster abort (run `2973-66e50ad9`, 2026-09-04:
-        the ledger re-seed; the same reaction serves the next writer
-        nobody has found yet). Returns the files that were healed."""
-        action = ("healing now" if heal_file is not None
-                  else "NO heal wired — the sweep will read a red tree")
-        deps.log(f"  {tag} [phase-c/tdd] iter {iter_no}: TREE UNPARSEABLE "
-                 f"{when} — {', '.join(files)}; no fill route can rewrite "
-                 f"a file the extractor cannot enumerate; {action}.")
-        healed: list[str] = []
-        for rel in files:
-            if heal_file is not None and heal_file(rel):
-                healed.append(rel)
-        deps.emit("phase_c.tdd.unparseable_tree", data={
-            "cluster": cluster.name, "iter": iter_no, "when": when,
-            "files": list(files), "healed": healed})
-        return healed
-
-    def _tree_src_root() -> tuple[Path, str]:
-        """`(dir to scan, rel prefix)`: the crate's `src/` when the target
-        is a crate root, else the target itself. Never the crate root
-        whole — `rglob` there walks `target/`."""
-        sub = Path(target_src_dir) / "src"
-        return (sub, "src/") if sub.is_dir() else (Path(target_src_dir), "")
+    def _heal_unparseable(when: str, iter_no: int,
+                          files: tuple[str, ...] | None = None) -> list[str]:
+        """The boundary invariant, through the transaction module's one
+        reading (`guard_tree_boundary`): the tree a sweep scores must
+        parse. `files=None` scans the tree before the sweep; the post-sweep
+        caller passes the files the compiler's uncoded diagnostics named.
+        Returns the files that were healed."""
+        return list(guard_tree_boundary(
+            target_src_dir, validate_parse=deps.parse_ok, heal_file=heal_file,
+            log=deps.log, emit=deps.emit, tag=f"{tag} [phase-c/tdd]",
+            when=when, iter_no=iter_no, cluster=cluster.name,
+            files=files).healed)
 
     # Digests this process already healed on: a file that comes back
     # unparseable with the SAME diagnostic after a heal is not healed
@@ -1541,6 +1530,9 @@ def run_phase_c_tdd(
             "pass_count": pass_count, "fail_count": fail_count,
             "improved": improved, "stall": stall,
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
+            "build_red": _build.red,
+            "build_missing": sorted(_build.missing),
+            "build_failed_targets": list(_build.failed_targets),
             "retrigger_reverted": reverted,
         })
 
@@ -1548,6 +1540,16 @@ def run_phase_c_tdd(
     # binaries did not compile. Carried as evidence, never as a threshold — a
     # tree that cannot build produces no verdict at all, so waiting is pure loss.
     _compile_broke_streak = 0
+    # The current sweep's build accounting (assigned once per iteration where
+    # the sweep output is final); seeded empty so the retrigger-path iteration
+    # emit above can carry it before the first sweep assigns it.
+    _build = sweep_build("", _expected_labels)
+    # Units the fill phase dispatched since a sweep last read the red-build
+    # streak. The refusal's sentence is "the fill passes between these sweeps
+    # changed nothing", and in run `2131920-86818224` both passes it cited
+    # dispatched 0 of 0 — so a repeated digest counts only across a real
+    # attempt.
+    _dispatched_before_sweep = 0
     # Stub count at the previous sweep, for the plateau check below. -1 means
     # "no previous sweep", which never counts as a decrease.
     _stubs_prev = -1
@@ -1580,9 +1582,11 @@ def run_phase_c_tdd(
             # vanished names say nothing about crashes then, and downstream
             # consumers (crash localizer expectation, layout-retrigger streak)
             # must not read them as crash evidence.
-            _compile_broke = "could not compile" in (output_ or "")
+            _build_ = sweep_build(output_ or "", _expected_labels)
+            _compile_broke = _build_.red
             _err_total, _err_digest = (
-                compile_error_digest(output_ or "") if _compile_broke else (0, []))
+                compile_error_digest(_build_.build_output)
+                if _compile_broke else (0, []))
             _why = []
             if oracle.vanished:
                 # On a compile break every expected name vanishes for ONE
@@ -1643,6 +1647,7 @@ def run_phase_c_tdd(
                 # without re-running cargo by hand against the right tree.
                 "compile_errors": _err_total,
                 "compile_digest": _err_digest,
+                "build_failed_targets": list(_build_.failed_targets),
                 "crashed_binaries": oracle.crashed,
                 "cause": "+".join(
                     ((["compile_fail"] if _compile_broke else ["crash"])
@@ -1762,13 +1767,7 @@ def run_phase_c_tdd(
         # The boundary invariant: the tree a sweep scores must parse. Every
         # mechanical writer verifies its own transaction, and this is the
         # reading that does not depend on a writer having been migrated.
-        if deps.parse_ok is not None:
-            _scan_root, _scan_prefix = _tree_src_root()
-            _unparseable = tuple(
-                _scan_prefix + f
-                for f in unparseable_files(_scan_root, deps.parse_ok))
-            if _unparseable:
-                _heal_unparseable(_unparseable, "before the sweep", iter_n)
+        _heal_unparseable("before the sweep", iter_n)
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: running cargo test...")
         t0 = time.monotonic()
         rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
@@ -2169,9 +2168,22 @@ def run_phase_c_tdd(
             break
 
         # `output` is final for this iter by here (the ratchet's re-sweeps are
-        # all above), so the compile verdict is read once and shared by every
-        # consumer below rather than re-derived at each.
-        _sweep_compile_broke = "could not compile" in (output or "")
+        # all above), so the build verdict is read once and shared by every
+        # consumer below rather than re-derived at each. It is cargo's own
+        # `could not compile` in the BUILD PHASE of the capture — never a
+        # substring over the whole stream, which a test that runs a compiler
+        # itself prints into the middle of a sweep whose every binary ran:
+        # trybuild's nested build of this crate (`tests/compiletest.rs::ui`,
+        # built without the cluster's `--cfg`) relayed `error: could not
+        # compile `anyhow` (lib)` into run `2131920-86818224`'s iter-2 sweep,
+        # 32 of 32 binaries complete; the substring read it as red, narrowed
+        # the frontier from 33 fns to the one the NESTED build implicated,
+        # dispatched 0 of 0 twice and closed `nightly` EXHAUSTED at 42/152
+        # (2026-09-07). Every diagnostic reader below takes
+        # `_build.build_output` for the same reason: the prefix cannot contain
+        # a running test's stderr.
+        _build = sweep_build(output or "", _expected_labels)
+        _sweep_compile_broke = _build.red
         # A diagnostic rustc prints WITHOUT a code is parse-level (every
         # type/borrow/resolution error carries `[E…]`; no parse error does).
         # Confirmed against the extractor before acting — a lint denied
@@ -2181,14 +2193,15 @@ def run_phase_c_tdd(
         if (_sweep_compile_broke and heal_file is not None
                 and deps.parse_ok is not None):
             _uncoded = tuple(
-                f for f in uncoded_src_diagnostics(output or "")
+                f for f in uncoded_src_diagnostics(_build.build_output)
                 if (Path(target_src_dir) / f).exists()
                 and not deps.parse_ok(Path(target_src_dir) / f))
-            _uncoded_digest = "\n".join(compile_error_digest(output or "")[1])
+            _uncoded_digest = "\n".join(
+                compile_error_digest(_build.build_output)[1])
             if _uncoded and _uncoded_digest not in _healed_digests:
                 _healed_digests.add(_uncoded_digest)
-                if _heal_unparseable(_uncoded, "in the sweep's diagnostics",
-                                     iter_n):
+                if _heal_unparseable("in the sweep's diagnostics", iter_n,
+                                     files=tuple(_uncoded)):
                     # Nothing charges on this sweep: it measured a
                     # mechanical break, not the bodies. The next
                     # iteration sweeps the healed tree.
@@ -2235,23 +2248,28 @@ def run_phase_c_tdd(
                 _cluster_done = True
                 break
         # Red-build budget: identical compile digest across three consecutive
-        # sweeps means two full fill passes moved nothing about why the
-        # cluster cannot compile — the failure is attempt-invariant, so it is
-        # RED now, not after the stall budget finishes paying for it.
+        # sweeps that fills were attempted between means the fills moved
+        # nothing about why the cluster cannot compile — the failure is
+        # attempt-invariant, so it is RED now, not after the stall budget
+        # finishes paying for it. A sweep no fill preceded is not a reading
+        # of the fills: it keeps the digest and not the count, so the
+        # refusal cannot fire on passes that dispatched nothing.
         if _sweep_compile_broke:
-            _err_count, _err_lines = compile_error_digest(output or "")
+            _err_count, _err_lines = compile_error_digest(_build.build_output)
             _digest_now = "\n".join(_err_lines)
-            _red_streak = (_red_streak + 1
-                           if _digest_now and _digest_now == _red_digest
-                           else 1)
+            if not _digest_now or _digest_now != _red_digest:
+                _red_streak = 1
+            elif _dispatched_before_sweep > 0:
+                _red_streak += 1
             _red_digest = _digest_now
             if _red_streak >= 3:
                 deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: RED — the "
                          f"cluster cannot compile and the {_err_count} "
                          "error(s) are IDENTICAL across 3 consecutive "
-                         "sweeps; two full fill passes changed nothing "
-                         "about them. Stopping this cluster instead of "
-                         "spending the stall budget on 0-test sweeps. "
+                         "sweeps separated by real fill attempts; those "
+                         "fills changed nothing about them. Stopping this "
+                         "cluster instead of spending the stall budget on "
+                         "0-test sweeps. "
                          f"First error: {_err_lines[0] if _err_lines else '?'}")
                 deps.emit("phase_c.tdd.red_build_refusal", data={
                     "cluster": cluster.name, "iter": iter_n,
@@ -2268,6 +2286,7 @@ def run_phase_c_tdd(
                 break
         else:
             _red_digest, _red_streak = "", 0
+        _dispatched_before_sweep = 0
         # Read once here, not at the dispatch site further down: the plateau
         # check below needs it, and nothing between the two mutates the tree
         # (the ratchet's re-sweeps and every splice are outside this span).
@@ -3373,7 +3392,7 @@ def run_phase_c_tdd(
             # back `downstream_only`). Narrow to what the compiler implicates,
             # which is also the only set a fill can possibly fix.
             _blockers = frozenset(
-                deps.implicated_fns(output or "", target_src_dir))
+                deps.implicated_fns(_build.build_output, target_src_dir))
             eligible, _unaimed = restrict_to_compile_blockers(
                 eligible, _blockers)
             # The narrowing ADDS keys, so it lands them behind the test-oracle
@@ -3457,10 +3476,11 @@ def run_phase_c_tdd(
         _compile_broke_streak = _compile_broke_streak + 1 if _sweep_compile_broke else 0
         if (_sweep_compile_broke
                 and deps.retrigger_layout is not None
-                and lib_compile_clean(output or "")):
-            _err_n, _err_lines = compile_error_digest(output or "")
+                and lib_compile_clean(_build.build_output)):
+            _err_n, _err_lines = compile_error_digest(_build.build_output)
             _retrig_k = deps.retrigger_layout(
-                project_dir, module, cluster.name, target_src_dir, output,
+                project_dir, module, cluster.name, target_src_dir,
+                _build.build_output,
                 compile_evidence=CompileEvidence(
                     digest="\n".join(_err_lines),
                     lib_clean=True,
@@ -3566,8 +3586,7 @@ def run_phase_c_tdd(
                 _p2, _f2, _ig2 = parse_test_counts(_out2)
                 _oracle2 = _reconcile(
                     _rc2, _out2, _p2, _f2, parse_failed_tests(_out2)).oracle
-                if (_oracle2.vanished
-                        and "could not compile" not in (_out2 or "")):
+                if _oracle2.vanished and not build_broke(_out2 or ""):
                     deps.log(
                         f"  {tag} [phase-c/tdd] iter {iter_n}: oracle shrink "
                         "reproduced on immediate re-sweep — crash is "
@@ -4527,8 +4546,31 @@ def run_phase_c_tdd(
         # about it: first-fill ranks the live-stub producers first for a
         # reason (run `155810-cbb3b9fc`), and a stub's standing grade is a
         # claim about bytes that are not the body the batch would write.
+        _before_excl = [key for key, _ in ordered]
         ordered = drop_standing_flat(
             ordered, _flat_keys, exempt=_crash_grades.keys() | _stub_keys)
+        _kept_after_excl = {key for key, _ in ordered}
+        _excluded = [k for k in _before_excl if k not in _kept_after_excl]
+        if _excluded:
+            # The exclusion is a spend decision and has to be readable as
+            # one: without this line the only trace was a smaller `flat`
+            # count on the service-order line, which cannot be told from a
+            # frontier that never held the unit (runs 358833 → 216855,
+            # 2026-09-01/02, read `flat` 1–3 with nothing naming the
+            # excluded set).
+            _excl_names = sorted(f"{k.file}::{k.fn_name}" for k in _excluded)
+            deps.log(
+                f"  {tag} [phase-c/dispatch] iter {iter_n}: {len(_excluded)} "
+                "unit(s) EXCLUDED from the batch — standing FLAT under "
+                "evidence unchanged since the grade (same oracle, same body, "
+                "same convicting set); a refusal to spend, not a sink rank: "
+                + ", ".join(_excl_names[:8])
+                + (f" … (+{len(_excl_names) - 8})" if len(_excl_names) > 8 else ""))
+            deps.emit("phase_c.dispatch.flat_excluded", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "units": _excl_names,
+                "remaining": len(ordered),
+            })
         if _pass_cohort is None:
             _pass_cohort = tuple(key for key, _ in ordered)
         # The promotion above is worthless unless the cursor is told to let
@@ -4820,6 +4862,7 @@ def run_phase_c_tdd(
         # fired `test_altdebug` at iter 1).
         _pass_units_at_close = _pass_attempted | set(_batch.keys)
         _cohort_at_close = len(_pass_cohort or ())
+        _dispatched_before_sweep = len(_batch.keys)
         _pass_attempted = (set() if _batch.completes_pass
                            else _pass_attempted | set(_batch.keys))
         # A closed pass releases its cohort; the next iteration opens one over
@@ -4895,6 +4938,9 @@ def run_phase_c_tdd(
             "pass_completed": _batch.completes_pass,
             "unowned": len(_unowned),
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
+            "build_red": _build.red,
+            "build_missing": sorted(_build.missing),
+            "build_failed_targets": list(_build.failed_targets),
             "fill_classes": (
                 _prev_fill_classes.as_dict() if _saw_fill else None),
         })

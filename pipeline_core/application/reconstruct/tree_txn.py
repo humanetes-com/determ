@@ -30,7 +30,7 @@ one file and one write, kept because the authored splicers need exactly that.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -50,6 +50,14 @@ class PreImage:
     path: Path
     data: bytes | None
     parsed: bool | None
+
+    def text(self, errors: str = "strict") -> str:
+        """The pre-image decoded as UTF-8 — the same bytes a caller reads
+        for a prompt or a stub count, so one read serves both the text view
+        and the byte restore. Empty for a file that did not exist. No
+        newline translation: `Path.read_text` folds `\r\n` to `\n`, which
+        is why a text round-trip was never a byte restore."""
+        return "" if self.data is None else self.data.decode("utf-8", errors)
 
 
 def capture(path: Path, validate_parse: ParseValidator | None) -> PreImage:
@@ -85,6 +93,81 @@ def parse_guarded_write(
         path.write_bytes(pre_bytes)
         return False
     return True
+
+
+def tree_scan_root(target_dir: Path) -> tuple[Path, str]:
+    """`(dir to scan, rel prefix)` for a boundary read of `target_dir`: the
+    crate's `src/` when the target is a crate root, else the target itself.
+    Never the crate root whole — `rglob` there walks `target/`."""
+    sub = Path(target_dir) / "src"
+    return (sub, "src/") if sub.is_dir() else (Path(target_dir), "")
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryOutcome:
+    """What a boundary read found and did: the files the structure reader
+    could not parse (target-relative, `src/…`), and the subset the heal
+    hierarchy restored to a parseable state."""
+
+    files: tuple[str, ...] = ()
+    healed: tuple[str, ...] = ()
+
+    @property
+    def clean(self) -> bool:
+        return not self.files
+
+
+# The event every boundary emits, whichever loop owns the sweep; `when`
+# distinguishes the boundary.
+UNPARSEABLE_TREE_EVENT = "phase_c.tdd.unparseable_tree"
+
+
+def guard_tree_boundary(
+    target_dir: Path, *,
+    validate_parse: ParseValidator | None,
+    heal_file: Callable[[str], bool] | None,
+    log: Callable[[str], None],
+    emit: Callable[..., None],
+    tag: str, when: str, iter_no: int, cluster: str,
+    files: Sequence[str] | None = None,
+) -> BoundaryOutcome:
+    """The boundary invariant, as one call every sweep owner makes before
+    it runs `cargo test`: the tree a sweep scores must parse.
+
+    A file the extractor cannot parse has no enumerable unit — no fill
+    route can open it, the frontier cannot name it, and every sweep reads
+    it as the same parse error — so each such file goes to the heal
+    hierarchy NOW, whichever writer left it that way, instead of after
+    three identical red sweeps and a cluster abort (run `2973-66e50ad9`,
+    2026-09-04: the ledger re-seed left `src/context.rs` unparseable; the
+    TDD driver got this reading first, and the post-merge wave and the
+    legacy per-fn route swept without it). Logged under the caller's
+    `tag` and emitted as `UNPARSEABLE_TREE_EVENT` with `when` naming the
+    boundary. `validate_parse=None` disables the reading (no structure
+    reader wired: the fixture path). `files` names the broken files when
+    the caller already knows them (the TDD driver's post-sweep read from
+    the compiler's uncoded diagnostics); otherwise the tree is scanned."""
+    if validate_parse is None:
+        return BoundaryOutcome()
+    if files is None:
+        root, prefix = tree_scan_root(target_dir)
+        files = tuple(prefix + f for f in unparseable_files(root, validate_parse))
+    files = tuple(files)
+    if not files:
+        return BoundaryOutcome()
+    action = ("healing now" if heal_file is not None
+              else "NO heal wired — the sweep will read a red tree")
+    log(f"  {tag} iter {iter_no}: TREE UNPARSEABLE {when} — "
+        f"{', '.join(files)}; no fill route can rewrite a file the "
+        f"extractor cannot enumerate; {action}.")
+    healed: list[str] = []
+    for rel in files:
+        if heal_file is not None and heal_file(rel):
+            healed.append(rel)
+    emit(UNPARSEABLE_TREE_EVENT, data={
+        "cluster": cluster, "iter": iter_no, "when": when,
+        "files": list(files), "healed": healed})
+    return BoundaryOutcome(files, tuple(healed))
 
 
 def unparseable_files(src_dir: Path, validate_parse: ParseValidator,

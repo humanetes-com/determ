@@ -32,6 +32,11 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     make_request_answerer,
     workspace_file_reader,
 )
+from pipeline_core.application.reconstruct.tree_txn import (
+    PreImage,
+    capture,
+    restore,
+)
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.cluster_plan import cfg_world_rules
@@ -115,6 +120,11 @@ class RetryDeps:
     focus_cargo_errors: Callable[[str, str], str]
     is_gen_tests_file: Callable[[str], bool]
     log: Callable[[str], None]
+    # The splice gate's parse check (`Mutator.parse_validator()`), handed to
+    # the deterministic import repair so its `use` insertion is refused —
+    # not merely re-checked later — when it would leave the file
+    # unparseable. None disables the refusal (fixture path).
+    parse_ok: Callable[[Path], bool] | None = None
 
 
 class RepairTarget(NamedTuple):
@@ -198,7 +208,7 @@ class Task3Attribution:
 @dataclass(frozen=True, slots=True)
 class Task3Enumerate:
     """Cluster-aware type/container enumeration for the per-fn fix prompts."""
-    cluster_filter_type_methods: Callable[..., list[Any]]
+    cluster_filter_type_members: Callable[..., list[Any]]
     enumerate_types: Callable[..., list[Any] | None]
     fn_container_index: Callable[..., dict[FnLocator, str]]
     fn_occurrence_index: Callable[
@@ -350,7 +360,7 @@ def run_task3_inline_retry(
     # no container — the model had to guess struct fields. Enumerate from the
     # current (reconstructed) src; cluster-filter so only methods that compile
     # under THIS cluster are advertised.
-    _retry_type_recs = deps.enumerator.cluster_filter_type_methods(
+    _retry_type_recs = deps.enumerator.cluster_filter_type_members(
         deps.enumerator.enumerate_types(src_root) or [], cluster)
     _retry_containers = deps.enumerator.fn_container_index(src_root)
     _retry_occurrences = deps.enumerator.fn_occurrence_index(src_root)
@@ -558,7 +568,8 @@ def run_task3_inline_retry(
                 lambda cmd, cwd, env: deps.cargo.check_diag(
                     cmd, cwd, env, timeout=deps.test_timeout),
                 compile_cmd, project_dir, _env(), _rel, diags,
-                deps.log, "[task3-retry]")
+                deps.log, "[task3-retry]",
+                validate_parse=deps.retry_fix.parse_ok)
             if _rep is not None:
                 _, _, diags = _rep
                 if not diags:
@@ -874,12 +885,15 @@ def apply_per_fn_fixes(
     for _ref, _draft in _drafts_in_windows(targets, output, ctx, deps):
         rel_f, fn, _occurrence = _ref
         fp = ctx.project_dir / rel_f
-        before_text: str | None = None
+        # The pre-image the gate's revert restores — bytes, through the
+        # transaction primitive, so the revert cannot differ from what was
+        # there by a newline translation.
+        before: PreImage | None = None
         if gate is not None and fp.exists():
             try:
-                before_text = fp.read_text(encoding="utf-8")
+                before = capture(fp, None)
             except Exception:
-                before_text = None
+                before = None
         try:
             if _draft is None or not splice_draft(_draft, ctx, deps):
                 continue
@@ -898,8 +912,8 @@ def apply_per_fn_fixes(
                              f"frontier after {rel_f}::{fn}.")
                     break
                 continue
-            if before_text is not None:
-                fp.write_text(before_text, encoding="utf-8")
+            if before is not None:
+                restore(before)
             gate.log(f"  [task3-retry] reverted {rel_f}::{fn}: {verdict} "
                      f"({_reading_summary(baseline)} → {_reading_summary(after)}).")
         except Exception as e:

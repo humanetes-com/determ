@@ -26,9 +26,14 @@ def _failed(n: int) -> str:
     return f"running {n} tests\n{rows}\ntest result: FAILED. 0 passed; {n} failed\n"
 
 
-def _deps(*, run=None, check_diag=None) -> Task3RetryDeps:
+def _deps(*, run=None, check_diag=None, parse_ok=None, unattributed=False,
+          log=None) -> Task3RetryDeps:
     def _unused(*_a, **_k):  # noqa: ANN002, ANN003
         raise AssertionError("collaborator should not be called on this path")
+    # `unattributed`: the compile frontier resolves to nothing, so the retry
+    # aborts `unattributed_compile_errors` instead of asking the model.
+    _frontier = (lambda diags, pd: {}) if unattributed else _unused
+    _filter = (lambda fr, pd: fr) if unattributed else _unused
     return Task3RetryDeps(
         cargo=Task3Cargo(
             env=lambda: {},
@@ -37,10 +42,10 @@ def _deps(*, run=None, check_diag=None) -> Task3RetryDeps:
         ),
         attribution=Task3Attribution(
             attribute_failures=_unused, build_test_reverse_map=_unused,
-            frontier_from_diags=_unused, filter_test_targets=_unused,
+            frontier_from_diags=_frontier, filter_test_targets=_filter,
             expand_frontier_by_calls=_unused),
         enumerator=Task3Enumerate(
-            cluster_filter_type_methods=lambda recs, cl: [],
+            cluster_filter_type_members=lambda recs, cl: [],
             enumerate_types=lambda root: [], fn_container_index=lambda root: {},
             fn_occurrence_index=lambda root: {},
             collect_crate_macros=lambda root: "",
@@ -53,8 +58,8 @@ def _deps(*, run=None, check_diag=None) -> Task3RetryDeps:
             splice_fn_body=_unused, splice_body_scoped=_unused,
             find_tests_for_fn=_unused,
             focus_cargo_errors=_unused, is_gen_tests_file=lambda n: False,
-            log=lambda *_: None),
-        log=lambda *_: None,
+            log=lambda *_: None, parse_ok=parse_ok),
+        log=log or (lambda *_: None),
         test_timeout=10,
     )
 
@@ -293,3 +298,60 @@ def test_env_for_cluster_uses_the_injected_mapping_not_dict_update() -> None:
     bad = env_for_cluster(old, cluster)
     assert bad["RUSTFLAGS"] == "--cfg extra"
     assert "RUSTUP_TOOLCHAIN" not in bad
+
+
+def _braces_balance(p: Path) -> bool:
+    t = p.read_text(encoding="utf-8")
+    return t.count("{") == t.count("}")
+
+
+def _unparseable_import_fixture(tmp_path: Path):
+    """An E0425 whose only rustc suggestion, applied, leaves the file
+    unparseable (a `use` line carrying a stray brace)."""
+    from pipeline_core.domain.import_repair import ImportFix
+    from pipeline_core.domain.models import Diagnostic
+
+    (tmp_path / "src").mkdir()
+    src = tmp_path / "src" / "lib.rs"
+    src.write_text("fn f() -> u32 { helper() }\n", encoding="utf-8")
+    fix = ImportFix(file="src/lib.rs", byte_start=0, byte_end=0,
+                    replacement="use crate::util::helper;\n}\n")
+    diag = Diagnostic(code="E0425", file="src/lib.rs", line=1,
+                      message="cannot find function `helper`",
+                      import_fixes=(fix,))
+
+    def _check_diag(*a, **k):
+        if "use crate::util::helper;" in src.read_text(encoding="utf-8"):
+            return 0, "", []
+        return 1, "error[E0425]", [diag]
+
+    return src, _check_diag
+
+
+def test_build_mode_import_repair_is_refused_when_it_would_leave_the_file_unparseable(
+        tmp_path: Path) -> None:
+    """The fix-loop caller hands the transaction the parse validator, so the
+    verdict is the transaction's — the file is restored before any later
+    check could read the break."""
+    src, _check_diag = _unparseable_import_fixture(tmp_path)
+    logs: list[str] = []
+    deps = _deps(check_diag=_check_diag, parse_ok=_braces_balance,
+                 unattributed=True, log=logs.append)
+    initial = "error: could not compile (no FAILED test lines)\n"
+    run_task3_inline_retry(tmp_path, "cargo test --no-run", 1, initial, None,
+                           max_stalls=3, hard_cap=10, deps=deps)
+    assert src.read_text(encoding="utf-8") == "fn f() -> u32 { helper() }\n"
+    assert any("import repair left the file unparseable" in ln for ln in logs)
+
+
+def test_control_without_the_validator_the_unparseable_import_lands(
+        tmp_path: Path) -> None:
+    """The pre-fix shape: no validator reaches the repair from this caller,
+    so the write commits and the parse break is the next check's problem."""
+    src, _check_diag = _unparseable_import_fixture(tmp_path)
+    deps = _deps(check_diag=_check_diag, parse_ok=None, unattributed=True)
+    initial = "error: could not compile (no FAILED test lines)\n"
+    run_task3_inline_retry(tmp_path, "cargo test --no-run", 1, initial, None,
+                           max_stalls=3, hard_cap=10, deps=deps)
+    assert "use crate::util::helper;\n}\n" in src.read_text(encoding="utf-8")
+    assert not _braces_balance(src)

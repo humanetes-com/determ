@@ -352,3 +352,44 @@ def test_a_judged_turn_states_which_changed_units_the_targets_execute(
     verdict = transcripts[1][3]["content"]
     assert "changed units they do NOT execute: src/render.rs::render" in verdict
     assert "editable units the targets execute now: src/lib.rs::fmt" in verdict
+
+
+def test_a_kept_session_stamps_its_forgiven_losses_on_the_unit_records(
+        monkeypatch, tmp_path):
+    """A session kept on a strict net gain forgives a newly-red test (the
+    sweep's rule). Its own record — the `*session*` key — carried that set,
+    but the next file-first / per-impl prompt for a KEPT unit reads the
+    unit's key, so the forgiven loss never reached it: run
+    `1092886-60870fdd` (2026-09-06) kept a session at net +5 with two tests
+    newly red, and zero prompts on disk carried `<PRIOR_REGRESSION>`. The
+    plan's sentence: every kept unit's record names the forgiven tests and
+    what they printed. The negative control is the session key alone, the
+    pre-fix stamp, which the unit records never read."""
+    ws, tests = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("SLICE_SESSION_MAX_TURNS", "1")
+    _install_turns(monkeypatch, [SECOND_REPLY])
+    base = ("running 3 tests\ntest t_keep ... ok\ntest t_other ... FAILED\n"
+            + _RED.replace("running 1 test\n", "")
+            .replace("test result: FAILED. 0 passed; 1 failed",
+                     "test result: FAILED. 1 passed; 2 failed"))
+    after = ("running 3 tests\ntest t_keep ... FAILED\ntest t_other ... ok\n"
+             "test t_pair ... ok\n\nfailures:\n\n---- t_keep stdout ----\n"
+             "thread 't_keep' panicked at tests/display_gen_1.rs:9:5:\n"
+             "assertion `left == right` failed\n  left: \"rendered hi\"\n"
+             " right: \"hi\"\n\nfailures:\n    t_keep\n\n"
+             "test result: FAILED. 2 passed; 1 failed; 0 ignored\n")
+    install_scripted_cargo(
+        monkeypatch, check_diag=(0, "", []),
+        run=[(101, base), (101, after), (101, after), (101, after)])
+    res = _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
+    assert "rendered {}" in (ws / "src" / "lib.rs").read_text(), "kept, net +1"
+    assert not res.reverted_fns
+    recs = pipeline._APP.impl_fill_deps.load_retrospectives(ws)
+    session = [v for k, v in recs.items() if "*session*" in str(k)]
+    assert session and session[0]["regressed"] == ["t_keep"], "the control: the slice key"
+    units = {str(k): v for k, v in recs.items()
+             if "*session*" not in str(k) and str(k).startswith(("src/lib.rs::fmt::", "src/render.rs::render::"))}
+    assert len(units) == 2, sorted(recs)
+    for rec in units.values():
+        assert rec["regressed"] == ["t_keep"]
+        assert 'right: "hi"' in rec["regressed_output"]["t_keep"]

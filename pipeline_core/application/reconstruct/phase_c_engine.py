@@ -49,6 +49,12 @@ from pipeline_core.application.reconstruct.scheduling import (
     match_records_to_order,
     rank_stubs_by_blocker_counts,
 )
+from pipeline_core.application.reconstruct.tree_txn import (
+    PreImage,
+    capture,
+    guard_tree_boundary,
+    restore,
+)
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
@@ -308,6 +314,10 @@ class PhaseCFillEngine:
         fill_budget_minutes: float = 0.0,
         fill_iteration: int = 0,
         run_id: str = "",
+        # `(rel) -> healed?`: the heal hierarchy on one file of the tree,
+        # for the boundary read before the per-pass test. None reports the
+        # break and lets the pass test read it (the fixture path).
+        heal_file: Callable[[str], bool] | None = None,
     ) -> ClusterFillResult:
         """Phase C — every route of one fill, ordered and budgeted by
         `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
@@ -483,7 +493,8 @@ class PhaseCFillEngine:
             is_cfg_dead=_is_cfg_dead, dispatched=_dispatched,
             reverted=_reverted, answer_lost=_answer_lost,
             landed_before=(_prepared_fill.landed if _prepared_fill is not None
-                           else (lambda: 0)))
+                           else (lambda: 0)),
+            heal_file=heal_file)
         routes: list[FillRoute] = []
         if _prepared_fill is not None:
             routes.extend(_prepared_fill.routes)
@@ -595,6 +606,7 @@ class PhaseCFillEngine:
         _answer_lost: set[FnLocator],
         landed_before: Callable[[], int],
         claim: Callable[[], bool],
+        heal_file: Callable[[str], bool] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -631,7 +643,7 @@ class PhaseCFillEngine:
         invariants_section = "\n\n".join(
             s for s in (_no_std_invariant, _macro_invariants) if s)
         # Crate-wide type records, filtered to what THIS cfg-cluster compiles.
-        _crate_type_records = self.ws.cluster_filter_type_methods(
+        _crate_type_records = self.ws.cluster_filter_type_members(
             self.ws.enumerate_types(target_src_dir) or [], cluster)
 
         # P7.6: floor-stall against (remaining_stubs + last_pass_failures).
@@ -987,6 +999,16 @@ class PhaseCFillEngine:
                     self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: cargo test "
                                  f"{len(test_stems)} test file(s): {', '.join(test_stems[:5])}"
                                  + ("..." if len(test_stems) > 5 else ""))
+                    # The boundary invariant: the tree this pass test scores
+                    # must parse — the same reading the TDD driver takes
+                    # before every sweep, on the legacy route's own sweep.
+                    guard_tree_boundary(
+                        target_src_dir,
+                        validate_parse=self.mut.parse_validator(),
+                        heal_file=heal_file, log=self.tel.log,
+                        emit=self.tel.emit, tag="[phase-c/per-fn]",
+                        when="before the pass test", iter_no=pass_n,
+                        cluster=cluster_name)
                     _test_t0 = time.monotonic()
                     rc, test_out = self.cargo.run(test_cmd, target_src_dir, cluster_env,
                                                   timeout=300)
@@ -1092,7 +1114,10 @@ class PhaseCFillEngine:
                             # in place ("leaving for next pass") — the one
                             # site in the fill machinery that could destroy a
                             # compiling tree and keep the wreck.
-                            _touched: dict[Path, str] = {}
+                            # Byte pre-images of the files the test-fix
+                            # re-splices, restored through the transaction
+                            # primitive when the re-splice breaks the check.
+                            _touched: dict[Path, PreImage] = {}
                             # P5.1 parity: map (file, fn) → container via the syn
                             # enumerator so the self-type's definition gets injected.
                             _retry_containers = self.ws.fn_container_index(target_src_dir)
@@ -1172,9 +1197,7 @@ class PhaseCFillEngine:
                                 # another impl is never overwritten.
                                 if fp not in _touched:
                                     with suppress(OSError):
-                                        _touched[fp] = fp.read_text(
-                                            encoding="utf-8",
-                                            errors="replace")
+                                        _touched[fp] = capture(fp, None)
                                 ok2 = self.mut.splice_body_scoped(
                                     fp, fn, container_for_fn, sig_t, new_body,
                                     allow_nonstub=True).ok
@@ -1198,10 +1221,9 @@ class PhaseCFillEngine:
                             # Re-run cargo check (cheap) then cargo test.
                             rc_c, out_c = self.cargo.run(check_cmd, target_src_dir, cluster_env)
                             if rc_c != 0:
-                                for _tfp, _timg in _touched.items():
+                                for _timg in _touched.values():
                                     with suppress(OSError):
-                                        _tfp.write_text(_timg,
-                                                        encoding="utf-8")
+                                        restore(_timg)
                                 self.tel.log(
                                     f"  [phase-c/per-fn] pass {pass_n}: "
                                     "test-fix broke cargo check; restored "
@@ -1416,7 +1438,8 @@ class _PerFnRoute:
             behaviour_specs=kw["behaviour_specs"], _cfg_dead=kw["cfg_dead"],
             _is_cfg_dead=kw["is_cfg_dead"], _dispatched=kw["dispatched"],
             _reverted=kw["reverted"], _answer_lost=kw["answer_lost"],
-            landed_before=kw["landed_before"], claim=clock.may_claim)
+            landed_before=kw["landed_before"], claim=clock.may_claim,
+            heal_file=kw["heal_file"])
         res = self.result
         disp = frozenset(kw["dispatched"]) - before_disp
         rev = frozenset(kw["reverted"]) - before_rev

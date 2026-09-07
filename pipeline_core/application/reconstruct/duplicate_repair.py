@@ -32,6 +32,7 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.splice import delete_fn_item
 from pipeline_core.application.reconstruct.splice_txn import ParseValidator
+from pipeline_core.application.reconstruct.tree_txn import capture, restore
 from pipeline_core.domain.associated_items import (
     AssociatedItem,
     DuplicateIntroduction,
@@ -153,7 +154,7 @@ def repair_duplicate_definitions(
         if loser_rec is None:
             continue
         path = src_root / loser_rel
-        pre_image = path.read_bytes()
+        pre_image = capture(path, None)
         outcome = delete_fn_item(
             deps.enumerate_fns, path, str(loser_rec.get("fn_name", "")),
             str(loser_rec.get("container", "")),
@@ -166,7 +167,7 @@ def repair_duplicate_definitions(
         _rc2, _r2, after_diags = deps.probe()
         after = _distinct(after_diags)
         if after >= before:
-            path.write_bytes(pre_image)
+            restore(pre_image)
             deps.log(f"  [fix loop/duplicate] deleting {loser_rel}::"
                      f"{item.item_name} did not reduce diagnostics "
                      f"({before} → {after}) — restored.")

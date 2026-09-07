@@ -424,19 +424,51 @@ def test_a_real_compile_failure_is_still_a_build_failure() -> None:
     assert classify_failure(out) is FailureCategory.BUILD
 
 
-def test_no_fail_fast_reports_a_late_compile_failure_as_build() -> None:
-    """Under `--no-fail-fast` cargo runs the targets that built and then reports
-    the ones that did not, so a genuine compile failure legitimately appears
-    after tests have run. The DRIVER's own wording identifies it there; a
-    diagnostic alone does not."""
+def test_a_test_target_that_did_not_build_runs_nothing_and_is_build() -> None:
+    """Measured on cargo 1.95.0 / 1.97.0-nightly (2026-09-07): under
+    `--no-fail-fast` a compile failure in ANY target runs NO binary — zero
+    `Running`, zero `running N tests` — so the driver's own wording is in the
+    build phase, where every signal is read. This replaces a constructed
+    stream that put the driver line AFTER a `test result:` trailer; cargo does
+    not print that shape."""
     from pipeline_core.domain.failure_classification import (
         FailureCategory,
         classify_failure,
     )
-    out = ("running 3 tests\n"
-           "test result: ok. 3 passed; 0 failed; 0 ignored\n"
-           "error: could not compile `anyhow` (test \"other\")\n")
+    out = ("   Compiling anyhow v1.0.104 (/w)\n"
+           "error: expected one of `!` or `::`, found `fn`\n"
+           " --> tests/other.rs:1:5\n"
+           "error: could not compile `anyhow` (test \"other\")\n"
+           "warning: build failed, waiting for other jobs to finish...\n")
     assert classify_failure(out) is FailureCategory.BUILD
+
+
+def test_a_nested_cargo_build_a_test_ran_is_not_a_build_failure() -> None:
+    """The driver's own words after a test announced itself were printed BY a
+    test: trybuild's nested build of the crate (without the cluster's `--cfg`)
+    relayed `error: could not compile `anyhow` (lib)` into run
+    `2131920-86818224`'s sweep with 32 of 32 binaries complete. Trusting that
+    wording anywhere in the capture classified it BUILD, the TASK 4 half of the
+    same misroute the diagnostic-only rule above already closed."""
+    from pipeline_core.domain.failure_classification import (
+        FailureCategory,
+        classify_failure,
+    )
+    out = ("   Compiling anyhow v1.0.104 (/w)\n"
+           "    Finished `test` profile [unoptimized + debuginfo] target(s)\n"
+           "     Running tests/compiletest.rs (target/debug/deps/compiletest-1)\n"
+           "\n"
+           "running 1 test\n"
+           "test ui ...    Compiling anyhow v1.0.104 (/w)\n"
+           "error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`\n"
+           " --> /w/src/error.rs:202:41\n"
+           "error: could not compile `anyhow` (lib) due to 1 previous error\n"
+           "FAILED\n"
+           "\n"
+           "test result: FAILED. 0 passed; 1 failed; 0 ignored\n")
+    # Negative control: the anywhere-trusted driver wording IS in the capture.
+    assert "error: could not compile" in out
+    assert classify_failure(out) is not FailureCategory.BUILD
 
 
 def test_build_phase_output_stops_at_the_first_announcement() -> None:

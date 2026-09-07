@@ -96,13 +96,30 @@ def cfg_dead_type_records(
     return frozenset(dead)
 
 
-def cluster_filter_type_methods(
+def cluster_filter_type_members(
     records: list[TypeRecord], cluster: Any,
 ) -> list[TypeRecord]:
     """Drop what `cluster` does not compile so TYPES_IN_SCOPE advertises only
     what exists here (Hard Rule 8): a METHOD whose cfg evaluates definitively
-    False, and a whole TYPE RECORD whose own leading cfg does. Undecidable
-    predicates are kept (conservative). `cluster is None` → unchanged.
+    False, a FIELD whose effective cfg does, and a whole TYPE RECORD whose own
+    leading cfg does. Undecidable predicates are kept (conservative).
+    `cluster is None` → unchanged.
+
+    Fields are the member kind this filter did not reach until 2026-09-07.
+    The extractor carried cfg on methods only, so the type section and the
+    `construct:` hint rendered every field of `ErrorVTable` under `nightly`,
+    including `#[cfg(all(not(error_generic_member_access), feature = "std"))]
+    object_backtrace`, and the `impl Error` fill wrote exactly the hinted
+    seven-field literal in four of five attempts — `E0560: struct ErrorVTable
+    has no field named object_backtrace` (runs `2065433-a1c7219a` and
+    `2131920-86818224`). The nightly cfg-set decides that gate False; the
+    stable one keeps the field (its `msg` vtable carries `object_backtrace`),
+    so the answer is per-cluster evaluation of the field's effective cfg —
+    struct gate plus field gate, as `MethodRecord.cfg_predicates` already is
+    for impl blocks — never dropping the field. Every renderer that shows
+    fields (`format_type_for_prompt`, `_construct_hint`, the private-field
+    lines) reads the records this function returns, which is why the
+    projection lives here and not in each renderer.
 
     The record-level drop is the half added after run `617614-0abaf2d0`
     (2026-09-01). `src/backtrace.rs` is the standard no-std shim — `#[cfg(
@@ -142,8 +159,14 @@ def cluster_filter_type_methods(
             m for m in r.methods
             if not any(cfg_set.evaluate(p) is False for p in m.cfg_predicates)
         )
-        out.append(dataclasses.replace(r, methods=kept)
-                   if len(kept) != len(r.methods) else r)
+        kept_fields = tuple(
+            f for f in r.fields
+            if not any(cfg_set.evaluate(p) is False for p in f.cfg_predicates)
+        )
+        if len(kept) != len(r.methods) or len(kept_fields) != len(r.fields):
+            out.append(dataclasses.replace(r, methods=kept, fields=kept_fields))
+        else:
+            out.append(r)
     return out
 
 

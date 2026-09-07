@@ -30,6 +30,10 @@ from pipeline_core.domain.cfg import (
     normalize_pred,
     parse_cfg_pred,
 )
+from pipeline_core.domain.item_attributes import (
+    outer_attributes_before,
+    prev_code_index,
+)
 from pipeline_core.domain.rust_lex import code_mask
 
 _IDENT_CHARS = frozenset(
@@ -147,7 +151,7 @@ def _read_mod_item(
     close = _matching_brace(text, mask, k)
     if close is None:
         return None
-    head, attrs = _attrs_before(text, mask, _item_head_start(text, mask, mod_idx))
+    head, attrs = outer_attributes_before(text, mask, _item_head_start(text, mask, mod_idx))
     cfgs = [p for p in (_cfg_predicate(a) for a in attrs) if p is not None]
     gate = _test_gate(cfgs)
     if gate is None:
@@ -230,14 +234,14 @@ def _matching_brace(text: str, mask: Sequence[bool], open_idx: int) -> int | Non
 
 def _item_head_start(text: str, mask: Sequence[bool], mod_idx: int) -> int:
     """Index of the item's first token — steps back over `pub` / `pub(crate)`."""
-    j = _prev_code(text, mask, mod_idx)
+    j = prev_code_index(text, mask, mod_idx)
     if j is None:
         return mod_idx
     if text[j] == ")":
         opener = _matching_paren_back(text, mask, j)
         if opener is None:
             return mod_idx
-        j = _prev_code(text, mask, opener)
+        j = prev_code_index(text, mask, opener)
         if j is None:
             return mod_idx
     end = j + 1
@@ -245,70 +249,6 @@ def _item_head_start(text: str, mask: Sequence[bool], mod_idx: int) -> int:
     while start > 0 and not mask[start - 1] and text[start - 1] in _IDENT_CHARS:
         start -= 1
     return start if text[start:end] == "pub" else mod_idx
-
-
-def _attrs_before(
-    text: str, mask: Sequence[bool], head: int,
-) -> tuple[int, list[str]]:
-    """(span start, text of each outer attribute) for the item starting at `head`.
-
-    The span start is where the item's FIRST attribute begins, so the caller can
-    swap the whole `#[…] #[…] mod X { … }` run in one slice — replacing only the
-    `mod` would strand its attributes on whatever item follows. Walks backwards
-    span by span so a multi-line attribute is ONE span, not one per line. Stops
-    at an inner attribute (`#![…]`): that belongs to the enclosing module.
-    """
-    attrs: list[str] = []
-    at = head
-    while True:
-        span = _attr_span_before(text, mask, at)
-        if span is None:
-            return at, list(reversed(attrs))
-        start, end = span
-        body = text[start:end]
-        if body.lstrip("#").lstrip().startswith("!"):
-            return at, list(reversed(attrs))
-        attrs.append(body)
-        at = start
-
-
-def _attr_span_before(
-    text: str, mask: Sequence[bool], at: int,
-) -> tuple[int, int] | None:
-    """(start, end) of the attribute whose `]` is the last code char before `at`."""
-    j = _prev_code(text, mask, at)
-    if j is None or text[j] != "]":
-        return None
-    close = j
-    depth = 0
-    while j >= 0:
-        if not mask[j]:
-            if text[j] == "]":
-                depth += 1
-            elif text[j] == "[":
-                depth -= 1
-                if depth == 0:
-                    break
-        j -= 1
-    if j < 0:
-        return None
-    end = _prev_code(text, mask, j)
-    if end is None:
-        return None
-    if text[end] == "!":                        # `#![…]` — inner attribute
-        end = _prev_code(text, mask, end)
-        if end is None:
-            return None
-    if text[end] != "#":
-        return None
-    return end, close + 1
-
-
-def _prev_code(text: str, mask: Sequence[bool], at: int) -> int | None:
-    j = at - 1
-    while j >= 0 and (mask[j] or text[j].isspace()):
-        j -= 1
-    return j if j >= 0 else None
 
 
 def _matching_paren_back(

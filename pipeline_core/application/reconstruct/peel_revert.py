@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.tree_txn import PreImage, restore
 from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 
@@ -227,7 +228,7 @@ def peel_to_compiling(
 def peel_file_first(
     *,
     file_path: Path,
-    snapshot: str,
+    pre_image: PreImage,
     file_rel: str,
     landed: Sequence[LandedBody],
     diags: Sequence[Any],
@@ -243,6 +244,10 @@ def peel_file_first(
     """Wire :func:`peel_to_compiling` to a tree, returning the peel outcome
     together with the check state it leaves behind (`rc`, cargo output,
     diagnostics) so the caller can carry on with its own gates.
+
+    `pre_image` is the file's byte pre-image from before the reply landed
+    (the transaction module's `capture`); every re-apply round starts by
+    restoring it byte for byte, never by re-writing a text the caller read.
 
     `implicated_keys_from_diags` is `attribution.implicated_fn_keys` (or a
     test double): `(file, fn_name, one-line container)` per span-resolved fn,
@@ -270,7 +275,7 @@ def peel_file_first(
         # authorization: a refill's pristine body is non-stub, and replaying
         # the splice without `allow_nonstub` refuses `target_not_stub` on the
         # first kept refill (run `349271-d876e4a9`).
-        file_path.write_text(snapshot, encoding="utf-8")
+        restore(pre_image)
         for b in keep:
             ok, _reason, _delta = splice_fn_with_where(
                 file_path, b.container, b.fn_name, b.body, b.where_clause,

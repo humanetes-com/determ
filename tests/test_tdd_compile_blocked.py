@@ -46,7 +46,8 @@ def _cluster() -> BuildCluster:
 
 
 def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
-         retrigger=None, red: str = _RED) -> ClusterFillResult:
+         retrigger=None, red: str = _RED, run_cargo=None, order=None,
+         logs=None) -> ClusterFillResult:
     """Drive the loop over a permanently red tree with a two-fn frontier."""
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "4")
@@ -54,7 +55,7 @@ def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
 
     def _order(eligible, counts):
         dispatched.append(dict(eligible))
-        return list(eligible.items())
+        return list(eligible.items()) if order is None else order(eligible)
 
     deps = PhaseCTddDeps(
         attribute_failures=lambda *a, **k: AttributionResult(
@@ -70,11 +71,11 @@ def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
         count_relevant_notes=lambda *a, **k: 0,
         effective_stalls=lambda budget, module: budget,
         emit=lambda ev, **k: events.append((ev, k.get("data") or {})),
-        log=lambda *a, **k: None,
+        log=(lambda *a, **k: None) if logs is None else logs.append,
         order_frontier=_order,
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
-        run_cargo=lambda *a, **k: (101, red),
+        run_cargo=run_cargo or (lambda *a, **k: (101, red)),
         scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
         scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=lambda **kw: ClusterFillResult(attempts=1),
@@ -174,3 +175,140 @@ def test_a_cluster_that_finishes_normally_is_not_flagged_broken(
     result = _run(monkeypatch, tmp_path, implicated=[_LIB], events=events,
                   dispatched=[])
     assert result.baseline_broken is False
+
+
+# --- the verdict is the build phase, not the whole capture -----------------
+
+# A sweep in which every target the command asked for ran (the harness's
+# `tests/t.rs` plus the `--lib` binary) and a test printed a NESTED cargo's
+# `could not compile` — the shape of run `2131920-86818224`'s iter-2 sweep,
+# where trybuild's build of the crate without the cluster's `--cfg` failed
+# `E0063` while all 32 binaries completed.
+_NESTED = (
+    "   Compiling anyhow v1.0.104 (/w)\n"
+    "    Finished `test` profile [unoptimized + debuginfo] target(s)\n"
+    "     Running unittests src/lib.rs (target/debug/deps/anyhow-1)\n"
+    "\n"
+    "running 0 tests\n"
+    "\n"
+    "test result: ok. 0 passed; 0 failed; 0 ignored\n"
+    "\n"
+    "     Running tests/t.rs (target/debug/deps/t-1)\n"
+    "\n"
+    "running 2 tests\n"
+    "test t1 ...    Compiling anyhow v1.0.104 (/scratch)\n"
+    "error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`\n"
+    " --> /w/src/error.rs:202:41\n"
+    "error: could not compile `anyhow` (lib) due to 1 previous error\n"
+    "FAILED\n"
+    "test t2 ... ok\n"
+    "\n"
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+)
+
+
+def test_a_nested_build_inside_a_running_test_does_not_narrow_the_frontier(
+        tmp_path: Path, monkeypatch) -> None:
+    """Every expected target ran, so there is no red build to narrow to: the
+    attribution frontier (both fns) is dispatched whole, no `build is RED`
+    line, no `compile_blocked_frontier` event — even though the text scan
+    would implicate a fn from the nested world's diagnostic."""
+    events: list[tuple[str, dict]] = []
+    dispatched: list[dict[Any, Any]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, implicated=[_LIB], events=events,
+         dispatched=dispatched, run_cargo=lambda *a, **k: (101, _NESTED),
+         logs=logs)
+    assert dispatched and all(set(d) == {_LIB, _OTHER} for d in dispatched), \
+        dispatched
+    assert not [d for ev, d in events
+                if ev == "phase_c.tdd.compile_blocked_frontier"]
+    assert not any("build is RED" in ln for ln in logs)
+    iters = [d for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert iters and iters[0]["build_red"] is False
+    assert iters[0]["build_missing"] == []
+    assert iters[0]["frontier_size"] == 2
+
+
+def test_control_the_whole_capture_substring_narrows_to_the_nested_builds_fn(
+        tmp_path: Path, monkeypatch) -> None:
+    """The pre-fix verdict injected: a build whose `build_output` is the WHOLE
+    capture reads the nested `could not compile` as this crate's, and the
+    driver narrows to the one fn the nested build implicated — `2131920`'s
+    `frontier=1`, `62 withheld` shape."""
+    from pipeline_core.application.reconstruct import phase_c_tdd
+    from pipeline_core.domain.test_results import SweepBuild, parse_binary_results
+
+    def _whole_capture(out: str, expected):
+        return SweepBuild(
+            expected=frozenset(expected),
+            built=frozenset(b.label for b in parse_binary_results(out)),
+            build_output=out)
+
+    monkeypatch.setattr(phase_c_tdd, "sweep_build", _whole_capture)
+    events: list[tuple[str, dict]] = []
+    dispatched: list[dict[Any, Any]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, implicated=[_LIB], events=events,
+         dispatched=dispatched, run_cargo=lambda *a, **k: (101, _NESTED),
+         logs=logs)
+    assert dispatched and all(set(d) == {_LIB} for d in dispatched)
+    narrowed = [d for ev, d in events
+                if ev == "phase_c.tdd.compile_blocked_frontier"]
+    assert narrowed and narrowed[0]["withheld"] == 1
+    assert any("build is RED" in ln for ln in logs)
+
+
+# --- the refusal counts sweeps that fills were attempted between -----------
+
+_GREEN = (
+    "     Running tests/t.rs (target/debug/deps/t-1)\n"
+    "running 2 tests\n"
+    "test t1 ... ok\ntest t2 ... ok\n"
+    "test result: ok. 2 passed; 0 failed; 0 ignored\n"
+)
+
+
+def _red_then_green(reds: int):
+    calls = [0]
+
+    def _cargo(*a: Any, **k: Any) -> tuple[int, str]:
+        calls[0] += 1
+        assert calls[0] <= reds + 3, "the loop did not settle after the green sweep"
+        return (101, _RED) if calls[0] <= reds else (0, _GREEN)
+    return _cargo, calls
+
+
+def test_identical_red_sweeps_with_nothing_dispatched_do_not_refuse(
+        tmp_path: Path, monkeypatch) -> None:
+    """Four identical red sweeps, the compiler implicating a fn the ranking
+    never dispatches (`2131920`: the implicated unit was already filled and
+    graded flat, so no route had a run for it — `dispatching 0 of 0`). The
+    refusal's sentence is "the fill passes between these sweeps changed
+    nothing"; with no fill between them it has no evidence and must not fire."""
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    cargo, calls = _red_then_green(4)
+    _run(monkeypatch, tmp_path, implicated=[_LIB], events=events,
+         dispatched=[], run_cargo=cargo, order=lambda eligible: [],
+         logs=logs)
+    # The plateau budget (`TDD_MAX_STALLS=4`) ends this walk at the fourth
+    # sweep — a stop that describes what happened (nothing dispatched) — and
+    # the fourth red sweep is reached. The control below stops at the third.
+    assert calls[0] == 4, calls
+    assert not [d for ev, d in events if ev == "phase_c.tdd.red_build_refusal"]
+    assert not any("RED — the cluster cannot compile" in ln for ln in logs)
+    assert any("pass_count plateau" in ln for ln in logs), logs[-3:]
+
+
+def test_control_identical_red_sweeps_separated_by_attempts_refuse_on_the_third(
+        tmp_path: Path, monkeypatch) -> None:
+    """Same sweeps, a unit dispatched before each: the third identical reading
+    is a verdict on two real fill passes and the refusal fires there."""
+    events: list[tuple[str, dict]] = []
+    cargo, calls = _red_then_green(4)
+    _run(monkeypatch, tmp_path, implicated=[_LIB], events=events,
+         dispatched=[], run_cargo=cargo)
+    refusals = [d for ev, d in events if ev == "phase_c.tdd.red_build_refusal"]
+    assert refusals and refusals[0]["iter"] == 3
+    assert calls[0] == 3

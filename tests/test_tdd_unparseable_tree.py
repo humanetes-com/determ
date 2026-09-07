@@ -13,7 +13,13 @@ Plan sentences, each with its control in the same module:
   extractor confirms unparseable is healed and NOT charged: the next
   iteration sweeps the healed tree and the red-build refusal never fires —
   control: with no heal wired the identical red sweep repeats and the
-  refusal fires on the third (run `2973-66e50ad9`, 2026-09-04).
+  refusal fires on the third (run `2973-66e50ad9`, 2026-09-04);
+* the post-merge wave takes the same reading on the merged tree before its
+  own sweep, healing through the merged best-tree snapshot — control: the
+  wave composed without a structure reader sweeps the broken tree;
+* the legacy per-fn route takes the same reading before its per-pass test —
+  control: with no heal wired it reports and the pass test reads the
+  broken tree.
 """
 from __future__ import annotations
 
@@ -169,3 +175,124 @@ def test_control_with_no_heal_the_identical_red_sweep_repeats_until_the_refusal(
          events=events, logs=logs, max_stalls="0")
     assert [k for k, _d in events if k == "phase_c.tdd.red_build_refusal"]
     assert any("IDENTICAL across 3 consecutive" in ln for ln in logs)
+
+
+# --- the post-merge wave --------------------------------------------------
+
+def _merged_wave(tmp_path: Path, *, with_reader: bool):
+    from types import SimpleNamespace
+
+    from pipeline_core.application.generators.task2_generator import (
+        StaticSkeletonTask2Generator,
+    )
+    from tests.test_skeleton_task2_generator import (
+        FakeAdapter,
+        _cfg,
+        _cluster,
+        _make_project,
+    )
+    c = _cluster()
+    fake = FakeAdapter(clusters_list=[c], run_results=[(0, "ok")] * 4)
+    pd = _make_project(tmp_path, [c])
+    lib = pd / "src" / "lib.rs"
+    lib.write_text(_BROKEN, encoding="utf-8")
+    best = pd / ".best_tree" / "_merged"
+    best.mkdir(parents=True)
+    (best / "lib.rs").write_text(_LAYOUT, encoding="utf-8")
+    seen_at_sweep: list[bool] = []
+    real_run = fake.run
+
+    def _run(cmd: str, cwd: Path, env: dict, timeout: int = 180):
+        seen_at_sweep.append(_parses(lib))
+        return real_run(cmd, cwd, env, timeout)
+
+    fake.run = _run  # type: ignore[method-assign]
+    gen = StaticSkeletonTask2Generator(
+        tel=fake, cargo=fake, fill=fake, clusters=fake, gentests=fake,
+        scan=fake, ws=fake, cfg=_cfg(per_fn=True, tdd=True),
+        structure=SimpleNamespace(parse_ok=_parses) if with_reader else None)
+    gen._post_merge_fill_pass(project_dir=pd, clusters=[c], module="crate",
+                              functional_req="")
+    return lib, seen_at_sweep, fake
+
+
+def test_the_post_merge_wave_heals_an_unparseable_merged_file_before_its_sweep(
+        tmp_path: Path) -> None:
+    lib, seen, fake = _merged_wave(tmp_path, with_reader=True)
+    assert seen and seen[0] is True, "the merged sweep must run on a tree that parses"
+    assert lib.read_text(encoding="utf-8") == _LAYOUT, "restored from the merged best tree"
+    ev = [d for k, d in fake.event_data if k == "phase_c.tdd.unparseable_tree"]
+    assert ev and ev[0]["when"] == "before the post-merge sweep"
+    assert ev[0]["files"] == ["src/lib.rs"] and ev[0]["healed"] == ["src/lib.rs"]
+    assert ev[0]["cluster"] == "merged" and ev[0]["iter"] == 1
+    assert any("post-merge iter 1: TREE UNPARSEABLE before the post-merge sweep"
+               " — src/lib.rs" in ln for ln in fake.logs)
+    assert any("[heal] src/lib.rs: restored from best-tree snapshot" in ln
+               for ln in fake.logs)
+
+
+def test_control_the_post_merge_wave_without_a_reader_sweeps_the_broken_tree(
+        tmp_path: Path) -> None:
+    lib, seen, fake = _merged_wave(tmp_path, with_reader=False)
+    assert seen and seen[0] is False, "the pre-fix shape: no boundary, red sweep"
+    assert lib.read_text(encoding="utf-8") == _BROKEN
+    assert "phase_c.tdd.unparseable_tree" not in fake.events
+
+
+# --- the legacy per-fn route -----------------------------------------------
+
+def _legacy_route(tmp_path: Path, *, heal):
+    from pipeline_core.domain.enums import FillUnit
+    from tests.test_fill_engine_usecases import FakeFill, _engine, _mk_ws
+    ws = _mk_ws(tmp_path)
+    lib = ws / "src" / "lib.rs"
+    lib.write_text(_BROKEN, encoding="utf-8")
+    (ws / "tests").mkdir()
+    (ws / "tests" / "t.rs").write_text("#[test] fn t() {}", encoding="utf-8")
+    live = {"file": "src/lib.rs", "fn_name": "depth", "sig_text": "fn depth()"}
+    fake = FakeFill(stub_tuples=[], stub_records=[live], run=(0, ""),
+                    parse_ok=_parses)
+    seen_at_test: list[bool] = []
+    real_run = fake.run
+
+    def _run(*a, **k):
+        if a and a[0] == "cargo test":
+            seen_at_test.append(_parses(lib))
+        return real_run(*a, **k)
+
+    fake.run = _run  # type: ignore[method-assign]
+    _engine(fake, FillUnit.FN).run(
+        ws, ws / "src", [ws / "tests" / "t.rs"], "m", "stable",
+        cluster=None, cluster_env={}, max_passes=1,
+        skip_end_pass_test=False, heal_file=heal)
+    return lib, seen_at_test, fake
+
+
+def test_the_legacy_per_fn_route_heals_before_its_pass_test(tmp_path: Path) -> None:
+    healed: list[str] = []
+
+    # The engine's target here is the `src/` dir itself (the module's
+    # fixture shape), so the boundary names files relative to it — the
+    # same root rule the driver applies to a crate-root target.
+    def _heal(rel: str) -> bool:
+        healed.append(rel)
+        (tmp_path / "src" / rel).write_text(_LAYOUT, encoding="utf-8")
+        return True
+
+    lib, seen, fake = _legacy_route(tmp_path, heal=_heal)
+    assert healed == ["lib.rs"]
+    assert seen and seen[0] is True, "the pass test must run on a tree that parses"
+    ev = [d for k, d in fake.event_data if k == "phase_c.tdd.unparseable_tree"]
+    assert ev and ev[0]["when"] == "before the pass test"
+    assert ev[0]["files"] == ["lib.rs"] and ev[0]["healed"] == ["lib.rs"]
+    assert any("[phase-c/per-fn] iter 1: TREE UNPARSEABLE before the pass test"
+               " — lib.rs" in ln for ln in fake.logs)
+
+
+def test_control_the_legacy_route_with_no_heal_reads_the_broken_tree(
+        tmp_path: Path) -> None:
+    lib, seen, fake = _legacy_route(tmp_path, heal=None)
+    assert seen and seen[0] is False
+    assert any("NO heal wired" in ln for ln in fake.logs)
+    ev = [d for k, d in fake.event_data if k == "phase_c.tdd.unparseable_tree"]
+    assert ev and ev[0]["healed"] == []

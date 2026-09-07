@@ -1273,3 +1273,31 @@ def test_stub_crash_vanished_breach_reverts_when_hollow_stayed_flat(
     assert (tmp_path / "src" / "a.rs").read_text(encoding="utf-8") == _STUB_BODY
     assert any(ev == "phase_c.tdd.batch_revert" for ev, _ in events)
     assert not any(ev == "phase_c.tdd.batch_withheld" for ev, _ in events)
+
+# --- the batch ratchet's restore is a byte restore ---------------------------
+
+_CRLF = b"fn a() {\r\n    1\r\n}\r\n"
+
+
+def test_restore_src_tree_is_a_byte_restore_after_a_corrupting_write(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.rs").write_bytes(_CRLF)
+    snap = snapshot_src_tree(src)
+    assert snap is not None and snap[str(src / "a.rs")] == _CRLF.decode()
+    (src / "a.rs").write_bytes(b"fn a() {\n    1\n}\n}\n")   # the double-splice shape
+    assert restore_src_tree(snap) == 1
+    assert (src / "a.rs").read_bytes() == _CRLF
+
+
+def test_control_a_text_snapshot_read_with_newline_translation_cannot_restore_the_bytes(
+        tmp_path: Path) -> None:
+    """The pre-fix shape: the snapshot was `{path: read_text()}` and the
+    restore was `write_text` — a round-trip that folds `\r\n`."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.rs").write_bytes(_CRLF)
+    texts = {str(p): p.read_text(encoding="utf-8") for p in src.rglob("*.rs")}
+    (src / "a.rs").write_bytes(b"corrupt")
+    assert restore_src_tree(texts) == 1
+    assert (src / "a.rs").read_bytes() == b"fn a() {\n    1\n}\n" != _CRLF

@@ -43,6 +43,7 @@ from pipeline_core.domain.test_results import (
     RegressionComparison,
     TestRunOutcome,
     TestStateReading,
+    build_broke,
     compare_readings,
     failure_bodies_for,
     parse_binary_results,
@@ -487,7 +488,10 @@ def u2_test_gate(
     # never silently invisible.
     _reported = report.passed | {f.test_name for f in report.failures}
     _missing = fn_tests - _reported
-    _compile_failed = "could not compile" in (out or "")
+    # Cargo's verdict from the build phase of the scoped capture, the same
+    # reading the cluster sweep takes — a test that runs a compiler itself
+    # prints the same words later in the stream.
+    _compile_failed = build_broke(out or "")
     if rc != 0 and _missing:
         guard("phase-c/u2_missing_verdict",
               f"{sorted(_missing)} reported no verdict in the scoped run "

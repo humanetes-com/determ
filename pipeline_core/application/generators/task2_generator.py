@@ -38,7 +38,7 @@ from ...application.reconstruct.fill_rules import is_unimplemented_body
 from ...application.reconstruct.heal import HealDeps, heal_file
 from ...application.reconstruct.hollow_repair import repair_hollow_bodies
 from ...application.reconstruct.import_repair import repair_missing_imports
-from ...application.reconstruct.tree_txn import TreeTxn
+from ...application.reconstruct.tree_txn import TreeTxn, guard_tree_boundary
 from ...application.workspace_lifecycle import (
     MERGED_BEST,
     merged_best_pass_count,
@@ -2206,6 +2206,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     max_passes=self.cfg.phase_c_max_passes,
                     leaf_name_counts=_leaf_counts,
                     fr_path=_fr_for_notes,
+                    heal_file=lambda rel: self._heal_rel(
+                        project_dir, filled_dir, skeleton_dir, cluster.name, rel),
                 )
             self.tel.log(f"  {tag} [skeleton-C] {c_result.fns_filled} fn(s) filled, "
                          f"{c_result.bytes_filled:,} bytes net, "
@@ -2364,6 +2366,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 max_passes=1,  # one pass through the reverted set
                 leaf_name_counts=self.clusters.load_baked_leaf_order(project_dir, cluster.name),
                 fr_path=_fr_for_notes,
+                heal_file=lambda rel: self._heal_rel(
+                    project_dir, filled_dir, skeleton_dir, cluster.name, rel),
             )
 
         # F7: the tree still does not compile/parse after every heal attempt.
@@ -2601,6 +2605,40 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if deps is None:
             return False
         return heal_file(filled_dir, rel, cluster_name,
+                         deps).point is not RestorePoint.NONE
+
+    def _heal_merged_rel(self, project_dir: Path,
+                         clusters: list[BuildCluster], rel: str) -> bool:
+        """The heal hierarchy on one file of the MERGED tree (`project_dir/
+        src`), for the post-merge wave's boundary invariant. The restore
+        tiers are the merged tree's own: the merged best-tree snapshot
+        (`.best_tree/_merged/`, rooted at `src/`), the workspace git
+        ancestors of the project-relative path, and — last, loud — the
+        first cluster skeleton that carries the file (the merged file came
+        from one cluster's filled tree, so a cluster's skeleton is its
+        stub-only shape). True when some restore point held."""
+        if self.structure is None:
+            return False
+        merged_best = project_dir / ".best_tree" / MERGED_BEST
+
+        def _best_tree_bytes(r: str) -> bytes | None:
+            bp = merged_best / r.removeprefix("src/")
+            return bp.read_bytes() if bp.is_file() else None
+
+        def _skeleton_bytes(r: str) -> bytes | None:
+            for c in clusters:
+                sp = project_dir / ".skeleton" / c.name / r
+                if sp.is_file():
+                    return sp.read_bytes()
+            return None
+
+        deps = HealDeps(
+            parse_ok=self.structure.parse_ok,
+            best_tree_bytes=_best_tree_bytes,
+            git_ancestor_blobs=lambda r: self._git_ancestor_blobs(project_dir, r),
+            skeleton_bytes=_skeleton_bytes,
+            log=self.tel.log, emit=self.tel.emit)
+        return heal_file(project_dir, rel, "merged",
                          deps).point is not RestorePoint.NONE
 
     def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path],
@@ -3011,6 +3049,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.check_stop(f"post-merge fill iter {iter_n}")
             self.tel.log(f"\n  {tag} post-merge fill iter {iter_n}: "
                          f"running cargo test on merged tree...")
+            # The boundary invariant on the merged tree: the same reading
+            # the TDD driver takes before every cluster sweep. A file the
+            # extractor cannot parse has no enumerable unit, so the wave
+            # could neither fill nor attribute it — heal it now, through
+            # the merged tree's own restore tiers.
+            guard_tree_boundary(
+                project_dir,
+                validate_parse=(self.structure.parse_ok
+                                if self.structure is not None else None),
+                heal_file=lambda rel: self._heal_merged_rel(
+                    project_dir, clusters, rel),
+                log=self.tel.log, emit=self.tel.emit,
+                tag=f"{tag} post-merge", when="before the post-merge sweep",
+                iter_no=iter_n, cluster="merged")
             t0 = time.monotonic()
             rc, output = self.cargo.run(test_cmd, project_dir, self.cargo.env(),
                                         timeout=test_timeout)

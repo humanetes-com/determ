@@ -101,13 +101,22 @@ class FieldRecord:
     name: str = ""
     ty: str = ""
     is_pub: bool = False
+    # Effective cfg predicates — the enclosing struct's gate plus the field's
+    # own, as `MethodRecord.cfg_predicates` carries an impl block's plus the
+    # method's. A cluster-scoped consumer drops a field whose gate the cluster
+    # decides False; empty (a pre-field artefact, a hand-made record) reads as
+    # ungated, so nothing is dropped on absence of evidence.
+    cfg_predicates: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FieldRecord:
-        return cls(name=d.get("name", ""), ty=d.get("ty", ""), is_pub=bool(d.get("is_pub", False)))
+        return cls(name=d.get("name", ""), ty=d.get("ty", ""),
+                   is_pub=bool(d.get("is_pub", False)),
+                   cfg_predicates=_strs(d.get("cfg_predicates")))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "ty": self.ty, "is_pub": self.is_pub}
+        return {"name": self.name, "ty": self.ty, "is_pub": self.is_pub,
+                "cfg_predicates": list(self.cfg_predicates)}
 
 
 @dataclass(frozen=True, slots=True)

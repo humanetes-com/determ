@@ -80,6 +80,17 @@ pub struct FieldRecord {
     pub name: String,
     pub ty: String,
     pub is_pub: bool,
+    // Effective cfg predicates: the enclosing struct's cfgs unioned with the
+    // field's own — the same shape `MethodRecord::cfg_predicates` carries for
+    // an impl block's items — so a cluster-aware consumer can drop a field
+    // the cluster does not compile. Without it the type section listed every
+    // field of `ErrorVTable` under `nightly`, including `#[cfg(all(not(
+    // error_generic_member_access), feature = "std"))] object_backtrace`,
+    // and the `construct:` hint spelled out a seven-field literal the
+    // cluster rejects with E0560 (runs `2065433-a1c7219a`, `2131920-86818224`,
+    // 2026-09-07: the `impl Error` fill wrote exactly the hinted literal in
+    // four of five attempts).
+    pub cfg_predicates: Vec<String>,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]

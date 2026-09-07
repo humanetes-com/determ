@@ -709,3 +709,45 @@ def test_an_escalated_unit_whose_every_reply_was_capped_is_not_graded_flat(
     assert capped_named[0]["esc_unchanged"] == [], (
         "withheld from the graded set, not merely relabelled")
     assert any("every reply capped" in ln for ln in logs)
+
+
+def test_the_flat_exclusion_is_logged_and_emitted_with_the_units_it_refuses(
+        monkeypatch, tmp_path: Path) -> None:
+    """A FLAT row whose premise still holds excludes its unit from the batch
+    (`drop_standing_flat`). The exclusion had no line and no event: on runs
+    `358833` → `216855` (2026-09-01/02) the only trace was a smaller `flat`
+    count on the service-order line, which cannot be told from a frontier
+    that never held the unit. The plan's sentence: the sweep names the
+    excluded units on its own line and in `phase_c.dispatch.flat_excluded`.
+    The negative control is the same row with its premise erased
+    (`convicting=()`), which the domain refuses to exclude — no line, no
+    event, and the unit is dispatched."""
+    _tree(tmp_path, layout=_LAYOUT_TWO)
+    row = replace(_proven_row(tmp_path), state=BodyState.FLAT,
+                  convicting=("t2",), iteration=1)
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    dispatched: list[str] = []
+    _run(monkeypatch, tmp_path, ledger={"rows": [row]}, events=events,
+         logs=logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="2",
+         fill_write=lambda _src: dispatched.append("fill"))
+    line = [ln for ln in logs if "EXCLUDED from the batch" in ln]
+    assert line and "src/a.rs::depth" in line[0], logs[-12:]
+    excl = [d for ev, d in events if ev == "phase_c.dispatch.flat_excluded"]
+    assert excl and excl[0]["units"] == ["src/a.rs::depth"]
+    assert excl[0]["remaining"] == 0
+
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control, layout=_LAYOUT_TWO)
+    erased = replace(_proven_row(control), state=BodyState.FLAT,
+                     convicting=(), iteration=1)
+    c_events: list[tuple[str, dict]] = []
+    c_logs: list[str] = []
+    c_dispatched: list[str] = []
+    _run(monkeypatch, control, ledger={"rows": [erased]}, events=c_events,
+         logs=c_logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="2",
+         fill_write=lambda _src: c_dispatched.append("fill"))
+    assert not any("EXCLUDED from the batch" in ln for ln in c_logs)
+    assert not any(ev == "phase_c.dispatch.flat_excluded" for ev, _ in c_events)
+    assert c_dispatched, "an erased premise re-enters dispatch"

@@ -22,7 +22,7 @@ char-scan splitter, never ``re``).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.rust_scan import contains_word
@@ -380,7 +380,13 @@ def crate_cfg_predicates(text: str) -> list[str]:
 def _capture_one_level(text: str, op: int) -> tuple[str, int] | None:
     """Parse ``(?:[^()]|\\([^()]*\\))+`` starting just after the ``(`` at `op`; return
     ``(inner, close)`` where `close` is the top-level ``)`` index, or None if the
-    one-or-more body is empty / a nested ``(`` breaks the single-level unit."""
+    one-or-more body is empty / a nested ``(`` breaks the single-level unit.
+
+    ONE nested level is the regex's limit, not a cfg property: the ordinary
+    ``all(not(a), feature = "std")`` is two levels deep and is NOT a match. This
+    scanner exists only to keep `last_trailing_cfg_pred` byte-equivalent to the
+    regex it replaced; an item's own gate is read with `cfg_attr_predicate`,
+    which captures balanced parens to any depth."""
     n = len(text)
     i = op + 1
     start = i
@@ -410,7 +416,16 @@ def last_trailing_cfg_pred(text: str) -> str:
     to the final match of MULTILINE
     ``#\\[cfg\\(((?:[^()]|\\([^()]*\\))+)\\)\\]\\s*$`` (one nested-paren level allowed;
     the ``]`` is followed only by whitespace to the line end). ``""`` when none; the
-    caller strips the result."""
+    caller strips the result.
+
+    Not a way to find an item's gate. "The last match in a window of text" has no
+    notion of which item a line belongs to, and the one-level capture skips the
+    very gates that matter, so the last match falls through to a PREVIOUS item's
+    ``#[cfg]``: the macro-variant enumerator used it over an 800-char lookback and
+    tagged every ``backtrace_if_absent!`` arm of the live tree with the first
+    arm's predicate (2026-09-01). Kept byte-equivalent for the regex-equivalence
+    suite; item gates go through `item_attributes.outer_attributes_before` and
+    `cfg_attr_predicate`."""
     n = len(text)
     found = ""
     needle = "#[cfg("
@@ -431,6 +446,91 @@ def last_trailing_cfg_pred(text: str) -> str:
         found = inner
         i = close + 2
     return found
+
+
+def cfg_attr_predicate(attr: str) -> str | None:
+    """Predicate ``P`` of ONE outer attribute ``#[cfg(P)]``, captured by a balanced
+    parenthesis walk, else None.
+
+    ``P`` may nest to any depth — ``all(not(a), any(b, not(c)))`` is the ordinary
+    shape of a crate's cfg gate, and a capture limited to one nested level
+    (`_capture_one_level`) rejects it outright, which is how a window scanner came
+    to return a neighbouring item's gate instead. Whitespace is flexible around
+    every token (``# [ cfg ( … ) ]``, or an attribute wrapped over several lines);
+    parens inside a string literal do not count. The result has its outer
+    whitespace stripped and inner whitespace runs collapsed to one space, so a
+    wrapped multi-line predicate compares equal to its single-line spelling.
+    ``#[cfg_attr(…)]`` is a different attribute and is not matched."""
+    n = len(attr)
+    p = 0
+    while p < n and attr[p].isspace():
+        p += 1
+    if p >= n or attr[p] != "#":
+        return None
+    p += 1
+    while p < n and attr[p].isspace():
+        p += 1
+    if p >= n or attr[p] != "[":
+        return None
+    p += 1
+    while p < n and attr[p].isspace():
+        p += 1
+    if not attr.startswith("cfg", p):
+        return None
+    p += 3
+    while p < n and attr[p].isspace():
+        p += 1
+    if p >= n or attr[p] != "(":
+        return None
+    op = p
+    depth = 0
+    in_str = False
+    escaped = False
+    q = op
+    close = -1
+    while q < n:
+        c = attr[q]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                close = q
+                break
+        q += 1
+    if close == -1:
+        return None
+    q = close + 1
+    while q < n and attr[q].isspace():
+        q += 1
+    if q >= n or attr[q] != "]":
+        return None
+    q += 1
+    if any(not c.isspace() for c in attr[q:]):
+        return None
+    inner = " ".join(attr[op + 1:close].split())
+    return inner or None
+
+
+def conjoined_cfg_predicate(preds: Sequence[str]) -> str:
+    """The single predicate equivalent to an item carrying every ``#[cfg]`` in
+    `preds`: rustc applies stacked cfg attributes conjunctively, so two gates are
+    ``all(p1, p2)``; one gate is itself; none is ``""``."""
+    ps = [p for p in preds if p]
+    if not ps:
+        return ""
+    if len(ps) == 1:
+        return ps[0]
+    return "all(" + ", ".join(ps) + ")"
 
 
 def _cfg_attr_inner_predicates(text: str) -> list[str]:

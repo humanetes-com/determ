@@ -20,7 +20,7 @@ from pathlib import Path
 from pipeline_core.adapters.structure import load_baked_clusters
 from pipeline_core.application.reconstruct.cluster_membership import (
     cfg_dead_type_records,
-    cluster_filter_type_methods,
+    cluster_filter_type_members,
 )
 from pipeline_core.domain.cfg import CfgSet, cluster_cfg_set
 from pipeline_core.domain.models import BuildCluster, MethodRecord, TypeRecord
@@ -80,7 +80,7 @@ def test_a_cfg_dead_type_record_is_not_advertised() -> None:
     false about a name that really resolves elsewhere."""
     recs = [DEAD_ARM, LIVE_TYPE, UNDECIDABLE, INNER_CFG]
     assert cfg_dead_type_records(recs, DEFAULTED) == frozenset({"Widget"})
-    names = [r.name for r in cluster_filter_type_methods(recs, DEFAULTED)]
+    names = [r.name for r in cluster_filter_type_members(recs, DEFAULTED)]
     assert names == ["Gadget", "Target", "Holder"]
 
 
@@ -95,7 +95,7 @@ def test_undecidable_stays_and_no_cluster_changes_nothing() -> None:
     properties every caller's branch already relies on."""
     assert cfg_dead_type_records([UNDECIDABLE], DEFAULTED) == frozenset()
     recs = [DEAD_ARM, LIVE_TYPE]
-    assert cluster_filter_type_methods(recs, None) == recs
+    assert cluster_filter_type_members(recs, None) == recs
     assert cfg_dead_type_records(recs, None) == frozenset()
 
 

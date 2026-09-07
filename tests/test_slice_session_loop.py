@@ -14,6 +14,7 @@ from pipeline_core.application.reconstruct.slice_session import (
     _peel,
     run_slice_session,
 )
+from pipeline_core.application.reconstruct.tree_txn import PreImage
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_results import BinaryResult, TestStateReading
@@ -45,6 +46,12 @@ def _tree(tmp_path: Path) -> Path:
     (src / "lib.rs").write_text("SESSION_LIB")
     (src / "render.rs").write_text("SESSION_REN")
     return tmp_path
+
+
+def _base_pre_images(root: Path) -> dict[str, PreImage]:
+    """The session-open byte pre-images the peel restores from."""
+    return {"src/lib.rs": PreImage(root / "src" / "lib.rs", b"BASE_LIB", None),
+            "src/render.rs": PreImage(root / "src" / "render.rs", b"BASE_REN", None)}
 
 
 def _ports(*, measure, splice=None, ask=None, bodies=None):
@@ -107,7 +114,7 @@ def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_fla
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
         {_FMT: "BASE_LIB", _RENDER: "BASE_REN"},
-        {"src/lib.rs": "BASE_LIB", "src/render.rs": "BASE_REN"},
+        _base_pre_images(root),
         frozenset({_FMT, _RENDER}), peel_max=1, label="t")
     # One unit peeled (sorted pop takes render), the other holds.
     assert kept == frozenset({_FMT}) and reverted == frozenset({_RENDER})
@@ -125,7 +132,7 @@ def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_fla
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
         {_FMT: "BASE_LIB", _RENDER: "BASE_REN"},
-        {"src/lib.rs": "BASE_LIB", "src/render.rs": "BASE_REN"},
+        _base_pre_images(root2),
         frozenset({_FMT, _RENDER}), peel_max=1, label="t")
     assert kept2 == frozenset()
     assert (root2 / "src" / "lib.rs").read_text() == "BASE_LIB"
@@ -152,7 +159,7 @@ def test_a_failed_peel_splice_leaves_the_unit_on_the_kept_side(tmp_path):
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
         {_FMT: "BASE_LIB", _RENDER: "BASE_REN"},
-        {"src/lib.rs": "BASE_LIB", "src/render.rs": "BASE_REN"},
+        _base_pre_images(root),
         frozenset({_FMT, _RENDER}), peel_max=6, label="t")
     # Sorted (file, name): fmt then render; pop takes render first (fails),
     # then fmt (holds). render stays the session body and is kept.

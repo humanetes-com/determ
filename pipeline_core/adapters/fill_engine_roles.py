@@ -74,6 +74,12 @@ class MutatorAdapter:
     replace_fn_signature_fn: Callable[[Path, str, str], bool]
     extract_signature_block_fn: Callable[[str], str | None]
     lock_for_fn: Callable[[Path], Lock]
+    # The structure reader's parse check the splice functions above are
+    # bound to; None when composed without a reader.
+    parse_validator_fn: Callable[[Path], bool] | None = None
+
+    def parse_validator(self) -> Callable[[Path], bool] | None:
+        return self.parse_validator_fn
 
     def locate_fn_by_record(self, file_path: Path, name: str, container: str,
                             sig_text: str,
@@ -312,7 +318,7 @@ class WorkspaceModelAdapter:
     collect_impl_blocks_for_cluster_fn: Callable[..., list[Any] | None]
     fn_container_index_fn: Callable[[Path], dict[FnLocator, str]]
     fn_belongs_to_cluster_fn: Callable[..., bool]
-    cluster_filter_type_methods_fn: Callable[[list[Any], Any], list[Any]]
+    cluster_filter_type_members_fn: Callable[[list[Any], Any], list[Any]]
     is_gen_tests_file_fn: Callable[[str], bool]
     leaf_first_fn_order_fn: Callable[[list[FnLocator], Any], list[FnLocator]]
 
@@ -346,9 +352,9 @@ class WorkspaceModelAdapter:
         return self.fn_belongs_to_cluster_fn(target_src_dir, file_rel, fn_name,
                                              cluster, fn_cfg_predicates=fn_cfg_predicates)
 
-    def cluster_filter_type_methods(self, records: list[Any],
+    def cluster_filter_type_members(self, records: list[Any],
                                     cluster: Any) -> list[Any]:
-        return self.cluster_filter_type_methods_fn(records, cluster)
+        return self.cluster_filter_type_members_fn(records, cluster)
 
     def is_gen_tests_file(self, name: str) -> bool:
         return self.is_gen_tests_file_fn(name)

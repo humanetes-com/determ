@@ -161,6 +161,7 @@ class FillEngine(Protocol):
         skip_end_pass_test: bool = ...,
         tdd_frontier_tests: FailureFrontier | None = ...,
         tdd_test_cmd: str | None = ...,
+        heal_file: Any = ...,
     ) -> ClusterFillResult: ...
     def fill_groups(
         self, skeleton_dir: Path, target_src_dir: Path, groups: list[dict[str, Any]],

@@ -148,6 +148,41 @@ mod tests {
     }
 
     #[test]
+    fn a_field_carries_its_own_cfg_and_its_structs() {
+        // The type section listed every field of `ErrorVTable` under `nightly`
+        // because the record carried no cfg on fields (methods had one); the
+        // `construct:` hint then spelled out a literal with a field the
+        // cluster does not compile. A field's effective gate is the struct's
+        // plus its own, exactly as a method's is the impl block's plus its own.
+        let mut types = std::collections::BTreeMap::new();
+        let a: syn::File = parse_file(
+            "struct ErrorVTable { object_drop: usize, \
+             #[cfg(all(not(error_generic_member_access), feature = \"std\"))] \
+             object_backtrace: usize }\n\
+             #[cfg(feature = \"std\")] struct Gated(u8, #[cfg(unix)] u16);",
+        )
+        .unwrap();
+        collect_types_and_methods(&a.items, "error.rs", "", &mut types);
+        let vt = types.get("ErrorVTable").unwrap();
+        assert_eq!(vt.fields[0].cfg_predicates, Vec::<String>::new());
+        // Predicates are the attribute's token stream rendered by `ToString`
+        // (spaced tokens), the spelling every `cfg_predicates` consumer parses.
+        assert_eq!(
+            vt.fields[1].cfg_predicates,
+            vec!["all (not (error_generic_member_access) , feature = \"std\")".to_string()]
+        );
+        let gated = types.get("Gated").unwrap();
+        assert_eq!(
+            gated.fields[0].cfg_predicates,
+            vec!["feature = \"std\"".to_string()]
+        );
+        assert_eq!(
+            gated.fields[1].cfg_predicates,
+            vec!["feature = \"std\"".to_string(), "unix".to_string()]
+        );
+    }
+
+    #[test]
     fn visibility_is_the_most_public_declaration_of_a_name() {
         // Type records are keyed by bare name tree-wide, so a crate that
         // declares one twice gets ONE record. anyhow declares `Chain` as `pub`

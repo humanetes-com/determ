@@ -16,7 +16,7 @@ import directly. Only I/O, the LLM call, the extractor, the retro store, and
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -83,6 +83,14 @@ class Mutator(Protocol):
     ) -> bool: ...
     def extract_signature_block(self, response: str) -> str | None: ...
     def lock_for(self, tree: Path) -> threading.Lock: ...
+    def parse_validator(self) -> Callable[[Path], bool] | None:
+        """The splice gate's parse check (the structure reader's `parse_ok`,
+        `(path) -> parses?`), or None when no reader is wired (the fixture
+        path). The value the transaction module's `validate_parse` takes:
+        a writer that lands text outside the splicers — the deterministic
+        import repair, a salvage image, a boundary read before a sweep —
+        verifies through the same reader the splicers do."""
+        ...
 
 
 @runtime_checkable
@@ -176,7 +184,7 @@ class WorkspaceModel(Protocol):
         self, target_src_dir: Path, file_rel: str, fn_name: str,
         cluster: BuildCluster, fn_cfg_predicates: list[str] | None = ...,
     ) -> bool: ...
-    def cluster_filter_type_methods(
+    def cluster_filter_type_members(
         self, records: list[TypeRecord], cluster: BuildCluster | None,
     ) -> list[TypeRecord]: ...
     def is_gen_tests_file(self, name: str) -> bool: ...

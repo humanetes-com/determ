@@ -67,6 +67,8 @@ class FakeFill:
     def splice_body_scoped(self, *a: Any, **k: Any) -> SpliceOutcome:
         self.s["last_allow_nonstub"] = k.get("allow_nonstub", False)
         return self.s.get("splice", SpliceOutcome(True, "ok", 4))
+    def parse_validator(self) -> Any:
+        return self.s.get("parse_ok")
     def revert_body_scoped(self, *a: Any, **k: Any) -> SpliceOutcome:
         self.s.setdefault("reverts", []).append(a)
         return SpliceOutcome(True, "ok", 0)
@@ -113,7 +115,7 @@ class FakeFill:
         return self.s.get("cluster_blocks", [])
     def fn_container_index(self, *a: Any) -> dict[tuple[str, str], str]: return {}
     def fn_belongs_to_cluster(self, *a: Any, **k: Any) -> bool: return True
-    def cluster_filter_type_methods(self, records: Any, cluster: Any) -> Any: return []
+    def cluster_filter_type_members(self, records: Any, cluster: Any) -> Any: return []
     def is_gen_tests_file(self, name: str) -> bool: return False
     def leaf_first_fn_order(self, tuples: Any, counts: Any) -> Any: return tuples
 

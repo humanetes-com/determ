@@ -43,3 +43,19 @@ def build_test_cmd(
     for s in test_stems:
         parts += ["--test", s]
     return shlex.join(parts)
+
+
+def expected_target_labels(
+    test_stems: list[str], *, include_lib: bool = False,
+) -> tuple[str, ...]:
+    """The labels cargo prints on `Running <label> (<exe>)` for the targets
+    :func:`build_test_cmd` asks for: `unittests src/lib.rs` for `--lib`, then
+    `tests/<stem>.rs` per `--test stem`. Rendered beside the command so the
+    vocabulary the sweep's build accounting (`test_results.sweep_build`)
+    compares the stream against has one owner. Checked against the live
+    `phase_c.tdd.iter` event of run `2131920-86818224` (cluster `nightly`,
+    iter 2): its 31 stems plus the lib binary are exactly the event's 32
+    binary labels."""
+    labels: list[str] = ["unittests src/lib.rs"] if include_lib else []
+    labels += [f"tests/{s}.rs" for s in test_stems]
+    return tuple(labels)

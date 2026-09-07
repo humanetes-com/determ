@@ -751,11 +751,26 @@ def build_phase_output(output: str) -> str:
     diagnostic — a `compile_fail` doc test, a test comparing an error string
     containing `error[E0308]`.
 
-    Note the asymmetry this leaves for the caller: under `--no-fail-fast` cargo
-    runs the targets that DID build and then reports the ones that did not, so a
-    genuine compile failure can appear after the build phase. What identifies it
-    there is the driver's own wording (`error: could not compile …`), never a
-    rustc diagnostic — see `failure_classification._DRIVER_BUILD_SIGNALS`.
+    The cut is also where cargo's OWN verdict, `error: could not compile …`,
+    is read from — nowhere later. Measured on this box (cargo 1.95.0 and
+    1.97.0-nightly, 2026-09-07): `cargo test --no-fail-fast --lib --test ok
+    --test bad` with an unparseable `tests/bad.rs` prints nine lines, zero
+    `Running`, zero `running N tests`, then `error: could not compile …
+    (test "bad")` and `warning: build failed, waiting for other jobs to
+    finish...` — a compile failure in ANY target runs NO binary, so a genuine
+    red build's capture is its build phase in full and this function returns
+    it whole. What CAN follow the first `running` line is a test that runs a
+    compiler itself: `tests/compiletest.rs::ui` (trybuild) builds this crate
+    again as a path dependency of a scratch project, without the cluster's
+    `RUSTFLAGS` `--cfg`, and relays that nested cargo's `error: could not
+    compile `anyhow` (lib)` — target name and all — into the sweep stream
+    between `running 1 test` and `test ui ... FAILED`. Run `2131920-86818224`
+    (cluster `nightly`, 2026-09-07) had 32 of 32 binaries complete on that
+    stream and a whole-capture substring read it as red: the frontier was
+    narrowed from 33 fns to the one the NESTED build implicated, two passes
+    dispatched 0 of 0, and the cluster closed EXHAUSTED at 42/152.
+    :func:`build_broke` is the one place the driver wording is read, and it
+    reads it here.
     """
     lines = output.splitlines()
     for i, ln in enumerate(lines):
@@ -765,6 +780,71 @@ def build_phase_output(output: str) -> str:
         if stripped.startswith("test result:"):
             return "\n".join(lines[:i])
     return output
+
+
+_COULD_NOT_COMPILE = "could not compile"
+
+
+def build_broke(cargo_output: str) -> bool:
+    """Did the crate under test fail to BUILD in this `cargo test` capture?
+
+    True iff cargo's own verdict, `error: could not compile …`, appears in
+    :func:`build_phase_output` — the stream before any binary announced its
+    tests. The same words after that point were printed BY a test (a
+    trybuild/ui harness, a `cargo`-invoking integration test, a proc-macro
+    harness) and describe a build that is not this one; see
+    :func:`build_phase_output` for the two measured cargo facts this rests on.
+
+    The TDD sweep, its reconciliation event, the immediate crash re-sweep,
+    the scoped u2 run and the TASK 4 failure classifier all read this one
+    function, so they answer "did the build fail" the same way."""
+    return _COULD_NOT_COMPILE in build_phase_output(cargo_output or "")
+
+
+@dataclass(frozen=True, slots=True)
+class SweepBuild:
+    """The build half of one sweep, read once and shared by every consumer.
+
+    ``red`` is :func:`build_broke` — the build-phase marker, never label
+    arithmetic. On this toolchain a red build prints no `Running` line at
+    all (``missing`` == ``expected``), and a synthetic sweep with no
+    `Running` line (the walk harness's stub) is not red either, so ``missing``
+    cannot DEFINE red. It is carried for the iteration event: on a genuine
+    red it names the targets that never ran, on a complete sweep it is
+    empty — the reading run `2131920-86818224`'s iter-2 event already held
+    (32 of 32 complete) while the substring verdict said otherwise.
+    ``failed_targets`` is cargo's own naming of what did not build (`lib`,
+    `test "x"`), from the build phase only. ``build_output`` is the slice
+    every diagnostic reader takes."""
+
+    expected: frozenset[str]
+    built: frozenset[str]
+    build_output: str
+
+    @property
+    def missing(self) -> frozenset[str]:
+        return self.expected - self.built
+
+    @property
+    def red(self) -> bool:
+        return _COULD_NOT_COMPILE in self.build_output
+
+    @property
+    def failed_targets(self) -> tuple[str, ...]:
+        return compile_failed_targets(self.build_output)
+
+
+def sweep_build(cargo_output: str, expected_labels: Iterable[str]) -> SweepBuild:
+    """:class:`SweepBuild` for one capture. ``expected_labels`` is the label
+    vocabulary cargo prints on `Running <label> (<exe>)`, rendered by the
+    same domain code that renders the command (`test_cmd.expected_target_labels`);
+    ``built`` is every label :func:`parse_binary_results` paired with a
+    section."""
+    out = cargo_output or ""
+    return SweepBuild(
+        expected=frozenset(expected_labels),
+        built=frozenset(b.label for b in parse_binary_results(out)),
+        build_output=build_phase_output(out))
 
 
 def failure_bodies_for(output: str, names: set[str]) -> dict[str, str]:
@@ -916,7 +996,7 @@ def compile_failed_targets(cargo_output: str) -> tuple[str, ...]:
     and what links against it did not". Empty when no such line parses (link
     error, ICE, unreadable output): callers must read empty as UNKNOWN, never as
     "nothing failed"."""
-    marker = "could not compile "
+    marker = _COULD_NOT_COMPILE + " "
     out: list[str] = []
     for line in strip_ansi(cargo_output).split("\n"):
         stripped = line.lstrip()

@@ -49,11 +49,15 @@ TRANSACTION_MODULES: frozenset[str] = frozenset({
 })
 
 # (module, enclosing function) -> why this write is not a mechanical tree
-# write. Three admissible reasons: it is not a tree file (a failures log, a
-# JSON store, a staged scratch copy); it is a byte restore of a pre-image the
-# SAME function captured (the transaction's own primitive, inlined where the
-# capture and the restore are a few lines apart); or it is an authored write
-# already parse-gated in place. Anything else routes through TreeTxn.
+# write. Two admissible reasons: it is not a tree file (a failures log, a
+# JSON store, a staged scratch copy), or it is an authored write already
+# parse-gated in place. A byte restore of a pre-image is NOT a reason any
+# more: every such site (the fix loops' snapshots and salvage, the slice
+# session, the peel, the task3 retry gate, the duplicate repair, the batch
+# ratchet) captures through `tree_txn.capture` and restores through
+# `tree_txn.restore`, so an inlined text round-trip — which folds `\r\n`
+# and is not a byte restore — cannot be added back without a reviewable
+# line here. Anything else routes through TreeTxn.
 ALLOWLIST: dict[tuple[str, str], str] = {
     ("application/reconstruct/fill_one_fn.py", "run"):
         "failures-dir text log, not a tree file",
@@ -67,28 +71,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("application/reconstruct/hollow_repair.py", "repair_hollow_bodies"):
         "the file did not parse before; the parse-gated candidate was refused "
         "above and an un-nested body cannot make an unparseable file worse",
-    ("application/reconstruct/per_fn_retry.py", "apply_per_fn_fixes"):
-        "byte restore of the pre-image captured in the same function",
-    ("application/reconstruct/duplicate_repair.py", "repair_duplicate_definitions"):
-        "byte restore of the pre-image captured in the same function",
-    ("application/reconstruct/peel_revert.py", "_reapply"):
-        "byte restore of the pre-image, then the parse-gated splicer replays",
-    ("application/reconstruct/tdd_ratchet.py", "restore_src_tree"):
-        "byte restore of a scored tree snapshot (the batch ratchet)",
-    ("application/reconstruct/impl_fill.py", "_fill_block_group"):
-        "byte restore of the pre-image captured in the same function",
-    ("application/reconstruct/impl_fill.py", "_splice_and_verify"):
-        "byte restore of the pre-image captured in the same function",
-    ("application/reconstruct/impl_fill.py", "_fill_one_block"):
-        "salvage: a compiling snapshot written, checked, and restored in place",
-    ("application/reconstruct/impl_fill.py", "_revert_pair"):
-        "byte restore of the pre-images captured beside it",
-    ("application/reconstruct/slice_session.py", "_restore"):
-        "byte restore of the pre-images captured at session open",
-    ("application/reconstruct/slice_session.py", "reapply"):
-        "byte restore of the pre-images captured at session open",
-    ("application/reconstruct/slice_session.py", "_peel"):
-        "byte restore of the baseline texts captured at session open",
     ("application/reconstruct/splice.py", "splice_fn_with_where"):
         "where-clause insert and its undo inside the parse-gated body splice",
     ("application/reconstruct/assert_probe_runner.py", "run_assert_probes"):
@@ -99,8 +81,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
         "JSON groups store, not a tree file",
     ("application/generators/task2_generator.py", "_save_cluster_evidence"):
         "JSON evidence store, not a tree file",
-    ("application/reconstruct/phase_c_engine.py", "_attempt_test_fix"):
-        "byte restore of the test files' pre-images captured in the same function",
     ("application/generators/task2_generator.py", "_save_reinstall_streak"):
         "JSON streak store, not a tree file",
     ("application/generators/task2_generator.py", "_generate_one_cluster"):

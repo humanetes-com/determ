@@ -15,26 +15,24 @@ from enum import StrEnum
 from pipeline_core.domain.test_results import build_phase_output
 
 # Compile-failure markers across the toolchains we drive (rustc/cargo + a few
-# JS/TS/Python ones that appear in mixed harnesses).
+# JS/TS/Python ones that appear in mixed harnesses). EVERY one of them is read
+# from `build_phase_output` only — the driver's own wording included. The
+# driver subset (`error: could not compile`, `build failed`, …) used to be
+# trusted anywhere in the capture on the premise that `--no-fail-fast` runs the
+# targets that built and then reports the ones that did not; measured on cargo
+# 1.95.0 / 1.97.0-nightly (2026-09-07) a compile failure in any target runs no
+# binary at all, so the driver wording never legitimately follows a `running N
+# tests` line. What does follow one is a test that runs cargo itself:
+# trybuild's nested build of this crate relayed `error: could not compile
+# `anyhow` (lib)` into a sweep whose 32 binaries all completed (run
+# `2131920-86818224`, 2026-09-07), and the anywhere-trust classified that as
+# BUILD — the same TASK 4 misroute `build_phase_output` was written for, one
+# signal over.
 _BUILD_SIGNALS = (
     "error[e", "error: could not compile", "failed to compile",
     "failed to load manifest", "failed to parse manifest", "error: aborting due to",
     "cannot find", "unresolved import", "module not found", "modulenotfounderror",
     "syntaxerror", "cannot find module", "tserror", "build failed", "compilationerror",
-)
-
-# The subset a TEST cannot produce by printing a diagnostic: these are the build
-# DRIVER talking about its own failure to build, not a compiler talking about
-# code. They are trusted anywhere in the output, because `--no-fail-fast` runs
-# the targets that built before reporting the ones that did not — so a real
-# compile failure legitimately appears after tests have run. Every other signal
-# in `_BUILD_SIGNALS` is a rustc/tsc/python diagnostic, which a compile-fail
-# harness quotes verbatim into its own stdout, and is trusted only inside
-# `build_phase_output`.
-_DRIVER_BUILD_SIGNALS = (
-    "error: could not compile", "failed to compile", "failed to load manifest",
-    "failed to parse manifest", "module not found", "modulenotfounderror",
-    "cannot find module", "tserror", "build failed", "compilationerror",
 )
 
 
@@ -92,14 +90,18 @@ def first_diagnostic(text: str) -> str:
 def classify_failure(test_output: str) -> FailureCategory:
     """Classify runner output into a :class:`FailureCategory`.
 
-    Build signals are read from CARGO's own output only. A test that prints a
-    compiler diagnostic into its captured stdout — a trybuild/UI harness diffing
-    rustc's stderr against a fixture, a `compile_fail` doc test, a test
-    asserting on an error string — is not a build failure, and reading one as
-    such routes TASK 4 into its structural branch with a premise that is false
-    on the face of the same output. See :func:`cargo_own_output`; on `anyhow`
-    2026-08-06 that mistake was the whole reason TASK 4 ran at all, on a tree
-    with 275 of 278 tests passing.
+    Build signals are read from the BUILD PHASE of cargo's output only
+    (:func:`build_phase_output`). A test that prints a compiler diagnostic
+    into its captured stdout — a trybuild/UI harness diffing rustc's stderr
+    against a fixture, a `compile_fail` doc test, a test asserting on an
+    error string — is not a build failure, and reading one as such routes
+    TASK 4 into its structural branch with a premise that is false on the
+    face of the same output; on `anyhow` 2026-08-06 that mistake was the
+    whole reason TASK 4 ran at all, on a tree with 275 of 278 tests passing.
+    The driver's own `error: could not compile` is no exception: a test that
+    runs cargo itself (trybuild's nested build, 2026-09-07) prints it after
+    the build phase too, and a genuine compile failure never does — see
+    `_BUILD_SIGNALS`.
 
     The rest of the classification still reads the full text: `panicked at`,
     `assertion`, `timeout` and the `running 0 tests` shape are all things a test
@@ -107,8 +109,8 @@ def classify_failure(test_output: str) -> FailureCategory:
     """
     out = test_output.lower()
 
-    if (any(s in build_phase_output(test_output).lower() for s in _BUILD_SIGNALS)
-            or any(s in out for s in _DRIVER_BUILD_SIGNALS)):
+    build_out = build_phase_output(test_output).lower()
+    if any(s in build_out for s in _BUILD_SIGNALS):
         return FailureCategory.BUILD
     if "timeout" in out or "timed out" in out:
         return FailureCategory.TIMEOUT

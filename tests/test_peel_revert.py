@@ -233,8 +233,10 @@ def test_reapply_replays_the_overwrite_authorization(tmp_path) -> None:
     from pipeline_core.application.reconstruct.peel_revert import (
         peel_file_first,
     )
+    from pipeline_core.application.reconstruct.tree_txn import capture
     f = tmp_path / "context.rs"
     f.write_text("pristine", encoding="utf-8")
+    pristine = capture(f, None)
 
     def _splice(_path, _cont, _fn, _body, _wc, allow_nonstub=False,
                 sig_text=""):
@@ -254,7 +256,7 @@ def test_reapply_replays_the_overwrite_authorization(tmp_path) -> None:
                        overwrite_authorized=authorized),
         ]
         return peel_file_first(
-            file_path=f, snapshot="pristine", file_rel="src/context.rs",
+            file_path=f, pre_image=pristine, file_rel="src/context.rs",
             landed=landed, diags=[], target_src_dir=tmp_path,
             check_cmd="cargo check", cluster_env={},
             implicated_keys_from_diags=lambda _d, _s: frozenset(

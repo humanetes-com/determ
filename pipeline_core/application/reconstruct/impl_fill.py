@@ -16,7 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
 from pipeline_core.application.reconstruct.assert_probe_runner import (
@@ -79,6 +79,12 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
 )
 from pipeline_core.application.reconstruct.test_locator import (
     attributed_test_blocks,
+)
+from pipeline_core.application.reconstruct.tree_txn import (
+    PreImage,
+    TreeTxn,
+    capture,
+    restore,
 )
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
@@ -404,7 +410,7 @@ class ImplFillDeps:
     cargo_err_sig: Callable[..., frozenset[str]]
     cargo_err_sig_from_diagnostics: Callable[..., frozenset[str]]
     check_graceful_stop: Callable[[str], None]
-    cluster_filter_type_methods: Callable[..., list[TypeRecord]]
+    cluster_filter_type_members: Callable[..., list[TypeRecord]]
     collect_crate_macros: Callable[..., str]
     collect_impl_blocks_for_cluster: Callable[..., list[ImplBlock] | None]
     collect_sibling_filled_bodies: Callable[..., str]
@@ -466,6 +472,12 @@ class ImplFillDeps:
     # the owner-map probe, so a session can tell the model which of its
     # changed units the still-failing targets execute; None disables it.
     measure_coverage_slice: Callable[..., Any] | None = None
+    # The structure reader's parse check, `(path) -> parses?` — the splice
+    # gate's validator. Handed to the deterministic import repair so a
+    # rustc-suggested `use` that would leave the file unparseable is
+    # refused by the transaction, not discovered by the next check; and
+    # to the salvage write. None disables (fixture path).
+    parse_ok: Callable[[Path], bool] | None = None
 
 
 def cluster_inactive_stub_names(
@@ -690,7 +702,7 @@ def prepare_impl_fill(
     _cargo_err_sig = deps.cargo_err_sig
     _cargo_err_sig_from_diagnostics = deps.cargo_err_sig_from_diagnostics
     _check_graceful_stop = deps.check_graceful_stop
-    _cluster_filter_type_methods = deps.cluster_filter_type_methods
+    _cluster_filter_type_members = deps.cluster_filter_type_members
     _collect_crate_macros = deps.collect_crate_macros
     _collect_impl_blocks_for_cluster = deps.collect_impl_blocks_for_cluster
     _collect_sibling_filled_bodies = deps.collect_sibling_filled_bodies
@@ -717,6 +729,7 @@ def prepare_impl_fill(
     _record_error_codes_seen = deps.record_error_codes_seen
     _retro_key = deps.retro_key
     _run_cargo_check_diag = deps.run_cargo_check_diag
+    _parse_ok = deps.parse_ok
     _save_retrospectives = deps.save_retrospectives
     _scan_unimplemented_for_cluster = deps.scan_unimplemented_for_cluster
     _scan_unimplemented_records_for_cluster = deps.scan_unimplemented_records_for_cluster
@@ -756,21 +769,39 @@ def prepare_impl_fill(
         return hist.combined_with(
             unbound.histogram() if unbound is not None else None)
 
-    def _record_regression_evidence(keys: Iterable[RetroKey]) -> None:
+    def _record_regression_evidence(
+        keys: Iterable[RetroKey], *,
+        newly_red: Iterable[str] | None = None,
+        newly_red_output: Mapping[str, str] | None = None,
+    ) -> None:
         """A kept landing whose gate reading forgave newly-red tests (the
         sweep's rule: strict net gain) stamps those tests and what they
         printed on every record the next prompt for these units reads —
-        the session and pair routes already did this on their own records;
-        the file and impl routes did not, so their forgiven losses were
-        silent leftovers."""
-        cmp = last_comparison()
-        if cmp is None or not cmp.newly_red:
+        the pair route already did this on its own record; the file and
+        impl routes did not, so their forgiven losses were silent
+        leftovers. The session route stamps its OWN slice key
+        (`*session*`), which only the next session on the same slice reads:
+        `_prior_regression_for` reads UNIT keys, so a session kept with
+        newly-red tests (run `1092886-60870fdd`, 2026-09-06: two tests
+        forgiven on a net +5 keep) left every later file-first and per-impl
+        prompt for those units without `<PRIOR_REGRESSION>` — zero of the
+        prompts on disk carried the tag and zero of 40 records carried
+        `regressed`. The session passes its own reading here explicitly
+        because its comparisons are not the route gate's `last_comparison`."""
+        if newly_red is None:
+            cmp = last_comparison()
+            if cmp is None or not cmp.newly_red:
+                return
+            newly_red = cmp.newly_red
+            newly_red_output = cmp.newly_red_output
+        red = sorted(str(n) for n in newly_red)
+        if not red:
             return
         with _counters_lock:
             for key in keys:
                 rec = dict(retros_cache.get(key, {}) or {})
-                rec["regressed"] = sorted(cmp.newly_red)
-                rec[REGRESSED_OUTPUT] = dict(cmp.newly_red_output)
+                rec["regressed"] = red
+                rec[REGRESSED_OUTPUT] = dict(newly_red_output or {})
                 retros_cache[key] = rec
             _save_retrospectives(project_dir, retros_cache)
 
@@ -1059,7 +1090,7 @@ def prepare_impl_fill(
     _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
     invariants_section = "\n\n".join(
         s for s in (_no_std_invariant, _macro_invariants) if s)
-    _crate_type_records = _cluster_filter_type_methods(
+    _crate_type_records = _cluster_filter_type_members(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
     # The crate's tuple structs — the wrappers a body can construct by
     # `Name(…)` — for the wrap reading that gates the TypeId sentence.
@@ -1202,18 +1233,46 @@ def prepare_impl_fill(
         file_path = target_src_dir / file_rel
         if not file_path.exists():
             return
+        plan = _file_fill_plan(file_rel, fblocks)
+        if plan.groups is None:
+            if plan.wanted:
+                _fill_block_group(file_rel, fblocks, file_rel)
+            return
+        if not plan.groups:
+            # Decided — and logged — at plan time by `_file_route_admits`,
+            # so this run was never scheduled; reached only when the file's
+            # blocks changed between the plan and the run.
+            return
+        _sizes = ", ".join(str(n) for n in plan.sizes)
+        _log(f"  [phase-c/file] {file_rel}: {plan.wanted} fn(s) exceeds "
+             f"PHASE_C_FILE_MAX_FNS={plan.max_fns} — split into "
+             f"{len(plan.groups)} group(s) of {_sizes} fn(s) (test-welded, "
+             "plus any block no other route covers) "
+             f"(+{plan.solo} uncoupled block(s) → per-block loop).")
+        for _gi, _g in enumerate(plan.groups, 1):
+            if _gi > 1 and may_claim is not None and not may_claim():
+                _log(f"  [phase-c/file] {file_rel}: fill share spent after "
+                     f"{_gi - 1} of {len(plan.groups)} group(s) and the last "
+                     "landed nothing — the remaining groups are left to the "
+                     "next fill.")
+                break
+            _fill_block_group(file_rel, [fblocks[i] for i in _g],
+                              f"{file_rel}[group {_gi}/{len(plan.groups)}]")
+
+    def _file_fill_plan(file_rel: str, fblocks: list[ImplBlock]) -> _FileFillPlan:
+        """What the file-first route would ask for `file_rel` — the ONE
+        reading of the fn bound, taken at plan time by `_file_route_admits`
+        and again by `_fill_file_first` when the run opens."""
         wanted_all = [m.fn_name for b in fblocks
                       for m in (*b.stub_members, *b.refill_members)]
-        if not wanted_all:
-            return
         # Bounds how many fns one prompt asks for; counts re-fills too — they
         # are bodies the model must write. The stubs-era env var is still
         # honoured so an existing .env keeps working.
         max_fns = int(os.getenv("PHASE_C_FILE_MAX_FNS")
                       or os.getenv("PHASE_C_FILE_MAX_STUBS") or "20")
         if len(wanted_all) <= max_fns:
-            _fill_block_group(file_rel, fblocks, file_rel)
-            return
+            return _FileFillPlan(wanted=len(wanted_all), max_fns=max_fns,
+                                 groups=None, sizes=(), solo=0, stranded=())
         # Welding is keyed on CONVICTING tests: the coupling claim is "one
         # validation run judges both blocks", which only a test that can
         # actually reject them supports. An inferred attribution welds
@@ -1249,38 +1308,49 @@ def prepare_impl_fill(
         _joint = [g for g in _packed
                   if (len(g) >= 2 or _orphans.intersection(g))
                   and sum(_binputs[i].fn_count for i in g) <= max_fns]
-        _solo = len(_packed) - len(_joint)
         _stranded = sorted(_orphans - {i for g in _joint for i in g})
-        if _stranded:
+        return _FileFillPlan(
+            wanted=len(wanted_all), max_fns=max_fns, groups=_joint,
+            sizes=tuple(sum(_binputs[i].fn_count for i in g) for g in _joint),
+            solo=len(_packed) - len(_joint),
+            stranded=tuple(
+                f"{fblocks[i].container.splitlines()[0] if fblocks[i].container else 'free fns'}"
+                f" ({_binputs[i].fn_count} fn(s))" for i in _stranded))
+
+    def _file_route_admits(file_rel: str, fblocks: list[ImplBlock]) -> bool:
+        """Whether the file-first route can OPEN a run on `file_rel` now.
+
+        The fn bound used to be read only inside `_fill_file_first`, after
+        the schedule had already ranked the run: on the nightly tree of run
+        `2131920-86818224` (2026-09-07) `src/error.rs` held 21 fns against
+        `PHASE_C_FILE_MAX_FNS=20` with no test-welded group under it, so
+        every fill's schedule line opened with `1. file src/error.rs
+        (never_served; 14 stub(s))`, the route returned EMPTY at 0.0 min,
+        and `_rank_of` — which skips EMPTY rows by contract — ranked the
+        same identity never-served again on the next fill. A run the route
+        cannot open is not a candidate; the bound is a plan-time fact and
+        is read here, once per plan, so the schedule never sees it."""
+        if not (target_src_dir / file_rel).exists():
+            return False
+        plan = _file_fill_plan(file_rel, fblocks)
+        if not plan.wanted:
+            return False
+        if plan.stranded:
             # Nothing downstream will attempt these; say so where it is read,
             # rather than let the count above imply the per-block loop has them.
-            _log(f"  [phase-c/file] {file_rel}: {len(_stranded)} block(s) that "
-                 "NO route covers exceed the bound alone and are left unfilled: "
-                 + ", ".join(
-                     f"{fblocks[i].container.splitlines()[0] if fblocks[i].container else 'free fns'}"
-                     f" ({_binputs[i].fn_count} fn(s))" for i in _stranded)
-                 + f" — raise PHASE_C_FILE_MAX_FNS (now {max_fns}) to reach them.")
-        if not _joint:
-            _log(f"  [phase-c/file] {file_rel}: skipped — {len(wanted_all)} "
-                 f"fn(s) exceeds PHASE_C_FILE_MAX_FNS={max_fns} and no "
-                 "test-welded multi-block group fits the bound; per-block "
-                 "fills will handle the blocks that route covers.")
-            return
-        _sizes = ", ".join(
-            str(sum(_binputs[i].fn_count for i in g)) for g in _joint)
-        _log(f"  [phase-c/file] {file_rel}: {len(wanted_all)} fn(s) exceeds "
-             f"PHASE_C_FILE_MAX_FNS={max_fns} — split into {len(_joint)} "
-             f"group(s) of {_sizes} fn(s) (test-welded, plus any block no "
-             f"other route covers) (+{_solo} uncoupled block(s) → "
-             "per-block loop).")
-        for _gi, _g in enumerate(_joint, 1):
-            if _gi > 1 and may_claim is not None and not may_claim():
-                _log(f"  [phase-c/file] {file_rel}: fill share spent after "
-                     f"{_gi - 1} of {len(_joint)} group(s) and the last landed "
-                     "nothing — the remaining groups are left to the next fill.")
-                break
-            _fill_block_group(file_rel, [fblocks[i] for i in _g],
-                              f"{file_rel}[group {_gi}/{len(_joint)}]")
+            _log(f"  [phase-c/file] {file_rel}: {len(plan.stranded)} block(s) "
+                 "that NO route covers exceed the bound alone and are left "
+                 "unfilled: " + ", ".join(plan.stranded)
+                 + f" — raise PHASE_C_FILE_MAX_FNS (now {plan.max_fns}) to "
+                 "reach them.")
+        if plan.groups is not None and not plan.groups:
+            _log(f"  [phase-c/file] {file_rel}: skipped — {plan.wanted} "
+                 f"fn(s) exceeds PHASE_C_FILE_MAX_FNS={plan.max_fns} and no "
+                 "test-welded multi-block group fits the bound; not "
+                 "scheduled — per-block fills will handle the blocks that "
+                 "route covers.")
+            return False
+        return True
 
     def _fill_block_group(file_rel: str, fblocks: list[ImplBlock],
                           glabel: str) -> None:
@@ -1297,7 +1367,11 @@ def prepare_impl_fill(
             return
         _pull_file.file = file_rel
         attempts.note_dispatched(FnLocator(file_rel, n) for n in wanted)
-        snapshot = file_path.read_text(encoding="utf-8", errors="replace")
+        # One read serves both: the text the prompts quote and the byte
+        # pre-image every whole-file revert below restores through the
+        # transaction primitive.
+        _pre = capture(file_path, None)
+        snapshot = _pre.text("replace")
         # Locators in the crash-evidence dict that are not origin-blame:
         # callees of the faulting frame. `crash_blamed` convicts; this set
         # is dispatch. Without it `collect_refill_evidence` grades them
@@ -2050,7 +2124,7 @@ def prepare_impl_fill(
                     _rep = repair_missing_imports(
                         _run_cargo_check_diag, check_cmd, target_src_dir,
                         cluster_env or {}, file_rel, _diags, _log,
-                        "[phase-c/file]")
+                        "[phase-c/file]", validate_parse=_parse_ok)
                     if _rep is not None:
                         rc, cargo_out, _diags = _rep
                 _pre_peel_out = cargo_out
@@ -2065,7 +2139,7 @@ def prepare_impl_fill(
                     # record of their peel path, and which branch declined
                     # was unrecoverable afterwards.
                     _peel, rc, _p_out, _p_diags = peel_file_first(
-                        file_path=file_path, snapshot=snapshot,
+                        file_path=file_path, pre_image=_pre,
                         file_rel=file_rel, landed=list(_landed), diags=_diags,
                         target_src_dir=target_src_dir, check_cmd=check_cmd,
                         cluster_env=cluster_env,
@@ -2374,11 +2448,11 @@ def prepare_impl_fill(
                              "judged and kept).")
                         prior_error = _peel_err
                         _retry_names = frozenset(_peel_reverted)
-                        snapshot = file_path.read_text(
-                            encoding="utf-8", errors="replace")
+                        _pre = capture(file_path, None)
+                        snapshot = _pre.text("replace")
                         continue
                     return
-                file_path.write_text(snapshot, encoding="utf-8")
+                restore(_pre)
                 _note_reverted(file_rel, _attempted_names)
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
@@ -2706,7 +2780,10 @@ def prepare_impl_fill(
             if b2.file == block.file and _bid2 not in _route_seen:
                 _route_candidates.append(b2)
                 _route_seen.add(_bid2)
-        snapshot = file_path.read_text(encoding="utf-8")
+        # The block's byte pre-image: the text view feeds the prompts, the
+        # bytes are what every revert of this block restores.
+        _block_pre = capture(file_path, None)
+        snapshot = _block_pre.text()
         # LAST_ERROR window is recomputed from the tree cargo just compiled
         # (inside each attempt), not snapshotted here: a splice that grows a
         # body shifts siblings past a frozen `line_hi`, and a header /
@@ -3156,7 +3233,7 @@ def prepare_impl_fill(
                     _rep = repair_missing_imports(
                         _run_cargo_check_diag, check_cmd, target_src_dir,
                         cluster_env or {}, block.file, diagnostics, _log,
-                        "[phase-c/impl]")
+                        "[phase-c/impl]", validate_parse=_parse_ok)
                     if _rep is not None:
                         rc, cargo_out, diagnostics = _rep
                 _last_full_out[0] = cargo_out  # `full_error` pull source
@@ -3222,7 +3299,7 @@ def prepare_impl_fill(
                     if rc == 0 else None)
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
-                    file_path.write_text(snapshot, encoding="utf-8")
+                    restore(_block_pre)
                     _last_regr_reverted[0] = True
                     _note_reverted(block.file, _impl_spliced)
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
@@ -3460,7 +3537,7 @@ def prepare_impl_fill(
                     salvage.offer(
                         file_path.read_text(encoding="utf-8", errors="replace"),
                         cur_metric)
-                file_path.write_text(snapshot, encoding="utf-8")
+                restore(_block_pre)
                 _note_reverted(block.file, _impl_spliced)
                 return FixOutcome("failed", err_sig=cur_err_sig,
                                    metric=cur_metric)
@@ -3971,9 +4048,11 @@ def prepare_impl_fill(
                 with _splice_check_lock:
                     _sv_base = _test_regression_baseline(
                         tdd_test_cmd, target_src_dir, cluster_env)
-                    _stubbed = file_path.read_text(encoding="utf-8",
-                                                   errors="replace")
-                    file_path.write_text(_salvaged.body, encoding="utf-8")
+                    # The salvage is a transaction: the compiling image
+                    # goes in, is checked, and is rolled back to the
+                    # stubbed pre-image byte for byte when it does not hold.
+                    _sv_txn = TreeTxn(target_src_dir, validate_parse=_parse_ok)
+                    _sv_txn.write(block.file, _salvaged.body)
                     _sv_rc, _, _ = _run_cargo_check_diag(
                         check_cmd, target_src_dir, cluster_env)
                     _sv_regr = (_test_regression_gate(
@@ -3981,7 +4060,7 @@ def prepare_impl_fill(
                         stub_free=stub_free)
                         if _sv_rc == 0 else None)
                     if _sv_rc != 0 or _sv_regr is not None:
-                        file_path.write_text(_stubbed, encoding="utf-8")
+                        _sv_txn.rollback()
                         _log(f"  [phase-c/impl] {block_id}: best compiling "
                              "attempt NOT salvaged ("
                              + ("no longer compiles here" if _sv_regr is None
@@ -3995,6 +4074,7 @@ def prepare_impl_fill(
                             outcome=GateOutcome.NEGATIVE,
                             attempt=fix_attempt)
                     else:
+                        _sv_txn.commit()
                         _log(f"  [phase-c/impl] {block_id}: fix loop exhausted "
                              f"— KEEPING best compiling image "
                              f"({_salvaged.metric}); stubs would abort the test "
@@ -4322,9 +4402,8 @@ def prepare_impl_fill(
                     _log(f"  [phase-c/pair/retro] {pair_id}: {_re}")
 
             with _splice_check_lock:
-                _snaps = {
-                    b.file: (target_src_dir / b.file).read_text(encoding="utf-8")
-                    for b in halves}
+                _snaps = {b.file: capture(target_src_dir / b.file, None)
+                          for b in halves}
                 _pair_base_raw: list[str] = []
                 _pair_baseline = _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
@@ -4358,12 +4437,11 @@ def prepare_impl_fill(
                             _log(f"  [phase-c/pair] {pair_id}: splice "
                                  f"`{_fd['fn_name']}` failed: {_reason}")
 
-                def _revert_pair(_kept: dict[str, str] = _snaps,
+                def _revert_pair(_kept: dict[str, PreImage] = _snaps,
                                  _names: dict[str, list[str]] = _spliced_by_file
                                  ) -> None:
-                    for _pf, _ptxt in _kept.items():
-                        (target_src_dir / _pf).write_text(
-                            _ptxt, encoding="utf-8")
+                    for _pre_img in _kept.values():
+                        restore(_pre_img)
                     for _pf, _pnames in _names.items():
                         _note_reverted(_pf, _pnames)
 
@@ -4967,6 +5045,14 @@ def prepare_impl_fill(
                 })
                 retros_cache[_skey] = _new_rec
                 _save_retrospectives(project_dir, retros_cache)
+            if _out.kept and _out.newly_red:
+                # The forgiven losses on the UNIT records too: the next
+                # file-first / per-impl prompt for a kept unit reads its own
+                # key, not the slice's. Outside the lock — the writer takes it.
+                _record_regression_evidence(
+                    [_retro_key(u.file, u.fn_name, u.container) for u in _out.kept],
+                    newly_red=_out.newly_red,
+                    newly_red_output=_out.newly_red_output)
             if _out.kept and _out.final is not None:
                 note_kept(_out.final.pass_delta,
                           newly_red=tuple(sorted(_out.newly_red)),
@@ -5079,6 +5165,7 @@ def prepare_impl_fill(
         tests_for=_tests_for, stubs=_stubs_all, log=_log)
     _file_route = _FileRoute(
         units_now=_file_units_now, fill_file=_fill_file_first,
+        admits=_file_route_admits,
         snapshot=_snapshot, report_since=_report_since,
         tests_for=_tests_for, stubs=_stubs_all,
         on_plan=_file_plan_logged, log=_log)
@@ -5174,6 +5261,24 @@ def fill_impl_blocks(
             unmeasurable_tests=frozenset(kw.get("unmeasurable_tests") or ()),
             crash_blamed=frozenset(kw.get("crash_blamed") or ())))
     return prepared.finish()
+
+
+class _FileFillPlan(NamedTuple):
+    """What the file-first route would ask for one file, under the fn bound.
+
+    `groups` is None when the whole file fits one prompt, an empty list when
+    the route can open nothing on it (over the bound and no test-welded
+    multi-block group under it), else the welded groups as block indexes.
+    `wanted` is the fn count the bound was read against, `sizes` the fn
+    count per group, `solo` the uncoupled blocks left to the per-block
+    loop, `stranded` the rendered blocks no route covers."""
+
+    wanted: int
+    max_fns: int
+    groups: list[list[int]] | None
+    sizes: tuple[int, ...]
+    solo: int
+    stranded: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -5292,6 +5397,7 @@ class _FileRoute:
 
     def __init__(self, *, units_now: Callable[[], list[tuple[str, list[ImplBlock]]]],
                  fill_file: Callable[..., None],
+                 admits: Callable[[str, list[ImplBlock]], bool],
                  snapshot: Callable[[], _RouteSnap],
                  report_since: Callable[[_RouteSnap], RouteRunReport],
                  tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
@@ -5300,6 +5406,7 @@ class _FileRoute:
                  log: Callable[[str], None]) -> None:
         self._units_now = units_now
         self._fill_file = fill_file
+        self._admits = admits
         self._snapshot = snapshot
         self._report_since = report_since
         self._tests_for = tests_for
@@ -5311,7 +5418,12 @@ class _FileRoute:
         units = self._units_now()
         self._on_plan(units)
         out: list[RouteRun] = []
-        for i, (file_rel, fblocks) in enumerate(units):
+        # A file the route cannot open under the fn bound is not a run: the
+        # schedule ranks only what can be served, so a permanent EMPTY row
+        # never heads the order (`_rank_of` skips EMPTY, and would rank the
+        # same identity never-served on every fill).
+        for i, (file_rel, fblocks) in enumerate(
+                (f, bs) for f, bs in units if self._admits(f, bs)):
             locs = frozenset(
                 FnLocator(file_rel, m.fn_name) for b in fblocks
                 for m in (*b.stub_members, *b.refill_members))

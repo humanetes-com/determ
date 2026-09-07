@@ -2574,7 +2574,8 @@ def test_slice6_models() -> None:
     # TypeRecord with nested field/method records.
     ty_wire = {
         "file": "src/lib.rs", "kind": "struct", "name": "Error", "generics": "", "definition": "struct Error",
-        "fields": [{"name": "inner", "ty": "Own<ErrorImpl>", "is_pub": False}],
+        "fields": [{"name": "inner", "ty": "Own<ErrorImpl>", "is_pub": False,
+                    "cfg_predicates": []}],
         "variants": [], "methods": [{"name": "new", "sig": "fn new() -> Self", "is_pub": True,
                                      "is_exactly_pub": True,
                                      "cfg_predicates": ["feature = \"std\""],
@@ -3016,7 +3017,7 @@ def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
         print("  OK  _revert_gen_tests_pass reconciles all dropped siblings (R9.6)")
 
 
-def test_cluster_filter_type_methods_drops_cfg_dead_methods():
+def test_cluster_filter_type_members_drops_cfg_dead_methods():
     """TYPES_IN_SCOPE must advertise only methods that compile in the cluster
     (Hard Rule 8). In a no_core cluster, a constructor gated
     `any(feature="std", not(anyhow_no_core_error))` must be dropped, while an
@@ -3034,11 +3035,11 @@ def test_cluster_filter_type_methods_drops_cfg_dead_methods():
         name="anyhow_no_core_error", env_extra={}, tarpaulin_exclude_files=[],
         excluded_cfg=["std"], active_cfg=["anyhow_no_core_error"],
         prompt_nightly_rule="")
-    [out] = _membership.cluster_filter_type_methods([err], cluster)
+    [out] = _membership.cluster_filter_type_members([err], cluster)
     kept = {m.name for m in out.methods}
     assert kept == {"construct_from_display", "provide"}, kept
     # None cluster → unchanged identity.
-    assert _membership.cluster_filter_type_methods([err], None) == [err]
+    assert _membership.cluster_filter_type_members([err], None) == [err]
 
 
 # ─── Driver ─────────────────────────────────────────────────────────────────

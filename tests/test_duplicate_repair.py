@@ -278,13 +278,15 @@ def test_repair_restores_when_the_deletion_does_not_help(tmp_path: Path) -> None
     src, _ = _tree(tmp_path)
     err_line = ERROR_RS[:ERROR_RS.index("fn debug")].count("\n") + 1
     fmt_line = FMT_RS[:FMT_RS.index("fn debug")].count("\n") + 1
-    before = (src / "error.rs").read_text(encoding="utf-8")
+    before = (src / "error.rs").read_bytes()
     stuck = [_diag("src/error.rs", err_line, "src/fmt.rs", fmt_line)]
     log: list[str] = []
     report = repair_duplicate_definitions(tmp_path, src, _deps([stuck, stuck], log))
 
     assert report is None
-    assert (src / "error.rs").read_text(encoding="utf-8") == before
+    # Byte for byte: the restore is the transaction primitive over the
+    # captured pre-image.
+    assert (src / "error.rs").read_bytes() == before
     assert any("did not reduce diagnostics" in line for line in log)
 
 

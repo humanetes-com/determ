@@ -385,6 +385,15 @@ pub(crate) fn collect_types_and_methods(
             Item::Struct(s) => {
                 let name = s.ident.to_string();
                 let generics = render_type(&s.generics).trim().to_string();
+                // A field's effective cfg is the struct's own gate plus the
+                // field's: a field of a cfg'd struct exists only where the
+                // struct does, exactly as a method of a cfg'd impl block does.
+                let struct_cfgs = extract_cfg_predicates(&s.attrs);
+                let field_cfgs = |attrs: &[syn::Attribute]| -> Vec<String> {
+                    let mut cfgs = struct_cfgs.clone();
+                    cfgs.extend(extract_cfg_predicates(attrs));
+                    cfgs
+                };
                 let mut fields = Vec::new();
                 match &s.fields {
                     Fields::Named(f) => {
@@ -393,6 +402,7 @@ pub(crate) fn collect_types_and_methods(
                                 name: nf.ident.as_ref().map(|i| i.to_string()).unwrap_or_default(),
                                 ty: render_type(&nf.ty).trim().to_string(),
                                 is_pub: matches!(nf.vis, syn::Visibility::Public(_)),
+                                cfg_predicates: field_cfgs(&nf.attrs),
                             });
                         }
                     }
@@ -402,6 +412,7 @@ pub(crate) fn collect_types_and_methods(
                                 name: i.to_string(),
                                 ty: render_type(&nf.ty).trim().to_string(),
                                 is_pub: matches!(nf.vis, syn::Visibility::Public(_)),
+                                cfg_predicates: field_cfgs(&nf.attrs),
                             });
                         }
                     }

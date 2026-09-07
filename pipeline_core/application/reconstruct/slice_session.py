@@ -34,6 +34,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
     PeelResult,
     peel_to_compiling,
 )
+from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
 from pipeline_core.domain.attribution import container_key, site_payload
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnRecord, FnSite
@@ -153,7 +154,10 @@ def run_slice_session(
     session judged clean."""
     label = slice_.label()
     files = slice_.files
-    baseline_texts = {f: (target_src_dir / f).read_text(encoding="utf-8") for f in files}
+    # Byte pre-images of the slice's files, restored through the
+    # transaction primitive: the session's undo is a byte restore, never a
+    # re-write of a text it read.
+    baseline_texts = {f: capture(target_src_dir / f, None) for f in files}
     baseline_bodies = dict(ports.enumerate_bodies())
     base_raw: list[str] = []
     baseline = ports.measure_suite(base_raw)
@@ -192,14 +196,14 @@ def run_slice_session(
     # end-of-session decision peels or restores.
     last_judged_clean = True
 
-    def _restore(texts: Mapping[str, str]) -> None:
-        for f, txt in texts.items():
-            (target_src_dir / f).write_text(txt, encoding="utf-8")
+    def _restore(pre_images: Mapping[str, PreImage]) -> None:
+        for pre in pre_images.values():
+            restore(pre)
 
-    def _apply(cs: ChangeSet) -> tuple[list[str], dict[str, str]]:
+    def _apply(cs: ChangeSet) -> tuple[list[str], dict[str, PreImage]]:
         """Splice the routed bodies; returns (rejected reasons, pre-splice
-        texts of the files touched)."""
-        pre = {r.unit.file: (target_src_dir / r.unit.file).read_text(encoding="utf-8")
+        byte pre-images of the files touched)."""
+        pre = {r.unit.file: capture(target_src_dir / r.unit.file, None)
                for r in cs.routed}
         rejected = list(cs.rejected)
         for r in cs.routed:
@@ -438,7 +442,7 @@ def _peel_compile(
     ports: SessionPorts,
     target_src_dir: Path,
     cs: ChangeSet,
-    pre: Mapping[str, str],
+    pre: Mapping[str, PreImage],
     diags: list[Any],
 ) -> PeelResult | None:
     """Drop the bodies the compiler blames and keep the rest, on the same
@@ -462,8 +466,8 @@ def _peel_compile(
                          {t.removeprefix("src/") for t in touched})
 
     def reapply(kept: Sequence[LandedBody]) -> bool:
-        for f, txt in pre.items():
-            (target_src_dir / f).write_text(txt, encoding="utf-8")
+        for pre_image in pre.values():
+            restore(pre_image)
         ok_all = True
         for b in kept:
             r = by_key[b.key]
@@ -493,7 +497,7 @@ def _peel(
     records: Mapping[FnSite, FnRecord],
     baseline: TestStateReading | None,
     baseline_bodies: Mapping[FnSite, str],
-    baseline_texts: Mapping[str, str],
+    baseline_texts: Mapping[str, PreImage],
     changed: frozenset[FnSite],
     *,
     peel_max: int,
@@ -538,8 +542,8 @@ def _peel(
                       f"the remaining {len(remaining) + len(unrestored)} hold "
                       "with no previously-passing test red.")
             return frozenset(remaining) | frozenset(unrestored), frozenset(reverted)
-    for f, txt in baseline_texts.items():
-        (target_src_dir / f).write_text(txt, encoding="utf-8")
+    for pre_image in baseline_texts.values():
+        restore(pre_image)
     ports.log(f"  [phase-c/session] {label}: no subset of the change set holds "
               "within the peel budget — baseline restored.")
     return frozenset(), changed

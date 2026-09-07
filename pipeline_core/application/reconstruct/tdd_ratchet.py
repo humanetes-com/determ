@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
 from pipeline_core.domain.layout_retrigger import RefillGrace
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 
@@ -185,32 +186,55 @@ def snapshot_due(
         pass_count == best_pass and tree_sha != snap_sha)
 
 
-def snapshot_src_tree(src_root: Path) -> dict[str, str] | None:
-    """Every `.rs` under `src_root` → {abs-path: text}. None when `src_root` is
-    absent (ratchet self-disables for that workspace). Scoped to `src/` on
-    purpose: fills only touch impl files there, never `tests/` (the oracle) or
-    `target/` (build cache)."""
+class TreeSnapshot(dict[str, str]):
+    """`{abs-path: text}` of every `.rs` under a `src/` root, over the bytes
+    each was read from. The text view is what `hollow_count` and the
+    ratchet's stub diffs read; the byte view (`pre_images`) is what
+    `restore_src_tree` writes back through the transaction module's
+    `restore` — a text round-trip folds `\r\n` to `\n` and was never a
+    byte restore. A dict subclass so every reader typed on the text mapping
+    keeps working unchanged."""
+
+    __slots__ = ("pre_images",)
+
+    def __init__(self, pre_images: dict[str, PreImage]) -> None:
+        super().__init__({k: v.text("replace") for k, v in pre_images.items()})
+        self.pre_images = pre_images
+
+
+def snapshot_src_tree(src_root: Path) -> TreeSnapshot | None:
+    """Every `.rs` under `src_root` → {abs-path: text}, each over its byte
+    pre-image. None when `src_root` is absent (ratchet self-disables for
+    that workspace). Scoped to `src/` on purpose: fills only touch impl
+    files there, never `tests/` (the oracle) or `target/` (build cache)."""
     if not src_root.is_dir():
         return None
-    snap: dict[str, str] = {}
+    pres: dict[str, PreImage] = {}
     for p in sorted(src_root.rglob("*.rs")):
         try:
-            snap[str(p)] = p.read_text(encoding="utf-8", errors="replace")
+            pre = capture(p, None)
         except OSError:
             continue
-    return snap
+        if pre.data is not None:
+            pres[str(p)] = pre
+    return TreeSnapshot(pres)
 
 
 def restore_src_tree(snapshot: dict[str, str]) -> int:
-    """Rewrite each snapshotted file that has since changed back to its snapshot
-    content; return the count reverted. Files created after the snapshot are left
-    alone (a fill never adds a `.rs`, it fills stubs in existing files)."""
+    """Put each snapshotted file that has since changed back, byte for byte,
+    through the transaction module's `restore`; return the count reverted.
+    Files created after the snapshot are left alone (a fill never adds a
+    `.rs`, it fills stubs in existing files). A plain text mapping (no byte
+    view) is restored from its texts — the pre-byte-snapshot shape, kept
+    for callers that build one by hand."""
+    pres = (snapshot.pre_images if isinstance(snapshot, TreeSnapshot)
+            else {k: PreImage(Path(k), v.encode("utf-8"), None)
+                  for k, v in snapshot.items()})
     reverted = 0
-    for path_str, text in snapshot.items():
-        p = Path(path_str)
+    for pre in pres.values():
         try:
-            if p.read_text(encoding="utf-8", errors="replace") != text:
-                p.write_text(text, encoding="utf-8")
+            if pre.path.read_bytes() != pre.data:
+                restore(pre)
                 reverted += 1
         except OSError:
             continue

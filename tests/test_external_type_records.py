@@ -29,7 +29,7 @@ from pipeline_core.adapters.std_types import (
 )
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.application.reconstruct.cluster_membership import (
-    cluster_filter_type_methods,
+    cluster_filter_type_members,
 )
 from pipeline_core.domain import external_types as et
 from pipeline_core.domain.cfg import CfgSet
@@ -561,16 +561,16 @@ def test_reader_gates_the_external_arm_by_the_shim_complement(tmp_path: Path, mo
     assert external.external_path == "std::backtrace::Backtrace"
     assert '#[cfg(not(not(feature = "std")))]' in external.definition.splitlines()
     std_cluster = _cluster("stable", default_features=("std",))
-    kept = cluster_filter_type_methods(list(recs), std_cluster)
+    kept = cluster_filter_type_members(list(recs), std_cluster)
     assert [(r.kind, r.name) for r in kept if r.name == "Backtrace"] == [("external struct", "Backtrace")]
     no_std_cluster = _cluster("nostd", excluded=('feature = "std"',))
-    kept = cluster_filter_type_methods(list(recs), no_std_cluster)
+    kept = cluster_filter_type_members(list(recs), no_std_cluster)
     assert [(r.kind, r.name) for r in kept if r.name == "Backtrace"] == [("enum", "Backtrace")]
     # What the formatter fill's selection now sees under the std cluster: the
     # field hop from `Error { inner: … }` is unchanged, and `Backtrace` written
     # in a signature resolves to the external record.
     sel = types_referenced_in_text("fn backtrace(this: Ref<Self>) -> &Backtrace",
-                                   cluster_filter_type_methods(list(recs), std_cluster), visible_from="src/fmt.rs")
+                                   cluster_filter_type_members(list(recs), std_cluster), visible_from="src/fmt.rs")
     assert [(r.kind, r.name) for r in sel] == [
         ("external struct", "Backtrace"),
         ("external enum", "BacktraceStatus"),
@@ -716,6 +716,6 @@ def test_reader_over_the_real_extractor_appends_the_backtrace_record(tmp_path: P
     assert recs[:len(crate_recs)] == crate_recs  # crate records keep their positions
     external = [r for r in recs if r.name == "Backtrace" and r.external_path]
     assert len(external) == 1 and external[0].file == "src/backtrace.rs"
-    kept = cluster_filter_type_methods(list(recs), _cluster("stable", default_features=("std",)))
+    kept = cluster_filter_type_members(list(recs), _cluster("stable", default_features=("std",)))
     assert [(r.kind, r.name) for r in kept if r.name == "Backtrace"] == [("external struct", "Backtrace")]
     assert (root / ".phase_c_logs" / "std_types").is_dir()

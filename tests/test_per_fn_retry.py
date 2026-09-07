@@ -526,3 +526,23 @@ def test_generation_overlaps_while_the_writes_stay_serial(tmp_path, monkeypatch)
     assert peak["n"] > 1, "the model calls never overlapped"
     assert set(splice_threads) == {threading.get_ident()}, \
         "the writes must happen on the caller's thread, one at a time"
+
+
+def test_the_gate_revert_is_a_byte_restore(tmp_path):
+    """The reverted body's file comes back byte for byte — the pre-image is
+    captured and restored through the transaction primitive, never as a
+    text the newline translation already folded."""
+    crlf = b"fn b() {\r\n    OLD\r\n}\r\n"
+    (tmp_path / "a.rs").write_text("fn a() { OLD }\n", encoding="utf-8")
+    (tmp_path / "b.rs").write_bytes(crlf)
+    readings = [
+        _reading(nightly=(True, 1)),   # after a.rs — better
+        _reading(nightly=(True, 3)),   # after b.rs — worse
+    ]
+    gate = BodyGate(read_tree=lambda: readings.pop(0),
+                    baseline=_reading(nightly=(True, 2)), log=lambda m: None)
+    count = apply_per_fn_fixes(
+        [("a.rs", "a"), ("b.rs", "b")], "", _ctx(tmp_path), _writing_deps(), gate=gate)
+    assert count == 1
+    assert "NEW" in (tmp_path / "a.rs").read_text(encoding="utf-8")
+    assert (tmp_path / "b.rs").read_bytes() == crlf

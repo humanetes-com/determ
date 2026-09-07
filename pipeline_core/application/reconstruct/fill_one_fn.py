@@ -823,7 +823,8 @@ class FillOneFn:
                 _rep = repair_missing_imports(
                     self.cargo.check_diag, ctx.check_cmd, ctx.target_src_dir,
                     ctx.cluster_env or {}, rel_file, _diags, self.tel.log,
-                    "[phase-c/per-fn]")
+                    "[phase-c/per-fn]",
+                    validate_parse=self.mut.parse_validator())
                 if _rep is not None:
                     rc, cargo_out, _diags = _rep
             # Plan 10 U2: compile is only a pre-gate — accept the fn only if
