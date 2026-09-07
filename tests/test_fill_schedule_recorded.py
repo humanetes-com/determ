@@ -194,3 +194,89 @@ def test_fill_4_of_the_2215_run_rows_the_revert_then_keep_as_flat_and_kept() -> 
     ranked_old = next(s for s in nxt_old.ordered + nxt_old.deferred
                       if s.run.kind is RouteKind.FILE and s.run.label == "file src/error.rs")
     assert ranked_old.reason == "rebuy_reverted"
+
+
+def test_fill_1_of_the_97_run_s_file_wave_rows_each_run_s_own_landings() -> None:
+    """Plan sentence, computed on the 13:55 UTC file wave of fill 1 of
+    `1212998-d61fbd2c` (the rows in fill 3's ledger): `file src/context.rs`
+    dispatched and reverted its one target, `source`, while `file
+    src/error.rs` kept its eight and `file src/ptr.rs` its one; read with
+    each run's label, context.rs rows REVERTED, kept 0, reverted 1 — the
+    shape its fill-2 row has, where it ran with no sibling keep in its
+    window — and the next fill ranks that identity `rebuy_reverted`.
+    Negative control: read off the whole window, the context.rs row's
+    kept set is exactly the nine foreign locators the ledger recorded, it
+    grades FLAT as the ledger did, and the identity ranks `rebuy_flat`."""
+    from dataclasses import replace
+
+    from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
+    from pipeline_core.application.reconstruct.fill_scheduler import _outcome
+    from pipeline_core.domain.fill_attempts import FillAttempts
+    from pipeline_core.domain.fill_schedule import RouteRun
+    from pipeline_core.domain.models import FnLocator
+
+    fix = load_fill("1212998-d61fbd2c_iter3")
+    wave = [r for r in ledger_of(fix)
+            if r.iteration == 1 and r.kind is RouteKind.FILE]
+    assert [r.label for r in wave] == [
+        "file src/context.rs", "file src/error.rs", "file src/ptr.rs"]
+    assert len({r.started for r in wave}) == 1          # one wave
+    ctx = next(r for r in wave if r.label == "file src/context.rs")
+    assert ctx.outcome is RunOutcome.FLAT and len(ctx.kept) == 9
+    assert all(f != "src/context.rs" for f, _fn in ctx.kept)
+    assert ctx.reverted == (("src/context.rs", "source"),)
+    control = next(r for r in ledger_of(fix)
+                   if r.iteration == 2 and r.label == "file src/context.rs")
+    assert (control.outcome, control.kept, control.reverted) == (
+        RunOutcome.REVERTED, (), (("src/context.rs", "source"),))
+
+    def own(row, pairs):  # noqa: ANN001, ANN202 — the row's own file
+        file = row.targets[0][0]
+        return frozenset(FnLocator(f, fn) for f, fn in pairs if f == file)
+
+    def wave_rows(labelled: bool) -> dict[str, tuple[RouteRunReport, RunOutcome]]:
+        ledger = FillAttempts(run_label=lambda: "")
+        before = {r.label: ledger.snapshot() for r in wave}   # all open at once
+        for r in wave:
+            ledger.note_dispatched((FnLocator(f, fn) for f, fn in r.targets), label=r.label)
+            ledger.note_call(label=r.label)
+            ledger.note_kept(own(r, r.kept), label=r.label)
+            ledger.note_reverted(own(r, r.reverted), label=r.label)
+        now = ledger.snapshot()
+        out = {}
+        for r in wave:
+            rep = RouteRunReport.from_delta(FillAttempts.since(
+                before[r.label], now, r.label if labelled else None), {})
+            out[r.label] = (rep, _outcome(rep, 0))
+        return out
+
+    def rank(row, outcome, rep) -> str:  # noqa: ANN001 — the next fill's reason
+        run = RouteRun(kind=row.kind, label=row.label,
+                       targets=frozenset(FnLocator(f, fn) for f, fn in row.targets),
+                       target_tests=frozenset(row.target_tests),
+                       files=(row.targets[0][0],), bodies_sha=row.bodies_sha)
+        new_row = replace(row, outcome=outcome,
+                          kept=tuple(sorted((u.file, u.fn_name) for u in rep.kept)),
+                          reverted=tuple(sorted((u.file, u.fn_name) for u in rep.reverted)))
+        sched = schedule([run], [new_row], oracle_fp=row.oracle_fp, hollow={})
+        return (sched.ordered + sched.deferred)[0].reason
+
+    by = wave_rows(True)
+    rep, outcome = by["file src/context.rs"]
+    assert outcome is RunOutcome.REVERTED and not rep.kept
+    assert rep.reverted == {FnLocator("src/context.rs", "source")} and rep.model_calls == 1
+    assert rank(ctx, outcome, rep) == "rebuy_reverted"
+    rep_e, outcome_e = by["file src/error.rs"]
+    assert outcome_e is RunOutcome.FLAT and not rep_e.reverted
+    assert rep_e.kept == frozenset(FnLocator(f, fn) for f, fn in ctx.kept if f == "src/error.rs")
+    assert len(rep_e.kept) == 8
+    rep_p, _o = by["file src/ptr.rs"]
+    assert rep_p.kept == {FnLocator("src/ptr.rs", "by_ref")} and not rep_p.reverted
+
+    old = wave_rows(False)
+    rep_old, outcome_old = old["file src/context.rs"]
+    assert outcome_old is RunOutcome.FLAT
+    assert rep_old.kept == frozenset(FnLocator(f, fn) for f, fn in ctx.kept)
+    assert rep_old.reverted == {FnLocator("src/context.rs", "source")}
+    assert rep_old.model_calls == 3
+    assert rank(ctx, outcome_old, rep_old) == "rebuy_flat"

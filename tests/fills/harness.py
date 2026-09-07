@@ -40,7 +40,7 @@ from pipeline_core.application.reconstruct.fill_scheduler import (
     FillExecutionDeps,
     execute_fill,
 )
-from pipeline_core.domain.fill_attempts import FillAttempts
+from pipeline_core.domain.fill_attempts import FillAttempts, current_run_label
 from pipeline_core.domain.fill_schedule import (
     TODAY_ORDER,
     RouteKind,
@@ -187,16 +187,25 @@ def route_attempts_of(fix: Mapping[str, Any]) -> dict[str, RecordedAttempts]:
 
 
 class FakeRoute:
+    """A route whose run replays the recorded attempt sequence through the
+    real attempt bookkeeping. Notes are stamped with the run label the
+    executor binds on the running thread (the loop's own stamping); the
+    row is read with `since(..., label)` as `impl_fill._report_since`
+    does, or — `labelled=False`, the pre-fix reading — off the whole tick
+    window, the negative control of the wave-attribution sentence."""
+
     def __init__(self, kind: RouteKind, runs: Sequence[RouteRun], opened: list[str],
                  *, parallel: bool = False,
                  attempts: Mapping[str, RecordedAttempts] | None = None,
-                 ledger: FillAttempts | None = None) -> None:
+                 ledger: FillAttempts | None = None,
+                 labelled: bool = True) -> None:
         self.kind = kind
         self.parallel = parallel
         self._runs = list(runs)
         self._opened = opened
         self._attempts = dict(attempts or {})
         self._ledger = ledger if ledger is not None else FillAttempts()
+        self._labelled = labelled
 
     def plan(self) -> Sequence[RouteRun]:
         return list(self._runs)
@@ -209,17 +218,19 @@ class FakeRoute:
         if rec is None:
             return RouteRunReport(model_calls=1, kept=run.targets)
         # The loop's own reading: snapshot, dispatch, one note per attempt
-        # (`impl_fill`'s keep / revert / lost sites), `since` at the end.
+        # (`impl_fill`'s keep / revert / lost sites), one call per attempt,
+        # `since` at the end.
         before = self._ledger.snapshot()
         self._ledger.note_dispatched(rec.dispatched)
         for outcome, units in rec.attempts:
+            self._ledger.note_call()
             {"kept": self._ledger.note_kept,
              "reverted": self._ledger.note_reverted,
              "lost": self._ledger.note_lost}[outcome](units)
-        delta = FillAttempts.since(before, self._ledger.snapshot())
-        return RouteRunReport(
-            model_calls=len(rec.attempts), kept=delta.kept,
-            reverted=delta.reverted, dispatched=delta.dispatched)
+        delta = FillAttempts.since(
+            before, self._ledger.snapshot(),
+            current_run_label() if self._labelled else None)
+        return RouteRunReport.from_delta(delta, {})
 
 
 class MemoryLedger:
@@ -241,11 +252,14 @@ def replay(fix: Mapping[str, Any], *, scheduled: bool = True,
            unmeasurable_tests: Sequence[str] = (),
            crash_blamed: Sequence[FnLocator] = (),
            oracle_fp: str = "o",
-           sticky_reverts: bool = False) -> tuple[FillExecution, list[str]]:
+           sticky_reverts: bool = False,
+           labelled: bool = True) -> tuple[FillExecution, list[str]]:
     """Run the recorded fill's candidates through the executor. Returns the
     execution and the labels in the order the routes were opened.
     `sticky_reverts=True` replays recorded attempts under the pre-fix
-    bookkeeping (a revert mark no keep clears) — the negative control."""
+    bookkeeping (a revert mark no keep clears); `labelled=False` reads
+    each row off the whole tick window rather than the run's own label —
+    each the negative control of its sentence."""
     opened = [] if opened is None else opened
     log = [] if log is None else log
     by_kind = candidate_runs(fix)
@@ -258,7 +272,7 @@ def replay(fix: Mapping[str, Any], *, scheduled: bool = True,
         if planned:
             routes.append(FakeRoute(
                 kind, planned, opened, parallel=kind in _parallel,
-                attempts=attempts, ledger=ledger))
+                attempts=attempts, ledger=ledger, labelled=labelled))
     deps = FillExecutionDeps(
         log=log.append, emit=lambda *_a, **_k: None, check_stop=lambda _c: None,
         ledger=MemoryLedger(rows), project="anyhow",

@@ -366,3 +366,23 @@ def test_session_rebuy_is_the_slice_file_rebuy_is_the_bodies() -> None:
     sched = schedule([s2], [_row(s1, RunOutcome.FLAT, 0)],
                      oracle_fp="o", hollow={})
     assert sched.ordered[0].reason == "never_served"
+
+
+def test_an_empty_row_neither_hides_the_last_verdict_nor_serves_the_targets() -> None:
+    """Plan sentences on EMPTY (the route returned before its first
+    dispatch): on the same identity an EMPTY row after a FLAT row leaves
+    the identity a flat re-buy — the EMPTY row is not evidence and does
+    not hide the verdict before it; on a moved identity (the bodies
+    changed, targets the same) an EMPTY or DEFERRED row alone leaves the
+    run never-served — a try that never opened served nothing. Control:
+    a FLAT row on the moved identity is `served`."""
+    f1 = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"}, sha="f1")
+    flat_then_empty = [_row(f1, RunOutcome.FLAT, 0), _row(f1, RunOutcome.EMPTY, 0)]
+    sched = schedule([f1], flat_then_empty, oracle_fp="o", hollow={})
+    assert sched.ordered[0].reason == "rebuy_flat"
+    f2 = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"}, sha="f2")
+    for outcome in (RunOutcome.EMPTY, RunOutcome.DEFERRED):
+        sched = schedule([f2], [_row(f1, outcome, 0)], oracle_fp="o", hollow={})
+        assert sched.ordered[0].reason == "never_served", outcome
+    sched = schedule([f2], [_row(f1, RunOutcome.FLAT, 0)], oracle_fp="o", hollow={})
+    assert sched.ordered[0].reason == "served"

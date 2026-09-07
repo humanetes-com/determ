@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from pipeline_core.domain.fill_attempts import AttemptsDelta
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteLedgerRow,
@@ -55,6 +56,27 @@ class RouteRunReport:
     #: The route's own verdict-delta reading, when it has one (a session's
     #: last judged turn); None means "let the executor's reading decide".
     own_delta: int | None = None
+
+    @classmethod
+    def from_delta(cls, delta: AttemptsDelta,
+                   classes: Mapping[str, int]) -> RouteRunReport:
+        """The report of a run read off its own attempt delta (the units
+        and calls stamped with the run's label — `FillAttempts.since`) and
+        its own class histogram delta. A delta that touched nothing and
+        made no call is an EMPTY run: the route returned before its first
+        dispatch (run `2011677`, 2026-09-07 10:26 UTC: `file src/error.rs`
+        skipped for exceeding the file-first fn bound was rowed `FLAT …
+        0 call(s), kept 1` off a sibling's dispatch in the same tick
+        window, so the identity would have re-entered as a flat re-buy).
+        `declined` is a run whose only classified outcome was the model
+        declining every target and that kept nothing."""
+        declined_only = bool(classes) and set(classes) == {"declined"}
+        return cls(
+            model_calls=delta.calls,
+            kept=delta.kept, reverted=delta.reverted,
+            dispatched=delta.dispatched, classes=dict(classes),
+            empty=delta.empty,
+            declined=declined_only and not delta.kept)
 
 
 @runtime_checkable

@@ -400,19 +400,26 @@ def _rank_of(run: RouteRun, oracle_fp: str,
              *, readmit_after: int) -> tuple[int, str, int]:
     """(rank, reason, deferrals) for one run against the ledger.
 
-    `served_targets` holds the (kind, targets) keys the ledger has ANY row
-    for — the "served, but under another identity" class."""
+    `served_targets` holds the (kind, targets) keys the ledger has a row
+    that OPENED for (any outcome but deferred or empty) — the "served,
+    but under another identity" class."""
     ident = rebuy_identity(
         run.kind, run.targets, run.bodies_sha, oracle_fp,
         target_tests=run.target_tests)
     rows = history.get(ident) or []
-    # Rows that RAN (not deferred): the latest decides the class. Deferrals
-    # since it are counted for the bounded re-admission.
+    # Rows that RAN (not deferred, not empty): the latest decides the
+    # class. Deferrals since it are counted for the bounded re-admission;
+    # an EMPTY row (the route returned before its first dispatch — a file
+    # over the file-first fn bound, a pair the refusal gate closed) says
+    # nothing about the body and neither hides an earlier verdict nor
+    # counts as a deferral.
     deferrals = 0
     last: RouteLedgerRow | None = None
     for r in reversed(rows):
         if r.outcome is RunOutcome.DEFERRED:
             deferrals += 1
+            continue
+        if r.outcome is RunOutcome.EMPTY:
             continue
         last = r
         break
@@ -424,8 +431,8 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
     if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
         return _RANK_PAYING, _REASON[_RANK_PAYING], deferrals
-    if last.outcome in (RunOutcome.STOPPED, RunOutcome.EMPTY):
-        # Interrupted, or nothing to do when it opened: not evidence.
+    if last.outcome is RunOutcome.STOPPED:
+        # Interrupted: not evidence.
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
     rank = (_RANK_REBUY_REVERTED if last.outcome is RunOutcome.REVERTED
             else _RANK_REBUY_FLAT)
@@ -505,7 +512,13 @@ def schedule(
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
-    served_targets = frozenset(_served_key_of(r) for r in rows_list)
+    # "Served under another identity" is a row that OPENED the try: a run
+    # the schedule deferred or a run that returned before its first
+    # dispatch (EMPTY) served nothing, so its targets under a moved body
+    # or oracle are still a new try, not a served one.
+    served_targets = frozenset(
+        _served_key_of(r) for r in rows_list
+        if r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY))
     order_index = {k: i for i, k in enumerate(today_order)}
 
     ranked: list[tuple[RouteRun, int, str, int, int]] = []

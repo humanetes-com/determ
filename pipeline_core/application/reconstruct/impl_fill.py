@@ -113,7 +113,11 @@ from pipeline_core.domain.failure_signature import (
     attempt_invariant,
     structural_group_note,
 )
-from pipeline_core.domain.fill_attempts import AttemptsSnapshot, FillAttempts
+from pipeline_core.domain.fill_attempts import (
+    AttemptsSnapshot,
+    FillAttempts,
+    current_run_label,
+)
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillClassHistogram,
@@ -728,11 +732,29 @@ def prepare_impl_fill(
     # impl route called it off workers with no lock while other sites
     # held two different ones.
     _counters_lock = threading.Lock()
+    # The same classes split by the route run that classified them, keyed
+    # by the run label bound on the classifying thread ("" outside any
+    # run). A route row's `classes` is the run's own histogram delta; the
+    # fill-wide counter above is one window over a concurrent wave, and a
+    # row read off it named its siblings' outcomes.
+    _classes_by_run: dict[str, FillClassCounter] = {}
 
     def _cls(kind: FillOutcomeClass, unit: str, route: str) -> None:
         with _counters_lock:
             note_fill_class(_emit, _fill_classes, kind,
                             cluster=cluster_name, unit=unit, route=route)
+            _classes_by_run.setdefault(
+                current_run_label(), FillClassCounter()).add(kind)
+
+    def _classes_of_run() -> FillClassHistogram:
+        """This run's classes plus the unlabelled ones — the keep-log rule
+        (an unlabelled note counts for any run). Caller holds the lock."""
+        label = current_run_label()
+        own = _classes_by_run.get(label)
+        hist = own.histogram() if own is not None else FillClassHistogram()
+        unbound = _classes_by_run.get("") if label else None
+        return hist.combined_with(
+            unbound.histogram() if unbound is not None else None)
 
     def _record_regression_evidence(keys: Iterable[RetroKey]) -> None:
         """A kept landing whose gate reading forgave newly-red tests (the
@@ -885,16 +907,17 @@ def prepare_impl_fill(
         return frozenset(fn for f, fn in _cfg_dead_pairs if f == rel)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
-    # Guards the plain-Python aggregate counters (`attempts_total`,
-    # `impls_failed`, `errors`) and the retrospective-cache save — the parts
-    # of a block's fill that touch SHARED state but fall outside the
-    # per-attempt `_splice_check_lock` critical section. The lock itself is
-    # created next to `_cls` above so classification shares it.
+    # Guards the plain-Python aggregate counters (`impls_failed`, `errors`)
+    # and the retrospective-cache save — the parts of a block's fill that
+    # touch SHARED state but fall outside the per-attempt
+    # `_splice_check_lock` critical section. The lock itself is created
+    # next to `_cls` above so classification shares it. The model-call
+    # count is NOT one of these: it lives on `attempts` (`note_call`),
+    # under that object's lock and stamped with the run that made it.
     bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
     impls_filled = 0
     impls_failed = 0
     fns_filled_total = 0
-    attempts_total = 0
     errors: list[str] = []
     # Per-unit attempt bookkeeping (`domain/fill_attempts.py`): dispatched
     # (stamped at the points a unit is handed to a fill cycle, AFTER the skip
@@ -1265,7 +1288,7 @@ def prepare_impl_fill(
         test-welded group of its blocks: prompt → splice → compile → U2 over
         the group's attributed tests (with comparative banking of strict
         self-failure improvement) → global regression gate."""
-        nonlocal fns_filled_total, attempts_total
+        nonlocal fns_filled_total
         file_path = target_src_dir / file_rel
         stub_names = [m.fn_name for b in fblocks for m in b.stub_members]
         refill_names = [m.fn_name for b in fblocks for m in b.refill_members]
@@ -1759,7 +1782,7 @@ def prepare_impl_fill(
                 "cluster": cluster_name, "file": file_rel, "group": glabel,
                 "blocks": len(fblocks), "stubs": len(stub_names),
                 "refills": len(refill_names)})
-            attempts_total += 1
+            attempts.note_call()
             try:
                 # The stream-meta rows of this call carry the units it
                 # serves, so the FLAT grading can tell a measured refusal
@@ -2425,7 +2448,7 @@ def prepare_impl_fill(
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
         unit on `drive_fix_loop` (slice 8a f3 — replaces the hand-rolled
         while loop), and exhausted-block bookkeeping (retro + fail emit)."""
-        nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+        nonlocal fns_filled_total, impls_filled, impls_failed
         block_id = _impl_block_id(block.file, block.container)
         _pull_file.file = block.file
         # Per-file converge keying: only the converge module keeps full budget.
@@ -2887,9 +2910,8 @@ def prepare_impl_fill(
         })
 
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
-            nonlocal attempts_total, last_response
-            with _counters_lock:
-                attempts_total += 1
+            nonlocal last_response
+            attempts.note_call()
             # Default this attempt's loss to the model's. Only the two
             # positively-identified pipeline-side losses below overwrite it, so
             # the escalation stays available exactly where it was before.
@@ -4031,7 +4053,7 @@ def prepare_impl_fill(
     # together. Selection is `pair_dispatches` (domain): the hop's own
     # records and the collected blocks, no live names.
     def _fill_pair(pd: PairDispatch) -> None:
-        nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+        nonlocal fns_filled_total, impls_filled, impls_failed
         _check_graceful_stop("pair-fill dispatch")
         pair = pd.pair
         halves = (pd.dispatcher_block, pd.implementer_block)
@@ -4207,8 +4229,8 @@ def prepare_impl_fill(
                 "implementer": site_payload(pair.implementer),
                 "convicting": sorted(_pair_tests)})
             attempts.note_dispatched(_pair_locs)
+            attempts.note_call()
             with _counters_lock:
-                attempts_total += 1
                 # The sha of what is being SENT, persisted before the reply can
                 # arrive — the refusal above compares against the last prompt
                 # sent, not the last one that produced a revert.
@@ -4725,7 +4747,7 @@ def prepare_impl_fill(
                 tests_by_file=by_file, run_cargo=_run_cargo, log=_log).rendered
 
         def _run_one_session(_sl: SessionSlice, clock: RunClock) -> RouteRunReport:
-            nonlocal attempts_total, fns_filled_total, impls_filled, impls_failed
+            nonlocal fns_filled_total, impls_filled, impls_failed
             nonlocal _all_recs, served
             _check_graceful_stop("slice-session dispatch")
             if served or attempts.dispatched:
@@ -4863,8 +4885,8 @@ def prepare_impl_fill(
                 locator_of(u) for u in (_out.dispatched | _out.kept))
             attempts.note_reverted(locator_of(u) for u in _out.reverted)
             attempts.note_kept(locator_of(u) for u in _out.kept)
+            attempts.note_call(_out.model_calls)
             with _counters_lock:
-                attempts_total += _out.model_calls
                 if _out.outcome == "accepted":
                     impls_filled += 1
                     fns_filled_total += len(_out.kept)
@@ -4977,23 +4999,23 @@ def prepare_impl_fill(
 
     def _snapshot() -> _RouteSnap:
         with _counters_lock:
-            return _RouteSnap(
-                units=attempts.snapshot(), calls=attempts_total,
-                classes=_fill_classes.histogram())
+            return _RouteSnap(units=attempts.snapshot(), classes=_classes_of_run())
 
     def _report_since(snap: _RouteSnap) -> RouteRunReport:
+        """This run's report: the units, calls and classes stamped with
+        the run label bound on this thread (the executor binds it around
+        `route.run`, on the worker that runs it), read off the attempt
+        ledger since `snap`. A wave of concurrent file or impl runs shares
+        one tick stream, so an unlabelled window would carry every
+        sibling's landings onto each row; the label is what keeps a row
+        to its own run."""
         now = _snapshot()
-        delta = FillAttempts.since(snap.units, now.units)
+        delta = FillAttempts.since(snap.units, now.units, current_run_label())
         before = snap.classes.as_dict()
         after = now.classes.as_dict()
         classes = {k: after[k] - before.get(k, 0) for k in after
                    if after[k] - before.get(k, 0)}
-        declined_only = bool(classes) and set(classes) == {"declined"}
-        return RouteRunReport(
-            model_calls=now.calls - snap.calls,
-            kept=delta.kept, reverted=delta.reverted,
-            dispatched=delta.dispatched, classes=classes,
-            declined=declined_only and not delta.kept)
+        return RouteRunReport.from_delta(delta, classes)
 
     def _blocks_after_pair() -> list[ImplBlock]:
         if not _pair_served:
@@ -5101,7 +5123,7 @@ def prepare_impl_fill(
         return ClusterFillResult(
             fns_filled=fns_filled_total,
             bytes_filled=max(0, bytes_after - bytes_before),
-            attempts=attempts_total,
+            attempts=attempts.calls,
             errors=tuple(errors),
             remaining=remaining_n,
             impls_filled=impls_filled,
@@ -5157,10 +5179,11 @@ def fill_impl_blocks(
 @dataclass(frozen=True, slots=True)
 class _RouteSnap:
     """The fill's shared counters at a run's start, so the run's own
-    landings can be read off the difference at its end."""
+    landings can be read off the difference at its end: the attempt
+    ledger (units and calls, each stamped with the run that made it) and
+    the classes this run's thread has classified so far."""
 
     units: AttemptsSnapshot
-    calls: int
     classes: FillClassHistogram
 
 

@@ -259,3 +259,82 @@ def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
     opened, _log, _events = two_fills(_PreFixSessionRoute, tmp_path / "prefix")
     assert opened[0] == a.tests
     assert opened[1:] == [b.tests, b.tests]
+
+
+def test_a_wave_s_rows_carry_each_run_s_own_units_and_a_run_that_never_opened_is_empty(
+        tmp_path: Path) -> None:
+    """Plan sentence: a wave of file runs on disjoint files, run
+    concurrently through `execute_fill` over one attempt ledger, where run
+    A keeps its unit, run B reverts its unit and run C returns without a
+    dispatch or a call: A's row is `kept == {A's unit}`, `model_calls ==
+    A's calls`, FLAT; B's row is `reverted == {B's unit}`, `kept == ∅`,
+    REVERTED; C's row is EMPTY. Negative control, the same wave read off
+    the whole tick window: B and C carry A's keep and grade FLAT, A
+    carries B's revert, and every row's calls are the wave's."""
+    import threading
+
+    from pipeline_core.domain.fill_attempts import FillAttempts, current_run_label
+
+    a = RouteRun(kind=RouteKind.FILE, label="file a.rs",
+                 targets=frozenset({FnLocator("a.rs", "f")}), files=("a.rs",))
+    b = RouteRun(kind=RouteKind.FILE, label="file b.rs",
+                 targets=frozenset({FnLocator("b.rs", "g")}), files=("b.rs",), seq=1)
+    c = RouteRun(kind=RouteKind.FILE, label="file c.rs",
+                 targets=frozenset({FnLocator("c.rs", "h")}), files=("c.rs",), seq=2)
+
+    class _WaveRoute:
+        """Three runs in flight at once: every window holds every note."""
+
+        kind = RouteKind.FILE
+        parallel = True
+
+        def __init__(self, labelled: bool) -> None:
+            self._ledger = FillAttempts()
+            self._gate = threading.Barrier(3, timeout=30)
+            self._labelled = labelled
+
+        def plan(self) -> Sequence[RouteRun]:
+            return [a, b, c]
+
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            before = self._ledger.snapshot()
+            self._gate.wait()                       # every run has opened
+            if run.label == "file a.rs":
+                self._ledger.note_dispatched(run.targets)
+                self._ledger.note_call()
+                self._ledger.note_kept(run.targets)
+            elif run.label == "file b.rs":
+                self._ledger.note_dispatched(run.targets)
+                self._ledger.note_call(2)
+                self._ledger.note_reverted(run.targets)
+            self._gate.wait()                       # every run has landed
+            delta = FillAttempts.since(
+                before, self._ledger.snapshot(),
+                current_run_label() if self._labelled else None)
+            return RouteRunReport.from_delta(delta, {})
+
+    def rows(labelled: bool, root: Path) -> dict[str, object]:
+        fill_reading.reset_last_comparison()
+        log: list[str] = []
+        events: list[tuple[str, dict]] = []
+        out = execute_fill([_WaveRoute(labelled)], hollow={}, bodies_sha=lambda _t: "b",
+                           deps=_deps(root, log, events, parallelism=3))
+        return {r.label: r for r in out.rows}
+
+    by = rows(True, tmp_path / "labelled")
+    assert by["file a.rs"].outcome is RunOutcome.FLAT
+    assert by["file a.rs"].kept == (("a.rs", "f"),) and by["file a.rs"].reverted == ()
+    assert by["file a.rs"].model_calls == 1
+    assert by["file b.rs"].outcome is RunOutcome.REVERTED
+    assert by["file b.rs"].reverted == (("b.rs", "g"),) and by["file b.rs"].kept == ()
+    assert by["file b.rs"].model_calls == 2
+    assert by["file c.rs"].outcome is RunOutcome.EMPTY
+    assert by["file c.rs"].kept == () and by["file c.rs"].model_calls == 0
+
+    old = rows(False, tmp_path / "window")
+    assert old["file b.rs"].outcome is RunOutcome.FLAT
+    assert ("a.rs", "f") in old["file b.rs"].kept
+    assert old["file c.rs"].outcome is RunOutcome.FLAT
+    assert old["file c.rs"].kept == (("a.rs", "f"),)
+    assert ("b.rs", "g") in old["file a.rs"].reverted
+    assert {r.model_calls for r in old.values()} == {3}

@@ -102,3 +102,69 @@ def test_since_reads_only_what_the_run_touched_by_its_outcome_now() -> None:
 
 def test_outcome_names_are_the_ledger_words() -> None:
     assert [o.value for o in AttemptOutcome] == ["kept", "reverted", "lost"]
+
+
+def test_a_labelled_reading_takes_only_the_run_s_own_notes_and_calls() -> None:
+    """Two runs of one wave share the tick stream: run A keeps its unit
+    and run B reverts its own, each inside the other's window. Read with
+    its label, A's delta is A's keep and A's call, B's is B's revert; read
+    off the whole window (the pre-fix rule), each delta carries both, and
+    B — a run whose every landing was reverted — is no longer
+    `reverted and not kept`."""
+    fa = FillAttempts(run_label=lambda: "")
+    before_a = fa.snapshot()
+    before_b = fa.snapshot()
+    fa.note_dispatched([_A], label="A")
+    fa.note_call(label="A")
+    fa.note_dispatched([_C], label="B")
+    fa.note_call(2, label="B")
+    fa.note_kept([_A], label="A")
+    fa.note_reverted([_C], label="B")
+    now = fa.snapshot()
+    a = FillAttempts.since(before_a, now, "A")
+    b = FillAttempts.since(before_b, now, "B")
+    assert a.kept == {_A} and not a.reverted and a.calls == 1
+    assert b.reverted == {_C} and not b.kept and b.calls == 2
+    assert fa.calls == 3
+    # Negative control: the whole-window reading.
+    union = FillAttempts.since(before_b, now)
+    assert union.kept == {_A} and union.reverted == {_C} and union.calls == 3
+
+
+def test_an_unlabelled_note_counts_for_any_run_as_the_keep_log_rule_does() -> None:
+    fa = FillAttempts(run_label=lambda: "")
+    before = fa.snapshot()
+    fa.note_kept([_B])                  # a site that could not bind its run
+    fa.note_call()
+    delta = FillAttempts.since(before, fa.snapshot(), "A")
+    assert delta.kept == {_B} and delta.calls == 1
+
+
+def test_the_default_label_is_the_run_scope_bound_on_the_thread() -> None:
+    from pipeline_core.domain.fill_context import route_scope
+
+    fa = FillAttempts()
+    before = fa.snapshot()
+    with route_scope("file", "file src/a.rs"):
+        fa.note_dispatched([_A])
+        fa.note_call()
+    with route_scope("file", "file src/b.rs"):
+        fa.note_dispatched([_C])
+    now = fa.snapshot()
+    assert FillAttempts.since(before, now, "file src/a.rs").dispatched == {_A}
+    assert FillAttempts.since(before, now, "file src/b.rs").dispatched == {_C}
+    assert FillAttempts.since(before, now, "file src/b.rs").calls == 0
+
+
+def test_a_run_that_touched_nothing_and_called_nothing_is_empty() -> None:
+    """A route that returned before its first dispatch reads empty even
+    while a sibling's dispatch sits in its window; a dispatch or a call
+    of its own makes it a run."""
+    fa = FillAttempts(run_label=lambda: "")
+    before = fa.snapshot()
+    fa.note_dispatched([_A], label="sibling")
+    now = fa.snapshot()
+    assert FillAttempts.since(before, now, "me").empty
+    assert not FillAttempts.since(before, now).empty      # the window is not
+    fa.note_call(label="me")
+    assert not FillAttempts.since(before, fa.snapshot(), "me").empty
