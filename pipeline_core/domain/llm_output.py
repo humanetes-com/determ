@@ -160,14 +160,27 @@ def _looks_like_prose(content: str, path: str) -> bool:
 
 
 def extract_tagged_block(text: str, tag: str) -> str | None:
-    """The inner text of the first ``<TAG> … </TAG>`` span (non-greedy, DOTALL), or
-    None — byte-equivalent to ``re.search(rf'<{tag}>(.*?)</{tag}>', text, re.DOTALL)``
-    projected onto ``group(1)`` (caller trims)."""
-    open_t, close_t = f"<{tag}>", f"</{tag}>"
-    i = text.find(open_t)
+    """The inner text of the first ``<TAG> … </TAG>`` span (non-greedy,
+    DOTALL), or None — byte-equivalent to
+    ``re.search(rf'<{tag}>(.*?)</{tag}>', text, re.DOTALL | re.IGNORECASE)``
+    projected onto ``group(1)`` (caller trims).
+
+    The tag match is CASE-INSENSITIVE. The per-fn prompt asks for `<BODY>`
+    and the model answers `<body>` often enough to matter: three
+    `construct_from_adhoc` replies of run `2585062-494e630e` (2026-09-07/08)
+    opened `<body>` / closed `</body>` with the correct body inside; the
+    case-sensitive find returned None, `extract_body_response` fell through
+    to the RAW reply — tags included, 449 of 449 characters — and the
+    splicer refused it (`parse_broken`). The repair belongs here, in the
+    extractor, because the raw fallback is what produced the unparseable
+    text; the splicer's repairs never see a case slip. The inner text is
+    returned from the ORIGINAL string (never lower-cased)."""
+    low = text.lower()
+    open_t, close_t = f"<{tag.lower()}>", f"</{tag.lower()}>"
+    i = low.find(open_t)
     if i == -1:
         return None
-    j = text.find(close_t, i + len(open_t))
+    j = low.find(close_t, i + len(open_t))
     if j == -1:
         return None
     return text[i + len(open_t):j]

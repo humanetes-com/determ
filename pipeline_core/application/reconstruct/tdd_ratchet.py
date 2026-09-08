@@ -17,6 +17,12 @@ from pathlib import Path
 from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
 from pipeline_core.domain.layout_retrigger import RefillGrace
 from pipeline_core.domain.rust_scan import stubbed_fn_names
+from pipeline_core.domain.test_report import stub_only_crash
+from pipeline_core.domain.test_results import (
+    TestStateReading,
+    compare_readings,
+    parse_binary_results,
+)
 
 
 def ratchet_breach(
@@ -109,6 +115,29 @@ def hollow_count(src_texts: dict[str, str] | None) -> int:
     if not src_texts:
         return 0
     return sum(len(stubbed_fn_names(text)) for text in src_texts.values())
+
+
+def closure_stub_sites(
+    snapshot_reading: TestStateReading | None, output: str,
+) -> frozenset[tuple[str, int]]:
+    """The stub-panic sites :func:`closure_withheld` may forgive a breach on:
+    `stub_only_crash` over exactly the binaries that were COMPLETE WITH A
+    PASS at the ratchet's snapshot and CRASHED in this sweep
+    (`compare_readings(...).newly_crashed`) — the binaries whose vanished
+    tests are the breach. The fill gates judge their crash-only keep over
+    the same set, so a keep is never a charge one iteration later.
+
+    Not the whole capture: a `crashed_all_red` binary (no pass at the
+    snapshot, so nothing of the breach is its) that dies on an assertion
+    would otherwise veto the evidence of the binary that vanished the
+    passes, and a completed binary's failures are verdicts, not crash
+    evidence. Without a snapshot reading there is nothing to compare
+    against, and nothing is forgiven."""
+    if snapshot_reading is None:
+        return frozenset()
+    now = TestStateReading(parse_binary_results(output))
+    crashed = compare_readings(snapshot_reading, now).newly_crashed
+    return stub_only_crash(output, crashed=crashed)
 
 
 def closure_withheld(

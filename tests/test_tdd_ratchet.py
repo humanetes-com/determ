@@ -1301,3 +1301,34 @@ def test_control_a_text_snapshot_read_with_newline_translation_cannot_restore_th
     (src / "a.rs").write_bytes(b"corrupt")
     assert restore_src_tree(texts) == 1
     assert (src / "a.rs").read_bytes() == b"fn a() {\n    1\n}\n" != _CRLF
+
+
+def test_closure_stub_sites_reads_only_the_binaries_the_breach_vanished_with() -> None:
+    # The sweep's consumer of the closure exemption. The snapshot reading
+    # had context_gen_1 complete with passes and error_gen_3 complete
+    # all-red; this sweep aborts both — the first on a stub panic plus the
+    # runtime's destructor line, the second on an assertion plus the same
+    # line. Only context_gen_1's vanished passes are the breach, and only
+    # its section is judged: pre-fix `stub_only_crash(output)` over the
+    # whole text was empty and the ratchet restored the snapshot over a
+    # kept fill one iteration later.
+    from pipeline_core.application.reconstruct.tdd_ratchet import (
+        closure_stub_sites,
+    )
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    from tests.test_test_report import _AFTER_245, _BASE_245
+    snap = TestStateReading(parse_binary_results(_BASE_245))
+    assert closure_stub_sites(snap, _AFTER_245) == frozenset({("src/error.rs", 669)})
+    # No snapshot reading: nothing to compare against, nothing forgiven.
+    assert closure_stub_sites(None, _AFTER_245) == frozenset()
+    # A snapshot where context_gen_1 was ALREADY all-red: no binary of the
+    # breach crashed, so the stub site is nobody's exemption.
+    all_red = TestStateReading(parse_binary_results(_BASE_245.replace(
+        "test ctx_a ... ok\ntest ctx_b ... ok\ntest ctx_c ... FAILED\n"
+        "test result: FAILED. 2 passed; 1 failed; 0 ignored",
+        "test ctx_a ... FAILED\ntest ctx_b ... FAILED\ntest ctx_c ... FAILED\n"
+        "test result: FAILED. 0 passed; 3 failed; 0 ignored")))
+    assert closure_stub_sites(all_red, _AFTER_245) == frozenset()

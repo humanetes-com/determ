@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 from pipeline_core.application.reconstruct.fill_rules import (
+    AttemptFailure,
     make_failed_attempt_body,
 )
 from pipeline_core.domain.construction_recipe import (
@@ -82,12 +83,12 @@ def test_constructs_type_misses_stubs_which_is_why_bypass_never_fired() -> None:
     peeled = make_failed_attempt_body(
         "crate::context::ext::StdError::ext_context(self, context)",
         "error[E0603]: module `ext` is private",
-        3)
+        3, failure=AttemptFailure.COMPILE)
     assert not constructs_type(peeled, "ContextError")
     boxed_fail = make_failed_attempt_body(
         "Self::construct_from_std(error, backtrace)",
         "error[E0277]: the size for values of type `dyn StdError + Send + Sync` cannot be known",
-        3)
+        3, failure=AttemptFailure.COMPILE)
     assert not constructs_type(boxed_fail, "BoxedError")
     assert "did not compile — do not repeat this approach" in boxed_fail
 

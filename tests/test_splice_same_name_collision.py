@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pipeline
 from pipeline_core.application.reconstruct.fill_rules import (
+    AttemptFailure,
     make_failed_attempt_body,
 )
 from pipeline_core.application.reconstruct.splice import (
@@ -137,7 +138,8 @@ def test_scoped_splice_writes_the_annotated_stub_when_allowed() -> None:
     # `body_is_stub` every time and the failure history never reaches the next
     # pass — the annotate was dead in production while its own unit test passed.
     f = _write(NOT_FIXTURE)
-    annotated = make_failed_attempt_body("let x = self;", "error[E0424]", 3)
+    annotated = make_failed_attempt_body("let x = self;", "error[E0424]", 3,
+                                         failure=AttemptFailure.COMPILE)
     refused = pipeline._APP.fill_roles.mut.splice_body_scoped(
         f, "not", "impl Bool for bool", "", annotated)
     assert refused == (False, "body_is_stub", 0)

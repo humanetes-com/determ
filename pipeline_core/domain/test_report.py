@@ -24,6 +24,7 @@ from typing import Protocol
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.test_results import (
+    binary_output_sections,
     parse_failed_tests,
     split_test_stdout_sections,
     strip_libtest_qualifier,
@@ -72,6 +73,29 @@ class TestRunReport:
 # `unimplemented!()` panics with "not implemented"; `todo!()` with "not yet
 # implemented". Skeleton stubs use `unimplemented!()`, but accept both forms.
 _STUB_MARKERS = ("not yet implemented", "not implemented")
+
+# The Rust runtime's own announcement of a double panic. When a `Drop` impl
+# panics while a first panic is already unwinding, `core::panicking::
+# panic_in_cleanup` prints ONE MORE `panicked at` line — located in the
+# runtime's sources (`/rustc/<sha>/library/core/src/panicking.rs:233:5` on
+# rustc 1.95.0, the `/rustc/<sha>/` prefix absent when the sysroot source
+# is a local path) carrying this message — and then `thread caused
+# non-unwinding panic. aborting.`, which is not a `panicked at` line and is
+# never yielded by the locator. The locator parsed the runtime line as one
+# more located panic with a non-stub message, and the all-or-nothing
+# stub-only rule read it as a veto: that is how a correct `Own::new` was
+# reverted on every route across three iterations of run
+# `2585062-494e630e` (2026-09-07/08). `Own::new` real means every `Error` a
+# test builds is dropped through the still-stubbed `vtable()`; the stub
+# panics during unwinding; the runtime aborts; the capture holds `not
+# implemented` at the stub's line PLUS this line. The line is POSITIVE
+# evidence the abort is a panic and not undefined behaviour, and it names
+# no body — a runtime-located panic with any OTHER message (`capacity
+# overflow` in `library/alloc`) is still a crate panic and still vetoes.
+_RUNTIME_ABORT_MESSAGES: tuple[str, ...] = (
+    "panic in a destructor during cleanup",
+)
+_RUNTIME_SOURCE_MARK = "library/"
 
 
 def parse_panic_location(body: str) -> tuple[str | None, int | None, int | None, str]:
@@ -372,15 +396,47 @@ def partition_blame(
     return BlameVerdict(tuple(self_f), tuple(external), tuple(no_verdict))
 
 
+@dataclass(frozen=True, slots=True)
+class LocatedPanic:
+    """One ``panicked at`` occurrence a capture printed, with the location
+    libtest gave it and the message that followed."""
+
+    file: str
+    line: int
+    message: str
+
+    @property
+    def site(self) -> tuple[str, int]:
+        return (self.file, self.line)
+
+    @property
+    def is_stub(self) -> bool:
+        """An `unimplemented!()` / `todo!()` stub speaking — the panic names
+        the hollow fn's own line."""
+        return any(m in self.message for m in _STUB_MARKERS)
+
+    @property
+    def is_runtime_abort(self) -> bool:
+        """The runtime's double-panic announcement (see
+        `_RUNTIME_ABORT_MESSAGES`): located in the runtime's own sources AND
+        carrying one of the announced messages. Neither half alone: a crate
+        panic can be located in `library/` (a `capacity overflow` inside
+        `alloc`), and the message alone on a crate-located line would be a
+        test that printed it."""
+        return (_RUNTIME_SOURCE_MARK in self.file
+                and any(m in self.message for m in _RUNTIME_ABORT_MESSAGES))
+
+
 def _iter_located_panics(
     text: str,
-) -> Iterator[tuple[str, int, str] | None]:
-    """Every ``panicked at`` occurrence in a raw capture → (file, line,
-    message), or None for one whose location does not parse (unknown
-    evidence). Same two libtest forms as :func:`parse_panic_location`, but
-    ALL occurrences: a crash capture can hold several — the drop panic that
-    aborted the process plus the panic it interrupted — and attribution must
-    see every one before it may exonerate."""
+) -> Iterator[LocatedPanic | None]:
+    """Every ``panicked at`` occurrence in a raw capture →
+    :class:`LocatedPanic`, or None for one whose location does not parse
+    (unknown evidence). Same two libtest forms as
+    :func:`parse_panic_location`, but ALL occurrences: a crash capture can
+    hold several — the drop panic that aborted the process plus the panic it
+    interrupted, plus the runtime's announcement of the pair — and
+    attribution must see every one before it may exonerate."""
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         idx = ln.find("panicked at ")
@@ -408,51 +464,173 @@ def _iter_located_panics(
             yield None
             continue
         pf, pl, _pc = parsed
-        yield (pf, pl, msg)
+        yield LocatedPanic(pf, pl, msg)
 
 
-def stub_only_crash(raw_output: str) -> frozenset[tuple[str, int]]:
-    """The (file, line) sites of a crashed capture's panics, iff EVERY located
-    panic is a stub panic (``unimplemented!()``/``todo!()`` markers) — else
-    empty.
+@dataclass(frozen=True, slots=True)
+class CrashPanics:
+    """What the CRASHED binaries of a capture printed about why they died —
+    every located panic in those binaries' own sections, sorted into the
+    three kinds attribution keys on, plus the two kinds of missing evidence.
+
+    ``stub_sites`` — `(file, line)` of `not implemented` panics: a hollow
+    sibling speaking. ``crate_panics`` — every other located crate panic
+    (an assertion, an `unwrap` on `None`, an index out of range): the
+    fill's own doing, or at least not the stubs'. ``runtime_aborts`` — the
+    runtime's double-panic announcements (`LocatedPanic.is_runtime_abort`):
+    positive evidence the abort was a panic in `Drop` and not undefined
+    behaviour, naming no body, counted so a renderer can say so and never
+    a veto. ``unparseable`` — `panicked at` lines with no location:
+    unknown evidence. ``missing`` — sections the caller asked to judge that
+    the capture does not hold: no evidence at all."""
+
+    stub_sites: frozenset[tuple[str, int]]
+    crate_panics: tuple[LocatedPanic, ...]
+    runtime_aborts: int
+    unparseable: int
+    sections: tuple[str, ...]
+    missing: tuple[str, ...]
+
+    @property
+    def stub_only(self) -> bool:
+        """The crash is exonerating evidence: at least one stub panic, and
+        nothing else spoke — no crate panic, no unparseable line, no section
+        the capture could not show. A segfault (no panic at all) is not
+        stub-only; neither is the runtime's announcement on its own."""
+        return (bool(self.stub_sites) and not self.crate_panics
+                and not self.unparseable and not self.missing)
+
+    @property
+    def rendered_stub_sites(self) -> str:
+        return ", ".join(f"{f}:{ln}" for f, ln in sorted(self.stub_sites))
+
+
+def crash_panics(
+    raw_output: str, crashed: Iterable[str] | None = None,
+) -> CrashPanics:
+    """Read the panics of the binaries named by ``crashed`` — labels as
+    :func:`test_results.parse_binary_results` gives them — out of their own
+    sections of ``raw_output`` (`binary_output_sections`: the stdout under
+    the binary's header plus the stderr under its ``Running`` line).
+    ``None`` judges every section that opened and never printed its
+    trailer, the aborted binaries of a scoped run.
+
+    Per SECTION, never over the whole capture. `compare_readings` already
+    splits a crash into ``newly_crashed`` (complete at baseline with a
+    pass — the cost) and ``crashed_all_red`` (complete at baseline with no
+    pass — the failure mode moved, not charged), and a completed binary's
+    failures are verdicts the comparison reads as ``newly_red``. A rule
+    over the whole capture let an assertion panic in an all-red or
+    completed binary veto the stub-only evidence of the binary that
+    actually cost something: on the live `2585062-494e630e` fills
+    (`newly_red=[]`, three to eight `newly_crashed`, every one paired with
+    a `crash_all_red` guard on `error_gen_3` and friends), the whole-text
+    read was `frozenset()` on every fill, and each of the seven `ptr.rs`
+    route-runs reverted the textbook `Own::new`."""
+    sections = binary_output_sections(raw_output)
+    by_label: dict[str, list[str]] = {}
+    for s in sections:
+        by_label.setdefault(s.label, []).append(s.text)
+    wanted = (tuple(crashed) if crashed is not None
+              else tuple(s.label for s in sections if not s.completed))
+    stub_sites: set[tuple[str, int]] = set()
+    crate: list[LocatedPanic] = []
+    runtime = unparseable = 0
+    judged: list[str] = []
+    missing: list[str] = []
+    for label in wanted:
+        texts = by_label.get(label)
+        if not texts:
+            missing.append(label)
+            continue
+        judged.append(label)
+        for p in _iter_located_panics("\n".join(texts)):
+            if p is None:
+                unparseable += 1
+            elif p.is_runtime_abort:
+                runtime += 1
+            elif p.is_stub:
+                stub_sites.add(p.site)
+            else:
+                crate.append(p)
+    return CrashPanics(
+        stub_sites=frozenset(stub_sites), crate_panics=tuple(crate),
+        runtime_aborts=runtime, unparseable=unparseable,
+        sections=tuple(judged), missing=tuple(missing))
+
+
+def stub_only_crash(
+    raw_output: str, crashed: Iterable[str] | None = None,
+) -> frozenset[tuple[str, int]]:
+    """The (file, line) stub-panic sites of the ``crashed`` binaries, iff
+    EVERY crate panic those binaries printed is a stub panic
+    (``unimplemented!()``/``todo!()`` markers) — else empty. See
+    :func:`crash_panics` for the section rule and ``crashed``'s default.
 
     This is the evidence that separates "the fill is bad unsafe code" from
     "the fill correctly reached a still-hollow sibling": a stub panic names
     the hollow fn's own line, while a segfault prints no panic at all and an
-    assertion panic carries a real message. ALL-or-nothing on purpose — an
-    assertion panic followed by a stub panic in the unwind's Drop is real
-    self-evidence, and partial attribution must not exonerate. An
-    unparseable ``panicked at`` line likewise vetoes: unknown evidence is not
-    exculpatory evidence."""
-    sites: set[tuple[str, int]] = set()
-    for p in _iter_located_panics(raw_output):
-        if p is None:
+    assertion panic carries a real message. ALL-or-nothing WITHIN the
+    crashed sections on purpose — an assertion panic followed by a stub
+    panic in the unwind's Drop is real self-evidence, and partial
+    attribution must not exonerate. An unparseable ``panicked at`` line
+    likewise vetoes: unknown evidence is not exculpatory evidence. The
+    runtime's own double-panic announcement is neither: it is the
+    announcement OF the stub panic in `Drop`, and it is ignored here (never
+    a veto, never a site)."""
+    panics = crash_panics(raw_output, crashed)
+    return panics.stub_sites if panics.stub_only else frozenset()
+
+
+def stub_sites_outside(
+    sites: Iterable[tuple[str, int]],
+    unit_sites: frozenset[FnSite],
+    locate: Callable[[str, int], FnSite | None],
+) -> frozenset[tuple[str, int]]:
+    """The subset of stub-panic ``sites`` that resolve to a fn OUTSIDE
+    `unit_sites` — the hollow siblings, as `(file, line)`. A site that does
+    not locate or that resolves into the unit is dropped."""
+    own = {_site_key(s) for s in unit_sites}
+    out: set[tuple[str, int]] = set()
+    for pf, pl in sites:
+        loc = locate(pf, pl)
+        if loc is not None and _site_key(loc) not in own:
+            out.add((pf, pl))
+    return frozenset(out)
+
+
+def external_stub_sites_of(
+    panics: CrashPanics,
+    unit_sites: frozenset[FnSite],
+    locate: Callable[[str, int], FnSite | None],
+) -> frozenset[FnSite]:
+    """The still-stubbed fns OUTSIDE `unit_sites` whose stub panics are the
+    ONLY crate panics in the judged crashed sections — the blockers an
+    abort is attributable to. Empty when any panic is not a stub panic,
+    fails to locate, or resolves inside the unit itself: in each of those
+    cases the abort may be the unit's own doing and must stay charged."""
+    if not panics.stub_only:
+        return frozenset()
+    own = {_site_key(s) for s in unit_sites}
+    out: set[FnSite] = set()
+    for pf, pl in panics.stub_sites:
+        loc = locate(pf, pl)
+        if loc is None or _site_key(loc) in own:
             return frozenset()
-        pf, pl, msg = p
-        if not any(m in msg for m in _STUB_MARKERS):
-            return frozenset()
-        sites.add((pf, pl))
-    return frozenset(sites)
+        out.add(loc)
+    return frozenset(out)
 
 
 def external_stub_crash_sites(
     raw_output: str,
     unit_sites: frozenset[FnSite],
     locate: Callable[[str, int], FnSite | None],
+    crashed: Iterable[str] | None = None,
 ) -> frozenset[FnSite]:
-    """The still-stubbed fns OUTSIDE `unit_sites` whose stub panics are the
-    ONLY panics in a crashed capture — the blockers an abort is attributable
-    to. Empty when any panic is not a stub panic, fails to locate, or
-    resolves inside the unit itself: in each of those cases the abort may be
-    the unit's own doing and must stay charged."""
-    own = {_site_key(s) for s in unit_sites}
-    out: set[FnSite] = set()
-    for pf, pl in stub_only_crash(raw_output):
-        loc = locate(pf, pl)
-        if loc is None or _site_key(loc) in own:
-            return frozenset()
-        out.add(loc)
-    return frozenset(out)
+    """:func:`external_stub_sites_of` over :func:`crash_panics` of
+    ``raw_output``'s ``crashed`` sections (default: the aborted ones)."""
+    return external_stub_sites_of(
+        crash_panics(raw_output, crashed), unit_sites, locate)
 
 
 class U2Decision(Enum):
@@ -489,6 +667,18 @@ class U2Verdict:
     # evidence comparative banking requires (a test absent from the output is
     # never "resolved", it is unmeasured).
     self_passed: frozenset[str] = frozenset()
+    # A REJECT for an abort: the attributed tests whose verdict the scoped
+    # binary destroyed (`self_aborted_tests`), what the aborted sections
+    # printed (`crash_panics`), and the stub-panic sites among them that
+    # resolve OUTSIDE the unit. The caller's retro writer stamps the record
+    # it earns from this verdict with those sites (`crash_stub_sites`), so a
+    # conviction reached on an abort the tree's holes decided is never an
+    # honoured exhaustion, and the failed-attempt comment names the stubs
+    # rather than calling the body wrong. Empty / None on every other
+    # decision.
+    aborted: frozenset[str] = frozenset()
+    crash: CrashPanics | None = None
+    external_stub_sites: frozenset[tuple[str, int]] = frozenset()
 
     @classmethod
     def accept(cls, self_passed: frozenset[str] = frozenset()) -> U2Verdict:
@@ -519,10 +709,16 @@ class U2Verdict:
     def reject(cls, self_failures: frozenset[str], detail: str,
                no_verdict: frozenset[str] = frozenset(),
                self_passed: frozenset[str] = frozenset(),
-               sites: tuple[TestFailure, ...] = ()) -> U2Verdict:
+               sites: tuple[TestFailure, ...] = (),
+               aborted: frozenset[str] = frozenset(),
+               crash: CrashPanics | None = None,
+               external_stub_sites: frozenset[tuple[str, int]] = frozenset(),
+               ) -> U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures,
                    detail=detail, no_verdict=no_verdict,
-                   self_passed=self_passed, self_failure_sites=sites)
+                   self_passed=self_passed, self_failure_sites=sites,
+                   aborted=aborted, crash=crash,
+                   external_stub_sites=external_stub_sites)
 
     @property
     def panic_sites(self) -> dict[str, tuple[str, int]]:

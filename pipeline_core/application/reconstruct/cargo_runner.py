@@ -27,17 +27,20 @@ from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_report import (
     BlameVerdict,
+    CrashPanics,
     FailureExcerpt,
     FailureKind,
     TestFailure,
     TestRunReport,
     U2Verdict,
-    external_stub_crash_sites,
+    crash_panics,
+    external_stub_sites_of,
     parse_test_output,
     partition_blame,
     regressed_test_outputs,
     self_aborted_tests,
     stub_only_crash,
+    stub_sites_outside,
 )
 from pipeline_core.domain.test_results import (
     RegressionComparison,
@@ -278,8 +281,9 @@ def test_regression_gate(
                   "not refused over an individual loss")
         return None
     # A crash-only verdict is asked one more question before it may revert:
-    # WHAT panicked. When every completed binary held (no newly-red, no
-    # measured-scope count drop) and the capture's only panics are
+    # WHAT panicked, in the binaries that COST something. When every
+    # completed binary held (no newly-red, no measured-scope count drop) and
+    # the `newly_crashed` binaries' own sections hold no crate panic but
     # `not implemented` in a stub, the crash is a still-hollow sibling
     # speaking — typically a correct fill letting Error::drop reach hollow
     # vtable fns for the first time. Reverting there erases correct work and
@@ -290,6 +294,12 @@ def test_regression_gate(
     # (run `1048052-2feafd52`, iter 4). Keep the fill; the tests it cannot
     # move stay red/vanished, so nothing is over-reported, and once the last
     # stub fills the same gate judges everything again with real verdicts.
+    # Judged over the `newly_crashed` SECTIONS, not the whole capture: an
+    # assertion panic in a `crashed_all_red` binary (not charged above) or
+    # in a completed one (a verdict, read as `newly_red` when new) is not
+    # this crash's evidence. Read over the whole text, the runtime's own
+    # `panic in a destructor during cleanup` line and `error_gen_3`'s
+    # assertion vetoed every `ptr.rs` keep of run `2585062-494e630e`.
     # NOTE for future call sites: every current caller judges a FILL (hollow →
     # body). A caller judging the reverse direction — deliberately
     # INTRODUCING a stub — must pass ``introduced_stubs=True``, because a
@@ -309,7 +319,13 @@ def test_regression_gate(
         # speaking; a crash implicates no unit by itself) and let the sweep
         # claw the keep back: a full iteration per cycle, and every later
         # unit of the batch judged with the crashed binaries excluded.
-        _stub_sites = stub_only_crash(_raw[-1] if _raw else "")
+        _stub_sites = stub_only_crash(_raw[-1] if _raw else "",
+                                      crashed=cmp.newly_crashed)
+        # Carried out on every exit of this branch: the retro writer stamps
+        # the record it earns from a stub-caused crash as the tree's, not
+        # the body's (`crash_stub_sites`), and the failed-attempt comment
+        # names the stubs instead of "did not compile".
+        cmp = replace(cmp, crash_stub_sites=_stub_sites)
         _plural = 'ies' if len(cmp.newly_crashed) > 1 else 'y'
         if _stub_sites:
             _locs = sorted(f"{f}:{ln}" for f, ln in _stub_sites)
@@ -350,40 +366,82 @@ def test_regression_gate(
             return cmp, render_regression_detail(cmp)
         guard("phase-c/crash_only_reverted",
               f"binar{_plural} {list(cmp.newly_crashed)} crashed with no "
-              "newly-red verdict in any completed binary and no panic the "
-              "capture can locate — the sweep would count the vanished tests "
-              "as failing and the ratchet would restore the snapshot; "
-              "REVERTED here instead, so the rest of the fill is judged "
-              f"against a live baseline (cost: {cmp.crash_lost_pass} "
-              "baseline pass(es))")
+              "newly-red verdict in any completed binary and no stub-only "
+              "panic evidence in the crashed binar" + _plural + "'s own "
+              "output — the sweep would count the vanished tests as failing "
+              "and the ratchet would restore the snapshot; REVERTED here "
+              "instead, so the rest of the fill is judged against a live "
+              f"baseline (cost: {cmp.crash_lost_pass} baseline pass(es))")
         return cmp, render_regression_detail(cmp)
     return cmp, render_regression_detail(cmp)
 
 
 def _render_u2_abort(aborted: frozenset[str], scoped: TestRunReport,
-                     err_cap: int) -> str:
-    """Prompt feedback for a body that ABORTED the test process.
+                     err_cap: int, panics: CrashPanics) -> str:
+    """Prompt feedback for a body under which the test process ABORTED.
 
     Stated as the primary finding, not a footnote: these tests are not failing
     assertions to be argued with, they produced no output because the process
     died. The named tests come first and uncapped — which test was in flight is
     the one locator the model has — and any assertion that did print follows,
-    explicitly demoted so the model does not spend the attempt on it."""
+    explicitly demoted so the model does not spend the attempt on it.
+
+    ``panics`` is what the aborted sections printed, and it decides WHICH
+    abort is described. The capture distinguishes the two ways a Rust
+    process aborts — the runtime announces a double panic on its own
+    `panicked at` line — and the gate reaches this renderer only when that
+    evidence did not exonerate the body: a segfault (no panic located: the
+    old undefined-behaviour text, still right), or a crate panic of the
+    unit's own that a still-stubbed `Drop`-path fn then turned into an
+    abort while unwinding. For the second the fault is the FIRST panic, and
+    telling the model to re-derive the body against memory faults was a
+    wrong-body steer on a right body (the live `ptr.rs::new` comment of run
+    `2585062-494e630e` carries exactly that text over the textbook body)."""
     names = ", ".join(sorted(aborted))
-    out = (
+    head = (
         "Your body ABORTED the test process. These test(s) produced a verdict "
         "BEFORE your change and produced no output at all after it:\n"
         f"{names}\n\n"
         "This is not an assertion failure — the process died, so every later "
         "test in the same binary was never run. A normal `panic!` does not do "
-        "this: libtest catches it and prints a failure. Aborting means either "
-        "undefined behaviour (an unsafe block reading/writing memory that does "
-        "not hold what it claims), or a panic raised while another panic was "
-        "already unwinding.\n\n"
-        "Re-derive the body from the types. Do not re-send the previous body "
-        "with a different helper call — the fault is what the body does to "
-        "memory, not which API it names."
-    )
+        "this: libtest catches it and prints a failure. ")
+    if panics.crate_panics:
+        own = "; ".join(f"{p.file}:{p.line}: {p.message}"
+                        for p in panics.crate_panics[:4])
+        stubs = panics.rendered_stub_sites
+        body = (
+            "The capture shows a DOUBLE panic. Your test's own panic came "
+            f"first: {own}. "
+            + (f"While it unwound, a still-stubbed fn on the drop path panicked "
+               f"too (`not implemented` at {stubs}), "
+               if stubs else
+               "While it unwound, a second panic fired in a destructor, ")
+            + "and the runtime aborted the process"
+            + (" (`panic in a destructor during cleanup`)"
+               if panics.runtime_aborts else "")
+            + ". The abort is the tree's; the first panic is yours. Fix what "
+            "the first panic reports and leave the drop path alone — the "
+            "still-stubbed fn(s) are separate work.")
+    elif panics.stub_sites:
+        body = (
+            "The only panics the aborted binar"
+            f"{'ies' if len(panics.sections) > 1 else 'y'} printed are "
+            f"`not implemented` at {panics.rendered_stub_sites}, and at least "
+            "one of them resolves into THIS unit (or to no fn at all): the "
+            "body still reaches a stub of its own. Replace every "
+            "`unimplemented!()` / `todo!()` this body can reach with a real "
+            "body.")
+    else:
+        body = (
+            "No panic was located in the aborted binar"
+            f"{'ies' if len(panics.sections) > 1 else 'y'}, so this is not a "
+            "panic in a destructor: it is undefined behaviour — an unsafe "
+            "block reading/writing memory that does not hold what it "
+            "claims.\n\n"
+            "Re-derive the body from the types. Do not re-send the previous "
+            "body with a different helper call — the fault is what the body "
+            "does to memory, not which API it names.")
+    out = head + body
     if scoped.failures:
         excerpt = FailureExcerpt(
             names=tuple(sorted(f.test_name for f in scoped.failures)),
@@ -512,17 +570,21 @@ def u2_test_gate(
     if _aborted:
         # Destroyed verdicts convict the body — unless the capture proves the
         # aborting panic fired inside ANOTHER unit's `unimplemented!()` stub
-        # (all panics stub panics, none resolving into this unit). Then the
-        # abort is the hollow tree speaking: a correct body finally made a
-        # still-stubbed sibling reachable (drop-path fns, typically), and
+        # (every crate panic in the ABORTED sections a stub panic, none
+        # resolving into this unit; the runtime's own double-panic line is
+        # the announcement of that stub panic in `Drop`, not a veto). Then
+        # the abort is the hollow tree speaking: a correct body finally made
+        # a still-stubbed sibling reachable (drop-path fns, typically), and
         # rejecting it burns attempts toward a conviction the unit never
         # earned — `from_boxed` spent attempts 2/4/5 exactly here in run
         # `1048052-2feafd52` while `src/error.rs` still held its hollow
-        # drop machinery. Keep the fill, name the blockers, defer to the
-        # outer loop's producer re-admission.
-        _ext = external_stub_crash_sites(
-            out, frozenset(unit_sites),
-            make_fn_site_locator(structure, target_src_dir))
+        # drop machinery, and `ptr.rs::new` two attempts and two retro
+        # rounds in run `2585062-494e630e` with the destructor line as the
+        # veto. Keep the fill, name the blockers, defer to the outer loop's
+        # producer re-admission.
+        _locate = make_fn_site_locator(structure, target_src_dir)
+        _panics = crash_panics(out)
+        _ext = external_stub_sites_of(_panics, frozenset(unit_sites), _locate)
         if _ext:
             _names = sorted(f"{s.file}::{s.fn_name}" for s in _ext)
             guard("phase-c/u2_abort_external",
@@ -540,8 +602,10 @@ def u2_test_gate(
             return U2Verdict.accept_external_only(_pairs, frozenset(_aborted))
         return U2Verdict.reject(
             frozenset(_aborted) | {f.test_name for f in scoped.failures},
-            _render_u2_abort(_aborted, scoped, err_cap),
-            sites=scoped.failures)
+            _render_u2_abort(_aborted, scoped, err_cap, _panics),
+            sites=scoped.failures, aborted=frozenset(_aborted), crash=_panics,
+            external_stub_sites=stub_sites_outside(
+                _panics.stub_sites, frozenset(unit_sites), _locate))
     if not scoped.failures:
         # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
         # Carrying the names is what lets the caller's verdict row say so —

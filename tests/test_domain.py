@@ -1050,6 +1050,43 @@ def test_extract_body_response_body_tag_still_wins() -> None:
     reply = '<BODY>self.x()</BODY>\n<FN name="a" block="impl X">other</FN>'
     assert lo.extract_body_response(reply, "a") == "self.x()"
 
+
+# Reply `8959f7262cd3…` of run `2585062-494e630e` (2026-09-08 02:06 UTC),
+# verbatim: the per-fn prompt asked for `<BODY>`, the model closed the body
+# in lowercase tags, and the case-sensitive extractor handed the splicer all
+# 449 characters — tags included — which syn refused (`parse_broken`). The
+# same body, from a file-first reply, was in the tree at 03:22.
+_LOWERCASE_BODY_REPLY = (
+    "<body>\n"
+    "    let vtable = Box::leak(Box::new(ErrorVTable {\n"
+    "        object_drop: object_drop::<M>,\n"
+    "        object_ref: object_ref::<M>,\n"
+    "        object_boxed: object_boxed::<M>,\n"
+    "        object_reallocate_boxed: object_reallocate_boxed::<M>,\n"
+    "        object_downcast: object_downcast::<M>,\n"
+    "        object_drop_rest: object_drop_front::<M>,\n"
+    "        object_backtrace: no_backtrace,\n"
+    "    }));\n"
+    "    unsafe { Self::construct(message, vtable, backtrace) }\n"
+    "</body>")
+
+
+def test_extract_body_response_reads_a_lowercase_body_tag() -> None:
+    from pipeline_core.domain import llm_output as lo
+
+    assert len(_LOWERCASE_BODY_REPLY) == 449
+    body = lo.extract_body_response(_LOWERCASE_BODY_REPLY)
+    assert body is not None and len(body) == 430
+    assert body.startswith("let vtable = Box::leak(") and body.endswith("}")
+    assert "<body>" not in body and "</body>" not in body
+    # Mixed case and the signature tag take the same rule; the inner text is
+    # returned from the original string, never lower-cased.
+    assert lo.extract_tagged_block("<Body>Self::X()</BODY>", "BODY") == "Self::X()"
+    assert lo.extract_signature_block("<signature>fn F()</signature>") == "fn F()"
+    # NEGATIVE CONTROL: an unclosed lowercase tag is still no block, and the
+    # raw fallback then carries the reply as before.
+    assert lo.extract_tagged_block("<body>open", "BODY") is None
+
 def test_extract_fn_bodies_unwraps_full_definition_wrapper() -> None:
     # A reply wrapping the body in the target's own full definition would
     # splice as a NESTED `fn`: the outer fn loses its tail expression

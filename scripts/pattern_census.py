@@ -1273,15 +1273,17 @@ P16_UNSTAMPED_UNITS: set[str] | None = None
 
 
 def _p16_unstamped_units() -> set[str]:
-    """Store keys of regression-derived records carrying no `regressed`
-    stamp — the population nothing screens (see `regression_derived_records`).
-    Read once per process from the stores under the repo's tmp/."""
+    """Store keys of gate-verdict-derived records carrying no stamp of their
+    class (`regressed` for a regression verdict, `crash_stub_sites` for a
+    crash / abort verdict) — the population nothing screens (see
+    `regression_derived_records`).  Read once per process from the stores
+    under the repo's tmp/."""
     global P16_UNSTAMPED_UNITS
     if P16_UNSTAMPED_UNITS is None:
         root = Path(__file__).resolve().parent.parent
         P16_UNSTAMPED_UNITS = {
             r["unit"] for r in regression_derived_records(root)
-            if r["regressed"] is None}
+            if r["stamp"] is None}
     return P16_UNSTAMPED_UNITS
 
 
@@ -2244,17 +2246,43 @@ def print_immortal_accusations(rows: list[dict]) -> None:
             print(f"    subjects: {', '.join(r['fns'])}")
 
 
+# The openers of the two gate verdicts a compiled attempt earns from a test
+# process that died under it: the per-fn abort renderer
+# (`cargo_runner._render_u2_abort`) and the regression detail's crash head
+# (`test_results.render_regression_detail`).  A record opening on either is
+# a CRASH-EARNED prescription: the lesson explains an abort/crash, which on a
+# tree with a hollow drop path is the stubs' doing, not the body's.  The
+# stamp the screen reads for this class is `crash_stub_sites`
+# (`retro_gate.CRASH_STUB_SITES`); the regression class's stamp is
+# `regressed`.  Both live records of run `2585062-494e630e` (2026-09-08) —
+# `src/ptr.rs::new::Own<T>` ("Your body ABORTED the test process…",
+# `fully_exhausted: true`) and `src/ptr.rs::*impl*::Own<T>` ("This made
+# test binaries […] CRASH before reporting results…") — printed as
+# `no regression-derived record in any store` before this class existed,
+# because the detector keyed on `regressed`, which is `[]` for a crash.
+_CRASH_VERDICT_HEADS = (
+    "Your body ABORTED the test process",
+    "This made test binar",
+)
+
+
 def regression_derived_records(root: Path) -> list[dict]:
-    """P16 standing state — the records on disk earned from a regression
-    verdict: `error_count` 0 (the attempt compiled, so the lesson came from
-    test outcomes alone) and a `last_error_preview` opening on the
-    `REGRESSED previously-passing test(s)` head `render_regression_detail`
-    writes.  Per record: the store, the unit key, the failing-test count and
-    `convicted_by` it carries, whether it is `fully_exhausted`, the
-    `regressed` stamp (None when the record predates the stamp — the
-    population the screen cannot see), and the guidance head.  Measured on
+    """P16 standing state — the records on disk earned from a GATE verdict
+    on a compiled attempt: `error_count` 0 (the lesson came from test
+    outcomes alone) and a `last_error_preview` opening on one of the two
+    verdict shapes.  ``kind`` is `regression` (the `REGRESSED
+    previously-passing test(s)` head `render_regression_detail` writes;
+    stamp `regressed`) or `crash` (the abort / crash heads above; stamp
+    `crash_stub_sites`).  Per record: the store, the unit key, the kind,
+    the failing-test count and `convicted_by` it carries, whether it is
+    `fully_exhausted`, the class's ``stamp`` (a list, or None when the
+    record predates the stamp — the population the screen cannot see; the
+    legacy ``regressed`` key mirrors it for regression rows), and the
+    guidance head.  Measured on
     `tmp/anyhow/.phase_c_logs/retrospectives.json` 2026-08-26: 5 of 23
-    compiled records, all `convicted_by []`, none stamped."""
+    compiled records, all `convicted_by []`, none stamped; 2026-09-08: the
+    two `src/ptr.rs` crash-earned records, one of them `fully_exhausted`,
+    neither stamped."""
     out: list[dict] = []
     for store in sorted(root.glob("tmp/*/.phase_c_logs/retrospectives.json")):
         try:
@@ -2269,17 +2297,23 @@ def regression_derived_records(root: Path) -> list[dict]:
             if int(rec.get("error_count") or 0) != 0:
                 continue
             preview = str(rec.get("last_error_preview") or "")
-            if "REGRESSED previously-passing test(s)" not in preview:
+            if "REGRESSED previously-passing test(s)" in preview:
+                kind, stamped = "regression", rec.get("regressed")
+            elif preview.startswith(_CRASH_VERDICT_HEADS):
+                kind, stamped = "crash", rec.get("crash_stub_sites")
+            else:
                 continue
-            stamped = rec.get("regressed")
+            stamp = ([str(t) for t in stamped]
+                     if isinstance(stamped, list) else None)
             out.append({
                 "store": str(store.relative_to(root)),
                 "unit": key,
+                "kind": kind,
                 "failing_tests": int(rec.get("failing_test_count") or 0),
                 "convicted_by": [str(t) for t in (rec.get("convicted_by") or [])],
                 "exhausted": bool(rec.get("fully_exhausted")),
-                "regressed": ([str(t) for t in stamped]
-                              if isinstance(stamped, list) else None),
+                "stamp": stamp,
+                "regressed": stamp if kind == "regression" else None,
                 "guidance": " ".join(str(rec.get("guidance") or "").split())[:100],
             })
     return out
@@ -2288,21 +2322,24 @@ def regression_derived_records(root: Path) -> list[dict]:
 def print_regression_derived(rows: list[dict]) -> None:
     print()
     print("=" * 72)
-    print("P16 regression-derived prescription — retro records on disk earned")
-    print("from a REGRESSED verdict; UNSTAMPED ones are screened by nothing.")
+    print("P16 gate-verdict prescription — retro records on disk earned from a")
+    print("REGRESSED verdict (stamp `regressed`) or from a CRASH / ABORT verdict")
+    print("(stamp `crash_stub_sites`); UNSTAMPED ones are screened by nothing.")
     if not rows:
-        print("\n  no regression-derived record in any store under tmp/")
+        print("\n  no regression- or crash-derived record in any store under tmp/")
         return
     by_store: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_store[r["store"]].append(r)
     for store, recs in by_store.items():
-        unstamped = [r for r in recs if r["regressed"] is None]
+        unstamped = [r for r in recs if r["stamp"] is None]
         print(f"\n  {store}: {len(recs)} record(s), {len(unstamped)} UNSTAMPED")
         for r in recs:
-            stamp = ("UNSTAMPED" if r["regressed"] is None
-                     else f"regressed[{len(r['regressed'])}]")
-            print(f"    {r['unit']}: failing_tests={r['failing_tests']} "
+            field = "regressed" if r["kind"] == "regression" else "crash_stub_sites"
+            stamp = ("UNSTAMPED" if r["stamp"] is None
+                     else f"{field}[{len(r['stamp'])}]")
+            print(f"    {r['unit']}: kind={r['kind']} "
+                  f"failing_tests={r['failing_tests']} "
                   f"convicted_by={r['convicted_by']} "
                   f"exhausted={r['exhausted']} {stamp}")
             print(f"      guidance: {r['guidance']}")

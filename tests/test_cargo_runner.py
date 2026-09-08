@@ -728,3 +728,143 @@ def test_regression_gate_reverts_a_crash_in_a_stub_free_tree() -> None:
         guard=lambda loc, m: fired3.append((loc, m)), stub_free=True) is not None
     assert any(loc == "phase-c/crash_stub_panic_reverted" for loc, _m in fired3)
     assert not any(loc == "phase-c/crash_stub_free_reverted" for loc, _m in fired3)
+
+
+# --- the abort-in-Drop shape of run 2585062-494e630e -------------------------
+#
+# A correct fill lets `Error::drop` reach the still-stubbed `vtable()`; the
+# stub panics while a first panic is unwinding; the runtime prints its own
+# `panicked at …/library/core/src/panicking.rs:233:5: panic in a destructor
+# during cleanup` and aborts. Both gates read the crashed binaries' OWN
+# sections and treat the runtime line as the announcement of the stub panic,
+# never as a veto; a `crashed_all_red` binary's assertion elsewhere in the
+# same capture is not this crash's evidence.
+
+_RUSTC_PANICKING = ("/rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/"
+                    "core/src/panicking.rs:233:5")
+_DESTRUCTOR = "panic in a destructor during cleanup"
+
+
+def test_regression_gate_keeps_the_overnight_abort_in_drop_reading(tmp_path: Path) -> None:
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    from tests.test_test_report import _AFTER_245, _BASE_245
+    base = TestStateReading(parse_binary_results(_BASE_245))
+    fired: list[tuple[str, str]] = []
+    # `tmp_path` holds no `.rs`, so the hollow count after is 0 < 1: the
+    # closure exemption's shrink condition holds, as on the live `Own::new`
+    # fill (the fill turned one stub into a body).
+    res = test_regression_gate(
+        _const_run_cargo(101, _AFTER_245), "cargo test", tmp_path, {}, base,
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired.append((loc, m)), hollow_before=1)
+    assert res is None
+    assert any(loc == "phase-c/crash_all_red" for loc, _m in fired)
+    kept = [m for loc, m in fired if loc == "phase-c/crash_closure_kept"]
+    assert kept and "src/error.rs:669" in kept[0]
+    assert not any(loc == "phase-c/crash_only_reverted" for loc, _m in fired)
+    # NEGATIVE CONTROL — the same reading with the assertion INSIDE the
+    # newly-crashed binary is the fill's own and reverts, and the reverted
+    # comparison carries no stub evidence for the retro writer.
+    own = _AFTER_245.replace(
+        "thread 'ctx_a' panicked at src/error.rs:669:67:\nnot implemented\n",
+        "thread 'ctx_a' panicked at tests/context_gen_1.rs:9:5:\n"
+        "assertion failed: boom\n"
+        "thread 'ctx_a' panicked at src/error.rs:669:67:\nnot implemented\n")
+    fired2: list[tuple[str, str]] = []
+    res2 = test_regression_gate(
+        _const_run_cargo(101, own), "cargo test", tmp_path, {}, base,
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired2.append((loc, m)), hollow_before=1)
+    assert res2 is not None
+    assert any(loc == "phase-c/crash_only_reverted" for loc, _m in fired2)
+    assert res2[0].crash_stub_sites == frozenset()
+    # The stub-only reading with the hollow set NOT shrinking still reverts
+    # (the sweep would charge it) — and the comparison it returns carries the
+    # sites, so the record earned from it is stamped as the tree's.
+    fired3: list[tuple[str, str]] = []
+    res3 = test_regression_gate(
+        _const_run_cargo(101, _AFTER_245), "cargo test", tmp_path, {}, base,
+        enabled=True, timeout=120,
+        guard=lambda loc, m: fired3.append((loc, m)), hollow_before=0)
+    assert res3 is not None
+    assert any(loc == "phase-c/crash_stub_panic_reverted" for loc, _m in fired3)
+    assert res3[0].crash_stub_sites == frozenset({("src/error.rs", 669)})
+
+
+def _vtable_tree(tmp_path: Path) -> tuple[_FakeStructure, Path]:
+    """A tree with a still-stubbed `vtable()` in error.rs and the unit under
+    test in ptr.rs, wired for the site locator."""
+    (tmp_path / "src").mkdir()
+    err = tmp_path / "src" / "error.rs"
+    err.write_text("fn vtable() {\n    unimplemented!()\n}\n", encoding="utf-8")
+    recs = [{"file": "src/error.rs", "fn_name": "vtable", "container": "",
+             "sig_byte_start": 0, "body_byte_end": len(err.read_text())}]
+    return _FakeStructure(recs), tmp_path
+
+
+def test_u2_gate_keeps_an_abort_whose_stub_panic_the_runtime_announced(tmp_path: Path) -> None:
+    # The scoped run of per-fn `ptr.rs::new`: the aborted binary printed the
+    # stub panic in `vtable()` and then the runtime's destructor line. Pre-fix
+    # the runtime line vetoed `external_stub_crash_sites` and the gate
+    # REJECTED with the undefined-behaviour text (12 `u2_missing_verdict`,
+    # 0 `u2_abort_external` overnight).
+    structure, src = _vtable_tree(tmp_path)
+    out = ("running 2 tests\n"
+           "test a ... \n"
+           "thread 'a' panicked at src/error.rs:2:5:\nnot implemented\n"
+           "\n--- stderr ---\n"
+           "     Running tests/t.rs (t/t-1)\n"
+           f"thread 'a' panicked at {_RUSTC_PANICKING}:\n{_DESTRUCTOR}\n"
+           "thread caused non-unwinding panic. aborting.\n")
+    fired: list[tuple[str, str]] = []
+    v = _gate(_const_run_cargo(101, out), {"a", "b"},
+              baseline=_judged(["a", "b"]),
+              unit_fns=frozenset({FnSite("src/ptr.rs", "new", "impl Own<T>")}),
+              structure=structure, src_dir=src,
+              guard=lambda loc, m: fired.append((loc, m)))
+    assert v.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
+    assert FnSite("src/error.rs", "vtable", "") in v.blocking_fns
+    assert any(loc == "phase-c/u2_abort_external" for loc, _m in fired)
+
+
+def test_u2_gate_names_the_units_own_first_panic_when_drop_then_aborts(tmp_path: Path) -> None:
+    # The residual REJECT: the unit's own assertion came first, the stubbed
+    # drop path turned it into an abort. The text blames the first panic and
+    # says the abort is the tree's; the verdict carries the abort evidence
+    # (the external stub site) for the retro stamp.
+    structure, src = _vtable_tree(tmp_path)
+    out = ("running 2 tests\n"
+           "test a ... \n"
+           "thread 'a' panicked at tests/t.rs:9:5:\nassertion failed: boom\n"
+           "thread 'a' panicked at src/error.rs:2:5:\nnot implemented\n"
+           "\n--- stderr ---\n"
+           "     Running tests/t.rs (t/t-1)\n"
+           f"thread 'a' panicked at {_RUSTC_PANICKING}:\n{_DESTRUCTOR}\n")
+    v = _gate(_const_run_cargo(101, out), {"a", "b"},
+              baseline=_judged(["a", "b"]),
+              unit_fns=frozenset({FnSite("src/ptr.rs", "new", "impl Own<T>")}),
+              structure=structure, src_dir=src)
+    assert v.decision is U2Decision.REJECT
+    assert v.aborted == frozenset({"a", "b"})
+    assert "ABORTED the test process" in v.detail
+    assert "tests/t.rs:9: assertion failed: boom" in v.detail
+    assert "The abort is the tree's; the first panic is yours" in v.detail
+    assert "src/error.rs:2" in v.detail
+    assert "undefined behaviour" not in v.detail
+    assert v.crash is not None and v.crash.runtime_aborts == 1
+    assert v.external_stub_sites == frozenset({("src/error.rs", 2)})
+    # A silent abort keeps the undefined-behaviour text and carries no
+    # evidence (stamped-empty downstream: the body's own).
+    seg = _gate(_const_run_cargo(101, "running 2 tests\ntest a ... \n"
+                                      "(signal: 11, SIGSEGV)"),
+                {"a", "b"}, baseline=_judged(["a", "b"]))
+    assert seg.decision is U2Decision.REJECT
+    assert "undefined behaviour" in seg.detail
+    assert seg.external_stub_sites == frozenset() and seg.crash is not None
+    assert seg.crash.stub_sites == frozenset()

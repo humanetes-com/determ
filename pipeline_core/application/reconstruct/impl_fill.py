@@ -227,6 +227,7 @@ from pipeline_core.domain.retro_gate import (
     anchor_types_for_container,
     conviction_standing,
     convictor_entry_moved,
+    crash_earned_conviction,
     evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
@@ -2486,6 +2487,16 @@ def prepare_impl_fill(
                  "from a regression of test(s) this block does not answer "
                  "for — retro guidance withheld (regression_scoped), "
                  "exhaustion not honoured (regression-scoped).")
+        # The record was earned from a crash/abort the tree's still-stubbed
+        # fns decided (`crash_earned_conviction`) — judged before the
+        # premise rules, which flip while the body is a stub and back the
+        # moment the gate keeps the correct body.
+        elif crash_earned_conviction(_retro_rec):
+            _poisoned_retro = True
+            _log(f"  [phase-c/impl] {block_id}: retro guidance was earned "
+                 "from a crash/abort the tree's still-stubbed fn(s) decided "
+                 "— guidance withheld, exhaustion not honoured "
+                 "(crash_earned).")
         # The second way stored guidance goes bad, and the one the layout sieve
         # above cannot see: a claim that the crate CANNOT do this, made against
         # a tree that has since moved (or against no recorded tree at all). This
@@ -2851,6 +2862,16 @@ def prepare_impl_fill(
         # second banks its compiling image as salvage, so both describe
         # something the loop can retain.
         _last_regr_reverted: list[bool] = [False]
+        # When the LAST judged attempt died — a binary that completed at the
+        # baseline crashed under it, or the scoped run aborted — the
+        # stub-panic sites the gate located in the crashed binaries' own
+        # output (`None` while the last failure was not a crash; empty when
+        # it was and no stub panic was located, i.e. a segfault). The retro
+        # writer stamps the record with them (`crash_stub_sites`) and never
+        # exhausts the block on an abort the tree's stubs decided: the live
+        # `src/ptr.rs::*impl*::Own<T>` record was earned from exactly that
+        # crash (run `2585062-494e630e`, 2026-09-08).
+        _last_crash_sites: list[frozenset[tuple[str, int]] | None] = [None]
         # Best COMPILING file image this block produced. `unimplemented!()` is
         # not a neutral fallback — it panics and aborts the test binary, so
         # every sibling test in it goes unjudged. On exhaustion we restore this
@@ -3000,6 +3021,7 @@ def prepare_impl_fill(
             nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
                 members_filled_this_block, block_already_complete, last_metric
             _last_regr_reverted[0] = False
+            _last_crash_sites[0] = None
             # Hold the global splice+cargo lock while we mutate and check.
             with _splice_check_lock:
                 # Monotone ratchet baseline: the cluster's runtime test state
@@ -3216,6 +3238,8 @@ def prepare_impl_fill(
                          f"fn(s) — regressed sibling test(s): "
                          f"{_cmp.summary} (attempt {fix_attempt}).")
                     last_error_excerpt = _regr_detail
+                    if _cmp.newly_crashed:
+                        _last_crash_sites[0] = _cmp.crash_stub_sites
                     _rsig = _cmp.signature
                     last_metric = FixProgress(0, max(1, len(_rsig)))
                     # Crash-only regression (no newly-red verdict in a
@@ -3401,6 +3425,8 @@ def prepare_impl_fill(
                         return FixOutcome("accepted")
                 if _u2_impl_reject and _u2_impl is not None:
                     cargo_out = _u2_impl.detail   # route test-failure detail as the error
+                    if _u2_impl.aborted:
+                        _last_crash_sites[0] = _u2_impl.external_stub_sites
                 # Compile failed (or U2 self-test failure). Structured diagnostics
                 # give the error signature; a U2 test failure uses the
                 # failing-test set (test output has no rustc E-codes).
@@ -3804,6 +3830,20 @@ def prepare_impl_fill(
                         "cluster": cluster_name, "file": block.file,
                         "container": block.container,
                         "convicted_by": sorted(_bc_now)})
+                # A verdict earned from a crash whose only panics are
+                # still-stubbed siblings' is the tree's verdict, not the
+                # block's — the per-fn retro arm's rule, ported. The record
+                # is still written (stamped `crash_stub_sites`, so the lesson
+                # is withheld as hollow-tree guidance and the class is
+                # countable); it just convicts nothing.
+                if full_exhaust and _last_crash_sites[0]:
+                    full_exhaust = False
+                    _log(f"  [phase-c/impl/retro] {block_id}: NOT exhausting "
+                         "— the last failure was a crash whose only panics "
+                         "are still-stubbed sibling(s) at "
+                         + ", ".join(f"{f}:{ln}" for f, ln
+                                     in sorted(_last_crash_sites[0]))
+                         + "; the verdict is the tree's, not the block's.")
                 # The dict write + on-disk save must be atomic together —
 
                 # two blocks finishing concurrently each write their OWN key
@@ -3851,7 +3891,8 @@ def prepare_impl_fill(
                         regressed=regressed_tests_from_excerpt(
                             last_error_excerpt),
                         pins=pins_for_contradiction_guard(
-                            _pins, _block_ev.observables))
+                            _pins, _block_ev.observables),
+                        crash_stub_sites=_last_crash_sites[0])
                     _save_retrospectives(project_dir, retros_cache)
                 _verdict_row(
                     block_id,
@@ -4294,7 +4335,9 @@ def prepare_impl_fill(
                         }, _prov, _pair_answers, _blockers,
                             regressed=tuple(sorted(_rcmp.newly_red)),
                             pins=pins_for_contradiction_guard(
-                                _pair_ev.pins, _pair_ev.observables))
+                                _pair_ev.pins, _pair_ev.observables),
+                            crash_stub_sites=(_rcmp.crash_stub_sites
+                                              if _rcmp.newly_crashed else None))
                         _rec[JOINT_MEMBERS] = sorted(pd.member_scope())
                         _rec[JOINT_BODY_SHA] = pd.member_body_sha()
                         # What the reddened tests printed, beside their

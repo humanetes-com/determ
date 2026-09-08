@@ -744,6 +744,65 @@ def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
 # fixed — which is precisely when the false premise is provable, not forgivable.
 GUIDANCE_FROM_HOLLOW_TREE = "guidance_from_hollow_tree"
 
+# Stamped (as `["file:line", …]`) on a record whose verdict was earned from
+# a test process that CRASHED or ABORTED under a compiling body: the
+# `(file, line)` stub-panic sites the gate located in the crashed binaries'
+# own output, resolving OUTSIDE the unit. Non-empty means the tree's holes
+# decided the outcome — a correct body reached a still-stubbed `Drop`-path
+# fn, the stub panicked during unwinding, the runtime aborted — so the
+# lesson explains an abort the stubs caused and the exhaustion counted
+# attempts no body could have passed. `blocked_on` cannot carry this: it
+# is read off the FAILED BODY's callees, and the body that reaches the
+# stub through `Error::drop` names none of them (the live
+# `src/ptr.rs::new::Own<T>` record: `blocked_on: []`,
+# `guidance_from_hollow_tree: false`, `fully_exhausted: true`, guidance
+# about ZST null pointers written over the textbook `Box::into_raw` body;
+# run `2585062-494e630e`, 2026-09-08). Present-and-empty means the failure
+# WAS a crash and the gate located no stub panic (a segfault): the body's
+# own, honoured. Absent means the record predates the stamp, and the
+# verdict's prose decides (`crash_earned_conviction`).
+CRASH_STUB_SITES = "crash_stub_sites"
+# `GuidanceScreening.retired_by` for the class above.
+CRASH_EARNED = "crash_earned"
+# The openers of the two gate verdicts a compiled attempt can earn from a
+# crash: the per-fn abort renderer (`cargo_runner._render_u2_abort`) and
+# the regression detail's crash head (`test_results.render_regression_detail`).
+# Read only for records that carry no `crash_stub_sites` stamp.
+_CRASH_VERDICT_HEADS: tuple[str, ...] = (
+    "Your body ABORTED the test process",
+    "This made test binar",
+)
+
+
+def crash_earned_conviction(record: Mapping[str, Any] | None) -> bool:
+    """True when ``record``'s lesson and exhaustion were earned from a crash
+    or abort the tree's still-stubbed fns decided.
+
+    Stamped records answer from the stamp: `crash_stub_sites` non-empty.
+    Records written before the stamp answer from the verdict's opening
+    sentence — a compiled attempt (`error_count` 0) whose failure text is
+    the abort renderer's or the regression detail's crash head. That prose
+    also covers a segfault, and for a legacy record the two cannot be told
+    apart; retiring a segfault lesson costs one unguided re-attempt, while
+    honouring a crash-earned one locks the unit behind the readmission
+    deadlock the repo conventions describe (passing needs the body,
+    releasing the body needs passing). A stamped-empty record is the
+    post-stamp segfault and stays honoured.
+
+    Deliberately NOT keyed on `convictor_entry_moved`: that premise is true
+    while the body is a stub (the convicting tests no longer enter it) and
+    turns false the moment the gate keeps the correct body — exactly when
+    the stored lesson would be injected against it."""
+    if not record:
+        return False
+    if int(record.get("error_count") or 0) != 0:
+        return False
+    stamped = record.get(CRASH_STUB_SITES)
+    if isinstance(stamped, list):
+        return bool(stamped)
+    preview = str(record.get("last_error_preview") or "")
+    return preview.startswith(_CRASH_VERDICT_HEADS)
+
 # Set (a dict `{"cluster": ..., "tests": [...]}`) when the futility escalation
 # declared the unit's rewrites futile for the named tests: the attributed
 # unit-set was UNCHANGED across judged sweeps while the tests kept failing, so
@@ -1021,6 +1080,13 @@ def screen_guidance(
         return GuidanceScreening("", "")
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
         return GuidanceScreening("", "hollow_tree")
+    # The same class by a different record: the lesson explains a crash or
+    # abort the tree's holes decided (`CRASH_STUB_SITES`), and `blocked_on`
+    # is empty because the failed body never named the stub it reached
+    # through `Drop`. Judged before the premise rules below because the
+    # entry premise flips to TRUE the moment the correct body is kept.
+    if crash_earned_conviction(rec):
+        return GuidanceScreening("", CRASH_EARNED)
     # The eleventh way, judged before every rule below because none of them
     # can see it: the lesson prescribes removing an observable the tests this
     # unit answers for pin. Obeyed, it re-creates the failure it explains —
@@ -1214,6 +1280,21 @@ def retired_guidance_line(
                 f"when its convicting test(s) ({names[:4]}) entered a "
                 f"different set of bodies — the execution it explains is "
                 f"superseded; NOT injected ({CONVICTOR_ENTRY_MOVED}): {head}")
+    if verdict.retired_by == CRASH_EARNED:
+        # The record stays on disk (`fully_exhausted` and all); the text is
+        # what was dropped. Without a line the next launch reads the unit as
+        # never screened — and this class held `src/ptr.rs::new::Own<T>` out
+        # of dispatch as `fully exhausted` for a whole night.
+        sites = [str(s) for s in (rec.get(CRASH_STUB_SITES) or [])]
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} was earned "
+                "from a crash/abort the tree's still-stubbed fn(s) decided "
+                + (f"(stub panics at {sites[:4]}) " if sites
+                   else "(pre-stamp record; verdict text is the abort/crash head) ")
+                + f"— NOT injected, exhaustion not honoured ({CRASH_EARNED}): "
+                f"{head}")
     if verdict.retired_by == JOINT_PREMISE_MOVED:
         # Same shape as the entry-moved expiry: healthy, but the record stays
         # on disk, so silence would make the next launch read it as never
@@ -1311,6 +1392,7 @@ def stamp_conviction(
     *,
     regressed: tuple[str, ...] = (),
     pins: str = "",
+    crash_stub_sites: Iterable[tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
     """Every half a later reader needs: the CONTEXT the verdict was earned in
     (equality-checked), the EVIDENCE it rests on (subset-checked), the hollow
@@ -1338,9 +1420,29 @@ def stamp_conviction(
     a stamp from a previous round's text would withhold a lesson that no
     longer contradicts anything. Empty `pins` (every caller before the
     stamp existed, and a unit with no attributed test to pin) judges
-    nothing and writes the record exactly as before."""
+    nothing and writes the record exactly as before.
+
+    `crash_stub_sites` is the gate's evidence when the failure this record
+    is written from was a CRASH or ABORT of the test process: the
+    `(file, line)` stub-panic sites located in the crashed binaries' own
+    output, outside the unit (`U2Verdict.external_stub_sites` per-fn,
+    `RegressionComparison.crash_stub_sites` on the joint routes). Written
+    as `CRASH_STUB_SITES`; non-empty also sets `GUIDANCE_FROM_HOLLOW_TREE`
+    (the lesson explains an outcome the stubs decided) and clears
+    `fully_exhausted` (the attempts counted could not have passed while
+    the drop path was hollow). ``None`` — the failure was not a crash —
+    writes no key, so the record reads as "not this class" rather than as
+    a legacy record."""
     stamped = evidence.stamp(provenance.stamp(record))
     stamped["regressed"] = sorted(regressed)
+    if crash_stub_sites is not None:
+        _sites = sorted(f"{f}:{ln}" for f, ln in set(crash_stub_sites))
+        stamped[CRASH_STUB_SITES] = _sites
+        if _sites and int(stamped.get("error_count") or 0) == 0:
+            stamped[GUIDANCE_FROM_HOLLOW_TREE] = True
+            stamped["fully_exhausted"] = False
+    else:
+        stamped.pop(CRASH_STUB_SITES, None)
     if pins and prescription_removes_pinned_observable(
             str(stamped.get("guidance") or ""), pins):
         stamped[CONTRADICTS_TARGET] = True
@@ -1361,8 +1463,10 @@ def stamp_conviction(
                 t: list(v) for t, v in _entries.items()}
     if blockers is None:
         return stamped
-    stamped[GUIDANCE_FROM_HOLLOW_TREE] = bool(
-        blockers.stubs) and int(stamped.get("error_count") or 0) == 0
+    stamped[GUIDANCE_FROM_HOLLOW_TREE] = (
+        bool(stamped.get(GUIDANCE_FROM_HOLLOW_TREE))
+        or (bool(blockers.stubs)
+            and int(stamped.get("error_count") or 0) == 0))
     return blockers.stamp(stamped)
 
 

@@ -30,6 +30,7 @@ from pipeline_core.application.reconstruct.body_reseed import (
 from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
+    closure_stub_sites,
     closure_withheld,
     hollow_count,
     ratchet_breach,
@@ -204,7 +205,6 @@ from pipeline_core.domain.test_report import (
     failure_evidence_by_test,
     merge_observations,
     parse_test_output,
-    stub_only_crash,
 )
 from pipeline_core.domain.test_results import (
     TestStateReading,
@@ -1158,6 +1158,11 @@ def run_phase_c_tdd(
     # candidate tree against these, so a crash costs exactly the passes it
     # took and nothing more.
     _bratchet_passing: frozenset[str] = frozenset()
+    # The per-binary reading of the snapshot sweep. The closure exemption
+    # below forgives a breach only on stub-panic evidence from the binaries
+    # that were complete WITH a pass here and crashed since — the same
+    # `newly_crashed` set the fill gates judge their crash-only keep over.
+    _bratchet_reading: TestStateReading | None = None
     # Persist each new pass high-water to heal's durable restore tiers
     # (best-tree snapshot + workspace-git commit). Tracked independently of
     # the in-memory batch ratchet above so the tiers stay populated even when
@@ -1817,7 +1822,7 @@ def run_phase_c_tdd(
             _withheld = closure_withheld(
                 _breach, _bratchet_passing - _sweep.passing,
                 TestStateReading(parse_binary_results(output)).judged_names,
-                stub_only_crash(output),
+                closure_stub_sites(_bratchet_reading, output),
                 hollow_now=hollow_count(snapshot_src_tree(target_src_dir)),
                 hollow_at_snapshot=hollow_count(_bratchet_snap),
             )
@@ -1911,6 +1916,7 @@ def run_phase_c_tdd(
                 _bratchet_snap = _snap
                 _bratchet_sha = _tree_sha
                 _bratchet_passing = _sweep.passing
+                _bratchet_reading = TestStateReading(parse_binary_results(output))
         # Durable checkpoint of the new-best fill tree so a later heal restores
         # THIS good state (best-tree copy / git ancestor) instead of nuking the
         # file to the baked skeleton. Independent of _batch_ratchet. A short

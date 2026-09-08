@@ -1492,6 +1492,139 @@ def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
     return None
 
 
+def _target_label(line: str) -> tuple[str, str | None] | None:
+    """The (label, exe) a cargo stderr line names — ``Running <desc>
+    (<path>)`` or ``Doc-tests <crate>`` — or None for any other line. The
+    ONE rule both :func:`parse_binary_results` and
+    :func:`binary_output_sections` pair sections by, so a crash's evidence
+    is filed under the same label the regression comparison names."""
+    if line.startswith("Running "):
+        desc, sep, tail = line[len("Running "):].partition(" (")
+        exe = tail[:-1].strip() if sep and tail.endswith(")") else None
+        # Fall back to the executable before `?`: an unnamed target is
+        # still identifiable by the binary cargo ran.
+        return (desc.strip() or exe or "?", exe)
+    if line.startswith("Doc-tests "):
+        return ("Doc-tests " + line[len("Doc-tests "):].strip(), None)
+    return None
+
+
+def _is_section_header(line: str) -> bool:
+    """libtest's ``running N tests`` / ``running 1 test`` preamble."""
+    return line.startswith("running ") and line.endswith(("tests", "test"))
+
+
+def _opens_implicit_section(line: str) -> bool:
+    """Whether a line with no open section opens one anyway — the
+    headerless-capture tolerance :func:`parse_binary_results` documents
+    (a trailer, or a `test NAME ... <verdict>` line WITH a verdict)."""
+    if line.startswith("test result:"):
+        return True
+    _open = _verdict_of_test_line(line)
+    return _open is not None and bool(_open[1])
+
+
+def _unnamed_label(index: int) -> str:
+    return f"unnamed section #{index + 1}"
+
+
+@dataclass(frozen=True)
+class BinaryOutputSection:
+    """One test target's RAW lines in a combined `cargo test` capture: what
+    it printed on stdout after its ``running N tests`` header, plus what
+    cargo and the runtime printed on stderr under its ``Running`` line.
+    ``label`` is the same label :func:`parse_binary_results` gives the
+    target, so a comparison's ``newly_crashed`` names index straight into
+    these; ``completed`` is the same trailer rule.
+
+    :class:`BinaryResult` deliberately carries no panic text — the READING
+    is verdicts. Crash attribution needs the text, and needs it PER BINARY:
+    an all-or-nothing rule over the whole capture let an assertion panic in
+    one binary veto the stub-only evidence of another (run
+    `2585062-494e630e`, 2026-09-07/08: 19 of 21 aborted binaries held only
+    stub panics; the three assertion panics sat in two others and vetoed
+    every keep). This is that slicer, a sibling of the parser rather than a
+    field on it."""
+
+    label: str
+    text: str
+    completed: bool
+
+
+def binary_output_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
+    """Slice a combined capture into one :class:`BinaryOutputSection` per
+    ``running N tests`` section, paired index-wise with the ``Running`` /
+    ``Doc-tests`` labels exactly as :func:`parse_binary_results` pairs them
+    (cargo executes targets sequentially, so the i-th label names the i-th
+    section; a section past the last label is ``unnamed section #i``).
+
+    Two layouts are read. The pipeline's combined layout is stdout, then a
+    ``--- stderr ---`` separator, then stderr: stdout lines belong to the
+    section whose header they follow, stderr lines to the label they
+    follow. Measured on rustc 1.95.0 (run `2585062-494e630e`): a binary
+    aborted by a panic in `Drop` prints its crate panics — ``not
+    implemented`` at the stub's own line — on STDOUT under its header, and
+    the runtime's ``panicked at /rustc/…/library/core/src/panicking.rs:233:5:
+    panic in a destructor during cleanup`` plus ``thread caused
+    non-unwinding panic. aborting.`` on STDERR under its ``Running`` line.
+    Both halves are this binary's evidence, so the section text is their
+    concatenation. An interleaved capture (no separator — hand-made
+    fixtures, other runners) attributes each line to the most recent marker
+    of either kind, which is the same pairing because cargo prints a
+    target's ``Running`` line before the target prints its header."""
+    labels: list[str] = []
+    for raw in test_output.splitlines():
+        _lab = _target_label(raw.strip())
+        if _lab is not None:
+            labels.append(_lab[0])
+    stdout_by: dict[int, list[str]] = {}
+    stderr_by: dict[int, list[str]] = {}
+    completed: set[int] = set()
+    in_stderr = False
+    sec_idx = -1
+    lab_idx = -1
+    sec_open = False
+    for raw in test_output.splitlines():
+        line = raw.strip()
+        if line == "--- stderr ---":
+            in_stderr = True
+            lab_idx = -1
+            continue
+        if _target_label(line) is not None:
+            lab_idx += 1
+            continue
+        if in_stderr:
+            if lab_idx >= 0:
+                stderr_by.setdefault(lab_idx, []).append(raw)
+            continue
+        if _is_section_header(line):
+            sec_idx += 1
+            sec_open = True
+            continue
+        if not sec_open and _opens_implicit_section(line):
+            sec_idx += 1
+            sec_open = True
+        if sec_open:
+            stdout_by.setdefault(sec_idx, []).append(raw)
+            if line.startswith("test result:"):
+                completed.add(sec_idx)
+                sec_open = False
+            continue
+        # Between a target's `Running` line and its header (interleaved
+        # layout), or after its trailer: cargo's / the runtime's own lines
+        # for the most recently announced target.
+        idx = max(lab_idx, sec_idx)
+        if idx >= 0:
+            stderr_by.setdefault(idx, []).append(raw)
+    out: list[BinaryOutputSection] = []
+    for i in range(sec_idx + 1):
+        out.append(BinaryOutputSection(
+            label=labels[i] if i < len(labels) else _unnamed_label(i),
+            text="\n".join(stdout_by.get(i, []) + stderr_by.get(i, [])),
+            completed=i in completed))
+    return tuple(out)
+
+
 def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
     """Split a combined cargo-test stdout+stderr capture into per-binary
     :class:`BinaryResult`s. Labels come from the stderr ``Running <desc>
@@ -1504,15 +1637,9 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
     prefix line (verdict never printed) names the in-flight test."""
     labels: list[tuple[str, str | None]] = []
     for raw in test_output.splitlines():
-        line = raw.strip()
-        if line.startswith("Running "):
-            desc, sep, tail = line[len("Running "):].partition(" (")
-            exe = tail[:-1].strip() if sep and tail.endswith(")") else None
-            # Fall back to the executable before `?`: an unnamed target is
-            # still identifiable by the binary cargo ran.
-            labels.append((desc.strip() or exe or "?", exe))
-        elif line.startswith("Doc-tests "):
-            labels.append(("Doc-tests " + line[len("Doc-tests "):].strip(), None))
+        _lab = _target_label(raw.strip())
+        if _lab is not None:
+            labels.append(_lab)
 
     class _Section:
         __slots__ = ("passed", "failed", "ignored", "completed", "dangling",
@@ -1531,7 +1658,7 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
     current: _Section | None = None
     for raw in test_output.splitlines():
         line = raw.strip()
-        if line.startswith("running ") and line.endswith(("tests", "test")):
+        if _is_section_header(line):
             current = _Section()
             sections.append(current)
             continue
@@ -1550,8 +1677,7 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             # printed the dump between two targets it would have shifted every
             # later label by one. `dangling` describes an in-flight test in a
             # section already open; it must not conjure the section.
-            _open = _verdict_of_test_line(line)
-            if line.startswith("test result:") or (_open is not None and _open[1]):
+            if _opens_implicit_section(line):
                 current = _Section()
                 sections.append(current)
             else:
@@ -1596,7 +1722,7 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
         # localizer skips the binary outright because it also has no exe path.
         # Naming the section costs nothing and makes both auditable.
         label, exe = (labels[i] if i < len(labels)
-                      else (f"unnamed section #{i + 1}", None))
+                      else (_unnamed_label(i), None))
         if not sec.completed:
             # crashed section: only the observed verdicts exist
             sec.pass_count, sec.fail_count = len(sec.passed), len(sec.failed)
@@ -1674,6 +1800,16 @@ class RegressionComparison:
     # without a capture; `compare_readings` never fills it. See
     # `test_report.regressed_test_outputs` for the instance.
     newly_red_output: Mapping[str, str] = field(default_factory=dict)
+    # The `(file, line)` stub-panic sites of the ``newly_crashed`` binaries
+    # when — and only when — every crate panic those binaries printed was a
+    # stub panic (`test_report.stub_only_crash` over exactly those
+    # sections). Attached by the regression gate on its crash-only exits so
+    # the retro writer downstream can stamp the record it earns from this
+    # verdict as one the tree's holes decided (`crash_stub_sites` on the
+    # record), rather than reading the verdict's prose for it. Empty on a
+    # comparison the gate did not judge crash-only, and on a crash with no
+    # stub evidence (a segfault): `compare_readings` never fills it.
+    crash_stub_sites: frozenset[tuple[str, int]] = frozenset()
 
     @property
     def net_pass_delta(self) -> int:

@@ -849,3 +849,115 @@ def test_compiled_record_reads_under_the_tests_the_unit_answers_for() -> None:
     assert conviction_standing(
         wide, prov, evidence_for_record(wide, convicting=convicting, answers=answers)
     ) is ConvictionStanding.CURRENT
+
+
+# --- a conviction earned from a crash the tree's stubs decided ---------------
+#
+# Run `2585062-494e630e` (2026-09-07/08), cluster `stable`, fresh stub tree:
+# every route wrote the textbook `Own::new`, the test process aborted in the
+# still-stubbed `vtable()` reached through `Error::drop`, the gates reverted
+# it, and the retro store convicted the unit on the abort signature. The two
+# live records, copied from `.phase_c_logs/retrospectives.json` at 04:50 UTC
+# (guidance trimmed): the per-fn one is `fully_exhausted` with `blocked_on`
+# EMPTY (the body never names the stub it reaches through `Drop`) and
+# `guidance_from_hollow_tree: false`; the impl one carries the CRASH head.
+_LIVE_PER_FN_ABORT = {
+    "category": "WRONG_TYPE_CHOICE",
+    "guidance": "Move the Box into an owned raw pointer with Box::into_raw and "
+                "build a valid NonNull from it without ever forming a NonNull "
+                "from a null/dangling raw pointer",
+    "signal": "ok", "retrospective_count": 2, "error_count": 0,
+    "failing_test_count": 29, "best_compile_errors": 0,
+    "best_failing_tests": 29, "fully_exhausted": True,
+    "last_error_preview": "Your body ABORTED the test process. These test(s) "
+                          "produced a verdict BEFORE your change and produced "
+                          "no output at all after it:\nboxed_error_source_none",
+    "cluster": "stable", "convicted_by": ["boxed_error_source_none", "test_drop"],
+    "regressed": [],
+    "convictor_entry": {"boxed_error_source_none": [
+        "src/error.rs::construct", "src/ptr.rs::new"]},
+    "guidance_from_hollow_tree": False, "blocked_on": [],
+}
+_LIVE_IMPL_CRASH = {
+    "category": "WRONG_TYPE_CHOICE",
+    "guidance": "for the frozen `Own<T>` API the constructor should just adopt "
+                "the supplied raw pointer directly",
+    "signal": "ok", "retrospective_count": 2, "error_count": 0,
+    "failing_test_count": 4, "fully_exhausted": False,
+    "last_error_preview": "This made test binaries ['tests/context_gen_1.rs', "
+                          "'tests/context_gen_2.rs'] CRASH before reporting "
+                          "results (e.g. segfault from bad unsafe code)",
+    "cluster": "stable", "convicted_by": [], "regressed": [],
+    "guidance_from_hollow_tree": True,
+    "blocked_on": ["boxed", "by_ref", "cast", "new"],
+}
+
+
+def test_the_live_crash_earned_records_are_retired_at_read_time() -> None:
+    from pipeline_core.domain.retro_gate import (
+        CRASH_EARNED,
+        crash_earned_conviction,
+    )
+    assert crash_earned_conviction(_LIVE_PER_FN_ABORT)
+    assert crash_earned_conviction(_LIVE_IMPL_CRASH)
+    # The per-fn record's exhaustion and lesson are both withheld — and by
+    # THIS rule, not by the entry premise, which flips back to "current"
+    # the moment the gate keeps the correct body.
+    v = screen_guidance(_LIVE_PER_FN_ABORT, VTABLE_LAYOUT, evidence=NO_TESTS)
+    assert v.text == "" and v.retired_by == CRASH_EARNED
+    line = retired_guidance_line("src/ptr.rs::new::Own<T>", _LIVE_PER_FN_ABORT, v)
+    assert line.startswith("[phase-c/retro-retired] src/ptr.rs::new::Own<T>")
+    assert "crash/abort" in line and CRASH_EARNED in line
+    # NEGATIVE CONTROLS: a compile-taught record with the same head is the
+    # compiler's verdict; a compiled record with a test-failure head is not
+    # this class; an empty record is nothing to retire.
+    assert not crash_earned_conviction({**_LIVE_PER_FN_ABORT, "error_count": 2})
+    assert not crash_earned_conviction({
+        **_LIVE_PER_FN_ABORT,
+        "last_error_preview": "This compiled, but these tests still FAIL: ['a']"})
+    assert not crash_earned_conviction({})
+    assert not crash_earned_conviction(None)
+
+
+def test_stamp_conviction_records_the_crash_sites_and_never_exhausts_on_them() -> None:
+    # Write-time: the gate located stub panics outside the unit in the
+    # aborted binaries. The record is hollow-tree guidance, not exhausted,
+    # and carries the sites — checkable, and read without the prose.
+    from pipeline_core.domain.retro_gate import CRASH_STUB_SITES
+    prov = RetroProvenance.current("stable", VTABLE_LAYOUT)
+    rec = stamp_conviction(
+        {"guidance": "Adopt the raw pointer directly.", "error_count": 0,
+         "fully_exhausted": True,
+         "last_error_preview": "Your body ABORTED the test process."},
+        prov, NO_TESTS, BlockedOnStubs(frozenset()),
+        crash_stub_sites=[("src/error.rs", 669), ("src/error.rs", 553)])
+    assert rec[CRASH_STUB_SITES] == ["src/error.rs:553", "src/error.rs:669"]
+    assert rec[GUIDANCE_FROM_HOLLOW_TREE] is True
+    assert rec["fully_exhausted"] is False
+    assert admissible_guidance(rec, VTABLE_LAYOUT, evidence=NO_TESTS) == ""
+    # A stamped-EMPTY record is the post-stamp segfault: the failure was a
+    # crash and the gate located no stub panic — the body's own, honoured
+    # exactly as before (the prose head no longer decides).
+    seg = stamp_conviction(
+        {"guidance": "Do not read past the allocation.", "error_count": 0,
+         "fully_exhausted": True,
+         "last_error_preview": "Your body ABORTED the test process."},
+        prov, NO_TESTS, BlockedOnStubs(frozenset()), crash_stub_sites=[])
+    assert seg[CRASH_STUB_SITES] == [] and seg["fully_exhausted"] is True
+    assert seg[GUIDANCE_FROM_HOLLOW_TREE] is False
+    from pipeline_core.domain.retro_gate import crash_earned_conviction
+    assert not crash_earned_conviction(seg)
+    # A non-crash failure writes no key at all (not "this class", not legacy).
+    plain = stamp_conviction(
+        {"guidance": "x", "error_count": 0,
+         "last_error_preview": "This compiled, but these tests still FAIL"},
+        prov, NO_TESTS, BlockedOnStubs(frozenset()))
+    assert CRASH_STUB_SITES not in plain
+    # Compile-taught: the sites are recorded but the compiler's verdict
+    # stands — no hollow flag, exhaustion untouched.
+    taught = stamp_conviction(
+        {"guidance": "y", "error_count": 2, "fully_exhausted": True},
+        prov, NO_TESTS, BlockedOnStubs(frozenset()),
+        crash_stub_sites=[("src/error.rs", 669)])
+    assert taught["fully_exhausted"] is True
+    assert taught[GUIDANCE_FROM_HOLLOW_TREE] is False

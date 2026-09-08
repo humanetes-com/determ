@@ -37,6 +37,7 @@ from pipeline_core.application.reconstruct.fill_reading import (
     note_kept_comparison,
 )
 from pipeline_core.application.reconstruct.fill_rules import (
+    AttemptFailure,
     is_unimplemented_body,
     make_failed_attempt_body,
     module_of,
@@ -92,6 +93,7 @@ from pipeline_core.domain.retro_gate import (
     anchor_types_for_container,
     conviction_standing,
     convictor_entry_moved,
+    crash_earned_conviction,
     evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
@@ -234,6 +236,19 @@ class FillOneFn:
         # Non-empty iff the latest revert was a crash-only regression blamed
         # wholly outside this unit — holds the crash-block mark to persist.
         _crash_blocked_mark: list[str] = []
+        # HOW the last judged attempt failed, and — when the test process
+        # died under it — what the crashed binaries printed: the stub-panic
+        # sites outside this unit (`None` while the last failure was not a
+        # crash; empty when it was and no stub panic was located, i.e. a
+        # segfault) and the unit's own rendered panics. Read by the retro
+        # writer (the record is stamped `crash_stub_sites`, never exhausted
+        # on an abort the tree's stubs decided) and by the failed-attempt
+        # comment (labelled by failure kind, never "did not compile" over a
+        # body that compiled). Lists so the attempt closure can write them
+        # without `nonlocal`, like the holders above.
+        _last_failure: list[AttemptFailure] = [AttemptFailure.COMPILE]
+        _last_crash_sites: list[frozenset[tuple[str, int]] | None] = [None]
+        _last_own_panics: list[tuple[str, ...]] = [()]
         # A crash-implicated fn is never exhaustion-skipped: the localized
         # faulting stack is evidence no prior attempt ever saw.
         _crash_evidence = (ctx.crash_evidence or {}).get(
@@ -313,6 +328,20 @@ class FillOneFn:
                          "regression of test(s) this fn does not answer for "
                          "— retro guidance withheld (regression_scoped), "
                          "exhaustion not honoured (regression-scoped).")
+        # The record was earned from a crash/abort the tree's still-stubbed
+        # fns decided (`crash_earned_conviction`): the lesson explains an
+        # abort the stubs caused, and the exhaustion counted attempts no
+        # body could have passed. Judged BEFORE the entry-premise rules:
+        # those flip to "moved" while the body is a stub and back to
+        # "current" the moment the gate keeps the correct body — which is
+        # when the stored lesson would be injected against it.
+        elif crash_earned_conviction(_retro_rec):
+            _poisoned_retro = True
+            self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name} "
+                         f"[{container}]: retro guidance was earned from a "
+                         "crash/abort the tree's still-stubbed fn(s) decided "
+                         "— retro guidance withheld, exhaustion not honoured "
+                         "(crash_earned).")
         # A stored lesson with `blocked_on` absent or empty cannot expire
         # on its own evidence and must not convict the unit into a skip
         # either: honouring `fully_exhausted` here would mean the next
@@ -563,6 +592,8 @@ class FillOneFn:
             # on its own merits — carrying the earlier blockers out would
             # report a judgeable fill as unjudgeable.
             _blocked_by.clear()
+            _last_crash_sites[0] = None
+            _last_own_panics[0] = ()
             cur_text = file_path.read_text(encoding="utf-8")
             # E/R3: strip inactive #[cfg] branches so the model sees only the
             # active variant (e.g. one StdError definition, not three).
@@ -855,6 +886,12 @@ class FillOneFn:
                     # normal fix path: revert + re-prompt with the failing tests
                     # as the stall signature.
                     _u2_fail_sig, cargo_out = _v.self_failures, _v.detail
+                    if _v.aborted:
+                        _last_crash_sites[0] = _v.external_stub_sites
+                        _last_own_panics[0] = tuple(
+                            f"{p.file}:{p.line}: {p.message}"
+                            for p in (_v.crash.crate_panics
+                                      if _v.crash is not None else ())[:4])
                     # EXCEPT when this attempt was dispatched on localized
                     # crash evidence: a correct fix of a LATENT fault moves no
                     # test at baseline by definition — the tests it saves only
@@ -1004,6 +1041,8 @@ class FillOneFn:
                     _cmp, _regr_detail = _regr
                     _u2_fail_sig = _cmp.signature
                     cargo_out = _regr_detail
+                    if _cmp.newly_crashed:
+                        _last_crash_sites[0] = _cmp.crash_stub_sites
                     self.tel.log(
                         f"  [phase-c/per-fn] {fn_name}: reverted — "
                         f"regressed sibling test(s): {_cmp.summary}.")
@@ -1144,6 +1183,10 @@ class FillOneFn:
             cur_metric = FixProgress(
                 compile_errors=0 if _compiled else max(1, len(cur_err_sig)),
                 failing_tests=len(cur_err_sig) if _compiled else 0)
+            _last_failure[0] = (
+                AttemptFailure.COMPILE if not _compiled
+                else AttemptFailure.ABORT if _last_crash_sites[0] is not None
+                else AttemptFailure.TEST)
             # P2: record this failed attempt for the prior-attempts block.
             # We store the focused excerpt (already tier-sliced) so the
             # next prompt sees what really failed without re-paying budget.
@@ -1374,6 +1417,26 @@ class FillOneFn:
                                 "file": rel_file, "fn": fn_name,
                                 "convicted_by": sorted(_cov_unreached),
                             })
+                    # A verdict earned from an abort whose only panics are
+                    # still-stubbed siblings' is the tree's verdict, not the
+                    # body's: no rewrite of this fn can pass a test that is
+                    # dropped through a hollow `vtable()`. Convicting on it
+                    # parks the unit behind the readmission deadlock —
+                    # `src/ptr.rs::new::Own<T>` was `fully_exhausted` on that
+                    # signature for the whole of run `2585062-494e630e`
+                    # while the textbook body sat in its own comment. The
+                    # record is still written (stamped `crash_stub_sites`,
+                    # so the lesson is withheld as hollow-tree guidance and
+                    # the class is countable), it just convicts nothing.
+                    if _full_exhaust and _last_crash_sites[0]:
+                        _full_exhaust = False
+                        self.tel.log(
+                            f"  [phase-c/retro] {rel_file}::{fn_name}: NOT "
+                            "exhausting — the last failure was an abort whose "
+                            "only panics are still-stubbed sibling(s) at "
+                            + ", ".join(f"{f}:{ln}" for f, ln
+                                        in sorted(_last_crash_sites[0]))
+                            + "; the verdict is the tree's, not the body's.")
                     _new_count = _prior_count + 1
                     # Stamped with the context it was earned in (same cluster,
 
@@ -1410,7 +1473,8 @@ class FillOneFn:
                         # regression's test list mid-name.
                         regressed=regressed_tests_from_excerpt(
                             error_excerpt or first_error_excerpt or ""),
-                        pins=pins_for_contradiction_guard(_fn_pins, _fn_observables))
+                        pins=pins_for_contradiction_guard(_fn_pins, _fn_observables),
+                        crash_stub_sites=_last_crash_sites[0])
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to
@@ -1522,6 +1586,9 @@ class FillOneFn:
                         attempted_body=last_body or first_failed_body or "",
                         error_excerpt=error_excerpt or first_error_excerpt or "",
                         fix_attempts=fix_attempt,
+                        failure=_last_failure[0],
+                        stub_sites=_last_crash_sites[0] or (),
+                        own_panics=_last_own_panics[0],
                     )
                     # Container-scoped: annotate THIS fn's body, never a
                     # same-named sibling in another impl (the `from`/`fmt`/`not`

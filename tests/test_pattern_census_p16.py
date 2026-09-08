@@ -118,3 +118,65 @@ def test_p16_store_scan_lists_regression_derived_records_and_their_stamp(tmp_pat
     assert rows[0]["store"] == "tmp/anyhow/.phase_c_logs/retrospectives.json"
     # No store, no rows.
     assert census.regression_derived_records(tmp_path / "nowhere") == []
+
+
+# --- the crash-earned class: both live records of run 2585062-494e630e ------
+#
+# Shapes copied from `tmp/anyhow/.phase_c_logs/retrospectives.json`
+# (2026-09-08 04:50 UTC, guidance trimmed). Pre-fix the detector keyed on the
+# `REGRESSED previously-passing test(s)` head only and printed `no
+# regression-derived record in any store` while these two sat on disk, one
+# of them `fully_exhausted`.
+_LIVE_ABORT = {
+    "category": "WRONG_TYPE_CHOICE",
+    "guidance": "Move the Box into an owned raw pointer with Box::into_raw",
+    "error_count": 0, "failing_test_count": 29, "fully_exhausted": True,
+    "last_error_preview": "Your body ABORTED the test process. These test(s) "
+                          "produced a verdict BEFORE your change",
+    "cluster": "stable", "convicted_by": ["boxed_error_source_none"],
+    "regressed": [], "blocked_on": [],
+}
+_LIVE_CRASH = {
+    "category": "WRONG_TYPE_CHOICE",
+    "guidance": "the constructor should just adopt the supplied raw pointer",
+    "error_count": 0, "failing_test_count": 4, "fully_exhausted": False,
+    "last_error_preview": "This made test binaries ['tests/context_gen_1.rs'] "
+                          "CRASH before reporting results",
+    "cluster": "stable", "convicted_by": [], "regressed": [],
+    "guidance_from_hollow_tree": True, "blocked_on": ["boxed", "new"],
+}
+
+
+def test_p16_store_scan_lists_crash_earned_records_as_unstamped(tmp_path: Path) -> None:
+    store = tmp_path / "tmp" / "anyhow" / ".phase_c_logs"
+    store.mkdir(parents=True)
+    (store / "retrospectives.json").write_text(json.dumps({
+        "src/ptr.rs::new::Own<T>": _LIVE_ABORT,
+        "src/ptr.rs::*impl*::Own<T>": _LIVE_CRASH,
+        _KEY: _LIVE_RECORD,
+        # NEGATIVE CONTROLS: a compile-taught record with the crash head is
+        # the compiler's verdict; a stamped crash record is screened.
+        "src/x.rs::f::": {**_LIVE_ABORT, "error_count": 3},
+        "src/y.rs::g::": {**_LIVE_ABORT, "crash_stub_sites": ["src/error.rs:669"]},
+    }), encoding="utf-8")
+    rows = {r["unit"]: r for r in census.regression_derived_records(tmp_path)}
+    assert set(rows) == {"src/ptr.rs::new::Own<T>", "src/ptr.rs::*impl*::Own<T>",
+                         _KEY, "src/y.rs::g::"}
+    abort = rows["src/ptr.rs::new::Own<T>"]
+    assert abort["kind"] == "crash" and abort["exhausted"] is True
+    assert abort["stamp"] is None and abort["regressed"] is None
+    crash = rows["src/ptr.rs::*impl*::Own<T>"]
+    assert crash["kind"] == "crash" and crash["stamp"] is None
+    assert rows[_KEY]["kind"] == "regression"
+    assert rows["src/y.rs::g::"]["stamp"] == ["src/error.rs:669"]
+    # The unstamped population the SILENT shape keys on holds both live
+    # records and the regression one, not the stamped crash record.
+    census.P16_UNSTAMPED_UNITS = None
+    try:
+        import unittest.mock as um
+        with um.patch.object(census, "regression_derived_records",
+                             lambda root: list(rows.values())):
+            assert census._p16_unstamped_units() == {
+                "src/ptr.rs::new::Own<T>", "src/ptr.rs::*impl*::Own<T>", _KEY}
+    finally:
+        census.P16_UNSTAMPED_UNITS = None

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterable
+from enum import Enum
 from pathlib import Path
 
 from ... import log
@@ -84,28 +86,87 @@ def extract_fn_blocks(response: str) -> dict[str, str]:
     return out
 
 
-def make_failed_attempt_body(attempted_body: str, error_excerpt: str,
-                               fix_attempts: int) -> str:
+class AttemptFailure(Enum):
+    """How the LAST attempt a fix loop gave up on failed — the axis the
+    failed-attempt comment labels the quoted body by.
+
+    A comment that says "did not compile — do not repeat this approach" over
+    a body that compiled is a false lesson written into the one file every
+    later prompt for that fn quotes. Run `2585062-494e630e` (2026-09-08)
+    wrote exactly that over the textbook `Own::new` one-liner after the
+    body compiled and the test process aborted in a still-stubbed drop-path
+    fn; the next four prompts for the file carried the correct body as the
+    thing not to write."""
+
+    COMPILE = "compile"   # rustc rejected it
+    TEST = "test"         # compiled; its attributed tests still failed
+    ABORT = "abort"       # compiled; the test process died under it
+
+
+def make_failed_attempt_body(
+    attempted_body: str, error_excerpt: str, fix_attempts: int, *,
+    failure: AttemptFailure,
+    stub_sites: Iterable[tuple[str, int]] = (),
+    own_panics: Iterable[str] = (),
+) -> str:
     """Build a fn body that documents a failed fill attempt as comments and
     ends in `unimplemented!()` so the crate still compiles.
 
     The body carries the SKELETON_STUB_FAILED_ATTEMPT sentinel so a later
     pass's `_scan_unimplemented_functions` re-discovers this fn as still
-    needing a fill. The attempted body is labelled as a do-not-repeat:
-    quoting it as a hint handed the next fill the recipe that just failed
-    (run ``1383168-eb151d09``, ``construct_from_boxed`` quoting
-    ``construct_from_std`` on the Box).
+    needing a fill. The attempted body is labelled by HOW it failed
+    (``failure``): a compile failure is a do-not-repeat — quoting it as a
+    hint handed the next fill the recipe that just failed (run
+    ``1383168-eb151d09``, ``construct_from_boxed`` quoting
+    ``construct_from_std`` on the Box); a test failure is a body to correct,
+    not to avoid; an abort names what the aborted binaries printed —
+    ``stub_sites`` (`(file, line)` of the still-stubbed fns whose panics
+    the capture located, rendered `file:line`) and ``own_panics`` (the
+    unit's own crate panics, already rendered) — and never calls the body
+    wrong on the abort alone, because an abort through a hollow drop path
+    is the tree's verdict, not the body's.
     """
     ts = int(time.time())
+    _stubs = ", ".join(f"{f}:{ln}" for f, ln in sorted(set(stub_sites)))
+    _own = "; ".join(own_panics)
+    if failure is AttemptFailure.COMPILE:
+        what = (f"// Previous attempt failed compilation after {fix_attempts} "
+                "fix-loop attempts.")
+        label = "// ATTEMPTED BODY (did not compile — do not repeat this approach):"
+        evidence = "// CARGO ERROR (focused excerpt):"
+    elif failure is AttemptFailure.TEST:
+        what = (f"// Previous attempt COMPILED but its attributed tests still "
+                f"failed after {fix_attempts} fix-loop attempts.")
+        label = ("// ATTEMPTED BODY (compiled; its tests failed — correct it "
+                 "against the excerpt below, do not avoid it):")
+        evidence = "// TEST FAILURE (excerpt):"
+    else:
+        what = (f"// Previous attempt COMPILED; the test process ABORTED under "
+                f"it after {fix_attempts} fix-loop attempts.")
+        if _own:
+            label = ("// ATTEMPTED BODY (compiled; the unit's own panic came "
+                     f"first — {_own} — and a still-stubbed fn"
+                     + (f" at {_stubs}" if _stubs else " on the drop path")
+                     + " then panicked during unwinding; fix the first panic, "
+                     "the abort is the tree's):")
+        elif _stubs:
+            label = ("// ATTEMPTED BODY (compiled; the abort came from "
+                     f"still-stubbed fn(s) at {_stubs} reached during "
+                     "unwinding — this body was NOT shown wrong and may be "
+                     "correct as written):")
+        else:
+            label = ("// ATTEMPTED BODY (compiled; the test process aborted "
+                     "with no panic located — likely undefined behaviour in "
+                     "this body):")
+        evidence = "// ABORT EVIDENCE (excerpt):"
     lines = [
         FAILED_ATTEMPT_SENTINEL,
-        f"// Previous attempt failed compilation after {fix_attempts} fix-loop "
-        "attempts.",
+        what,
         "// Body reverted to `unimplemented!()` so the crate compiles. A later",
         "// pass will retry — by then more sibling functions in this file will",
         "// be implemented, giving the model richer context.",
         "//",
-        "// ATTEMPTED BODY (did not compile — do not repeat this approach):",
+        label,
     ]
     if attempted_body:
         for ln in attempted_body.splitlines()[:60]:
@@ -113,7 +174,7 @@ def make_failed_attempt_body(attempted_body: str, error_excerpt: str,
     else:
         lines.append("//   (no body captured)")
     lines.append("//")
-    lines.append("// CARGO ERROR (focused excerpt):")
+    lines.append(evidence)
     if error_excerpt:
         for ln in error_excerpt.splitlines()[:30]:
             lines.append(f"//   {ln}")

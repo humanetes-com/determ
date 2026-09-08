@@ -392,13 +392,18 @@ def test_self_abort_ignores_tests_the_baseline_never_judged() -> None:
 
 
 # --- stub_only_crash: attribute an abort to the hollow tree ------------------
+#
+# Every capture below opens a `running N tests` section that never prints
+# its trailer: the judgment is over the ABORTED binaries' own sections, and
+# a bare panic line with no section belongs to no binary.
+
+_ABORTED = "running 2 tests\ntest a ... \n"
 
 
 def test_stub_only_crash_collects_stub_panic_sites_new_style() -> None:
     from pipeline_core.domain.test_report import stub_only_crash
-    out = ("running 2 tests\n"
-           "test a ... \n"
-           "thread 'a' panicked at src/error.rs:64:17:\n"
+    out = (_ABORTED
+           + "thread 'a' panicked at src/error.rs:64:17:\n"
            "not implemented\n"
            "thread 'a' panicked at src/error.rs:80:9:\n"
            "not yet implemented\n")
@@ -408,16 +413,17 @@ def test_stub_only_crash_collects_stub_panic_sites_new_style() -> None:
 
 def test_stub_only_crash_old_style_location() -> None:
     from pipeline_core.domain.test_report import stub_only_crash
-    out = "thread 'a' panicked at 'not implemented', src/error.rs:64:17\n"
+    out = _ABORTED + "thread 'a' panicked at 'not implemented', src/error.rs:64:17\n"
     assert stub_only_crash(out) == frozenset({("src/error.rs", 64)})
 
 
 def test_stub_only_crash_vetoed_by_any_non_stub_panic() -> None:
-    # An assertion panic in the same capture is real self-evidence; the mix
-    # must not exonerate (the assertion may be what started the unwind that
-    # reached the hollow Drop).
+    # An assertion panic in the same aborted binary is real self-evidence;
+    # the mix must not exonerate (the assertion may be what started the
+    # unwind that reached the hollow Drop).
     from pipeline_core.domain.test_report import stub_only_crash
-    out = ("thread 'a' panicked at tests/t.rs:9:5:\n"
+    out = (_ABORTED
+           + "thread 'a' panicked at tests/t.rs:9:5:\n"
            "assertion failed: boom\n"
            "thread 'a' panicked at src/error.rs:64:17:\n"
            "not implemented\n")
@@ -427,6 +433,7 @@ def test_stub_only_crash_vetoed_by_any_non_stub_panic() -> None:
 def test_stub_only_crash_empty_without_panics() -> None:
     # A segfault prints no panic line: no evidence, no forgiveness.
     from pipeline_core.domain.test_report import stub_only_crash
+    assert stub_only_crash(_ABORTED + "error: process didn't exit successfully") == frozenset()
     assert stub_only_crash("error: process didn't exit successfully") == frozenset()
     assert stub_only_crash("") == frozenset()
 
@@ -435,10 +442,244 @@ def test_stub_only_crash_unparseable_panic_line_vetoes() -> None:
     # A `panicked at` line whose location cannot be parsed is unknown
     # evidence; unknown must not exonerate.
     from pipeline_core.domain.test_report import stub_only_crash
-    out = ("thread 'a' panicked at somewhere strange\n"
+    out = (_ABORTED
+           + "thread 'a' panicked at somewhere strange\n"
            "thread 'a' panicked at src/error.rs:64:17:\n"
            "not implemented\n")
     assert stub_only_crash(out) == frozenset()
+
+
+def test_stub_only_crash_ignores_a_panic_line_outside_any_section() -> None:
+    # A panic line no binary's section holds is nobody's evidence. Pre-fix
+    # the whole text was one capture and this exonerated.
+    from pipeline_core.domain.test_report import stub_only_crash
+    assert stub_only_crash("thread 'a' panicked at src/error.rs:64:17:\n"
+                           "not implemented\n") == frozenset()
+
+
+# --- the runtime's own double-panic line, and per-binary evidence -----------
+#
+# The abort of run `2585062-494e630e` (2026-09-07/08), rustc 1.95.0: a test
+# panics in a still-stubbed fn, the `Error` it holds is dropped while
+# unwinding, `Error::drop` reaches the still-stubbed `vtable()`, the stub
+# panics, and the runtime prints ITS OWN `panicked at` line — located in
+# `library/core/src/panicking.rs` with the message `panic in a destructor
+# during cleanup` — before `thread caused non-unwinding panic. aborting.`
+# and SIGABRT. The locator read the runtime line as one more located panic
+# with a non-stub message, so the all-or-nothing rule was empty on every
+# fill that landed a correct `Own::new`.
+
+_RUSTC_PANICKING = ("/rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/"
+                    "core/src/panicking.rs:233:5")
+_DESTRUCTOR = "panic in a destructor during cleanup"
+
+
+def test_runtime_double_panic_line_is_recognised_with_and_without_rustc_prefix() -> None:
+    from pipeline_core.domain.test_report import _iter_located_panics
+    for loc in (_RUSTC_PANICKING, "library/core/src/panicking.rs:233:5",
+                "/home/u/.rustup/toolchains/stable/lib/rustlib/src/rust/"
+                "library/core/src/panicking.rs:233:5"):
+        (p,) = _iter_located_panics(
+            f"thread 'x' panicked at {loc}:\n{_DESTRUCTOR}\n")
+        assert p is not None and p.is_runtime_abort and not p.is_stub, loc
+    # NEGATIVE CONTROLS: a runtime-located panic with another message is a
+    # crate panic (an `alloc` overflow); the announcement on a crate line is
+    # a test that printed it. Neither is the runtime's abort.
+    (q,) = _iter_located_panics(
+        "thread 'x' panicked at /rustc/abc/library/alloc/src/raw_vec.rs:24:5:\n"
+        "capacity overflow\n")
+    assert q is not None and not q.is_runtime_abort
+    (r,) = _iter_located_panics(
+        f"thread 'x' panicked at src/lib.rs:3:5:\n{_DESTRUCTOR}\n")
+    assert r is not None and not r.is_runtime_abort
+
+
+def test_stub_only_crash_treats_the_runtime_line_as_evidence_not_veto() -> None:
+    # The overnight shape: stub panic, then the runtime's announcement.
+    from pipeline_core.domain.test_report import crash_panics, stub_only_crash
+    out = (_ABORTED
+           + "thread 'a' panicked at src/error.rs:669:67:\n"
+           "not implemented\n"
+           f"thread 'a' panicked at {_RUSTC_PANICKING}:\n"
+           f"{_DESTRUCTOR}\n"
+           "thread caused non-unwinding panic. aborting.\n")
+    assert stub_only_crash(out) == frozenset({("src/error.rs", 669)})
+    p = crash_panics(out)
+    assert p.runtime_aborts == 1 and p.stub_only and not p.crate_panics
+    # The announcement ALONE (no stub panic located) exonerates nothing: it
+    # says the abort was a panic, not whose.
+    only_rt = (_ABORTED + f"thread 'a' panicked at {_RUSTC_PANICKING}:\n"
+               f"{_DESTRUCTOR}\n")
+    assert stub_only_crash(only_rt) == frozenset()
+    assert not crash_panics(only_rt).stub_only
+
+
+# The three-binary capture of the overnight `phase_c.fill.reading` shape,
+# in the combined layout the pipeline captures (stdout, `--- stderr ---`,
+# stderr): `newly_red=[]`, one `newly_crashed` section (context_gen_1 —
+# had a pass; aborts on `not implemented` at error.rs:669 plus the
+# destructor line), one `crashed_all_red` section (error_gen_3 — 0 passes
+# at baseline; an assertion, then the destructor line), one completed
+# section with a pre-existing stub failure.
+_BASE_245 = (
+    "running 3 tests\n"
+    "test ctx_a ... ok\n"
+    "test ctx_b ... ok\n"
+    "test ctx_c ... FAILED\n"
+    "test result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+    "\n"
+    "running 2 tests\n"
+    "test eg_a ... FAILED\n"
+    "test eg_b ... FAILED\n"
+    "test result: FAILED. 0 passed; 2 failed; 0 ignored\n"
+    "\n"
+    "running 2 tests\n"
+    "test lib_a ... ok\n"
+    "test lib_b ... FAILED\n"
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+    "\n--- stderr ---\n"
+    "     Running tests/context_gen_1.rs (target/debug/deps/context_gen_1-aaaa)\n"
+    "     Running tests/error_gen_3.rs (target/debug/deps/error_gen_3-bbbb)\n"
+    "     Running tests/lib_gen_1.rs (target/debug/deps/lib_gen_1-cccc)\n"
+)
+_AFTER_245 = (
+    "running 3 tests\n"
+    "test ctx_a ... \n"
+    "thread 'ctx_a' panicked at src/error.rs:669:67:\n"
+    "not implemented\n"
+    "\n"
+    "running 2 tests\n"
+    "test eg_a ... \n"
+    "thread 'eg_a' panicked at tests/error_gen_3.rs:50:5:\n"
+    "assertion failed: inner.is_some()\n"
+    "\n"
+    "running 2 tests\n"
+    "test lib_a ... ok\n"
+    "test lib_b ... FAILED\n"
+    "\n"
+    "failures:\n"
+    "\n"
+    "---- lib_b stdout ----\n"
+    "thread 'lib_b' panicked at src/fmt.rs:8:5:\n"
+    "not implemented\n"
+    "\n"
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+    "\n--- stderr ---\n"
+    "     Running tests/context_gen_1.rs (target/debug/deps/context_gen_1-aaaa)\n"
+    "\n"
+    f"thread 'ctx_a' panicked at {_RUSTC_PANICKING}:\n"
+    f"{_DESTRUCTOR}\n"
+    "thread caused non-unwinding panic. aborting.\n"
+    "error: test failed, to rerun pass `--test context_gen_1`\n"
+    "     Running tests/error_gen_3.rs (target/debug/deps/error_gen_3-bbbb)\n"
+    "\n"
+    f"thread 'eg_a' panicked at {_RUSTC_PANICKING}:\n"
+    f"{_DESTRUCTOR}\n"
+    "thread caused non-unwinding panic. aborting.\n"
+    "error: test failed, to rerun pass `--test error_gen_3`\n"
+    "     Running tests/lib_gen_1.rs (target/debug/deps/lib_gen_1-cccc)\n"
+    "error: test failed, to rerun pass `--test lib_gen_1`\n"
+)
+
+
+def _readings_245():
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    return (TestStateReading(parse_binary_results(_BASE_245)),
+            TestStateReading(parse_binary_results(_AFTER_245)))
+
+
+def test_binary_output_sections_pair_the_stderr_slice_with_its_binary() -> None:
+    # Combined layout: the runtime's destructor line is printed on STDERR
+    # under the binary's `Running` line, the stub panic on STDOUT under its
+    # header; the section holds both, and the completed binary holds
+    # neither.
+    from pipeline_core.domain.test_results import binary_output_sections
+    secs = {s.label: s for s in binary_output_sections(_AFTER_245)}
+    assert list(secs) == ["tests/context_gen_1.rs", "tests/error_gen_3.rs",
+                          "tests/lib_gen_1.rs"]
+    ctx = secs["tests/context_gen_1.rs"]
+    assert not ctx.completed
+    assert "src/error.rs:669:67" in ctx.text and _DESTRUCTOR in ctx.text
+    assert "assertion failed" not in ctx.text
+    eg = secs["tests/error_gen_3.rs"]
+    assert not eg.completed and "assertion failed" in eg.text
+    assert eg.text.count(_DESTRUCTOR) == 1
+    lib = secs["tests/lib_gen_1.rs"]
+    assert lib.completed and _DESTRUCTOR not in lib.text
+    assert "src/fmt.rs:8:5" in lib.text
+    # Interleaved layout (no separator): same pairing.
+    inter = ("     Running tests/a.rs (t/a-1)\n"
+             "running 1 test\ntest x ... ok\n"
+             "test result: ok. 1 passed; 0 failed; 0 ignored\n"
+             "     Running tests/b.rs (t/b-2)\n"
+             "running 1 test\ntest y ... \n"
+             "thread 'y' panicked at src/error.rs:669:67:\nnot implemented\n"
+             f"thread 'y' panicked at {_RUSTC_PANICKING}:\n{_DESTRUCTOR}\n")
+    a, b = binary_output_sections(inter)
+    assert (a.label, a.completed) == ("tests/a.rs", True)
+    assert (b.label, b.completed) == ("tests/b.rs", False)
+    assert _DESTRUCTOR in b.text and _DESTRUCTOR not in a.text
+
+
+def test_the_overnight_reading_keeps_only_when_judged_over_newly_crashed() -> None:
+    # The plan's sentence, computed: `compare_readings` splits the crash;
+    # the whole text is empty (the pre-fix path — the runtime line and
+    # error_gen_3's assertion veto); every crashed section is still empty
+    # (error_gen_3's assertion); the `newly_crashed` section alone yields
+    # the vtable stub site, and that is the keep.
+    from pipeline_core.domain.test_report import crash_panics, stub_only_crash
+    from pipeline_core.domain.test_results import (
+        binary_output_sections,
+        compare_readings,
+    )
+    base, after = _readings_245()
+    cmp = compare_readings(base, after)
+    assert cmp.newly_crashed == ("tests/context_gen_1.rs",)
+    assert cmp.crashed_all_red == ("tests/error_gen_3.rs",)
+    assert not cmp.newly_red
+    assert (cmp.cur_pass >= cmp.base_pass
+            and cmp.cur_executed >= cmp.base_executed)  # the crash-only branch
+    every = [s.label for s in binary_output_sections(_AFTER_245)]
+    assert stub_only_crash(_AFTER_245, crashed=every) == frozenset()
+    assert stub_only_crash(_AFTER_245) == frozenset()          # all aborted
+    assert stub_only_crash(_AFTER_245, crashed=cmp.newly_crashed) == frozenset(
+        {("src/error.rs", 669)})
+    p = crash_panics(_AFTER_245, crashed=cmp.newly_crashed)
+    assert p.stub_only and p.runtime_aborts == 1 and p.sections == cmp.newly_crashed
+
+
+def test_a_segfault_or_a_missing_section_in_newly_crashed_still_reverts() -> None:
+    from pipeline_core.domain.test_report import crash_panics, stub_only_crash
+    from pipeline_core.domain.test_results import compare_readings
+    base, after = _readings_245()
+    crashed = compare_readings(base, after).newly_crashed
+    # No panic at all in the newly-crashed section: undefined behaviour.
+    seg = (_AFTER_245
+           .replace("thread 'ctx_a' panicked at src/error.rs:669:67:\n"
+                    "not implemented\n", "")
+           .replace(f"thread 'ctx_a' panicked at {_RUSTC_PANICKING}:\n"
+                    f"{_DESTRUCTOR}\n"
+                    "thread caused non-unwinding panic. aborting.\n",
+                    "(signal: 11, SIGSEGV: invalid memory reference)\n"))
+    assert stub_only_crash(seg, crashed=crashed) == frozenset()
+    assert crash_panics(seg, crashed=crashed).runtime_aborts == 0
+    # A section the capture does not hold is no evidence.
+    assert stub_only_crash(_AFTER_245, crashed=("tests/nope.rs",)) == frozenset()
+    assert crash_panics(_AFTER_245, crashed=("tests/nope.rs",)).missing == (
+        "tests/nope.rs",)
+    # The assertion INSIDE the newly-crashed section is the fill's own.
+    own = _AFTER_245.replace(
+        "thread 'ctx_a' panicked at src/error.rs:669:67:\nnot implemented\n",
+        "thread 'ctx_a' panicked at tests/context_gen_1.rs:9:5:\n"
+        "assertion failed: boom\n"
+        "thread 'ctx_a' panicked at src/error.rs:669:67:\nnot implemented\n")
+    assert stub_only_crash(own, crashed=crashed) == frozenset()
+    q = crash_panics(own, crashed=crashed)
+    assert not q.stub_only and len(q.crate_panics) == 1
+    assert q.stub_sites == frozenset({("src/error.rs", 669)})
 
 
 # --- the passing verdict of a `#[should_panic]` test, and the failure words --- #
