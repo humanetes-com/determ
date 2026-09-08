@@ -44,6 +44,16 @@ echo "=============================================================="
 echo " PRE-RUN GATE"
 echo "=============================================================="
 
+# Orphan reconstructed test binaries (PPID 1, leftover of a cargo timeout
+# that killed cargo and not the grandchild). A warning, not a gate: the
+# count cannot make the stamp stale, and a leftover does not mean this
+# tree is wrong. scripts/orphan_test_binaries.sh --kill reaps them.
+if _orphan_n=$(ps -eo ppid=,cmd= | awk '$1==1 && /\/deps\/[^ ]+ --test-threads=1/' | wc -l); then
+  if [[ "${_orphan_n// /}" != "0" ]]; then
+    echo "WARNING: ${_orphan_n// /} orphan test binary(ies) (PPID 1). scripts/orphan_test_binaries.sh --kill"
+  fi
+fi
+
 # --- stage 1: the binary the pipeline actually runs ------------------------ #
 # The stamp hashes the extractor's Rust SOURCES and prunes target/, and nothing on
 # the launch path ever rebuilt the binary — only setup.sh runs `cargo build

@@ -65,9 +65,10 @@ class Cargo(Protocol):
     """cargo invocation primitive: run one cargo command in a workspace.
 
     Matches the real seam (``pipeline._run_cargo``): one shell command, a working dir, an
-    explicit environment, a timeout. Higher-level concerns (deriving the command from a
-    cluster's features/toolchain, JSON-diagnostic checks) compose on top in the
-    application layer — they are not part of this port.
+    explicit environment, a timeout. When ``run`` returns after a timeout, no
+    process of the group it started is alive. Higher-level concerns (deriving
+    the command from a cluster's features/toolchain, JSON-diagnostic checks)
+    compose on top in the application layer — they are not part of this port.
     """
 
     def run(self, cmd: str, cwd: Path, *, env: dict[str, str], timeout: int = ...) -> ProcessResult: ...

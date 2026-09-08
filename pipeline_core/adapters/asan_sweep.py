@@ -20,9 +20,10 @@ gdb adapter emits, feeding one shared :func:`site_from_frames` path.
 from __future__ import annotations
 
 import shlex
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+
+from pipeline_core.adapters.process import run_bounded
 
 _HOST_TRIPLE = "x86_64-unknown-linux-gnu"
 
@@ -64,11 +65,8 @@ def run_asan_sweep(
         # the load-bearing flag for dangling stack-'static schemes.
         "ASAN_OPTIONS": "detect_stack_use_after_return=1:halt_on_error=1",
     }
-    try:
-        proc = subprocess.run(
-            argv, cwd=cwd, env=asan_env, capture_output=True, text=True,
-            timeout=timeout, check=False)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    proc = run_bounded(argv, cwd=cwd, env=asan_env, timeout=float(timeout))
+    if proc.failure is not None:
         return None
     out = proc.stdout + "\n" + proc.stderr
     _archive_report(out)

@@ -14,9 +14,10 @@ treat None as "no localization", never as proof of health.
 from __future__ import annotations
 
 import json
-import subprocess
 import tempfile
 from pathlib import Path
+
+from pipeline_core.adapters.process import run_bounded
 
 # Runs INSIDE gdb's embedded Python (which provides `import gdb`); written to
 # a temp file and `source`d. Emits exactly one CRASH_JSON line.
@@ -84,14 +85,14 @@ def localize_crashed_binary(
         # env passed byte-identical to the sweep's: stack-layout-sensitive
         # crashes (dangling stack pointers) appear/vanish with env size, so
         # ANY added/removed var can make the localizer miss a real crash.
-        proc = subprocess.run(
-            cmd, cwd=cwd, env=env,
-            capture_output=True, text=True, timeout=timeout, check=False)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
+        # gdb is the child; the inferior (the reconstructed binary) is the
+        # grandchild — timeout kills the group.
+        ran = run_bounded(cmd, cwd=cwd, env=env, timeout=float(timeout))
     finally:
         Path(script).unlink(missing_ok=True)
-    for line in proc.stdout.splitlines():
+    if ran.failure is not None:
+        return None
+    for line in ran.stdout.splitlines():
         # The marker can land mid-line: the dying test's `test NAME ... `
         # prefix has no trailing newline, so the script's print appends to it.
         if _MARKER not in line:

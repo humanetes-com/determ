@@ -469,6 +469,12 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         ("hung tree restored", "hung-tree-restored"),
         ("phase-c/hang_reverted", "hang-reverted"),
         ("phase-c/u2_hang", "hang-rejected"),
+        ("hung inside ", "group-killed"),
+    ],
+    "P26": [
+        # The bound converted an unbounded coverage wait into a P25 hang.
+        ("hung inside ", "group-killed"),
+        ("TIMEOUT after ", "group-killed"),
     ],
     "P19": [
         # The boundary invariant heals before the sweep (or on the sweep's
@@ -1882,6 +1888,8 @@ RE_HUNG_SWEEP = re.compile(
     r"\[phase-c/tdd\] iter (?P<iter>\d+): cargo test "
     r"(?:TIMED OUT \((?P<secs>\d+)s\)\. Stopping\.|"
     r"rc=-1 HUNG in (?P<where>\S+))")
+RE_HUNG_COVERAGE = re.compile(
+    r"\[coverage\].*hung inside (?P<where>\S+)")
 
 
 def detect_p25(run: Run, iters: list[dict]) -> list[dict]:
@@ -1898,6 +1906,9 @@ def detect_p25(run: Run, iters: list[dict]) -> list[dict]:
     for ref, m in run.find(RE_HUNG_SWEEP):
         where = m["where"] or f"timed out after {m['secs']}s (pre-fix: cluster abandoned)"
         hits.append({"evidence": f"iter {m['iter']}: sweep hung — {where}",
+                     "refs": [ref]})
+    for ref, m in run.find(RE_HUNG_COVERAGE):
+        hits.append({"evidence": f"coverage hung inside {m['where']}",
                      "refs": [ref]})
     return hits
 
@@ -2019,6 +2030,73 @@ def detect_p24(run: Run, iters: list[dict]) -> list[dict]:
     return hits[:4]
 
 
+_P26_START = (
+    "phase_c.session.turn", "phase_c.fn.fill.done", "phase_c.fill.reading")
+_P26_AUDIT = "flow_audit.report"
+# 5x PHASE_C_TEST_TIMEOUT default. 3x would tag a bounded sequential
+# recovery of several timed-out `--exact` runs as this class.
+_P26_GAP_SEC = 600.0
+
+
+def detect_p26(run: Run, iters: list[dict]) -> list[dict]:
+    """Unbounded wait inside a fill: a session turn / per-fn done / fill
+    reading, then no non-audit event for longer than 5x the sweep timeout.
+
+    Pre-fix this is a hit (run `3500465-67c40e78`: `phase_c.session.turn`
+    at 18:00:14 UTC, then silence while coverage waited on `lib_gen_1`).
+    Post-fix the bound converts it into a P25 coverage hang
+    (`phase_c.coverage.hung` within 120s). A long LLM call is not this:
+    it opens with `llm.request`, which is not a start event.
+    """
+    events: list[tuple[float, str]] = []
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if str(ev.get("run_id", "")) != run.run_id:
+                    continue
+                ts = _p26_ts(ev.get("ts"))
+                if ts is None:
+                    continue
+                events.append((ts, str(ev.get("event", ""))))
+    except OSError:
+        return []
+    events.sort()
+    hits: list[dict] = []
+    for i, (ts, name) in enumerate(events):
+        if name not in _P26_START:
+            continue
+        nxt = next((t for t, n in events[i + 1:] if n != _P26_AUDIT), None)
+        gap = (nxt if nxt is not None else _p26_now()) - ts
+        if gap >= _P26_GAP_SEC:
+            hits.append({
+                "evidence": (
+                    f"{name} at {ts:.0f} then {gap:.0f}s with no non-audit "
+                    "event (unbounded wait)"),
+                "refs": [run.start_ref]})
+            break
+    return hits
+
+
+def _p26_ts(raw: object) -> float | None:
+    if not raw:
+        return None
+    text = str(raw)
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _p26_now() -> float:
+    import time
+    return time.time()
+
+
 DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P4": detect_p4, "P5": detect_p5, "P6": detect_p6,
              "P7": detect_p7, "P8": detect_p8, "P9": detect_p9,
@@ -2027,7 +2105,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P17": detect_p17, "P18": detect_p18,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
-             "P25": detect_p25}
+             "P25": detect_p25, "P26": detect_p26}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2048,7 +2126,8 @@ CLASS_NAMES = {
     "P22": "route starvation (a session opened first while a stub held leftover tests hollow and no stub route had run this fill)",
     "P23": "declined unit (the model answered an empty body; pre-fix logged as a reader loss)",
     "P24": "crash-cohort lock (cohort > batch and exempt from the cursor: head re-dispatched, tail never reached)",
-    "P25": "hung sweep (cargo test timed out inside a test; pre-fix the cluster was abandoned and the hung tree left on disk)"}
+    "P25": "hung sweep (cargo test timed out inside a test; pre-fix the cluster was abandoned and the hung tree left on disk)",
+    "P26": "unbounded wait (a fill event then no non-audit event for longer than 5x the sweep timeout; pre-fix the coverage slice waited forever)"}
 
 
 # -------------------------------------------------------------------- report

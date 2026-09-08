@@ -4650,12 +4650,24 @@ def prepare_impl_fill(
                         and os.getenv("SLICE_SESSION_COVERAGE", "1") != "0")
         _stubs_now = _scan_unimplemented_for_cluster(target_src_dir, cluster).units
 
-        def _coverage(names: Sequence[str]) -> Mapping[str, frozenset[FnSite]]:
+        def _coverage(names: Sequence[str], hung: Sequence[str] = ()
+                      ) -> Mapping[str, frozenset[FnSite]]:
             if not _coverage_on or _coverage_fn is None:
                 return {}
+            hung_map = {}
+            for item in hung:
+                if "::" in item:
+                    lab, test = item.split("::", 1)
+                    hung_map[lab] = test
             cov = _coverage_fn(project_dir, cluster_name,
                                failing_tests=frozenset(names),
-                               cluster_env=cluster_env)
+                               cluster_env=cluster_env, hung=hung_map)
+            hung_found = getattr(cov, "hung_tests", None) or ()
+            if hung_found:
+                _emit("phase_c.coverage.hung", data={
+                    "cluster": cluster_name,
+                    "hung_tests": sorted(hung_found),
+                })
             owners = getattr(cov, "owners", None) or {}
             return {str(t).rsplit("::", 1)[-1]: frozenset(ks)
                     for t, ks in dict(owners).items()}

@@ -247,7 +247,7 @@ def test_measure_returns_none_when_the_staged_tree_does_not_build(
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         cov, "_run",
-        lambda cmd, cwd, env=None: subprocess.CompletedProcess(
+        lambda cmd, cwd, env=None, **k: subprocess.CompletedProcess(
             cmd, 1, stdout="", stderr="error"))
     notes: list[str] = []
     assert _measure(project, "stable", log=notes.append) is None
@@ -260,7 +260,7 @@ def test_measure_returns_none_when_no_test_binaries_exist(
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         cov, "_run",
-        lambda cmd, cwd, env=None: subprocess.CompletedProcess(
+        lambda cmd, cwd, env=None, **k: subprocess.CompletedProcess(
             cmd, 0, stdout="", stderr=""))
     monkeypatch.setattr(cov, "_test_binaries", lambda *_a, **_k: [])
     assert _measure(project, "stable") is None
@@ -272,7 +272,7 @@ def test_measure_returns_none_when_the_export_is_empty(
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         cov, "_run",
-        lambda cmd, cwd, env=None: subprocess.CompletedProcess(
+        lambda cmd, cwd, env=None, **k: subprocess.CompletedProcess(
             cmd, 0, stdout="", stderr=""))
     monkeypatch.setattr(
         cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
@@ -288,7 +288,7 @@ def test_measure_names_dead_bodies_and_unreachable_lines(
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         cov, "_run",
-        lambda cmd, cwd, env=None: subprocess.CompletedProcess(
+        lambda cmd, cwd, env=None, **k: subprocess.CompletedProcess(
             cmd, 0, stdout="", stderr=""))
     monkeypatch.setattr(
         cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
@@ -342,7 +342,7 @@ def test_measure_does_not_mark_a_locator_dead_when_a_same_name_body_is_live(
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         cov, "_run",
-        lambda cmd, cwd, env=None: subprocess.CompletedProcess(
+        lambda cmd, cwd, env=None, **k: subprocess.CompletedProcess(
             cmd, 0, stdout="", stderr=""))
     monkeypatch.setattr(
         cov, "_test_binaries", lambda *a, **k: [a[0] / "bin"])
@@ -405,7 +405,7 @@ def _owner_env(monkeypatch, claimed: set[str]) -> None:
     """Every binary claims the tests in `claimed` and no others."""
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
 
-    def _fake_run(cmd, cwd, env=None):
+    def _fake_run(cmd, cwd, env=None, **k):
         filt = cmd[cmd.index("--exact") + 1] if "--exact" in cmd else ""
         if filt and env and "LLVM_PROFILE_FILE" in env:
             Path(env["LLVM_PROFILE_FILE"]).write_text("raw")
@@ -476,7 +476,7 @@ def test_owner_map_filters_on_the_cargo_name_not_the_leaf(
     seen: list[str] = []
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
 
-    def _fake_run(cmd, cwd, env=None):
+    def _fake_run(cmd, cwd, env=None, **k):
         filt = cmd[cmd.index("--exact") + 1] if "--exact" in cmd else ""
         if filt:
             seen.append(filt)
@@ -511,7 +511,7 @@ def test_two_tests_sharing_a_leaf_do_not_share_a_profile(
     paths: list[str] = []
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
 
-    def _fake_run(cmd, cwd, env=None):
+    def _fake_run(cmd, cwd, env=None, **k):
         if "--exact" in cmd and env and "LLVM_PROFILE_FILE" in env:
             paths.append(env["LLVM_PROFILE_FILE"])
             Path(env["LLVM_PROFILE_FILE"]).write_text("raw")

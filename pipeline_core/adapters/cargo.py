@@ -6,6 +6,9 @@ structured result. Unlike the legacy helper (which collapsed stdout+stderr into 
 string and signalled timeout with rc=-1), this keeps the streams separate in a typed
 :class:`Process` — strictly more information, behaviour-compatible for callers that read
 ``returncode`` and the combined text.
+
+When ``run`` returns after a timeout, no process of the group it started is
+alive (`adapters.process.run_bounded`).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from ..domain.cluster_scope import ClusterScope
 from ..domain.enums import ProcessFailure
 from ..domain.models import BuildCluster
 from ..domain.test_command import parse_cmd
+from .process import run_bounded
 
 
 def run_build_check(
@@ -138,22 +142,14 @@ def _partial_text(captured: object) -> str:
 
 
 class CargoCli:
-    """Runs one cargo command. rc=-1 signals timeout / binary-not-found (legacy parity)."""
+    """Runs one cargo command. rc=-1 signals timeout / binary-not-found (legacy parity).
+
+    Timeout kills the process GROUP: cargo is the child, the test binary is
+    the grandchild, and a hung grandchild is exactly the process the bound
+    was written for. When this returns after a timeout, no process of that
+    group is alive.
+    """
 
     def run(self, cmd: str, cwd: Path, *, env: dict[str, str], timeout: int = 180) -> Process:
-        try:
-            r = subprocess.run(
-                shlex.split(cmd), cwd=cwd, capture_output=True, text=True,
-                timeout=timeout, env=env,
-            )
-            return Process(r.returncode, r.stdout or "", r.stderr or "")
-        except subprocess.TimeoutExpired as e:
-            # Keep the partial output: for a HUNG test it names which test was
-            # running when the clock ran out — the one fact the fix loop and
-            # the operator need. Discarding it is a feedback-fidelity loss.
-            return Process(-1, _partial_text(e.stdout),
-                           _partial_text(e.stderr) + f"\nTIMEOUT after {timeout}s",
-                           failure=ProcessFailure.TIMEOUT)
-        except FileNotFoundError as e:
-            return Process(-1, "", f"FILE NOT FOUND: {e}",
-                           failure=ProcessFailure.BINARY_MISSING)
+        r = run_bounded(shlex.split(cmd), cwd=cwd, env=env, timeout=float(timeout))
+        return Process(r.returncode, r.stdout, r.stderr, failure=r.failure)

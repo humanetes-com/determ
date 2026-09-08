@@ -490,6 +490,9 @@ def _run_is_unmeasurable(
     return run.target_tests <= frozenset(unmeasurable_tests)
 
 
+run_is_unmeasurable = _run_is_unmeasurable
+
+
 def schedule(
     runs: Sequence[RouteRun],
     rows: Iterable[RouteLedgerRow],

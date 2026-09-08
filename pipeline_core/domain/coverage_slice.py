@@ -140,6 +140,10 @@ class CoverageSlice:
     # asked) and the tests of an unmeasured binary that still died when run
     # alone (keyed as the binary lists them). Never in `owners`.
     unmeasured_tests: frozenset[str] = frozenset()
+    # ``label::test`` of a binary the bound cut while a test was in flight,
+    # or that the caller's own reading already named as hung. Distinct from
+    # ``unmeasured_tests`` (a SIGSEGV is unmeasured and not a hang).
+    hung_tests: frozenset[str] = frozenset()
 
 
 def contiguous_runs(lines: Iterable[int]) -> tuple[tuple[int, int], ...]:
@@ -190,6 +194,7 @@ def slice_from_counts(
     failing: Iterable[str] = (),
     unmeasured_binaries: Iterable[str] = (),
     unmeasured_tests: Iterable[str] = (),
+    hung_tests: Iterable[str] = (),
 ) -> CoverageSlice:
     """The contract that writes the dead set the ranking and prompts consume.
 
@@ -231,7 +236,8 @@ def slice_from_counts(
                          owners=dict(owners or {}),
                          failing=frozenset(failing),
                          unmeasured_binaries=frozenset(unmeasured_binaries),
-                         unmeasured_tests=frozenset(unmeasured_tests))
+                         unmeasured_tests=frozenset(unmeasured_tests),
+                         hung_tests=frozenset(hung_tests))
 
 
 def matching_test_key(name: str, keys: Iterable[str]) -> str | None:

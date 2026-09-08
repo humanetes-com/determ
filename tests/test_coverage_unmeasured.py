@@ -246,7 +246,7 @@ def _crash_env(monkeypatch, tmp_path: Path) -> list[list[str]]:
     ok = deps / "ok_bin-0123456789abcdef"
     monkeypatch.setattr(cov, "_test_binaries", lambda *a, **k: [crash, ok])
 
-    def _fake_run(cmd, cwd, env=None):
+    def _fake_run(cmd, cwd, env=None, **k):
         calls.append(list(cmd))
         prog = Path(cmd[0]).name
         if cmd[0] in ("cargo", "llvm-profdata", "llvm-cov"):

@@ -17,13 +17,14 @@ and the probe is dropped, which is the correct (self-filtering) outcome.
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from pipeline_core.adapters.cargo import cluster_cargo_env
+from pipeline_core.adapters.process import run_bounded
 from pipeline_core.domain.behaviour_probe import ProbeResult
+from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import BuildCluster
 
 PROBE_PREFIX = "__behaviour_probe_"
@@ -31,14 +32,6 @@ PROBE_PREFIX = "__behaviour_probe_"
 # (cmd, cwd, env, timeout) → (returncode, stdout, stderr). Injected in tests;
 # `subprocess_runner` in production.
 Runner = Callable[[list[str], Path, dict[str, str], int], tuple[int, str, str]]
-
-
-def _partial(captured: object) -> str:
-    if captured is None:
-        return ""
-    if isinstance(captured, bytes):
-        return captured.decode("utf-8", errors="replace")
-    return str(captured)
 
 
 def subprocess_runner(
@@ -49,14 +42,12 @@ def subprocess_runner(
 ) -> tuple[int, str, str]:
     """The production :data:`Runner`: rc −1 on timeout / missing binary, with
     the partial output kept (it names what was running when the clock ran
-    out)."""
-    try:
-        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout or "", r.stderr or ""
-    except subprocess.TimeoutExpired as e:
-        return -1, _partial(e.stdout), _partial(e.stderr) + f"\nTIMEOUT after {timeout}s"
-    except OSError as e:
-        return -1, "", f"cargo did not run: {e}"
+    out). Timeout kills the process group (`cargo run --example` is the
+    child; the example binary is the grandchild)."""
+    r = run_bounded(cmd, cwd=cwd, env=env, timeout=float(timeout))
+    if r.failure is ProcessFailure.BINARY_MISSING:
+        return -1, "", r.stderr or "cargo did not run"
+    return r.returncode, r.stdout, r.stderr
 
 
 def safe_probe_name(name: str) -> str:

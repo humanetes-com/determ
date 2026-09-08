@@ -35,6 +35,7 @@ from pipeline_core.application.reconstruct.context import (
 from pipeline_core.application.reconstruct.fill_reading import (
     last_comparison,
     note_kept_comparison,
+    unmeasurable_tests_now,
 )
 from pipeline_core.application.reconstruct.fill_rules import (
     AttemptFailure,
@@ -70,6 +71,7 @@ from pipeline_core.domain.model_notes import (
     rejected_symbols_in_errors,
 )
 from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
+from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
@@ -308,6 +310,27 @@ class FillOneFn:
         _answers = ConvictionEvidence(
             frozenset(ctx.tdd_frontier_tests.tests_for(_unit_loc))
             if ctx.tdd_frontier_tests is not None else frozenset())
+        # A keep earlier in this fill made every attributed test's binary
+        # abort or hang, and this unit is not the crash-blamed locator that
+        # can complete it. No body written here can move those verdicts
+        # (run 3500465-67c40e78, 2026-09-08: twelve constructor refills
+        # after a session keep crashed the aimed tests' binary).
+        if (_answers.tests
+                and not (ctx.crash_blamed and _unit_loc in ctx.crash_blamed)):
+            _unmeas = unmeasurable_tests_now()
+            if _unmeas and {bare_test_name(t) for t in _answers.tests} <= _unmeas:
+                self.tel.log(
+                    f"  [phase-c/per-fn] {idx}/{ctx.total} skipped "
+                    f"{rel_file}::{fn_name} [{container}] — attributed "
+                    "tests' binary did not complete at a keep in this fill "
+                    "and this unit is not the crash-blamed one. No attempt "
+                    "charged.")
+                self.tel.emit("phase_c.fn.fill.skip", data={
+                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "reason": "unmeasurable_binary",
+                })
+                return fill_skip(rec, attempts)
         _poisoned_retro = ctx.retro_gate.record(judge_guidance(
             _retro_rec.get("guidance", ""), snapshot,
             anchor_types=_anchor_types)) is RetroGateVerdict.RETIRED

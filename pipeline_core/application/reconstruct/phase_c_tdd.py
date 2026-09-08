@@ -4371,7 +4371,14 @@ def run_phase_c_tdd(
             _cov = deps.measure_coverage_slice(
                 project_dir, cluster.name,
                 failing_tests=frozenset(cur_failed),
-                cluster_env=cluster_env)
+                cluster_env=cluster_env,
+                timeout=test_timeout,
+                hung={b.label: (b.dangling or "?") for b in _hung})
+            if _cov is not None and _cov.hung_tests:
+                deps.emit("phase_c.coverage.hung", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "hung_tests": sorted(_cov.hung_tests),
+                })
         # UNMEASURED TESTS. A red test whose process did not complete (a
         # binary killed by a signal flushes no profile) has no live
         # reading; the record of what it entered when it last ran to a

@@ -643,7 +643,10 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   (`impl Error` alone). Do not set below that until a post-fix fill phase
   is measured. `0` disables. Minutes are read once at cluster entry
   (same as the other five) and passed to `fill_phase_clock.arm` each
-  fill — not re-read from the env per iteration.
+  fill — not re-read from the env per iteration. The clock is a boundary
+  between units and reaches no subprocess; the bound on a subprocess is
+  the runner's (`adapters.process.run_bounded`), `PHASE_C_TEST_TIMEOUT`
+  for everything that executes the reconstructed tree.
 - `TDD_FILL_BUDGET_MINUTES` (default 0) — NOT a stop: the fill schedule's
   wall-clock budget (`domain/fill_schedule.py`), the minutes one fill's
   route runs share by weight (never-served and paying runs 2, served 1,
@@ -917,6 +920,31 @@ backstop against a wrap slipping in anyway, so a stray mid-paragraph EOL costs
 nothing even if one is written. The tracker-id ban above applies here as it
 does everywhere else, and `commit.sh` refuses a subject that opens with one
 (`debt 91.2`, `FR-018`, `#82`) rather than letting it reach `git log`.
+
+**The subject line stays under 72 characters — it is a summary sentence, not
+the seventh place the batch's points get restated.** "One line, however long"
+above governs each BODY paragraph; the subject is a different object; it names
+the batch, and the batch's individual points already have a home, one bullet
+each, below the blank line. A subject built by concatenating every bullet's
+headline with "and" defeats the point of having bullets at all: `git log
+--oneline` truncates past 72 and shows nothing usable, and the subject stops
+being a summary a reader can act on. `commit.sh` already warns past 72 chars
+but does not refuse, so writing a short subject is the drafter's discipline to
+keep, not a check to lean on.
+
+**The instance, `975e5d4`, 2026-09-08.** The subject ran 362 characters —
+"Keep a session's best judged state, re-ask a reasoning-capped empty reply and
+grade it unmeasured, read the fill class off the fill reading, audit the TDD
+loop's own iterations, authorize the offered installables, move the route
+adapters behind the port, and cap sessions per fill, and score a hung test
+binary as a regression instead of an inconclusive reading" — one clause per
+body bullet, all seven of them, joined by commas and "and". The body already
+carried each of those seven as its own point in full detail; the subject added
+nothing the reader could not get faster from `git log -1` and cost every
+`--oneline` view its usefulness on this commit. The fix is not a script
+change: pick the one fact that best names the batch (or, if the batch has no
+single center, the dominant change) for the subject, and leave the rest to the
+bullets that already exist for it.
 
 **No assistant attribution, ever — no `Co-Authored-By:`, no "Generated with",
 no mention of Claude, Anthropic, Cursor, Grok, Fable, or 🤖.** Not in the

@@ -178,14 +178,29 @@ def measure_test_state(
         # test named) and the binaries after it never ran. A capture with no
         # section is a build that did not finish — inconclusive, as before.
         hung = TestStateReading(parse_binary_results(out or "", timed_out=True))
-        return hung if hung.binaries else None
+        if hung.binaries:
+            _note_reading(hung)
+            return hung
+        return None
     reading = TestStateReading(parse_binary_results(out))
     # No test-result sections AND a non-zero rc ⇒ the suite never executed
     # (the crate itself did not compile). Zero tests with rc==0 is a
     # legitimate empty baseline (pass_count 0, no failures).
     if not reading.binaries and rc != 0:
         return None
+    _note_reading(reading)
     return reading
+
+
+def _note_reading(reading: TestStateReading) -> None:
+    """Best-effort: a catalog miss must not fail a measurement."""
+    try:
+        from pipeline_core.application.reconstruct.fill_reading import (
+            note_last_reading,
+        )
+        note_last_reading(reading)
+    except Exception:  # noqa: BLE001 — catalog is a reader of the measurement
+        pass
 
 
 def test_regression_gate(

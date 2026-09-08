@@ -56,8 +56,9 @@ from collections.abc import Callable
 from typing import Any
 
 from pipeline_core.domain.fill_context import current_fill, current_route
+from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.reasoning_cap import current_units
-from pipeline_core.domain.test_results import RegressionComparison
+from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 
 #: Log prefix, chosen to be greppable next to the `[phase-c/tdd] iter N:`
 #: lines it interleaves with. A reader tailing the log during a fill phase
@@ -72,6 +73,17 @@ TAG = "[phase-c/fill-reading]"
 # the honest reading of "the last landed change set".
 _LAST_LOCK = threading.Lock()
 _LAST: list[RegressionComparison | None] = [None]
+# Last comparison a keep site accepted. Reverted measurements (a hang the
+# gate put back) must not make later runs look unmeasurable: the tree is
+# the baseline again. Run `3500465-67c40e78` session #6 kept a crash of
+# `test_downcast`; that keep, not the later hang-revert, is the reading
+# the per-fn run should have been graded on.
+_LAST_KEPT: list[RegressionComparison | None] = [None]
+# Binary label -> tests observed the last time that binary completed. A
+# crashed/hung after-reading only names the tests that printed a verdict
+# before abort; the five downcast tests aimed at by that run's per-fn
+# walk may never have printed. The catalog is the last complete set.
+_COMPLETE_TESTS: dict[str, frozenset[str]] = {}
 
 
 def note_last_comparison(cmp: RegressionComparison) -> None:
@@ -91,10 +103,64 @@ def last_comparison() -> RegressionComparison | None:
         return _LAST[0]
 
 
+def begin_fill() -> None:
+    """A new fill must not inherit the previous fill's last keep as
+    unmeasurable evidence: that keep described a tree the sweep between
+    fills already re-measured. The complete-catalog stays (binary labels
+    and their tests do not move)."""
+    with _LAST_LOCK:
+        _LAST_KEPT[0] = None
+
+
 def reset_last_comparison() -> None:
     with _LAST_LOCK:
         _LAST[0] = None
+        _LAST_KEPT[0] = None
+        _COMPLETE_TESTS.clear()
         _KEPT.clear()
+
+
+def note_last_reading(reading: TestStateReading) -> None:
+    """Refresh the last-complete catalog from a suite measurement.
+
+    Called from `measure_test_state` so a keep later in the fill can name
+    every test of a binary that then aborted, not only the prefix that
+    printed a verdict.
+    """
+    with _LAST_LOCK:
+        for binary in reading.binaries:
+            if binary.completed:
+                _COMPLETE_TESTS[binary.label] = (
+                    binary.passed | binary.failed | binary.ignored)
+
+
+def unmeasurable_tests_now() -> frozenset[str]:
+    """Bare test names whose binary a keep in this fill made incomplete.
+
+    Uses `newly_crashed` / `crashed_all_red` / `newly_hung` of the last
+    kept comparison (not `excluded_crashed`: those were already incomplete
+    at the keep's baseline, which is the plan-time unmeasurable set the
+    budget-0 contract still executes). Names come from the last-complete
+    catalog so tests that never printed before the abort are still named.
+    Empty when no keep in this fill has crashed or hung a binary.
+    """
+    with _LAST_LOCK:
+        cmp = _LAST_KEPT[0]
+        catalog = dict(_COMPLETE_TESTS)
+    if cmp is None:
+        return frozenset()
+    labels = (set(cmp.newly_crashed) | set(cmp.crashed_all_red)
+              | set(cmp.newly_hung))
+    if not labels:
+        return frozenset()
+    out: set[str] = set()
+    for label in labels:
+        names = catalog.get(label, frozenset())
+        out.update(bare_test_name(n) for n in names)
+        for item in cmp.hung_tests:
+            if item.startswith(label + "::"):
+                out.add(bare_test_name(item.split("::", 1)[-1]))
+    return frozenset(out)
 
 
 # What each route KEPT, with the comparison that judged it — the per-run
@@ -120,6 +186,8 @@ def note_kept_comparison(cmp: RegressionComparison | None) -> None:
     if cmp is None:
         note_kept(0)
         return
+    with _LAST_LOCK:
+        _LAST_KEPT[0] = cmp
     note_kept(cmp.net_pass_delta, newly_red=tuple(sorted(cmp.newly_red)),
               newly_crashed=tuple(cmp.newly_crashed))
 

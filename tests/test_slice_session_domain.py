@@ -458,3 +458,22 @@ def test_a_group_under_the_unit_cap_is_packed_when_its_prompt_is_over_the_char_c
                          test_chars={"t_a": 100}, fixed_chars=100, max_chars=60_000)
     assert plan_slices({"t_a": {a, hub}}, costs=too_big) == []
     assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_cap == 1
+
+
+def test_a_hung_binary_renders_as_a_hang_and_regresses_at_any_gain() -> None:
+    """Run `3500465-67c40e78` turn 1: `lib_gen_1` hung inside a test and the
+    turn said CRASH about it. A hang is named as a hang (the transcript's
+    next turn must say the body does not return), it is not a second CRASH
+    line for the same binary, and no net gain forgives it — the binaries
+    after it never ran."""
+    reading = TurnReading(
+        targets=(TargetStatus("t_a", True),),
+        crashed=("tests/lib_gen_1.rs", "tests/bin_b.rs"),
+        hung=("tests/lib_gen_1.rs::t_hang",), pass_delta=5)
+    text = render_test_turn(reading)
+    assert "HANG: binary tests/lib_gen_1.rs hung inside test t_hang" in text
+    assert "CRASH: test binary ['tests/bin_b.rs']" in text
+    assert "lib_gen_1.rs']" not in text.split("CRASH:", 1)[1]
+    assert reading.regressed and not reading.clean
+    assert not TurnReading(targets=(TargetStatus("t_a", True),),
+                           crashed=("tests/bin_b.rs",), pass_delta=5).regressed

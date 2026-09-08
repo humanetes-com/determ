@@ -670,6 +670,11 @@ class TurnReading:
     newly_red_said: Mapping[str, str] = field(default_factory=dict)
     newly_red_observed: Mapping[str, str] = field(default_factory=dict)
     crashed: tuple[str, ...] = ()
+    #: ``label::test`` of binaries the suite timeout cut while a test was
+    #: in flight. Also present in ``crashed`` (`compare_readings` puts a
+    #: hung binary in both); this field is what the coverage slice skips
+    #: and what the transcript names as a hang rather than a crash.
+    hung: tuple[str, ...] = ()
     pass_delta: int = 0
     #: A completed binary reported fewer verdicts than at baseline — oracle
     #: corruption, never traded away at any price (the sweep's rule).
@@ -681,7 +686,8 @@ class TurnReading:
 
     @property
     def clean(self) -> bool:
-        return self.targets_green and not self.newly_red and not self.crashed
+        return (self.targets_green and not self.newly_red
+                and not self.crashed and not self.hung)
 
     @property
     def regressed(self) -> bool:
@@ -693,6 +699,8 @@ class TurnReading:
         body of run `334902-2774708c`'s 05:39 turn while the sweep it never
         reached would have accepted it."""
         if self.executed_shrank:
+            return True
+        if self.hung:
             return True
         if self.pass_delta > 0:
             return False
@@ -892,10 +900,18 @@ def render_test_turn(
             obs = reading.newly_red_observed.get(name, "")
             if obs:
                 lines.append(_indent(obs, "      "))
-    if reading.crashed:
+    hung_labels = {item.split("::", 1)[0] for item in reading.hung}
+    if reading.hung:
+        for item in reading.hung:
+            label, _, test = item.partition("::")
+            lines.append(
+                f"  HANG: binary {label} hung inside test {test} "
+                "(it did not return within the suite timeout)")
+    crashed_only = [c for c in reading.crashed if c not in hung_labels]
+    if crashed_only:
         lines.append(
-            "  CRASH: test binar" + ("ies" if len(reading.crashed) > 1 else "y")
-            + f" {list(reading.crashed)} aborted before reporting — a memory "
+            "  CRASH: test binar" + ("ies" if len(crashed_only) > 1 else "y")
+            + f" {list(crashed_only)} aborted before reporting — a memory "
             "fault or a stub panic; a body in this change set routes execution "
             "into it.")
     if rejected:

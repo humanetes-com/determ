@@ -3,7 +3,7 @@
 import contextlib
 import json as _json
 import os
-import select
+import queue
 import signal
 import subprocess
 import sys
@@ -105,6 +105,7 @@ from pipeline_core.monitor.generation_panel import (  # noqa: E402
     generation_rows as _generation_rows,
 )
 from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
+from pipeline_core.monitor.key_input import KeyReader as _KeyReader  # noqa: E402
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
 from pipeline_core.monitor.render import (  # noqa: E402
     ansi_seq_len as _ansi_seq_len,
@@ -284,37 +285,10 @@ def box_lines(title, rows):
     return out
 
 # ── Key reading (handles arrow escape sequences) ──────────────────────────────
+#
+# Threaded off the render loop — see pipeline_core/monitor/key_input.py for why.
 
-def _read_key():
-    """Read one logical keypress; returns a string. Arrow keys → 'UP'/'DOWN'/'PGUP'/'PGDN'.
-
-    Uses os.read() throughout to bypass Python's BufferedReader — without this,
-    select.select() misses continuation bytes that the buffer has already consumed.
-    """
-    fd = sys.stdin.fileno()
-    if not select.select([fd], [], [], 0)[0]:
-        return ""
-    ch = os.read(fd, 1).decode("latin-1")
-    if ch != "\033":
-        return ch
-    # Escape sequence — read more with short timeout
-    if not select.select([fd], [], [], 0.05)[0]:
-        return "ESC"
-    ch2 = os.read(fd, 1).decode("latin-1")
-    if ch2 != "[":
-        return "ESC"
-    if not select.select([fd], [], [], 0.05)[0]:
-        return "ESC"
-    ch3 = os.read(fd, 1).decode("latin-1")
-    if ch3 == "A":  return "UP"
-    if ch3 == "B":  return "DOWN"
-    if ch3 == "5":
-        os.read(fd, 1)   # consume trailing ~
-        return "PGUP"
-    if ch3 == "6":
-        os.read(fd, 1)
-        return "PGDN"
-    return "ESC"
+_key_reader = _KeyReader()
 
 # ── Data collectors ───────────────────────────────────────────────────────────
 
@@ -1350,6 +1324,7 @@ def main():
     _demo_next = time.monotonic() + DEMO_INTERVAL
     try:
         tty.setcbreak(sys.stdin.fileno())
+        _key_reader.start()
         while True:
             # --demo: advance to the next of views 1/2/3 every DEMO_INTERVAL s.
             if _DEMO and time.monotonic() >= _demo_next:
@@ -1394,17 +1369,33 @@ def main():
                 timeout: float = REFRESH
                 if _DEMO:
                     timeout = max(0.1, min(float(REFRESH), _demo_next - time.monotonic()))
-                ready, _, _ = select.select([sys.stdin], [], [], timeout)
-                if ready:
-                    key = _read_key()
+                # Block on the queue the reader thread fills, not on stdin
+                # directly — the thread already decoded the key while this
+                # loop was busy rendering, so the first `get` here returns as
+                # soon as anything is pending instead of waiting out the rest
+                # of `timeout`. Then drain whatever else queued up during that
+                # same render pass so a burst of presses (e.g. holding PgDn)
+                # all land before the next, possibly slow, render.
+                key = _key_reader.get(timeout=timeout)
+                if key == "q":
+                    raise KeyboardInterrupt
+                _run_action(key)
+                while True:
+                    try:
+                        key = _key_reader.get_nowait()
+                    except queue.Empty:
+                        break
                     if key == "q":
                         raise KeyboardInterrupt
                     _run_action(key)
+            except queue.Empty:
+                pass
             except Exception:
                 pass
     except KeyboardInterrupt:
         pass
     finally:
+        _key_reader.stop()
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         sys.stdout.write("\033[?25h\033[2J\033[H\n")
         sys.stdout.flush()

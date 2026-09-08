@@ -280,3 +280,41 @@ def test_fill_1_of_the_97_run_s_file_wave_rows_each_run_s_own_landings() -> None
     assert rep_old.reverted == {FnLocator("src/context.rs", "source")}
     assert rep_old.model_calls == 3
     assert rank(ctx, outcome_old, rep_old) == "rebuy_flat"
+
+
+def test_the_3500465_per_fn_run_aims_at_completing_binaries_and_stays_open() -> None:
+    """`3500465-67c40e78_iter1.json` is the 2026-09-08 15:12 UTC fill whose
+    per-fn run spent 97 minutes on twelve escalated producers, every
+    verdict `unmeasurable`. The plan named the second session's kept crash
+    of `tests/test_downcast.rs` (15:32) as what made those verdicts
+    unreachable. Computed on the record: the run's five aimed tests live in
+    `tests/test_context.rs`, `tests/ptr_gen_1.rs` and `tests/test_ensure.rs`,
+    all of which completed in every reading, so the at-open re-grade does
+    not fire on this fill and its twelve fills were wrong bodies the class
+    label misnamed. A run aimed only at the crashed binary's tests — the
+    second session's own targets — is the shape the re-grade skips.
+    """
+    from pipeline_core.domain.fill_schedule import run_is_unmeasurable
+
+    fix = load_fill("3500465-67c40e78_iter1")
+    runs = candidate_runs(fix)
+    per_fn = next(r for r in runs[RouteKind.PER_FN] if "per-fn" in r.label)
+    assert per_fn.target_tests == frozenset({
+        "test_downcast_high", "test_downcast_low", "test_downcast_mid",
+        "test_error_downcast_is", "test_too_long"})
+    crashed_bin = "tests/test_downcast.rs"
+    crashed_tests = frozenset(
+        t for b, t in fix["failed_pairs"] if b == crashed_bin)
+    assert crashed_tests == frozenset({
+        "test_downcast", "test_downcast_mut", "test_downcast_ref",
+        "test_drop", "test_large_alignment"})
+    binaries_of_aim = {b for b, t in fix["failed_pairs"] if t in per_fn.target_tests}
+    assert crashed_bin not in binaries_of_aim
+    # Plan time: nothing unmeasurable; open time after the 15:32 keep: the
+    # per-fn run is still measurable, so it opens.
+    assert unmeasurable_of(fix) == frozenset()
+    assert not run_is_unmeasurable(per_fn, crashed_tests, crash_blamed_of(fix))
+    downcast_session = next(
+        r for r in runs[RouteKind.SESSION]
+        if r.target_tests == frozenset({"test_downcast_ref", "test_drop"}))
+    assert run_is_unmeasurable(downcast_session, crashed_tests, crash_blamed_of(fix))

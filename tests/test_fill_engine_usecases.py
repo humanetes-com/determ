@@ -1388,3 +1388,47 @@ def test_external_only_keep_names_the_blockers_in_log_event_and_verdict(
     assert evs and "src/error.rs::construct" in evs[0]["blocking_fns"]
     rows = _verdicts(fake)
     assert rows and "src/error.rs::construct" in rows[0]["evidence_keys"]
+
+
+def test_fill_one_skips_a_unit_whose_tests_binary_a_keep_crashed(tmp_path: Path) -> None:
+    """Run `3500465-67c40e78` (2026-09-08): a session keep at 15:32 made a
+    binary abort; a unit whose every attributed test is in that binary
+    cannot move a verdict this fill. Skipped with no model call, unless it
+    is the crash-blamed locator that can complete the binary."""
+    from dataclasses import replace
+
+    from pipeline_core.application.reconstruct import fill_reading
+    from pipeline_core.domain.attribution import FailureFrontier
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_results import (
+        RegressionComparison,
+        TestStateReading,
+        parse_binary_results,
+    )
+
+    suite = ("     Running tests/bin_x.rs (target/debug/deps/bin_x-0123456789abcdef)\n\n"
+             "running 1 test\ntest t_x1 ... FAILED\n\n"
+             "test result: FAILED. 0 passed; 1 failed; 0 ignored\n")
+    fill_reading.reset_last_comparison()
+    reading = TestStateReading(parse_binary_results(suite))
+    fill_reading.note_last_reading(reading)
+    label = reading.binaries[0].label
+    fill_reading.note_kept_comparison(RegressionComparison(
+        newly_red=frozenset(), newly_crashed=(), excluded_crashed=(),
+        not_run=(), measured=(), base_pass=0, cur_pass=0,
+        base_executed=1, cur_executed=0, crashed_all_red=(label,)))
+    loc = FnLocator("lib.rs", "answer")
+    frontier = FailureFrontier.of_direct({loc: {"t_x1"}})
+    ws = _mk_ws(tmp_path)
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier)
+    fake = FakeFill()
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    assert not res.filled and res.attempts == 0
+    assert "phase_c.fn.fill.skip" in fake.events
+    # Negative control: the crash-blamed unit is the one that can complete
+    # the binary — it is dispatched.
+    ctx_blamed = replace(ctx, crash_blamed=frozenset({loc}))
+    fake2 = FakeFill()
+    _fill_one(fake2).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx_blamed)
+    assert "phase_c.fn.fill.skip" not in fake2.events
+    fill_reading.reset_last_comparison()

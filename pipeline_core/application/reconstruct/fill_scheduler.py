@@ -25,8 +25,10 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pipeline_core.application.reconstruct.fill_reading import (
+    begin_fill,
     kept_mark,
     kept_since,
+    unmeasurable_tests_now,
 )
 from pipeline_core.application.reconstruct.fill_routes import (
     FillRoute,
@@ -44,6 +46,7 @@ from pipeline_core.domain.fill_schedule import (
     RunClock,
     RunOutcome,
     ScheduledRun,
+    run_is_unmeasurable,
     schedule,
 )
 from pipeline_core.domain.models import FnLocator
@@ -207,7 +210,12 @@ def execute_fill(
     rows: list[RouteLedgerRow] = []
     stopped = False
     ordered = list(sched.ordered)
+    begin_fill()
     i = 0
+
+    def _flush(new_rows: list[RouteLedgerRow]) -> None:
+        if deps.ledger is not None and new_rows:
+            deps.ledger.append(deps.project, new_rows)
     while i < len(ordered):
         s = ordered[i]
         route = by_key[s.run.key]
@@ -234,7 +242,36 @@ def execute_fill(
                 rows.append(row)
                 _log_row(deps, row)
                 remaining_weight -= w.weight
+            _flush(rows[-len(wave):])
             continue
+        # Fill-time re-grade: a keep earlier in THIS fill made every aimed
+        # test's binary abort or hang, and no target is crash-blamed. The
+        # budget-0 contract still opens plan-time unmeasurable runs (no
+        # reading yet); a keep is the reading. Skip even under budget 0.
+        now_unmeas = unmeasurable_tests_now()
+        if deps.scheduled and now_unmeas:
+            skipped = [w for w in wave
+                       if run_is_unmeasurable(
+                           w.run, now_unmeas, deps.crash_blamed)]
+            kept_wave = [w for w in wave if w not in skipped]
+            if skipped:
+                for w in skipped:
+                    remaining_weight -= w.weight
+                    deps.log(
+                        f"  [phase-c/schedule] {w.run.label}: re-graded "
+                        "rebuy_flat at open — every aimed test is in a "
+                        "binary that did not complete at a keep in this fill")
+                    row = replace(
+                        _row_for(w, None, None, deps=deps, started=started,
+                                 minutes=0.0, share=0.0,
+                                 outcome=RunOutcome.DEFERRED),
+                        reason="rebuy_flat")
+                    rows.append(row)
+                    _log_row(deps, row)
+                _flush(rows[-len(skipped):])
+            if not kept_wave:
+                continue
+            wave = kept_wave
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         for w in wave:
@@ -281,8 +318,7 @@ def execute_fill(
                                outcome=RunOutcome.STOPPED)
                 rows.append(row)
                 _log_row(deps, row)
-            if deps.ledger is not None:
-                deps.ledger.append(deps.project, rows)
+            _flush(rows[-len(wave):])
             raise
         for w in wave:
             rep = reports.get(w.run.key) or RouteRunReport(empty=True)
@@ -296,13 +332,15 @@ def execute_fill(
                            minutes=minutes, share=shares[w.run.key])
             rows.append(row)
             _log_row(deps, row)
+        _flush(rows[-len(wave):])
+    deferred_rows: list[RouteLedgerRow] = []
     for s in sched.deferred:
         row = _row_for(s, None, None, deps=deps,
                        started=datetime.now(UTC).isoformat(timespec="seconds"),
                        minutes=0.0, share=0.0, outcome=RunOutcome.DEFERRED)
         rows.append(row)
+        deferred_rows.append(row)
         _log_row(deps, row)
-    if deps.ledger is not None:
-        deps.ledger.append(deps.project, rows)
+    _flush(deferred_rows)
     return FillExecution(schedule=sched, rows=tuple(rows), stopped=stopped)
 

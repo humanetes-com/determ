@@ -104,9 +104,11 @@ class SessionPorts:
     # compiler's spans resolve to — the peel's implication; None disables
     # the per-body peel (a failed change set is then restored whole).
     implicated: Callable[[Sequence[Any]], frozenset[tuple[str, str, str]]] | None = None
-    # (failing test names) -> test -> the units it executes on the tree as it
-    # stands, measured; None disables the per-turn coverage statement.
-    coverage: Callable[[Sequence[str]], Mapping[str, frozenset[FnSite]]] | None = None
+    # (failing test names, hung=label::test) -> test -> the units it executes
+    # on the tree as it stands, measured; None disables the per-turn
+    # coverage statement. ``hung`` is the judge's own reading of binaries
+    # that did not return; the coverage adapter skips them.
+    coverage: Callable[..., Mapping[str, frozenset[FnSite]]] | None = None
     now: Callable[[], float] = time.monotonic
     # () -> whether the fill schedule's clock lets this session open ANOTHER
     # turn; None means unbounded. Polled before each turn beside the
@@ -326,11 +328,17 @@ def run_slice_session(
             targets.append(TargetStatus(
                 t, False, said or "(no captured section — the binary may have aborted)",
                 observed.get(t) or observed.get(leaf, "")))
+        hung = tuple(cmp.hung_tests)
+        if after is not None:
+            hung = tuple(dict.fromkeys(
+                (*hung, *(f"{b.label}::{b.dangling or '?'}"
+                          for b in after.hung_binaries))))
         reading = TurnReading(
             targets=tuple(targets), newly_red=tuple(red_names),
             newly_red_said=outputs,
             newly_red_observed={n: observed[n] for n in red_names if n in observed},
-            crashed=tuple(cmp.newly_crashed), pass_delta=cmp.net_pass_delta,
+            crashed=tuple(cmp.newly_crashed), hung=hung,
+            pass_delta=cmp.net_pass_delta,
             executed_shrank=cmp.cur_executed < cmp.base_executed)
         return reading, after
 
@@ -503,7 +511,7 @@ def run_slice_session(
             prev_observed, prev_judged_turn = observed_now, turns
             if ports.coverage is not None and failing and cs.units:
                 try:
-                    owners = ports.coverage(failing)
+                    owners = ports.coverage(failing, hung=reading.hung)
                 except Exception as exc:  # noqa: BLE001 — a probe never ends a session
                     ports.log(f"  [phase-c/session] {label}: coverage failed "
                               f"({type(exc).__name__}: {exc})")
