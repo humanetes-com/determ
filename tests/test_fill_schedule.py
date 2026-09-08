@@ -386,3 +386,32 @@ def test_an_empty_row_neither_hides_the_last_verdict_nor_serves_the_targets() ->
         assert sched.ordered[0].reason == "never_served", outcome
     sched = schedule([f2], [_row(f1, RunOutcome.FLAT, 0)], oracle_fp="o", hollow={})
     assert sched.ordered[0].reason == "served"
+
+
+def test_a_per_kind_cap_defers_the_sessions_beyond_it_in_schedule_order() -> None:
+    """Run `3014175-d98ed09e` iter 3 (2026-09-08): eight packed sessions of
+    14–50 minutes ran back to back for 4 h 18 min before the file and
+    per-fn routes opened. Under `max_per_kind={SESSION: 4}` the first four
+    in schedule order open, the rest are deferred `kind_cap` (share 0) and
+    re-enter the next fill as never-served candidates; other kinds are
+    untouched. Control: no cap opens all eight."""
+    sessions = [_session(f"session #{i}", {f"t{i}"}, {FnLocator("src/x.rs", f"f{i}")}, seq=i)
+                for i in range(8)]
+    per_fn = _per_fn({FnLocator("src/x.rs", "s")})
+    capped = schedule([*sessions, per_fn], [], oracle_fp="o", hollow={},
+                      max_per_kind={RouteKind.SESSION: 4})
+    opened = [s.run.label for s in capped.ordered]
+    assert opened == [f"session #{i}" for i in range(4)] + [per_fn.label]
+    assert [s.run.label for s in capped.deferred] == [f"session #{i}" for i in range(4, 8)]
+    assert all(s.reason == "kind_cap" and s.deferred and s.share_minutes == 0.0
+               for s in capped.deferred)
+    # Under a budget the capped ones stay deferred and the rest share it.
+    budgeted = schedule([*sessions, per_fn], [], oracle_fp="o", hollow={},
+                        budget_minutes=100.0, max_per_kind={RouteKind.SESSION: 4})
+    assert len(budgeted.ordered) == 5 and len(budgeted.deferred) == 4
+    assert all(s.share_minutes for s in budgeted.ordered)
+    # Control: no cap, or a cap of 0, opens every session.
+    for cap in (None, {RouteKind.SESSION: 0}):
+        free = schedule([*sessions, per_fn], [], oracle_fp="o", hollow={},
+                        max_per_kind=cap)
+        assert len(free.ordered) == 9 and not free.deferred

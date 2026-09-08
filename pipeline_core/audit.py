@@ -131,14 +131,87 @@ def load_run(events_path: Path, prompts_dir: Path | None,
                    corrupt_event_lines=corrupt)
 
 
-def iteration_series(run: RunData) -> list[tuple[str, int, int]]:
-    """(ts, iteration, pass_count) per t4 completion — the per-iteration outcome."""
+#: Series keys for the loops that write no task4 completion.
+POST_MERGE_SERIES = "post-merge"
+TDD_SERIES_PREFIX = "tdd:"
+
+
+def _t4_series(run: RunData) -> list[tuple[str, int, int]]:
     out = []
     for e in run.task_done("task4"):
         d = e.get("data") or {}
         if "current_pass_count" in d:
             out.append((e.get("ts", ""), int(d.get("iteration", 0) or 0),
                         int(d["current_pass_count"])))
+    return out
+
+
+def _loop_series(run: RunData, event: str, key_of: Any) -> dict[str, list[tuple[str, int, int]]]:
+    out: dict[str, list[tuple[str, int, int]]] = {}
+    for e in run.named(event):
+        d = e.get("data") or {}
+        if "pass_count" not in d:
+            continue
+        out.setdefault(key_of(d), []).append(
+            (e.get("ts", ""), int(d.get("iter", 0) or 0), int(d["pass_count"])))
+    return out
+
+
+def iteration_series_by_loop(run: RunData) -> dict[str, list[tuple[str, int, int]]]:
+    """Every per-iteration pass series the run recorded, keyed by the loop
+    that wrote it: ``task4`` (repair-loop completions, `current_pass_count`),
+    ``post-merge`` (`post_merge.fill.iter`), and ``tdd:<cluster>`` for each
+    cluster's `phase_c.tdd.iter`.
+
+    The audit used to read task4 completions only. The TDD loop emits
+    `phase_c.tdd.iter` and never a task4 completion, so on a `restart_from
+    task2a` run every periodic report printed `C3 … SKIP only 0
+    iteration(s) recorded` / `C4 … SKIP fewer than 3 iterations` while the
+    loop recorded three sweeps (run `3014175-d98ed09e`, 2026-09-08, 20
+    reports over 06:37–12:00 UTC). Each cluster is its own series: clusters
+    score different oracles, so one merged series would read a cluster
+    switch as a floor breach."""
+    out: dict[str, list[tuple[str, int, int]]] = {}
+    t4 = _t4_series(run)
+    if t4:
+        out["task4"] = t4
+    for key, series in _loop_series(
+            run, "post_merge.fill.iter", lambda _d: POST_MERGE_SERIES).items():
+        out[key] = series
+    for key, series in _loop_series(
+            run, "phase_c.tdd.iter",
+            lambda d: TDD_SERIES_PREFIX + str(d.get("cluster") or "")).items():
+        out[key] = series
+    return out
+
+
+def iteration_series(run: RunData) -> list[tuple[str, int, int]]:
+    """(ts, iteration, pass_count) per iteration of the run's main loop:
+    task4 completions when the run has them, else the post-merge wave's
+    iterations, else the longest cluster series of the TDD loop. The
+    per-loop view is :func:`iteration_series_by_loop`."""
+    by_loop = iteration_series_by_loop(run)
+    if "task4" in by_loop:
+        return by_loop["task4"]
+    if POST_MERGE_SERIES in by_loop:
+        return by_loop[POST_MERGE_SERIES]
+    tdd = [v for k, v in by_loop.items() if k.startswith(TDD_SERIES_PREFIX)]
+    if not tdd:
+        return []
+    return max(tdd, key=len)
+
+
+def _deliberate_drops(run: RunData) -> set[str]:
+    """Timestamps of iteration events whose score describes a tree the
+    loop deliberately took apart (a crash/layout retrigger's re-stub,
+    `retrigger_reverted > 0` or a `retrigger_*` kind): the reading after
+    such an event is a new floor, not a breach of the old one."""
+    out: set[str] = set()
+    for e in run.named("phase_c.tdd.iter"):
+        d = e.get("data") or {}
+        if int(d.get("retrigger_reverted", 0) or 0) > 0 or str(
+                d.get("kind", "")).startswith("retrigger"):
+            out.add(e.get("ts", ""))
     return out
 
 
@@ -198,36 +271,57 @@ def check_genesis_propagation(run: RunData, project_dir: Path | None) -> Verdict
 
 
 def check_floor_monotonicity(run: RunData) -> Verdict:
-    series = iteration_series(run)
-    if len(series) < 2:
+    """Every loop's series is checked on its own; the verdict is the worst.
+    A drop at an iteration the loop deliberately re-stubbed (a retrigger)
+    re-bases the floor instead of breaching it — a deliberate destruction
+    invalidates the measurement for every consumer, this one included."""
+    by_loop = iteration_series_by_loop(run)
+    checkable = {k: v for k, v in by_loop.items() if len(v) >= 2}
+    if not checkable:
+        n = max((len(v) for v in by_loop.values()), default=0)
         return Verdict("C3 floor-monotonicity", SKIP,
-                       f"only {len(series)} iteration(s) recorded")
+                       f"only {n} iteration(s) recorded")
     restores = run.named("ratchet.restore")
-    best = series[0][2]
-    for ts, it, count in series[1:]:
-        if count < best:
-            corrected = any(r.get("ts", "") >= ts for r in restores)
-            if not corrected:
-                return Verdict("C3 floor-monotonicity", FAIL,
-                               f"iter {it}: pass {count} < best {best}, no ratchet.restore")
-        best = max(best, count)
-    return Verdict("C3 floor-monotonicity", PASS,
-                   f"{len(series)} iterations, floor held at {best}")
+    rebased = _deliberate_drops(run)
+    held: list[str] = []
+    for key, series in sorted(checkable.items()):
+        best = series[0][2]
+        for ts, it, count in series[1:]:
+            if ts in rebased:
+                best = count
+                continue
+            if count < best:
+                corrected = any(r.get("ts", "") >= ts for r in restores)
+                if not corrected:
+                    return Verdict("C3 floor-monotonicity", FAIL,
+                                   f"{key} iter {it}: pass {count} < best {best}, "
+                                   "no ratchet.restore")
+            best = max(best, count)
+        held.append(f"{key}: {len(series)} iterations, floor held at {best}")
+    return Verdict("C3 floor-monotonicity", PASS, "; ".join(held))
 
 
 def check_plateau(run: RunData, plateau_n: int) -> Verdict:
-    series = [c for _, _, c in iteration_series(run)]
-    if len(series) < plateau_n:
+    """Per loop; WARN on the first loop whose series repeats a score
+    `plateau_n` times in a row."""
+    by_loop = iteration_series_by_loop(run)
+    checkable = {k: [c for _, _, c in v] for k, v in by_loop.items()
+                 if len(v) >= plateau_n}
+    if not checkable:
         return Verdict("C4 plateau", SKIP, f"fewer than {plateau_n} iterations")
-    streak, worst = 1, 1
-    for prev, cur in zip(series, series[1:], strict=False):
-        streak = streak + 1 if cur == prev else 1
-        worst = max(worst, streak)
-    if worst >= plateau_n:
-        return Verdict("C4 plateau", WARN,
-                       f"{worst} consecutive iterations at pass={series[-1]} "
-                       f"(series: {series}) — repair is not advancing")
-    return Verdict("C4 plateau", PASS, f"series advances: {series}")
+    advancing: list[str] = []
+    for key, series in sorted(checkable.items()):
+        streak, worst = 1, 1
+        for prev, cur in zip(series, series[1:], strict=False):
+            streak = streak + 1 if cur == prev else 1
+            worst = max(worst, streak)
+        if worst >= plateau_n:
+            return Verdict("C4 plateau", WARN,
+                           f"{key}: {worst} consecutive iterations at "
+                           f"pass={series[-1]} (series: {series}) — repair is "
+                           "not advancing")
+        advancing.append(f"{key}: {series}")
+    return Verdict("C4 plateau", PASS, "series advances: " + "; ".join(advancing))
 
 
 def check_no_wipe(run: RunData) -> Verdict:

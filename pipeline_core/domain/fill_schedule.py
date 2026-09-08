@@ -105,6 +105,13 @@ class RunOutcome(StrEnum):
     DEFERRED = "deferred"    # the schedule did not open it this fill
     STOPPED = "stopped"      # a graceful stop ended it mid-way
     EMPTY = "empty"          # nothing to do when it opened
+    #: The run's only landings (if any) came from reasoning-capped replies:
+    #: a truncated call is not a measured refusal (the batch routes' rule
+    #: for an escalated rewrite), so the row is not a re-buy verdict and
+    #: the next schedule ranks the run as never served. Run
+    #: `3014175-d98ed09e` (2026-09-08) session #3: turn 0 cut at the cap,
+    #: an empty follow-up, `FLAT after 14.3 min (1 call(s))`.
+    UNMEASURED = "unmeasured"
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,8 +438,8 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
     if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
         return _RANK_PAYING, _REASON[_RANK_PAYING], deferrals
-    if last.outcome is RunOutcome.STOPPED:
-        # Interrupted: not evidence.
+    if last.outcome in (RunOutcome.STOPPED, RunOutcome.UNMEASURED):
+        # Interrupted, or every reply reasoning-capped: not evidence.
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
     rank = (_RANK_REBUY_REVERTED if last.outcome is RunOutcome.REVERTED
             else _RANK_REBUY_FLAT)
@@ -494,6 +501,7 @@ def schedule(
     readmit_after: int = 2,
     unmeasurable_tests: Collection[str] = (),
     crash_blamed: Collection[FnLocator] = (),
+    max_per_kind: Mapping[RouteKind, int] | None = None,
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
 
@@ -509,16 +517,27 @@ def schedule(
     set ranks as a flat re-buy (weight 0) even with no ledger row, so a
     positive budget defers it. ``budget_minutes=0`` still runs weight-zero
     (order only).
+
+    ``max_per_kind`` caps how many runs of a route kind one fill opens, in
+    schedule order: the runs beyond a kind's cap are DEFERRED (reason
+    ``kind_cap``, share 0) whatever the budget, and re-enter the next fill
+    as never-served candidates. Sized from run `3014175-d98ed09e`'s iter-3
+    fill (2026-09-08): eight packed sessions of 14–50 minutes ran back to
+    back for 4 h 18 min before the file and per-fn routes opened, so the
+    sweep that reads the fill arrived five hours after the previous one.
+    A cap of 0 or a missing kind means unbounded.
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
     # "Served under another identity" is a row that OPENED the try: a run
-    # the schedule deferred or a run that returned before its first
-    # dispatch (EMPTY) served nothing, so its targets under a moved body
-    # or oracle are still a new try, not a served one.
+    # the schedule deferred, a run that returned before its first dispatch
+    # (EMPTY), or a run whose every reply was reasoning-capped
+    # (UNMEASURED) served nothing, so its targets under a moved body or
+    # oracle are still a new try, not a served one.
     served_targets = frozenset(
         _served_key_of(r) for r in rows_list
-        if r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY))
+        if r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
+                             RunOutcome.UNMEASURED))
     order_index = {k: i for i, k in enumerate(today_order)}
 
     ranked: list[tuple[RouteRun, int, str, int, int]] = []
@@ -568,8 +587,25 @@ def schedule(
             run=run, rank=rank, weight=weight, reason=reason, level=level,
             blocked_by=by))
 
+    # The per-kind cap, applied in schedule order so the runs the order put
+    # first are the ones that open; the rest are deferred whatever the
+    # budget says and are never-served candidates of the next fill.
+    capped: list[ScheduledRun] = []
+    if max_per_kind:
+        opened: dict[RouteKind, int] = {}
+        kept_sched: list[ScheduledRun] = []
+        for s in scheduled:
+            cap = int(max_per_kind.get(s.run.kind, 0) or 0)
+            if cap > 0 and opened.get(s.run.kind, 0) >= cap:
+                capped.append(replace(s, deferred=True, share_minutes=0.0,
+                                      reason="kind_cap"))
+                continue
+            opened[s.run.kind] = opened.get(s.run.kind, 0) + 1
+            kept_sched.append(s)
+        scheduled = kept_sched
+
     if budget_minutes <= 0:
-        return FillSchedule(tuple(scheduled), (), 0.0)
+        return FillSchedule(tuple(scheduled), tuple(capped), 0.0)
 
     runnable = [s for s in scheduled if s.weight > 0]
     if not runnable:
@@ -580,7 +616,7 @@ def schedule(
         runnable = list(scheduled)
     total_w = sum(s.weight for s in runnable)
     ordered: list[ScheduledRun] = []
-    deferred: list[ScheduledRun] = []
+    deferred: list[ScheduledRun] = list(capped)
     for s in scheduled:
         if s.weight <= 0:
             deferred.append(replace(s, deferred=True, share_minutes=0.0))

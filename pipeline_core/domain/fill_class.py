@@ -20,14 +20,16 @@ class FillOutcomeClass(StrEnum):
     terminated as."""
 
     CASHED = "cashed"
-    """Attributed tests were observed passing, or a banked joint
-    improvement kept the body on that positive evidence. A compiling
-    accept with an empty passing set is :attr:`UNREACHABLE_VERDICT` —
-    not this."""
+    """The fill's reading moved verdicts: attributed tests observed
+    passing, a banked joint improvement, or a net gain in the suite
+    reading the route ledger grades on. A compiling accept whose reading
+    moved nothing is :attr:`UNREACHABLE_VERDICT` — not this."""
 
     WRONG_BODY = "wrong"
     """The right unit, a compiling (or peeled) answer that did not cash:
-    U2 REJECT revert, POST-FILL MISMATCH, peel that restored the snapshot."""
+    U2 REJECT revert, peel that restored the snapshot. A keep whose
+    reading moved verdicts is :attr:`CASHED`; a still-stubbed member
+    after accept is :attr:`ANSWER_DROPPED` at the splice, not this."""
 
     MIS_TARGETED = "mis"
     """The record already said this unit cannot pay (refill-only, no
@@ -66,8 +68,11 @@ _FIELD = {
 }
 
 
-def class_for_kept(*, passed: Collection[str], unreachable: bool) -> FillOutcomeClass:
-    """CASHED only when attributed tests were observed passing.
+def class_for_kept(
+    *, passed: Collection[str], unreachable: bool,
+    net_delta: int = 0, newly_passing: Collection[str] = (),
+) -> FillOutcomeClass:
+    """CASHED when the fill's reading moved verdicts; UNREACHABLE otherwise.
 
     The three fill routes used to assign CASHED in the else of a U2
     decision chain, ten lines before they computed ``_passed_f`` /
@@ -75,7 +80,26 @@ def class_for_kept(*, passed: Collection[str], unreachable: bool) -> FillOutcome
     priced at run ``1064759-0f23fb68`` (2026-08-15/16): 50 successes
     against a byte-identical verdict vector. ``unreachable=True`` is
     ACCEPT_EXTERNAL_ONLY, still-stubbed sibling, crash-keep, B3-while-red.
+
+    The opposite miscount: ``passed`` is the unit's ATTRIBUTED tests
+    observed passing, and a fill run with no attribution (every leftover
+    test hollow) has an empty set for every unit, so a joint win graded
+    UNREACHABLE. Run `3014175-d98ed09e` (2026-09-08) iter 2: the file-
+    first `src/error.rs` group read `pass 26 -> 32` and the per-fn
+    `object_ref` keep `pass 32 -> 87`, both graded on an empty attributed
+    set, and the iter line printed `cashed=0` beside two CASHED ledger
+    rows (+6 and +55). The class now reads the evidence the ledger grades
+    on: ``net_delta`` and ``newly_passing`` are the fill reading the keep
+    site measured (`fill_reading.last_comparison` at the keep, the same
+    reading `note_kept_comparison` records for the route row). A reading
+    that moved verdicts is CASHED whatever the attribution says;
+    UNREACHABLE is a kept body whose reading moved nothing and whose
+    attributed tests could not run (``unreachable`` still vetoes an
+    attributed pass observed under a crash-keep or a red crate — a
+    partial reading is not a verdict; the fill reading is).
     """
+    if net_delta > 0 or newly_passing:
+        return FillOutcomeClass.CASHED
     if unreachable or not passed:
         return FillOutcomeClass.UNREACHABLE_VERDICT
     return FillOutcomeClass.CASHED

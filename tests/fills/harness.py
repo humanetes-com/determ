@@ -190,7 +190,7 @@ class FakeRoute:
     """A route whose run replays the recorded attempt sequence through the
     real attempt bookkeeping. Notes are stamped with the run label the
     executor binds on the running thread (the loop's own stamping); the
-    row is read with `since(..., label)` as `impl_fill._report_since`
+    row is read with `since(..., label)` as `impl_fill.prepare_impl_fill`'s `_report_since`
     does, or — `labelled=False`, the pre-fix reading — off the whole tick
     window, the negative control of the wave-attribution sentence."""
 

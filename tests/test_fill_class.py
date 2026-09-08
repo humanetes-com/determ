@@ -36,6 +36,20 @@ def test_class_for_kept_is_cashed_only_with_observed_passes() -> None:
         FillOutcomeClass.UNREACHABLE_VERDICT)
 
 
+def test_class_for_kept_a_reading_that_moved_is_cashed() -> None:
+    """A keep whose suite reading moved verdicts is CASHED even with an
+    empty attributed set — the session keep of run 3014175-d98ed09e
+    iter 3 session #1 (net +5, a target still red) and the per-fn
+    object_ref keep of iter 2 (net +55, hollow leftover set). Negative
+    control: the same call with the reading withheld is UNREACHABLE."""
+    assert class_for_kept(
+        passed=frozenset(), unreachable=False, net_delta=5) is (
+        FillOutcomeClass.CASHED)
+    assert class_for_kept(
+        passed=frozenset(), unreachable=False, net_delta=0) is (
+        FillOutcomeClass.UNREACHABLE_VERDICT)
+
+
 def test_counter_and_note_emit() -> None:
     events: list[tuple[str, dict]] = []
     c = FillClassCounter()

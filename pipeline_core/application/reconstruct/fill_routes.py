@@ -20,7 +20,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from pipeline_core.domain.fill_attempts import AttemptsDelta
+from pipeline_core.domain.fill_attempts import AttemptsDelta, AttemptsSnapshot
+from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteLedgerRow,
@@ -34,7 +35,21 @@ __all__ = [
     "PreparedFill",
     "RouteLedger",
     "RouteRunReport",
+    "RouteSnap",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RouteSnap:
+    """The fill's shared counters at a run's start, so the run's own
+    landings can be read off the difference at its end: the attempt
+    ledger (units and calls, each stamped with the run that made it) and
+    the classes this run's thread has classified so far. A route adapter
+    takes one from the fill context when its run opens and hands it back
+    for the report; it never reads inside."""
+
+    units: AttemptsSnapshot
+    classes: FillClassHistogram
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +71,11 @@ class RouteRunReport:
     #: The route's own verdict-delta reading, when it has one (a session's
     #: last judged turn); None means "let the executor's reading decide".
     own_delta: int | None = None
+    #: The run measured nothing it can be graded on: its only landings (if
+    #: any) came from reasoning-capped replies. A truncated call is not a
+    #: measured refusal, so the ledger grades such a run UNMEASURED rather
+    #: than FLAT and the next schedule ranks it as never served.
+    unmeasured: bool = False
 
     @classmethod
     def from_delta(cls, delta: AttemptsDelta,

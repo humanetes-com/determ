@@ -868,3 +868,129 @@ def test_u2_gate_names_the_units_own_first_panic_when_drop_then_aborts(tmp_path:
     assert "undefined behaviour" in seg.detail
     assert seg.external_stub_sites == frozenset() and seg.crash is not None
     assert seg.crash.stub_sites == frozenset()
+
+
+# --- a test binary that HANGS is a reading, not "nothing was measured" ----
+
+_HUNG_AFTER = ("    Running unittests src/lib.rs (t/lib-1)\n"
+               "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+               "test result: ok. 2 passed; 0 failed; 0 ignored\n"
+               "    Running tests/ptr_gen_1.rs (t/ptr_gen_1-1)\n"
+               "running 3 tests\n"
+               "test test_error_context_display ... FAILED\n"
+               "test test_error_debug_chain ... \n"
+               "\nTIMEOUT after 120s")
+
+
+def _two_binary_baseline() -> object:
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    base_out = ("    Running unittests src/lib.rs (t/lib-1)\n"
+                "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+                "test result: ok. 2 passed; 0 failed; 0 ignored\n"
+                "    Running tests/ptr_gen_1.rs (t/ptr_gen_1-1)\n"
+                "running 3 tests\ntest test_error_context_display ... FAILED\n"
+                "test test_error_debug_chain ... ok\ntest test_z ... ok\n"
+                "test result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+                "    Running tests/later.rs (t/later-1)\n"
+                "running 1 test\ntest later ... ok\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored\n")
+    return TestStateReading(parse_binary_results(base_out))
+
+
+def test_a_timed_out_capture_with_an_open_section_is_a_hung_reading() -> None:
+    """Run `3014175-d98ed09e` / `3371694-c8835690` (2026-09-08): the timeout
+    cut `cargo test` inside `tests/ptr_gen_1.rs::test_error_debug_chain`;
+    every rc -1 path read the capture as "no reading". The capture the
+    cargo adapter returns on a timeout is the partial stdout, and its open
+    section names the binary that hung and the test in flight."""
+    from pipeline_core.application.reconstruct.cargo_runner import measure_test_state
+    from pipeline_core.domain.test_results import hung_sections, parse_binary_results
+    hung = hung_sections(_HUNG_AFTER)
+    assert [(b.label, b.dangling) for b in hung] == [
+        ("tests/ptr_gen_1.rs", "test_error_debug_chain")]
+    # Only the LAST open section is the hang; an earlier unclosed one is a
+    # crash cargo went past. Without `timed_out` nothing is marked hung.
+    assert not any(b.hung for b in parse_binary_results(_HUNG_AFTER))
+    reading = measure_test_state(_const_run_cargo(-1, _HUNG_AFTER),
+                                 "cargo test", Path("."), {})
+    assert reading is not None and reading.timed_out
+    assert [b.label for b in reading.hung_binaries] == ["tests/ptr_gen_1.rs"]
+    # Control (the pre-fix contract, kept): a timeout that cut the BUILD —
+    # no section opened — is still inconclusive.
+    assert measure_test_state(_const_run_cargo(-1, "   Compiling anyhow v1\n"),
+                              "cargo test", Path("."), {}) is None
+
+
+def test_regression_gate_reverts_a_hang_whatever_the_count() -> None:
+    """The hung binary was passing 2 at baseline and the binary after it
+    never ran; the comparison names the hang and the gate reverts before
+    the crash-only branch (which asks what panicked — a hung binary printed
+    nothing). Control: the same baseline against a completed after-reading
+    that merely fails the test is a plain newly-red revert, not a hang."""
+    from pipeline_core.domain.test_results import compare_readings
+    seen: list[tuple[str, str]] = []
+    out = _regr(_const_run_cargo(-1, _HUNG_AFTER), _two_binary_baseline(),
+                guard=lambda k, m: seen.append((k, m)))
+    assert out is not None
+    cmp, detail = out
+    assert cmp.newly_hung == ("tests/ptr_gen_1.rs",)
+    assert cmp.hung_tests == ("tests/ptr_gen_1.rs::test_error_debug_chain",)
+    assert cmp.regressed and "hung" in cmp.summary
+    assert cmp.not_run == ("tests/later.rs",)
+    assert cmp.signature == frozenset({"__binary_hang__:tests/ptr_gen_1.rs"})
+    assert "HANG" in detail and "test_error_debug_chain" in detail
+    assert [k for k, _ in seen] == ["phase-c/hang_reverted"]
+    # A hang with NOTHING passing at baseline in the hung binary is still a
+    # regression: it blocks every later binary and every later sweep.
+    from pipeline_core.domain.test_results import TestStateReading, parse_binary_results
+    all_red = ("    Running unittests src/lib.rs (t/lib-1)\n"
+               "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+               "test result: ok. 2 passed; 0 failed; 0 ignored\n"
+               "    Running tests/ptr_gen_1.rs (t/ptr_gen_1-1)\n"
+               "running 1 test\ntest test_error_debug_chain ... FAILED\n"
+               "test result: FAILED. 0 passed; 1 failed; 0 ignored\n")
+    base_red = TestStateReading(parse_binary_results(all_red))
+    after = TestStateReading(parse_binary_results(_HUNG_AFTER, timed_out=True))
+    cmp2 = compare_readings(base_red, after)
+    assert cmp2.newly_hung and cmp2.regressed and cmp2.crash_lost_pass == 0
+    # Control: a completed after-reading with the same test simply FAILED.
+    failed_out = _HUNG_AFTER.replace("test test_error_debug_chain ... \n\nTIMEOUT after 120s",
+                                     "test test_error_debug_chain ... FAILED\n"
+                                     "test result: FAILED. 0 passed; 2 failed; 0 ignored\n")
+    out2 = _regr(_const_run_cargo(101, failed_out), _two_binary_baseline())
+    assert out2 is not None and not out2[0].newly_hung
+    assert "test_error_debug_chain" in out2[0].newly_red
+
+
+def test_u2_gate_rejects_a_scoped_run_that_hangs_inside_its_own_test() -> None:
+    """The scoped run carries the unit's tests and nothing else, so a test
+    that never returned is this unit's self failure; the detail says HANG
+    so the next attempt changes control flow, not values. Control (the
+    pre-fix contract, kept): a timeout that cut the build is still the
+    fail-safe accept."""
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        run_scoped_tests,
+        u2_test_gate,
+    )
+    from pipeline_core.domain.test_report import U2Decision
+    seen: list[tuple[str, str]] = []
+    v = u2_test_gate(
+        _const_run_cargo(-1, _HUNG_AFTER), {"test_error_debug_chain"},
+        frozenset(), "cargo test", Path("."), {}, structure=None, enabled=True,
+        timeout=120, err_cap=4000, guard=lambda k, m: seen.append((k, m)))
+    assert v.decision is U2Decision.REJECT
+    assert v.self_failures == frozenset({"test_error_debug_chain"})
+    assert "HANG" in v.detail and "120s" in v.detail
+    assert [k for k, _ in seen] == ["phase-c/u2_hang"]
+    scoped = run_scoped_tests(_const_run_cargo(-1, _HUNG_AFTER), "cargo test",
+                              Path("."), {}, timeout=120, err_cap=4000)
+    assert not scoped.passed and scoped.failed == {"test_error_debug_chain"}
+    assert "HANG" in scoped.detail
+    build_cut = u2_test_gate(
+        _const_run_cargo(-1, "   Compiling anyhow v1\n"), {"test_error_debug_chain"},
+        frozenset(), "cargo test", Path("."), {}, structure=None, enabled=True,
+        timeout=120, err_cap=4000, guard=lambda *_: None)
+    assert build_cut.decision is U2Decision.ACCEPT

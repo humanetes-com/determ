@@ -207,9 +207,11 @@ from pipeline_core.domain.test_report import (
     parse_test_output,
 )
 from pipeline_core.domain.test_results import (
+    BinaryResult,
     TestStateReading,
     build_broke,
     compile_error_digest,
+    hung_sections,
     lib_compile_clean,
     parse_binary_results,
     parse_failed_tests,
@@ -576,6 +578,23 @@ def _clear_coverage_on_return(
     return wrapped
 
 
+def _read_max_sessions_per_fill() -> int:
+    """`SLICE_SESSION_MAX_PER_FILL`, 0 (unbounded) on unset or garbage.
+
+    Read once at cluster entry like the stops. Not a stop: the sessions
+    beyond the cap are DEFERRED by the fill schedule and are the next
+    fill's never-served candidates, so a cap prevents no reading — it
+    moves the sweep that reads the fill earlier. Sized from run
+    `3014175-d98ed09e`'s iter-3 fill (2026-09-08): eight packed sessions
+    of 14.3–50.1 min (258 min, 07:32–11:50 UTC) before the file wave (34
+    min) and the per-fn route opened."""
+    raw = os.getenv("SLICE_SESSION_MAX_PER_FILL", "0").strip() or "0"
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def _read_fill_budget_minutes() -> float:
     """`TDD_FILL_BUDGET_MINUTES`, 0 on unset or garbage."""
     raw = os.getenv("TDD_FILL_BUDGET_MINUTES", "0")
@@ -685,6 +704,7 @@ def run_phase_c_tdd(
     # flight always completes, so a fill overruns by at most one unit. `0` =
     # order only (no shares, nothing deferred). Read once, like the stops.
     _fill_budget = _read_fill_budget_minutes()
+    _max_sessions = _read_max_sessions_per_fill()
 
     # The GPU protector (domain/flat_score.py). The plateau budget above charges
     # only on a COMPLETED frontier traversal, which under the dispatch cap is
@@ -764,6 +784,8 @@ def run_phase_c_tdd(
             else ", no-frontier-stop=off")
          + (f", fill-phase-stop={_fill_phase_max} min"
             if _fill_phase_max > 0 else ", fill-phase-stop=off")
+         + (f", sessions-per-fill={_max_sessions}"
+            if _max_sessions > 0 else ", sessions-per-fill=unbounded")
          + f", followup-think={'on' if followup_think_env_on() else 'off'}")
 
     if deps.migrate_retro_evidence is not None:
@@ -1564,9 +1586,16 @@ def run_phase_c_tdd(
 
     def _reconcile(rc_: int, output_: str, pass_n: int, fail_n: int,
                    failed_: set[str]) -> SweepReading:
-        _bins = parse_binary_results(output_)
+        # rc -1 is the caller's timeout. With a test section open at the cut
+        # the capture is a reading — that binary HUNG (marked so, its
+        # in-flight test named) and the binaries after it never ran — and it
+        # is reconciled exactly like a crashed one below: the vanished tests
+        # count as failing. Only a cut before any section opened (a build
+        # that did not finish) has no oracle to reconcile against.
+        _bins = parse_binary_results(output_, timed_out=(rc_ == -1))
         _passing = TestStateReading(_bins).passed_names
-        if rc_ == -1 or deps.active_test_inventory is None:
+        if ((rc_ == -1 and not any(b.hung for b in _bins))
+                or deps.active_test_inventory is None):
             return SweepReading(fail_n, failed_, SweepOracle(frozenset(), 0),
                                 _passing)
         _ig = parse_test_counts(output_)[2]
@@ -1778,6 +1807,22 @@ def run_phase_c_tdd(
         rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
                                   timeout=test_timeout)
         dt = time.monotonic() - t0
+
+        def _hung_of(rc_: int, output_: str) -> tuple[BinaryResult, ...]:
+            return hung_sections(output_ or "") if rc_ == -1 else ()
+
+        def _log_hung(hung_: tuple[BinaryResult, ...], *,
+                      iter_: int = iter_n) -> None:
+            if hung_:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_}: cargo test rc=-1 HUNG in "
+                    f"{hung_[-1].label}::{hung_[-1].dangling or '?'} after "
+                    f"{test_timeout}s — the binary did not die, a test never "
+                    "returned; its tests and every binary after it count as "
+                    "failing (a crash-shaped reading), not as 'no reading'.")
+
+        _hung = _hung_of(rc, output)
+        _log_hung(_hung)
         pass_count, fail_count, _ignored = parse_test_counts(output)
         cur_failed = parse_failed_tests(output)
         _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
@@ -1845,6 +1890,8 @@ def run_phase_c_tdd(
             # lock the plateau).
             rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
                                         timeout=test_timeout)
+            _hung = _hung_of(rc, output)
+            _log_hung(_hung)
             pass_count, fail_count, _ignored = parse_test_counts(output)
             cur_failed = parse_failed_tests(output)
             _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
@@ -1889,11 +1936,77 @@ def run_phase_c_tdd(
                 _reseed_site("after batch-ratchet restore", iter_n)
                 rc, output = deps.run_cargo(test_cmd, target_src_dir, cluster_env,
                                             timeout=test_timeout)
+                _hung = _hung_of(rc, output)
+                _log_hung(_hung)
                 pass_count, fail_count, _ignored = parse_test_counts(output)
                 cur_failed = parse_failed_tests(output)
                 _sweep = _reconcile(rc, output, pass_count, fail_count, cur_failed)
                 fail_count, cur_failed, _oracle = (
                     _sweep.fail_count, _sweep.failed, _sweep.oracle)
+        # A HUNG sweep in a process that holds no batch snapshot — the entry
+        # sweep of a resumed run — cannot be clawed back by the ratchet above,
+        # and the hung tree is what every later sweep would re-measure at the
+        # cost of the whole timeout. The durable pair is the tier that
+        # survives the process boundary; it used to fire only at the
+        # flat-score stop (disabled under `gpu-guard=off`). It fires HERE,
+        # once per process, when its mark beats the hung reading's verified
+        # floor. Run `3371694-c8835690` (2026-09-08): the entry sweep hung in
+        # `tests/ptr_gen_1.rs` at a floor of 27 with `stable:91` on disk one
+        # directory away, and the loop left the cluster for nightly.
+        if (_hung and _bratchet_snap is None and not _restore_spent
+                and deps.restore_best_tree_pair is not None
+                and deps.load_best_tree_mark is not None):
+            _mark_h = deps.load_best_tree_mark(project_dir, cluster.name)
+            if _mark_h is not None and _mark_h.pass_count > pass_count:
+                _pre_pairs_h = qualified_verdicts(
+                    parse_binary_results(output, timed_out=True))
+                _restored_h = deps.restore_best_tree_pair(
+                    project_dir, cluster.name, target_src_dir)
+                if _restored_h is not None:
+                    _restore_spent = True
+                    _bodies_h, _layout_h, _left_h = _restored_h
+                    _where_h = f"{_hung[-1].label}::{_hung[-1].dangling or '?'}"
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: hung tree restored "
+                        f"— the sweep hung inside {_where_h} at a verified floor "
+                        f"of {pass_count} and the durable mark is "
+                        f"{_mark_h.pass_count}/{_mark_h.oracle_size}; RESTORED "
+                        f"that pair ({_bodies_h} body file(s) + {_layout_h} "
+                        "layout file(s)). THE COST, stated: every fill landed "
+                        "since the mark is discarded"
+                        + (f"; {len(_left_h)} file(s) present here and not in "
+                           f"the snapshot are left in place ({_left_h[:3]})"
+                           if _left_h else "")
+                        + ". The restore is spent for this process; re-testing.")
+                    deps.emit("phase_c.tdd.hung_tree_restored", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "pass_count": pass_count, "hung_in": _where_h,
+                        "mark_pass": _mark_h.pass_count,
+                        "mark_oracle": _mark_h.oracle_size,
+                        "bodies": _bodies_h, "layout_files": _layout_h,
+                        "leftovers": _left_h[:20]})
+                    # A deliberate destruction invalidates the measurement for
+                    # every consumer: the held-over coverage binding and the
+                    # re-seed site described the discarded tree.
+                    bind_coverage_slice(None)
+                    _reseed_site("after hung-sweep restore", iter_n)
+                    rc, output = deps.run_cargo(test_cmd, target_src_dir,
+                                                cluster_env, timeout=test_timeout)
+                    _hung = _hung_of(rc, output)
+                    _log_hung(_hung)
+                    pass_count, fail_count, _ignored = parse_test_counts(output)
+                    cur_failed = parse_failed_tests(output)
+                    _sweep = _reconcile(rc, output, pass_count, fail_count,
+                                        cur_failed)
+                    fail_count, cur_failed, _oracle = (
+                        _sweep.fail_count, _sweep.failed, _sweep.oracle)
+                    if _bodies_h > 0 and qualified_verdicts(parse_binary_results(
+                            output, timed_out=(rc == -1))) == _pre_pairs_h:
+                        deps.log(
+                            f"  {tag} [phase-c/tdd] iter {iter_n}: the sweep after "
+                            "the hung-tree restore is byte-identical to the "
+                            "hung reading — the binaries did not rebuild; this "
+                            "reading measured the discarded tree.")
         # Refresh the best-known snapshot on the first iter and each strict
         # improvement (never on a plateau — the existing best-state snapshot is
         # equivalent and re-reading the tree would be wasted I/O). No oracle
@@ -1994,6 +2107,8 @@ def run_phase_c_tdd(
                  "passed_pairs": [list(p) for p in sorted(_p_pairs)][:200],
                  "failed_pairs": [list(p) for p in sorted(_f_pairs)][:200],
                  "incomplete": sorted(_incomplete),
+                 "hung": sorted(b.label for b in _hung),
+                 "hung_tests": sorted(f"{b.label}::{b.dangling or '?'}" for b in _hung),
                  "reconciled": _rec.reconciled,
                  "reconcile_note": _rec.note,
                  # The outer-loop budget travels with every iter event so a
@@ -2162,9 +2277,14 @@ def run_phase_c_tdd(
             # restore below must not claim it rolled the winning tree back.
             _cluster_done = True
             break
-        if rc == -1:
+        if rc == -1 and not _hung:
+            # The timeout cut the run before any test section opened: the
+            # build did not finish, so there is no reading of any kind. A
+            # cut INSIDE a test is `_hung` and was scored above as a
+            # crash-shaped reading; it never reaches this exit.
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test TIMED OUT "
-                 f"({test_timeout}s). Stopping.")
+                 f"({test_timeout}s) before any test binary opened a section — "
+                 "the build did not finish. Stopping.")
             deps.emit("phase_c.tdd.iter", data={
                 **_prov,
                 "cluster": cluster.name, "iter": iter_n, "rc": -1,
@@ -5100,6 +5220,7 @@ def run_phase_c_tdd(
                     fill_budget_minutes=_fill_budget,
                     fill_iteration=iter_n,
                     run_id=deps.run_id,
+                    max_sessions_per_fill=_max_sessions,
                     leaf_name_counts=leaf_counts,
                     fr_path=fr_path,
                     tdd_frontier_keys=frontier_keys,

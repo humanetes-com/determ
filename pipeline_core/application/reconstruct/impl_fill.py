@@ -49,6 +49,7 @@ from pipeline_core.application.reconstruct.fill_routes import (
     PreparedFill,
     RouteLedger,
     RouteRunReport,
+    RouteSnap,
 )
 from pipeline_core.application.reconstruct.fill_scheduler import (
     FillExecutionDeps,
@@ -68,6 +69,12 @@ from pipeline_core.application.reconstruct.pull_resolver import (
     ask_with_pulls,
     make_request_answerer,
     reconstruction_file_reader,
+)
+from pipeline_core.application.reconstruct.routes import (
+    FileRoute,
+    ImplRoute,
+    PairRoute,
+    SessionRoute,
 )
 from pipeline_core.application.reconstruct.slice_session import (
     SessionPorts,
@@ -120,7 +127,6 @@ from pipeline_core.domain.failure_signature import (
     structural_group_note,
 )
 from pipeline_core.domain.fill_attempts import (
-    AttemptsSnapshot,
     FillAttempts,
     current_run_label,
 )
@@ -133,8 +139,6 @@ from pipeline_core.domain.fill_class import (
 )
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.fill_schedule import (
-    RouteKind,
-    RouteRun,
     RunClock,
     bodies_sha_of,
     hollow_by_test,
@@ -183,7 +187,12 @@ from pipeline_core.domain.pair_fill import (
     pair_record_container,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
-from pipeline_core.domain.reasoning_cap import serving_units
+from pipeline_core.domain.reasoning_cap import (
+    CallCapReading,
+    observe_call,
+    read_call,
+    serving_units,
+)
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
     aimed_refill_names,
@@ -256,7 +265,6 @@ from pipeline_core.domain.slice_session import (
     expand_locator_sites,
     locator_only_expansions,
     plan_slices,
-    slice_for_run,
     slice_plan_gaps,
     slice_plan_payload,
 )
@@ -1881,9 +1889,24 @@ def prepare_impl_fill(
                 _refill_names = joint_overwrite_names(
                     all_blocks, file_rel,
                     (rb.fn_data["fn_name"] for rb in routing.routed))
+                # ONE authorization set: the names the prompt told the model
+                # are writable are the names the splice lets overwrite. The
+                # installable complement (`_installable`, rendered as
+                # "writable in this prompt … rewrite it together with the
+                # producer") was in the prompt and not in this set, so every
+                # installable body the model returned was refused
+                # `target_not_stub` — run `3014175-d98ed09e` (2026-09-08,
+                # iter 2, `src/error.rs`): three offered, three returned,
+                # three refused. In the coordinated case that instruction
+                # exists for, the producer would land and its table would
+                # not: a tree holding halves of two answers.
+                _overwrite_names = _refill_names | frozenset(
+                    i.fn_name for i in _installable)
                 if _retry_names is not None:
                     _refill_names = frozenset(
                         n for n in _refill_names if n in _retry_names)
+                    _overwrite_names = frozenset(
+                        n for n in _overwrite_names if n in _retry_names)
                 for rb in routing.routed:
                     wc = rb.fn_data["where_clause"]
                     if wc and (rb.via_trait_default
@@ -1895,14 +1918,14 @@ def prepare_impl_fill(
                     ok, reason, _delta = _splice_fn_with_where(
                         file_path, rb.container, _fn,
                         rb.fn_data["body"], wc,
-                        allow_nonstub=_fn in _refill_names,
+                        allow_nonstub=_fn in _overwrite_names,
                         sig_text=rb.sig_text)
                     if ok:
                         spliced_now += 1
                         _landed.append(LandedBody(
                             _fn, rb.container, rb.sig_text,
                             rb.fn_data["body"], wc,
-                            overwrite_authorized=_fn in _refill_names))
+                            overwrite_authorized=_fn in _overwrite_names))
                         if rb.via_member_name:
                             _log(f"  [phase-c/file] {file_rel}: `{_fn}` was "
                                  f"tagged {rb.fn_data['block']!r}, which names "
@@ -1937,8 +1960,18 @@ def prepare_impl_fill(
                              f"[routed to `{rb.container}`, "
                              + (f"already filled earlier in this reply via "
                                 f"`{_dup[0]}`" if _dup else
-                                f"overwrite {'allowed' if _fn in _refill_names else 'not authorized'}")
+                                f"overwrite {'allowed' if _fn in _overwrite_names else 'not authorized'}")
                              + "]")
+                        # A body the reader lost is charged to the MEMBER it
+                        # was for — a group with one dropped member grades
+                        # `dropped` for that member and by its own reading
+                        # for the rest. An unauthorized overwrite is a
+                        # refusal by contract, not a lost answer; a
+                        # duplicate of a body that already landed is not an
+                        # answer at all.
+                        if reason != "target_not_stub" and not _dup:
+                            _cls(FillOutcomeClass.ANSWER_DROPPED,
+                                 f"{file_rel}::{_fn}", "file")
                 # File-first is the ATOMIC co-dependent fill: it must land a
                 # file's FREE functions together with its impls, else a
                 # producer/consumer cycle (the free `not(cond)` that the `Bool`
@@ -2272,8 +2305,11 @@ def prepare_impl_fill(
                     # The peel survivors, not `_attempted_names`: a peeled
                     # name was restored and stays reverted.
                     _note_kept(file_rel, [b.fn_name for b in _landed])
-                    note_kept_comparison(last_comparison() if _regr_file is None
-                                         and tdd_test_cmd else None)
+                    # The reading the route row is graded on; the class
+                    # reads the same one below.
+                    _cmp_f = (last_comparison() if _regr_file is None
+                              and tdd_test_cmd else None)
+                    note_kept_comparison(_cmp_f)
                     _record_regression_evidence(
                         _retro_key(file_rel, m.fn_name, b.container)
                         for b in fblocks
@@ -2299,23 +2335,30 @@ def prepare_impl_fill(
                         and str(r.get("fn_name", "")) in set(stub_names)
                         and str(r.get("fn_name", "")) not in set(_peel_reverted)})
                     if _left:
+                        # The still-stubbed members were charged where the
+                        # reader lost them (the splice refusal above); the
+                        # group is graded by its own reading like any
+                        # other keep. Charging the whole group WRONG for
+                        # one member printed `cashed=0 wrong=1` beside a
+                        # `pass 26 -> 32` reading (run `3014175-d98ed09e`,
+                        # 2026-09-08, iter 2).
                         _log(f"  [phase-c/file] {glabel}: POST-FILL MISMATCH "
                              f"— still stubbed after accept: {_left}.")
                         _emit("phase_c.file.fill.mismatch", data={
                             "cluster": cluster_name, "file": file_rel,
                             "group": glabel, "still_stubbed": _left})
-                        _cls(FillOutcomeClass.WRONG_BODY, glabel, "file")
-                    else:
-                        _passed_f = (frozenset(_bank.resolved) if _bank is not None
-                                     else (_u2_file.self_passed
-                                           if _u2_file is not None else frozenset()))
-                        _kept_f = _crash_keep_file or _nonregr_keep_file
-                        _cls(class_for_kept(
-                            passed=_passed_f, unreachable=_kept_f
-                            or (_u2_file is not None
-                                and _u2_file.decision
-                                is U2Decision.ACCEPT_EXTERNAL_ONLY)),
-                             glabel, "file")
+                    _passed_f = (frozenset(_bank.resolved) if _bank is not None
+                                 else (_u2_file.self_passed
+                                       if _u2_file is not None else frozenset()))
+                    _kept_f = _crash_keep_file or _nonregr_keep_file
+                    _cls(class_for_kept(
+                        passed=_passed_f, unreachable=_kept_f
+                        or (_u2_file is not None
+                            and _u2_file.decision
+                            is U2Decision.ACCEPT_EXTERNAL_ONLY),
+                        net_delta=(_cmp_f.net_pass_delta
+                                   if _cmp_f is not None else 0)),
+                         glabel, "file")
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,
@@ -3316,7 +3359,8 @@ def prepare_impl_fill(
                 if rc == 0 and (not _u2_impl_reject or _bank_impl is not None
                                 or _crash_keep):
                     _note_kept(block.file, _impl_spliced)
-                    note_kept_comparison(last_comparison() if tdd_test_cmd else None)
+                    _cmp_i = last_comparison() if tdd_test_cmd else None
+                    note_kept_comparison(_cmp_i)
                     _record_regression_evidence(
                         [_retro_key(block.file, "*impl*", block.container),
                          *(_retro_key(block.file, m.fn_name, block.container)
@@ -3346,7 +3390,9 @@ def prepare_impl_fill(
                                  else (_u2_impl.self_passed
                                        if _u2_impl is not None else frozenset()))
                     _kept_i = _u2_external_only or _crash_keep
-                    _cls(class_for_kept(passed=_passed_i, unreachable=_kept_i),
+                    _cls(class_for_kept(passed=_passed_i, unreachable=_kept_i,
+                                        net_delta=(_cmp_i.net_pass_delta
+                                                   if _cmp_i is not None else 0)),
                          block_id, "impl")
                     _verdict_row(
                         block_id,
@@ -4536,7 +4582,8 @@ def prepare_impl_fill(
                     impls_filled += 1
                 for _pf, _pnames in _spliced_by_file.items():
                     _note_kept(_pf, _pnames)
-                note_kept_comparison(last_comparison() if tdd_test_cmd else None)
+                _cmp_p = last_comparison() if tdd_test_cmd else None
+                note_kept_comparison(_cmp_p)
                 _record_regression_evidence([_pair_key])
                 block_outcomes.append(UnitOutcome(landed=True))
                 _pair_passed = (_pair_u2.self_passed
@@ -4546,7 +4593,9 @@ def prepare_impl_fill(
                     and (_pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
                          or _pair_nonregr))
                 _cls(class_for_kept(passed=_pair_passed,
-                                    unreachable=_pair_kept_unreachable),
+                                    unreachable=_pair_kept_unreachable,
+                                    net_delta=(_cmp_p.net_pass_delta
+                                               if _cmp_p is not None else 0)),
                      pair_id, "pair")
                 _verdict_row(
                     pair_id,
@@ -4583,7 +4632,7 @@ def prepare_impl_fill(
     # the slice as its editable set, the compiler's and the suite's answers
     # as turns, and the probe's observed values beside every failing
     # assertion; acceptance is one transaction over the whole suite.
-    def _make_session_route() -> _SessionRoute | None:
+    def _make_session_route() -> SessionRoute | None:
         """Plan the packed sessions and return the route that runs them one
         at a time under the fill schedule; None when nothing is planned."""
         served: set[FnLocator] = set()
@@ -4882,10 +4931,22 @@ def prepare_impl_fill(
                 return {u: r.body_text
                         for u, r in _resolve(_want, _tree_sites()).items()}
 
+            # What the transport recorded about each call — reasoning-
+            # capped, follow-up fn blocks — read off the rows the call
+            # itself records, so the session can tell a capped reply that
+            # decided nothing from the model declining.
+            _last_call: list[CallCapReading | None] = [None]
+
+            def _ask(msgs: list[dict[str, Any]]) -> str:
+                with observe_call() as _rows:
+                    _reply = str(_ask_turns(
+                        msgs, model=_TASK2_MODEL,
+                        followup_think=followup_think_env_on()))
+                _last_call[0] = read_call(_rows)
+                return _reply
+
             _ports = SessionPorts(
-                ask_turns=lambda msgs: str(_ask_turns(
-                    msgs, model=_TASK2_MODEL,
-                    followup_think=followup_think_env_on())),
+                ask_turns=_ask,
                 splice=_splice_fn_with_where,
                 check=_check_now,
                 focus_errors=lambda out, f: str(_focus_cargo_errors(out, f)),
@@ -4904,7 +4965,8 @@ def prepare_impl_fill(
                 implicated=lambda diags: _implicated_keys_from_diags(
                     list(diags), target_src_dir),
                 coverage=_coverage if _coverage_on else None,
-                may_claim=clock.may_claim, note_delta=clock.note_delta)
+                may_claim=clock.may_claim, note_delta=clock.note_delta,
+                call_reading=lambda: _last_call[0])
             _sid = "session:" + "+".join(_sl.tests)
             with _splice_check_lock, serving_units(
                     f"{u.file}::{u.fn_name}" for u in _sl.units):
@@ -4929,6 +4991,15 @@ def prepare_impl_fill(
             # full-revert session spent GPU and left the tree as it was —
             # the pair and per-fn routes still have a shot this call.
             served |= {locator_of(u) for u in _out.kept}
+            if _out.unmeasured:
+                # Every landing (if any) came from a reasoning-capped reply:
+                # an answer the cap dropped, not a measured refusal. The
+                # class and the route row say so; the next schedule ranks
+                # the slice as never served, not as a flat re-buy.
+                _log(f"  [phase-c/session] {_sl.label()}: {_out.capped_turns} "
+                     f"reasoning-capped reply(ies) and no uncapped landing — "
+                     "graded UNMEASURED, not a re-buy.")
+                _cls(FillOutcomeClass.ANSWER_DROPPED, _sid, "session")
             if _out.outcome == "accepted":
                 _cls(class_for_kept(passed=frozenset(_sl.tests), unreachable=False),
                      _sid, "session")
@@ -4942,7 +5013,17 @@ def prepare_impl_fill(
                     route="session")
                 block_outcomes.append(UnitOutcome(landed=True))
             elif _out.outcome == "kept":
-                _cls(FillOutcomeClass.WRONG_BODY, _sid, "session")
+                if not _out.unmeasured:
+                    # Same reading note_kept records below: a keep-best
+                    # tree at net +5 with a target still red is CASHED,
+                    # not WRONG (run 3014175-d98ed09e iter 3 session #1).
+                    _cls(class_for_kept(
+                        passed=(_out.final.green_targets
+                                if _out.final is not None else frozenset()),
+                        unreachable=False,
+                        net_delta=(_out.final.pass_delta
+                                   if _out.final is not None else 0)),
+                         _sid, "session")
                 _verdict_row(
                     _sid, Disposition.KEEP_DEFERRED,
                     f"session kept {len(_out.kept)} body(ies) after {_out.turns} "
@@ -4952,7 +5033,8 @@ def prepare_impl_fill(
                     route="session")
                 block_outcomes.append(UnitOutcome(landed=bool(_out.kept)))
             elif _out.outcome == "reverted":
-                _cls(FillOutcomeClass.WRONG_BODY, _sid, "session")
+                if not _out.unmeasured:
+                    _cls(FillOutcomeClass.WRONG_BODY, _sid, "session")
                 _verdict_row(
                     _sid, Disposition.REVERT,
                     f"session reverted after {_out.turns} turn(s) — the last "
@@ -4962,9 +5044,10 @@ def prepare_impl_fill(
                     evidence=tuple(_out.newly_red), model_calls=_out.model_calls,
                     route="session")
             else:
-                _cls(FillOutcomeClass.COMPILE_FAIL
-                     if _out.compile_failures and _out.compile_failures >= _out.turns
-                     else FillOutcomeClass.WRONG_BODY, _sid, "session")
+                if not _out.unmeasured:
+                    _cls(FillOutcomeClass.COMPILE_FAIL
+                         if _out.compile_failures and _out.compile_failures >= _out.turns
+                         else FillOutcomeClass.WRONG_BODY, _sid, "session")
                 _verdict_row(
                     _sid, Disposition.REJECT,
                     f"session ended without a kept change after {_out.turns} "
@@ -5015,9 +5098,10 @@ def prepare_impl_fill(
                 kept=frozenset(locator_of(u) for u in _out.kept),
                 reverted=frozenset(locator_of(u) for u in _out.reverted),
                 dispatched=frozenset(locator_of(u) for u in _out.dispatched),
-                stopped=_out.outcome == "stopped")
+                stopped=_out.outcome == "stopped",
+                unmeasured=_out.unmeasured)
 
-        return _SessionRoute(_plans, _run_one_session, served, log=_log)
+        return SessionRoute(_plans, _run_one_session, served, log=_log)
 
     _session_route = _make_session_route()
     _pair_served: set[FnLocator] = set()
@@ -5036,11 +5120,11 @@ def prepare_impl_fill(
                 out.add(str(t).rsplit("::", 1)[-1])
         return frozenset(out)
 
-    def _snapshot() -> _RouteSnap:
+    def _snapshot() -> RouteSnap:
         with _counters_lock:
-            return _RouteSnap(units=attempts.snapshot(), classes=_classes_of_run())
+            return RouteSnap(units=attempts.snapshot(), classes=_classes_of_run())
 
-    def _report_since(snap: _RouteSnap) -> RouteRunReport:
+    def _report_since(snap: RouteSnap) -> RouteRunReport:
         """This run's report: the units, calls and classes stamped with
         the run label bound on this thread (the executor binds it around
         `route.run`, on the worker that runs it), read off the attempt
@@ -5110,13 +5194,13 @@ def prepare_impl_fill(
             "blocks": sum(len(bs) for _, bs in units),
             "order": str(_route_order)})
 
-    _pair_route = _PairRoute(
+    _pair_route = PairRoute(
         _pair_jobs, fill_pair=_fill_pair, pair_served=_pair_served,
         session_served=lambda: (_session_route.served
                                 if _session_route is not None else set()),
         snapshot=_snapshot, report_since=_report_since,
         tests_for=_tests_for, stubs=_stubs_all, log=_log)
-    _file_route = _FileRoute(
+    _file_route = FileRoute(
         units_now=_file_units_now, fill_file=_fill_file_first,
         admits=lambda f, bs: _file_route_admits(
             f, bs, target_src_dir=target_src_dir,
@@ -5125,7 +5209,7 @@ def prepare_impl_fill(
         snapshot=_snapshot, report_since=_report_since,
         tests_for=_tests_for, stubs=_stubs_all,
         on_plan=_file_plan_logged, log=_log)
-    _impl_route = _ImplRoute(
+    _impl_route = ImplRoute(
         blocks_now=_viable_now, fill_block=_fill_one_block,
         snapshot=_snapshot, report_since=_report_since,
         tests_for=_tests_for, stubs=_stubs_all, log=_log)
@@ -5339,240 +5423,3 @@ def _file_route_admits(
             "route covers.")
         return False
     return True
-
-
-@dataclass(frozen=True, slots=True)
-class _RouteSnap:
-    """The fill's shared counters at a run's start, so the run's own
-    landings can be read off the difference at its end: the attempt
-    ledger (units and calls, each stamped with the run that made it) and
-    the classes this run's thread has classified so far."""
-
-    units: AttemptsSnapshot
-    classes: FillClassHistogram
-
-
-def _bare(name: str) -> str:
-    return str(name).rsplit("::", 1)[-1]
-
-
-class _SessionRoute:
-    """The packed slice sessions, one run each."""
-
-    kind = RouteKind.SESSION
-    parallel = False
-
-    def __init__(self, plans: Sequence[SessionSlice],
-                 run_one: Callable[[SessionSlice, RunClock], RouteRunReport],
-                 served: set[FnLocator], *, log: Callable[[str], None]) -> None:
-        self._plans = list(plans)
-        self._run_one = run_one
-        self.served = served
-        self._log = log
-
-    def plan(self) -> Sequence[RouteRun]:
-        return [RouteRun(
-            kind=self.kind, label=sl.label(seq=i),
-            targets=frozenset(locator_of(u) for u in sl.units),
-            target_tests=frozenset(_bare(t) for t in sl.tests),
-            files=tuple(sl.files), seq=i)
-            for i, sl in enumerate(self._plans)]
-
-    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        sl = slice_for_run(self._plans, run)
-        if sl is None:
-            return RouteRunReport(empty=True)
-        if not clock.may_claim():
-            self._log(f"  [phase-c/session] {run.label}: not opened — the "
-                      "fill share is spent.")
-            return RouteRunReport(empty=True)
-        return self._run_one(sl, clock)
-
-
-class _PairRoute:
-    """The formatter dispatcher/implementer pairs, one run each."""
-
-    kind = RouteKind.PAIR
-    parallel = False
-
-    def __init__(self, jobs: Sequence[PairDispatch], *,
-                 fill_pair: Callable[[PairDispatch], None],
-                 pair_served: set[FnLocator],
-                 session_served: Callable[[], set[FnLocator]],
-                 snapshot: Callable[[], _RouteSnap],
-                 report_since: Callable[[_RouteSnap], RouteRunReport],
-                 tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
-                 stubs: frozenset[FnLocator],
-                 log: Callable[[str], None]) -> None:
-        self._jobs = list(jobs)
-        self._fill_pair = fill_pair
-        self._pair_served = pair_served
-        self._session_served = session_served
-        self._snapshot = snapshot
-        self._report_since = report_since
-        self._tests_for = tests_for
-        self._stubs = stubs
-        self._log = log
-
-    @staticmethod
-    def _label(pd: PairDispatch) -> str:
-        return "pair " + " + ".join(sorted(pd.member_scope()))
-
-    def plan(self) -> Sequence[RouteRun]:
-        out: list[RouteRun] = []
-        for i, pd in enumerate(self._jobs):
-            locs = pd.member_locators()
-            out.append(RouteRun(
-                kind=self.kind, label=self._label(pd), targets=locs,
-                target_tests=self._tests_for(locs),
-                stubs_in_targets=locs & self._stubs,
-                files=tuple(sorted({k.file for k in locs})), seq=i))
-        return out
-
-    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        pd = next((j for j in self._jobs
-                   if j.member_locators() == run.targets), None)
-        if pd is None:
-            return RouteRunReport(empty=True)
-        if pd.member_locators() & self._session_served():
-            # A session kept or accepted these members under one judgment
-            # this call; the next sweep judges that write.
-            return RouteRunReport(empty=True)
-        if not clock.may_claim():
-            return RouteRunReport(empty=True)
-        snap = self._snapshot()
-        try:
-            self._fill_pair(pd)
-        except Exception as _pfe:  # noqa: BLE001 — a route reports, never dies
-            self._log(f"  [phase-c/pair] worker error: {_pfe}")
-        self._pair_served |= pd.member_locators()
-        return self._report_since(snap)
-
-
-class _FileRoute:
-    """File-first: one run per file of the frontier."""
-
-    kind = RouteKind.FILE
-    parallel = True
-
-    def __init__(self, *, units_now: Callable[[], list[tuple[str, list[ImplBlock]]]],
-                 fill_file: Callable[..., None],
-                 admits: Callable[[str, list[ImplBlock]], bool],
-                 snapshot: Callable[[], _RouteSnap],
-                 report_since: Callable[[_RouteSnap], RouteRunReport],
-                 tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
-                 stubs: frozenset[FnLocator],
-                 on_plan: Callable[[list[tuple[str, list[ImplBlock]]]], None],
-                 log: Callable[[str], None]) -> None:
-        self._units_now = units_now
-        self._fill_file = fill_file
-        self._admits = admits
-        self._snapshot = snapshot
-        self._report_since = report_since
-        self._tests_for = tests_for
-        self._stubs = stubs
-        self._on_plan = on_plan
-        self._log = log
-
-    def plan(self) -> Sequence[RouteRun]:
-        units = self._units_now()
-        self._on_plan(units)
-        out: list[RouteRun] = []
-        # A file the route cannot open under the fn bound is not a run: the
-        # schedule ranks only what can be served, so a permanent EMPTY row
-        # never heads the order (`_rank_of` skips EMPTY, and would rank the
-        # same identity never-served on every fill).
-        for i, (file_rel, fblocks) in enumerate(
-                (f, bs) for f, bs in units if self._admits(f, bs)):
-            locs = frozenset(
-                FnLocator(file_rel, m.fn_name) for b in fblocks
-                for m in (*b.stub_members, *b.refill_members))
-            stub_locs = frozenset(
-                FnLocator(file_rel, m.fn_name) for b in fblocks
-                for m in b.stub_members) | (locs & self._stubs)
-            out.append(RouteRun(
-                kind=self.kind, label=f"file {file_rel}", targets=locs,
-                target_tests=self._tests_for(locs),
-                stubs_in_targets=stub_locs, files=(file_rel,), seq=i))
-        return out
-
-    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        file_rel = run.files[0] if run.files else ""
-        unit = next(((f, bs) for f, bs in self._units_now() if f == file_rel), None)
-        if unit is None:
-            return RouteRunReport(empty=True)
-        if not clock.may_claim():
-            return RouteRunReport(empty=True)
-        snap = self._snapshot()
-        try:
-            self._fill_file(unit[0], unit[1], may_claim=clock.may_claim)
-        except Exception as exc:  # noqa: BLE001 — a route reports, never dies
-            self._log(f"  [phase-c/file] worker error on {file_rel}: {exc}")
-        return self._report_since(snap)
-
-
-class _ImplRoute:
-    """Per-impl: one run per file of viable blocks, blocks serial within."""
-
-    kind = RouteKind.IMPL
-    parallel = True
-
-    def __init__(self, *, blocks_now: Callable[[], list[ImplBlock]],
-                 fill_block: Callable[[ImplBlock], None],
-                 snapshot: Callable[[], _RouteSnap],
-                 report_since: Callable[[_RouteSnap], RouteRunReport],
-                 tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
-                 stubs: frozenset[FnLocator],
-                 log: Callable[[str], None]) -> None:
-        self._blocks_now = blocks_now
-        self._fill_block = fill_block
-        self._snapshot = snapshot
-        self._report_since = report_since
-        self._tests_for = tests_for
-        self._stubs = stubs
-        self._log = log
-
-    @staticmethod
-    def _by_file(blocks: Sequence[ImplBlock]) -> dict[str, list[ImplBlock]]:
-        out: dict[str, list[ImplBlock]] = {}
-        for b in blocks:
-            out.setdefault(b.file, []).append(b)
-        return out
-
-    def plan(self) -> Sequence[RouteRun]:
-        out: list[RouteRun] = []
-        for i, (file_rel, fblocks) in enumerate(self._by_file(self._blocks_now()).items()):
-            locs = frozenset(
-                FnLocator(file_rel, m.fn_name) for b in fblocks
-                for m in (*b.stub_members, *b.refill_members))
-            stub_locs = frozenset(
-                FnLocator(file_rel, m.fn_name) for b in fblocks
-                for m in b.stub_members) | (locs & self._stubs)
-            out.append(RouteRun(
-                kind=self.kind, label=f"impl {file_rel}", targets=locs,
-                target_tests=self._tests_for(locs),
-                stubs_in_targets=stub_locs, files=(file_rel,), seq=i))
-        return out
-
-    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        file_rel = run.files[0] if run.files else ""
-        fblocks = self._by_file(self._blocks_now()).get(file_rel) or []
-        if not fblocks:
-            return RouteRunReport(empty=True)
-        snap = self._snapshot()
-        opened = 0
-        for blk in fblocks:
-            if not clock.may_claim():
-                self._log(f"  [phase-c/impl] {file_rel}: fill share spent after "
-                          f"{opened} of {len(fblocks)} block(s) — the rest are "
-                          "left to the next fill.")
-                break
-            opened += 1
-            try:
-                self._fill_block(blk)
-            except Exception as _we:  # noqa: BLE001 — a route reports, never dies
-                self._log(f"  [phase-c/impl] worker error on "
-                          f"{blk.file}::{blk.container}: {_we}")
-        if opened == 0:
-            return RouteRunReport(empty=True)
-        return self._report_since(snap)

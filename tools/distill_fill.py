@@ -62,7 +62,21 @@ slices), `schedule_runs` (the schedule event's candidate runs, all kinds),
 ([[file, fn], ...] from crash.localized), `ledger_rows` (prior route rows
 for the cluster), `route_attempts` ([{label, dispatched, planned_recorded,
 attempts: [{outcome, units}], recorded_outcome, source}] for this fill's
-file runs that went through more than one attempt or recorded a revert).
+file runs that went through more than one attempt or recorded a revert),
+`classes` ([{unit, route, class, keep, net_pass_delta, newly_red,
+reading_run}] — every `phase_c.fill.class` of the fill with the fill
+reading that preceded it: the latest `phase_c.fill.reading` of the same
+route before the class event, which is the keep site's own measurement
+since a keep classifies right after its gate; `reading_run` names the run
+label the reading carried so a mismatch is visible, and a class with no
+reading before it carries `net_pass_delta: null`. `keep` says the class
+was charged at a KEEP site — `cashed` / `unreachable` always are, and a
+`wrong` is when the event right before it is the file route's
+`phase_c.file.fill.mismatch` for the same group; every other class is a
+revert, a drop or a decline and carries no reading of its own). The class
+fold test refolds the keep classes through `class_for_kept` with the
+reading (the fix) and without it (the pre-fix input shape, the negative
+control) and compares the histograms with the recorded one.
 The recorded test builds the candidate runs from it and asserts the plan's
 sentence about the order, with the fixed pre-schedule walk as the negative
 control; a run with `route_attempts` is replayed through the fill's attempt
@@ -162,6 +176,40 @@ def _route_attempts(fill: list[dict[str, Any]], iter_n: int) -> list[dict[str, A
     return out
 
 
+def _classes(fill: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every fill class of the fill, paired with the latest fill reading
+    of the same route that preceded it (see the module docstring)."""
+    last_reading: dict[str, dict[str, Any]] = {}
+    out: list[dict[str, Any]] = []
+    prev: dict[str, Any] | None = None
+    for e in fill:
+        k = _kind(e)
+        if k == "phase_c.fill.reading":
+            last_reading[str(e.get("route") or "")] = e
+            continue
+        if k != "phase_c.fill.class":
+            prev = e
+            continue
+        d = e.get("data") or {}
+        route = str(d.get("route") or "")
+        rd = last_reading.get(route)
+        cls = str(d.get("class", ""))
+        mismatch = (prev is not None and _kind(prev) == "phase_c.file.fill.mismatch"
+                    and str((prev.get("data") or {}).get("group", "")) == str(d.get("unit", "")))
+        prev = e
+        out.append({
+            "ts": str(e.get("ts", "")),
+            "unit": str(d.get("unit", "")), "route": route,
+            "class": cls,
+            "keep": cls in ("cashed", "unreachable") or (cls == "wrong" and mismatch),
+            "net_pass_delta": (int(rd.get("net_pass_delta", 0) or 0)
+                               if rd is not None else None),
+            "newly_red": list(rd.get("newly_red") or []) if rd is not None else [],
+            "reading_run": str(rd.get("run") or "") if rd is not None else "",
+        })
+    return out
+
+
 def distil(run_id: str, iter_n: int, stubs: list[str], *,
            events_path: Path) -> dict[str, Any]:
     evs = _events(events_path, run_id)
@@ -246,6 +294,7 @@ def distil(run_id: str, iter_n: int, stubs: list[str], *,
         "failed_pairs": [list(p) for p in (idat.get("failed_pairs") or [])],
         "incomplete": list(idat.get("incomplete") or []),
         "crash_blamed": crash_blamed,
+        "classes": _classes(fill),
     }
 
 

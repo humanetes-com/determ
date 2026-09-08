@@ -698,6 +698,113 @@ class TurnReading:
             return False
         return bool(self.pass_delta < 0 or self.newly_red or self.crashed)
 
+    @property
+    def green_targets(self) -> frozenset[str]:
+        """The session's own targets this reading saw passing."""
+        return frozenset(t.test for t in self.targets if t.passing)
+
+
+@dataclass(frozen=True, slots=True)
+class BestStateVerdict:
+    """How a judged turn compares with the session's BEST judged state.
+
+    The session's regression reference used to be its opening baseline,
+    so a turn that lost a target an earlier turn had won printed
+    `newly red 0` (the target was red at baseline, its loss invisible),
+    stayed on the tree for the next turn to build on, and the end-of-
+    session peel could only walk back toward baseline — never toward the
+    better turn. Run `3014175-d98ed09e` (2026-09-08, cluster `stable`,
+    iter 3): session #1 measured +5 with three of four targets green on
+    turn 1, lost seven passengers on turn 3 and ended `kept 1 / net -4`;
+    session #4 turned `test_debug_format_with_context` green three times
+    (turns 1, 4, 5) and ended on turn 7's tree, where it is red.
+
+    The comparison is lexicographic in the order the session values its
+    evidence: the targets first (a turn that loses a target and gains two
+    passengers is a loss for the session), then losses beyond the best's
+    (newly-red tests, crashed binaries, a shrunken verdict set — a crash
+    counts exactly as `compare_readings` counts it at the sweep), then the
+    net verdict count. A turn that holds on every axis is at least as
+    good and becomes the reference; every field here empty means it holds.
+    """
+
+    lost_targets: tuple[str, ...] = ()
+    red_beyond: tuple[str, ...] = ()
+    crashed_beyond: tuple[str, ...] = ()
+    executed_shrank: bool = False
+    #: `(best's pass_delta, this turn's)` when the net fell below the best's.
+    delta_below: tuple[int, int] | None = None
+
+    @property
+    def holds(self) -> bool:
+        return not (self.lost_targets or self.red_beyond or self.crashed_beyond
+                    or self.executed_shrank or self.delta_below is not None)
+
+    def losses(self) -> str:
+        """The lost evidence, for the log line and the transcript."""
+        parts: list[str] = []
+        if self.lost_targets:
+            parts.append("lost target(s) " + ", ".join(self.lost_targets))
+        if self.red_beyond:
+            parts.append("reddened " + ", ".join(self.red_beyond))
+        if self.crashed_beyond:
+            parts.append("crashed " + ", ".join(self.crashed_beyond))
+        if self.executed_shrank:
+            parts.append("shrank the verdict set")
+        if self.delta_below is not None:
+            best, now = self.delta_below
+            parts.append(f"dropped the net verdict count from {best:+d} to {now:+d}")
+        return "; ".join(parts)
+
+
+def judge_against_best(new: TurnReading, best: TurnReading) -> BestStateVerdict:
+    """Compare a judged turn with the best judged state (see
+    :class:`BestStateVerdict` for the order and why)."""
+    return BestStateVerdict(
+        lost_targets=tuple(sorted(best.green_targets - new.green_targets)),
+        red_beyond=tuple(sorted(set(new.newly_red) - set(best.newly_red))),
+        crashed_beyond=tuple(sorted(set(new.crashed) - set(best.crashed))),
+        executed_shrank=new.executed_shrank and not best.executed_shrank,
+        delta_below=((best.pass_delta, new.pass_delta)
+                     if new.pass_delta < best.pass_delta else None))
+
+
+def render_restored_note(verdict: BestStateVerdict, best_turn: int) -> str:
+    """The sentence the transcript carries when a judged turn was worse than
+    the best state and the tree was put back: what it lost against turn N,
+    and that the next change set is applied on turn N's bodies."""
+    return (f"RESTORED: this change set {verdict.losses()} that turn "
+            f"{best_turn} had; the tree is back at turn {best_turn}'s bodies. "
+            f"Your next change set is applied on turn {best_turn}'s tree, not "
+            "on this one — resend every body you want on the tree, and keep "
+            f"what turn {best_turn} had green.")
+
+
+def render_capped_turn() -> str:
+    """The turn the harness writes back when the model's reply ran out of
+    reasoning budget before it produced a change set or a request.
+
+    A capped reply's forced follow-up carries what the deliberation had
+    reached when it was cut, which on every trace measured (runs
+    `2965-453dd7a4`, `1829581-dbdce1ad`, `2131920-86818224`, `3014175-
+    d98ed09e`, 2026-09-05..08) was a hypothesis still branching, not a
+    decision: the follow-up either returned an empty change set or a
+    forced guess. An empty one used to end the session as `no_change`
+    after one of eight turns (`3014175-d98ed09e` session #3, 14 minutes,
+    graded FLAT). The turn is not a decision and is not judged; the model
+    is asked again, told to answer from the deliberation it has done and
+    to commit rather than restart."""
+    return ("RESULT: your previous reply ran out of reasoning budget before "
+            "it produced a change set or a request, so nothing was applied "
+            "and nothing was judged. Do not restart the analysis from the "
+            "top. Answer from the deliberation you have already done: commit "
+            "to the change set it was converging on — every body you want on "
+            "the tree, in <FN name=\"…\" block=\"…\"> blocks — or send a "
+            "<REQUEST …/> for the one thing you still need. Keep the "
+            "reasoning to what writing the bodies needs: a partial change set "
+            "that compiles is judged and its verdicts come back to you; an "
+            "empty reply is not.")
+
 
 def render_compile_turn(diagnostics: str, rejected: Sequence[str] = ()) -> str:
     lines = ["RESULT: the change set did NOT compile; it was not applied. "
@@ -726,7 +833,7 @@ def _indent(text: str, pad: str = "    ") -> str:
 def render_test_turn(
     reading: TurnReading, rejected: Sequence[str] = (), *,
     dropped: Sequence[str] = (), dropped_diagnostics: str = "",
-    coverage_note: str = "",
+    coverage_note: str = "", restored_note: str = "",
 ) -> str:
     """The verdict turn: every target's state, every newly-red sibling with
     its printed values, the observed values beside each. The one contract
@@ -738,7 +845,11 @@ def render_test_turn(
     turn 1: the right implementer body was discarded together with a
     sibling's type error). `coverage_note` is the measured statement of which
     changed units the still-failing targets execute (same run, turns 3–8:
-    five rewrites of an implementer the dispatcher never called)."""
+    five rewrites of an implementer the dispatcher never called).
+    `restored_note` (:func:`render_restored_note`) says the tree was put
+    back to the best judged state because this turn was worse than it —
+    the verdicts above still describe THIS change set, which is what the
+    model has to learn from."""
     lines: list[str] = []
     if reading.clean:
         lines.append("RESULT: the change set compiled, every target test "
@@ -791,6 +902,8 @@ def render_test_turn(
         lines.append("  Bodies not applied: " + "; ".join(rejected))
     if coverage_note:
         lines.append("  " + coverage_note)
+    if restored_note:
+        lines.append(restored_note)
     lines.append(
         "Next: a change set (every body you want on the tree, applied on the "
         "tree as it now stands), a <REQUEST …/>, or an empty reply to stop.")

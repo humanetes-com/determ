@@ -314,6 +314,10 @@ class PhaseCFillEngine:
         fill_budget_minutes: float = 0.0,
         fill_iteration: int = 0,
         run_id: str = "",
+        # How many slice sessions one fill opens (`SLICE_SESSION_MAX_PER_FILL`;
+        # 0 = unbounded); the rest are deferred to the next fill by the
+        # schedule, never truncated.
+        max_sessions_per_fill: int = 0,
         # `(rel) -> healed?`: the heal hierarchy on one file of the tree,
         # for the boundary read before the per-pass test. None reports the
         # break and lets the pass test read it (the fixture path).
@@ -513,7 +517,9 @@ class PhaseCFillEngine:
                 scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
                 parallelism=self.config.parallelism,
                 unmeasurable_tests=unmeasurable_tests,
-                crash_blamed=crash_blamed or frozenset()))
+                crash_blamed=crash_blamed or frozenset(),
+                max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
+                              if max_sessions_per_fill > 0 else {})))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
                        else None)
         _per_fn = _per_fn_route.result

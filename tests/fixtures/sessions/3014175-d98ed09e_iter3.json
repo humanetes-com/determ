@@ -1,0 +1,2232 @@
+{
+ "cluster": "stable",
+ "iter": 3,
+ "run_id": "3014175-d98ed09e",
+ "sessions": [
+  {
+   "baseline_pass": 91,
+   "end": {
+    "kept": [
+     {
+      "container": "impl Debug for Error",
+      "file": "src/error.rs",
+      "fn": "fmt"
+     },
+     {
+      "container": "impl ErrorImpl",
+      "file": "src/fmt.rs",
+      "fn": "display"
+     }
+    ],
+    "model_calls": 8,
+    "outcome": "kept",
+    "reverted": [],
+    "turns": 8
+   },
+   "files": [
+    "src/chain.rs",
+    "src/context.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/kind.rs",
+    "src/ptr.rs"
+   ],
+   "index": 0,
+   "max_turns": 8,
+   "row": {
+    "kept": [
+     [
+      "src/error.rs",
+      "fmt"
+     ],
+     [
+      "src/fmt.rs",
+      "display"
+     ]
+    ],
+    "label": "session[2 test(s), 25 unit(s)] #0",
+    "minutes": 49.961,
+    "model_calls": 8,
+    "net_pass_delta": 4,
+    "outcome": "cashed",
+    "reverted": []
+   },
+   "tests": [
+    "behaviour_probe_stable_exact_format_0",
+    "test_altdebug"
+   ],
+   "ts": "2026-09-08T07:32:10.561+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "rejected",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 1,
+     "targets_failing": [],
+     "turn": 1,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 2,
+     "units": [
+      {
+       "container": "impl Debug for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 3,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 4,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_altdebug"
+     ],
+     "turn": 5,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 6,
+     "units": [
+      {
+       "container": "impl Debug for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 7,
+     "units": [
+      {
+       "container": "impl Debug for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_altdebug"
+     ],
+     "turn": 8,
+     "units": [
+      {
+       "container": "impl Debug for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      }
+     ]
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Chain<'a>",
+     "file": "src/chain.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Iterator for Chain<'a>",
+     "file": "src/chain.rs",
+     "fn": "next"
+    },
+    {
+     "container": "impl Display for ContextError<C,E>",
+     "file": "src/context.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "chain"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_std"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Debug for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl From<E>for Error",
+     "file": "src/error.rs",
+     "fn": "from"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "new"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "display"
+    },
+    {
+     "container": "trait TraitKind",
+     "file": "src/kind.rs",
+     "fn": "anyhow_kind"
+    },
+    {
+     "container": "impl Trait",
+     "file": "src/kind.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 95,
+   "end": {
+    "kept": [
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "downcast_mut"
+     }
+    ],
+    "model_calls": 8,
+    "outcome": "kept",
+    "reverted": [
+     {
+      "container": "impl Display for Error",
+      "file": "src/error.rs",
+      "fn": "fmt"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "is"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "msg"
+     },
+     {
+      "container": "",
+      "file": "src/error.rs",
+      "fn": "no_backtrace"
+     }
+    ],
+    "turns": 8
+   },
+   "files": [
+    "src/context.rs",
+    "src/error.rs",
+    "src/kind.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "index": 1,
+   "max_turns": 8,
+   "row": {
+    "kept": [
+     [
+      "src/error.rs",
+      "downcast_mut"
+     ]
+    ],
+    "label": "session[4 test(s), 32 unit(s)] #1",
+    "minutes": 27.236,
+    "model_calls": 8,
+    "net_pass_delta": -4,
+    "outcome": "flat",
+    "reverted": [
+     [
+      "src/error.rs",
+      "fmt"
+     ],
+     [
+      "src/error.rs",
+      "is"
+     ],
+     [
+      "src/error.rs",
+      "msg"
+     ],
+     [
+      "src/error.rs",
+      "no_backtrace"
+     ]
+    ]
+   },
+   "tests": [
+    "test_altdisplay",
+    "test_anyhow_interpolated_multiple_args",
+    "test_backtrace_reachable",
+    "test_deref_mut_via_downcast_mut"
+   ],
+   "ts": "2026-09-08T08:22:08.577+00:00",
+   "turns": [
+    {
+     "crashed": [
+      "tests/test_fmt.rs"
+     ],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 5,
+     "rejected": 0,
+     "targets_failing": [
+      "test_altdisplay"
+     ],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_mut"
+      },
+      {
+       "container": "impl Display for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "is"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "msg"
+      },
+      {
+       "container": "",
+       "file": "src/error.rs",
+       "fn": "no_backtrace"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 2,
+     "units": []
+    },
+    {
+     "crashed": [
+      "tests/test_fmt.rs"
+     ],
+     "kind": "judged",
+     "newly_red": [
+      "result_with_context_err_anyhow_error",
+      "result_with_context_err_lazy_closure",
+      "result_with_context_err_wraps",
+      "test_error_impl_source_triggered_by_boxed_with_context",
+      "test_error_multi_context_chain",
+      "test_message_error_display_forwards_simple_str",
+      "test_message_error_display_with_custom_display_debug"
+     ],
+     "pass_delta": -4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_altdisplay"
+     ],
+     "turn": 3,
+     "units": [
+      {
+       "container": "impl Display for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 4,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 5,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 6,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 7,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 8,
+     "units": []
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Context<T,E>for Result<T,E>",
+     "file": "src/context.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl StdError for Error",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl Display for ContextError<C,E>",
+     "file": "src/context.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "backtrace"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "backtrace"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_std"
+    },
+    {
+     "container": "impl Deref for Error",
+     "file": "src/error.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast_mut"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Display for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl From<E>for Error",
+     "file": "src/error.rs",
+     "fn": "from"
+    },
+    {
+     "container": "impl From<Error>for Box<dyn StdError+'static>",
+     "file": "src/error.rs",
+     "fn": "from"
+    },
+    {
+     "container": "impl From<Error>for Box<dyn StdError+Send+'static>",
+     "file": "src/error.rs",
+     "fn": "from"
+    },
+    {
+     "container": "impl From<Error>for Box<dyn StdError+Send+Sync+'static>",
+     "file": "src/error.rs",
+     "fn": "from"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "is"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "new"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "no_backtrace"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "trait TraitKind",
+     "file": "src/kind.rs",
+     "fn": "anyhow_kind"
+    },
+    {
+     "container": "impl Trait",
+     "file": "src/kind.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Display for MessageError<M>",
+     "file": "src/wrapper.rs",
+     "fn": "fmt"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 96,
+   "end": {
+    "kept": [
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "downcast_ref"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "is"
+     }
+    ],
+    "model_calls": 4,
+    "outcome": "accepted",
+    "reverted": [],
+    "turns": 4
+   },
+   "files": [
+    "src/error.rs",
+    "src/lib.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "index": 2,
+   "max_turns": 8,
+   "row": {
+    "kept": [
+     [
+      "src/error.rs",
+      "downcast_ref"
+     ],
+     [
+      "src/error.rs",
+      "is"
+     ]
+    ],
+    "label": "session[2 test(s), 20 unit(s)] #2",
+    "minutes": 17.633,
+    "model_calls": 4,
+    "net_pass_delta": 8,
+    "outcome": "cashed",
+    "reverted": []
+   },
+   "tests": [
+    "test_anyhow_literal_preserves_static_str",
+    "test_error_anyhow_static_str"
+   ],
+   "ts": "2026-09-08T08:49:22.583+00:00",
+   "turns": [
+    {
+     "crashed": [
+      "tests/test_downcast.rs"
+     ],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_ref"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "is"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 2,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 3,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 8,
+     "rejected": 1,
+     "targets_failing": [],
+     "turn": 4,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_ref"
+      }
+     ]
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Deref for Error",
+     "file": "src/error.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast_ref"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Display for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "is"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "mod __private",
+     "file": "src/lib.rs",
+     "fn": "format_err"
+    },
+    {
+     "container": "mod __private",
+     "file": "src/lib.rs",
+     "fn": "must_use"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Display for MessageError<M>",
+     "file": "src/wrapper.rs",
+     "fn": "fmt"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 104,
+   "end": {
+    "kept": [],
+    "model_calls": 1,
+    "outcome": "no_change",
+    "reverted": [],
+    "turns": 1
+   },
+   "files": [
+    "src/context.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/kind.rs",
+    "src/ptr.rs"
+   ],
+   "index": 3,
+   "max_turns": 8,
+   "row": {
+    "kept": [],
+    "label": "session[2 test(s), 23 unit(s)] #3",
+    "minutes": 14.256,
+    "model_calls": 1,
+    "net_pass_delta": 0,
+    "outcome": "flat",
+    "reverted": []
+   },
+   "tests": [
+    "test_debug",
+    "test_downcast_high"
+   ],
+   "ts": "2026-09-08T09:07:00.684+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "no_change",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 1,
+     "units": []
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Context<T,E>for Result<T,E>",
+     "file": "src/context.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl StdError for E",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl StdError for Error",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl Display for ContextError<C,E>",
+     "file": "src/context.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_std"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Debug for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl From<E>for Error",
+     "file": "src/error.rs",
+     "fn": "from"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "new"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "display"
+    },
+    {
+     "container": "trait TraitKind",
+     "file": "src/kind.rs",
+     "fn": "anyhow_kind"
+    },
+    {
+     "container": "impl Trait",
+     "file": "src/kind.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 104,
+   "end": {
+    "kept": [
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "construct_from_adhoc"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "context"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "msg"
+     }
+    ],
+    "model_calls": 8,
+    "outcome": "kept",
+    "reverted": [],
+    "turns": 8
+   },
+   "files": [
+    "src/context.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "index": 4,
+   "max_turns": 8,
+   "row": {
+    "kept": [
+     [
+      "src/error.rs",
+      "construct_from_adhoc"
+     ],
+     [
+      "src/error.rs",
+      "context"
+     ],
+     [
+      "src/error.rs",
+      "msg"
+     ]
+    ],
+    "label": "session[3 test(s), 18 unit(s)] #4",
+    "minutes": 35.071,
+    "model_calls": 8,
+    "net_pass_delta": 0,
+    "outcome": "flat",
+    "reverted": []
+   },
+   "tests": [
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause",
+    "test_debug_format_with_context"
+   ],
+   "ts": "2026-09-08T09:21:15.831+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 1,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause"
+     ],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "construct_from_adhoc"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "context"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "msg"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause",
+      "test_debug_format_with_context"
+     ],
+     "turn": 2,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause",
+      "test_debug_format_with_context"
+     ],
+     "turn": 3,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 1,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause"
+     ],
+     "turn": 4,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "context"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "msg"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 1,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause"
+     ],
+     "turn": 5,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "msg"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause",
+      "test_debug_format_with_context"
+     ],
+     "turn": 6,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [
+      "test_debug_backtrace_captured_simple",
+      "test_debug_backtrace_captured_with_cause",
+      "test_debug_format_with_context"
+     ],
+     "turn": 7,
+     "units": [
+      {
+       "container": "impl ErrorImpl",
+       "file": "src/fmt.rs",
+       "fn": "display"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 8,
+     "units": []
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Display for ContextError<C,E>",
+     "file": "src/context.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Debug for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "display"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Display for MessageError<M>",
+     "file": "src/wrapper.rs",
+     "fn": "fmt"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 105,
+   "end": {
+    "kept": [
+     {
+      "container": "impl StdError for Error",
+      "file": "src/context.rs",
+      "fn": "ext_context"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "downcast"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "downcast_mut"
+     }
+    ],
+    "model_calls": 8,
+    "outcome": "kept",
+    "reverted": [],
+    "turns": 8
+   },
+   "files": [
+    "src/context.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/ptr.rs"
+   ],
+   "index": 5,
+   "max_turns": 8,
+   "row": {
+    "kept": [
+     [
+      "src/context.rs",
+      "ext_context"
+     ],
+     [
+      "src/error.rs",
+      "downcast"
+     ],
+     [
+      "src/error.rs",
+      "downcast_mut"
+     ]
+    ],
+    "label": "session[3 test(s), 21 unit(s)] #5",
+    "minutes": 33.902,
+    "model_calls": 8,
+    "net_pass_delta": 4,
+    "outcome": "cashed",
+    "reverted": []
+   },
+   "tests": [
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut"
+   ],
+   "ts": "2026-09-08T09:56:20.786+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_downcast_low",
+      "test_downcast_mid",
+      "test_downcast_mut"
+     ],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 2,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_mut"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 3,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_mut"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_downcast_low",
+      "test_downcast_mid",
+      "test_downcast_mut"
+     ],
+     "turn": 4,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_downcast_low",
+      "test_downcast_mid",
+      "test_downcast_mut"
+     ],
+     "turn": 5,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_mut"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 6,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 4,
+     "rejected": 0,
+     "targets_failing": [
+      "test_downcast_low",
+      "test_downcast_mid",
+      "test_downcast_mut"
+     ],
+     "turn": 7,
+     "units": [
+      {
+       "container": "impl StdError for Error",
+       "file": "src/context.rs",
+       "fn": "ext_context"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "rejected",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 1,
+     "targets_failing": [],
+     "turn": 8,
+     "units": []
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Context<T,E>for Result<T,E>",
+     "file": "src/context.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl StdError for E",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl StdError for Error",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl Display for ContextError<C,E>",
+     "file": "src/context.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_std"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast_mut"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Debug for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "new"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "display"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 109,
+   "end": {
+    "kept": [
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "downcast"
+     },
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "downcast_ref"
+     },
+     {
+      "container": "impl Display for Error",
+      "file": "src/error.rs",
+      "fn": "fmt"
+     }
+    ],
+    "model_calls": 8,
+    "outcome": "kept",
+    "reverted": [],
+    "turns": 8
+   },
+   "files": [
+    "src/context.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/ptr.rs"
+   ],
+   "index": 6,
+   "max_turns": 8,
+   "row": {
+    "kept": [
+     [
+      "src/error.rs",
+      "downcast"
+     ],
+     [
+      "src/error.rs",
+      "downcast_ref"
+     ],
+     [
+      "src/error.rs",
+      "fmt"
+     ]
+    ],
+    "label": "session[4 test(s), 27 unit(s)] #6",
+    "minutes": 30.084,
+    "model_calls": 8,
+    "net_pass_delta": 3,
+    "outcome": "cashed",
+    "reverted": []
+   },
+   "tests": [
+    "test_downcast_ref",
+    "test_drop",
+    "test_error_context_display",
+    "test_unsuccessful_downcast"
+   ],
+   "ts": "2026-09-08T10:30:14.460+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 3,
+     "rejected": 0,
+     "targets_failing": [
+      "test_downcast_ref",
+      "test_drop",
+      "test_unsuccessful_downcast"
+     ],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl Display for Error",
+       "file": "src/error.rs",
+       "fn": "fmt"
+      }
+     ]
+    },
+    {
+     "crashed": [
+      "tests/lib_gen_1.rs",
+      "tests/ptr_gen_1.rs",
+      "tests/test_boxed.rs",
+      "tests/test_context.rs",
+      "tests/test_downcast.rs"
+     ],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": -27,
+     "rejected": 3,
+     "targets_failing": [
+      "test_downcast_ref",
+      "test_drop",
+      "test_error_context_display",
+      "test_unsuccessful_downcast"
+     ],
+     "turn": 2,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_ref"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 3,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 3,
+     "rejected": 1,
+     "targets_failing": [
+      "test_downcast_ref",
+      "test_drop",
+      "test_unsuccessful_downcast"
+     ],
+     "turn": 4,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast"
+      },
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "downcast_ref"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "rejected",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 1,
+     "targets_failing": [],
+     "turn": 5,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 6,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "is"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 7,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 8,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "is"
+      }
+     ]
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Context<T,E>for Result<T,E>",
+     "file": "src/context.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl StdError for E",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl StdError for Error",
+     "file": "src/context.rs",
+     "fn": "ext_context"
+    },
+    {
+     "container": "impl Display for ContextError<C,E>",
+     "file": "src/context.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_std"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "context"
+    },
+    {
+     "container": "impl Deref for Error",
+     "file": "src/error.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast_ref"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Debug for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Display for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "is"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "new"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "display"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "deref"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    }
+   ]
+  },
+  {
+   "baseline_pass": 112,
+   "end": {
+    "kept": [],
+    "model_calls": 8,
+    "outcome": "reverted",
+    "reverted": [
+     {
+      "container": "impl Error",
+      "file": "src/error.rs",
+      "fn": "is"
+     }
+    ],
+    "turns": 8
+   },
+   "files": [
+    "src/error.rs",
+    "src/lib.rs",
+    "src/ptr.rs"
+   ],
+   "index": 7,
+   "max_turns": 8,
+   "row": {
+    "kept": [],
+    "label": "session[1 test(s), 12 unit(s)] #7",
+    "minutes": 50.052,
+    "model_calls": 8,
+    "net_pass_delta": 0,
+    "outcome": "reverted",
+    "reverted": [
+     [
+      "src/error.rs",
+      "is"
+     ]
+    ]
+   },
+   "tests": [
+    "test_error_downcast_is"
+   ],
+   "ts": "2026-09-08T11:00:19.707+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [
+      "test_unsuccessful_downcast"
+     ],
+     "pass_delta": -1,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "is"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 2,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 3,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 4,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 5,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 6,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 7,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "construct_from_adhoc"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "compile",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 8,
+     "units": [
+      {
+       "container": "impl Error",
+       "file": "src/error.rs",
+       "fn": "construct_from_adhoc"
+      }
+     ]
+    }
+   ],
+   "units": [
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "downcast_ref"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "is"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "vtable"
+    },
+    {
+     "container": "mod __private",
+     "file": "src/lib.rs",
+     "fn": "format_err"
+    },
+    {
+     "container": "mod __private",
+     "file": "src/lib.rs",
+     "fn": "must_use"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    }
+   ]
+  }
+ ]
+}

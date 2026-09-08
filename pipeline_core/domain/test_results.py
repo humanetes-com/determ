@@ -1372,6 +1372,13 @@ class BinaryResult:
     fail_count: int = 0
     dangling: str | None = None
     exe_path: str | None = None
+    # The section was still OPEN when the caller's timeout cut the run: the
+    # process did not die, a test never returned (`dangling` names it). The
+    # shape a hung binary leaves is the shape a crashed one leaves minus the
+    # panic, and until this flag existed every rc -1 path read it as "nothing
+    # was measured": run `3014175-d98ed09e` (2026-09-08) kept three `fmt`
+    # bodies on that reading, and the next sweep never returned.
+    hung: bool = False
     # Names libtest reported as `ignored` (cfg-gated off for THIS cluster, e.g.
     # `ignored, requires nightly`). Kept, not dropped: an ignored test reports
     # no pass/fail verdict, so an oracle that only knows passed∪failed counts
@@ -1454,6 +1461,16 @@ class TestStateReading:
     @property
     def crashed(self) -> tuple[BinaryResult, ...]:
         return tuple(b for b in self.binaries if not b.completed)
+
+    @property
+    def hung_binaries(self) -> tuple[BinaryResult, ...]:
+        """The binaries the timeout cut while their section was open."""
+        return tuple(b for b in self.binaries if b.hung)
+
+    @property
+    def timed_out(self) -> bool:
+        """The run was cut by the caller's timeout inside a test section."""
+        return any(b.hung for b in self.binaries)
 
     def by_label(self) -> dict[str, BinaryResult]:
         return {b.label: b for b in self.binaries}
@@ -1625,7 +1642,9 @@ def binary_output_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
     return tuple(out)
 
 
-def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
+def parse_binary_results(
+    test_output: str, *, timed_out: bool = False,
+) -> tuple[BinaryResult, ...]:
     """Split a combined cargo-test stdout+stderr capture into per-binary
     :class:`BinaryResult`s. Labels come from the stderr ``Running <desc>
     (<path>)`` / ``Doc-tests <crate>`` lines; sections open on the stdout
@@ -1634,7 +1653,15 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
     section even when stderr and stdout ordering interleaves (same pairing
     rule as :func:`summarize_test_binaries`). A section with no trailer is a
     crashed binary: ``completed=False`` and any dangling ``test NAME ... ``
-    prefix line (verdict never printed) names the in-flight test."""
+    prefix line (verdict never printed) names the in-flight test.
+
+    ``timed_out`` says the capture is the partial output of a run the
+    CALLER cut (the cargo adapter returns it with rc -1). Cargo runs
+    targets one after another, so at most one section can be open at the
+    cut — the last one — and that binary did not die, it HUNG: it is marked
+    ``hung`` (its ``dangling`` test is the one that never returned). Earlier
+    unclosed sections in the same capture are crashes as before (cargo
+    went on to the next target after them)."""
     labels: list[tuple[str, str | None]] = []
     for raw in test_output.splitlines():
         _lab = _target_label(raw.strip())
@@ -1710,6 +1737,8 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             current.dangling = name
 
     out: list[BinaryResult] = []
+    last_open = max((i for i, sec in enumerate(sections) if not sec.completed),
+                    default=None)
     for i, sec in enumerate(sections):
         # A section with no matching `Running <desc>` label still has an
         # IDENTITY — its position in cargo's sequential execution order. The
@@ -1736,8 +1765,17 @@ def parse_binary_results(test_output: str) -> tuple[BinaryResult, ...]:
             dangling=None if sec.completed else sec.dangling,
             exe_path=exe,
             ignored=frozenset(sec.ignored),
+            hung=bool(timed_out and i == last_open),
         ))
     return tuple(out)
+
+
+def hung_sections(test_output: str) -> tuple[BinaryResult, ...]:
+    """The binaries a timed-out capture shows as hung (see
+    :func:`parse_binary_results`); empty when no section was open — the
+    timeout cut a build, not a test."""
+    return tuple(b for b in parse_binary_results(test_output, timed_out=True)
+                 if b.hung)
 
 
 def still_open_names(output: str) -> frozenset[str]:
@@ -1794,6 +1832,14 @@ class RegressionComparison:
     cur_executed: int
     crashed_all_red: tuple[str, ...] = ()
     crash_lost_pass: int = 0
+    # Binaries complete at baseline that the after-reading's timeout cut
+    # while their section was open — a test that never returned — and the
+    # in-flight test of each (``label::test``). A hang is charged whatever
+    # the binary was passing: it blocks every binary after it (they never
+    # ran) and every later sweep costs the whole timeout, so it is oracle
+    # corruption of the ``executed_shrank`` kind, never traded away.
+    newly_hung: tuple[str, ...] = ()
+    hung_tests: tuple[str, ...] = ()
     # What each newly-red test PRINTED (bare name → the failing assertion
     # with its `left` / `right` values), attached by the gate from the same
     # capture the comparison was read from. Empty on a comparison built
@@ -1830,6 +1876,8 @@ class RegressionComparison:
         corruption, not a behavioural cost."""
         if self.cur_executed < self.base_executed:
             return True
+        if self.newly_hung:
+            return True
         if self.net_pass_delta > 0:
             return False
         return bool(self.net_pass_delta < 0
@@ -1841,6 +1889,11 @@ class RegressionComparison:
         print '(pass-count drop)' whenever `newly_red` was empty, which
         mislabels a binary that crashed — the two are different failures with
         different fixes, and the log is where that distinction is read."""
+        if self.newly_hung:
+            plural = "ies" if len(self.newly_hung) > 1 else "y"
+            return (f"binar{plural} hung: {list(self.newly_hung)} (timed out "
+                    f"inside {list(self.hung_tests)}; net "
+                    f"{self.net_pass_delta:+d} test(s))")
         if self.newly_crashed:
             plural = "ies" if len(self.newly_crashed) > 1 else "y"
             return (f"binar{plural} crashed: {list(self.newly_crashed)} "
@@ -1861,6 +1914,8 @@ class RegressionComparison:
         as a repeat."""
         if self.newly_red:
             return self.newly_red
+        if self.newly_hung:
+            return frozenset(f"__binary_hang__:{b}" for b in self.newly_hung)
         if self.newly_crashed:
             return frozenset(f"__binary_crash__:{b}" for b in self.newly_crashed)
         if self.cur_pass < self.base_pass:
@@ -1886,6 +1941,8 @@ def compare_readings(base: TestStateReading,
     crashed_all_red: list[str] = []
     excluded: list[str] = []
     not_run: list[str] = []
+    newly_hung: list[str] = []
+    hung_tests: list[str] = []
     newly_red: set[str] = set()
     base_pass = cur_pass = base_exec = cur_exec = crash_lost = 0
     for label, b in base_by.items():
@@ -1901,6 +1958,12 @@ def compare_readings(base: TestStateReading,
             not_run.append(label)
             continue
         if not c.completed:
+            if c.hung:
+                # The timeout cut the run inside this binary: charged as a
+                # crash for the count (its passes are lost) AND as a hang
+                # for the verdict, whatever it was passing.
+                newly_hung.append(label)
+                hung_tests.append(f"{label}::{c.dangling or '?'}")
             if b.pass_count == 0:
                 crashed_all_red.append(label)
             else:
@@ -1922,7 +1985,9 @@ def compare_readings(base: TestStateReading,
         base_pass=base_pass, cur_pass=cur_pass,
         base_executed=base_exec, cur_executed=cur_exec,
         crashed_all_red=tuple(sorted(crashed_all_red)),
-        crash_lost_pass=crash_lost)
+        crash_lost_pass=crash_lost,
+        newly_hung=tuple(sorted(newly_hung)),
+        hung_tests=tuple(sorted(hung_tests)))
 
 
 def render_regression_detail(cmp: RegressionComparison) -> str:
@@ -1931,7 +1996,18 @@ def render_regression_detail(cmp: RegressionComparison) -> str:
     them); the scope sentences state WHAT was measured and what was excluded
     as pre-existing, so the model is never blamed for a crash it didn't
     cause."""
-    if cmp.newly_crashed:
+    if cmp.newly_hung:
+        head = (f"This made test binar{'ies' if len(cmp.newly_hung) > 1 else 'y'} "
+                f"{list(cmp.newly_hung)} HANG: the run was cut by the timeout "
+                f"inside {list(cmp.hung_tests)}, which never returned, and "
+                "every test after it never ran. A hang is an infinite loop or "
+                "unbounded recursion in a body this change reaches — a "
+                "formatter or accessor that calls itself (directly, or through "
+                "a wrapper that forwards back to it) is the usual shape. Write "
+                "a body that terminates: a Display/Debug body must format the "
+                "inner value's own fields or delegate to a DIFFERENT impl, "
+                "never to the value being formatted.")
+    elif cmp.newly_crashed:
         head = (f"This made test binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
                 f"{list(cmp.newly_crashed)} CRASH before reporting results "
                 "(e.g. segfault from bad unsafe code) — they completed fine "

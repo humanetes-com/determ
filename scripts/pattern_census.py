@@ -462,6 +462,14 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         # The route named the decline (and the unit's next prompt carries it).
         ("[phase-c/declined]", "declined-named"),
     ],
+    "P25": [
+        # The sweep read the hang as a reading and put the durable pair back,
+        # or a fill gate reverted the body that hung the suite.
+        ("HUNG in ", "hang-scored"),
+        ("hung tree restored", "hung-tree-restored"),
+        ("phase-c/hang_reverted", "hang-reverted"),
+        ("phase-c/u2_hang", "hang-rejected"),
+    ],
     "P19": [
         # The boundary invariant heals before the sweep (or on the sweep's
         # own uncoded diagnostic); the older reaction is the abort-time heal.
@@ -1870,6 +1878,30 @@ def _cohort_batch_set(sw: dict) -> tuple[set[str], bool]:
     return set(b["names"]), len(b["names"]) >= (b["m"] or 0)
 
 
+RE_HUNG_SWEEP = re.compile(
+    r"\[phase-c/tdd\] iter (?P<iter>\d+): cargo test "
+    r"(?:TIMED OUT \((?P<secs>\d+)s\)\. Stopping\.|"
+    r"rc=-1 HUNG in (?P<where>\S+))")
+
+
+def detect_p25(run: Run, iters: list[dict]) -> list[dict]:
+    """A cluster sweep that timed out inside a test. Pre-fix the loop logged
+    `cargo test TIMED OUT (Ns). Stopping.`, broke out of the cluster with no
+    reading and went on to the next cluster with the hung tree on disk (run
+    `3371694-c8835690`, 2026-09-08: stable abandoned at a 91-passing durable
+    mark, nightly filled at 0 passing); post-fix the sweep prints `rc=-1
+    HUNG in <binary>::<test>` and either restores the durable pair or scores
+    the hang as a crash. The fill gates that KEPT the hanging body are the
+    other half of the class; their reaction markers are listed too.
+    """
+    hits: list[dict] = []
+    for ref, m in run.find(RE_HUNG_SWEEP):
+        where = m["where"] or f"timed out after {m['secs']}s (pre-fix: cluster abandoned)"
+        hits.append({"evidence": f"iter {m['iter']}: sweep hung — {where}",
+                     "refs": [ref]})
+    return hits
+
+
 def detect_p24(run: Run, iters: list[dict]) -> list[dict]:
     """Crash-cohort lock: the crash-evidence cohort is larger than the
     dispatch batch and every graded unit is exempt from the pass cursor,
@@ -1994,7 +2026,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P14": detect_p14, "P15": detect_p15, "P16": detect_p16,
              "P17": detect_p17, "P18": detect_p18,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
-             "P22": detect_p22, "P23": detect_p23, "P24": detect_p24}
+             "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
+             "P25": detect_p25}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2014,7 +2047,8 @@ CLASS_NAMES = {
     "P21": "over-union session refusal (every test fits the cap, the union does not, never-served units wait)",
     "P22": "route starvation (a session opened first while a stub held leftover tests hollow and no stub route had run this fill)",
     "P23": "declined unit (the model answered an empty body; pre-fix logged as a reader loss)",
-    "P24": "crash-cohort lock (cohort > batch and exempt from the cursor: head re-dispatched, tail never reached)"}
+    "P24": "crash-cohort lock (cohort > batch and exempt from the cursor: head re-dispatched, tail never reached)",
+    "P25": "hung sweep (cargo test timed out inside a test; pre-fix the cluster was abandoned and the hung tree left on disk)"}
 
 
 # -------------------------------------------------------------------- report

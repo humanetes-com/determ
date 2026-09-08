@@ -368,3 +368,56 @@ def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C10 parallel-streams"].status == "WARN"
     assert "1 torn" in vs["C10 parallel-streams"].evidence
+
+
+def _tdd(ts: str, cluster: str, it: int, count: int, **extra) -> dict:
+    return {"ts": ts, "event": "phase_c.tdd.iter",
+            "data": {"cluster": cluster, "iter": it, "rc": 101, "kind": "merged",
+                     "pass_count": count, "fail_count": 3, **extra}}
+
+
+def test_iteration_checks_read_the_tdd_loops_own_iterations(tmp_path: Path) -> None:
+    """Run `3014175-d98ed09e` (2026-09-08): a `restart_from task2a` run
+    writes `phase_c.tdd.iter` and never a task4 completion, and every one
+    of its 20 periodic reports printed `C3 … SKIP only 0 iteration(s)
+    recorded` / `C4 … SKIP fewer than 3 iterations` over three recorded
+    sweeps (26, 26, 91). The plan's sentence: C3 and C4 have a series to
+    read. Negative control: the task4 series those checks used to read is
+    empty for the same events."""
+    events = [_tdd("2026-09-08T06:37:15", "stable", 1, 26),
+              _tdd("2026-09-08T07:10:33", "stable", 2, 26),
+              _tdd("2026-09-08T07:32:07", "stable", 3, 91)]
+    ev, pdir, lg = _write_run(tmp_path, events)
+    run = flow_audit.load_run(ev, pdir, lg, "")
+    assert run.task_done("task4") == []                       # the pre-fix source
+    assert [c for _, _, c in flow_audit.iteration_series(run)] == [26, 26, 91]
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C3 floor-monotonicity"].status == "PASS"
+    assert "tdd:stable: 3 iterations, floor held at 91" in vs["C3 floor-monotonicity"].evidence
+    assert vs["C4 plateau"].status == "PASS"
+
+    # A three-sweep plateau on one cluster is the WARN the check exists for.
+    flat = [_tdd("2026-09-08T06:00:00", "stable", 1, 50),
+            _tdd("2026-09-08T07:00:00", "stable", 2, 50),
+            _tdd("2026-09-08T08:00:00", "stable", 3, 50)]
+    ev2, pdir2, lg2 = _write_run(tmp_path / "flat", flat)
+    vs2 = {v.check: v for v in flow_audit.audit(ev2, pdir2, lg2, None, "", 3)}
+    assert vs2["C4 plateau"].status == "WARN"
+
+    # Two clusters are two series: a cluster switch is not a floor breach,
+    # and a deliberate re-stub (a retrigger) re-bases the floor instead of
+    # breaching it — the drop the ratchet was told not to charge.
+    two = [_tdd("2026-09-08T06:00:00", "stable", 1, 81),
+           _tdd("2026-09-08T07:00:00", "stable", 2, 21, kind="retrigger_build",
+                retrigger_reverted=56),
+           _tdd("2026-09-08T08:00:00", "stable", 3, 40),
+           _tdd("2026-09-08T09:00:00", "nightly", 1, 42)]
+    ev3, pdir3, lg3 = _write_run(tmp_path / "two", two)
+    vs3 = {v.check: v for v in flow_audit.audit(ev3, pdir3, lg3, None, "", 3)}
+    assert vs3["C3 floor-monotonicity"].status == "PASS"
+    # Control: the same drop without the retrigger marker is a breach.
+    plain = [_tdd("2026-09-08T06:00:00", "stable", 1, 81),
+             _tdd("2026-09-08T07:00:00", "stable", 2, 21)]
+    ev4, pdir4, lg4 = _write_run(tmp_path / "plain", plain)
+    vs4 = {v.check: v for v in flow_audit.audit(ev4, pdir4, lg4, None, "", 3)}
+    assert vs4["C3 floor-monotonicity"].status == "FAIL"

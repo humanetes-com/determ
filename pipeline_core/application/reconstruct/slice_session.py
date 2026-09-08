@@ -5,8 +5,13 @@ the model returns change sets over the slice's units, the harness splices
 them, compiles, runs the whole suite and writes back what the failing
 assertions printed and what the probe observed, on the SAME transcript.
 Acceptance is one transaction: every target green and no previously-passing
-test red keeps the state; a session that ends otherwise peels the changed
-units back one at a time until the suite holds, or restores the baseline.
+test red keeps the state. Every other judged turn is compared with the
+session's BEST judged state — its targets first, then losses beyond the
+best's, then the net verdict count — and a turn that is worse is put back
+to the best state's bytes before the next turn opens, with the transcript
+told what it lost. A session that ends on a best state that still
+regresses the opening suite peels the changed units back one at a time
+until the suite holds, or restores the baseline.
 
 What this replaces, measured on run `3003-93e9a9bf` (2026-09-02, cluster
 `stable`): a two-fn pair attempted six times as six independent 88K-char
@@ -38,6 +43,7 @@ from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, re
 from pipeline_core.domain.attribution import container_key, site_payload
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.reasoning_cap import CallCapReading
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import quote_panic_site
 from pipeline_core.domain.rust_idents import signature_fixed_by_trait
@@ -48,9 +54,12 @@ from pipeline_core.domain.slice_session import (
     TurnReading,
     coverage_note_for,
     extract_notes,
+    judge_against_best,
     render_budget_turn,
+    render_capped_turn,
     render_compile_turn,
     render_rejected_only_turn,
+    render_restored_note,
     render_test_turn,
     route_change_set,
 )
@@ -106,6 +115,11 @@ class SessionPorts:
     # (net verdict delta of the turn just judged) -> None; what the clock's
     # "budget follows payoff" rule reads.
     note_delta: Callable[[int], None] | None = None
+    # () -> what the transport recorded about the most recent `ask_turns`
+    # call (reasoning-capped? follow-up fn blocks?); None when the transport
+    # records nothing. Read after a reply that carried no change set and no
+    # request: a capped reply is not a decision and is re-asked, not ended.
+    call_reading: Callable[[], CallCapReading | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +136,44 @@ class SessionOutcome:
     transcript_chars: int
     newly_red: tuple[str, ...] = ()
     newly_red_output: Mapping[str, str] = field(default_factory=dict)
+    #: The judged turn whose state the session ended on; None when no turn
+    #: was judged. `final` is that turn's reading.
+    best_turn: int | None = None
+    #: Judged turns that were worse than the best state and were put back.
+    restored_turns: int = 0
+    #: Replies cut by the reasoning cap. One that carried no change set and
+    #: no request is re-asked, never judged, never a `no_change`; one that
+    #: carried a body is judged and counted in `judged_capped_turns`.
+    capped_turns: int = 0
+    #: Judged turns, and how many of them came from a capped reply (a
+    #: forced completion's guess).
+    judged_turns: int = 0
+    judged_capped_turns: int = 0
+
+    @property
+    def unmeasured(self) -> bool:
+        """The session measured nothing it can be graded on: every judged
+        landing came from a reasoning-capped reply, or no turn was judged
+        and every reply was capped. A truncated call is not a measured
+        refusal (the batch routes' rule for an escalated rewrite), so such
+        a session is not a FLAT re-buy for the next fill's ordering."""
+        if self.outcome == "accepted":
+            return False
+        uncapped_judged = self.judged_turns - self.judged_capped_turns
+        if uncapped_judged > 0 or not self.capped_turns:
+            return False
+        return (self.judged_turns > 0
+                or self.capped_turns >= self.model_calls)
+
+
+@dataclass(frozen=True, slots=True)
+class _JudgedState:
+    """A judged turn's reading and the bytes of the slice's files at that
+    reading — what a worse later turn is put back to."""
+
+    turn: int
+    reading: TurnReading
+    images: Mapping[str, PreImage]
 
 
 def _leaf(name: str) -> str:
@@ -147,11 +199,17 @@ def run_slice_session(
     max_turns: int = 8,
     max_minutes: float = 90.0,
     peel_max: int = 6,
+    keep_best: bool = True,
 ) -> SessionOutcome:
     """Run one session and leave the tree in its accepted, kept, or
     restored state. Never raises on a model or splice failure; a graceful
-    stop propagates after the tree is restored to the last state the
-    session judged clean."""
+    stop propagates after the tree is put back to the best judged state
+    the end-of-session decision would have kept, or to the baseline.
+
+    `keep_best=False` is the rule before the best-state reference (the
+    opening suite as the only reference, a worse judged turn left on the
+    tree for the next turn) — the negative control of the recorded
+    replays, never a live setting."""
     label = slice_.label()
     files = slice_.files
     # Byte pre-images of the slice's files, restored through the
@@ -188,17 +246,32 @@ def run_slice_session(
     notes = ""
     dispatched: set[FnSite] = set()
     accepted = False
-    last_reading: TurnReading | None = None
     prev_observed: dict[str, str] = {}
     prev_judged_turn = 0
-    # The tree state the session last judged (compiling); a non-clean judged
-    # state stays on the tree for the next turn to build on and is what the
-    # end-of-session decision peels or restores.
-    last_judged_clean = True
+    # The best judged state: the tree the next turn builds on and the state
+    # the end-of-session decision reads. A judged turn that is at least as
+    # good (its targets, then losses beyond the best's, then the net)
+    # becomes it; a worse one is put back to its bytes before the next turn.
+    best: _JudgedState | None = None
+    restored_turns = 0
+    capped_turns = 0
+    judged_turns = 0
+    judged_capped = 0
 
     def _restore(pre_images: Mapping[str, PreImage]) -> None:
         for pre in pre_images.values():
             restore(pre)
+
+    def _images() -> dict[str, PreImage]:
+        return {f: capture(target_src_dir / f, None) for f in files}
+
+    def _reply_capped() -> CallCapReading | None:
+        if ports.call_reading is None:
+            return None
+        try:
+            return ports.call_reading()
+        except Exception:  # noqa: BLE001 — a reading never ends a session
+            return None
 
     def _apply(cs: ChangeSet) -> tuple[list[str], dict[str, PreImage]]:
         """Splice the routed bodies; returns (rejected reasons, pre-splice
@@ -285,6 +358,9 @@ def run_slice_session(
             if turn_notes:
                 notes = turn_notes
             parsed = extract_fn_bodies(reply)
+            cap = _reply_capped()
+            if cap is not None and cap.capped:
+                capped_turns += 1
             if not parsed:
                 followup = ports.answer_pulls(reply)
                 if followup:
@@ -292,6 +368,28 @@ def run_slice_session(
                         "cluster": cluster_name, "turn": turns, "kind": "request"})
                     messages.append(_user(followup + "\n" + render_budget_turn(max_turns - turns)))
                     continue
+                if cap is not None and cap.empty_after_cap:
+                    # The reply was cut by the reasoning cap before it
+                    # decided anything and its forced completion salvaged
+                    # no body: an answer dropped, not a decision to change
+                    # nothing. The turn is spent (it made a call); the
+                    # session is not ended on it while turns remain.
+                    ports.emit("phase_c.session.turn", data={
+                        "cluster": cluster_name, "turn": turns, "kind": "capped",
+                        "followup_fn_blocks": cap.followup_fn_blocks,
+                        "reasked": turns < max_turns})
+                    if turns < max_turns:
+                        ports.log(f"  [phase-c/session] {label}: turn {turns} — the "
+                                  "reply was reasoning-capped and its follow-up "
+                                  "carried no change set; not a decision — re-asked "
+                                  "from the deliberation so far.")
+                        messages.append(_user(render_capped_turn() + "\n"
+                                              + render_budget_turn(max_turns - turns)))
+                        continue
+                    ports.log(f"  [phase-c/session] {label}: turn {turns} — the "
+                              "reply was reasoning-capped with no change set and "
+                              "no turn is left — session ends unmeasured.")
+                    break
                 ports.emit("phase_c.session.turn", data={
                     "cluster": cluster_name, "turn": turns, "kind": "no_change",
                     "notes": bool(turn_notes)})
@@ -339,33 +437,62 @@ def run_slice_session(
                           f"{len(cs.routed)} compile and are judged.")
             raw: list[str] = []
             reading, after = _read(raw)
-            last_reading = reading
             failing = [t.test for t in reading.targets if not t.passing]
-            ports.emit("phase_c.session.turn", data={
-                "cluster": cluster_name, "turn": turns, "kind": "judged",
-                "units": [site_payload(u) for u in sorted(cs.units)],
-                "targets_failing": failing, "newly_red": list(reading.newly_red),
-                "crashed": list(reading.crashed), "pass_delta": reading.pass_delta,
-                "rejected": rejected})
-            ports.log(f"  [phase-c/session] {label}: turn {turns} — {len(cs.routed)} "
-                      f"body(ies) compiled; targets failing {len(failing)}/"
-                      f"{len(slice_.tests)}, newly red {len(reading.newly_red)}, "
-                      f"net {reading.pass_delta:+d}.")
-            if ports.note_delta is not None and after is not None:
-                ports.note_delta(reading.pass_delta)
             if after is None or baseline is None:
                 # Inconclusive suite: keep nothing from this turn.
+                ports.emit("phase_c.session.turn", data={
+                    "cluster": cluster_name, "turn": turns, "kind": "inconclusive",
+                    "units": [site_payload(u) for u in sorted(cs.units)],
+                    "rejected": rejected})
                 _restore(pre)
                 messages.append(_user("RESULT: the test suite could not be measured "
                                       "after this change set (build or timeout); it was "
                                       "not applied.\n" + render_budget_turn(max_turns - turns)))
                 continue
-            last_judged_clean = reading.clean
+            judged_turns += 1
+            if cap is not None and cap.capped:
+                judged_capped += 1
+            # The best-state decision, before anything reads the reading:
+            # a turn at least as good as the best becomes it; a worse one
+            # is put back to the best's bytes before the next turn opens.
+            restored_to: int | None = None
+            restored_note = ""
+            restored_why = ""
+            if best is not None and keep_best and not reading.clean:
+                verdict = judge_against_best(reading, best.reading)
+                if not verdict.holds:
+                    restored_to = best.turn
+                    restored_note = render_restored_note(verdict, best.turn)
+                    restored_why = verdict.losses()
+            if restored_to is None:
+                best = _JudgedState(turns, reading, _images())
+            ports.emit("phase_c.session.turn", data={
+                "cluster": cluster_name, "turn": turns, "kind": "judged",
+                "units": [site_payload(u) for u in sorted(cs.units)],
+                "targets_failing": failing, "newly_red": list(reading.newly_red),
+                "crashed": list(reading.crashed), "pass_delta": reading.pass_delta,
+                "rejected": rejected, "capped": bool(cap is not None and cap.capped),
+                "best_turn": best.turn if best is not None else None,
+                "restored_to": restored_to})
+            ports.log(f"  [phase-c/session] {label}: turn {turns} — {len(cs.routed)} "
+                      f"body(ies) compiled; targets failing {len(failing)}/"
+                      f"{len(slice_.tests)}, newly red {len(reading.newly_red)}, "
+                      f"net {reading.pass_delta:+d}.")
             if reading.clean:
                 accepted = True
                 ports.log(f"  [phase-c/session] {label}: ACCEPTED on turn {turns} — "
                           "every target passes, no regression.")
                 break
+            if restored_to is not None and best is not None:
+                restored_turns += 1
+                _restore(best.images)
+                ports.log(f"  [phase-c/session] {label}: turn {turns} — worse than "
+                          f"turn {best.turn} ({restored_why}); the tree is back "
+                          f"at turn {best.turn}'s bodies.")
+            if ports.note_delta is not None and best is not None:
+                # What the run's last LANDED change set bought: the state on
+                # the tree, which after a restore is the best's, not this turn's.
+                ports.note_delta(best.reading.pass_delta)
             # What the still-failing targets execute NOW: the one fact that
             # separates "wrong body" from "body the targets never reach".
             note = ""
@@ -390,11 +517,18 @@ def run_slice_session(
                         "what the failing assertions see.")
             messages.append(_user(render_test_turn(
                 reading, rejected, dropped=dropped, dropped_diagnostics=dropped_diag,
-                coverage_note=note) + "\n" + render_budget_turn(max_turns - turns)))
+                coverage_note=note, restored_note=restored_note)
+                + "\n" + render_budget_turn(max_turns - turns)))
     except BaseException:
         # A stop mid-session: the tree must not hold an unjudged change set.
-        if not accepted and not last_judged_clean:
-            _restore(baseline_texts)
+        # It is put back to the best judged state when the end-of-session
+        # decision would have kept that state as it stands (not regressed
+        # against the opening suite — no peel needed), else to the baseline.
+        if not accepted:
+            if best is not None and not best.reading.regressed:
+                _restore(best.images)
+            else:
+                _restore(baseline_texts)
         raise
 
     current = dict(ports.enumerate_bodies())
@@ -405,37 +539,53 @@ def run_slice_session(
     reverted: frozenset[FnSite] = frozenset()
     newly_red: tuple[str, ...] = ()
     newly_red_output: Mapping[str, str] = {}
+    # The tree holds the best judged state (every worse turn was put back),
+    # so the decision reads that state's reading, and the peel — needed only
+    # when the best state itself regresses the opening suite — walks from it.
+    final = best.reading if best is not None else None
     if accepted:
         outcome, kept = "accepted", changed
     elif changed:
-        if last_reading is not None:
+        if final is not None:
             # Carried whether the set is kept or peeled: a kept net-positive
             # turn's newly-red tests are the next prompt's evidence.
-            newly_red = last_reading.newly_red
-            newly_red_output = dict(last_reading.newly_red_said)
-        if last_reading is not None and last_reading.regressed:
+            newly_red = final.newly_red
+            newly_red_output = dict(final.newly_red_said)
+        if final is not None and final.regressed:
             kept, reverted = _peel(ports, target_src_dir, slice_, records, baseline,
                                    baseline_bodies, baseline_texts, changed,
                                    peel_max=peel_max, label=label)
             outcome = "kept" if kept else "reverted"
         else:
             outcome, kept = "kept", changed
+    result = SessionOutcome(
+        outcome=outcome, turns=turns, model_calls=model_calls, kept=kept,
+        reverted=reverted, dispatched=frozenset(dispatched), notes=notes,
+        final=final, compile_failures=compile_failures,
+        transcript_chars=sum(len(str(m.get("content") or "")) for m in messages),
+        newly_red=newly_red, newly_red_output=newly_red_output,
+        best_turn=best.turn if best is not None else None,
+        restored_turns=restored_turns, capped_turns=capped_turns,
+        judged_turns=judged_turns, judged_capped_turns=judged_capped)
     ports.emit("phase_c.session.end", data={
         "cluster": cluster_name, "outcome": outcome, "turns": turns,
         "model_calls": model_calls, "compile_failures": compile_failures,
         "kept": [site_payload(u) for u in sorted(kept)],
         "reverted": [site_payload(u) for u in sorted(reverted)],
-        "notes_chars": len(notes)})
+        "notes_chars": len(notes),
+        "best_turn": result.best_turn, "restored_turns": restored_turns,
+        "capped_turns": capped_turns, "judged_turns": judged_turns,
+        "judged_capped_turns": judged_capped, "unmeasured": result.unmeasured})
     ports.log(f"  [phase-c/session] {label}: {outcome.upper()} after {turns} turn(s) "
               f"({model_calls} call(s), {compile_failures} compile failure(s)); "
               f"kept {len(kept)}, reverted {len(reverted)} unit(s)"
+              + (f"; ended on turn {result.best_turn}'s state"
+                 + (f", {restored_turns} worse turn(s) put back" if restored_turns else "")
+                 if result.best_turn is not None else "")
+              + (f"; {capped_turns} reasoning-capped turn(s)"
+                 + (" — unmeasured" if result.unmeasured else "") if capped_turns else "")
               + (f"; notes {len(notes)} chars." if notes else "."))
-    return SessionOutcome(
-        outcome=outcome, turns=turns, model_calls=model_calls, kept=kept,
-        reverted=reverted, dispatched=frozenset(dispatched), notes=notes,
-        final=last_reading, compile_failures=compile_failures,
-        transcript_chars=sum(len(str(m.get("content") or "")) for m in messages),
-        newly_red=newly_red, newly_red_output=newly_red_output)
+    return result
 
 
 def _peel_compile(

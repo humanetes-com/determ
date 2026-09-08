@@ -19,8 +19,8 @@ from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
 from pipeline_core.application.reconstruct.impl_fill import (
     _file_fill_plan,
     _file_route_admits,
-    _FileRoute,
 )
+from pipeline_core.application.reconstruct.routes import FileRoute
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.fill_schedule import RouteKind, RunClock
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
@@ -63,8 +63,8 @@ def _admits(tmp_path: Path, logs: list[str]):
     return _fn
 
 
-def _route(admits, *, units, fill, logs: list[str]) -> _FileRoute:
-    return _FileRoute(
+def _route(admits, *, units, fill, logs: list[str]) -> FileRoute:
+    return FileRoute(
         units_now=lambda: list(units), fill_file=fill, admits=admits,
         snapshot=lambda: None,  # type: ignore[arg-type,return-value]
         report_since=lambda _s: RouteRunReport(),

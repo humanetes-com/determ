@@ -32,6 +32,7 @@ from pipeline_core.domain.test_report import (
     FailureKind,
     TestFailure,
     TestRunReport,
+    U2Decision,
     U2Verdict,
     crash_panics,
     external_stub_sites_of,
@@ -49,6 +50,7 @@ from pipeline_core.domain.test_results import (
     build_broke,
     compare_readings,
     failure_bodies_for,
+    hung_sections,
     parse_binary_results,
     parse_failed_tests,
     render_regression_detail,
@@ -118,10 +120,20 @@ def run_scoped_tests(
     in the cluster) — falls back to ALL failing tests' bodies when omitted,
     and to the raw tail-slice only if no section body could be found at all.
     On timeout the caller gets (False, -1, …, set()) and should treat it as
-    INCONCLUSIVE — fall back to compile-based acceptance rather than block.
+    INCONCLUSIVE — fall back to compile-based acceptance — ONLY when the
+    timeout cut a build (no test section had opened). A timeout that cut
+    the run INSIDE a test is a test that never returned: the outcome names
+    it as a failure (`detail` says HUNG), because a body that makes the
+    suite hang is the one answer no gate may accept on "no evidence".
     """
     rc, out = run_cargo_fn(test_cmd, cwd, env, timeout=timeout)
     if rc == -1:
+        hung = hung_sections(out or "")
+        if hung and hung[-1].dangling:
+            name = hung[-1].dangling
+            return TestRunOutcome(
+                False, 1, render_hang_detail(name, hung[-1].label, timeout),
+                {name})
         return TestRunOutcome(False, -1, "scoped test run timed out", set())
     failed = parse_failed_tests(out)
     passed = rc == 0 and len(failed) == 0
@@ -161,7 +173,12 @@ def measure_test_state(
     if raw_sink is not None:
         raw_sink.append(out)
     if rc == -1:
-        return None
+        # The caller's timeout cut the run. A capture with an open test
+        # section is a READING: that binary hung (marked so, its in-flight
+        # test named) and the binaries after it never ran. A capture with no
+        # section is a build that did not finish — inconclusive, as before.
+        hung = TestStateReading(parse_binary_results(out or "", timed_out=True))
+        return hung if hung.binaries else None
     reading = TestStateReading(parse_binary_results(out))
     # No test-result sections AND a non-zero rc ⇒ the suite never executed
     # (the crate itself did not compile). Zero tests with rc==0 is a
@@ -271,6 +288,21 @@ def test_regression_gate(
               f"binaries {list(cmp.crashed_all_red)} crashed after the fill "
               "but were all-red at baseline — nothing that worked was lost; "
               "not charged as regression (failure mode moved, panic → abort)")
+    if cmp.newly_hung:
+        # Charged before every other exit, the net-gain forgiveness included:
+        # the binaries after the hung one never ran, so no net can be read,
+        # and every later sweep of this tree costs the whole timeout. The
+        # crash-only branch below asks what PANICKED in the dead binary; a
+        # hung binary printed nothing and did not die.
+        guard("phase-c/hang_reverted",
+              f"binar{'ies' if len(cmp.newly_hung) > 1 else 'y'} "
+              f"{list(cmp.newly_hung)} HUNG after the fill (timed out inside "
+              f"{list(cmp.hung_tests)}; {len(cmp.not_run)} later binar"
+              f"{'ies' if len(cmp.not_run) != 1 else 'y'} never ran) — a test "
+              "that never returns is not an inconclusive reading; REVERTED "
+              f"(cost: {cmp.crash_lost_pass} baseline pass(es) in the hung "
+              "binary, plus every binary after it)")
+        return cmp, render_regression_detail(cmp)
     if not cmp.regressed:
         if cmp.newly_crashed or cmp.newly_red:
             guard("phase-c/net_gain_accept",
@@ -374,6 +406,31 @@ def test_regression_gate(
               f"baseline (cost: {cmp.crash_lost_pass} baseline pass(es))")
         return cmp, render_regression_detail(cmp)
     return cmp, render_regression_detail(cmp)
+
+
+def render_hang_detail(test: str, binary: str, timeout: int) -> str:
+    """Prompt feedback for a body under which a test never RETURNED.
+
+    Stated as the primary finding: the test produced no verdict because it
+    never finished, not because an assertion failed, so the body's control
+    flow — not its values — is what the next attempt has to change. The
+    usual shape is a body that reaches itself: a Display or Debug impl that
+    formats the value it is formatting, an accessor that forwards to a
+    wrapper that forwards back. The test is named because it is the one
+    locator the model has; the timeout is named so the model does not read
+    the silence as a slow test."""
+    return (
+        f"Your body made the test `{test}` (binary `{binary}`) HANG: it did "
+        f"not return within {timeout}s, printed no verdict, and every test "
+        "after it in that binary never ran. This is not an assertion "
+        "failure — the process was still running when it was killed. A hang "
+        "is an infinite loop or unbounded recursion that this body reaches: "
+        "a formatter that formats the value being formatted (`{self}` or "
+        "`{:?}` of `self` inside its own impl, or through a wrapper that "
+        "forwards back to it), an accessor that calls itself through a "
+        "trait method with the same name, or a loop whose exit condition "
+        "never changes. Write a body that terminates: format the inner "
+        "fields, delegate to a DIFFERENT impl, and make every loop advance.")
 
 
 def _render_u2_abort(aborted: frozenset[str], scoped: TestRunReport,
@@ -533,7 +590,21 @@ def u2_test_gate(
         guard("phase-c/u2_skip", f"{type(e).__name__}: {e}")
         return U2Verdict.accept()
     if rc == -1:
-        return U2Verdict.accept()  # timeout → INCONCLUSIVE, never block
+        # The timeout cut the scoped run. Inside a test section it is a
+        # test of THIS unit's own that never returned (the scoped command
+        # runs `fn_tests` and nothing else): a self failure with the hang
+        # as its evidence. Before any section opened it is a build that did
+        # not finish — inconclusive, never block, as before.
+        hung = hung_sections(out or "")
+        if hung and hung[-1].dangling:
+            name = hung[-1].dangling
+            guard("phase-c/u2_hang",
+                  f"scoped run timed out inside `{name}` ({hung[-1].label}) — "
+                  "a test that never returns convicts the body under test")
+            return U2Verdict(
+                U2Decision.REJECT, self_failures=frozenset({name}),
+                detail=render_hang_detail(name, hung[-1].label, timeout))
+        return U2Verdict.accept()  # build did not finish → INCONCLUSIVE
     report = parse_test_output(out)
     scoped = TestRunReport(
         report.passed,

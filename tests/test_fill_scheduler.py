@@ -202,7 +202,7 @@ def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
     first never."""
     from dataclasses import replace
 
-    from pipeline_core.application.reconstruct.impl_fill import _SessionRoute
+    from pipeline_core.application.reconstruct.routes import SessionRoute
     from pipeline_core.domain.models import FnSite
     from pipeline_core.domain.slice_session import SessionSlice
 
@@ -216,7 +216,7 @@ def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
                FnSite("src/other.rs", "go", "free fn")))
     assert a.label() == b.label()
 
-    class _PreFixSessionRoute(_SessionRoute):
+    class _PreFixSessionRoute(SessionRoute):
         """The session route before binding moved to the aimed tests."""
 
         def plan(self) -> Sequence[RouteRun]:
@@ -229,7 +229,7 @@ def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
                 return RouteRunReport(empty=True)
             return self._run_one(sl, clock)
 
-    def two_fills(route_cls: type[_SessionRoute], root: Path) -> tuple[
+    def two_fills(route_cls: type[SessionRoute], root: Path) -> tuple[
             list[tuple[str, ...]], list[str], list[tuple[str, dict]]]:
         root.mkdir()
         opened: list[tuple[str, ...]] = []
@@ -248,7 +248,7 @@ def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
                          deps=_deps(root, log, events))
         return opened, log, events
 
-    opened, log, events = two_fills(_SessionRoute, tmp_path / "shipped")
+    opened, log, events = two_fills(SessionRoute, tmp_path / "shipped")
     assert opened[0] == a.tests                       # fill 1: the seed
     assert opened[1:] == [b.tests, a.tests]           # fill 2: schedule order
     line = [ln for ln in log if ln.startswith("  [phase-c/schedule] fill 1: 2 run(s)")][-1]

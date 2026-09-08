@@ -354,17 +354,9 @@ def test_a_judged_turn_states_which_changed_units_the_targets_execute(
     assert "editable units the targets execute now: src/lib.rs::fmt" in verdict
 
 
-def test_a_kept_session_stamps_its_forgiven_losses_on_the_unit_records(
-        monkeypatch, tmp_path):
-    """A session kept on a strict net gain forgives a newly-red test (the
-    sweep's rule). Its own record — the `*session*` key — carried that set,
-    but the next file-first / per-impl prompt for a KEPT unit reads the
-    unit's key, so the forgiven loss never reached it: run
-    `1092886-60870fdd` (2026-09-06) kept a session at net +5 with two tests
-    newly red, and zero prompts on disk carried `<PRIOR_REGRESSION>`. The
-    plan's sentence: every kept unit's record names the forgiven tests and
-    what they printed. The negative control is the session key alone, the
-    pre-fix stamp, which the unit records never read."""
+def _run_kept_net_gain(monkeypatch, tmp_path: Path):
+    """One compiling change set, strict net gain, a passenger newly red —
+    the keep-best session's customer (run 3014175-d98ed09e iter 3 #1)."""
     ws, tests = _setup(monkeypatch, tmp_path)
     monkeypatch.setenv("SLICE_SESSION_MAX_TURNS", "1")
     _install_turns(monkeypatch, [SECOND_REPLY])
@@ -382,6 +374,21 @@ def test_a_kept_session_stamps_its_forgiven_losses_on_the_unit_records(
         monkeypatch, check_diag=(0, "", []),
         run=[(101, base), (101, after), (101, after), (101, after)])
     res = _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
+    return ws, res
+
+
+def test_a_kept_session_stamps_its_forgiven_losses_on_the_unit_records(
+        monkeypatch, tmp_path):
+    """A session kept on a strict net gain forgives a newly-red test (the
+    sweep's rule). Its own record — the `*session*` key — carried that set,
+    but the next file-first / per-impl prompt for a KEPT unit reads the
+    unit's key, so the forgiven loss never reached it: run
+    `1092886-60870fdd` (2026-09-06) kept a session at net +5 with two tests
+    newly red, and zero prompts on disk carried `<PRIOR_REGRESSION>`. The
+    plan's sentence: every kept unit's record names the forgiven tests and
+    what they printed. The negative control is the session key alone, the
+    pre-fix stamp, which the unit records never read."""
+    ws, res = _run_kept_net_gain(monkeypatch, tmp_path)
     assert "rendered {}" in (ws / "src" / "lib.rs").read_text(), "kept, net +1"
     assert not res.reverted_fns
     recs = pipeline._APP.impl_fill_deps.load_retrospectives(ws)
@@ -393,3 +400,18 @@ def test_a_kept_session_stamps_its_forgiven_losses_on_the_unit_records(
     for rec in units.values():
         assert rec["regressed"] == ["t_keep"]
         assert 'right: "hi"' in rec["regressed_output"]["t_keep"]
+
+
+def test_a_kept_session_whose_reading_moved_is_cashed_not_wrong(
+        monkeypatch, tmp_path):
+    """The keep site used to charge WRONG_BODY whenever targets stayed
+    red. Session #1 of run 3014175-d98ed09e iter 3 ended kept on a +5
+    tree and the histogram printed wrong=1 beside a CASHED route row.
+    The class now reads the same delta note_kept records. Negative
+    control: class_for_kept with the reading withheld is UNREACHABLE
+    (tests/test_fill_class.py)."""
+    ws, res = _run_kept_net_gain(monkeypatch, tmp_path)
+    assert "rendered {}" in (ws / "src" / "lib.rs").read_text(), "kept, net +1"
+    assert res.fill_classes is not None
+    assert res.fill_classes.cashed >= 1
+    assert res.fill_classes.wrong == 0

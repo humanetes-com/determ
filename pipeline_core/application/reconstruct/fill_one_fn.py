@@ -1702,9 +1702,16 @@ class FillOneFn:
                               attempts=attempts, error=exhaust_error,
                               fill_class=_ex_cls.value)
 
-        note_kept_comparison(last_comparison() if ctx.tdd_test_cmd else None)
+        # The reading the route row is graded on is the reading the class
+        # reads: a keep whose suite reading moved verdicts is CASHED whatever
+        # its attributed set says (run `3014175-d98ed09e`, 2026-09-08: the
+        # `object_ref` keep read `pass 32 -> 87` under an empty attributed
+        # set and graded UNREACHABLE).
+        _cmp_u = last_comparison() if ctx.tdd_test_cmd else None
+        note_kept_comparison(_cmp_u)
         _ok = class_for_kept(
-            passed=_observed_passed[0], unreachable=bool(_blocked_by))
+            passed=_observed_passed[0], unreachable=bool(_blocked_by),
+            net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0)
         self.tel.emit("phase_c.fill.class", data={
             "cluster": ctx.cluster_name,
             "unit": f"{rel_file}::{fn_name}",

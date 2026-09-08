@@ -26,9 +26,19 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 _active: list[dict[str, Any]] | None = None
+
+# Per-call observers. A caller that needs the rows of ITS OWN call — the
+# slice session reading whether the reply it just got was reasoning-capped
+# — binds one around the call (`observe_call`); every row recorded inside
+# appends to it as well as to the fill window. A ContextVar for the same
+# reason as `_units_var`: fill routes run on worker threads, and each
+# thread's stack scopes its own calls.
+_observers_var: ContextVar[tuple[list[dict[str, Any]], ...]] = ContextVar(
+    "reasoning_cap_observers", default=())
 
 # The units (`file::fn`) the call currently in flight is serving, bound by
 # the fill route around its ask so the controller's row lands already
@@ -147,12 +157,74 @@ def serving_units(units: Iterable[str]) -> Iterator[None]:
 
 def _record(data: Mapping[str, Any]) -> None:
     active = _active
+    observers = _observers_var.get()
+    if active is None and not observers:
+        return
+    row = dict(data)
+    units = _units_var.get()
+    if units:
+        row["units"] = units
     if active is not None:
-        row = dict(data)
-        units = _units_var.get()
-        if units:
-            row["units"] = units
         active.append(row)
+    for rows in observers:
+        rows.append(row)
+
+
+@contextmanager
+def observe_call() -> Iterator[list[dict[str, Any]]]:
+    """Collect the rows the calls made inside record, for the caller that
+    made them. Independent of the fill window: a session outside any
+    window (a test, a route run on its own) still reads its own call."""
+    rows: list[dict[str, Any]] = []
+    token = _observers_var.set((*_observers_var.get(), rows))
+    try:
+        yield rows
+    finally:
+        _observers_var.reset(token)
+
+
+@dataclass(frozen=True, slots=True)
+class CallCapReading:
+    """What the transport recorded about ONE call.
+
+    `capped`: the main stream ended because reasoning ran out
+    (:func:`is_reasoning_capped`). `followup`: a forced completion ran.
+    `followup_fn_blocks`: how many `<FN` blocks that completion produced
+    (None when no follow-up row was recorded). The slice session reads it
+    after a reply that carried no change set and no request: on run
+    `3014175-d98ed09e` (2026-09-08) session #3's turn 0 was cut at
+    120,003 reasoning chars, its follow-up carried 43 chars and no body,
+    and the session ended `no_change` after one of eight turns — an
+    answer dropped by the cap, indistinguishable from the model declining
+    without this reading."""
+
+    capped: bool
+    followup: bool
+    followup_fn_blocks: int | None
+
+    @property
+    def empty_after_cap(self) -> bool:
+        """A capped call whose completion carried no fn block: the
+        deliberation was cut before a decision and nothing was salvaged."""
+        return self.capped and not (self.followup_fn_blocks or 0)
+
+
+def read_call(rows: Sequence[Mapping[str, Any]]) -> CallCapReading | None:
+    """Fold the rows of one observed call. None when the call recorded no
+    main-stream row (a transport that records nothing — a fake, a
+    non-streaming backend), so a caller cannot mistake silence for an
+    uncapped reply."""
+    stream = [r for r in rows if not _is_followup_row(r)]
+    if not stream:
+        return None
+    followups = [r for r in rows if _is_followup_row(r)]
+    blocks: int | None = None
+    if followups:
+        blocks = sum(int(r.get("fn_blocks") or 0) for r in followups)
+    return CallCapReading(
+        capped=any(is_reasoning_capped(r) for r in stream),
+        followup=bool(followups) or any(bool(r.get("followup")) for r in stream),
+        followup_fn_blocks=blocks)
 
 
 def record_stream_meta(data: Mapping[str, Any]) -> None:

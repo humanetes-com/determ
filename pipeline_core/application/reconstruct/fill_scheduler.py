@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pipeline_core.application.reconstruct.fill_reading import (
@@ -38,6 +38,7 @@ from pipeline_core.domain.fill_context import route_scope
 from pipeline_core.domain.fill_schedule import (
     FillBudget,
     FillSchedule,
+    RouteKind,
     RouteLedgerRow,
     RouteRun,
     RunClock,
@@ -73,6 +74,10 @@ class FillExecutionDeps:
     #: leaves every rank as the ledger would.
     unmeasurable_tests: frozenset[str] = frozenset()
     crash_blamed: frozenset[FnLocator] = frozenset()
+    #: How many runs of a route kind one fill opens (`schedule`'s
+    #: ``max_per_kind``); the rest are deferred to the next fill. Empty =
+    #: unbounded. The session cap is `SLICE_SESSION_MAX_PER_FILL`.
+    max_per_kind: Mapping[RouteKind, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +96,10 @@ def _outcome(report: RouteRunReport, delta: int) -> RunOutcome:
         return RunOutcome.DECLINED
     if delta > 0:
         return RunOutcome.CASHED
+    if report.unmeasured:
+        # Nothing this run landed came from a completed deliberation; a
+        # verdict that did not move under a truncated call is not FLAT.
+        return RunOutcome.UNMEASURED
     if report.reverted and not report.kept:
         return RunOutcome.REVERTED
     return RunOutcome.FLAT
@@ -177,7 +186,8 @@ def execute_fill(
         budget_minutes=deps.budget_minutes if deps.scheduled else 0.0,
         readmit_after=deps.readmit_after,
         unmeasurable_tests=deps.unmeasurable_tests if deps.scheduled else (),
-        crash_blamed=deps.crash_blamed if deps.scheduled else ())
+        crash_blamed=deps.crash_blamed if deps.scheduled else (),
+        max_per_kind=deps.max_per_kind if deps.scheduled else None)
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"

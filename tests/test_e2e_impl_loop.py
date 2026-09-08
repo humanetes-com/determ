@@ -1854,3 +1854,125 @@ def test_file_first_prompt_without_the_measured_set_offers_no_bypass(
     plan = file_prompt.split("Functions to write", 1)[1].split("```rust", 1)[0]
     assert "impl Clone for W" not in plan
     assert "[E0425]" in file_prompt
+
+
+# --- one authorization set: what the prompt calls writable, the splice lets overwrite ---
+
+INSTALLABLE_LIB = """\
+pub struct W { x: u32 }
+pub struct Vt { f: fn(u32) -> u32 }
+
+pub fn drop_w(v: u32) -> u32 { v }
+
+pub fn helper(v: u32) -> u64 { v as u64 }
+
+impl W {
+    pub fn maker(x: u32) -> W {
+        let t = Vt { f: drop_w };
+        let _ = t;
+        W { x }
+    }
+    pub fn other(&self) -> u32 {
+        unimplemented!()
+    }
+}
+impl Default for W {
+    fn default() -> W {
+        unimplemented!()
+    }
+}
+"""
+
+
+def _installable_blocks() -> list[ImplBlock]:
+    """Two blocks, so the default route ladder opens the FILE-first route
+    (a single-block file goes to the per-impl route)."""
+    mk = FnRecord(file="lib.rs", fn_name="maker", container="impl W",
+                  sig_text="fn maker (x : u32) -> W")
+    ot = FnRecord(file="lib.rs", fn_name="other", container="impl W",
+                  sig_text="fn other (& self) -> u32",
+                  has_unimplemented_body=True)
+    de = FnRecord(file="lib.rs", fn_name="default",
+                  container="impl Default for W",
+                  sig_text="fn default () -> W", has_unimplemented_body=True)
+    return [ImplBlock(file="lib.rs", container="impl W",
+                      members=(mk, ot), stub_members=(ot,), refill_members=(mk,)),
+            ImplBlock(file="lib.rs", container="impl Default for W",
+                      members=(de,), stub_members=(de,))]
+
+
+def _installable_setup(monkeypatch, tmp_path: Path, reply: str) -> tuple[Path, list[str]]:
+    from pipeline_core.domain.models import FieldRecord, TypeRecord
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(INSTALLABLE_LIB)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _installable_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    install_fake_extractor(
+        monkeypatch, fns=lambda sd: pipeline._STRUCTURE.enumerate_fns(sd),
+        types=[TypeRecord(file="lib.rs", kind="struct", name="Vt", fields=(
+                   FieldRecord(name="f", ty="fn(u32) -> u32"),)),
+               TypeRecord(file="lib.rs", kind="struct", name="W", fields=())],
+        dispatch_families=[])
+    prompts: list[str] = []
+
+    def _ask(prompt, *a, **k):
+        prompts.append(prompt)
+        return reply
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _ask)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    return ws, prompts
+
+
+_JOINT_REPLY = (
+    '<FN name="maker" block="impl W">let t = Vt { f: drop_w }; let _ = t; W { x: x + 1 }</FN>\n'
+    '<FN name="drop_w">v + 7</FN>\n'
+    '<FN name="helper">v as u64 + 1</FN>\n'
+    '<FN name="other" block="impl W">self.x</FN>\n'
+    '<FN name="default" block="impl Default for W">W { x: 0 }</FN>')
+
+
+def _run_escalated(ws: Path, *, measured) -> pipeline.ClusterFillResult:
+    return pipeline._phase_c_fill_impl_blocks(  # type: ignore[no-any-return]
+        project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, fr_path=None,
+        tdd_frontier_keys=None,
+        escalated_measured=measured, escalated_keys=measured)
+
+
+def test_file_first_splices_the_installable_the_prompt_offered_beside_its_producer(
+        monkeypatch, tmp_path):
+    """Run `3014175-d98ed09e` (2026-09-08, iter 2, `src/error.rs`): the
+    prompt said three installables were "writable in this prompt … rewrite
+    it together with the producer", the reply opened with all three, and
+    every one was refused `target_not_stub [overwrite not authorized]` —
+    the splice read `_refill_names` and the plan's `installable` tuple
+    was never consulted. The plan's sentence: a file-first reply carrying
+    a producer and its installables with changed bodies splices all of
+    them. The scope control in the same reply: a filled free fn the prompt
+    did NOT offer (`helper`, whose signature matches no table field) is
+    still refused."""
+    ws, prompts = _installable_setup(monkeypatch, tmp_path, _JOINT_REPLY)
+    _run_escalated(ws, measured=frozenset({FnLocator("lib.rs", "maker")}))
+    assert "INSTALLABLE" in prompts[0] and "`drop_w`" in prompts[0]
+    text = (ws / "src" / "lib.rs").read_text()
+    assert "W { x: x + 1 }" in text            # the producer (a refill target)
+    assert "v + 7" in text                    # its installable, offered → authorized
+    assert "self.x" in text                   # the stub
+    assert "v as u64 + 1" not in text         # not offered → not authorized
+
+
+def test_without_the_offer_the_same_installable_body_is_refused(monkeypatch, tmp_path):
+    """Negative control, the pre-fix shape from the splice's side: no
+    measured escalation, so nothing is offered as installable, and the
+    same `drop_w` body is refused `target_not_stub` while the producer
+    lands alone — halves of two answers, which is what the one set exists
+    to make impossible."""
+    ws, prompts = _installable_setup(monkeypatch, tmp_path, _JOINT_REPLY)
+    _run_escalated(ws, measured=frozenset())
+    assert "INSTALLABLE" not in prompts[0]
+    text = (ws / "src" / "lib.rs").read_text()
+    assert "W { x: x + 1 }" in text
+    assert "v + 7" not in text
+    assert "v as u64 + 1" not in text

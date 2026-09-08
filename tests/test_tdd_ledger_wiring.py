@@ -103,6 +103,12 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     monkeypatch.setenv("TDD_NO_VERDICT_SWEEPS", "0")
+    # The fill-phase clock and the sessions cap are read from the env at
+    # cluster entry like the stops above; the operator's .env sets both
+    # (360 min / 4 since 2026-09-08) and the assertions name the OFF
+    # wording, so pin them off here rather than read the live file.
+    monkeypatch.setenv("TDD_FILL_PHASE_MAX_MINUTES", "0")
+    monkeypatch.setenv("SLICE_SESSION_MAX_PER_FILL", "0")
     src = tmp_path / "src"
 
     def _cargo(*_a: Any, **_k: Any) -> tuple[int, str]:
@@ -218,6 +224,9 @@ def test_a_landing_is_recorded_and_the_next_sweep_judges_it(
     assert any("fill-phase-stop=off" in ln for ln in logs), (
         "the cluster-entry line names the fill-phase clock off switch "
         "before any GPU is spent")
+    assert any("sessions-per-fill=unbounded" in ln for ln in logs), (
+        "the cluster-entry line names the sessions cap before any GPU "
+        "is spent")
 
     # THE CONTROL: the identical run with the ledger unwired records nothing.
     control = tmp_path / "control"

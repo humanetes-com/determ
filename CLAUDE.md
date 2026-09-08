@@ -668,6 +668,22 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   share, and the deferred list. `TDD_FILL_PHASE_MAX_MINUTES` stays the
   process STOP and must be `0` or `>= budget + the longest healthy single
   unit`.
+- `SLICE_SESSION_MAX_PER_FILL` (default 0 = unbounded; `.env` sets 4) — NOT
+  a stop: how many slice sessions one fill OPENS. The fill schedule
+  (`domain/fill_schedule.py`, `max_per_kind`) defers the sessions beyond
+  it in schedule order (`DEFERRED … kind_cap`, share 0), and a deferred
+  session is the next fill's never-served candidate, so the cap prevents
+  no reading — it moves the sweep that reads the fill earlier. Sized on
+  run `3014175-d98ed09e` iter 3 (2026-09-08): eight packed sessions of
+  14.3–50.1 min ran back to back for 4 h 18 min before the file wave
+  (34 min) and the per-fn route opened. Read once at cluster entry with
+  the six stops; confirmed on the cluster-entry line (`sessions-per-fill=N`)
+  and on the `[phase-c/schedule] fill N:` line's deferred list.
+  `TDD_FILL_PHASE_MAX_MINUTES` bounds the product of this cap and
+  `SLICE_SESSION_MAX_MINUTES` (90 per session): raise it before raising
+  either. It was set to 360 on the same reading — four sessions at the
+  measured max (200 min) + the file wave + per-fn ≈ 270 min healthy worst
+  case, 90 min over it.
 - `POST_MERGE_MAX_STALLS` — the same clock for the post-merge wave (task2c),
   whose traversal is `ceil(frontier / POST_MERGE_MAX_DISPATCH)` iterations;
   same arithmetic, same `0`. Its empty-frontier branch
@@ -676,7 +692,7 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
 - `PHASE_C_TDD_BACKSTOP` (10000) is the only bound that should remain when
   the others are disabled; leave it.
 
-All six are read ONCE, at cluster entry (`phase_c_tdd.py`, the
+All of these are read ONCE, at cluster entry (`phase_c_tdd.py`, the
 
 `os.getenv` block near `UnmovedVerdicts(` / `FlatScoreGuard(`), so a change
 takes effect at the next launch — and the cluster-entry line
