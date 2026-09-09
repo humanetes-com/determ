@@ -382,6 +382,39 @@ def test_file_fill_plan_stub_construct_from_boxed_gets_wrap_the_box() -> None:
     assert line.rstrip().endswith("construct_from_boxed")
 
 
+def test_file_fill_generic_recipe_keys_on_sig_not_crate_wrappers() -> None:
+    """Plan rewrite: a Cell wrap/identity sig pays the shape instruction
+    without BoxedError / ContextError. Without sigs generic pays nothing."""
+    from pipeline_core.domain.construction_recipe import (
+        CHAIN_TABLE_RECIPE,
+        WRAP_BOX_RECIPE,
+    )
+    wrap_sig = (
+        "fn from_payload(error: Box<dyn StdError + Send + Sync>, "
+        "trace: Option<Trace>) -> Self")
+    wrap = _file_fill([BlockFillPlan(
+        "impl Cell", ("from_payload",), (),
+        sigs=(("from_payload", wrap_sig),))])
+    wrap_line = next(ln for ln in wrap.splitlines()
+                     if ln.startswith("  in `impl Cell`"))
+    assert "unsized" in wrap_line
+    assert "BoxedError" not in wrap_line
+    assert WRAP_BOX_RECIPE not in wrap_line
+    assert wrap_line.rstrip().endswith("from_payload")
+    bare = _file_fill([BlockFillPlan("impl Cell", ("from_payload",), ())])
+    bare_line = next(ln for ln in bare.splitlines()
+                     if ln.startswith("  in `impl Cell`"))
+    assert "unsized" not in bare_line
+    ident = _file_fill([BlockFillPlan(
+        "impl Cell", ("and_then",), (),
+        sigs=(("and_then", "fn and_then<C>(self, extra: C) -> Self"),))])
+    ident_line = next(ln for ln in ident.splitlines()
+                      if ln.startswith("  in `impl Cell`"))
+    assert "erased identity type" in ident_line
+    assert "ContextError" not in ident_line
+    assert CHAIN_TABLE_RECIPE not in ident_line
+
+
 def test_file_fill_plan_call_and_table_forms_in_one_prompt_stay_split() -> None:
     """context.rs writes both ext_context impls in one prompt. The generic
     impl's call form names the producer; the Error-impl's table form must

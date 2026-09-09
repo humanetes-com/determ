@@ -183,7 +183,7 @@ def _called_idents(line: str) -> list[str]:
 
 
 _WRAP_UNSIZED = (
-    "the argument is unsized; wrap it in a sized StdError this crate already "
+    "the argument is unsized; wrap it in a sized type this crate already "
     "declares. Do not pass the unsized value to a producer whose bound "
     "requires a sized type."
 )
@@ -224,6 +224,23 @@ _IN_SCOPE_ONLY_GATE = (
 def _unknown_name_diagnostic(excerpt: str) -> bool:
     low = excerpt.lower()
     return any(m in low for m in _UNKNOWN_NAME_MARKS)
+
+
+# Rustc's own wording that a cfg name is not a cargo feature. That note
+# is already in COMPILE_ERRORS. Teaching a WRONG/RIGHT pair, or naming
+# a cfg this crate declares, is the catalog.
+_CFG_NAMESPACE_MARKS = (
+    "expected values for `feature`",
+    "expected values for feature",
+    "unexpected `cfg` condition",
+    "unexpected cfg condition",
+    "unexpected_cfgs",
+)
+
+
+def _cfg_namespace_diagnostic(excerpt: str) -> bool:
+    low = excerpt.lower()
+    return any(m in low for m in _CFG_NAMESPACE_MARKS)
 
 
 _GENERIC_CLASS_ASKS: dict[str, str] = {
@@ -314,8 +331,12 @@ class GenericLanguageDriver:
     def gotchas_for_error(self, error_excerpt: str) -> str:
         # Language DETAIL is omitted. When rustc says a name or field is
         # missing, the pipeline gate is: do not add items; use
-        # TYPES_IN_SCOPE. Crate recipes stay on the catalog driver.
+        # TYPES_IN_SCOPE. When rustc says a cfg is not a cargo feature,
+        # that note is already in COMPILE_ERRORS — do not name a cfg
+        # this crate declares. Crate recipes stay on the catalog driver.
         if not (error_excerpt or "").strip():
+            return ""
+        if _cfg_namespace_diagnostic(error_excerpt):
             return ""
         if _unknown_name_diagnostic(error_excerpt):
             return _IN_SCOPE_ONLY_GATE

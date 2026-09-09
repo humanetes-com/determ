@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.domain.language_driver import (
+    GenericLanguageDriver,
+    using_driver,
+)
 from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.crash_site import (
     asan_stack_excerpt,
@@ -989,6 +992,50 @@ def test_a_report_without_a_summary_is_closed_by_the_next_report_or_label() -> N
 
 
 # ---- the conversion family: every by-value copy of inner ---------------------
+
+def test_generic_recovers_a_conversion_from_the_asan_line_without_a_name_set() -> None:
+    """Plan rewrite: a crate that does not declare into_boxed_dyn_error
+    still recovers the unique call on the ASAN test line. Catalog family
+    membership is the A/B (downcast in, downcast_ref not)."""
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        CrashFrame,
+        CrashSite,
+        blamed_locators,
+        recover_owner_from_caller_source,
+    )
+    origin = [
+        {"func": "free",
+         "file": "/rustc/llvm/compiler-rt/lib/asan/asan_malloc_linux.cpp",
+         "line": 51},
+        {"func": "<crate::Hold as core::ops::drop::Drop>::drop",
+         "file": "src/cell.rs", "line": 10},
+        {"func": "cell_gen_1::test_take", "file": "tests/cell_gen_1.rs",
+         "line": 21},
+    ]
+    access = [
+        {"func": "memcmp",
+         "file": "/rustc/llvm/sanitizer_common_interceptors.inc", "line": 880},
+    ]
+    line = "    let boxed = err.take_box();"
+    with using_driver(GenericLanguageDriver()):
+        frame = recover_owner_from_caller_source(
+            origin, access, line, named_by=("tests/cell_gen_1.rs", 21))
+        assert frame is not None
+        assert frame.fn_name == "take_box"
+        assert frame.file_rel == "src/cell.rs"
+        conv = CrashFrame(file_rel="src/cell.rs", line=0, fn_name="take_box",
+                          symbol="take_box",
+                          named_by=("tests/cell_gen_1.rs", 21))
+        site = CrashSite(binary_label="tests/cell_gen_1.rs", test_name="t",
+                         signal="AddressSanitizer: SEGV", frames=(),
+                         origin_frames=(conv,), origin_capable=True)
+        got = blamed_locators((site,))
+    assert got == frozenset({FnLocator("src/cell.rs", "take_box")})
+    assert "into_boxed_dyn_error" not in {loc.fn_name for loc in got}
+    assert got != frozenset(
+        FnLocator("src/cell.rs", n) for n in CONVERSION_FAMILY)
+
 
 def test_a_turbofish_call_names_the_conversion_and_downcast_ref_does_not() -> None:
     """`err.downcast::<HighLevel>().unwrap()` (tests/test_context.rs:124) and

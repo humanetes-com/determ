@@ -14,7 +14,7 @@ strings are byte-for-byte the originals (a characterization test pins them).
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from pipeline_core.domain.construction_recipe import (
@@ -610,6 +610,7 @@ def build_maximal_impl_prompt(
     errs: str,
     notes: str,
     identity_must: str = "",
+    sigs: Mapping[str, str] | None = None,
 ) -> str:
     """Last resort — budgets OFF. After the budgeted per-impl loop
     exhausts, the model gets ONE attempt with the WHOLE current file, every
@@ -620,10 +621,12 @@ def build_maximal_impl_prompt(
     prompt carries after the stub list. Empty (the default) leaves the
     prompt byte-identical to a call that never named the kwarg.
 
-    Construction recipes are derived from ``stub_names`` + ``container``,
-    not a sections field: a last-resort prompt for ``Error::context`` or
-    ``construct_from_boxed`` must carry the compile-time shape even when
-    identity Then is empty.
+    Construction recipes are derived from ``stub_names`` + ``container``
+    + ``sigs``. The catalog driver keys on name; the generic driver keys
+    on signature shape, so a last-resort prompt without ``sigs`` cannot
+    pay a wrap or identity instruction. Empty ``sigs`` (the default)
+    keeps the prompt byte-identical for every unit the catalog does not
+    name.
     """
     header = container.splitlines()[0] if container else "impl"
     names = ", ".join(stub_names)
@@ -631,7 +634,7 @@ def build_maximal_impl_prompt(
                   f"{tests_block}\n" if tests_block.strip() else "")
     notes_part = (f"\nNotes from earlier attempts:\n{notes}\n"
                   if notes.strip() else "")
-    recipe_text = construction_recipes_for(stub_names, container)
+    recipe_text = construction_recipes_for(stub_names, container, sigs=sigs)
     recipe_part = (f"{recipe_text}\n" if recipe_text else "")
     must_part = (f"{identity_must}\n" if identity_must.strip() else "")
     must_part += instruction_opener(file_rel, stub_names)

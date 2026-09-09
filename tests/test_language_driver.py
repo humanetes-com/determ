@@ -114,6 +114,7 @@ def test_generic_driver_source_does_not_name_the_catalog() -> None:
         "WRAP_BOX", "CHAIN_TABLE", "ErrorVTable", "ManuallyDrop",
         "BoxedError", "CLASS_PROMPTS", "into_boxed_dyn_error",
         "RUST_GOTCHAS", "ADHOC_VTABLE", "ContextValue", "object_downcast",
+        "error_generic_member_access", "ContextError", "cfg_name_vs_feature",
     ):
         assert banned not in src, banned
 
@@ -378,6 +379,9 @@ def test_generic_never_calls_gotchas_tables(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(sections, "gotchas_for_error", boom_detail)
     assert language_driver().gotchas_summary() == ""
     assert language_driver().gotchas_for_error("error[E0133]") == ""
+    assert language_driver().gotchas_for_error(
+        "warning: unexpected `cfg` condition name: `probe_flag`\n"
+        "  = note: expected values for `feature` are: `std`") == ""
     # A missing-field note pays the in-scope gate without calling the table.
     gate = language_driver().gotchas_for_error(
         "error[E0609]: no field `inner` on type `Cell`")
@@ -393,6 +397,25 @@ def test_generic_never_calls_gotchas_tables(monkeypatch: pytest.MonkeyPatch) -> 
         "<RUST_GOTCHAS>\n</RUST_GOTCHAS>" in prompt)
 
 
+def test_generic_never_calls_catalog_construction_recipe(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain import construction_recipe as cr
+
+    def boom(_name: str, _container: str) -> str:
+        raise AssertionError("catalog_construction_recipe was called")
+
+    monkeypatch.setattr(cr, "catalog_construction_recipe", boom)
+    monkeypatch.setattr(cr, "construction_recipe", boom)
+    wrap = language_driver().construction_recipe(
+        "from_payload", "impl Cell",
+        "fn from_payload(error: Box<dyn StdError + Send + Sync>, "
+        "trace: Option<Trace>) -> Self")
+    assert "unsized" in wrap
+    assert language_driver().construction_recipe(
+        "from_boxed", "impl Cell",
+        "fn from_boxed(error: Box<dyn StdError + Send + Sync>) -> Self") == ""
+
+
 def test_generic_construction_recipe_keys_on_sig_shape_not_crate_names() -> None:
     """Plan: unsized Box<dyn plus another arg gets the wrap instruction;
     by-value self returning Self on an inherent impl gets the identity
@@ -406,6 +429,7 @@ def test_generic_construction_recipe_keys_on_sig_shape_not_crate_names() -> None
         "trace: Option<Trace>) -> Self")
     assert "unsized" in wrap
     assert "BoxedError" not in wrap
+    assert "StdError" not in wrap
     assert "construct_from_std" not in wrap
     already = drv.construction_recipe(
         "from_boxed", "impl Cell",
@@ -493,7 +517,18 @@ def test_generic_conversion_license_is_box_dyn_or_a_crate_type() -> None:
         "into_boxed_dyn_error")
     assert drv.unique_called_name(
         "    err.downcast::<String>().unwrap()") == "downcast"
+    assert drv.unique_called_name(
+        "    let boxed = err.take_box();") == "take_box"
     assert drv.unique_called_name("    let x = 1;") is None
+    # Catalog unique-name is family-gated: downcast_ref is not a conversion.
+    # Generic recovers the first call; the family exclusion is the A/B.
+    assert drv.unique_called_name(
+        "    let _ = err.downcast_ref::<MyErr>();") == "downcast_ref"
+    with using_driver(catalog_driver()):
+        assert language_driver().unique_called_name(
+            "    let _ = err.downcast_ref::<MyErr>();") is None
+        assert language_driver().unique_called_name(
+            "    let boxed = err.take_box();") is None
     must = drv.ownership_transfer_must(("convert",))
     assert "original owner must not drop" in must
     assert "ManuallyDrop" not in must
@@ -553,7 +588,7 @@ _CRATE_GOTCHA_RECIPES = (
     "impl AsRef<dyn StdError + Send + Sync> for Error",
     "fn(&Error)", "Mut<'a, T>", "Mut::read", "anyhow APIs",
     "Error::msg", "ADHOC_VTABLE", "ContextValue { context",
-    "object_",
+    "object_", "error_generic_member_access",
 )
 
 
@@ -581,6 +616,9 @@ def test_generic_gotchas_for_error_is_the_in_scope_gate_not_a_crate_recipe() -> 
         ("error[E0433]: failed to resolve: could not find `format` in `core`",
          False),
         ("error[E0133]: call to unsafe function", False),
+        ("warning: unexpected `cfg` condition name: `probe_flag`\n"
+         "  = note: expected values for `feature` are: `std`", False),
+        ("error_generic_member_access", False),
     )
     for excerpt, gated in cases:
         out = drv.gotchas_for_error(excerpt)
@@ -632,6 +670,11 @@ def test_catalog_gotchas_still_name_this_crate() -> None:
             "error[E0433]: failed to resolve: could not find `format` in `core`")
         assert "anyhow APIs" in fmt
         assert "Error::msg" in fmt
+        cfg = drv.gotchas_for_error(
+            "warning: unexpected `cfg` condition name: `probe_flag`\n"
+            "  = note: expected values for `feature` are: `std`")
+        assert "error_generic_member_access" in cfg
+        assert '#[cfg(feature = "error_generic_member_access")]' in cfg
 
 
 def test_generic_fix_prompt_on_missing_field_carries_the_gate_not_a_crate_field() -> None:

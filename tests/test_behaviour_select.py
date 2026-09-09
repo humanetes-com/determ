@@ -28,6 +28,7 @@ from pipeline_core.domain.behaviour_select import (
     MUST_CLASS_ORDER,
     IdentityMustUnit,
     behaviour_class_name,
+    catalog_identity_must_admits,
     capture_owned,
     drop_capture_owned,
     identity_must_admits,
@@ -36,7 +37,7 @@ from pipeline_core.domain.behaviour_select import (
     select_identity_must,
     select_usage_examples,
 )
-from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.domain.language_driver import language_driver, using_driver
 from pipeline_core.domain.models import FnRecord
 from pipeline_core.prompts.language_catalog import catalog_driver
 
@@ -472,29 +473,42 @@ def test_identity_must_ranks_non_flood_hits_ahead_of_the_construct_dump() -> Non
 
 
 def test_identity_must_admits_is_stub_time_role_not_bare_self() -> None:
-    """Formatting and pointer `new` do not decide TypeId; constructors of
-    Error and downcast slots do. TypeId on a unit-return is the drop-rest
-    vtable sibling, not a downcast."""
-    assert not identity_must_admits(
-        "fmt", "impl Display for MessageError < M >",
-        "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result")
-    assert not identity_must_admits(
-        "new", "impl Own < T >", "fn new(ptr: NonNull<T>) -> Self")
-    assert not identity_must_admits(
-        "new", "impl Buf", "fn new() -> Self")
-    assert identity_must_admits(
+    """Admission on -> Self whose self-type equals the type the suite's
+    identity when names. A Counter suite admits Counter::new and refuses
+    impl Display for Counter. TypeId-plus-Option remains a downcast slot
+    without a name token. Catalog still pins Error constructors."""
+    drv = language_driver()
+    assert drv.name == "generic"
+    assert drv.identity_must_admits(
+        "new", "impl Counter", "fn new() -> Self", "Counter")
+    assert not drv.identity_must_admits(
+        "fmt", "impl Display for Counter",
+        "fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result", "Counter")
+    assert not drv.identity_must_admits(
+        "new", "impl Own < T >", "fn new(ptr: NonNull<T>) -> Self", "Counter")
+    assert not drv.identity_must_admits(
+        "new", "impl Buf", "fn new() -> Self", "Counter")
+    assert drv.identity_must_admits(
+        "slot", "impl Node",
+        "fn slot<E>(e: Ref<Node>, target: TypeId) -> Option<Ref<()>>",
+        "Counter")
+    assert not drv.identity_must_admits(
+        "drop_rest", "",
+        "fn drop_rest<E>(e: Own<Node>, target: TypeId)", "Counter")
+    # Catalog A/B: Error constructors and the downcast name token.
+    assert catalog_identity_must_admits(
         "construct_from_display", "impl Error",
         "fn construct_from_display<M>(error: M, backtrace: Backtrace) -> Self")
-    assert identity_must_admits(
+    assert catalog_identity_must_admits(
         "from", "impl From < E > for Error", "fn from(error: E) -> Self")
-    assert not identity_must_admits(
+    assert not catalog_identity_must_admits(
         "from",
         "impl From < Error > for Box < dyn StdError + Send + Sync + 'static >",
         "fn from(error: Error) -> Self")
-    assert not identity_must_admits(
+    assert not catalog_identity_must_admits(
         "object_drop_front", "",
         "fn object_drop_front<E>(e: Own<ErrorImpl>, target: TypeId)")
-    assert identity_must_admits(
+    assert catalog_identity_must_admits(
         "object_downcast", "",
         "fn object_downcast<E>(e: Ref<ErrorImpl>, target: TypeId) -> Option<Ref<()>>")
 

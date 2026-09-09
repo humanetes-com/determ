@@ -3719,7 +3719,10 @@ def prepare_impl_fill(
                         last_error_excerpt, _crate_type_records),
                     notes=notes_section,
                     identity_must=_identity_must(
-                        *block.stub_members, *block.refill_members))
+                        *block.stub_members, *block.refill_members),
+                    sigs={m.fn_name: (m.sig_text or "")
+                          for m in (*block.stub_members, *block.refill_members)
+                          if m.sig_text})
                 if len(_max_prompt) > _max_cap:
                     _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
                          f"skipped ({len(_max_prompt)} chars > cap {_max_cap}).")
