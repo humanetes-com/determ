@@ -102,6 +102,23 @@ class PhaseCDriver(_Coercible):
     TDD = "tdd"
 
 
+class LanguageDriverKind(_Coercible):
+    """Who is the language expert in fill and layout prompts (``LANGUAGE_DRIVER``).
+
+    GENERIC (default): the fill model. The pipeline is the gate — who may
+    write, what evidence sits in the prompt, whether a two-file change is
+    one transaction. Trait-contract tutorials, a Display/Debug name-set,
+    a hardcoded derive list, and the Send/Sync tutorial are not injected.
+
+    CATALOG: those pre-2026-09-09 tables, kept so an A/B can turn them
+    back on. Production call sites go through the bound driver; when
+    generic is bound the catalog functions are not called.
+    """
+
+    GENERIC = "generic"
+    CATALOG = "catalog"
+
+
 class ModelTier(_Coercible):
     """Instruction-following capability tier of a model."""
 

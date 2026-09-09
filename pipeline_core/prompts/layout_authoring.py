@@ -24,6 +24,7 @@ from pipeline_core.domain.behaviour_select import (
     class_rank,
     select_identity_must,
 )
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.private_surface import PrivateSurfaceItem, SurfaceItemKind
 
 _PROTOCOL = (
@@ -98,6 +99,11 @@ _RULES = (
 # Neither model and no reasoning strength fixed it, because the information was
 # never in the prompt. Raising Muse from `high` to `xhigh` made it worse, not
 # better. So this states the requirement instead of hoping it is inferred.
+#
+# Catalog-driver payload only. The generic driver omits this block:
+# `derive_requirements_text` already injects the computed list from the
+# tests, and a "standard set" paragraph invents derives the tests did
+# not ask for (E0119 on a hand-written impl, measured 2026-08-09/16).
 _DERIVED_TRAIT_RULE = (
     "TRAITS THE TESTS CALL MUST BE DERIVED:\n"
     "The frozen tests are the specification. If a test constructs or compares a\n"
@@ -122,6 +128,8 @@ _DERIVED_TRAIT_RULE = (
 # so a private layout choice silently removes them and the break surfaces only
 # when a test binary fails to compile — far from the layout that caused it.
 # Concrete examples, not "keep autotraits in mind": the model acts on examples.
+# Catalog-driver payload only. The generic driver omits this tutorial:
+# harvested autotrait pins already sit in LAYOUT-PINNING TESTS.
 _AUTOTRAIT_RULE = (
     "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API:\n"
     "`Send`/`Sync` are auto-derived from a struct's FIELDS. A private field\n"
@@ -484,8 +492,8 @@ def build_layout_authoring_prompt(
         extra_guidance or None,
         "" if extra_guidance else None,
         _RULES,
-        _DERIVED_TRAIT_RULE,
-        _AUTOTRAIT_RULE,
+        language_driver().derived_trait_rule() or None,
+        language_driver().autotrait_rule() or None,
         _DOC_CONTRACT_RULE,
         (_PUB_FIELDS_RULE
          if any(i.kind is SurfaceItemKind.PUB_FIELDS for i in items) else None),

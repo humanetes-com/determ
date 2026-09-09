@@ -36,6 +36,7 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.coverage_slice import unreached_by_test
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import (
     Diagnostic,
     FnLocator,
@@ -298,14 +299,18 @@ def _qualified_calls(body_text: str) -> frozenset[tuple[str, str]]:
 
 def _format_impl_calls(
     body_text: str,
-    methods: tuple[str, ...] = ("fmt", "debug"),
+    methods: tuple[str, ...] | None = None,
 ) -> frozenset[tuple[str, str]]:
-    """`_qualified_calls` restricted to `methods`. Default `fmt`/`debug` is
-    the attribution follow the hop used before the qualifier-complement:
-    a body that currently delegates to `Qualifier::display` is empty under
-    this default (run `3985224-5484d810`, 2026-09-09: `impl Debug for Error`
-    was `ErrorImpl::display(...)`), which is why the complement exists."""
-    want = frozenset(methods)
+    """`_qualified_calls` restricted to `methods`.
+
+    When `methods` is omitted, the bound language driver supplies the
+    follow set: catalog is `fmt`/`debug` (the pre-complement hop — a
+    Qual::display body is empty under it, run `3985224-5484d810`);
+    generic is `fmt` only. Production passes
+    `_follow_methods_for_trait(trait)` and does not use the default.
+    """
+    want = frozenset(methods if methods is not None
+                     else language_driver().format_follow_default())
     return frozenset(
         (q, m) for q, m in _qualified_calls(body_text) if m in want)
 

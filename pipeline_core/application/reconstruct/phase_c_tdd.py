@@ -130,6 +130,7 @@ from pipeline_core.domain.landed_change import (
     unattempted_units,
     unit_bodies,
 )
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.layout_retrigger import (
     DEFAULT_REFILL_GRACE_MAX_ITERS,
     DEFAULT_REFILL_PER_ITER,
@@ -786,6 +787,7 @@ def run_phase_c_tdd(
             if _fill_phase_max > 0 else ", fill-phase-stop=off")
          + (f", sessions-per-fill={_max_sessions}"
             if _max_sessions > 0 else ", sessions-per-fill=unbounded")
+         + f", language-driver={language_driver().name}"
          + f", followup-think={'on' if followup_think_env_on() else 'off'}")
 
     if deps.migrate_retro_evidence is not None:

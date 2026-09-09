@@ -19,6 +19,7 @@ from .domain.enums import (
     CoverageBackend,
     FillUnit,
     FixStrategy,
+    LanguageDriverKind,
     PhaseCDriver,
     PhaseCMode,
 )
@@ -141,6 +142,12 @@ class Settings:
     # contract: movers are withdrawn, harvest Display counts as exact-format
     # coverage, and the ask is Display, Debug, or alternate.
     behaviour_pin_env_debug: bool = True
+    # Who is the language expert in fill and layout prompts. generic (default):
+    # the fill model; the pipeline is the gate. catalog: the pre-2026-09-09
+    # std-trait tutorials, Display/Debug name-set, standard derive set, and
+    # Send/Sync tutorial, kept as an A/B. Read at composition; no code_id
+    # change. Confirmed on the cluster-entry line (language-driver=…).
+    language_driver: LanguageDriverKind = LanguageDriverKind.GENERIC
 
     @classmethod
     def from_env(cls, model: str = "") -> Settings:
@@ -183,4 +190,6 @@ class Settings:
                 os.getenv("TASK0D_CLASSES_PER_CLUSTER", "4")),
             behaviour_capture_split=os.getenv("BEHAVIOUR_CAPTURE_SPLIT", "1").strip() == "1",
             behaviour_pin_env_debug=os.getenv("BEHAVIOUR_PIN_ENV_DEBUG", "1").strip() == "1",
+            language_driver=LanguageDriverKind.coerce(
+                os.getenv("LANGUAGE_DRIVER"), LanguageDriverKind.GENERIC),
         )

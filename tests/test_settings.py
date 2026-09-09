@@ -1,6 +1,7 @@
 """Pins FixLoopCaps.from_env — the env→value mapping the pipeline.py fix/stall
 globals are now single-sourced from."""
 
+from pipeline_core.domain.enums import LanguageDriverKind
 from pipeline_core.settings import FixLoopCaps, Settings
 
 
@@ -55,6 +56,15 @@ def test_legacy_hard_cap_aliases(monkeypatch):
     c = FixLoopCaps.from_env(single_call_char_limit=100_000)
     assert c.per_fn_fix_hard_cap == 42
     assert c.per_pass_test_fix_hard_cap == 99
+
+
+def test_language_driver_defaults_generic(monkeypatch):
+    monkeypatch.delenv("LANGUAGE_DRIVER", raising=False)
+    assert Settings.from_env().language_driver is LanguageDriverKind.GENERIC
+    monkeypatch.setenv("LANGUAGE_DRIVER", "catalog")
+    assert Settings.from_env().language_driver is LanguageDriverKind.CATALOG
+    monkeypatch.setenv("LANGUAGE_DRIVER", "0")
+    assert Settings.from_env().language_driver is LanguageDriverKind.GENERIC
 
 
 def test_behaviour_pin_env_debug_defaults_on(monkeypatch):

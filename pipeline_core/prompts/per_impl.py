@@ -11,6 +11,7 @@ from pathlib import Path
 from pipeline_core.domain.construction_recipe import construction_recipes_for
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
@@ -19,7 +20,6 @@ from pipeline_core.prompts.sections import (
     format_impl_block_for_prompt,
     gotchas_summary,
     tag_block,
-    trait_contract_for,
 )
 
 SIBLING_FOLLOW_PREFIX = (
@@ -167,7 +167,8 @@ def build_per_impl_prompt(
                "the bodies below must resolve them; do not resubmit the "
                "same approach:\n")
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
-    trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
+    trait_block = tag_block(
+        "TRAIT_CONTRACT", language_driver().trait_contract(container))
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
     blueprint_block = tag_block(
         "DESIGN_BLUEPRINT", sections.blueprint,

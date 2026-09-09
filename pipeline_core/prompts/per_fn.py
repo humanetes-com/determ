@@ -12,6 +12,7 @@ from typing import Any
 from pipeline_core.domain.construction_recipe import construction_recipe_prefix
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -22,7 +23,6 @@ from pipeline_core.prompts.sections import (
     gotchas_for_error,
     gotchas_summary,
     tag_block,
-    trait_contract_for,
 )
 
 
@@ -103,8 +103,11 @@ def build_per_fn_prompt(
                "this file (already filled — your TARGET should follow the "
                "same structural pattern):\n```rust\n",
         suffix="\n```")
-    # P5.3: when impl-ing a known stdlib trait, inject its contract.
-    trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
+    # Trait-contract tutorial: catalog driver injects a std-trait table;
+    # generic (default) injects nothing — the impl header and the failing
+    # test are the evidence, the fill model is the language expert.
+    trait_block = tag_block(
+        "TRAIT_CONTRACT", language_driver().trait_contract(container))
     # Crate idioms — recurring patterns mined from already-filled fns in
     # THIS file (same section the per-impl prompt carries).
     idioms_block = tag_block(
@@ -260,7 +263,8 @@ def build_per_fn_fix_prompt(
                "this file (already filled — your TARGET should follow the "
                "same structural pattern):\n```rust\n",
         suffix="\n```")
-    trait_block = tag_block("TRAIT_CONTRACT", trait_contract_for(container))
+    trait_block = tag_block(
+        "TRAIT_CONTRACT", language_driver().trait_contract(container))
     # Crate idioms — same section the per-impl / per-fn initial prompts carry.
     idioms_block = tag_block(
         "CRATE_IDIOMS", crate_idioms_section,

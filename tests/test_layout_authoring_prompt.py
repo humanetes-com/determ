@@ -139,16 +139,33 @@ def test_pub_fields_rule_absent_when_no_such_item_is_listed():
 
 
 def test_prompt_states_the_autotrait_obligation():
-    """A private field type silently strips Send/Sync from the PUBLIC type that
-    holds it; the break then surfaces as a test-binary compile error far from
-    the layout that caused it, so the obligation must be stated where the
-    layout is chosen."""
+    """Generic (default): harvested pins are the gate, the Send/Sync
+    tutorial is not injected. Catalog: the tutorial is still there (A/B)."""
+    from pipeline_core.domain.language_driver import using_driver
+    from pipeline_core.prompts.language_catalog import catalog_driver
     p = _prompt()
-    assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" in p
-    assert "cannot be sent between threads safely" in p
-    # Concrete WRONG->RIGHT, not abstract advice: both escape hatches shown.
-    assert "unsafe impl Send for Handle {}" in p
-    assert "pub struct Handle { inner: Box<Repr> }" in p
+    assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" not in p
+    assert "unsafe impl Send for Handle {}" not in p
+    pin = BehaviourSpec(
+        "p", "", "assert_impl_all!(Handle: Send, Sync)",
+        ObservableOutcome.static_assertion(
+            StaticAssertKind.AUTOTRAITS,
+            "assert_impl_all!(Handle: Send, Sync)"),
+        subkind=BehaviourSubKind.OUTCOME)
+    pinned = build_layout_authoring_prompt(
+        module_name="anyhow", cfg_cluster="stable",
+        items=(PrivateSurfaceItem(SurfaceItemKind.STRUCT, "ErrorImpl",
+                                  "src/error.rs", "struct ErrorImpl { .. }"),),
+        public_surface="pub struct Error { .. }",
+        layout_pins=[pin], symbol_inventory="Box, NonNull, StdError")
+    assert "assert_impl_all!(Handle: Send, Sync)" in pinned
+    assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" not in pinned
+    with using_driver(catalog_driver()):
+        catalog = _prompt()
+        assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" in catalog
+        assert "cannot be sent between threads safely" in catalog
+        assert "unsafe impl Send for Handle {}" in catalog
+        assert "pub struct Handle { inner: Box<Repr> }" in catalog
 
 
 def test_autotrait_rule_uses_placeholder_names_only():
@@ -165,9 +182,15 @@ def test_autotrait_rule_uses_placeholder_names_only():
 # Golden of the PRE-CHANGE builder: exactly `_control_prompt()`'s inputs, run
 # through `build_layout_authoring_prompt` on 2026-08-26 BEFORE the `behaviours`
 # parameter and `_DOC_CONTRACT_RULE` existed (`PYTHONPATH=. python` over the
-# same call, `len(p)` and `hashlib.sha256(p.encode()).hexdigest()`).
+# same call, `len(p)` and `hashlib.sha256(p.encode()).hexdigest()`). That
+# prompt included the catalog derive/autotrait tutorials. Catalog driver
+# minus the doc rule still matches it. Generic driver omits those tutorials
+# (computed 2026-09-09 after LANGUAGE_DRIVER=generic).
 _PRE_CHANGE_LEN = 7678
 _PRE_CHANGE_SHA256 = "d6464c06f07e4e5dce91d9643aa25ee0f0d61ff07abec1a9c6fabecd1ab49718"
+_GENERIC_BASELINE_LEN = 5695
+_GENERIC_BASELINE_SHA256 = (
+    "1826a9e2dc5025d03c77dbf0929efc9338aecfb37187d372755715155039e5c3")
 
 
 def _control_prompt(**overrides):
@@ -213,25 +236,31 @@ def _display_spec(bid="b-display", text="x"):
 def test_no_behaviours_adds_nothing_but_the_doc_rule_to_the_pre_change_prompt():
     """The claim: with `behaviours=()` the behaviours channel contributes ZERO
     bytes — the section, its header and the MAY sentence are all absent — so
-    the prompt is what it was before the channel existed, plus exactly the
-    always-rendered `_DOC_CONTRACT_RULE` block (deliberate: the pins alone
-    justify a contract line, see the rule's comment).
+    the prompt is today's generic baseline plus exactly the always-rendered
+    `_DOC_CONTRACT_RULE` block (deliberate: the pins alone justify a contract
+    line, see the rule's comment).
 
-    Checked against a golden captured from the pre-change code, not against
-    the current code: `_PRE_CHANGE_SHA256` is the hash of this very call on
-    the builder as it stood before this batch. Removing the doc-rule block
-    (and its join newline) from today's output must reproduce that hash
-    byte for byte. Negative control: one behaviour changes the hash."""
+    Generic baseline is `_control_prompt()` minus the doc rule, captured
+    after LANGUAGE_DRIVER=generic omitted the derive/autotrait tutorials.
+    Negative control: one behaviour changes the hash; the catalog driver
+    minus the doc rule still matches the 2026-08-26 pre-change golden
+    (those tutorials were in that prompt)."""
+    from pipeline_core.domain.language_driver import using_driver
+    from pipeline_core.prompts.language_catalog import catalog_driver
     p = _control_prompt()
     assert _DOC_CONTRACT_RULE in p
     assert "BEHAVIOURS THIS REPRESENTATION" not in p
     assert _may_note() not in p
     stripped = p.replace(_DOC_CONTRACT_RULE + "\n", "", 1)
-    assert len(stripped) == _PRE_CHANGE_LEN
-    assert hashlib.sha256(stripped.encode()).hexdigest() == _PRE_CHANGE_SHA256
+    assert len(stripped) == _GENERIC_BASELINE_LEN
+    assert hashlib.sha256(stripped.encode()).hexdigest() == _GENERIC_BASELINE_SHA256
     with_one = _control_prompt(behaviours=[_identity_spec()])
     with_one = with_one.replace(_DOC_CONTRACT_RULE + "\n", "", 1)
-    assert hashlib.sha256(with_one.encode()).hexdigest() != _PRE_CHANGE_SHA256
+    assert hashlib.sha256(with_one.encode()).hexdigest() != _GENERIC_BASELINE_SHA256
+    with using_driver(catalog_driver()):
+        catalog = _control_prompt().replace(_DOC_CONTRACT_RULE + "\n", "", 1)
+        assert len(catalog) == _PRE_CHANGE_LEN
+        assert hashlib.sha256(catalog.encode()).hexdigest() == _PRE_CHANGE_SHA256
 
 
 def test_behaviours_section_sits_after_the_pins_and_groups_identity_first():

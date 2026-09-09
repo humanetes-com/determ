@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective
 from pipeline_core.domain.installable_fns import fn_decl_shape
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
@@ -351,6 +352,10 @@ class IdentityMustUnit:
 IdentityMustInput = IdentityMustUnit | FnRecord
 
 
+# Catalog-driver admission: Display/Debug by trait name, or a fmt::Result
+# return. The generic driver uses the return-type check alone and never
+# reads this set. Kept so LANGUAGE_DRIVER=catalog is the pre-2026-09-09
+# path, not a delete.
 _FORMAT_TRAITS = frozenset({"Display", "Debug"})
 
 # The type identity `when` texts name (`Error::msg`, `err.is::<&str>()`).
@@ -363,13 +368,23 @@ def _return_type(sig: str) -> str:
     return shape[2] if shape is not None else ""
 
 
-def _is_formatting(container: str, sig: str) -> bool:
-    """True iff this unit is a formatting impl — Display/Debug, or a
-    `fmt::Result` return (inherent `ErrorImpl::display`/`debug`, Write)."""
+def catalog_is_formatting(container: str, sig: str) -> bool:
+    """Catalog-driver formatting test: the Display/Debug name-set, else
+    a `fmt::Result` return (inherent display/debug, Write).
+
+    Production admission goes through :func:`language_driver`. This
+    function is the catalog implementation; the generic driver does not
+    call it.
+    """
     trait = impl_trait_name(container) or ""
     if trait in _FORMAT_TRAITS:
         return True
     return "fmt::Result" in _return_type(sig)
+
+
+def _is_formatting(container: str, sig: str) -> bool:
+    """Bound-driver formatting test (generic: return type; catalog: name-set)."""
+    return language_driver().is_formatting(container, sig)
 
 
 def constructs_identity_subject(name: str, container: str, sig: str) -> bool:

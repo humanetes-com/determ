@@ -42,3 +42,7 @@ os.environ.setdefault("PIPELINE_PROMPTS_DIR", str(_TEST_OBS_DIR / "prompts"))
 # `setdefault`, so an explicit override on the command line still wins.
 os.environ.setdefault("BACKEND", "vllm")
 os.environ.setdefault("VLLM_MAX_MODEL_LEN", "131072")
+# Language driver: generic is production default. Pin it here so a local
+# LANGUAGE_DRIVER=catalog in .env cannot flip the suite onto the catalog
+# path the tests treat as the A/B negative control.
+os.environ.setdefault("LANGUAGE_DRIVER", "generic")

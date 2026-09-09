@@ -26,8 +26,9 @@ def test_extract_trait_from_container() -> None:
     assert extract_trait_from_container("impl Foo") is None          # inherent
     assert extract_trait_from_container("") is None
     assert extract_trait_from_container("fn free()") is None
-    # Forms the old regex silently MISSED (returned None → no TRAIT_CONTRACT):
-    # generic impls (regex demanded whitespace right after `impl`) ...
+    # Forms the old regex silently MISSED (returned None, so the catalog
+    # driver had no trait name to look up): generic impls (regex demanded
+    # whitespace right after `impl`) ...
     assert extract_trait_from_container("impl<T> From<T> for X") == "From"
     assert extract_trait_from_container("impl<'a, T: ?Sized> AsRef<T> for Y<'a, T>") == "AsRef"
     # ... and nested generic arguments (regex stopped at the first `>`).
@@ -39,6 +40,9 @@ def test_extract_trait_from_container() -> None:
 
 
 def test_trait_contract_lookup() -> None:
+    """The catalog table still exists (LANGUAGE_DRIVER=catalog A/B).
+    Production builders go through the bound driver; generic injects
+    nothing — that pin lives in test_language_driver.py."""
     assert "Display::fmt" in trait_contract_for("impl Display for X")
     # The generic-impl fix makes contracts reachable for generic impls too.
     assert "From<T>::from" in trait_contract_for("impl<T> From<T> for X")

@@ -23,11 +23,13 @@ from pipeline_core.domain.type_refs import (
     field_accessible_from,
 )
 
-# Standard library trait contracts. When a fn is being implemented
-# inside `impl Trait for X`, inject the trait's documented behavior so the
-# model knows what's expected (return type semantics, format conventions,
-# etc.). Hardcoded for the most common stdlib traits — covers ~90% of impl
-# blocks in typical Rust crates.
+# Catalog-driver std-trait tutorials. When a fn is being implemented
+# inside `impl Trait for X`, the catalog driver injects the trait's
+# documented behavior. Hardcoded for the most common stdlib traits —
+# covers ~90% of impl blocks in typical Rust crates. The generic driver
+# (LANGUAGE_DRIVER=generic, the default) does not read this table: the
+# trait name is already in the impl header the prompt quotes, and the
+# fill model is the language expert.
 TRAIT_CONTRACTS: dict[str, str] = {
     "Display": (
         "Display::fmt(&self, f: &mut Formatter) -> fmt::Result\n"
@@ -178,8 +180,12 @@ def extract_trait_from_container(container: str) -> str | None:
 
 
 def trait_contract_for(container: str) -> str:
-    """Return the standard contract text for the trait this fn implements,
+    """Catalog-driver contract text for the trait this fn implements,
     or empty string if no matching contract is known.
+
+    Production builders go through :func:`language_driver`. This
+    function is the catalog implementation; the generic driver does not
+    call it.
     """
     name = extract_trait_from_container(container)
     if not name:

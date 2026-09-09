@@ -258,7 +258,8 @@ def test_debug_dispatcher_calling_display_pairs_the_debug_implementer() -> None:
     and the session stayed dispatcher-only. The complement is
     trait.lower(), not a Debug branch — a Display dispatcher on the
     same body does not ask for debug."""
-    assert _format_impl_calls(_DISP_REC_VIA_DISPLAY["body_text"]) == frozenset()
+    assert _format_impl_calls(
+        _DISP_REC_VIA_DISPLAY["body_text"], ("fmt", "debug")) == frozenset()
     assert _called_qualifier_complements(
         "Debug", _DISP_REC_VIA_DISPLAY["body_text"]) == {("Inner", "debug")}
     assert _called_qualifier_complements(
@@ -398,7 +399,8 @@ def test_a_file_request_admits_the_uncalled_qualifier_method() -> None:
 def test_live_filled_debug_dispatcher_that_calls_display_pairs_debug() -> None:
     """Plan fixture, computed 2026-09-09 on the filled stable tree (not
     described): `impl Debug for Error` body is `ErrorImpl::display(...)`;
-    `_format_impl_calls` of fmt|debug is empty (the pre-complement hop);
+    `_format_impl_calls` of fmt|debug is empty (the pre-complement hop,
+    passed explicitly so the bound language driver cannot change it);
     `_called_qualifier_complements("Debug", body)` is `{("ErrorImpl",
     "debug")}`; the hop records the pair `src/error.rs::fmt (impl Debug
     for Error)` → `src/fmt.rs::debug (impl ErrorImpl)`.
@@ -424,7 +426,7 @@ def test_live_filled_debug_dispatcher_that_calls_display_pairs_debug() -> None:
     if disp is None:
         pytest.skip("no Debug dispatcher currently calling display")
     body = disp.body_text or ""
-    assert _format_impl_calls(body) == frozenset(), body
+    assert _format_impl_calls(body, ("fmt", "debug")) == frozenset(), body
     assert ("ErrorImpl", "debug") in _called_qualifier_complements("Debug", body)
     tsrc = (
         "use crate::Error;\n#[test]\nfn t_debug() {\n"
