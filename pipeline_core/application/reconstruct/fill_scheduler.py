@@ -81,6 +81,16 @@ class FillExecutionDeps:
     #: ``max_per_kind``); the rest are deferred to the next fill. Empty =
     #: unbounded. The session cap is `SLICE_SESSION_MAX_PER_FILL`.
     max_per_kind: Mapping[RouteKind, int] = field(default_factory=dict)
+    #: Called once per wave, after the wave's route rows are flushed, with
+    #: the units the wave's reports say they kept — and once more on the
+    #: wave a graceful stop cut, before the stop propagates. The driver's
+    #: unit-ledger writer sits behind it: the per-unit `landed` rows used
+    #: to be written only after the whole fill returned, so a fill that
+    #: ended on a stop left every kept body without a row (four fills of
+    #: 2026-09-08, about sixty bodies, zero rows). The route ledger is
+    #: flushed per wave for the same reason; this is the unit ledger's
+    #: turn. None (the default) keeps the post-fill write alone.
+    on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +98,25 @@ class FillExecution:
     schedule: FillSchedule
     rows: tuple[RouteLedgerRow, ...]
     stopped: bool = False
+
+
+def _notify_wave(deps: FillExecutionDeps,
+                 reports: Sequence[RouteRunReport | None]) -> None:
+    """Hand a finished (or stopped) wave's kept units to the driver's
+    unit-ledger writer. A wave whose every report is `empty` opened
+    nothing and is not reported; a failure in the writer is logged and
+    never ends the fill — the ledger records the fill, it does not run it."""
+    if deps.on_wave_kept is None:
+        return
+    present = [r for r in reports if r is not None]
+    if present and all(r.empty for r in present):
+        return
+    kept = frozenset(u for r in present for u in r.kept)
+    try:
+        deps.on_wave_kept(kept)
+    except Exception as exc:  # noqa: BLE001 — the ledger never ends a fill
+        deps.log(f"  [phase-c/schedule] wave ledger write failed "
+                 f"({type(exc).__name__}: {exc})")
 
 
 def _outcome(report: RouteRunReport, delta: int) -> RunOutcome:
@@ -319,6 +348,9 @@ def execute_fill(
                 rows.append(row)
                 _log_row(deps, row)
             _flush(rows[-len(wave):])
+            # The cut wave's keeps are on the tree; record them before the
+            # stop unwinds past the post-fill write.
+            _notify_wave(deps, [reports.get(w.run.key) for w in wave])
             raise
         for w in wave:
             rep = reports.get(w.run.key) or RouteRunReport(empty=True)
@@ -333,6 +365,7 @@ def execute_fill(
             rows.append(row)
             _log_row(deps, row)
         _flush(rows[-len(wave):])
+        _notify_wave(deps, [reports.get(w.run.key) for w in wave])
     deferred_rows: list[RouteLedgerRow] = []
     for s in sched.deferred:
         row = _row_for(s, None, None, deps=deps,

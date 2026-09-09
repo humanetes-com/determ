@@ -255,18 +255,28 @@ def _impl_trait_and_self(container: str) -> tuple[str, str] | None:
     return trait, self_ty
 
 
-def _format_impl_calls(body_text: str) -> frozenset[tuple[str, str]]:
-    """Qualified formatting-method calls `Qualifier::(fmt|debug)` in a body, as
-    `(qualifier, method)` pairs. `unsafe { ErrorImpl::debug(r, f) }` yields
-    `('ErrorImpl', 'debug')`; `Self::debug(r, f)` yields `('Self', 'debug')`,
-    which the caller resolves to the dispatcher's own self-type. Std-trait
-    dispatch (`Display::fmt(x, f)`) yields `('Display', 'fmt')` and is dropped
+def _format_impl_calls(
+    body_text: str,
+    methods: tuple[str, ...] = ("fmt", "debug"),
+) -> frozenset[tuple[str, str]]:
+    """Qualified formatting-method calls `Qualifier::method` in a body, as
+    `(qualifier, method)` pairs. Default methods are `fmt` and `debug`:
+    `unsafe { ErrorImpl::debug(r, f) }` yields `('ErrorImpl', 'debug')`;
+    `Self::debug(r, f)` yields `('Self', 'debug')`, which the caller
+    resolves to the dispatcher's own self-type. Std-trait dispatch
+    (`Display::fmt(x, f)`) yields `('Display', 'fmt')` and is dropped
     downstream because the qualifier is matched against a fn record's
     SELF-TYPE (`impl_self_type` of its container), never against any token of
     the container: `Display`/`Debug` are std traits, the self-type of no crate
-    impl, so they match no record."""
+    impl, so they match no record.
+
+    `methods=("display",)` is the Debug-dispatcher misshape scan: a body
+    that currently delegates to `Qualifier::display` is invisible to the
+    default pair (run `3985224-5484d810`, 2026-09-09: `impl Debug for Error`
+    was `ErrorImpl::display(...)` and the default parse returned empty, so
+    no pair was recorded and the session never gained `debug`)."""
     out: set[tuple[str, str]] = set()
-    for method in ("fmt", "debug"):
+    for method in methods:
         needle = f"::{method}"
         pos = body_text.find(needle)
         while pos != -1:
@@ -285,6 +295,29 @@ def _format_impl_calls(body_text: str) -> frozenset[tuple[str, str]]:
                 out.add((qual, method))
             pos = body_text.find(needle, pos + len(needle))
     return frozenset(out)
+
+
+def _debug_implementer_not_yet_called(
+    trait: str, body_text: str,
+) -> frozenset[tuple[str, str]]:
+    """The Debug implementer a Debug dispatcher does not yet call.
+
+    `_format_impl_calls` names `fmt`/`debug`. A dispatcher whose body
+    currently calls `Qualifier::display` (the Display-path sibling) looks
+    self-contained to that parse, so the pair hop records nothing and
+    `slices_with_pair_hops` cannot add the unentered `debug` — the case
+    that docstring names (run `164454-8ec9c4d4`) and the shape measured
+    on run `3985224-5484d810` (a Debug dispatcher whose body was a
+    Qual::display call; default parse empty). Same qualifier, method
+    `debug`. A Display dispatcher, or a Debug dispatcher that already
+    calls `debug`, yields nothing."""
+    if trait != "Debug":
+        return frozenset()
+    have_debug = {q for q, m in _format_impl_calls(body_text) if m == "debug"}
+    return frozenset(
+        (q, "debug")
+        for q, _m in _format_impl_calls(body_text, methods=("display",))
+        if q not in have_debug)
 
 
 def _attribute_format_only_test(
@@ -309,19 +342,24 @@ def _attribute_format_only_test(
     (`src/error.rs`) and never `Debug for MessageError`, which it never names.
 
     But the matched `fmt` body is often NOT the defect — it is the dispatcher.
-    On the live tree `Debug for Error::fmt` is already correct: it branches on
-    `formatter.alternate()` and delegates the `{:#?}` case to
-    `unsafe { ErrorImpl::debug(r, formatter) }`; the wrong body is
-    `src/fmt.rs::debug` (both branches `write!("{}", err)` = Display). Escalating
-    the `fmt` accessor cannot reach `debug` — the futility escalation adds fns
-    that construct/return the accessor's container type `Error`, and
-    `ErrorImpl::debug` returns `fmt::Result` — and `FnLocator` erases the
-    container, so `src/error.rs::fmt` dispatch is coarser than `Debug for Error`
-    anyway. So follow ONE hop: if the matched `fmt` body calls a crate
-    formatting method (`Qualifier::fmt`/`::debug` where the qualifier is a real
-    fn record's container token), attribute THAT implementer — the body the
-    verdict actually pins. Only when the matched `fmt` calls no sibling
-    formatter (it IS the implementer) is the `fmt` itself attributed.
+    When that body already calls `Qualifier::debug`, the hop follows it. When
+    it currently calls `Qualifier::display` instead, the default call parse
+    sees no formatting method and used to treat the dispatcher as
+    self-contained — no pair, so the session never gained `debug` (run
+    `3985224-5484d810`: `impl Debug for Error` was
+    `ErrorImpl::display(...)`; `_format_impl_calls` returned empty).
+    `_debug_implementer_not_yet_called` is that misshape: same qualifier,
+    method `debug`. Escalating the `fmt` accessor cannot reach `debug` — the
+    futility escalation adds fns that construct/return the accessor's
+    container type `Error`, and `ErrorImpl::debug` returns `fmt::Result` —
+    and `FnLocator` erases the container, so `src/error.rs::fmt` dispatch is
+    coarser than `Debug for Error` anyway. So follow ONE hop: if the matched
+    `fmt` body calls a crate formatting method (`Qualifier::fmt`/`::debug`
+    where the qualifier is a real fn record's container token), or is a
+    Debug dispatcher whose body currently calls `Qualifier::display`,
+    attribute THAT implementer — the body the verdict actually pins. Only
+    when the matched `fmt` calls no sibling formatter (it IS the
+    implementer) is the `fmt` itself attributed.
 
     `owned=False` is the original constituency: a test the primary attribution
     left unowned, for which this adds the only owner it will ever have.
@@ -385,8 +423,14 @@ def _attribute_format_only_test(
         if not (trait in traits and self_ty in file_idents):
             continue
         # Follow the dispatcher's call to its real formatting implementer.
+        # A Debug dispatcher that currently calls Qual::display is the
+        # implementer-not-yet-called case: fold in Qual::debug so the
+        # pair hop can add it (empty default parse otherwise).
         implementers: list[tuple[FnLocator, dict[str, Any]]] = []
-        for qual, method in _format_impl_calls(str(rec.get("body_text", "") or "")):
+        body_text = str(rec.get("body_text", "") or "")
+        calls = (_format_impl_calls(body_text)
+                 | _debug_implementer_not_yet_called(trait, body_text))
+        for qual, method in calls:
             if qual == "Self":
                 # `Self::debug(r, f)` inside `impl Debug for Error` names the
                 # dispatcher's own self-type: resolve it before matching.

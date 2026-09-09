@@ -338,3 +338,60 @@ def test_a_wave_s_rows_carry_each_run_s_own_units_and_a_run_that_never_opened_is
     assert old["file c.rs"].kept == (("a.rs", "f"),)
     assert ("b.rs", "g") in old["file a.rs"].reverted
     assert {r.model_calls for r in old.values()} == {3}
+
+
+class _StopRoute(_Route):
+    """A route whose run a graceful stop cuts: the executor's SystemExit path."""
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        self._calls.append(run.label)
+        raise SystemExit(0)
+
+
+def test_every_wave_hands_its_kept_units_to_the_unit_ledger_writer(
+        tmp_path: Path) -> None:
+    """The unit ledger's per-wave seam: `on_wave_kept` fires after each wave
+    with the units the wave's reports kept, and once more on the wave a stop
+    cuts, before the stop propagates. The sixty row-less bodies of
+    2026-09-08 were kept by waves that completed inside fills that never
+    returned; the control is the hook left unset, which is that silence."""
+    from dataclasses import replace as _replace
+
+    import pytest
+
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    calls: list[str] = []
+    seen: list[frozenset[FnLocator]] = []
+    kept_run = RouteRun(kind=RouteKind.FILE, label="file src/x.rs",
+                        targets=frozenset({_FMT}))
+    cut_run = RouteRun(kind=RouteKind.PER_FN, label="per-fn 1 re-fill(s)",
+                       targets=frozenset({_STUB}))
+    routes = [
+        _Route(RouteKind.FILE, [kept_run], calls=calls,
+               report=RouteRunReport(model_calls=1, kept=frozenset({_FMT}))),
+        _StopRoute(RouteKind.PER_FN, [cut_run], calls=calls),
+    ]
+    deps = _replace(_deps(tmp_path, log, events), on_wave_kept=seen.append)
+    with pytest.raises(SystemExit):
+        execute_fill(routes, hollow={}, bodies_sha=lambda _t: "s", deps=deps)
+    assert calls == ["file src/x.rs", "per-fn 1 re-fill(s)"]
+    assert seen == [frozenset({_FMT}), frozenset()], (
+        "one call per completed wave with its keeps, one for the cut wave")
+
+    # THE CONTROL: no hook wired — the executor stops the same way and
+    # tells nobody what the waves kept.
+    calls_control: list[str] = []
+    routes_control = [
+        _Route(RouteKind.FILE, [kept_run], calls=calls_control,
+               report=RouteRunReport(model_calls=1, kept=frozenset({_FMT}))),
+        _StopRoute(RouteKind.PER_FN, [cut_run], calls=calls_control),
+    ]
+    # Its own ledger: the first fill's rows would rank the file run a
+    # re-buy and put the stopping run first, which is a different fill.
+    control_dir = tmp_path / "control"
+    control_dir.mkdir()
+    with pytest.raises(SystemExit):
+        execute_fill(routes_control, hollow={}, bodies_sha=lambda _t: "s",
+                     deps=_deps(control_dir, [], []))
+    assert calls_control == calls

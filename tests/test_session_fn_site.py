@@ -23,7 +23,11 @@ import pytest
 
 from pipeline_core.adapters.coverage_owner import SiteIndex, _body_counts, _counted_bodies
 from pipeline_core.adapters.extractor import CliExtractor
-from pipeline_core.application.reconstruct.attribution import _attribute_format_only_test
+from pipeline_core.application.reconstruct.attribution import (
+    _attribute_format_only_test,
+    _debug_implementer_not_yet_called,
+    _format_impl_calls,
+)
 from pipeline_core.domain.attribution import (
     FormatterPair,
     canon_site,
@@ -228,6 +232,95 @@ def test_hop_pair_sites_are_canonical_for_a_generic_container() -> None:
            FnSite("src/i.rs", "debug", "impl Inner < T >"))
     assert raw[0] != pair.dispatcher
     assert slices_with_pair_hops(owners, [raw])["t_wrap"] == frozenset(owners["t_wrap"])
+
+
+# A Debug dispatcher whose body currently calls Qual::display is the
+# implementer-not-yet-called case the pair hop exists for. The default
+# call parse only names fmt|debug, so today's hop records no pair.
+# Computed 2026-09-09 on run 3985224-5484d810: the filled Debug dispatcher
+# body was a Qual::display call and `_format_impl_calls` on it was empty.
+_DISP_REC_VIA_DISPLAY = {
+    **_DISP_REC,
+    "body_text": "\n        Inner::display(self.inner.by_ref(), f)\n    ",
+}
+
+
+def test_debug_dispatcher_calling_display_pairs_the_debug_implementer() -> None:
+    """Plan: a Debug dispatcher whose body calls Qual::display (and not
+    Qual::debug) still records a pair with Qual::debug, and
+    slices_with_pair_hops then puts that debug site in a session that
+    only held the dispatcher. Negative control: the same body through
+    today's call-follower names no fmt|debug call, so the old hop
+    recorded no pair and the session stayed dispatcher-only."""
+    assert _format_impl_calls(_DISP_REC_VIA_DISPLAY["body_text"]) == frozenset()
+    assert _debug_implementer_not_yet_called(
+        "Debug", _DISP_REC_VIA_DISPLAY["body_text"]) == {("Inner", "debug")}
+    pairs: set[FormatterPair] = set()
+    frontier: dict = {}
+    sites: dict = {}
+    _attribute_format_only_test(
+        "t_wrap", _TSRC, _TSRC,
+        {"fmt": [_DISP_REC_VIA_DISPLAY], "debug": [_IMPL_REC]},
+        frontier, sites, log=lambda _m: None, pairs_out=pairs)
+    assert len(pairs) == 1, pairs
+    pair = next(iter(pairs))
+    assert pair.implementer.fn_name == "debug"
+    assert pair.implementer.file == "src/i.rs"
+    owners = {"t_wrap": {canon_site(FnSite(
+        "src/w.rs", "fmt", "impl Debug for Wrapper < T >"))}}
+    hopped = slices_with_pair_hops(owners, [(pair.dispatcher, pair.implementer)])
+    assert pair.implementer in hopped["t_wrap"]
+    assert slices_with_pair_hops(owners, [])["t_wrap"] == frozenset(owners["t_wrap"])
+
+
+def test_display_dispatcher_calling_display_does_not_synthesize_debug() -> None:
+    """Negative control: a Display dispatcher that calls Qual::display is
+    not the Debug misshape — no debug pair, the fmt itself is the
+    implementer."""
+    rec = {
+        "file": "src/w.rs", "fn_name": "fmt",
+        "container": "impl Display for Wrapper < T >",
+        "body_text": "\n        Inner::display(self.inner.by_ref(), f)\n    ",
+    }
+    tsrc = (
+        "#[test]\nfn t_wrap() {\n    let w: Wrapper<u8> = make();\n"
+        "    let s = format!(\"{}\", w);\n    assert!(s.contains(\"x\"));\n}\n"
+    )
+    assert _debug_implementer_not_yet_called("Display", rec["body_text"]) == frozenset()
+    pairs: set[FormatterPair] = set()
+    frontier: dict = {}
+    sites: dict = {}
+    _attribute_format_only_test(
+        "t_wrap", tsrc, tsrc,
+        {"fmt": [rec], "debug": [_IMPL_REC],
+         "display": [{**_IMPL_REC, "fn_name": "display"}]},
+        frontier, sites, log=lambda _m: None, pairs_out=pairs)
+    assert pairs == set(), pairs
+    owners = {f"{k.file}::{k.fn_name}"
+              for k, v in frontier.items() if "t_wrap" in v}
+    assert owners == {"src/w.rs::fmt"}, owners
+
+
+def test_debug_dispatcher_that_already_calls_debug_does_not_need_display() -> None:
+    """Negative control: a Debug dispatcher that already calls Qual::debug
+    is today's hop; a display call beside it does not change the pair."""
+    rec = {
+        **_DISP_REC,
+        "body_text": (
+            "\n        Inner::display(self.inner.by_ref(), f);\n"
+            "        Inner::debug(self.inner.by_ref(), f)\n    "
+        ),
+    }
+    assert _debug_implementer_not_yet_called("Debug", rec["body_text"]) == frozenset()
+    pairs: set[FormatterPair] = set()
+    frontier: dict = {}
+    sites: dict = {}
+    _attribute_format_only_test(
+        "t_wrap", _TSRC, _TSRC,
+        {"fmt": [rec], "debug": [_IMPL_REC]},
+        frontier, sites, log=lambda _m: None, pairs_out=pairs)
+    assert len(pairs) == 1, pairs
+    assert next(iter(pairs)).implementer.fn_name == "debug"
 
 
 # ---- locator-only attributions expand over the tree ------------------------

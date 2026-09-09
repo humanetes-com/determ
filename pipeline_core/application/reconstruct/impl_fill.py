@@ -5311,7 +5311,8 @@ def fill_impl_blocks(
             scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
             parallelism=int(kw.get("parallelism", 1) or 1),
             unmeasurable_tests=frozenset(kw.get("unmeasurable_tests") or ()),
-            crash_blamed=frozenset(kw.get("crash_blamed") or ())))
+            crash_blamed=frozenset(kw.get("crash_blamed") or ()),
+            on_wave_kept=kw.get("on_wave_kept")))
     return prepared.finish()
 
 

@@ -5157,6 +5157,85 @@ def run_phase_c_tdd(
         _bodies_before = (
             unit_bodies(deps.enumerate_fns(target_src_dir) or [], frontier_keys)
             if deps.enumerate_fns is not None else None)
+        # THE UNIT LEDGER'S WRITE PATH, AT THE WAVE. The `landed` rows used
+        # to be written only in the post-fill block below, which a fill that
+        # ends on a stop never reaches: every stop kind (sentinel, the
+        # fill-phase clock, a TERM) unwinds through the `except` around the
+        # fill call, so the four fills of 2026-09-08 that ended that way —
+        # runs `3400546`, `3500465`, `3625246`, `3698228`, about sixty kept
+        # bodies — left the unit ledger without one row (its index was last
+        # written 09:31 that morning), and the next process could grade
+        # nothing about them and exclude none of their flat re-buys. The
+        # fill executor now calls this after every wave and on the wave a
+        # stop cuts; the `except` branch calls it once more as the backstop
+        # for what the cut wave had already written. The truth is the tree,
+        # not the routes' reports: the units are the dispatched ones whose
+        # body has moved since the snapshot above, exactly as the post-fill
+        # block reads them, keyed by body sha so a row is written once.
+        _wave_written: dict[FnLocator, str] = {}
+
+        def _record_landed_rows(
+            site: str, kept_hint: frozenset[FnLocator], *,
+            # Bound at definition, per iteration: the snapshot, the batch,
+            # the premise and the row list this iteration's sweep judges.
+            _before: dict[FnLocator, Any] | None = _bodies_before,
+            _keys: frozenset[FnLocator] = frozenset(frontier_keys),
+            _failed: frozenset[str] = frozenset(cur_failed),
+            _elig: Mapping[FnLocator, Any] = eligible,
+            _epoch: int = _destruction_epoch,
+            _iter: int = iter_n,
+            _rows: list[LedgerEntry] = _ledger_rows,
+            _written: dict[FnLocator, str] = _wave_written,
+        ) -> int:
+            if (deps.ledger_append is None or deps.enumerate_fns is None
+                    or _before is None):
+                return 0
+            try:
+                recs_now = deps.enumerate_fns(target_src_dir) or []
+                landed_now = changed_units(_before, unit_bodies(recs_now, _keys))
+                if not landed_now:
+                    return 0
+                items_w, file_of_w, fps_w = _layout_ctx(_epoch)
+                bare_failed_w = frozenset(bare_test_name(t) for t in _failed)
+                rows_w = rows_for_units(
+                    [(k.file, k.fn_name) for k in landed_now], recs_now,
+                    project=project_dir.name, cluster=cluster.name,
+                    state=BodyState.LANDED, items=items_w, file_of=file_of_w,
+                    file_fp=fps_w, run_id=deps.run_id, iteration=_iter,
+                    epoch=_epoch, oracle_fp=_oracle_fp(_iter),
+                    convicting_of={
+                        (k.file, k.fn_name): sorted(
+                            frozenset(bare_test_name(t)
+                                      for t in _elig.get(k, ()))
+                            & bare_failed_w)
+                        for k in landed_now})
+                fresh = [r for r in rows_w
+                         if _written.get(FnLocator(r.key.file, r.key.fn_name))
+                         != r.body_sha]
+                if not fresh:
+                    return 0
+                deps.ledger_append(project_dir, fresh)
+                _rows.extend(fresh)
+                if _ledger_cache is not None:
+                    _ledger_cache.extend(fresh)
+                for r in fresh:
+                    _written[FnLocator(r.key.file, r.key.fn_name)] = r.body_sha
+                deps.log(
+                    f"  {tag} [phase-c/ledger] iter {_iter}: {len(fresh)} "
+                    f"landed body(ies) recorded at {site} "
+                    f"({len(kept_hint)} kept by the wave's route(s)) — judged "
+                    "at the next sweep, by the next process if this one stops "
+                    "first.")
+                deps.emit("phase_c.ledger.landed_rows", data={
+                    "cluster": cluster.name, "iter": _iter, "site": site,
+                    "units": sorted(f"{r.key.file}::{r.key.fn_name}"
+                                    for r in fresh)})
+                return len(fresh)
+            except Exception as exc:  # noqa: BLE001 — a ledger write never ends a fill or masks a stop
+                deps.log(f"  {tag} [phase-c/ledger] iter {_iter}: landed rows "
+                         f"at {site} could not be written "
+                         f"({type(exc).__name__}: {exc})")
+                return 0
         # Only the units the escalation MEASURED, scoped to the batch exactly
         # as the two frontier projections are. Computed once here because the
         # landed-change audit below grades an unchanged escalated unit as a
@@ -5274,8 +5353,12 @@ def run_phase_c_tdd(
                         or None),
                     session_slices=_session_slices or None,
                     session_owners=_session_owners or None,
+                    on_wave_kept=lambda kept: _record_landed_rows("wave", kept),
                 )
         except BaseException:
+            # Before the restore: a restored tree no longer holds these
+            # bodies, and the ledger is where a body outlives the tree.
+            _record_landed_rows("stopped during the fill pass", frozenset())
             _restore_abandoned_bet("stopped during the fill pass")
             _final_sweep("stopped during the fill pass")
             raise
@@ -5457,6 +5540,13 @@ def run_phase_c_tdd(
                     file_fp=_fps, run_id=deps.run_id, iteration=iter_n,
                     epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n),
                     convicting_of=_convicting_of)
+                # A row the wave writer already appended for this exact body
+                # is not written twice; a body a later wave moved again is a
+                # new row, as it should be.
+                _new_rows = [
+                    r for r in _new_rows
+                    if _wave_written.get(FnLocator(r.key.file, r.key.fn_name))
+                    != r.body_sha]
                 if _new_rows:
                     deps.ledger_append(project_dir, _new_rows)
                     _ledger_rows.extend(_new_rows)

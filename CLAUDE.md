@@ -293,6 +293,55 @@ or symbol from the live frontier; a plan-line MUST that names the crate's
 remaining failures; any comment or test fixture whose force is the live
 names rather than the shape. On any of them, stop.
 
+## Hard Rule 11 — no original source after strip; the fill crate is never the fix
+
+The original crate is read once, pre-strip, to bake artifacts and augment
+tests. After strip there is no post-strip read of original source into a
+prompt, a note, a write-list, a plan-line, or any other channel the fill
+model sees. Prompt-visible text is never original crate source. The
+implementation may differ from the original; the target is test-passing
+behaviour, not fidelity, not upstream shape. Do not steer a fill toward
+the original implementation. New source-derived data extends the bake,
+never a post-strip read.
+
+**The LLM that follows these rules cannot modify the crate under
+reconstruction at all.** That includes anyhow and every other project the
+pipeline is filling: not a body, not a test, not a one-line obvious fix,
+not a "I will put it back." The crate is the measurement and the model's
+job. The editable surface is the pipeline (`pipeline.py`, `pipeline_core`,
+`tools`, the extractor's Rust sources, the scripts and the trackers).
+This is the same ban as "The assistant does not write, delete or repair a
+single line of the crate under reconstruction" below; Hard Rule 11 is why
+that ban exists for the original-source half as well as the hand-edit half.
+
+**Any solution or fix is on the pipeline, not on the repository being
+filled.** It is a generic robust mechanism: the same function, with the
+same arguments, would fire for any crate, any remaining-failure set, and
+any test whose source has the same shape — including a crate that does
+not exist yet. A change whose purpose is that this anyhow leftover, this
+msg, this Debug body, would look like original anyhow is not a pipeline
+fix. It is a steer plus a Hard Rule 11 violation, even when the original
+body never hits the disk.
+
+**The rule, checkable.** Before shipping a stall fix, name the pipeline
+function that would carry it. Then one of: it reads no original crate
+source, writes no fill-crate source, and does not know this repository's
+names; or it is a Hard Rule 11 / steer — stop, do not ship. Using the
+original as a private diagnostic in chat ("original msg captures at
+construct, this tree's msg passes None") does not license putting that
+body, or a paraphrase of it, into a prompt or into the tree.
+
+**The instance, 2026-09-09, run `3985224-5484d810`.** A stall analysis
+treated "write msg like original anyhow" as the lever for three leftover
+Debug tests. That is reading the original as the answer and aiming a body
+at this crate. The legal lever is the pipeline mechanism that failed to
+land a body the tests already pin, without ever showing the original.
+
+**The tells.** "Do it like original anyhow"; pasting or paraphrasing an
+original body into a prompt, a note, or a MUST; editing
+`tmp/<project>/`, `.skeleton-filled/`, `.skeleton/`, `.best_tree`, or the
+generated tests; a fix whose first customer is this repository's leftovers.
+
 ## Nothing leaves this machine
 
 **Never transmit repository or workspace content to any external service.**
@@ -653,9 +702,15 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   re-buys 0 and deferred). An unmeasurable run — every aimed test is one
   whose binary did not complete, and no target is the crash-blamed
   locator — ranks as a re-buy (weight 0) even with no ledger row, so a
-  positive budget defers it. Do not set a positive budget until a sweep
-  has printed conversion blame: deferring the conversion file before that
-  reading is a stop that fires too early. It can prevent no reading: the
+  positive budget defers it. The check before a positive budget is the
+  entry sweep's own crash lines: with a crash-blamed conversion on the
+  frontier, a budget would defer its only route as unmeasurable, which is
+  a stop that fires too early; with no crashed binary at the sweep (run
+  `3698228-901de95e`, 2026-09-08: `rc=101`, no crash line), nothing the
+  budget defers is a reading. Set to 200 on that run's fill: 364 min under
+  budget 0 — sessions 224, a per-fn re-buy the previous fill had bought
+  flat 107, two `rebuy_flat` files 34 — and the 360-min clock ended the
+  process before iter 2's sweep. It can prevent no reading: the
   sweep runs at every iteration boundary regardless, a deferred run is
   recorded `deferred` in `logs/route_ledger/` and is the NEXT fill's
   never-served candidate (a re-buy deferred twice is re-admitted with

@@ -38,7 +38,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,6 +146,89 @@ def _suite_timeout() -> int:
         return int(os.environ.get("PHASE_C_TEST_TIMEOUT", "120"))
     except ValueError:
         return 120
+
+
+def _coverage_workers() -> int:
+    """How many reconstructed-binary processes one coverage step runs at
+    once: `PHASE_C_COVERAGE_WORKERS`, else `PIPELINE_PARALLELISM`, else 4.
+
+    The step's cost on a tree that carries a spinning body is the bound
+    paid once per binary that never returns and once per single-test
+    re-run that never returns, and run `3698228-901de95e` (2026-09-08/09)
+    paid it serially: ten coverage steps of 12.1 min each, 121 of the
+    fill's 364 minutes, on the same seven binaries every turn. The
+    processes are independent — each writes its own profile file under its
+    own directory and each is its own process group — so the serial loop
+    was the shape of the original `subprocess.run` call, not a contract.
+    A spinning binary holds one core; the model is on the GPU."""
+    for var in ("PHASE_C_COVERAGE_WORKERS", "PIPELINE_PARALLELISM"):
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            continue
+    return 4
+
+
+def _exact_timeout(bound: float) -> float:
+    """The bound on one single-test (`--exact`) process:
+    `PHASE_C_EXACT_TEST_TIMEOUT` when set, else the suite bound.
+
+    A test that runs alone for the whole suite bound is a hang, but the
+    number that licenses a shorter bound is the longest COMPLETING
+    single-test run the step has measured (`_Longest`, printed on the
+    `[coverage]` line) — the same rule every other bound here follows:
+    sized on a reading, never guessed. Unset means no behaviour change."""
+    raw = os.environ.get("PHASE_C_EXACT_TEST_TIMEOUT", "").strip()
+    if not raw:
+        return bound
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return bound
+
+
+class _Longest:
+    """The longest completing bounded run in one coverage step, and what it
+    ran — the reading that sizes `PHASE_C_EXACT_TEST_TIMEOUT`."""
+
+    def __init__(self) -> None:
+        self.seconds = 0.0
+        self.label = ""
+        self._lock = threading.Lock()
+
+    def note(self, seconds: float, label: str) -> None:
+        with self._lock:
+            if seconds > self.seconds:
+                self.seconds = seconds
+                self.label = label
+
+    def render(self) -> str:
+        with self._lock:
+            if not self.label:
+                return "none completed"
+            return f"{self.seconds:.1f}s ({self.label})"
+
+
+def _map_concurrently[T, R](fn: Callable[[T], R], items: Sequence[T],
+                            workers: int) -> list[R]:
+    """`fn` over `items`, up to `workers` at a time, results in item order.
+    One worker (or one item) is the plain serial map — the negative control
+    the concurrency test runs against."""
+    if workers <= 1 or len(items) <= 1:
+        return [fn(it) for it in items]
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+        return list(pool.map(fn, items))
+
+
+def _run_timed(cmd: list[str], cwd: Path, env: dict[str, str] | None = None,
+               *, timeout: float | None = None,
+               ) -> tuple[subprocess.CompletedProcess[str], float]:
+    t0 = time.monotonic()
+    out = _run(cmd, cwd=cwd, env=env, timeout=timeout)
+    return out, time.monotonic() - t0
 
 
 def _stage(project: Path, cluster: str, work: Path) -> Path:
@@ -348,19 +434,24 @@ class ExactRun:
 
 
 def _exact_run(tree: Path, binary: Path, name: str, raw: Path,
-               env: dict[str, str], *, timeout: float) -> ExactRun | None:
+               env: dict[str, str], *, timeout: float,
+               longest: _Longest | None = None) -> ExactRun | None:
     """Run `name` alone on `binary`; None when the binary does not claim it
     (`running 1 test` is printed before the test starts, so a claim is
-    readable even when the process then dies)."""
+    readable even when the process then dies). A completing run's duration
+    is noted on `longest` — the reading that sizes the single-test bound."""
     raw.unlink(missing_ok=True)
     e = dict(env)
     e["LLVM_PROFILE_FILE"] = str(raw)
-    out = _run([str(binary), "--exact", name, "--test-threads=1"],
-               cwd=tree, env=e, timeout=timeout)
+    out, secs = _run_timed([str(binary), "--exact", name, "--test-threads=1"],
+                           cwd=tree, env=e, timeout=timeout)
     if "running 1 test" not in (out.stdout or ""):
         return None
-    return ExactRun(name=name, binary=binary, returncode=out.returncode,
-                    raw=raw, completed=_completed(out.returncode, [raw]))
+    run = ExactRun(name=name, binary=binary, returncode=out.returncode,
+                   raw=raw, completed=_completed(out.returncode, [raw]))
+    if run.completed and longest is not None:
+        longest.note(secs, f"{_binary_label(binary)}::{name}")
+    return run
 
 
 def _listed_tests(tree: Path, binary: Path, env: dict[str, str],
@@ -380,26 +471,60 @@ def _name_matches(name: str, skip: Iterable[str]) -> bool:
     return name in set(skip) or name.rsplit("::", 1)[-1] in leaves
 
 
+def _recover_binaries(
+    tree: Path, items: Sequence[tuple[Path, Iterable[str]]],
+    env: dict[str, str], prof: Path,
+    *, timeout: float, exact_timeout: float | None = None,
+    workers: int = 1, longest: _Longest | None = None,
+) -> dict[str, ExactRun]:
+    """Every binary whose whole-suite process did not complete, re-run one
+    test per process. The runs that complete carry the counts the merge
+    lost with the crash; the ones that still die are the tests the reading
+    cannot measure. Keyed by the listed name, in listing order (binary
+    order, then the binary's own order — a name two binaries share keeps
+    the later binary's run, as the serial loop did).
+
+    Each item is `(binary, skip)`: ``skip`` is the hung test the caller
+    already named for that binary — re-running it is a second wait on the
+    same test (run `3500465-67c40e78`: kill of pass A handed `lib_gen_1` to
+    recovery, which `--exact`'d the hung name).
+
+    The listings are serial (`--list` runs no test); the single-test
+    processes run `workers` at a time across every binary, each under
+    `exact_timeout` (the suite bound when None). The profile file carries
+    the binary's stem as well as the test's, so two binaries listing the
+    same name never write one file concurrently."""
+    bound = float(timeout if exact_timeout is None else exact_timeout)
+    tasks: list[tuple[Path, str, Path]] = []
+    for binary, skip in items:
+        skip_names = tuple(skip)
+        for name in _listed_tests(tree, binary, env, prof, timeout=timeout):
+            if _name_matches(name, skip_names):
+                continue
+            raw = prof / (f"one-{_prof_stem(_binary_label(binary))}"
+                          f"-{_prof_stem(name)}.profraw")
+            tasks.append((binary, name, raw))
+
+    def _one(task: tuple[Path, str, Path]) -> tuple[str, ExactRun | None]:
+        binary, name, raw = task
+        return name, _exact_run(tree, binary, name, raw, env,
+                                timeout=bound, longest=longest)
+
+    runs: dict[str, ExactRun] = {}
+    for name, run in _map_concurrently(_one, tasks, workers):
+        if run is not None:
+            runs[name] = run
+    return runs
+
+
 def _recover_binary(
     tree: Path, binary: Path, env: dict[str, str], prof: Path,
     *, timeout: float, skip: Iterable[str] = (),
 ) -> dict[str, ExactRun]:
-    """A binary whose whole-suite process did not complete, re-run one
-    test per process. The runs that complete carry the counts the merge
-    lost with the crash; the ones that still die are the tests the reading
-    cannot measure. Keyed by the listed name. ``skip`` is the hung test
-    the caller already named — re-running it is a second unbounded wait
-    on the same test (run `3500465-67c40e78`: kill of pass A handed
-    `lib_gen_1` to recovery, which `--exact`'d the hung name)."""
-    runs: dict[str, ExactRun] = {}
-    for name in _listed_tests(tree, binary, env, prof, timeout=timeout):
-        if _name_matches(name, skip):
-            continue
-        raw = prof / f"one-{_prof_stem(name)}.profraw"
-        run = _exact_run(tree, binary, name, raw, env, timeout=timeout)
-        if run is not None:
-            runs[name] = run
-    return runs
+    """One binary through `_recover_binaries`, serially — the pre-concurrency
+    shape, kept for callers that recover a single binary."""
+    return _recover_binaries(tree, [(binary, skip)], env, prof,
+                             timeout=timeout, workers=1)
 
 
 def _entered_sites(export: dict[str, Any], tree: Path,
@@ -416,7 +541,7 @@ def _owner_map(
     tests: Iterable[str], profdata_bin: str, cov_bin: str,
     index: SiteIndex,
     prior: Mapping[str, ExactRun] | None = None,
-    *, timeout: float,
+    *, timeout: float, workers: int = 1, longest: _Longest | None = None,
 ) -> tuple[dict[str, frozenset[FnSite]], frozenset[str]]:
     """Which crate bodies does each named test enter, one profile per test
     — and which named tests could not be measured because their process
@@ -444,31 +569,41 @@ def _owner_map(
     owning one answers, plus a merge and an export. Measured on the
     2026-08-30 stable tree: sub-second per test against a 6 s
     uninstrumented build of the same suite, which is why this runs on the
-    failing set only and never on the whole oracle.
+    failing set only and never on the whole oracle. The tests are
+    independent (own profile, own export file), so they run `workers` at a
+    time; `timeout` here is the single-test bound.
     """
     owners: dict[str, frozenset[FnSite]] = {}
     unmeasured: set[str] = set()
     prior = dict(prior or {})
-    for name in dict.fromkeys(tests):
+
+    def _one(name: str) -> tuple[str, frozenset[FnSite] | None, bool]:
         key = matching_test_key(name, prior)
         run: ExactRun | None = prior[key] if key is not None else None
         if run is None:
             raw = prof / f"one-{_prof_stem(name)}.profraw"
             for b in bins:
-                run = _exact_run(tree, b, name, raw, env, timeout=timeout)
+                run = _exact_run(tree, b, name, raw, env, timeout=timeout,
+                                 longest=longest)
                 if run is not None:
                     break
         if run is None:
-            continue
+            return name, None, False
         if not run.completed:
-            unmeasured.add(name)
-            continue
+            return name, None, True
         export = _merge_export([run.raw], [run.binary],
                                prof / f"one-{_prof_stem(name)}.json",
                                profdata_bin, cov_bin)
         if export is None:
-            continue
-        owners[name] = _entered_sites(export, tree, index)
+            return name, None, False
+        return name, _entered_sites(export, tree, index), False
+
+    for name, sites, died in _map_concurrently(
+            _one, list(dict.fromkeys(tests)), workers):
+        if died:
+            unmeasured.add(name)
+        elif sites is not None:
+            owners[name] = sites
     return owners, frozenset(unmeasured)
 
 
@@ -482,6 +617,8 @@ def measure_coverage_slice(
     enumerate_fns: Callable[[Path], Sequence[Any] | None],
     timeout: int | None = None,
     hung: Mapping[str, str] | None = None,
+    workers: int | None = None,
+    exact_timeout: float | None = None,
 ) -> CoverageSlice | None:
     """Pass A of the owner probe, plus pass C over `failing_tests`.
 
@@ -515,8 +652,22 @@ def measure_coverage_slice(
     `hung` maps a binary label the caller's own reading already saw in
     flight to that test name. Pass A skips those binaries; recovery and
     pass C do not re-run the named test.
+
+    `workers` is how many reconstructed-binary processes run at once in
+    pass A, in recovery and in pass C (None reads
+    `PHASE_C_COVERAGE_WORKERS` / `PIPELINE_PARALLELISM`, default 4); the
+    judge's reading names only the binary its single bounded sweep died
+    in, so a tree whose instrumented build spins in seven binaries paid
+    seven bounds serially per turn before this (run `3698228-901de95e`:
+    121 minutes over ten steps). `exact_timeout` bounds the single-test
+    processes (None reads `PHASE_C_EXACT_TEST_TIMEOUT`, else the suite
+    bound); the longest completing run is printed for sizing it.
     """
     bound = float(timeout if timeout is not None else _suite_timeout())
+    exact_bound = (float(exact_timeout) if exact_timeout is not None
+                   else _exact_timeout(bound))
+    pool = workers if workers is not None else _coverage_workers()
+    longest = _Longest()
     hung_map = dict(hung or {})
     profdata_bin = os.environ.get("LLVM_PROFDATA", "llvm-profdata")
     cov_bin = os.environ.get("LLVM_COV", "llvm-cov")
@@ -556,8 +707,32 @@ def measure_coverage_slice(
         recovered: dict[str, ExactRun] = {}
         hung_skip: dict[Path, set[str]] = {}
         for b in bins:
+            (run_a / b.name).mkdir()
+
+        def _pass_a(b: Path) -> tuple[
+                Path, subprocess.CompletedProcess[str], list[Path], bool]:
             d = run_a / b.name
-            d.mkdir()
+            e = dict(env)
+            e["LLVM_PROFILE_FILE"] = str(d / "%p-%m.profraw")
+            ran, secs = _run_timed([str(b), "--test-threads=1"], cwd=tree,
+                                   env=e, timeout=bound)
+            raws = sorted(d.glob("*.profraw"))
+            done = _completed(ran.returncode, raws)
+            if done:
+                longest.note(secs, _binary_label(b))
+            return b, ran, raws, done
+
+        # The binaries the judge did not already see hang, `pool` at a
+        # time; the results are read back in `bins` order so the log line
+        # and the unmeasured list are the same under any worker count.
+        ran_by: dict[Path, tuple[subprocess.CompletedProcess[str],
+                                 list[Path], bool]] = {
+            b: (ran, raws, done)
+            for b, ran, raws, done in _map_concurrently(
+                _pass_a, [b for b in bins
+                          if _binary_label(b) not in hung_map], pool)}
+        for b in bins:
+            d = run_a / b.name
             label = _binary_label(b)
             if label in hung_map:
                 unmeasured_bins.append((b, -1))
@@ -568,12 +743,8 @@ def measure_coverage_slice(
                     name=hung_name, binary=b, returncode=-1,
                     raw=d / "hung.profraw", completed=False)
                 continue
-            e = dict(env)
-            e["LLVM_PROFILE_FILE"] = str(d / "%p-%m.profraw")
-            ran = _run([str(b), "--test-threads=1"], cwd=tree, env=e,
-                       timeout=bound)
-            raws = sorted(d.glob("*.profraw"))
-            if _completed(ran.returncode, raws):
+            ran, raws, done = ran_by[b]
+            if done:
                 completed_raws.extend(raws)
                 continue
             unmeasured_bins.append((b, ran.returncode))
@@ -584,10 +755,10 @@ def measure_coverage_slice(
                 recovered[dangling] = ExactRun(
                     name=dangling, binary=b, returncode=ran.returncode,
                     raw=d / "hung.profraw", completed=False)
-        for b, _rc in unmeasured_bins:
-            recovered.update(_recover_binary(
-                tree, b, env, prof, timeout=bound,
-                skip=hung_skip.get(b, ())))
+        recovered.update(_recover_binaries(
+            tree, [(b, hung_skip.get(b, ())) for b, _rc in unmeasured_bins],
+            env, prof, timeout=bound, exact_timeout=exact_bound,
+            workers=pool, longest=longest))
         completed_raws.extend(
             r.raw for r in recovered.values() if r.completed)
         if unmeasured_bins and log:
@@ -631,7 +802,8 @@ def measure_coverage_slice(
         asked = tuple(dict.fromkeys(failing_tests))
         owners, unmeasured_asked = _owner_map(
             tree, bins, prof, env, asked, profdata_bin, cov_bin, index,
-            prior=recovered, timeout=bound)
+            prior=recovered, timeout=exact_bound, workers=pool,
+            longest=longest)
         # The crashed binaries' tests that still died alone, under the name
         # the binary lists, unless an asked name already covers them.
         unmeasured_tests = set(unmeasured_asked)
@@ -650,7 +822,9 @@ def measure_coverage_slice(
                 f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "
                 f"owner set for {len(owners)}/{len(asked)} failing test(s), "
                 f"{len(unmeasured_asked)} unmeasured (binary did not complete) "
-                "(staged, own target dir)")
+                f"(staged, own target dir; {pool} worker(s), single-test "
+                f"bound {int(exact_bound)}s, longest completing run "
+                f"{longest.render()})")
         return slice_
     except (OSError, subprocess.SubprocessError) as exc:
         if log:

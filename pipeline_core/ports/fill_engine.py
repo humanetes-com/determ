@@ -283,4 +283,5 @@ class ImplFillPath(Protocol):
         dispatch_ranks: dict[FnLocator, int] | None = ...,
         session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
         session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
+        on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = ...,
     ) -> ClusterFillResult: ...

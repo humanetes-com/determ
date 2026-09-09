@@ -322,6 +322,10 @@ class PhaseCFillEngine:
         # for the boundary read before the per-pass test. None reports the
         # break and lets the pass test read it (the fixture path).
         heal_file: Callable[[str], bool] | None = None,
+        # The driver's unit-ledger writer, called by the fill executor after
+        # every wave (and on the wave a stop cuts) with the units the wave
+        # kept, so a fill that never returns still leaves its `landed` rows.
+        on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None,
     ) -> ClusterFillResult:
         """Phase C — every route of one fill, ordered and budgeted by
         `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
@@ -519,7 +523,8 @@ class PhaseCFillEngine:
                 unmeasurable_tests=unmeasurable_tests,
                 crash_blamed=crash_blamed or frozenset(),
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
-                              if max_sessions_per_fill > 0 else {})))
+                              if max_sessions_per_fill > 0 else {}),
+                on_wave_kept=on_wave_kept))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
                        else None)
         _per_fn = _per_fn_route.result

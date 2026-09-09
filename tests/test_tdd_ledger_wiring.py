@@ -16,6 +16,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pipeline_core.adapters.oracle_fingerprint import cluster_oracle_fp
 from pipeline_core.domain.body_ledger import (
     BodyState,
@@ -98,7 +100,7 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
          stubbed: bool = True, layout: str = _LAYOUT,
          dispatched_fns: tuple[tuple[str, str], ...] | None = None,
          answer_lost_fns: tuple[tuple[str, str], ...] = (),
-         fill_write: Any = None) -> None:
+         fill_write: Any = None, fill_hook: Any = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
@@ -129,6 +131,11 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
                 encoding="utf-8")
         if fill_write is not None:
             fill_write(src)
+        # `fill_hook` plays the engine: it receives the driver's kwargs, so
+        # it can keep a body and call the per-wave writer the way the fill
+        # executor does — and raise the stop the executor would propagate.
+        if fill_hook is not None:
+            fill_hook(_kw)
         return ClusterFillResult(
             attempts=1, fns_filled=fills, dispatched_fns=dispatched_fns,
             answer_lost_fns=answer_lost_fns)
@@ -760,3 +767,83 @@ def test_the_flat_exclusion_is_logged_and_emitted_with_the_units_it_refuses(
     assert not any("EXCLUDED from the batch" in ln for ln in c_logs)
     assert not any(ev == "phase_c.dispatch.flat_excluded" for ev, _ in c_events)
     assert c_dispatched, "an erased premise re-enters dispatch"
+
+
+def _filled_layout() -> str:
+    return _LAYOUT.replace("\n        unimplemented!()\n    ", _BODY)
+
+
+def test_a_stop_during_the_fill_still_records_the_landing(
+        monkeypatch, tmp_path: Path) -> None:
+    """THE WRITE PATH UNDER A STOP. The `landed` rows were written only by
+    the block after the fill returns, and every stop kind unwinds past it:
+    the four fills of 2026-09-08 that ended on a sentinel, a TERM and the
+    fill-phase clock left about sixty kept bodies and zero rows. Here the
+    engine keeps a body, reports the wave, and the stop unwinds before the
+    post-fill block — the row must already be on the ledger, `landed`, with
+    the convicting test the dispatch was bought on. The control is the same
+    stop with the ledger unwired: a landing nobody records."""
+    _tree(tmp_path)
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    src = tmp_path / "src"
+
+    def _engine(kw: dict) -> None:
+        (src / "a.rs").write_text(_filled_layout(), encoding="utf-8")
+        kw["on_wave_kept"](frozenset({_UNIT}))
+        raise SystemExit(0)
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+             fill_hook=_engine)
+    rows: list[LedgerEntry] = [r for r in ledger["rows"]
+                               if r.key.fn_name == "depth"]
+    assert len(rows) == 1, rows
+    assert rows[0].state is BodyState.LANDED
+    assert rows[0].bodies == (_BODY,)
+    assert rows[0].convicting == ("t2",), (
+        "the premise the row's later grade is scoped to is the test whose "
+        "failure bought the dispatch")
+    assert any(ev == "phase_c.ledger.landed_rows" and d.get("site") == "wave"
+               for ev, d in events)
+    assert any("landed body(ies) recorded at wave" in ln for ln in logs)
+
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control)
+    control_logs: list[str] = []
+
+    def _engine_control(kw: dict) -> None:
+        (control / "src" / "a.rs").write_text(_filled_layout(), encoding="utf-8")
+        kw["on_wave_kept"](frozenset({_UNIT}))
+        raise SystemExit(0)
+
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, control, ledger=None, events=[], logs=control_logs,
+             fill_hook=_engine_control)
+    assert not any("landed body(ies) recorded" in ln for ln in control_logs)
+
+
+def test_a_wave_row_is_written_once_when_the_fill_returns(
+        monkeypatch, tmp_path: Path) -> None:
+    """The per-wave write and the post-fill write describe the same body
+    once: the wave writes the row, the post-fill block skips a unit whose
+    body sha it already wrote, and the sweep after grades that one row."""
+    _tree(tmp_path)
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    src = tmp_path / "src"
+
+    def _engine(kw: dict) -> None:
+        (src / "a.rs").write_text(_filled_layout(), encoding="utf-8")
+        kw["on_wave_kept"](frozenset({_UNIT}))
+
+    _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+         fill_hook=_engine)
+    landed = [r for r in ledger["rows"]
+              if r.key.fn_name == "depth" and r.state is BodyState.LANDED]
+    assert len(landed) == 1, [(r.state, r.run_id) for r in ledger["rows"]]
+    assert any(ev == "phase_c.ledger.judged" for ev, _ in events), (
+        "the sweep after the fill judges the wave's row like any landing")

@@ -22,6 +22,8 @@ with no `timeout` — the fake refuses it, so the old `_run` cannot pass.
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -170,3 +172,104 @@ def test_the_bound_defaults_to_the_suite_timeout_and_never_to_unbounded(
         project, "stable", failing_tests=["t_other"],
         enumerate_fns=_enumerate) is not None
     assert {t for c, t in calls if "/bins/" in c[0]} == {77.0}
+
+
+def _spin_env(monkeypatch, tmp_path: Path, *, spinners: int = 4, fast: int = 3
+              ) -> list[tuple[list[str], object]]:
+    """`spinners` binaries the bound cuts inside `t_spin` after SLEEPING the
+    whole bound — the instrumented build spins where the judge's plain build
+    completed, so no hung map can name them (run `3698228-901de95e`: seven
+    such binaries, ten steps, 12.1 min each) — and `fast` binaries that
+    complete at once. Nothing is asked for, so pass C runs no test."""
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
+    deps = tmp_path / "bins"
+    deps.mkdir(exist_ok=True)
+    bins = ([deps / f"spin_{i}-{i:016x}" for i in range(spinners)]
+            + [deps / f"fast_{i}-{i + 100:016x}" for i in range(fast)])
+    monkeypatch.setattr(cov, "_test_binaries", lambda *a, **k: list(bins))
+
+    def _fake_run(cmd, cwd, env=None, **k):
+        calls.append((list(cmd), k.get("timeout")))
+        prog = Path(cmd[0]).name
+        if cmd[0] in ("cargo", "llvm-profdata", "llvm-cov"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        assert k.get("timeout"), f"test binary invoked with no bound: {cmd}"
+        pattern = (env or {}).get("LLVM_PROFILE_FILE", "")
+        if "--list" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="t_ok: test\nt_spin: test\n", stderr="")
+        if "--exact" in cmd:
+            name = cmd[cmd.index("--exact") + 1]
+            assert name != "t_spin", "the hung test was re-run alone"
+            Path(pattern).write_bytes(b"counts:" + name.encode())
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="running 1 test\n", stderr="")
+        if prog.startswith("spin_"):
+            # A real wall-clock wait: the repo conftest no-ops `time.sleep`.
+            threading.Event().wait(float(k["timeout"]))
+            return subprocess.CompletedProcess(
+                cmd, -1,
+                stdout="running 2 tests\ntest t_ok ... ok\ntest t_spin ... ",
+                stderr="\nTIMEOUT")
+        Path(pattern.replace("%p", "1").replace("%m", "1")).write_bytes(
+            b"counts:fast")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cov, "_run", _fake_run)
+    monkeypatch.setattr(cov, "_merge_export",
+                        lambda *a, **k: {"data": [{"functions": []}]})
+    return calls
+
+
+def test_b_spinning_binaries_pay_the_bound_concurrently_and_read_the_same(
+        monkeypatch, tmp_path: Path) -> None:
+    """Four binaries that never return cost one bound with four workers and
+    four bounds serially; the reading — which binaries were unmeasured,
+    which test each hung inside — is byte-identical either way. The serial
+    run IS the pre-concurrency adapter (`_map_concurrently` at one worker
+    is the plain loop), so it is the negative control, not a mock of one."""
+    project = _project(tmp_path)
+    bound = 1
+    _spin_env(monkeypatch, tmp_path)
+    t0 = time.monotonic()
+    four = measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+                                  timeout=bound, workers=4)
+    wall_four = time.monotonic() - t0
+    _spin_env(monkeypatch, tmp_path)
+    t0 = time.monotonic()
+    one = measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+                                 timeout=bound, workers=1)
+    wall_one = time.monotonic() - t0
+    assert four is not None and one is not None
+    spinners = frozenset(f"spin_{i}" for i in range(4))
+    assert four.unmeasured_binaries == one.unmeasured_binaries == spinners
+    assert four.hung_tests == one.hung_tests == frozenset(
+        f"spin_{i}::t_spin" for i in range(4))
+    assert four.dead == one.dead
+    assert wall_one >= 4 * bound - 0.1, (
+        f"the serial control pays one bound per spinning binary: {wall_one:.2f}s")
+    assert wall_four < 2 * bound + 0.9, (
+        f"four workers pay the bound once for four spinners: {wall_four:.2f}s")
+
+
+def test_c_single_test_runs_carry_their_own_bound(
+        monkeypatch, tmp_path: Path) -> None:
+    """`exact_timeout` bounds the `--exact` processes and nothing else; unset,
+    they carry the suite bound (no behaviour change until the printed
+    longest-completing-run reading sizes it)."""
+    project = _project(tmp_path)
+    calls = _spin_env(monkeypatch, tmp_path, spinners=1, fast=1)
+    slice_ = measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+                                    timeout=1, workers=1, exact_timeout=7)
+    assert slice_ is not None
+    assert {t for c, t in calls if "--exact" in c} == {7.0}
+    assert {t for c, t in calls if c[1:] == ["--test-threads=1"]} == {1.0}
+    monkeypatch.delenv("PHASE_C_EXACT_TEST_TIMEOUT", raising=False)
+    calls = _spin_env(monkeypatch, tmp_path, spinners=1, fast=1)
+    notes: list[str] = []
+    measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+                           timeout=1, workers=1, log=notes.append)
+    assert {t for c, t in calls if "--exact" in c} == {1.0}
+    assert any("longest completing run" in n and "single-test bound 1s" in n
+               for n in notes), notes
