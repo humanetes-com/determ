@@ -4939,9 +4939,16 @@ def prepare_impl_fill(
                 _last_full_out[0] = out
                 return rc, out, list(diags)
 
-            def _bodies_now(_want: tuple[FnSite, ...] = _units) -> Mapping[FnSite, str]:
+            _watch = list(_units)
+
+            def _bodies_now() -> Mapping[FnSite, str]:
                 return {u: r.body_text
-                        for u, r in _resolve(_want, _tree_sites()).items()}
+                        for u, r in _resolve(tuple(_watch), _tree_sites()).items()}
+
+            def _extend_watch(sites: Sequence[FnSite]) -> None:
+                for s in sites:
+                    if s not in _watch:
+                        _watch.append(s)
 
             # What the transport recorded about each call — reasoning-
             # capped, follow-up fn blocks — read off the rows the call
@@ -4968,6 +4975,7 @@ def prepare_impl_fill(
                     tdd_test_cmd, target_src_dir, cluster_env, raw),
                 read_source=_read_source,
                 enumerate_bodies=_bodies_now,
+                extend_body_watch=_extend_watch,
                 answer_pulls=make_request_answerer(
                     _pull_sources, log=_log, emit=_emit,
                     max_pulls=_max_pulls_session),
@@ -4985,7 +4993,8 @@ def prepare_impl_fill(
                 _out = run_slice_session(
                     _ports, target_src_dir=target_src_dir,
                     cluster_name=cluster_name, slice_=_sl, records=_records,
-                    turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes)
+                    turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes,
+                    all_records=list(_all_recs.values()))
             attempts.note_dispatched(
                 locator_of(u) for u in (_out.dispatched | _out.kept))
             attempts.note_reverted(locator_of(u) for u in _out.reverted)

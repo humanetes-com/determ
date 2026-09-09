@@ -291,9 +291,11 @@ have measured that assignment, not reconstruction.
 whose first customer is this run's leftovers; a match on a leftover test
 or symbol from the live frontier; a plan-line MUST that names the crate's
 remaining failures; any comment or test fixture whose force is the live
-names rather than the shape. On any of them, stop.
+names rather than the shape. On any of them, stop. A stall fix that names
+no leftover and still branches on a language construct (Debug, Drop, Hash)
+is Hard Rule 11's catalog clause, not a pass of this section.
 
-## Hard Rule 11 — no original source after strip; the fill crate is never the fix
+## Hard Rule 11 — no original source after strip; the fill crate is never the fix; the pipeline does not name a language
 
 The original crate is read once, pre-strip, to bake artifacts and augment
 tests. After strip there is no post-strip read of original source into a
@@ -341,6 +343,49 @@ land a body the tests already pin, without ever showing the original.
 original body into a prompt, a note, or a MUST; editing
 `tmp/<project>/`, `.skeleton-filled/`, `.skeleton/`, `.best_tree`, or the
 generated tests; a fix whose first customer is this repository's leftovers.
+
+**The pipeline does not special-case a language name the fill model is
+the expert on.** The fill model is the language expert. The pipeline's
+job is the gate the model cannot open: who may write, what evidence sits
+in the prompt, whether a two-file change is one transaction. A stall fix
+that adds `if trait != "Debug"`, a Drop hop, a Hash handler, is the
+pipeline taking the language job. The next leftover of a different
+construct needs a sibling of that function, and the next score measures
+the catalog, not reconstruction. That is the same contamination as
+writing the original body: the mechanism now knows a name from this
+problem. A name the pipeline already had for a job only it can do is not
+this class — mapping `{:?}` in a test's source to Debug is attribution
+from syntax that names no crate fn. A function that then special-cases
+Debug because this leftover was Debug is the class. The generic-mechanism
+sentence above is not satisfied by avoiding original source while
+branching on a keyword.
+
+**The rule, checkable.** Before shipping a stall fix, name the function
+and every language construct or crate symbol it branches on. Then one
+of: it keys on a shape the record already has (a qualifier a body named,
+a trait the test's source already mapped, coverage unentered, a FILE
+request) and contains no language-name or crate-symbol branch; or it is
+a catalog — stop, do not ship. A test whose fixture is this leftover's
+trait or keyword is the same catalog with a passing suite. The negative
+control is the same function on a different construct, producing the
+paying outcome without that name.
+
+**The instance, 2026-09-09, commit `b4131c0`.** A Debug dispatcher whose
+body called Qual::display needed the uncalled implementer in the write
+set. The function shipped was `_debug_implementer_not_yet_called` with
+`if trait != "Debug"`. Muse already knew Debug is not Display; it could
+not write a function the session did not list as editable. The Debug
+branch closed the instance and left the class alive: the next leftover
+that is Display-via-debug, or Drop, would want the next sibling. The
+class-closing owner keys on a qualifier the body already named and on
+the trait the test's source already mapped, and a FILE request admits
+those units. No trait name is the reason the function exists.
+
+**The tells.** `if trait != "Debug"` / `== "Display"` / `== "Drop"`; a
+function named for one trait or keyword; "for Debug we should pair
+debug"; a match on a leftover's language construct rather than on the
+shape (a qualifier the body named, a trait the test already mapped). On
+any of them, stop.
 
 ## Nothing leaves this machine
 

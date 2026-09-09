@@ -34,13 +34,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.attribution import (
+    admit_format_siblings_for_file,
+)
 from pipeline_core.application.reconstruct.peel_revert import (
     LandedBody,
     PeelResult,
     peel_to_compiling,
 )
 from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
-from pipeline_core.domain.attribution import container_key, site_payload
+from pipeline_core.domain.attribution import (
+    container_key,
+    record_site,
+    site_payload,
+)
+from pipeline_core.domain.context_pull import PullKind, extract_context_pulls
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.reasoning_cap import CallCapReading
@@ -122,6 +130,12 @@ class SessionPorts:
     # records nothing. Read after a reply that carried no change set and no
     # request: a capped reply is not a decision and is re-asked, not ended.
     call_reading: Callable[[], CallCapReading | None] | None = None
+    # Extra slice units the session admitted after turn 0 (a FILE request
+    # that held a called-qualifier complement). The caller's
+    # enumerate_bodies must then return those sites too, or a kept body
+    # on an admitted unit is invisible at close. None: admission still
+    # grows the write set; close cannot see the new body.
+    extend_body_watch: Callable[[Sequence[FnSite]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +204,57 @@ def _assistant(text: str) -> dict[str, Any]:
     return {"role": "assistant", "content": text}
 
 
+def _admit_from_file_requests(
+    reply: str,
+    records: dict[FnSite, FnRecord],
+    tree: Sequence[FnRecord],
+    files: list[str],
+    baseline_texts: dict[str, PreImage],
+    baseline_bodies: dict[FnSite, str],
+    target_src_dir: Path,
+    ports: SessionPorts,
+) -> tuple[FnRecord, ...]:
+    """Grow the write set from FILE requests in `reply`. Returns the
+    newly admitted records, in request order then tree order."""
+    if not tree:
+        return ()
+    found: list[FnRecord] = []
+    seen: set[FnSite] = set()
+    for pull in extract_context_pulls(reply):
+        if pull.kind is not PullKind.FILE:
+            continue
+        for rec in admit_format_siblings_for_file(pull.arg, records, tree):
+            site = record_site(rec)
+            if site in records or site in seen:
+                continue
+            seen.add(site)
+            records[site] = rec
+            baseline_bodies.setdefault(site, rec.body_text)
+            if rec.file not in baseline_texts:
+                baseline_texts[rec.file] = capture(
+                    target_src_dir / rec.file, None)
+                files.append(rec.file)
+            found.append(rec)
+    if found:
+        if ports.extend_body_watch is not None:
+            ports.extend_body_watch(tuple(record_site(r) for r in found))
+        ports.log(
+            f"  [phase-c/session] FILE request admitted "
+            f"{len(found)} unit(s) to the write set: "
+            + ", ".join(f"{r.file}::{r.fn_name}" for r in found))
+    return tuple(found)
+
+
+def render_admitted_units(recs: Sequence[FnRecord]) -> str:
+    """The sentence the request follow-up carries when a FILE request
+    grew the write set: the units, with the block= header the next
+    change set must name."""
+    named = ", ".join(
+        f"{r.fn_name} ({r.container or 'free fn'}) in {r.file}" for r in recs)
+    return (f"\nThese units are now in the session's editable set; you may "
+            f"return <FN> bodies for them: {named}.")
+
+
 def run_slice_session(
     ports: SessionPorts,
     *,
@@ -202,6 +267,7 @@ def run_slice_session(
     max_minutes: float = 90.0,
     peel_max: int = 6,
     keep_best: bool = True,
+    all_records: Sequence[FnRecord] = (),
 ) -> SessionOutcome:
     """Run one session and leave the tree in its accepted, kept, or
     restored state. Never raises on a model or splice failure; a graceful
@@ -213,7 +279,10 @@ def run_slice_session(
     tree for the next turn) — the negative control of the recorded
     replays, never a live setting."""
     label = slice_.label()
-    files = slice_.files
+    files = list(slice_.files)
+    # The write set starts as the planned slice and may grow when a FILE
+    # request holds a called-qualifier complement the plan did not admit.
+    records = dict(records)
     # Byte pre-images of the slice's files, restored through the
     # transaction primitive: the session's undo is a byte restore, never a
     # re-write of a text it read.
@@ -372,8 +441,15 @@ def run_slice_session(
             if not parsed:
                 followup = ports.answer_pulls(reply)
                 if followup:
+                    admitted = _admit_from_file_requests(
+                        reply, records, all_records, files, baseline_texts,
+                        baseline_bodies, target_src_dir, ports)
+                    if admitted:
+                        followup += render_admitted_units(admitted)
                     ports.emit("phase_c.session.turn", data={
-                        "cluster": cluster_name, "turn": turns, "kind": "request"})
+                        "cluster": cluster_name, "turn": turns, "kind": "request",
+                        "admitted": [site_payload(record_site(r))
+                                     for r in admitted]})
                     messages.append(_user(followup + "\n" + render_budget_turn(max_turns - turns)))
                     continue
                 if cap is not None and cap.empty_after_cap:
@@ -540,8 +616,10 @@ def run_slice_session(
         raise
 
     current = dict(ports.enumerate_bodies())
-    changed = frozenset(u for u in slice_.units
-                        if current.get(u, baseline_bodies.get(u)) != baseline_bodies.get(u))
+    watch = frozenset(slice_.units) | frozenset(records)
+    changed = frozenset(
+        u for u in watch
+        if current.get(u, baseline_bodies.get(u)) != baseline_bodies.get(u))
     outcome = "no_change"
     kept: frozenset[FnSite] = frozenset()
     reverted: frozenset[FnSite] = frozenset()

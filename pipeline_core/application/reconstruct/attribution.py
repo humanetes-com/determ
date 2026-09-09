@@ -13,7 +13,7 @@ Cargo-output parsing goes through the structured `domain.test_report` parser
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,9 +35,11 @@ from pipeline_core.domain.attribution import (
     record_site,
 )
 from pipeline_core.domain.coverage_slice import unreached_by_test
+from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import (
     Diagnostic,
     FnLocator,
+    FnRecord,
     FnSite,
     Frontier,
     SiteFrontier,
@@ -255,69 +257,136 @@ def _impl_trait_and_self(container: str) -> tuple[str, str] | None:
     return trait, self_ty
 
 
-def _format_impl_calls(
-    body_text: str,
-    methods: tuple[str, ...] = ("fmt", "debug"),
-) -> frozenset[tuple[str, str]]:
-    """Qualified formatting-method calls `Qualifier::method` in a body, as
-    `(qualifier, method)` pairs. Default methods are `fmt` and `debug`:
-    `unsafe { ErrorImpl::debug(r, f) }` yields `('ErrorImpl', 'debug')`;
+def _qualified_calls(body_text: str) -> frozenset[tuple[str, str]]:
+    """Every `Qualifier::method` token pair in a body.
+
+    `unsafe { ErrorImpl::display(r, f) }` yields `('ErrorImpl', 'display')`;
     `Self::debug(r, f)` yields `('Self', 'debug')`, which the caller
     resolves to the dispatcher's own self-type. Std-trait dispatch
     (`Display::fmt(x, f)`) yields `('Display', 'fmt')` and is dropped
     downstream because the qualifier is matched against a fn record's
     SELF-TYPE (`impl_self_type` of its container), never against any token of
     the container: `Display`/`Debug` are std traits, the self-type of no crate
-    impl, so they match no record.
-
-    `methods=("display",)` is the Debug-dispatcher misshape scan: a body
-    that currently delegates to `Qualifier::display` is invisible to the
-    default pair (run `3985224-5484d810`, 2026-09-09: `impl Debug for Error`
-    was `ErrorImpl::display(...)` and the default parse returned empty, so
-    no pair was recorded and the session never gained `debug`)."""
+    impl, so they match no record. A path `core::fmt::Display::fmt` yields
+    one pair per `::` (`Display`/`fmt`, `fmt`/`Display`, `core`/`fmt`); the
+    same self-type match drops every one that is not a crate type."""
     out: set[tuple[str, str]] = set()
-    for method in methods:
-        needle = f"::{method}"
-        pos = body_text.find(needle)
-        while pos != -1:
-            j = pos - 1
-            while j >= 0 and body_text[j] in " \t":
-                j -= 1
-            end = j + 1
-            while j >= 0 and (body_text[j].isalnum() or body_text[j] == "_"):
-                j -= 1
-            qual = body_text[j + 1:end]
-            after = pos + len(needle)
-            # method must be a whole token (call/path), not a prefix
-            if qual and not (after < len(body_text)
-                             and (body_text[after].isalnum()
-                                  or body_text[after] == "_")):
-                out.add((qual, method))
-            pos = body_text.find(needle, pos + len(needle))
+    pos = 0
+    n = len(body_text)
+    while True:
+        pos = body_text.find("::", pos)
+        if pos == -1:
+            break
+        k = pos + 2
+        while k < n and (body_text[k].isalnum() or body_text[k] == "_"):
+            k += 1
+        method = body_text[pos + 2:k]
+        j = pos - 1
+        while j >= 0 and body_text[j] in " \t":
+            j -= 1
+        end = j + 1
+        while j >= 0 and (body_text[j].isalnum() or body_text[j] == "_"):
+            j -= 1
+        qual = body_text[j + 1:end]
+        # method must be a whole token (call/path), not a prefix
+        if qual and method and not (k < n and (body_text[k].isalnum()
+                                               or body_text[k] == "_")):
+            out.add((qual, method))
+        pos = k if k > pos + 2 else pos + 2
     return frozenset(out)
 
 
-def _debug_implementer_not_yet_called(
+def _format_impl_calls(
+    body_text: str,
+    methods: tuple[str, ...] = ("fmt", "debug"),
+) -> frozenset[tuple[str, str]]:
+    """`_qualified_calls` restricted to `methods`. Default `fmt`/`debug` is
+    the attribution follow the hop used before the qualifier-complement:
+    a body that currently delegates to `Qualifier::display` is empty under
+    this default (run `3985224-5484d810`, 2026-09-09: `impl Debug for Error`
+    was `ErrorImpl::display(...)`), which is why the complement exists."""
+    want = frozenset(methods)
+    return frozenset(
+        (q, m) for q, m in _qualified_calls(body_text) if m in want)
+
+
+def _called_qualifier_complements(
     trait: str, body_text: str,
 ) -> frozenset[tuple[str, str]]:
-    """The Debug implementer a Debug dispatcher does not yet call.
+    """The crate method this dispatcher's trait still needs, of a qualifier
+    the body already names.
 
-    `_format_impl_calls` names `fmt`/`debug`. A dispatcher whose body
-    currently calls `Qualifier::display` (the Display-path sibling) looks
-    self-contained to that parse, so the pair hop records nothing and
-    `slices_with_pair_hops` cannot add the unentered `debug` — the case
-    that docstring names (run `164454-8ec9c4d4`) and the shape measured
-    on run `3985224-5484d810` (a Debug dispatcher whose body was a
-    Qual::display call; default parse empty). Same qualifier, method
-    `debug`. A Display dispatcher, or a Debug dispatcher that already
-    calls `debug`, yields nothing."""
-    if trait != "Debug":
+    A body that calls `Qual::anything` has named `Qual`. The crate method
+    the hop already searches for a format-trait dispatcher is
+    `trait.lower()` (`Debug` → `debug`, `Display` → `display`) — the same
+    mapping `format_traits_used` already decided the test needs, not a
+    per-keyword branch. If that call is absent, the default follow sees
+    nothing and the session never gains the implementer: run
+    `3985224-5484d810` (a Debug dispatcher whose body was a Qual::display
+    call; default parse empty). A Display dispatcher that currently calls
+    `Qual::debug` complements `display` the same way. A dispatcher that
+    already calls the wanted method, or that names no qualifier, yields
+    nothing."""
+    want = trait.lower() if trait else ""
+    if not want:
         return frozenset()
-    have_debug = {q for q, m in _format_impl_calls(body_text) if m == "debug"}
-    return frozenset(
-        (q, "debug")
-        for q, _m in _format_impl_calls(body_text, methods=("display",))
-        if q not in have_debug)
+    called = _qualified_calls(body_text)
+    quals = {q for q, _m in called}
+    have = {q for q, m in called if m == want}
+    return frozenset((q, want) for q in quals if q not in have)
+
+
+def _follow_methods_for_trait(trait: str) -> tuple[str, ...]:
+    """Attribution follow: the std format method `fmt`, plus the crate
+    method named for this trait (`debug`, `display`). A Display dispatcher
+    that currently calls `Qual::display` is no longer self-contained."""
+    if trait:
+        return ("fmt", trait.lower())
+    return ("fmt",)
+
+
+def _same_src_file(a: str, b: str) -> bool:
+    return a == b or norm_src_rel(a) == norm_src_rel(b)
+
+
+def admit_format_siblings_for_file(
+    file_rel: str,
+    editable: Mapping[FnSite, FnRecord],
+    tree: Sequence[FnRecord],
+) -> tuple[FnRecord, ...]:
+    """Units in `file_rel` a format dispatcher in `editable` already named
+    a qualifier for, that the session cannot yet write.
+
+    The pair hop records these at plan time when the dispatcher is in the
+    slice. A FILE request is the backstop for a session that opened without
+    them (run `164454-8ec9c4d4`: the first turn asked for `src/fmt.rs` and
+    the write set did not grow). Same complement as the hop: no trait name
+    is special-cased. Empty when the file holds no such method, or every
+    one is already editable."""
+    already = set(editable)
+    out: list[FnRecord] = []
+    seen: set[FnSite] = set()
+    for rec in editable.values():
+        parsed = _impl_trait_and_self(rec.container)
+        if parsed is None:
+            continue
+        trait, self_ty = parsed
+        for qual, method in _called_qualifier_complements(trait, rec.body_text):
+            if qual == "Self":
+                qual = self_ty
+            for r in tree:
+                if not _same_src_file(r.file, file_rel):
+                    continue
+                if r.fn_name != method:
+                    continue
+                if qual != (impl_self_type(r.container) or ""):
+                    continue
+                site = record_site(r)
+                if site in already or site in seen:
+                    continue
+                seen.add(site)
+                out.append(r)
+    return tuple(out)
 
 
 def _attribute_format_only_test(
@@ -342,21 +411,21 @@ def _attribute_format_only_test(
     (`src/error.rs`) and never `Debug for MessageError`, which it never names.
 
     But the matched `fmt` body is often NOT the defect — it is the dispatcher.
-    When that body already calls `Qualifier::debug`, the hop follows it. When
-    it currently calls `Qualifier::display` instead, the default call parse
-    sees no formatting method and used to treat the dispatcher as
-    self-contained — no pair, so the session never gained `debug` (run
-    `3985224-5484d810`: `impl Debug for Error` was
-    `ErrorImpl::display(...)`; `_format_impl_calls` returned empty).
-    `_debug_implementer_not_yet_called` is that misshape: same qualifier,
-    method `debug`. Escalating the `fmt` accessor cannot reach `debug` — the
-    futility escalation adds fns that construct/return the accessor's
-    container type `Error`, and `ErrorImpl::debug` returns `fmt::Result` —
-    and `FnLocator` erases the container, so `src/error.rs::fmt` dispatch is
-    coarser than `Debug for Error` anyway. So follow ONE hop: if the matched
-    `fmt` body calls a crate formatting method (`Qualifier::fmt`/`::debug`
-    where the qualifier is a real fn record's container token), or is a
-    Debug dispatcher whose body currently calls `Qualifier::display`,
+    Attribution follows `Qual::fmt` and `Qual::<trait.lower()>` (`debug` for
+    a Debug dispatcher, `display` for a Display dispatcher). When the body
+    currently calls a different method of the same qualifier, that follow
+    is empty and the session never gained the implementer (run
+    `3985224-5484d810`: `impl Debug for Error` was `ErrorImpl::display(...)`;
+    `_format_impl_calls` of `fmt`/`debug` returned empty).
+    `_called_qualifier_complements` is that misshape, for any format trait:
+    same qualifier, method `trait.lower()`. Escalating the `fmt` accessor
+    cannot reach `debug` — the futility escalation adds fns that
+    construct/return the accessor's container type `Error`, and
+    `ErrorImpl::debug` returns `fmt::Result` — and `FnLocator` erases the
+    container, so `src/error.rs::fmt` dispatch is coarser than
+    `Debug for Error` anyway. So follow ONE hop: if the matched `fmt` body
+    calls a crate formatting method of the trait, or names a qualifier
+    whose trait-named method exists on the tree and is not yet called,
     attribute THAT implementer — the body the verdict actually pins. Only
     when the matched `fmt` calls no sibling formatter (it IS the
     implementer) is the `fmt` itself attributed.
@@ -423,13 +492,14 @@ def _attribute_format_only_test(
         if not (trait in traits and self_ty in file_idents):
             continue
         # Follow the dispatcher's call to its real formatting implementer.
-        # A Debug dispatcher that currently calls Qual::display is the
-        # implementer-not-yet-called case: fold in Qual::debug so the
-        # pair hop can add it (empty default parse otherwise).
+        # A dispatcher that currently calls a different method of the same
+        # qualifier is the implementer-not-yet-called case: fold in
+        # Qual::<trait.lower()> so the pair hop can add it (empty follow
+        # otherwise). No trait name is special-cased.
         implementers: list[tuple[FnLocator, dict[str, Any]]] = []
         body_text = str(rec.get("body_text", "") or "")
-        calls = (_format_impl_calls(body_text)
-                 | _debug_implementer_not_yet_called(trait, body_text))
+        calls = (_format_impl_calls(body_text, _follow_methods_for_trait(trait))
+                 | _called_qualifier_complements(trait, body_text))
         for qual, method in calls:
             if qual == "Self":
                 # `Self::debug(r, f)` inside `impl Debug for Error` names the

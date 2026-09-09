@@ -166,3 +166,112 @@ def test_a_failed_peel_splice_leaves_the_unit_on_the_kept_side(tmp_path):
     assert _RENDER in kept and _FMT in reverted
     assert (root / "src" / "render.rs").read_text() == "SESSION_REN"
     assert (root / "src" / "lib.rs").read_text() == "BASE_LIB"
+
+
+def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_implementer(
+        tmp_path):
+    """Plan: a session that opened on a Debug dispatcher whose body calls
+    Qual::display cannot write Qual::debug until a FILE request for that
+    file admits it. Turn 1 asks; turn 2's debug body routes and is kept.
+    Control: the same debug body on turn 1, before the request, is
+    rejected as out of scope."""
+    from pipeline_core.domain.attribution import record_site
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "w.rs").write_text("DISP")
+    (src / "i.rs").write_text("IMPL")
+    disp = FnRecord(
+        file="src/w.rs", fn_name="fmt",
+        container="impl Debug for Wrapper < T >",
+        sig_text="fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result",
+        body_text="Inner::display(self.inner.by_ref(), f)")
+    debug = FnRecord(
+        file="src/i.rs", fn_name="debug",
+        container="impl Inner < T >",
+        sig_text="fn debug(this: Ref<Self>, f: &mut fmt::Formatter) -> fmt::Result",
+        body_text="write!(f, \"{}\", this.value)")
+    disp_site = record_site(disp)
+    debug_site = record_site(debug)
+    bodies = {disp_site: disp.body_text}
+    replies = [
+        '<REQUEST kind="file" arg="src/i.rs"/>',
+        '<FN name="debug" block="impl Inner < T >">write!(f, "x")</FN>',
+    ]
+    logs: list[str] = []
+
+    def ask(_m: object) -> str:
+        return replies.pop(0) if replies else ""
+
+    def splice(path, container, name, body, where, **k):
+        path.write_text(body)
+        return True, "", 0
+
+    def extend(sites):
+        for s in sites:
+            if s == debug_site:
+                bodies[s] = debug.body_text
+
+    def enumerate():
+        out = dict(bodies)
+        if debug_site in bodies:
+            text = (tmp_path / "src" / "i.rs").read_text()
+            if text != "IMPL":
+                out[debug_site] = text
+        return out
+
+    baseline = _reading({"t_keep"}, {"t_wrap"})
+    after = _reading({"t_keep"}, {"t_wrap"})
+    ports = SessionPorts(
+        ask_turns=ask, splice=splice, check=lambda: (0, "", []),
+        focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
+        measure_suite=lambda raw: after if (tmp_path / "src" / "i.rs").read_text() != "IMPL"
+        else baseline,
+        read_source=lambda p: None,
+        enumerate_bodies=enumerate,
+        answer_pulls=lambda r: "file src/i.rs follows." if "<REQUEST" in r else None,
+        extend_body_watch=extend,
+        log=logs.append, emit=lambda *a, **k: None,
+        check_graceful_stop=lambda s: None)
+    out = run_slice_session(
+        ports, target_src_dir=tmp_path, cluster_name="t",
+        slice_=SessionSlice(tests=("t_wrap",), units=(disp_site,)),
+        records={disp_site: disp}, turn0="turn0", max_turns=4,
+        all_records=(disp, debug))
+    assert any("admitted 1 unit" in m for m in logs), logs
+    assert debug_site in out.kept
+    assert out.outcome == "kept"
+    assert (tmp_path / "src" / "i.rs").read_text() == 'write!(f, "x")'
+
+    # Control: writing debug on turn 1, with no request, is out of scope.
+    src2 = tmp_path / "ctrl"
+    src2.mkdir()
+    (src2 / "src").mkdir()
+    (src2 / "src" / "w.rs").write_text("DISP")
+    (src2 / "src" / "i.rs").write_text("IMPL")
+    rejected: list[str] = []
+
+    def ask_ctrl(_m: object) -> str:
+        return '<FN name="debug" block="impl Inner < T >">write!(f, "x")</FN>'
+
+    def emit(_n, **kw):
+        data = kw.get("data") or {}
+        if data.get("kind") == "rejected":
+            rejected.extend(data.get("rejected") or [])
+
+    ports_ctrl = SessionPorts(
+        ask_turns=ask_ctrl, splice=splice, check=lambda: (0, "", []),
+        focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
+        measure_suite=lambda raw: baseline,
+        read_source=lambda p: None,
+        enumerate_bodies=lambda: {disp_site: disp.body_text},
+        answer_pulls=lambda r: None,
+        log=lambda m: None, emit=emit,
+        check_graceful_stop=lambda s: None)
+    out_ctrl = run_slice_session(
+        ports_ctrl, target_src_dir=src2, cluster_name="t",
+        slice_=SessionSlice(tests=("t_wrap",), units=(disp_site,)),
+        records={disp_site: disp}, turn0="turn0", max_turns=1,
+        all_records=(disp, debug))
+    assert out_ctrl.kept == frozenset()
+    assert any("not in this session's editable set" in r for r in rejected)

@@ -109,6 +109,9 @@ failed to compile was NOT applied and its bodies must be resent.
 (b) A CONTEXT REQUEST, when a fact you need is not in this transcript:
 <REQUEST kind="file" arg="src/helper.rs"/> · <REQUEST kind="test_source" arg="test_name"/>
 · <REQUEST kind="type_def" arg="TypeName"/> · <REQUEST kind="full_error"/>
+A FILE request for a crate file that holds a formatter method of a type an
+editable dispatcher already calls adds that method to this session's
+editable set — you may then return an FN body for it.
 
 (c) NOTES you want carried into the next session on this slice:
 {NOTES_OPEN} what you established, what the printed values showed, what remains {NOTES_CLOSE}

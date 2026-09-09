@@ -25,8 +25,9 @@ from pipeline_core.adapters.coverage_owner import SiteIndex, _body_counts, _coun
 from pipeline_core.adapters.extractor import CliExtractor
 from pipeline_core.application.reconstruct.attribution import (
     _attribute_format_only_test,
-    _debug_implementer_not_yet_called,
+    _called_qualifier_complements,
     _format_impl_calls,
+    admit_format_siblings_for_file,
 )
 from pipeline_core.domain.attribution import (
     FormatterPair,
@@ -41,6 +42,7 @@ from pipeline_core.domain.attribution import (
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.coverage_slice import slice_from_counts
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
+from pipeline_core.domain.rust_idents import impl_self_type, impl_trait_name
 from pipeline_core.domain.slice_session import (
     SessionSlice,
     attributed_units_for_session,
@@ -234,15 +236,17 @@ def test_hop_pair_sites_are_canonical_for_a_generic_container() -> None:
     assert slices_with_pair_hops(owners, [raw])["t_wrap"] == frozenset(owners["t_wrap"])
 
 
-# A Debug dispatcher whose body currently calls Qual::display is the
-# implementer-not-yet-called case the pair hop exists for. The default
-# call parse only names fmt|debug, so today's hop records no pair.
-# Computed 2026-09-09 on run 3985224-5484d810: the filled Debug dispatcher
-# body was a Qual::display call and `_format_impl_calls` on it was empty.
+# A format dispatcher whose body currently calls a different method of
+# the same qualifier is the implementer-not-yet-called case the pair hop
+# exists for. The default call parse only names fmt|debug, so a display
+# call recorded no pair. Computed 2026-09-09 on run 3985224-5484d810: the
+# filled Debug dispatcher body was a Qual::display call and
+# `_format_impl_calls` on it was empty.
 _DISP_REC_VIA_DISPLAY = {
     **_DISP_REC,
     "body_text": "\n        Inner::display(self.inner.by_ref(), f)\n    ",
 }
+_DISPLAY_IMPL_REC = {**_IMPL_REC, "fn_name": "display"}
 
 
 def test_debug_dispatcher_calling_display_pairs_the_debug_implementer() -> None:
@@ -250,11 +254,15 @@ def test_debug_dispatcher_calling_display_pairs_the_debug_implementer() -> None:
     Qual::debug) still records a pair with Qual::debug, and
     slices_with_pair_hops then puts that debug site in a session that
     only held the dispatcher. Negative control: the same body through
-    today's call-follower names no fmt|debug call, so the old hop
-    recorded no pair and the session stayed dispatcher-only."""
+    the fmt|debug follow names no call, so the old hop recorded no pair
+    and the session stayed dispatcher-only. The complement is
+    trait.lower(), not a Debug branch — a Display dispatcher on the
+    same body does not ask for debug."""
     assert _format_impl_calls(_DISP_REC_VIA_DISPLAY["body_text"]) == frozenset()
-    assert _debug_implementer_not_yet_called(
+    assert _called_qualifier_complements(
         "Debug", _DISP_REC_VIA_DISPLAY["body_text"]) == {("Inner", "debug")}
+    assert _called_qualifier_complements(
+        "Display", _DISP_REC_VIA_DISPLAY["body_text"]) == frozenset()
     pairs: set[FormatterPair] = set()
     frontier: dict = {}
     sites: dict = {}
@@ -273,10 +281,37 @@ def test_debug_dispatcher_calling_display_pairs_the_debug_implementer() -> None:
     assert slices_with_pair_hops(owners, [])["t_wrap"] == frozenset(owners["t_wrap"])
 
 
+def test_display_dispatcher_calling_debug_pairs_the_display_implementer() -> None:
+    """The same complement in reverse: a Display dispatcher whose body
+    calls Qual::debug (not Qual::display) records a pair with
+    Qual::display. A Debug-only helper would miss this crate shape."""
+    rec = {
+        "file": "src/w.rs", "fn_name": "fmt",
+        "container": "impl Display for Wrapper < T >",
+        "body_text": "\n        Inner::debug(self.inner.by_ref(), f)\n    ",
+    }
+    tsrc = (
+        "#[test]\nfn t_wrap() {\n    let w: Wrapper<u8> = make();\n"
+        "    let s = format!(\"{}\", w);\n    assert!(s.contains(\"x\"));\n}\n"
+    )
+    assert _called_qualifier_complements("Display", rec["body_text"]) == {
+        ("Inner", "display")}
+    assert _called_qualifier_complements("Debug", rec["body_text"]) == frozenset()
+    pairs: set[FormatterPair] = set()
+    frontier: dict = {}
+    sites: dict = {}
+    _attribute_format_only_test(
+        "t_wrap", tsrc, tsrc,
+        {"fmt": [rec], "debug": [_IMPL_REC], "display": [_DISPLAY_IMPL_REC]},
+        frontier, sites, log=lambda _m: None, pairs_out=pairs)
+    assert len(pairs) == 1, pairs
+    assert next(iter(pairs)).implementer.fn_name == "display"
+
+
 def test_display_dispatcher_calling_display_does_not_synthesize_debug() -> None:
-    """Negative control: a Display dispatcher that calls Qual::display is
-    not the Debug misshape — no debug pair, the fmt itself is the
-    implementer."""
+    """Negative control: a Display dispatcher that already calls
+    Qual::display does not pair debug. It does follow display (the
+    implementer the hop exists to name)."""
     rec = {
         "file": "src/w.rs", "fn_name": "fmt",
         "container": "impl Display for Wrapper < T >",
@@ -286,24 +321,23 @@ def test_display_dispatcher_calling_display_does_not_synthesize_debug() -> None:
         "#[test]\nfn t_wrap() {\n    let w: Wrapper<u8> = make();\n"
         "    let s = format!(\"{}\", w);\n    assert!(s.contains(\"x\"));\n}\n"
     )
-    assert _debug_implementer_not_yet_called("Display", rec["body_text"]) == frozenset()
+    assert _called_qualifier_complements("Display", rec["body_text"]) == frozenset()
     pairs: set[FormatterPair] = set()
     frontier: dict = {}
     sites: dict = {}
     _attribute_format_only_test(
         "t_wrap", tsrc, tsrc,
-        {"fmt": [rec], "debug": [_IMPL_REC],
-         "display": [{**_IMPL_REC, "fn_name": "display"}]},
+        {"fmt": [rec], "debug": [_IMPL_REC], "display": [_DISPLAY_IMPL_REC]},
         frontier, sites, log=lambda _m: None, pairs_out=pairs)
-    assert pairs == set(), pairs
+    assert {p.implementer.fn_name for p in pairs} == {"display"}, pairs
     owners = {f"{k.file}::{k.fn_name}"
               for k, v in frontier.items() if "t_wrap" in v}
-    assert owners == {"src/w.rs::fmt"}, owners
+    assert owners == {"src/i.rs::display"}, owners
 
 
 def test_debug_dispatcher_that_already_calls_debug_does_not_need_display() -> None:
     """Negative control: a Debug dispatcher that already calls Qual::debug
-    is today's hop; a display call beside it does not change the pair."""
+    is the follow; a display call beside it does not change the pair."""
     rec = {
         **_DISP_REC,
         "body_text": (
@@ -311,7 +345,7 @@ def test_debug_dispatcher_that_already_calls_debug_does_not_need_display() -> No
             "        Inner::debug(self.inner.by_ref(), f)\n    "
         ),
     }
-    assert _debug_implementer_not_yet_called("Debug", rec["body_text"]) == frozenset()
+    assert _called_qualifier_complements("Debug", rec["body_text"]) == frozenset()
     pairs: set[FormatterPair] = set()
     frontier: dict = {}
     sites: dict = {}
@@ -321,6 +355,88 @@ def test_debug_dispatcher_that_already_calls_debug_does_not_need_display() -> No
         frontier, sites, log=lambda _m: None, pairs_out=pairs)
     assert len(pairs) == 1, pairs
     assert next(iter(pairs)).implementer.fn_name == "debug"
+
+
+def test_a_file_request_admits_the_uncalled_qualifier_method() -> None:
+    """Plan: a FILE request for the file that holds Qual::debug admits
+    that unit when an editable Debug dispatcher currently calls
+    Qual::display and debug is not yet in the write set. Control: the
+    same request does not admit debug for a Display dispatcher that
+    already calls display; a request for a different file admits nothing."""
+    disp = FnRecord(
+        file=_DISP_REC_VIA_DISPLAY["file"],
+        fn_name=_DISP_REC_VIA_DISPLAY["fn_name"],
+        container=_DISP_REC_VIA_DISPLAY["container"],
+        sig_text=_DISP_REC["sig_text"],
+        body_text=_DISP_REC_VIA_DISPLAY["body_text"])
+    debug = FnRecord(
+        file=_IMPL_REC["file"], fn_name="debug",
+        container=_IMPL_REC["container"],
+        sig_text=_IMPL_REC["sig_text"],
+        body_text=_IMPL_REC["body_text"])
+    display = FnRecord(
+        file=_IMPL_REC["file"], fn_name="display",
+        container=_IMPL_REC["container"],
+        sig_text=_IMPL_REC["sig_text"],
+        body_text=_IMPL_REC["body_text"])
+    editable = {record_site(disp): disp}
+    tree = (disp, debug, display)
+    admitted = admit_format_siblings_for_file("src/i.rs", editable, tree)
+    assert [r.fn_name for r in admitted] == ["debug"]
+    assert admit_format_siblings_for_file("src/other.rs", editable, tree) == ()
+    already = {record_site(disp): disp, record_site(debug): debug}
+    assert admit_format_siblings_for_file("src/i.rs", already, tree) == ()
+    disp_for_display = FnRecord(
+        file="src/w.rs", fn_name="fmt",
+        container="impl Display for Wrapper < T >",
+        body_text=_DISP_REC_VIA_DISPLAY["body_text"])
+    assert admit_format_siblings_for_file(
+        "src/i.rs", {record_site(disp_for_display): disp_for_display},
+        tree) == ()
+
+
+def test_live_filled_debug_dispatcher_that_calls_display_pairs_debug() -> None:
+    """Plan fixture, computed 2026-09-09 on the filled stable tree (not
+    described): `impl Debug for Error` body is `ErrorImpl::display(...)`;
+    `_format_impl_calls` of fmt|debug is empty (the pre-complement hop);
+    `_called_qualifier_complements("Debug", body)` is `{("ErrorImpl",
+    "debug")}`; the hop records the pair `src/error.rs::fmt (impl Debug
+    for Error)` → `src/fmt.rs::debug (impl ErrorImpl)`.
+
+    Skip when the tree is absent or the dispatcher no longer has that
+    shape — the unit tests above pin the mechanism either way."""
+    filled = (Path(__file__).resolve().parents[1]
+              / "tmp" / "anyhow" / ".skeleton-filled" / "stable")
+    if not _BIN.exists() or not filled.exists():
+        pytest.skip("filled stable tree or extractor binary missing")
+    recs = CliExtractor(_BIN).enumerate_fns(filled) or []
+    by_name: dict[str, list] = {}
+    disp = None
+    for r in recs:
+        by_name.setdefault(r.fn_name, []).append(r.to_dict())
+        cont = r.container or ""
+        if (r.fn_name == "fmt"
+                and impl_trait_name(cont) == "Debug"
+                and impl_self_type(cont) == "Error"
+                and "::display" in (r.body_text or "")
+                and "::debug" not in (r.body_text or "")):
+            disp = r
+    if disp is None:
+        pytest.skip("no Debug dispatcher currently calling display")
+    body = disp.body_text or ""
+    assert _format_impl_calls(body) == frozenset(), body
+    assert ("ErrorImpl", "debug") in _called_qualifier_complements("Debug", body)
+    tsrc = (
+        "use crate::Error;\n#[test]\nfn t_debug() {\n"
+        "    let e: Error = make();\n"
+        "    let s = format!(\"{:?}\", e);\n    assert!(s.contains(\"x\"));\n}\n"
+    )
+    pairs: set[FormatterPair] = set()
+    _attribute_format_only_test(
+        "t_debug", tsrc, tsrc, by_name, {}, {}, log=lambda _m: None,
+        pairs_out=pairs)
+    impls = {(p.implementer.file, p.implementer.fn_name) for p in pairs}
+    assert ("src/fmt.rs", "debug") in impls, impls
 
 
 # ---- locator-only attributions expand over the tree ------------------------
