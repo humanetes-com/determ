@@ -32,7 +32,7 @@ skeleton:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from pipeline_core.domain.rust_idents import impl_self_type
 
@@ -61,14 +61,12 @@ WRAP_BOX_RECIPE = (
 )
 
 
-def construction_recipe(name: str, container: str) -> str:
-    """Instruction for this unit at stub time, or ``""``.
+def catalog_construction_recipe(name: str, container: str) -> str:
+    """Catalog-driver recipes keyed on two crate names.
 
-    Admission is name plus the impl's self type, never body text: a stub,
-    a failed-attempt comment, and a compiling-wrong wrap all get the same
-    sentence. ``ext_context`` and ``Result::context`` are different names
-    or a different self type and are refused. ``from_boxed`` is refused
-    so it keeps calling this producer instead of wrapping a second time.
+    Production builders go through :func:`language_driver`. This
+    function is the catalog table; the generic driver keys on signature
+    shape and does not call it.
     """
     if name == "construct_from_boxed":
         return WRAP_BOX_RECIPE
@@ -77,31 +75,43 @@ def construction_recipe(name: str, container: str) -> str:
     return ""
 
 
-def construction_recipe_prefix(name: str, container: str) -> str:
+# Tests pin the catalog table under this name (the A/B). Production
+# builders use language_driver().construction_recipe.
+construction_recipe = catalog_construction_recipe
+
+
+def construction_recipe_prefix(name: str, container: str, sig: str = "") -> str:
     """Recipe plus blank line for splicing ahead of the next prompt section.
 
-    Empty when :func:`construction_recipe` is empty, so a builder that
+    Empty when the bound driver returns empty, so a builder that
     always concatenates this keeps byte-identical output for every other
     unit (the characterization tests).
     """
-    text = construction_recipe(name, container)
+    from pipeline_core.domain.language_driver import language_driver
+    text = language_driver().construction_recipe(name, container, sig)
     return f"{text}\n\n" if text else ""
 
 
 def construction_recipes_for(
     names: Iterable[str], container: str,
+    sigs: Mapping[str, str] | None = None,
 ) -> str:
     """Unique recipes for these names under ``container``, stable order.
 
     Used by the per-impl / maximal builders whose unit of work is a block.
+    ``sigs`` is the generic driver's shape input; the catalog driver
+    ignores it and keys on name.
     """
+    from pipeline_core.domain.language_driver import language_driver
     parts: list[str] = []
     seen: set[str] = set()
+    table = sigs or {}
     for name in names:
         if name in seen:
             continue
         seen.add(name)
-        text = construction_recipe(name, container)
+        text = language_driver().construction_recipe(
+            name, container, table.get(name, ""))
         if text:
             parts.append(text)
     return "\n\n".join(parts)

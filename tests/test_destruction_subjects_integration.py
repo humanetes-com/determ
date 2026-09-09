@@ -27,13 +27,22 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.domain.crash_site import destruction_path_subjects
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 _BIN = (Path(__file__).parent.parent / "tools" / "skeleton_extractor"
         / "target" / "release" / "skeleton-extractor")
 
 pytestmark = pytest.mark.skipif(
     not _BIN.exists(), reason="skeleton-extractor binary not built (bash setup.sh)")
+
+
+@pytest.fixture(autouse=True)
+def _catalog_driver():
+    """Catalog drop-token subjects (the A/B). Generic uses body primitives only."""
+    with using_driver(catalog_driver()):
+        yield
 
 _ERROR_RS = """\
 pub struct Own<T> { pub ptr: *mut T }

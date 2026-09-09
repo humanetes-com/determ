@@ -25,7 +25,8 @@ from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import NOTES_CLOSE, NOTES_OPEN, SessionSlice
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
-from pipeline_core.prompts.sections import gotchas_summary, tag_block
+from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.prompts.sections import tag_block
 
 # A file over this many chars is rendered condensed: the editable fns in
 # full, every other fn as its signature. Sized so a five-file slice stays
@@ -194,7 +195,7 @@ FAILING TESTS (the targets):
 
 {tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", prior_regression)}
 <RUST_GOTCHAS>
-{gotchas_summary()}
+{language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
 {tag_block("REPOSITORY_SPECIFICATIONS", repo_spec_section(fr_path, file_rel=first_file), prefix="The crate's own specification documents. When your plan conflicts with them, follow the spec.\n")}{tag_block("DESIGN_BLUEPRINT", blueprint)}{tag_block("TYPES_IN_SCOPE", types_section)}{tag_block("BOUND_METHODS", bound_methods)}{tag_block("CLUSTER_INVARIANTS", invariants)}{tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))}{tag_block("MACROS", macros)}
 THE SLICE — the crate fns the failing tests execute (plus the formatter

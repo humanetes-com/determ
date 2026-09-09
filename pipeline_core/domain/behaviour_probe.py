@@ -31,6 +31,7 @@ from pipeline_core.domain.behaviour import (
     has_resource_boundary,
 )
 from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.rust_idents import impl_self_type
 from pipeline_core.domain.rust_scan import contains_word
@@ -483,15 +484,20 @@ def fills_non_format_class(probe: CapturedProbe) -> bool:
     return ".is_none()" in when or ".is_some()" in when
 
 
+def catalog_exact_format_observe_ok(observe: str) -> bool:
+    """Catalog-driver EXACT_FORMAT observe: debug / alt_debug only."""
+    return (observe or "").strip().lower() in _EXACT_FORMAT_OBSERVE
+
+
 def exact_format_ask_rejects(probe: CapturedProbe) -> str | None:
     """Why this block may not stand in for an EXACT_FORMAT ask, else None.
 
-    A Display observe of a public error type pins the unperturbed world the
-    crate's own tests already run. The ask is for Debug / alternate-Debug."""
+    Catalog refuses a Display observe. Generic accepts any non-empty
+    observe — a Display probe that moved under the env flip counts."""
     if fills_non_format_class(probe):
         return None
     obs = (probe.observe or "").strip().lower()
-    if obs in _EXACT_FORMAT_OBSERVE:
+    if language_driver().exact_format_observe_ok(obs):
         return None
     return (
         "EXACT_FORMAT ask requires observe debug or alt_debug; "
@@ -574,13 +580,17 @@ _EXACT_FORMAT_PROMPT_LEGACY = (
 )
 
 
-def class_prompts(*, pin_env_debug: bool) -> dict[str, str]:
-    """The class-ask phrasing. Off restores Display-or-Debug; on asks Debug
-    only, because Display does not pin a render that moves with the env."""
+def catalog_class_prompts(*, pin_env_debug: bool) -> dict[str, str]:
+    """Catalog-driver class-ask phrasing (Debug-only EXACT_FORMAT when on)."""
     out = dict(CLASS_PROMPTS)
     if not pin_env_debug:
         out["EXACT_FORMAT"] = _EXACT_FORMAT_PROMPT_LEGACY
     return out
+
+
+def class_prompts(*, pin_env_debug: bool) -> dict[str, str]:
+    """Bound-driver class-ask phrasing."""
+    return language_driver().class_prompts(pin_env_debug=pin_env_debug)
 
 
 def class_targets(
@@ -608,7 +618,8 @@ def class_targets(
     Pass :func:`class_prompts` with pin_env_debug off to restore Display-or-Debug."""
     if max_targets <= 0:
         return ()
-    table = CLASS_PROMPTS if prompts is None else prompts
+    table = (language_driver().class_prompts(pin_env_debug=True)
+             if prompts is None else prompts)
     wanted = [c for c in (classes or tuple(table)) if c in table]
     counts = dict.fromkeys(wanted, 0)
     for spec in specs:
@@ -697,10 +708,16 @@ def probe_coverage_class(spec: BehaviourSpec) -> str:
     if name == "OTHER":
         return ""
     if name == "EXACT_FORMAT":
-        kind = spec.then.kind if spec.then else None
-        if kind not in _EXACT_FORMAT_PROBE_KINDS:
+        if not language_driver().exact_format_probe_covers(spec):
             return ""
     return name
+
+
+def catalog_exact_format_probe_covers(spec: object) -> bool:
+    """Catalog-driver coverage: Debug / alternate-Debug / chain Then only."""
+    then = getattr(spec, "then", None)
+    kind = then.kind if then is not None else None
+    return kind in _EXACT_FORMAT_PROBE_KINDS
 
 
 def probe_spec(

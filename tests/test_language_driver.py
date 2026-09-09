@@ -17,6 +17,7 @@ from collections.abc import Iterator
 import pytest
 
 from pipeline_core.domain.behaviour import (
+    BehaviourClass,
     BehaviourSpec,
     BehaviourSubKind,
     ObservableOutcome,
@@ -109,7 +110,10 @@ def test_generic_driver_source_does_not_name_the_catalog() -> None:
         "TRAIT_CONTRACTS", "trait_contract_for", "_FORMAT_TRAITS",
         "catalog_is_formatting", "_DERIVED_TRAIT_RULE", "_AUTOTRAIT_RULE",
         "Display", "Debug", "Hash", "Drop", "Send", "Sync", "Default",
-        "PartialEq",
+        "PartialEq", "ErrorImpl", "construct_from_boxed", "CONVERSION_FAMILY",
+        "WRAP_BOX", "CHAIN_TABLE", "ErrorVTable", "ManuallyDrop",
+        "BoxedError", "CLASS_PROMPTS", "into_boxed_dyn_error",
+        "RUST_GOTCHAS",
     ):
         assert banned not in src, banned
 
@@ -314,3 +318,225 @@ def test_using_driver_restores_the_previous_driver() -> None:
     with using_driver(catalog_driver()):
         assert language_driver().name == "catalog"
     assert language_driver().name == "generic"
+
+
+# --- items 6–15: generic pays from shape; catalog keeps today's table ---
+
+
+def test_generic_class_prompts_do_not_name_a_render_or_a_std_trait() -> None:
+    """Plan: EXACT_FORMAT scarcity is env-moving, not Debug. TRAIT_OBJECT
+    identity does not name a std Error trait object."""
+    drv = language_driver()
+    on = drv.class_prompts(pin_env_debug=True)
+    off = drv.class_prompts(pin_env_debug=False)
+    assert on == off
+    assert "never Display" not in on["EXACT_FORMAT"]
+    assert "Debug" not in on["EXACT_FORMAT"]
+    assert "{:?}" not in on["EXACT_FORMAT"]
+    assert "std::error::Error" not in on["TRAIT_OBJECT_IDENTITY"]
+    assert "dyn " not in on["TRAIT_OBJECT_IDENTITY"]
+
+
+def test_generic_exact_format_observe_accepts_display_and_covers_env_movers() -> None:
+    from pipeline_core.domain.behaviour_probe import (
+        CapturedProbe,
+        exact_format_ask_rejects,
+        probe_coverage_class,
+    )
+    display = CapturedProbe("u", "let v = crate_x::go();", "v", "display")
+    assert exact_format_ask_rejects(display) is None
+    assert language_driver().exact_format_observe_ok("display")
+    assert not language_driver().exact_format_observe_ok("")
+
+    moved = BehaviourSpec(
+        "probe::stable::u::0", "let v = crate_x::go();", "v",
+        ObservableOutcome.debug("X { .. }"),
+        subkind=BehaviourSubKind.OUTCOME,
+        klass=BehaviourClass.EXACT_FORMAT,
+        required_env=(("RUST_BACKTRACE", "1"),))
+    still = BehaviourSpec(
+        "probe::stable::u::1", "let v = crate_x::go();", "v",
+        ObservableOutcome.debug("X { .. }"),
+        subkind=BehaviourSubKind.OUTCOME,
+        klass=BehaviourClass.EXACT_FORMAT)
+    assert language_driver().exact_format_probe_covers(moved)
+    assert not language_driver().exact_format_probe_covers(still)
+    assert probe_coverage_class(moved) == "EXACT_FORMAT"
+    assert probe_coverage_class(still) == ""
+
+
+def test_generic_never_calls_gotchas_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.prompts import sections
+
+    def boom_summary() -> str:
+        raise AssertionError("catalog gotchas_summary was called")
+
+    def boom_detail(_excerpt: str) -> str:
+        raise AssertionError("catalog gotchas_for_error was called")
+
+    monkeypatch.setattr(sections, "gotchas_summary", boom_summary)
+    monkeypatch.setattr(sections, "gotchas_for_error", boom_detail)
+    assert language_driver().gotchas_summary() == ""
+    assert language_driver().gotchas_for_error("error[E0133]") == ""
+    prompt = build_per_fn_prompt(
+        file_text="fn go() { unimplemented!() }",
+        fn_name="go", sig_text="fn go(&self)",
+        test_blocks=[], module_name="demo", cluster_name="stable",
+        file_rel="src/x.rs", fr_path=None,
+        sections=_fn_sections("impl Hash for K"))
+    assert "<RUST_GOTCHAS>\n\n</RUST_GOTCHAS>" in prompt or (
+        "<RUST_GOTCHAS>\n</RUST_GOTCHAS>" in prompt)
+
+
+def test_generic_construction_recipe_keys_on_sig_shape_not_crate_names() -> None:
+    """Plan: unsized Box<dyn plus another arg gets the wrap instruction;
+    by-value self returning Self on an inherent impl gets the identity
+    instruction; a single Box<dyn arg (already boxed) does not wrap;
+    a unit named construct_from_boxed on a crate that does not declare
+    BoxedError still gets the wrap from the sig."""
+    drv = language_driver()
+    wrap = drv.construction_recipe(
+        "from_payload", "impl Cell",
+        "fn from_payload(error: Box<dyn StdError + Send + Sync>, "
+        "trace: Option<Trace>) -> Self")
+    assert "unsized" in wrap
+    assert "BoxedError" not in wrap
+    assert "construct_from_std" not in wrap
+    already = drv.construction_recipe(
+        "from_boxed", "impl Cell",
+        "fn from_boxed(error: Box<dyn StdError + Send + Sync>) -> Self")
+    assert already == ""
+    chain = drv.construction_recipe(
+        "and_then", "impl Cell",
+        "fn and_then<C>(self, extra: C) -> Self")
+    assert "erased identity type" in chain
+    assert "ContextError" not in chain
+    assert drv.construction_recipe("and_then", "impl Cell") == ""
+    assert drv.construction_recipe(
+        "construct_from_boxed", "impl Error",
+        "fn construct_from_boxed(error: Box<dyn StdError + Send + Sync>, "
+        "backtrace: Option<Backtrace>) -> Self")
+    trait_self = drv.construction_recipe(
+        "context", "impl<T, E> Context<T, E> for Result<T, E>",
+        "fn context<C>(self, context: C) -> Self")
+    assert trait_self == ""
+
+
+def test_generic_identity_subject_is_harvested_from_when() -> None:
+    """Plan: a Counter suite admits Counter::new and refuses impl Display
+    for Counter. An Error-named leftover is not the reason the function
+    exists."""
+    from pipeline_core.domain.behaviour_select import (
+        identity_must_admits as catalog_admits,
+        identity_subject_from_specs,
+        identity_subject_from_when,
+        select_identity_must,
+        IdentityMustUnit,
+    )
+    assert identity_subject_from_when("Counter::new()") == "Counter"
+    assert identity_subject_from_when("crate::Error::msg") == "Error"
+    pin = BehaviourSpec(
+        "p", "", "Counter::new()",
+        ObservableOutcome.type_identity("u32", True),
+        subkind=BehaviourSubKind.OUTCOME,
+        klass=BehaviourClass.IDENTITY)
+    assert identity_subject_from_specs((pin,)) == "Counter"
+    drv = language_driver()
+    assert drv.identity_must_admits(
+        "new", "impl Counter", "fn new() -> Self", "Counter")
+    assert not drv.identity_must_admits(
+        "fmt", "impl Display for Counter",
+        "fn fmt(&self, f: &mut Formatter) -> fmt::Result", "Counter")
+    assert not drv.constructs_identity_subject(
+        "new", "impl Own < T >", "fn new(ptr: NonNull<T>) -> Self", "Counter")
+    # Catalog still pins Error constructors (the A/B).
+    assert catalog_admits(
+        "construct_from_display", "impl Error",
+        "fn construct_from_display<M>(error: M) -> Self")
+    picked = select_identity_must(
+        (pin,), units=(IdentityMustUnit(
+            "new", "impl Counter", "fn new() -> Self"),))
+    assert [s.then.value for s in picked if s.then is not None] == ["u32"]
+
+
+def test_generic_vtable_dispatch_is_wrapper_shape_not_a_crate_type() -> None:
+    drv = language_driver()
+    assert drv.is_vtable_dispatch(
+        "unsafe fn slot(this: Hold<Node>) -> u8", "impl Node")
+    assert not drv.is_vtable_dispatch(
+        "unsafe fn read_at<T: Copy>(p: *const T, i: isize) -> T",
+        "impl ReadHelper")
+    assert not drv.is_vtable_dispatch(
+        "unsafe fn slot<E>(this: Hold<Node>) -> u8 where E: Copy",
+        "impl Node")
+    assert "ErrorImpl" not in drv.vtable_fast_exit_guidance()
+    assert "ErrorVTable" not in drv.vtable_fast_exit_guidance()
+    assert "ErrorVTable" not in drv.vtable_category_line()
+
+
+def test_generic_conversion_license_is_box_dyn_or_a_crate_type() -> None:
+    drv = language_driver()
+    assert drv.conversion_family() == frozenset()
+    assert drv.access_licenses_conversion(
+        "drop_glue::<Box<dyn core::error::Error + Send>>")
+    assert drv.access_licenses_conversion(
+        "<crate::cell::Node>::go", crate_types=("Node",))
+    assert not drv.access_licenses_conversion(
+        "<crate::cell::Node>::go", crate_types=("Other",))
+    assert drv.unique_called_name(
+        "    let boxed = err.into_boxed_dyn_error();") == (
+        "into_boxed_dyn_error")
+    assert drv.unique_called_name(
+        "    err.downcast::<String>().unwrap()") == "downcast"
+    assert drv.unique_called_name("    let x = 1;") is None
+    must = drv.ownership_transfer_must(("convert",))
+    assert "original owner must not drop" in must
+    assert "ManuallyDrop" not in must
+    assert drv.ownership_transfer_must(()) == ""
+    assert not drv.is_destructor_fn_name("object_drop")
+    assert not drv.is_destructor_fn_name("drop")
+
+
+def test_generic_prompt_examples_do_not_name_this_crate() -> None:
+    drv = language_driver()
+    tags = drv.file_fill_tag_examples()
+    assert "ErrorImpl" not in tags
+    assert "FUNCTION_NAME" not in tags or "method" in tags
+    assert "impl Inner" in tags
+    ex = drv.sig_change_example("slot")
+    assert "ErrorImpl" not in ex
+    assert "Own<T>" in ex
+    assert "slot" in ex
+
+
+def test_catalog_driver_keeps_items_6_to_15_tables() -> None:
+    """Negative control: catalog still produces today's table."""
+    from pipeline_core.domain.construction_recipe import WRAP_BOX_RECIPE
+    from pipeline_core.domain.crash_site import (
+        CONVERSION_FAMILY,
+        OWNERSHIP_TRANSFER_MUST,
+    )
+    with using_driver(catalog_driver()):
+        drv = language_driver()
+        assert "never Display" in drv.class_prompts(pin_env_debug=True)[
+            "EXACT_FORMAT"]
+        assert "std::error::Error" in drv.class_prompts(pin_env_debug=True)[
+            "TRAIT_OBJECT_IDENTITY"]
+        assert drv.exact_format_observe_ok("debug")
+        assert not drv.exact_format_observe_ok("display")
+        assert "E0133" in drv.gotchas_for_error(
+            "error[E0133]: call to unsafe function") or (
+            "unsafe" in drv.gotchas_for_error(
+                "error[E0133]: call to unsafe function").lower())
+        assert drv.gotchas_summary()
+        assert drv.construction_recipe(
+            "construct_from_boxed", "impl Error") == WRAP_BOX_RECIPE
+        assert drv.conversion_family() == CONVERSION_FAMILY
+        assert drv.is_destructor_fn_name("object_drop")
+        assert drv.ownership_transfer_must(("downcast",)) == (
+            OWNERSHIP_TRANSFER_MUST)
+        assert "ErrorImpl::provide" in drv.file_fill_tag_examples()
+        assert "Own<ErrorImpl>" in drv.sig_change_example("provide")
+        assert "ErrorVTable" in drv.vtable_fast_exit_guidance()
+        assert drv.is_vtable_dispatch(
+            "unsafe fn error(this: Ref<ErrorImpl>) -> u8", "impl ErrorImpl")

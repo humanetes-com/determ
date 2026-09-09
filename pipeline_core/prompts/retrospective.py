@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pipeline_core.domain.language_driver import language_driver
+
 
 def build_phase_c_retro_prompt(
     fn_name: str, sig_text: str, container: str, file_rel: str,
@@ -57,7 +59,7 @@ def build_phase_c_retro_prompt(
         f"{siblings_section}"
         f"{bound_section}"
         f"{pins_section}\n"
-        # R1 (debt #28): the skeleton FREEZES the signature. The fixer can ONLY
+        # The skeleton FREEZES the signature. The fixer can ONLY
         # rewrite the body, so guidance that proposes editing a bound / where /
         # generic / return type is un-actionable → identical re-submit → thrash.
         # State the constraint with WRONG→RIGHT examples (the model acts on
@@ -96,9 +98,7 @@ def build_phase_c_retro_prompt(
         "value/call that satisfies it — usually a method the frozen bound's own trait "
         "provides (see <BOUND_METHODS>), NOT a bound to add. Only if truly none → GENUINELY_HARD\n"
         "  API_HALLUCINATION       — model called a method that does not exist; name it\n"
-        "  NEEDS_VTABLE_ACCESS     — requires reading the ErrorVTable; layout is needed "
-        "→ classify as GENUINELY_HARD immediately; vtable layout cannot be satisfied via "
-        "trait methods alone, and the skeleton does not expose the vtable struct\n"
+        + language_driver().vtable_category_line() + "\n"
         "  GENUINELY_HARD          — unfixable within the frozen body: a bound/where/sig change "
         "is the ONLY route AND the frozen bound's trait offers no usable method (see "
         "<BOUND_METHODS>), or fundamental layout unknown; flag for skip\n\n"

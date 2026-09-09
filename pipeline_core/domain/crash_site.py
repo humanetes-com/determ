@@ -216,17 +216,19 @@ def prefer_non_destructor(
     return kept or frames
 
 
-def _is_destructor_fn_name(fn_name: str) -> bool:
-    """A drop token in the crate's own vocabulary: `drop`, `object_drop`,
-    `object_drop_front`, `context_drop_rest`, `context_chain_drop_rest`.
+def catalog_is_destructor_fn_name(fn_name: str) -> bool:
+    """Catalog-driver drop-token rule: `drop`, `object_drop`, …
 
-    Same rule :func:`destruction_path_subjects` uses on extractor names —
-    a substring match would also catch `dropdown`. The skip that feeds
-    blame must treat those names as destructors too: otherwise
-    `object_drop` survives `non_destructor_frames` and is promoted over
-    the conversion that called it.
+    Production skip/subject selection goes through :func:`language_driver`.
+    The generic driver does not synthesize a family from the token.
     """
     return fn_name == "drop" or "drop" in fn_name.split("_")
+
+
+def _is_destructor_fn_name(fn_name: str) -> bool:
+    """Bound-driver destructor-name test (catalog: drop token; generic: no)."""
+    from pipeline_core.domain.language_driver import language_driver
+    return language_driver().is_destructor_fn_name(fn_name)
 
 
 # A drop is running when the symbol is a `Drop::drop` impl, the compiler's drop
@@ -357,25 +359,24 @@ def _has_boxed_dyn_error(symbols: str) -> bool:
     return any(m in symbols for m in _BOX_DYN_ERROR_MARKS)
 
 
+def catalog_access_licenses_conversion(symbols: str) -> bool:
+    """Catalog-driver ACCESS license: `ErrorImpl` or `Box<dyn Error>`."""
+    return _ERROR_IMPL_MARK in symbols or _has_boxed_dyn_error(symbols)
+
+
 def conversion_family_from_access(
     raw_frames: list[dict[str, object]],
 ) -> frozenset[str]:
     """The conversion family iff the ACCESS (READ) stack names `ErrorImpl`
     or `Box<dyn Error>`.
 
-    Either-not-both: the two live UAFs of run `1212998-d61fbd2c` (2026-09-06)
-    each carry one of the two types. Report 1's READ is
-    `<anyhow::error::ErrorImpl>::error` with no Box; report 2's READ is
-    `drop_glue::<Box<dyn Error + Sync + Send>>` with no ErrorImpl. Requiring
-    both left family empty, recovery off, and blame on `drop` four sweeps.
-    An Arc double-drop (`test_downcast::test_drop`, run `1064759-0f23fb68`)
-    has neither mark and still returns empty — recovery stays off,
-    last-resort blame stays `drop`, and the walk that injects a hardcoded
-    drop site is untouched. The source-line unique-name gate still has to
-    fire; a family here only licenses looking.
+    Catalog table. Production recovery goes through
+    :func:`language_driver` (generic licenses `Box<dyn` or a crate type
+    the extractor recorded, and names the unique call on the source
+    line). This function stays the catalog so tests pin today's table.
     """
     symbols = "\n".join(str(r.get("func") or "") for r in raw_frames)
-    if _ERROR_IMPL_MARK in symbols or _has_boxed_dyn_error(symbols):
+    if catalog_access_licenses_conversion(symbols):
         return CONVERSION_FAMILY
     return frozenset()
 
@@ -406,6 +407,12 @@ def conversion_family_from_origin(
     if first_test_file_after_destructor(origin) is not None:
         return CONVERSION_FAMILY
     return frozenset()
+
+
+def catalog_origin_licenses_conversion(
+        origin: Sequence[Mapping[str, object]]) -> bool:
+    """Catalog-driver ORIGIN license: destructor-then-caller on the free stack."""
+    return first_test_file_after_destructor(list(origin)) is not None
 
 
 def crate_fn_named_on_source_line(
@@ -578,7 +585,8 @@ def first_test_file_after_destructor(
         if file_.startswith("tests/"):
             return (file_, raw_line)
         if file_.startswith("src/"):
-            if bare_fn_name(func) in CONVERSION_FAMILY:
+            from pipeline_core.domain.language_driver import language_driver
+            if bare_fn_name(func) in language_driver().conversion_family():
                 return None
             return (file_, raw_line)
         return None
@@ -619,17 +627,38 @@ def recover_owner_from_caller_source(
     of its own; ``named_by`` is the (file, line) that justified the
     recovery, and render prints that instead of fabricating ``:0``.
     """
-    family = (conversion_family_from_access(access_raw)
-              | conversion_family_from_origin(origin_raw))
-    if not family:
+    from pipeline_core.domain.language_driver import language_driver
+    drv = language_driver()
+    access_symbols = "\n".join(str(r.get("func") or "") for r in access_raw)
+    licensed = (
+        drv.access_licenses_conversion(access_symbols)
+        or drv.origin_licenses_conversion(origin_raw))
+    if not licensed:
         return None
+    family = drv.conversion_family()
     if source_line:
-        name = crate_fn_named_on_source_line(source_line, family)
+        name = (crate_fn_named_on_source_line(source_line, family)
+                if family else drv.unique_called_name(source_line))
     elif source_window is not None and source_window.lines:
-        hit = crate_fn_named_in_source_window_at(source_window.lines, family)
-        name = hit[0] if hit is not None else None
-        if hit is not None:
-            named_by = (source_window.file_rel, source_window.line_no(hit[1]))
+        if family:
+            hit = crate_fn_named_in_source_window_at(
+                source_window.lines, family)
+            name = hit[0] if hit is not None else None
+            if hit is not None:
+                named_by = (source_window.file_rel,
+                            source_window.line_no(hit[1]))
+        else:
+            name = None
+            for i, line in enumerate(source_window.lines):
+                cand = drv.unique_called_name(line)
+                if cand is None:
+                    continue
+                if name is not None and cand != name:
+                    name = None
+                    break
+                name = cand
+                named_by = (source_window.file_rel,
+                            source_window.line_no(i))
     else:
         return None
     if name is None:
@@ -665,16 +694,17 @@ def _frame_locus(fr: CrashFrame) -> str:
     return f"{fr.file_rel}:{fr.line}"
 
 
-def ownership_transfer_must(names: Collection[str]) -> str:
-    """The plan-line MUST when a crashed refill is a conversion, else empty.
-
-    File-first appends this to `_plan_line`'s CRASHED clause. Per-fn and
-    per-impl prepend it to the CRASH_EVIDENCE prefix so a conversion fill
-    cannot be dispatched by a sibling route that omits the sentence.
-    """
+def catalog_ownership_transfer_must(names: Collection[str]) -> str:
+    """Catalog-driver MUST: ManuallyDrop catalog aimed at CONVERSION_FAMILY."""
     if CONVERSION_FAMILY.intersection(names):
         return OWNERSHIP_TRANSFER_MUST
     return ""
+
+
+def ownership_transfer_must(names: Collection[str]) -> str:
+    """Bound-driver plan-line MUST when a crashed refill is a conversion."""
+    from pipeline_core.domain.language_driver import language_driver
+    return language_driver().ownership_transfer_must(names)
 
 
 def crash_evidence_prefix(base: str, names: Collection[str]) -> str:
@@ -1526,7 +1556,8 @@ def destruction_path_subjects(
         if not _is_authorable_file(file_):
             continue
         loc = FnLocator(file_, fn_name)
-        if _is_destructor_fn_name(fn_name):
+        from pipeline_core.domain.language_driver import language_driver
+        if language_driver().is_destructor_fn_name(fn_name):
             named.add(loc)
             continue
         body = str(rec.get("body_text") or "")
@@ -1612,10 +1643,12 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     avoid (`self_type_names`'s docstring; the StdError/`Quoted` fires).
     Both the filled-body gate and the OWNS grade take
     :func:`origin_blamed_locators` instead."""
+    from pipeline_core.domain.language_driver import language_driver
+    family = language_driver().conversion_family()
     out: set[FnLocator] = set(origin_blamed_locators(sites))
     for loc in list(out):
-        if loc.fn_name in CONVERSION_FAMILY:
-            out |= {FnLocator(loc.file, n) for n in CONVERSION_FAMILY}
+        if loc.fn_name in family:
+            out |= {FnLocator(loc.file, n) for n in family}
     return frozenset(out)
 
 
@@ -1635,9 +1668,11 @@ def family_members_beside_a_crashed_conversion(
     the first and moved the payload into a fresh `Box::new` in the second.
     A family member beside a crashed family member is the same defect and
     gets the same instruction."""
-    if not CONVERSION_FAMILY.intersection(crashed):
+    from pipeline_core.domain.language_driver import language_driver
+    family = language_driver().conversion_family()
+    if not family.intersection(crashed):
         return frozenset()
-    return frozenset(c for c in candidates if c in CONVERSION_FAMILY)
+    return frozenset(c for c in candidates if c in family)
 
 
 def blame_outside_unit(

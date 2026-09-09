@@ -13,7 +13,9 @@ from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.tasks.task0d import Task0dDeps, run_task0d
 from pipeline_core.domain.behaviour import BehaviourSuite, OutcomeKind
 from pipeline_core.domain.behaviour_probe import ProbeResult
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import BuildCluster, FnRecord
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 FIXTURES = Path(__file__).parent / "fixtures" / "behaviours"
 
@@ -267,7 +269,8 @@ def test_a_display_observe_is_a_miss_for_the_exact_format_ask(tmp_path: Path) ->
     """EXACT_FORMAT is asked (harvest Display does not cover it). A Display
     observe of a public value is not that pin and must not spend cargo."""
     w = _World(reply=_DISPLAY_REPLY)
-    run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    with using_driver(catalog_driver()):
+        run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     reasons = [m["reason"] for _c, ms in w.misses for m in ms]
     assert reasons and "EXACT_FORMAT ask requires observe debug" in reasons[0]
     assert w.probes_run == []

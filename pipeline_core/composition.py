@@ -821,12 +821,7 @@ from pipeline_core.prompts.sections import (
 from pipeline_core.prompts.sections import (
     format_api_surface_section as _fmt_api_surface_impl,
 )
-from pipeline_core.prompts.sections import (
-    gotchas_for_error as _gotchas_for_error,
-)
-from pipeline_core.prompts.sections import (
-    gotchas_summary as _gotchas_summary,
-)
+from pipeline_core.domain.language_driver import language_driver as _language_driver
 from pipeline_core.prompts.sections import tag_block as _tag_block
 from pipeline_core.prompts.skeleton_index import (
     format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
@@ -2770,8 +2765,8 @@ def build_app(
             filter_test_targets=filter_test_targets,
             fix_diag=helpers.fix_diag,
             frontier_from_diags=_via("frontier_from_diags"),
-            gotchas_for_error=_gotchas_for_error,
-            gotchas_summary=_gotchas_summary,
+            gotchas_for_error=lambda e: _language_driver().gotchas_for_error(e),
+            gotchas_summary=lambda: _language_driver().gotchas_summary(),
             is_pub_fn=_domain_is_pub_fn,
             locate_fn=_domain_locate_fn,
             log=ports.log,

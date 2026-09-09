@@ -38,9 +38,14 @@ there.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.dispatch_batch import promote_crash_evidence, take_batch
 from pipeline_core.domain.landed_change import declined_unchanged
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
@@ -53,6 +58,13 @@ from pipeline_core.domain.refill_evidence import (
 )
 from pipeline_core.prompts.fix_prompts import BlockFillPlan, _plan_line
 from pipeline_core.prompts.sections import format_impl_block_for_prompt
+
+
+@pytest.fixture(autouse=True)
+def _catalog_driver() -> Iterator[None]:
+    """This module pins the catalog conversion-family MUST and widening."""
+    with using_driver(catalog_driver()):
+        yield
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "dispatch"
            / "crash_cursor_1519852_2026-08-30.json")

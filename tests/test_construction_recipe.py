@@ -29,8 +29,10 @@ from pipeline_core.domain.construction_recipe import (
 )
 from pipeline_core.domain.models import FnRecord, ImplBlock
 from pipeline_core.domain.type_production import constructs_type
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.prompts.context import PerFnSections, PerImplSections
 from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
+from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.prompts.per_fn import build_per_fn_prompt
 from pipeline_core.prompts.per_impl import build_per_impl_prompt
 
@@ -96,7 +98,17 @@ def test_constructs_type_misses_stubs_which_is_why_bypass_never_fired() -> None:
 def test_per_fn_and_per_impl_builders_derive_the_recipe_without_a_sections_field() -> None:
     """A forgotten construction_recipe kwarg cannot omit it: the builder
     computes from name + container. msg (no recipe) stays free of both
-    sentences so identity-must characterization stays byte-stable."""
+    sentences so identity-must characterization stays byte-stable.
+
+    Catalog-driver pin of the name-keyed recipes (the A/B). Generic
+    builders key on signature shape and are tested in
+    test_language_driver.
+    """
+    with using_driver(catalog_driver()):
+        _per_fn_and_per_impl_builders_derive_the_recipe()
+
+
+def _per_fn_and_per_impl_builders_derive_the_recipe() -> None:
     fn_empty = {"macros": "", "notes": "", "container": "impl Error",
                 "types": "", "invariants": "", "siblings": "",
                 "crate_idioms": "", "bound_methods": ""}

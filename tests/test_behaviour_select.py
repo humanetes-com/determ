@@ -36,7 +36,9 @@ from pipeline_core.domain.behaviour_select import (
     select_identity_must,
     select_usage_examples,
 )
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnRecord
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 def _spec(bid, when, *, exercises=frozenset(), fence=FenceDirective.RUN):
@@ -513,6 +515,11 @@ def test_identity_must_aiming_on_recorded_frontier_drops_wrapper_fmt() -> None:
     of constructor names would pass by construction — the fixture is the
     live stub records.
     """
+    with using_driver(catalog_driver()):
+        _identity_must_aiming_on_recorded_frontier()
+
+
+def _identity_must_aiming_on_recorded_frontier() -> None:
     from pipeline_core.prompts.layout_authoring import identity_must_instruction
 
     stubs = json.loads(_FRONTIER_STUBS.read_text(encoding="utf-8"))
@@ -603,7 +610,8 @@ def test_select_identity_must_units_accept_fn_record_and_reject_a_bare_name() ->
         fn_name="construct_from_adhoc",
         container="impl Error",
         sig_text="fn construct_from_adhoc<M>(error: M) -> Self")
-    text = identity_must_instruction(suite.specs, units=(rec,))
+    with using_driver(catalog_driver()):
+        text = identity_must_instruction(suite.specs, units=(rec,))
     assert text.startswith("MUST:")
     assert "`is::<&str>()`" in text
     with pytest.raises(TypeError, match="IdentityMustUnit or FnRecord"):

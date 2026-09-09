@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.layout_retrigger import (
     PAYOFF_HIGH_KEY,
     PAYOFF_ZERO_KEY,
@@ -242,9 +244,10 @@ def test_a_filled_conversion_stays_filled_body_when_a_family_sibling_is_undeclar
     origin_ev = CrashEvidence(
         vanished=vanished, suspect_fns=frozenset(),
         blamed_fns=origin_blamed_locators((site,)))
-    union_ev = CrashEvidence(
-        vanished=vanished, suspect_fns=frozenset(),
-        blamed_fns=blamed_locators((site,)))
+    with using_driver(catalog_driver()):
+        union_ev = CrashEvidence(
+            vanished=vanished, suspect_fns=frozenset(),
+            blamed_fns=blamed_locators((site,)))
     assert crash_blame_is_filled_body(origin_ev, filled) is True
     assert crash_blame_is_filled_body(union_ev, filled) is False, (
         "negative control: the family union is False on the same records")
@@ -826,9 +829,10 @@ def test_an_undeclared_origin_beside_a_declared_family_sibling_still_declines():
     origin_ev = CrashEvidence(
         vanished=vanished, suspect_fns=frozenset(),
         blamed_fns=origin_blamed_locators((site,)))
-    union_ev = CrashEvidence(
-        vanished=vanished, suspect_fns=frozenset(),
-        blamed_fns=blamed_locators((site,)))
+    with using_driver(catalog_driver()):
+        union_ev = CrashEvidence(
+            vanished=vanished, suspect_fns=frozenset(),
+            blamed_fns=blamed_locators((site,)))
     assert crash_candidate_grade(
         origin_ev, records, vtable_comp) is BlameGrade.NONE
     assert crash_candidate_grade(

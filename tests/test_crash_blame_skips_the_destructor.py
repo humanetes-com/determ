@@ -32,8 +32,13 @@ wrapping `ErrorImpl`, blame is `into_boxed_dyn_error`.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
+from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.crash_site import (
     CONVERSION_FAMILY,
     AsanReport,
@@ -54,6 +59,14 @@ from pipeline_core.domain.crash_site import (
     site_from_frames,
 )
 from pipeline_core.domain.models import FnLocator
+
+
+@pytest.fixture(autouse=True)
+def _catalog_driver() -> Iterator[None]:
+    """This module pins the catalog destructor skip and conversion family."""
+    with using_driver(catalog_driver()):
+        yield
+
 
 #: The run's own report, first error block, byte-for-byte. Driven through the
 #: real parser and the real relativizer so this pins the LIVE path and not a

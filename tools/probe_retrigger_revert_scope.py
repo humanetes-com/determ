@@ -7,7 +7,7 @@ scope silently reads empty and the run logs "reverted 0 referencing fn(s)" as a
 success. Prints each stage so a zero can be attributed to a real empty scope
 rather than to an enumeration that returned nothing.
 
-    .venv/bin/python tools/probe_retrigger_revert_scope.py <crate_dir> [name ...]
+    .venv/bin/python tools/probe_retrigger_revert_scope.py <crate_dir> name [name ...]
 """
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ from pipeline_core.domain.oracle_immutability import production_fns  # noqa: E40
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 3:
         print(__doc__)
         return 2
     crate = Path(sys.argv[1]).resolve()
-    names = frozenset(sys.argv[2:]) or frozenset({"Error", "ErrorImpl", "vtable"})
+    names = frozenset(sys.argv[2:])
 
     ex = CliExtractor(
         Path(__file__).resolve().parent

@@ -19,11 +19,7 @@ from pipeline_core.prompts.runtime import (
     promoted_error_rules,
     repo_spec_section,
 )
-from pipeline_core.prompts.sections import (
-    gotchas_for_error,
-    gotchas_summary,
-    tag_block,
-)
+from pipeline_core.prompts.sections import tag_block
 
 
 def build_per_fn_prompt(
@@ -128,7 +124,7 @@ def build_per_fn_prompt(
                "requirements, build rules, API ground truth). When your plan "
                "conflicts with them, follow the spec.\n")
     container_line = f"In: {container}\n" if container else ""
-    recipe_part = construction_recipe_prefix(fn_name, container)
+    recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     coverage_part = instruction_opener(file_rel, (fn_name,))
@@ -139,7 +135,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {sig_text}
 
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
-{gotchas_summary()}
+{language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
@@ -232,9 +228,10 @@ def build_per_fn_fix_prompt(
                "here:\n```rust\n", suffix="\n```")
     macros_block = tag_block("MACROS", macros_section)
     # P3.2: full detail block for gotchas matching the current error.
-    gotchas_block = tag_block("RUST_GOTCHAS_DETAIL", gotchas_for_error(error_excerpt))
+    gotchas_block = tag_block(
+        "RUST_GOTCHAS_DETAIL", language_driver().gotchas_for_error(error_excerpt))
     container_line = f"In: {container}\n" if container else ""
-    recipe_part = construction_recipe_prefix(fn_name, container)
+    recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     coverage_part = instruction_opener(file_rel, (fn_name,))
@@ -329,7 +326,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {sig_text}
 
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
-{gotchas_summary()}
+{language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
@@ -353,16 +350,16 @@ Output:
   corrected body without surrounding braces
   </BODY>
 {
-("\nIf the fix REQUIRES a signature change (e.g. adding `T: 'static`, "
- "tightening lifetimes, or relaxing a generic bound), AND the function is "
- "private (not pub), include a `<SIGNATURE>` block AFTER your `<BODY>`:\n"
- "  <SIGNATURE>\n"
- "  unsafe fn " + fn_name + "<E: 'static>(e: Own<ErrorImpl>, target: TypeId) {{\n"
- "  </SIGNATURE>\n"
- "The signature line must end at the opening brace `{{`. We will splice it "
- "in place of the current signature. This option is available only after "
- "multiple failed attempts; use it only when the body cannot be made to "
- "compile under the existing signature."
+((("\nIf the fix REQUIRES a signature change (e.g. adding `T: 'static`, "
+   "tightening lifetimes, or relaxing a generic bound), AND the function is "
+   "private (not pub), include a `<SIGNATURE>` block AFTER your `<BODY>`:\n"
+   "  <SIGNATURE>\n")
+  + language_driver().sig_change_example(fn_name)
+  + ("  </SIGNATURE>\n"
+     "The signature line must end at the opening brace `{{`. We will splice it "
+     "in place of the current signature. This option is available only after "
+     "multiple failed attempts; use it only when the body cannot be made to "
+     "compile under the existing signature."))
  if allow_sig_change else "")
 }
 Rules:

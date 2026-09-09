@@ -300,7 +300,7 @@ from pipeline_core.prompts.fix_prompts import (
 )
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
-from pipeline_core.prompts.sections import gotchas_summary as _gotchas_summary
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.prompts.slice_session import (
     DEFAULT_FILE_CHARS as SESSION_FILE_CHARS,
 )
@@ -1623,7 +1623,11 @@ def prepare_impl_fill(
             coverage_must=_coverage_must(
                 b.file,
                 *(m.fn_name for m in (*b.stub_members, *b.refill_members)),
-                *(x.fn_name for x in _bypass_for(b.container))))
+                *(x.fn_name for x in _bypass_for(b.container))),
+            sigs=tuple(
+                (m.fn_name, m.sig_text or "")
+                for m in (*b.stub_members, *b.refill_members)
+                if m.sig_text))
             for b in fblocks]
         _covered = {" ".join(b.container.split("{", 1)[0].split())
                     for b in fblocks} | {""}
@@ -1740,7 +1744,7 @@ def prepare_impl_fill(
                 crash_evidence=_file_crash,
                 retrospective_guidance=_file_retro,
                 module_name=module_name, cluster_name=cluster_name,
-                gotchas=_gotchas_summary(), types_section=_file_types,
+                gotchas=language_driver().gotchas_summary(), types_section=_file_types,
                 invariants_section=invariants_section,
                 prior_regression=_prior_regression_for(
                     (_retro_key(file_rel, m.fn_name, b.container)

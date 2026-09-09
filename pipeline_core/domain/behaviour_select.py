@@ -387,14 +387,15 @@ def _is_formatting(container: str, sig: str) -> bool:
     return language_driver().is_formatting(container, sig)
 
 
-def constructs_identity_subject(name: str, container: str, sig: str) -> bool:
-    """True iff this unit constructs the type identity tests are about.
+def catalog_constructs_identity_subject(
+        name: str, container: str, sig: str) -> bool:
+    """Catalog-driver identity constructor: return type or Self is Error.
 
-    Not a downcast reader and not a formatting impl. `-> Error` covers
-    `ext_context` and free `render`; `-> Self` on inherent/`From` Error
-    covers `construct*` / `context` / `From<E> for Error`. `From<Error>
-    for Box<dyn …>` has self-type Box and is refused."""
-    if "downcast" in name or _is_formatting(container, sig):
+    Production aiming goes through :func:`language_driver`. This function
+    is the catalog table; the generic driver harvests the subject type
+    from the suite's ``when`` and does not call it.
+    """
+    if "downcast" in name or catalog_is_formatting(container, sig):
         return False
     ret = _return_type(sig)
     if ret == _IDENTITY_SUBJECT:
@@ -403,23 +404,69 @@ def constructs_identity_subject(name: str, container: str, sig: str) -> bool:
     return ret == "Self" and self_ty == _IDENTITY_SUBJECT
 
 
-def identity_must_admits(name: str, container: str, sig: str) -> bool:
-    """True iff this unit at stub time decides or reads a TypeId.
+def constructs_identity_subject(name: str, container: str, sig: str) -> bool:
+    """Catalog table. Production aiming uses language_driver()."""
+    return catalog_constructs_identity_subject(name, container, sig)
 
-    Formatting is refused. A `downcast` name is the vtable/method half that
-    consumes TypeId. A `TypeId` parameter with an Option return is a
-    downcast slot; the same parameter on a unit return is the drop-rest
-    sibling and is refused. Constructors of the identity-subject type
-    (see :func:`constructs_identity_subject`) are admitted.
+
+def catalog_identity_must_admits(name: str, container: str, sig: str) -> bool:
+    """Catalog-driver identity-MUST admission, including a downcast name.
+
+    Production aiming goes through :func:`language_driver`. The generic
+    driver drops the name token and keys on TypeId-plus-Option plus the
+    harvested subject type.
     """
-    if _is_formatting(container, sig):
+    if catalog_is_formatting(container, sig):
         return False
     if "downcast" in name:
         return True
     ret = _return_type(sig)
     if "TypeId" in sig and ret.startswith("Option"):
         return True
-    return constructs_identity_subject(name, container, sig)
+    return catalog_constructs_identity_subject(name, container, sig)
+
+
+def identity_must_admits(name: str, container: str, sig: str) -> bool:
+    """Catalog table. Production aiming uses language_driver()."""
+    return catalog_identity_must_admits(name, container, sig)
+
+
+def identity_subject_from_when(when: str) -> str:
+    """Last path segment of a ``Type::`` call in ``when``, else ``""``.
+
+    The type identity Thens already name (``Error::msg``, ``Counter::new``).
+    Harvested, not hardcoded: a different subject type is a different
+    last segment.
+    """
+    last = ""
+    i = 0
+    n = len(when)
+    while i < n:
+        ch = when[i]
+        if "A" <= ch <= "Z":
+            j = i + 1
+            while j < n and (when[j].isalnum() or when[j] == "_"):
+                j += 1
+            if j + 1 < n and when[j] == ":" and when[j + 1] == ":":
+                last = when[i:j]
+            i = j
+        else:
+            i += 1
+    return last
+
+
+def identity_subject_from_specs(specs: Sequence[BehaviourSpec]) -> str:
+    """The identity type the suite's ``when`` texts name, most common."""
+    counts: Counter[str] = Counter()
+    for spec in _identity_suite(specs):
+        for text in (spec.when, spec.given):
+            name = identity_subject_from_when(text)
+            if name:
+                counts[name] += 1
+                break
+    if not counts:
+        return ""
+    return counts.most_common(1)[0][0]
 
 
 def _coerce_unit(item: IdentityMustInput) -> IdentityMustUnit:
@@ -490,11 +537,15 @@ def select_identity_must(
     unit_list = [_coerce_unit(u) for u in units]
     constructor_miss = False
     if unit_list:
+        subject = identity_subject_from_specs(specs)
+        drv = language_driver()
         admitted = [u for u in unit_list
-                    if identity_must_admits(u.name, u.container, u.sig)]
+                    if drv.identity_must_admits(
+                        u.name, u.container, u.sig, subject)]
         names = {u.name for u in admitted if u.name}
         constructor_miss = any(
-            constructs_identity_subject(u.name, u.container, u.sig)
+            drv.constructs_identity_subject(
+                u.name, u.container, u.sig, subject)
             for u in admitted)
     else:
         names = {n for n in fn_names if n}

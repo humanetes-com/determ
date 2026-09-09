@@ -31,15 +31,14 @@ from ...prompts.retrospective import (
 
 
 def _is_vtable_dispatch_fn(sig_text: str, container: str) -> bool:
-    """True when the fn requires ErrorVTable layout access that the skeleton
-    does not expose: `unsafe fn` with `Own<ErrorImpl>` or `Ref<ErrorImpl>`
-    param and no `where E:` bound (which would open a normal dispatch path)."""
-    if "unsafe fn" not in sig_text:
-        return False
-    combined = sig_text + " " + container
-    if "Own<ErrorImpl" not in combined and "Ref<ErrorImpl" not in combined:
-        return False
-    return "where E:" not in sig_text
+    """Bound-driver vtable-dispatch test.
+
+    Catalog keys on Own<ErrorImpl>/Ref<ErrorImpl>. Generic keys on an
+    unsafe fn whose parameter is a wrapper of a named type with no
+    where-bound that opens a typed path.
+    """
+    from pipeline_core.domain.language_driver import language_driver
+    return language_driver().is_vtable_dispatch(sig_text, container)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,13 +81,10 @@ def diagnose_phase_c(
     # ErrorVTable struct layout. Skip the LLM call and mark GENUINELY_HARD
     # immediately at ≥2 attempts — saves ~32 wasted model calls per anyhow run.
     if fix_attempts >= 2 and _is_vtable_dispatch_fn(sig_text, container):
+        from pipeline_core.domain.language_driver import language_driver
         return {
             "category": "GENUINELY_HARD",
-            "guidance": (
-                "fn requires ErrorVTable layout access via Own<ErrorImpl> or "
-                "Ref<ErrorImpl> without a where-bound. The vtable struct is not "
-                "exposed by the skeleton — do not retry."
-            ),
+            "guidance": language_driver().vtable_fast_exit_guidance(),
             "signal": "vtable_fast_exit",
         }
 

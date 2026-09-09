@@ -18,7 +18,6 @@ from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import (
     format_impl_block_for_prompt,
-    gotchas_summary,
     tag_block,
 )
 
@@ -296,8 +295,10 @@ def build_per_impl_prompt(
     if partner_names:
         stub_names = (f"{stub_names} ({file_rel}); "
                       f"{partner_names} ({partner_file})")
+    _recipe_members = (*stub_members, *refill_members)
     recipe_text = construction_recipes_for(
-        (m.fn_name for m in (*stub_members, *refill_members)), container)
+        (m.fn_name for m in _recipe_members), container,
+        sigs={m.fn_name: (m.sig_text or "") for m in _recipe_members})
     recipe_part = (f"{recipe_text}\n\n" if recipe_text else "")
     identity_part = (
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
@@ -314,7 +315,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel}
 Stubs to fill in this response: {stub_names}
 
 {pair_part}{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
-{gotchas_summary()}
+{language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
 <TARGET_IMPL_BLOCK file="{file_rel}">

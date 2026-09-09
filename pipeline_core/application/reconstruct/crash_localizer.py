@@ -33,8 +33,6 @@ from pipeline_core.domain.crash_site import (
     CrashSite,
     SourceWindow,
     asan_stack_excerpt,
-    conversion_family_from_access,
-    conversion_family_from_origin,
     enclosing_fn_window,
     first_test_file_after_destructor,
     first_test_file_on_access,
@@ -43,6 +41,7 @@ from pipeline_core.domain.crash_site import (
     relativize_frame_files,
     site_from_frames,
 )
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.test_results import parse_binary_results
 
@@ -136,8 +135,11 @@ def _site_for_report(
     label = report.label
     source_line, source_loc = _caller_source_line(origin, workspace_root)
     source_window: SourceWindow | None = None
-    if source_line is None and (conversion_family_from_access(access)
-                                or conversion_family_from_origin(origin)):
+    drv = language_driver()
+    access_symbols = "\n".join(str(r.get("func") or "") for r in access)
+    if source_line is None and (
+            drv.access_licenses_conversion(access_symbols)
+            or drv.origin_licenses_conversion(origin)):
         # Origin recovery has nothing to read; the family is licensed, so
         # the access side may name the conversion. The licence is the same
         # gate that keeps an Arc double-drop off this path.

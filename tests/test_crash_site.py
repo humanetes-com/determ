@@ -3,8 +3,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
+from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.crash_site import (
     asan_stack_excerpt,
     bare_fn_name,
@@ -24,6 +29,13 @@ from pipeline_core.domain.crash_site import (
     vanished_subject_fns,
 )
 from pipeline_core.domain.models import FnLocator
+
+
+@pytest.fixture(autouse=True)
+def _catalog_driver() -> Iterator[None]:
+    """This module pins the catalog conversion/drop tables (the A/B)."""
+    with using_driver(catalog_driver()):
+        yield
 
 
 def test_bare_fn_name_strips_generics_and_paths() -> None:

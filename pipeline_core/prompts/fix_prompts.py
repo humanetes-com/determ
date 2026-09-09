@@ -18,10 +18,10 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 
 from pipeline_core.domain.construction_recipe import (
-    construction_recipe,
     construction_recipe_prefix,
     construction_recipes_for,
 )
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import (
     family_members_beside_a_crashed_conversion,
@@ -64,7 +64,7 @@ def build_fn_fix_prompt(
     default) leaves the prompt byte-identical for every unit the recipe
     does not name.
     """
-    recipe_part = construction_recipe_prefix(fn_name, container)
+    recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     return f"""ONE Rust function does not compile. Return ONLY its corrected body.
 {thinking_directive}File: {file_rel} | Fn: {fn_name}
 {sig_rule}{sig_text}
@@ -222,6 +222,10 @@ class BlockFillPlan:
     # speak. Instruction slot, not an evidence section: a fill can carry
     # the profile and still wrap. Bound by the TDD driver for one sweep.
     coverage_must: str = ""
+    # Signature text per name, so the generic construction recipe can key
+    # on shape. Empty under the catalog driver (it keys on name). Frozen
+    # as pairs because this dataclass is frozen.
+    sigs: tuple[tuple[str, str], ...] = ()
 
 
 def restrict_fill_plan(
@@ -249,6 +253,7 @@ def restrict_fill_plan(
             aimed=tuple(n for n in p.aimed if n in want),
             installable=tuple(n for n in p.installable if n in want),
             bypass=tuple(b for b in p.bypass if b.fn_name in want),
+            sigs=tuple((n, s) for n, s in p.sigs if n in want),
         )
         if q.stubs or q.refills:
             out.append(q)
@@ -267,7 +272,9 @@ def _recipe_for_plan(p: BlockFillPlan) -> dict[str, str]:
     for name in (*p.stubs, *p.refills):
         if name in out:
             continue
-        text = construction_recipe(name, p.header)
+        from pipeline_core.domain.language_driver import language_driver
+        text = language_driver().construction_recipe(
+            name, p.header, dict(p.sigs).get(name, ""))
         if text:
             out[name] = text
     return out
@@ -585,10 +592,7 @@ Functions to write (by impl block):
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
 in `block` and NOWHERE else:
-WRONG: <FN name="Error: root_cause" block="impl Error">
-WRONG: <FN name="ErrorImpl::provide" block="impl ErrorImpl">
-RIGHT: <FN name="root_cause" block="impl Error">
-RIGHT: <FN name="provide" block="impl ErrorImpl">
+{language_driver().file_fill_tag_examples()}
 {FN_LITERAL_RULE}
 <FN name="FUNCTION_NAME" block="IMPL_HEADER">
 ...body...
@@ -675,7 +679,7 @@ def build_behavior_fix_prompt(
 
     ``container`` feeds the stub-time construction recipe (same default).
     """
-    recipe_part = construction_recipe_prefix(fn_name, container)
+    recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     must_part = (f"{identity_must}\n\n" if identity_must.strip() else "")
     must_part += instruction_opener(file_rel, (fn_name,))
     return (
@@ -712,7 +716,7 @@ def build_tdd_stub_fill_prompt(
     default) leaves the prompt byte-identical for every unit the recipe
     does not name.
     """
-    recipe_part = construction_recipe_prefix(fn_name, container)
+    recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     return (
         f"ONE Rust function has an unimplemented body — fill it.\n"
         f"{thinking_directive}"

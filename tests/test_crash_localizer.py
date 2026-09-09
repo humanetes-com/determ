@@ -5,13 +5,25 @@ dependent and reproduce intermittently), and the "nothing localized" contract
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
 
 from pipeline_core.application.reconstruct.crash_localizer import (
     CrashLocalizerDeps,
     localize_crashes,
 )
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.prompts.language_catalog import catalog_driver
+
+
+@pytest.fixture(autouse=True)
+def _catalog_driver() -> Iterator[None]:
+    """This module pins catalog conversion recovery from ASAN reports."""
+    with using_driver(catalog_driver()):
+        yield
 
 _SWEEP_WITH_CRASH = """\
     Running tests/test_a.rs (target/debug/deps/test_a-111)

@@ -35,6 +35,8 @@ from pipeline_core.domain.behaviour_probe import (
     value_bearing_reason,
 )
 from pipeline_core.domain.behaviour_select import behaviour_class_name
+from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 def _probe(**kw: str) -> CapturedProbe:
@@ -196,7 +198,8 @@ def test_debug_probes_cover_exact_format_for_the_probe_ask() -> None:
     from pipeline_core.domain.behaviour_probe import probe_coverage_class
 
     dbgs = [captured_spec(cfg_cluster="s", probe=_probe(observe="debug"), n=i, stdout="v") for i in range(5)]
-    names = [c for c, _ in class_targets(dbgs, probe_coverage_class, max_targets=3)]
+    with using_driver(catalog_driver()):
+        names = [c for c, _ in class_targets(dbgs, probe_coverage_class, max_targets=3)]
     assert "EXACT_FORMAT" not in names
 
 
@@ -224,11 +227,15 @@ def test_the_recorded_stable_suite_asks_exact_format_under_probe_coverage() -> N
 
 
 def test_class_prompts_off_restores_display_or_debug() -> None:
-    """BEHAVIOUR_PIN_ENV_DEBUG=0 is the pre-2026-09-02 ask. On is Debug-only."""
-    from pipeline_core.domain.behaviour_probe import class_prompts
+    """BEHAVIOUR_PIN_ENV_DEBUG=0 is the pre-2026-09-02 ask. On is Debug-only.
 
-    on = class_prompts(pin_env_debug=True)
-    off = class_prompts(pin_env_debug=False)
+    Catalog-driver pin. Generic class prompts ignore the switch and do
+    not name a render.
+    """
+    from pipeline_core.domain.behaviour_probe import catalog_class_prompts
+
+    on = catalog_class_prompts(pin_env_debug=True)
+    off = catalog_class_prompts(pin_env_debug=False)
     assert "never Display" in on["EXACT_FORMAT"]
     assert "Display, Debug, or the alternate" in off["EXACT_FORMAT"]
     assert "never Display" not in off["EXACT_FORMAT"]
@@ -386,6 +393,7 @@ def test_a_display_observe_is_rejected_for_an_exact_format_ask() -> None:
     display = CapturedProbe(name="x", given='let e = anyhow!("x");', when="e", observe="display")
     debug = CapturedProbe(name="x", given='let e = anyhow!("x");', when="e", observe="debug")
     ident = CapturedProbe(name="x", given="let e = Error::new(E);", when="e.is::<E>()", observe="display")
-    assert exact_format_ask_rejects(display) is not None
-    assert exact_format_ask_rejects(debug) is None
-    assert fills_non_format_class(ident) and exact_format_ask_rejects(ident) is None
+    with using_driver(catalog_driver()):
+        assert exact_format_ask_rejects(display) is not None
+        assert exact_format_ask_rejects(debug) is None
+        assert fills_non_format_class(ident) and exact_format_ask_rejects(ident) is None
