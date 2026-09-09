@@ -16,7 +16,8 @@ Two drivers, selected by ``LANGUAGE_DRIVER`` at composition
   (a ``fmt::Result`` return, a harvested pin, a computed derive list
   injected elsewhere, an unsized ``Box<dyn`` argument, a by-value
   ``self`` that copies a pointer field, a Then that moved under an
-  env flip). It does not import or call the catalog tables.
+  env flip, rustc saying a name or field is missing). It does not
+  import or call the catalog tables.
 - :class:`CatalogLanguageDriver` is those tables, kept so an A/B can
   turn them back on. The factory
   ``pipeline_core.prompts.language_catalog.catalog_driver`` injects the
@@ -197,6 +198,34 @@ _OWNERSHIP_AFTER_COPY = (
     "the original owner must not drop."
 )
 
+# Rustc's own wording that a name or field is not there. That is the
+# pipeline gate (use TYPES_IN_SCOPE; do not add items), not a language
+# tutorial and not a recipe that names a type this crate declares.
+_UNKNOWN_NAME_MARKS = (
+    "cannot find value",
+    "cannot find function",
+    "no field",
+    "has no field named",
+    "does not have a field",
+    "no method",
+    "no function or associated item",
+    "no associated item named",
+)
+
+_IN_SCOPE_ONLY_GATE = (
+    "You are filling a function body. You may not add a new top-level item "
+    "(no new static, const, free function, or use). Use only names and fields "
+    "listed in TYPES_IN_SCOPE, the impl, and its siblings. Build any needed "
+    "value inline from those items. Do not invent a field, method, or "
+    "associated function the type definition does not show."
+)
+
+
+def _unknown_name_diagnostic(excerpt: str) -> bool:
+    low = excerpt.lower()
+    return any(m in low for m in _UNKNOWN_NAME_MARKS)
+
+
 _GENERIC_CLASS_ASKS: dict[str, str] = {
     "IDENTITY": (
         "the concrete type a downcast finds on a value this crate constructed "
@@ -276,12 +305,20 @@ class GenericLanguageDriver:
         return bool(getattr(spec, "required_env", ()))
 
     def gotchas_summary(self) -> str:
-        # Language DETAIL is the fill model's job. The rustc excerpt
-        # already sits in COMPILE_ERRORS.
+        # The always-on cheatsheet is the catalog of language tutorials.
+        # The rustc excerpt already sits in COMPILE_ERRORS; TYPES_IN_SCOPE
+        # is the standing evidence. A missing-name note pays the gate in
+        # gotchas_for_error, not a dump of every recipe.
         return ""
 
     def gotchas_for_error(self, error_excerpt: str) -> str:
-        del error_excerpt
+        # Language DETAIL is omitted. When rustc says a name or field is
+        # missing, the pipeline gate is: do not add items; use
+        # TYPES_IN_SCOPE. Crate recipes stay on the catalog driver.
+        if not (error_excerpt or "").strip():
+            return ""
+        if _unknown_name_diagnostic(error_excerpt):
+            return _IN_SCOPE_ONLY_GATE
         return ""
 
     def construction_recipe(self, name: str, container: str, sig: str = "") -> str:

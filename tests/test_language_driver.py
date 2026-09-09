@@ -113,7 +113,7 @@ def test_generic_driver_source_does_not_name_the_catalog() -> None:
         "PartialEq", "ErrorImpl", "construct_from_boxed", "CONVERSION_FAMILY",
         "WRAP_BOX", "CHAIN_TABLE", "ErrorVTable", "ManuallyDrop",
         "BoxedError", "CLASS_PROMPTS", "into_boxed_dyn_error",
-        "RUST_GOTCHAS",
+        "RUST_GOTCHAS", "ADHOC_VTABLE", "ContextValue", "object_downcast",
     ):
         assert banned not in src, banned
 
@@ -320,7 +320,7 @@ def test_using_driver_restores_the_previous_driver() -> None:
     assert language_driver().name == "generic"
 
 
-# --- items 6–15: generic pays from shape; catalog keeps today's table ---
+# --- generic pays from shape; catalog keeps today's table ---
 
 
 def test_generic_class_prompts_do_not_name_a_render_or_a_std_trait() -> None:
@@ -378,6 +378,11 @@ def test_generic_never_calls_gotchas_tables(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(sections, "gotchas_for_error", boom_detail)
     assert language_driver().gotchas_summary() == ""
     assert language_driver().gotchas_for_error("error[E0133]") == ""
+    # A missing-field note pays the in-scope gate without calling the table.
+    gate = language_driver().gotchas_for_error(
+        "error[E0609]: no field `inner` on type `Cell`")
+    assert "You may not add a new top-level item" in gate
+    assert "TYPES_IN_SCOPE" in gate
     prompt = build_per_fn_prompt(
         file_text="fn go() { unimplemented!() }",
         fn_name="go", sig_text="fn go(&self)",
@@ -509,7 +514,7 @@ def test_generic_prompt_examples_do_not_name_this_crate() -> None:
     assert "slot" in ex
 
 
-def test_catalog_driver_keeps_items_6_to_15_tables() -> None:
+def test_catalog_driver_keeps_the_pre_generic_tables() -> None:
     """Negative control: catalog still produces today's table."""
     from pipeline_core.domain.construction_recipe import WRAP_BOX_RECIPE
     from pipeline_core.domain.crash_site import (
@@ -540,3 +545,121 @@ def test_catalog_driver_keeps_items_6_to_15_tables() -> None:
         assert "ErrorVTable" in drv.vtable_fast_exit_guidance()
         assert drv.is_vtable_dispatch(
             "unsafe fn error(this: Ref<ErrorImpl>) -> u8", "impl ErrorImpl")
+
+
+_CRATE_GOTCHA_RECIPES = (
+    "Own<T>", "Ref<T>", "wrapper.as_ptr()", "ErrorImpl<E>",
+    "vtable.object_downcast", "anyhow's", "ErrorVTable",
+    "impl AsRef<dyn StdError + Send + Sync> for Error",
+    "fn(&Error)", "Mut<'a, T>", "Mut::read", "anyhow APIs",
+    "Error::msg", "ADHOC_VTABLE", "ContextValue { context",
+    "object_",
+)
+
+
+def test_generic_gotchas_for_error_is_the_in_scope_gate_not_a_crate_recipe() -> None:
+    """Plan: rustc saying a name or field is missing pays the pipeline
+    gate (TYPES_IN_SCOPE, no new items). A duplicate-impl, signature
+    mismatch, unsized-return, or missing-format note pays nothing — the
+    excerpt is already in COMPILE_ERRORS and the fill model is the
+    language expert. No recipe names a wrapper this crate declares."""
+    drv = language_driver()
+    cases = (
+        ("error[E0609]: no field `inner` on type `Cell`", True),
+        ("error[E0560]: struct `Cell` has no field named `inner`", True),
+        ("error[E0609]: type `Cell` does not have a field named `inner`", True),
+        ("error[E0599]: no method named `foo` found for struct `Hold<Node>`",
+         True),
+        ("error[E0425]: cannot find value `SHARED` in this scope", True),
+        ("error[E0599]: no function or associated item named `new` found "
+         "for struct `Pair<A, B>`", True),
+        ("error[E0201]: duplicate definitions with name `as_ref`", False),
+        ("error[E0053]: method `as_ref` has an incompatible type for trait",
+         False),
+        ("error[E0277]: the size for values of type `T` cannot be known at "
+         "compile time\ndoesn't have a size known at compile-time", False),
+        ("error[E0433]: failed to resolve: could not find `format` in `core`",
+         False),
+        ("error[E0133]: call to unsafe function", False),
+    )
+    for excerpt, gated in cases:
+        out = drv.gotchas_for_error(excerpt)
+        for mark in _CRATE_GOTCHA_RECIPES:
+            assert mark not in out, (excerpt, mark)
+        if gated:
+            assert "You may not add a new top-level item" in out, excerpt
+            assert "TYPES_IN_SCOPE" in out, excerpt
+        else:
+            assert out == "", excerpt
+    assert drv.gotchas_summary() == ""
+
+
+def test_catalog_gotchas_still_name_this_crate() -> None:
+    """Negative control: catalog DETAIL still carries today's crate recipes."""
+    with using_driver(catalog_driver()):
+        drv = language_driver()
+        summary = drv.gotchas_summary()
+        assert "Own<T>" in summary
+        assert "wrapper.as_ptr()" in summary
+        assert "Error::msg" in summary
+        field = drv.gotchas_for_error(
+            "error[E0609]: no field `inner` on type `Cell`")
+        assert "ErrorImpl<E>" in field
+        assert "object_" in field
+        method = drv.gotchas_for_error(
+            "error[E0599]: no method named `foo` found for struct `Hold<Node>`")
+        assert "vtable.object_downcast" in method
+        assert "anyhow's" in method
+        assert "Own<T>" in method
+        value = drv.gotchas_for_error(
+            "error[E0425]: cannot find value `SHARED` in this scope")
+        assert "ADHOC_VTABLE" in value
+        assoc = drv.gotchas_for_error(
+            "error[E0599]: no function or associated item named `new` found "
+            "for struct `Pair<A, B>`")
+        assert "ContextValue { context" in assoc
+        dup = drv.gotchas_for_error(
+            "error[E0201]: duplicate definitions with name `as_ref`")
+        assert "impl AsRef<dyn StdError + Send + Sync> for Error" in dup
+        sig = drv.gotchas_for_error(
+            "error[E0053]: method `as_ref` has an incompatible type for trait")
+        assert "fn(&Error)" in sig
+        unsized = drv.gotchas_for_error(
+            "error[E0277]: the size for values of type `T` cannot be known "
+            "at compile time\ndoesn't have a size known at compile-time")
+        assert "Mut<'a, T>" in unsized
+        fmt = drv.gotchas_for_error(
+            "error[E0433]: failed to resolve: could not find `format` in `core`")
+        assert "anyhow APIs" in fmt
+        assert "Error::msg" in fmt
+
+
+def test_generic_fix_prompt_on_missing_field_carries_the_gate_not_a_crate_field() -> None:
+    """The live builder: a Cell missing-field note gets the in-scope gate
+    and the Cell type record. Catalog on the same note still teaches
+    this crate's private-field class."""
+    from pipeline_core.prompts.context import PerFnFixSections
+
+    sections = PerFnFixSections(
+        macros="", notes="", container="impl Cell",
+        types="struct Cell { head: u8 }",
+        invariants="", siblings="", crate_idioms="", bound_methods="")
+    kwargs = dict(
+        file_text="fn first() { unimplemented!() }",
+        fn_name="first",
+        sig_text="fn first(&self) -> u8",
+        test_blocks=[],
+        module_name="demo", cluster_name="stable",
+        file_rel="src/cell.rs", prev_body="self.inner",
+        error_excerpt="error[E0609]: no field `inner` on type `Cell`",
+        sections=sections, fr_path=None)
+    p = build_per_fn_fix_prompt(**kwargs)
+    assert "struct Cell { head: u8 }" in p
+    assert "You may not add a new top-level item" in p
+    assert "object_" not in p
+    assert "ErrorImpl" not in p
+    assert "ADHOC_VTABLE" not in p
+    with using_driver(catalog_driver()):
+        cat = build_per_fn_fix_prompt(**kwargs)
+    assert "object_" in cat
+    assert "ErrorImpl<E>" in cat
