@@ -26,11 +26,13 @@ identically.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
 from typing import NamedTuple
 
-from pipeline_core.domain.attribution import FormatterPair, container_key
+from pipeline_core.domain.attribution import (
+    FormatterPair, container_key, key_as_site,
+)
 from pipeline_core.domain.body_ledger import body_sha
 from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock
 
@@ -119,6 +121,59 @@ def pairs_to_dispatch(
             continue
         seen.add(p)
         out.append(p)
+    return out
+
+
+def _as_loc(key: FnLocator | tuple[str, str]) -> FnLocator:
+    if isinstance(key, FnLocator):
+        return key
+    return FnLocator(key[0], key[1])
+
+
+def dispatch_including_pairs(
+    eligible: Mapping[FnLocator, set[str]] | Mapping[tuple[str, str], set[str]],
+    frontier_keys: Collection[FnLocator] | Collection[tuple[str, str]],
+    pairs: Iterable[FormatterPair],
+    convicting: Mapping[FnLocator, set[str]]
+    | Mapping[FnSite, set[str]]
+    | Mapping[tuple[str, ...], set[str]]
+    | None = None,
+) -> dict[FnLocator, set[str]]:
+    """The fill's dispatch map: the 12-cap batch, plus every hop-pair
+    member this fill will actually write.
+
+    ``FailureFrontier.build`` drops conviction for a locator absent from
+    dispatch, which is the right invariant for a unit the fill will not
+    touch. ``pairs_to_dispatch`` no longer requires a batch member, so a
+    standing-flat dispatcher plus an unentered implementer still opens
+    as a pair — and that write then ran with an empty convicting set
+    (run ``200802-b835274e``, 2026-09-10: pair prompt had no
+    REFILL_EVIDENCE, joint-reverted on a hang). Adding the pair's
+    members, with the tests the hop already attributed to either
+    endpoint, is the conviction half of that dispatch. Same-file pairs
+    are ignored (file-first already writes both). A pair that names no
+    test on either endpoint is not added — empty dispatch would reopen
+    the accept-on-no-tests hole.
+    """
+    elig_by_loc = {_as_loc(key): set(tests) for key, tests in eligible.items()}
+    keys = {_as_loc(k) for k in frontier_keys}
+    out: dict[FnLocator, set[str]] = {
+        loc: set(tests) for loc, tests in elig_by_loc.items() if loc in keys
+    }
+    conv = convicting or {}
+    for p in pairs_to_dispatch(pairs):
+        members = p.member_locators()
+        tests: set[str] = set()
+        for loc in members:
+            tests |= elig_by_loc.get(loc, set())
+        for ckey, ctests in conv.items():
+            site = key_as_site(ckey)
+            if FnLocator(site.file, site.fn_name) in members:
+                tests |= set(ctests)
+        if not tests:
+            continue
+        for loc in members:
+            out.setdefault(loc, set()).update(tests)
     return out
 
 

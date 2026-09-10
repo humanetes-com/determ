@@ -140,6 +140,25 @@ def _row(run: RouteRun, outcome: RunOutcome, delta: int = 0,
         target_tests=tuple(sorted(run.target_tests)))
 
 
+def test_a_reverted_pair_retries_instead_of_deferring_under_a_budget() -> None:
+    """A pair revert stores a diagnosis the next prompt carries. Ranking it
+    as a zero-weight rebuy defers that retry, so the next fill opens the
+    overlapping session instead. Control: a reverted FILE run on the same
+    ledger still defers."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    rows = [_row(pair, RunOutcome.REVERTED, 0),
+            _row(file_run, RunOutcome.REVERTED, 0)]
+    sched = schedule([pair, file_run], rows, oracle_fp="o", hollow={},
+                     budget_minutes=60)
+    assert [s.run.label for s in sched.ordered] == [
+        "pair src/x.rs::fmt + src/y.rs::new"]
+    assert sched.ordered[0].reason == "never_served"
+    assert [s.run.label for s in sched.deferred] == ["file src/x.rs"]
+    control = schedule([pair], [], oracle_fp="o", hollow={}, budget_minutes=60)
+    assert control.ordered[0].reason == "never_served"
+
+
 def test_a_flat_rebuy_sinks_below_a_never_served_run_and_is_deferred_under_a_budget() -> None:
     """Plan sentence: never-served before re-buys; a zero-weight re-buy is
     deferred. Control: with no ledger the same run keeps its rank."""

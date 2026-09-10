@@ -456,6 +456,15 @@ def _rank_of(run: RouteRun, oracle_fp: str,
     if last.outcome in (RunOutcome.STOPPED, RunOutcome.UNMEASURED):
         # Interrupted, or every reply reasoning-capped: not evidence.
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
+    if last.outcome is RunOutcome.REVERTED and run.kind is RouteKind.PAIR:
+        # The pair's revert stores a diagnosis the next prompt is
+        # supposed to carry. Ranking it as a zero-weight rebuy defers
+        # that retry under a positive budget, so the next fill opens
+        # the overlapping session instead and splits the transaction
+        # (run 200802-b835274e, 2026-09-10: fill 1 pair reverted, fills
+        # 2 and 3 never opened it). A pair FLAT is still a rebuy — the
+        # bodies landed and the leftovers stayed red.
+        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
     rank = (_RANK_REBUY_REVERTED if last.outcome is RunOutcome.REVERTED
             else _RANK_REBUY_FLAT)
     if deferrals >= readmit_after:

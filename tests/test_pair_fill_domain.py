@@ -8,10 +8,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pipeline_core.domain.attribution import FormatterPair, pair_for_unit
+from pipeline_core.domain.attribution import (
+    FailureFrontier, FormatterPair, pair_for_unit,
+)
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from pipeline_core.domain.pair_fill import (
     blocks_after_pair_fill,
+    dispatch_including_pairs,
     pair_dispatches,
     pairs_to_dispatch,
 )
@@ -77,6 +80,44 @@ def test_pairs_to_dispatch_admits_a_hop_pair_the_batch_cut_dropped() -> None:
     unrelated = {FnLocator("src/z.rs", "other")}
     assert [p for p in pairs_to_dispatch({other})
             if p.member_locators() & unrelated] == []
+
+
+def test_dispatch_including_pairs_keeps_conviction_when_the_batch_dropped_both() -> None:
+    """Plan: a hop pair the 12-cap batch dropped still convicts on the
+    tests either endpoint already owns. Control: the batch-only dict
+    FailureFrontier.build used to take drops the implementer, so
+    convicting_for it is empty and the pair prompt has no REFILL_EVIDENCE
+    (200802-b835274e). The pair is a Display dispatcher in lib.rs
+    delegating to render.rs — not this crate's leftover names."""
+    disp = FnLocator("src/lib.rs", "fmt")
+    impl = FnLocator("src/render.rs", "render")
+    other = FnLocator("src/z.rs", "other")
+    tests = {"t_format"}
+    eligible = {disp: set(tests), impl: set(tests), other: {"t_unrelated"}}
+    batch = {other}
+    pair = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/render.rs", "render", "impl Renderer"))
+    conv = {pair.implementer: set(tests)}
+    # Negative control: batch-only dispatch drops both pair members.
+    old = {k: t for k, t in eligible.items() if k in batch}
+    old_fr = FailureFrontier.build(old, conv)
+    assert old_fr.convicting_for(impl) == set()
+    assert impl not in old_fr.dispatch
+    # The helper puts both members in dispatch with the hop's tests.
+    new = dispatch_including_pairs(eligible, batch, {pair}, conv)
+    assert other in new and new[other] == {"t_unrelated"}
+    assert new[disp] == tests and new[impl] == tests
+    new_fr = FailureFrontier.build(new, conv)
+    assert new_fr.convicting_for(impl) == tests
+    assert new_fr.tests_for(disp) == tests
+    assert new_fr.tests_for(impl) == tests
+    # A pair that names no test on either endpoint is not added.
+    empty_pair = FormatterPair(
+        FnSite("src/a.rs", "fmt", "impl Display for A"),
+        FnSite("src/b.rs", "show", "impl Show"))
+    only_batch = dispatch_including_pairs(eligible, batch, {empty_pair}, {})
+    assert only_batch == old
 
 
 def test_pair_dispatches_resolves_both_endpoint_blocks() -> None:

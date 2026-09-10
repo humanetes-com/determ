@@ -47,6 +47,7 @@ from pipeline_core.domain.attribution import (
     site_payload,
     union_unattributed_stubs,
 )
+from pipeline_core.domain.pair_fill import dispatch_including_pairs
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.body_ledger import (
     BodyState,
@@ -5312,15 +5313,19 @@ def run_phase_c_tdd(
                     leaf_name_counts=leaf_counts,
                     fr_path=fr_path,
                     tdd_frontier_keys=frontier_keys,
-                    # Both projections are built from the BATCH, not from `eligible`.
-                    # `FailureFrontier` exists so dispatch and conviction can never
-                    # drift apart; handing it the full frontier while the keys are
-                    # capped would reintroduce that drift at the one seam the type
-                    # was written to close — and a unit convicted by tests it was
-                    # never dispatched against is the fatal direction its own
-                    # docstring names.
+                    # The 12-cap batch is still the dispatch map for every
+                    # ordinary unit: a key convicted by tests it was never
+                    # dispatched against is the fatal direction
+                    # FailureFrontier's docstring names. Pair members are
+                    # the exception `pairs_to_dispatch` already made — they
+                    # write even when the batch cut dropped them — so they
+                    # join this map with the tests the hop attributed to
+                    # either endpoint. Without that, the pair opens and
+                    # convicting_for both members is empty.
                     tdd_frontier_tests=FailureFrontier.build(
-                        {k: t for k, t in eligible.items() if k in frontier_keys},
+                        dispatch_including_pairs(
+                            eligible, frontier_keys, _attr.pairs,
+                            convicting),
                         convicting,
                         # The sweep's own words per failing test (panic site +
                         # assertion), so a re-fill prompt can show WHY the test
