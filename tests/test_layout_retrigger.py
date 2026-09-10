@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.layout_retrigger import (
     PAYOFF_HIGH_KEY,
     PAYOFF_ZERO_KEY,
@@ -33,6 +32,7 @@ from pipeline_core.domain.layout_retrigger import (
 )
 from pipeline_core.domain.models import FnLocator, FnRecord
 from pipeline_core.domain.starvation import StarvationCause
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 _PRIV = frozenset({"ErrorImpl", "ErrorVTable"})
 

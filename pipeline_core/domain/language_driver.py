@@ -415,20 +415,16 @@ class GenericLanguageDriver:
         crate_traits: Collection[str] = ()) -> bool:
         if "Box<dyn " in symbols:
             return True
-        for name in crate_types:
-            if name and name in symbols:
-                return True
-        for trait in crate_traits:
-            if trait and f"dyn {trait}" in symbols:
-                return True
-        return False
+        if any(name and name in symbols for name in crate_types):
+            return True
+        return any(trait and f"dyn {trait}" in symbols for trait in crate_traits)
 
     def origin_licenses_conversion(
             self, origin: Sequence[Mapping[str, object]]) -> bool:
         # Destructor-then-caller on the free stack is the shape; the
         # catalog then returns a name set. This path only licenses.
         from pipeline_core.domain.crash_site import first_test_file_after_destructor
-        return first_test_file_after_destructor(list(origin)) is not None
+        return first_test_file_after_destructor(origin) is not None
 
     def unique_called_name(self, source_line: str) -> str | None:
         found = _called_idents(source_line)

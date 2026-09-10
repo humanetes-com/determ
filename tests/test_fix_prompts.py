@@ -11,7 +11,6 @@ import dataclasses
 
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
     build_behavior_fix_prompt,
@@ -21,6 +20,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_tdd_stub_fill_prompt,
     restrict_fill_plan,
 )
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 def test_fn_fix_prompt_exact() -> None:

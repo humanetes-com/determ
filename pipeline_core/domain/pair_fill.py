@@ -14,7 +14,9 @@ redden the alternate-arm tests (`test_altdebug` in the same 5). No sequence
 of independently-judged keeps can land it. The pair the attribution hop
 already resolved (`FormatterPair`) is the dispatch unit that can: one
 prompt carrying both blocks, one splice of both replies, one compile+test
-reading, kept or reverted together.
+reading, kept or reverted together. It dispatches from the hop set, not
+from the 12-cap batch: a standing-flat dispatcher plus an unentered
+implementer is exactly the pair, not a reason to skip it.
 
 Everything here is pure selection/shaping; the transaction itself lives in
 the impl fill route. Inputs are the hop's pair records and the collected
@@ -101,37 +103,34 @@ def _endpoint_block(
 
 def pairs_to_dispatch(
     pairs: Iterable[FormatterPair],
-    frontier_keys: set[FnLocator] | frozenset[FnLocator] | None,
 ) -> list[FormatterPair]:
-    """The cross-file pairs this batch carries, deduped and in a
-    deterministic order. A pair dispatches when EITHER member is in the
-    batch — the hop resolved both endpoints from one delegation, so the
-    partner rides along whichever half the ranking admitted. Same-file
-    pairs never dispatch (file-first already writes both under one
-    judgment)."""
-    if not frontier_keys:
-        return []
+    """Every cross-file pair the hop resolved, deduped, in a deterministic
+    order. The pair is its own dispatch unit: it does not wait for a
+    member to survive ``take_batch`` or standing-flat. Run
+    ``19980-f9ea6adb`` (2026-09-10): the hop named the pair, standing-flat
+    excluded the dispatcher from the 12-cap batch, coverage dropped the
+    implementer as unentered, ``pairs_to_dispatch`` of that batch was
+    empty, and two sessions split the transaction. Same-file pairs never
+    dispatch (file-first already writes both under one judgment)."""
     out: list[FormatterPair] = []
     seen: set[FormatterPair] = set()
     for p in sorted(pairs, key=lambda p: (p.dispatcher, p.implementer)):
         if p in seen or not p.cross_file:
             continue
         seen.add(p)
-        if p.member_locators() & frontier_keys:
-            out.append(p)
+        out.append(p)
     return out
 
 
 def pair_dispatches(
     pairs: Iterable[FormatterPair],
-    frontier_keys: set[FnLocator] | frozenset[FnLocator] | None,
     all_blocks: Sequence[ImplBlock],
 ) -> list[PairDispatch]:
-    """The batch's dispatchable pairs with both endpoint blocks resolved.
+    """The hop's dispatchable pairs with both endpoint blocks resolved.
     A pair either of whose endpoints has no collected block (record drift,
     a free fn) is dropped — the ordinary routes still own its members."""
     out: list[PairDispatch] = []
-    for p in pairs_to_dispatch(pairs, frontier_keys):
+    for p in pairs_to_dispatch(pairs):
         db = _endpoint_block(p.dispatcher, all_blocks)
         ib = _endpoint_block(p.implementer, all_blocks)
         if db is None or ib is None:

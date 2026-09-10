@@ -44,10 +44,9 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.domain.attribution import FailureFrontier
-from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.dispatch_batch import promote_crash_evidence, take_batch
 from pipeline_core.domain.landed_change import declined_unchanged
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     Attribution,
@@ -57,6 +56,7 @@ from pipeline_core.domain.refill_evidence import (
     render_refill_evidence,
 )
 from pipeline_core.prompts.fix_prompts import BlockFillPlan, _plan_line
+from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.prompts.sections import format_impl_block_for_prompt
 
 

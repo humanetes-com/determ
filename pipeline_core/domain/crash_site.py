@@ -412,7 +412,7 @@ def conversion_family_from_origin(
 def catalog_origin_licenses_conversion(
         origin: Sequence[Mapping[str, object]]) -> bool:
     """Catalog-driver ORIGIN license: destructor-then-caller on the free stack."""
-    return first_test_file_after_destructor(list(origin)) is not None
+    return first_test_file_after_destructor(origin) is not None
 
 
 def crate_fn_named_on_source_line(
@@ -542,7 +542,7 @@ def first_test_file_on_access(
 
 
 def first_test_file_after_destructor(
-    origin: list[dict[str, object]],
+    origin: Sequence[Mapping[str, object]],
 ) -> tuple[str, int] | None:
     """If the first in-crate origin frame is a destructor, return the next
     non-toolchain caller's ``(file_rel, line)`` when that caller is not

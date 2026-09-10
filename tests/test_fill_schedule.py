@@ -89,6 +89,35 @@ def test_with_no_hollow_test_the_session_keeps_todays_precedence() -> None:
         "session[1 test(s)]", "file src/x.rs"]
 
 
+def _pair(label: str, units: set[FnLocator], tests: set[str]) -> RouteRun:
+    return RouteRun(kind=RouteKind.PAIR, label=label, targets=frozenset(units),
+                    target_tests=frozenset(tests),
+                    files=tuple(sorted({u.file for u in units})), bodies_sha="pair")
+
+
+def test_a_pair_sharing_a_sessions_units_goes_before_that_session() -> None:
+    """Plan: the pair is the two-file transaction; a session that can write
+    either member waits. Control: TODAY_ORDER puts the session first, and
+    a pair that shares no unit and no leftover test does not move."""
+    session = _session("session[1 test(s)]", {"t_fmt"}, {_FMT, _NEW})
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    assert run_blocks(pair, session, {})
+    assert not run_blocks(session, pair, {})
+    sched = schedule([session, pair], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered] == [
+        "pair src/x.rs::fmt + src/y.rs::new", "session[1 test(s)]"]
+    assert sched.ordered[1].blocked_by == (
+        "pair src/x.rs::fmt + src/y.rs::new",)
+    fixed = sorted([session, pair], key=lambda r: TODAY_ORDER.index(r.kind))
+    assert fixed[0].kind is RouteKind.SESSION
+    other = _pair("pair src/y.rs::new + src/y.rs::next", {_NEW}, {"t_other"})
+    session_fmt = _session("session[1 test(s)]", {"t_fmt"}, {_FMT})
+    assert not run_blocks(other, session_fmt, {})
+    sched2 = schedule([session_fmt, other], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched2.ordered] == [
+        "session[1 test(s)]", "pair src/y.rs::new + src/y.rs::next"]
+
+
 def test_a_run_whose_tests_are_hollow_goes_after_the_run_holding_its_stub() -> None:
     holder = _file("file src/x.rs", {_STUB}, {_STUB}, {"t_hollow"})
     consumer = RouteRun(kind=RouteKind.IMPL, label="impl src/y.rs",

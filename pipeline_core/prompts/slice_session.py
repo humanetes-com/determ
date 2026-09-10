@@ -21,11 +21,11 @@ from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 from pipeline_core.domain.attribution import record_site
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import NOTES_CLOSE, NOTES_OPEN, SessionSlice
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
-from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.prompts.sections import tag_block
 
 # A file over this many chars is rendered condensed: the editable fns in

@@ -21,13 +21,13 @@ from pipeline_core.domain.construction_recipe import (
     construction_recipe_prefix,
     construction_recipes_for,
 )
-from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import (
     family_members_beside_a_crashed_conversion,
     ownership_transfer_must,
 )
 from pipeline_core.domain.installable_fns import ProducerBypass
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
 # The file/impl view handed to the model can itself contain HTML-escaped Rust —

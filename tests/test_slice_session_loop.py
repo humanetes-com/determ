@@ -139,6 +139,80 @@ def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_fla
     assert (root2 / "src" / "render.rs").read_text() == "BASE_REN"
 
 
+def test_a_hung_turn_restores_the_whole_change_set(tmp_path):
+    """Plan: a hang is not a peelable subset — later binaries never ran,
+    so no member's keep can be read. File-first already reverts on hang;
+    the session's peel kept one half of a hung two-unit write (run
+    19980-f9ea6adb fill 2). Control: the same two-unit write without a
+    hang still peels to a holding subset (the existing net-positive peel
+    test)."""
+    root = _tree(tmp_path)
+    baseline = TestStateReading(binaries=(
+        BinaryResult(label="unit", completed=True,
+                     passed=frozenset({"t_keep"}), failed=frozenset({"t_pair"}),
+                     pass_count=1, fail_count=1),
+        BinaryResult(label="tests/chain.rs", completed=True,
+                     passed=frozenset({"t_chain"}), failed=frozenset(),
+                     pass_count=1, fail_count=0),
+    ))
+    hung = TestStateReading(binaries=(
+        BinaryResult(label="unit", completed=True,
+                     passed=frozenset({"t_keep"}), failed=frozenset({"t_pair"}),
+                     pass_count=1, fail_count=1),
+        BinaryResult(label="tests/chain.rs", completed=False,
+                     passed=frozenset(), failed=frozenset(),
+                     pass_count=0, fail_count=0, dangling="t_chain", hung=True),
+    ))
+    hold = _reading({"t_keep"}, {"t_pair"})
+    logs: list[str] = []
+
+    def measure(_raw):
+        lib = (root / "src" / "lib.rs").read_text()
+        ren = (root / "src" / "render.rs").read_text()
+        if lib == "SESSION_LIB" and ren == "SESSION_REN":
+            return baseline
+        if lib != "SESSION_LIB" and ren != "SESSION_REN":
+            return hung
+        # One member restored: the subset does not hang. Pre-fix peel
+        # would keep it; the hung bar must not reach peel.
+        return hold
+
+    def enumerate():
+        return {
+            _FMT: (root / "src" / "lib.rs").read_text(),
+            _RENDER: (root / "src" / "render.rs").read_text(),
+        }
+
+    def ask(_m: object) -> str:
+        return (
+            '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT</FN>\n'
+            '<FN name="render" block="impl Renderer">NEW_REN</FN>'
+        )
+
+    ports = SessionPorts(
+        ask_turns=ask,
+        splice=_ports(measure=measure).splice,
+        check=lambda: (0, "", []),
+        focus_errors=lambda out, f: out,
+        blamed_type_api=lambda t: t,
+        measure_suite=measure,
+        read_source=lambda p: None,
+        enumerate_bodies=enumerate,
+        answer_pulls=lambda r: None,
+        log=logs.append, emit=lambda *a, **k: None,
+        check_graceful_stop=lambda s: None)
+    out = run_slice_session(
+        ports, target_src_dir=root, cluster_name="t",
+        slice_=SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
+        records=_RECS, turn0="turn0", max_turns=1)
+    assert out.outcome == "reverted" and out.kept == frozenset()
+    assert _FMT in out.reverted and _RENDER in out.reverted
+    assert (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
+    assert (root / "src" / "render.rs").read_text() == "SESSION_REN"
+    assert any("hung binary" in m and "whole change set restored" in m
+               for m in logs), logs
+
+
 def test_a_failed_peel_splice_leaves_the_unit_on_the_kept_side(tmp_path):
     """Pop + continue without restore used to drop the unit from remaining
     while its post-session body stayed on disk. An early hold then reported

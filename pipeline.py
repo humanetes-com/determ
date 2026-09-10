@@ -101,7 +101,6 @@ from pipeline_core.domain.enums import (
 from pipeline_core.domain.impl_block_ranges import (
     render_impl_block as _render_impl_block,  # noqa: F401  (test pin: pipeline._render_impl_block)
 )
-from pipeline_core.domain.language_driver import bind as _bind_language_driver
 from pipeline_core.domain.llm_output import (
     GENESIS_DELIM_END,
     GENESIS_DELIM_START,
@@ -165,9 +164,6 @@ from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.disclaimer import (
     from_scratch_disclaimer as _prompts_disclaimer,
 )
-from pipeline_core.prompts.language_catalog import (
-    driver_from_kind as _language_driver_from_kind,
-)
 from pipeline_core.prompts.per_fn import (  # noqa: F401  (smoke pin: test_pipeline_smoke uses pipeline._build_per_fn_fix_prompt)
     build_per_fn_fix_prompt as _build_per_fn_fix_prompt,
 )
@@ -217,7 +213,6 @@ def _hot_reload_mi() -> None:
 # Everything downstream reads SETTINGS rather than os.environ for these values.
 # (Per-task numeric tuning knobs still live as their own getenv reads for now.)
 SETTINGS = Settings.from_env(model=MODEL)
-_bind_language_driver(_language_driver_from_kind(SETTINGS.language_driver))
 
 # Per-task model overrides — each task uses the most appropriate model.
 # Single-sourced from Settings.task_models (env TASK*_MODEL, falling back to MODEL).

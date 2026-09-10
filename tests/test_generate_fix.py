@@ -25,13 +25,13 @@ from pipeline_core.application.reconstruct.splice import (
 )
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.enums import FillUnit, FixStrategy
-from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.fix_report import FixKind, FixReport
 from pipeline_core.domain.fix_session import FixSession
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 class _Model:

@@ -161,6 +161,7 @@ from pipeline_core.domain.installable_fns import (
     offer_producers,
     producer_bypasses,
 )
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.llm_output import (
     ReplyAudit,
     bind_headerless_names,
@@ -300,7 +301,6 @@ from pipeline_core.prompts.fix_prompts import (
 )
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
-from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.prompts.slice_session import (
     DEFAULT_FILE_CHARS as SESSION_FILE_CHARS,
 )
@@ -5133,8 +5133,7 @@ def prepare_impl_fill(
 
     _session_route = _make_session_route()
     _pair_served: set[FnLocator] = set()
-    _pair_jobs = pair_dispatches(
-        _frontier_tests.pairs, tdd_frontier_keys, all_blocks)
+    _pair_jobs = pair_dispatches(_frontier_tests.pairs, all_blocks)
     _stubs_all: frozenset[FnLocator] = frozenset(
         _scan_unimplemented_for_cluster(target_src_dir, cluster).units)
     _hollow = hollow_by_test(session_slices or {}, _stubs_all)

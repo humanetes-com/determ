@@ -224,9 +224,24 @@ def _blocking_stubs(run: RouteRun,
 
 def run_blocks(a: RouteRun, b: RouteRun,
                hollow: Mapping[str, frozenset[FnLocator]]) -> bool:
-    """True when `b`'s own tests are hollow because of a stub `a` holds and
-    `b` does not — `a` must land before `b` can be judged."""
-    if a is b or not a.stubs_in_targets or not b.target_tests:
+    """True when `a` must land before `b` can be judged.
+
+    A hop pair is the two-file transaction for its members. A session that
+    can write either member (or that aims at the same leftover tests)
+    waits: run ``19980-f9ea6adb`` (2026-09-10) opened the overlapping
+    session first, wrote both halves plus a hanging companion, peeled the
+    set apart, and ``PairRoute`` would have skipped once a session had
+    served either member. The pre-schedule walk still puts SESSION before
+    PAIR; this rule is the schedule's.
+
+    Otherwise: `b`'s own tests are hollow because of a stub `a` holds and
+    `b` does not."""
+    if a is b:
+        return False
+    if (a.kind is RouteKind.PAIR and b.kind is RouteKind.SESSION
+            and (a.targets & b.targets or a.target_tests & b.target_tests)):
+        return True
+    if not a.stubs_in_targets or not b.target_tests:
         return False
     needed: set[FnLocator] = set()
     for t in b.target_tests:

@@ -638,10 +638,24 @@ def run_slice_session(
             newly_red = final.newly_red
             newly_red_output = dict(final.newly_red_said)
         if final is not None and final.regressed:
-            kept, reverted = _peel(ports, target_src_dir, slice_, records, baseline,
-                                   baseline_bodies, baseline_texts, changed,
-                                   peel_max=peel_max, label=label)
-            outcome = "kept" if kept else "reverted"
+            if final.hung:
+                # A hang is not a peelable subset: later binaries never
+                # ran, so no member's keep can be read. File-first already
+                # reverts on hang; the session's peel kept one half of a
+                # hung two-unit write (run `19980-f9ea6adb` fill 2).
+                for pre_image in baseline_texts.values():
+                    restore(pre_image)
+                ports.log(f"  [phase-c/session] {label}: hung binary — "
+                          "the whole change set restored (a hang is not a "
+                          "peelable subset; later binaries never ran).")
+                kept, reverted = frozenset(), changed
+                outcome = "reverted"
+            else:
+                kept, reverted = _peel(
+                    ports, target_src_dir, slice_, records, baseline,
+                    baseline_bodies, baseline_texts, changed,
+                    peel_max=peel_max, label=label)
+                outcome = "kept" if kept else "reverted"
         else:
             outcome, kept = "kept", changed
     result = SessionOutcome(

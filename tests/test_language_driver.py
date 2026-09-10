@@ -456,11 +456,13 @@ def test_generic_identity_subject_is_harvested_from_when() -> None:
     for Counter. An Error-named leftover is not the reason the function
     exists."""
     from pipeline_core.domain.behaviour_select import (
-        identity_must_admits as catalog_admits,
+        IdentityMustUnit,
         identity_subject_from_specs,
         identity_subject_from_when,
         select_identity_must,
-        IdentityMustUnit,
+    )
+    from pipeline_core.domain.behaviour_select import (
+        identity_must_admits as catalog_admits,
     )
     assert identity_subject_from_when("Counter::new()") == "Counter"
     assert identity_subject_from_when("crate::Error::msg") == "Error"
@@ -687,15 +689,16 @@ def test_generic_fix_prompt_on_missing_field_carries_the_gate_not_a_crate_field(
         macros="", notes="", container="impl Cell",
         types="struct Cell { head: u8 }",
         invariants="", siblings="", crate_idioms="", bound_methods="")
-    kwargs = dict(
-        file_text="fn first() { unimplemented!() }",
-        fn_name="first",
-        sig_text="fn first(&self) -> u8",
-        test_blocks=[],
-        module_name="demo", cluster_name="stable",
-        file_rel="src/cell.rs", prev_body="self.inner",
-        error_excerpt="error[E0609]: no field `inner` on type `Cell`",
-        sections=sections, fr_path=None)
+    kwargs = {
+        "file_text": "fn first() { unimplemented!() }",
+        "fn_name": "first",
+        "sig_text": "fn first(&self) -> u8",
+        "test_blocks": [],
+        "module_name": "demo", "cluster_name": "stable",
+        "file_rel": "src/cell.rs", "prev_body": "self.inner",
+        "error_excerpt": "error[E0609]: no field `inner` on type `Cell`",
+        "sections": sections, "fr_path": None,
+    }
     p = build_per_fn_fix_prompt(**kwargs)
     assert "struct Cell { head: u8 }" in p
     assert "You may not add a new top-level item" in p

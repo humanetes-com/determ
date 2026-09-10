@@ -57,19 +57,30 @@ def test_pair_for_unit_matches_either_member_and_skips_same_file() -> None:
     assert pair_for_unit(pairs, FnLocator("src/error.rs", "chain")) is None
 
 
-def test_pairs_to_dispatch_needs_a_batch_member_and_dedupes() -> None:
-    batch = {FnLocator("src/error.rs", "fmt")}
-    assert pairs_to_dispatch({_PAIR, _SAME_FILE}, batch) == [_PAIR]
-    # The partner rides along whichever half the ranking admitted.
-    assert pairs_to_dispatch({_PAIR}, {FnLocator("src/fmt.rs", "debug")}) \
-        == [_PAIR]
-    assert pairs_to_dispatch({_PAIR}, {FnLocator("src/ptr.rs", "own")}) == []
-    assert pairs_to_dispatch({_PAIR}, set()) == []
+def test_pairs_to_dispatch_admits_a_hop_pair_the_batch_cut_dropped() -> None:
+    """Plan: a hop-resolved cross-file pair is a dispatch unit of its own.
+    Control: the pre-fix filter required a member in the 12-cap batch, so
+    a standing-flat dispatcher plus an unentered implementer produced no
+    pair run (19980-f9ea6adb fill 1 and fill 2). The pair is a Display
+    dispatcher in lib.rs delegating to render.rs — the shape the module
+    claims selects identically, not this crate's leftover names."""
+    other = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/render.rs", "render", "impl Renderer"))
+    same_file = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/lib.rs", "render", "impl Renderer"))
+    assert pairs_to_dispatch({other, same_file}) == [other]
+    assert pairs_to_dispatch({other}) == [other]
+    # Negative control: the pre-fix batch filter on an unrelated 12-cap
+    # cut (neither member in the batch) is empty.
+    unrelated = {FnLocator("src/z.rs", "other")}
+    assert [p for p in pairs_to_dispatch({other})
+            if p.member_locators() & unrelated] == []
 
 
 def test_pair_dispatches_resolves_both_endpoint_blocks() -> None:
-    jobs = pair_dispatches({_PAIR}, {FnLocator("src/error.rs", "fmt")},
-                           _blocks())
+    jobs = pair_dispatches({_PAIR}, _blocks())
     assert len(jobs) == 1
     job = jobs[0]
     assert job.dispatcher_block.file == "src/error.rs"
@@ -80,8 +91,7 @@ def test_pair_dispatches_resolves_both_endpoint_blocks() -> None:
             for m in job.implementer_block.refill_members] == ["debug"]
     # A missing endpoint block drops the pair — the ordinary routes still
     # own its members.
-    assert pair_dispatches({_PAIR}, {FnLocator("src/error.rs", "fmt")},
-                           _blocks()[:2]) == []
+    assert pair_dispatches({_PAIR}, _blocks()[:2]) == []
 
 
 def test_a_still_stubbed_endpoint_dispatches_as_a_stub() -> None:
@@ -89,7 +99,7 @@ def test_a_still_stubbed_endpoint_dispatches_as_a_stub() -> None:
     blocks = _blocks()[:2] + [
         ImplBlock(file="src/fmt.rs", container="impl ErrorImpl",
                   members=(stub,), stub_members=(stub,))]
-    jobs = pair_dispatches({_PAIR}, {FnLocator("src/error.rs", "fmt")}, blocks)
+    jobs = pair_dispatches({_PAIR}, blocks)
     assert len(jobs) == 1
     assert [m.fn_name for m in jobs[0].implementer_block.stub_members] \
         == ["debug"]
@@ -127,7 +137,7 @@ def test_the_recorded_pair_selects_on_the_recorded_records() -> None:
         ImplBlock(file=f, container=c, members=tuple(ms),
                   refill_members=tuple(ms))
         for (f, c), ms in by_key.items()]
-    jobs = pair_dispatches({_PAIR}, {FnLocator("src/error.rs", "fmt")}, blocks)
+    jobs = pair_dispatches({_PAIR}, blocks)
     assert len(jobs) == 1
     assert jobs[0].pair == _PAIR
     assert {b.file for b in (jobs[0].dispatcher_block,

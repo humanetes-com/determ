@@ -37,8 +37,6 @@ from pathlib import Path
 
 import pytest
 
-from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.domain.crash_site import (
     CONVERSION_FAMILY,
     AsanReport,
@@ -58,7 +56,9 @@ from pipeline_core.domain.crash_site import (
     relativize_frame_files,
     site_from_frames,
 )
+from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 @pytest.fixture(autouse=True)

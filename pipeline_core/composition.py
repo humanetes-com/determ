@@ -670,6 +670,7 @@ from pipeline_core.domain.coverage_annotation import (
     partition_uncovered_lines as _cov_partition_uncovered_lines,
 )
 from pipeline_core.domain.enums import (
+    LanguageDriverKind,
     PhaseCDriver,
     PhaseCMode,
     Task1Backend,
@@ -729,6 +730,8 @@ from pipeline_core.domain.impl_block_ranges import (
     render_impl_block as _render_impl_block,
 )
 from pipeline_core.domain.impl_routing import impl_block_id as _impl_block_id
+from pipeline_core.domain.language_driver import bind as _bind_language_driver
+from pipeline_core.domain.language_driver import language_driver as _language_driver
 from pipeline_core.domain.llm_output import extract_files as _extract_files
 from pipeline_core.domain.llm_output import (
     extract_signature_block as _extract_signature_block,
@@ -810,6 +813,9 @@ from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
     extract_crate_idioms as _extract_crate_idioms,
 )
+from pipeline_core.prompts.language_catalog import (
+    driver_from_kind as _language_driver_from_kind,
+)
 from pipeline_core.prompts.output_format import FILE_FORMAT_INSTRUCTION
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 from pipeline_core.prompts.per_impl import (
@@ -821,13 +827,16 @@ from pipeline_core.prompts.sections import (
 from pipeline_core.prompts.sections import (
     format_api_surface_section as _fmt_api_surface_impl,
 )
-from pipeline_core.domain.language_driver import language_driver as _language_driver
 from pipeline_core.prompts.sections import tag_block as _tag_block
 from pipeline_core.prompts.skeleton_index import (
     format_skeleton_index_for_cluster as _format_skeleton_index_for_cluster,
 )
 from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt as _build_wff
 from pipeline_core.settings import Settings
+
+_bind_language_driver(_language_driver_from_kind(
+    LanguageDriverKind.coerce(
+        _os.getenv("LANGUAGE_DRIVER"), LanguageDriverKind.GENERIC)))
 
 # Model self-correction notes — prompt-section caps (see CLAUDE.md "The model
 # authors its own anti-hallucination notes").
