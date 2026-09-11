@@ -354,23 +354,86 @@ def _same_src_file(a: str, b: str) -> bool:
     return a == b or norm_src_rel(a) == norm_src_rel(b)
 
 
+def _is_inherent_impl(container: str) -> bool:
+    """True for `impl Type` / `impl Type<T>` (no trait). False for
+    `impl Trait for Type` and for a free-fn empty container.
+
+    The hop follows a crate qualifier to this shape (`impl Inner { fn debug }`).
+    A dispatcher that names no qualifier still needs the same method, and
+    the trait-impl `fmt` sites are dispatchers themselves — they are not
+    this helper."""
+    c = (container or "").strip()
+    if not c.startswith("impl"):
+        return False
+    return _impl_trait_and_self(c) is None
+
+
+def _inherent_methods_named(
+    method: str,
+    recs: Iterable[Mapping[str, Any]],
+    *,
+    exclude_container: str = "",
+) -> list[tuple[FnLocator, dict[str, Any]]]:
+    """Inherent-impl records whose fn is `method` (`trait.lower()`).
+
+    Run `511277-e4cf5ade` (2026-09-10): the Debug dispatcher collected a
+    chain and called `Display::fmt`, so `_called_qualifier_complements`
+    offered only std-trait tokens and the hop recorded no pair; the
+    inherent `debug` on the other file stayed dead and a FILE pull of
+    that file admitted nothing. Method name is the same mapping the hop
+    already uses; inherent-impl is the filter that keeps `impl Trait for
+    Type { fn fmt }` out. No trait name is special-cased."""
+    if not method:
+        return []
+    want_excl = container_key(exclude_container) if exclude_container else ""
+    out: list[tuple[FnLocator, dict[str, Any]]] = []
+    seen: set[FnLocator] = set()
+    for rec in recs:
+        if str(rec.get("fn_name") or "") != method:
+            continue
+        icont = str(rec.get("container") or "")
+        if want_excl and container_key(icont) == want_excl:
+            continue
+        if not _is_inherent_impl(icont):
+            continue
+        key = FnLocator(str(rec["file"]), method)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((key, dict(rec)))
+    return out
+
+
 def admit_format_siblings_for_file(
     file_rel: str,
     editable: Mapping[FnSite, FnRecord],
     tree: Sequence[FnRecord],
 ) -> tuple[FnRecord, ...]:
-    """Units in `file_rel` a format dispatcher in `editable` already named
-    a qualifier for, that the session cannot yet write.
+    """Units in `file_rel` a format dispatcher in `editable` still needs,
+    that the session cannot yet write.
 
-    The pair hop records these at plan time when the dispatcher is in the
-    slice. A FILE request is the backstop for a session that opened without
-    them (run `164454-8ec9c4d4`: the first turn asked for `src/fmt.rs` and
-    the write set did not grow). Same complement as the hop: no trait name
-    is special-cased. Empty when the file holds no such method, or every
-    one is already editable."""
+    Two ways a dispatcher names that unit: a crate qualifier the body
+    already wrote (`Qual::display` while the trait wants `debug`), or —
+    when the body named no crate qualifier — the inherent method
+    `trait.lower()` on the tree. The pair hop records both at plan time
+    when the dispatcher is in the slice. A FILE request is the backstop
+    for a session that opened without them (run `164454-8ec9c4d4`: the
+    first turn asked for `src/fmt.rs` and the write set did not grow;
+    run `511277-e4cf5ade` asked again and complements were std-trait
+    tokens, so admission stayed empty). Same mapping as the hop: no
+    trait name is special-cased. Empty when the file holds no such
+    method, or every one is already editable."""
     already = set(editable)
     out: list[FnRecord] = []
     seen: set[FnSite] = set()
+
+    def _take(r: FnRecord) -> None:
+        site = record_site(r)
+        if site in already or site in seen:
+            return
+        seen.add(site)
+        out.append(r)
+
     for rec in editable.values():
         parsed = _impl_trait_and_self(rec.container)
         if parsed is None:
@@ -386,11 +449,17 @@ def admit_format_siblings_for_file(
                     continue
                 if qual != (impl_self_type(r.container) or ""):
                     continue
-                site = record_site(r)
-                if site in already or site in seen:
+                _take(r)
+        want = trait.lower() if trait else ""
+        if want:
+            for r in tree:
+                if not _same_src_file(r.file, file_rel):
                     continue
-                seen.add(site)
-                out.append(r)
+                if r.fn_name != want:
+                    continue
+                if not _is_inherent_impl(r.container or ""):
+                    continue
+                _take(r)
     return tuple(out)
 
 
@@ -423,17 +492,23 @@ def _attribute_format_only_test(
     `3985224-5484d810`: `impl Debug for Error` was `ErrorImpl::display(...)`;
     `_format_impl_calls` of `fmt`/`debug` returned empty).
     `_called_qualifier_complements` is that misshape, for any format trait:
-    same qualifier, method `trait.lower()`. Escalating the `fmt` accessor
-    cannot reach `debug` — the futility escalation adds fns that
-    construct/return the accessor's container type `Error`, and
-    `ErrorImpl::debug` returns `fmt::Result` — and `FnLocator` erases the
-    container, so `src/error.rs::fmt` dispatch is coarser than
-    `Debug for Error` anyway. So follow ONE hop: if the matched `fmt` body
-    calls a crate formatting method of the trait, or names a qualifier
-    whose trait-named method exists on the tree and is not yet called,
-    attribute THAT implementer — the body the verdict actually pins. Only
-    when the matched `fmt` calls no sibling formatter (it IS the
-    implementer) is the `fmt` itself attributed.
+    same qualifier, method `trait.lower()`. A dispatcher that names no
+    crate qualifier at all (chain collect + std `Display::fmt`, run
+    `511277-e4cf5ade` 2026-09-10) is the same misshape one step earlier:
+    complements are std-trait tokens, no record's self-type matches, the
+    hop recorded no pair, and the inherent method sat dead. Escalating
+    the `fmt` accessor cannot reach that method — the futility escalation
+    adds fns that construct/return the accessor's container type, and
+    the inherent helper returns `fmt::Result` — and `FnLocator` erases
+    the container, so `file::fmt` dispatch is coarser than the trait impl
+    anyway. So follow ONE hop: if the matched `fmt` body calls a crate
+    formatting method of the trait, or names a qualifier whose
+    trait-named method exists on the tree and is not yet called, or the
+    tree holds an inherent method named `trait.lower()` the body does
+    not call, attribute THAT implementer — the body the verdict actually
+    pins. Only when the matched `fmt` calls no sibling formatter and the
+    tree has no such inherent method (it IS the implementer) is the
+    `fmt` itself attributed.
 
     `owned=False` is the original constituency: a test the primary attribution
     left unowned, for which this adds the only owner it will ever have.
@@ -520,6 +595,13 @@ def _attribute_format_only_test(
                 if (icont != str(rec.get("container", ""))
                         and qual == (impl_self_type(icont) or "")):
                     implementers.append((FnLocator(irec["file"], method), irec))
+        # Body named no crate qualifier: still pair with the inherent
+        # method `trait.lower()` the Qual follow would have taken.
+        if not implementers:
+            implementers.extend(_inherent_methods_named(
+                trait.lower() if trait else "",
+                by_name.get(trait.lower() if trait else "", ()),
+                exclude_container=str(rec.get("container", "") or "")))
         if implementers:
             # Canonical from construction: the session's owner and site
             # frontiers are `canon_site`d, and a raw extractor header

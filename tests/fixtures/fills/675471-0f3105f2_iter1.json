@@ -1,0 +1,1205 @@
+{
+ "classes": [
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": 0,
+   "newly_red": [],
+   "reading_run": "file src/error.rs",
+   "route": "file",
+   "ts": "2026-09-10T19:13:58.540+00:00",
+   "unit": "src/error.rs"
+  },
+  {
+   "class": "wrong",
+   "keep": false,
+   "net_pass_delta": -31,
+   "newly_red": [
+    "behaviour_probe_stable_exact_format_0"
+   ],
+   "reading_run": "file src/error.rs",
+   "route": "file",
+   "ts": "2026-09-10T19:41:30.395+00:00",
+   "unit": "src/error.rs"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.451+00:00",
+   "unit": "src/wrapper.rs::DebugforMessageError<M>"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.451+00:00",
+   "unit": "src/kind.rs::Adhoc"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.453+00:00",
+   "unit": "src/chain.rs::Chain"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.457+00:00",
+   "unit": "src/ptr.rs::Ref<,T>"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.458+00:00",
+   "unit": "src/wrapper.rs::DisplayforMessageError<M>"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.458+00:00",
+   "unit": "src/kind.rs::Trait"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.458+00:00",
+   "unit": "src/chain.rs::IteratorforChain"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.464+00:00",
+   "unit": "src/wrapper.rs::DebugforDisplayError<M>"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.464+00:00",
+   "unit": "src/chain.rs::ExactSizeIteratorforChain"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.467+00:00",
+   "unit": "src/kind.rs::Boxed"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.467+00:00",
+   "unit": "src/wrapper.rs::DisplayforDisplayError<M>"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.469+00:00",
+   "unit": "src/wrapper.rs::DebugforBoxedError"
+  },
+  {
+   "class": "mis",
+   "keep": false,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "impl",
+   "ts": "2026-09-10T19:41:30.471+00:00",
+   "unit": "src/wrapper.rs::DisplayforBoxedError"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T19:50:59.990+00:00",
+   "unit": "src/error.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T19:52:34.944+00:00",
+   "unit": "src/error.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T19:53:56.302+00:00",
+   "unit": "src/error.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T19:55:27.159+00:00",
+   "unit": "src/error.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T19:55:50.337+00:00",
+   "unit": "src/wrapper.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T20:01:34.074+00:00",
+   "unit": "src/wrapper.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T20:04:51.742+00:00",
+   "unit": "src/wrapper.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T20:07:37.178+00:00",
+   "unit": "src/wrapper.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T20:08:21.565+00:00",
+   "unit": "src/wrapper.rs::fmt"
+  },
+  {
+   "class": "unreachable",
+   "keep": true,
+   "net_pass_delta": null,
+   "newly_red": [],
+   "reading_run": "",
+   "route": "per-fn",
+   "ts": "2026-09-10T20:13:29.328+00:00",
+   "unit": "src/wrapper.rs::fmt"
+  }
+ ],
+ "cluster": "stable",
+ "crash_blamed": [],
+ "failed": [
+  "test_altdebug",
+  "test_debug_backtrace_captured_simple",
+  "test_debug_backtrace_captured_with_cause"
+ ],
+ "failed_pairs": [
+  [
+   "tests/fmt_gen_1.rs",
+   "test_debug_backtrace_captured_simple"
+  ],
+  [
+   "tests/fmt_gen_1.rs",
+   "test_debug_backtrace_captured_with_cause"
+  ],
+  [
+   "tests/test_fmt.rs",
+   "test_altdebug"
+  ]
+ ],
+ "file_runs": [
+  {
+   "file": "src/error.rs",
+   "stubs": [],
+   "targets": [
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::drop",
+    "src/error.rs::fmt",
+    "src/error.rs::from"
+   ]
+  },
+  {
+   "file": "src/chain.rs",
+   "stubs": [],
+   "targets": [
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next"
+   ]
+  },
+  {
+   "file": "src/kind.rs",
+   "stubs": [],
+   "targets": [
+    "src/kind.rs::new"
+   ]
+  },
+  {
+   "file": "src/ptr.rs",
+   "stubs": [],
+   "targets": [
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw"
+   ]
+  },
+  {
+   "file": "src/wrapper.rs",
+   "stubs": [],
+   "targets": [
+    "src/wrapper.rs::fmt"
+   ]
+  }
+ ],
+ "fitted_recorded": 2,
+ "hollow_recorded": 0,
+ "incomplete": [],
+ "iter": 1,
+ "ledger_rows": [],
+ "route_attempts": [
+  {
+   "attempts": [
+    {
+     "attempt": 1,
+     "outcome": "reverted",
+     "spliced": 14,
+     "units": [
+      "src/error.rs::fmt"
+     ]
+    },
+    {
+     "attempt": 2,
+     "outcome": "reverted",
+     "spliced": 4,
+     "units": [
+      "src/error.rs::fmt"
+     ]
+    },
+    {
+     "attempt": 3,
+     "outcome": "reverted",
+     "spliced": 4,
+     "units": [
+      "src/error.rs::fmt"
+     ]
+    }
+   ],
+   "dispatched": [
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::context_backtrace",
+    "src/error.rs::drop",
+    "src/error.rs::fmt",
+    "src/error.rs::from",
+    "src/error.rs::no_backtrace",
+    "src/error.rs::object_drop"
+   ],
+   "label": "file src/error.rs",
+   "planned_recorded": 12,
+   "recorded_kept": 7,
+   "recorded_outcome": "flat",
+   "recorded_reverted": 1,
+   "source": "row.reverted per revert event; dispatched = targets + installable_offered"
+  }
+ ],
+ "run_id": "675471-0f3105f2",
+ "schedule_runs": [
+  {
+   "blocked_by": [],
+   "bodies_sha": "181be45cb9048811",
+   "deferred": false,
+   "files": [
+    "src/error.rs"
+   ],
+   "kind": "file",
+   "label": "file src/error.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 1,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::drop",
+    "src/error.rs::fmt",
+    "src/error.rs::from"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "fbdfe148d9c35399",
+   "deferred": false,
+   "files": [
+    "src/chain.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/chain.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 0,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "181be45cb9048811",
+   "deferred": false,
+   "files": [
+    "src/error.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/error.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 1,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::drop",
+    "src/error.rs::fmt",
+    "src/error.rs::from"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "0b894b4a2f6fff0a",
+   "deferred": false,
+   "files": [
+    "src/kind.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/kind.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 2,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug"
+   ],
+   "targets": [
+    "src/kind.rs::new"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "8c562c3d14d1d3b5",
+   "deferred": false,
+   "files": [
+    "src/ptr.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/ptr.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 3,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "381f2f840c7cef15",
+   "deferred": false,
+   "files": [
+    "src/wrapper.rs"
+   ],
+   "kind": "impl",
+   "label": "impl src/wrapper.rs",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 4,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/wrapper.rs::fmt"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "327385458b2ddbff",
+   "deferred": false,
+   "files": [
+    "src/chain.rs",
+    "src/error.rs",
+    "src/kind.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 0 stub(s), 26 re-fill(s)",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 0,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next",
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::drop",
+    "src/error.rs::fmt",
+    "src/error.rs::from",
+    "src/kind.rs::new",
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw",
+    "src/wrapper.rs::fmt"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "a8bacd89b24acdfe",
+   "deferred": false,
+   "files": [
+    "src/error.rs",
+    "src/fmt.rs"
+   ],
+   "kind": "pair",
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "level": 1,
+   "rank": 2,
+   "reason": "served",
+   "seq": 0,
+   "share_minutes": 8.7,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/error.rs::fmt",
+    "src/fmt.rs::debug"
+   ],
+   "weight": 1
+  },
+  {
+   "blocked_by": [
+    "pair src/error.rs::fmt + src/fmt.rs::debug"
+   ],
+   "bodies_sha": "63fc973fc6d02211",
+   "deferred": false,
+   "files": [
+    "src/chain.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/kind.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "kind": "session",
+   "label": "session[2 test(s), 28 unit(s)] #0",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 0,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple"
+   ],
+   "targets": [
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next",
+    "src/chain.rs::size_hint",
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::construct_from_std",
+    "src/error.rs::drop",
+    "src/error.rs::error",
+    "src/error.rs::fmt",
+    "src/error.rs::from",
+    "src/error.rs::msg",
+    "src/error.rs::new",
+    "src/error.rs::object_drop",
+    "src/error.rs::object_ref",
+    "src/error.rs::vtable",
+    "src/fmt.rs::debug",
+    "src/kind.rs::anyhow_kind",
+    "src/kind.rs::new",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw",
+    "src/ptr.rs::new",
+    "src/wrapper.rs::fmt"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [
+    "pair src/error.rs::fmt + src/fmt.rs::debug"
+   ],
+   "bodies_sha": "374e226c11d48779",
+   "deferred": false,
+   "files": [
+    "src/chain.rs",
+    "src/context.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "kind": "session",
+   "label": "session[1 test(s), 26 unit(s)] #1",
+   "level": 1,
+   "rank": 0,
+   "reason": "never_served",
+   "seq": 1,
+   "share_minutes": 17.39,
+   "stubs": [],
+   "target_tests": [
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next",
+    "src/chain.rs::size_hint",
+    "src/context.rs::fmt",
+    "src/context.rs::source",
+    "src/error.rs::chain",
+    "src/error.rs::construct",
+    "src/error.rs::construct_from_adhoc",
+    "src/error.rs::context",
+    "src/error.rs::drop",
+    "src/error.rs::error",
+    "src/error.rs::fmt",
+    "src/error.rs::msg",
+    "src/error.rs::object_drop",
+    "src/error.rs::object_ref",
+    "src/error.rs::vtable",
+    "src/fmt.rs::debug",
+    "src/ptr.rs::as_ptr",
+    "src/ptr.rs::by_ref",
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw",
+    "src/ptr.rs::new",
+    "src/wrapper.rs::fmt"
+   ],
+   "weight": 2
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "fbdfe148d9c35399",
+   "deferred": false,
+   "files": [
+    "src/chain.rs"
+   ],
+   "kind": "file",
+   "label": "file src/chain.rs",
+   "level": 1,
+   "rank": 2,
+   "reason": "served",
+   "seq": 0,
+   "share_minutes": 8.7,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/chain.rs::len",
+    "src/chain.rs::new",
+    "src/chain.rs::next"
+   ],
+   "weight": 1
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "0b894b4a2f6fff0a",
+   "deferred": false,
+   "files": [
+    "src/kind.rs"
+   ],
+   "kind": "file",
+   "label": "file src/kind.rs",
+   "level": 1,
+   "rank": 2,
+   "reason": "served",
+   "seq": 2,
+   "share_minutes": 8.7,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug"
+   ],
+   "targets": [
+    "src/kind.rs::new"
+   ],
+   "weight": 1
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "8c562c3d14d1d3b5",
+   "deferred": false,
+   "files": [
+    "src/ptr.rs"
+   ],
+   "kind": "file",
+   "label": "file src/ptr.rs",
+   "level": 1,
+   "rank": 2,
+   "reason": "served",
+   "seq": 3,
+   "share_minutes": 8.7,
+   "stubs": [],
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/ptr.rs::deref",
+    "src/ptr.rs::from_raw"
+   ],
+   "weight": 1
+  },
+  {
+   "blocked_by": [],
+   "bodies_sha": "381f2f840c7cef15",
+   "deferred": false,
+   "files": [
+    "src/wrapper.rs"
+   ],
+   "kind": "file",
+   "label": "file src/wrapper.rs",
+   "level": 1,
+   "rank": 2,
+   "reason": "served",
+   "seq": 4,
+   "share_minutes": 8.7,
+   "stubs": [],
+   "target_tests": [
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    "src/wrapper.rs::fmt"
+   ],
+   "weight": 1
+  }
+ ],
+ "sessions": [
+  {
+   "tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple"
+   ],
+   "units": 28
+  },
+  {
+   "tests": [
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "units": 26
+  }
+ ],
+ "stubs": [],
+ "stubs_source": "argument",
+ "tests": {
+  "test_altdebug": [
+   {
+    "container": "impl ExactSizeIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "len"
+   },
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "size_hint"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_std"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl From<E>for Error",
+    "file": "src/error.rs",
+    "fn": "from"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "new"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "debug"
+   },
+   {
+    "container": "trait TraitKind",
+    "file": "src/kind.rs",
+    "fn": "anyhow_kind"
+   },
+   {
+    "container": "impl Trait",
+    "file": "src/kind.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   }
+  ],
+  "test_debug_backtrace_captured_simple": [
+   {
+    "container": "impl ExactSizeIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "len"
+   },
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "size_hint"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "debug"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ],
+  "test_debug_backtrace_captured_with_cause": [
+   {
+    "container": "impl ExactSizeIterator for Chain<'_>",
+    "file": "src/chain.rs",
+    "fn": "len"
+   },
+   {
+    "container": "impl Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "next"
+   },
+   {
+    "container": "impl Iterator for Chain<'a>",
+    "file": "src/chain.rs",
+    "fn": "size_hint"
+   },
+   {
+    "container": "impl Display for ContextError<C,E>",
+    "file": "src/context.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl StdError for ContextError<C,Error>",
+    "file": "src/context.rs",
+    "fn": "source"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "chain"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "construct_from_adhoc"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "context"
+   },
+   {
+    "container": "impl Drop for Error",
+    "file": "src/error.rs",
+    "fn": "drop"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/error.rs",
+    "fn": "error"
+   },
+   {
+    "container": "impl Debug for Error",
+    "file": "src/error.rs",
+    "fn": "fmt"
+   },
+   {
+    "container": "impl Error",
+    "file": "src/error.rs",
+    "fn": "msg"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_drop"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "object_ref"
+   },
+   {
+    "container": "",
+    "file": "src/error.rs",
+    "fn": "vtable"
+   },
+   {
+    "container": "impl ErrorImpl",
+    "file": "src/fmt.rs",
+    "fn": "debug"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "as_ptr"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "by_ref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "deref"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "from_raw"
+   },
+   {
+    "container": "impl Own<T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Ref<'a,T>",
+    "file": "src/ptr.rs",
+    "fn": "new"
+   },
+   {
+    "container": "impl Display for MessageError<M>",
+    "file": "src/wrapper.rs",
+    "fn": "fmt"
+   }
+  ]
+ },
+ "ts": "2026-09-10T18:59:11.506+00:00"
+}

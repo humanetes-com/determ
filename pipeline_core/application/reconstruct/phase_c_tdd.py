@@ -47,7 +47,6 @@ from pipeline_core.domain.attribution import (
     site_payload,
     union_unattributed_stubs,
 )
-from pipeline_core.domain.pair_fill import dispatch_including_pairs
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.body_ledger import (
     BodyState,
@@ -164,6 +163,7 @@ from pipeline_core.domain.oracle_ledger import (
     bare_test_name,
     reconcile_sweep,
 )
+from pipeline_core.domain.pair_fill import dispatch_including_pairs
 from pipeline_core.domain.pass_highwater import PassHighWater
 from pipeline_core.domain.plateau import (
     plateau_exit_disabled,
@@ -4482,6 +4482,20 @@ def run_phase_c_tdd(
             for _ot in _ots:
                 _units_for_owners.setdefault(
                     bare_test_name(_ot), set()).add(_ok)
+        _pair_locs = frozenset(
+            loc
+            for p in (_attr.pairs or ())
+            if p.cross_file
+            for loc in p.member_locators())
+        _paired_tests = frozenset(
+            t for t, us in _units_for_owners.items()
+            if us & _pair_locs)
+        if _paired_tests:
+            deps.log(
+                f"  {tag} [phase-c/dispatch] measured-owners: "
+                f"{len(_paired_tests)} leftover test(s) already have a "
+                "hop-pair transaction — not admitting coverage owners "
+                "those tests execute through; the pair is the fill.")
         if _cov is not None and _owners_read:
             _owner_admits = escalate_to_measured_owners(
                 owners={bare_test_name(t): frozenset(
@@ -4493,6 +4507,7 @@ def run_phase_c_tdd(
                 already_owned=frozenset(eligible),
                 permanently_exhausted=permanently_exhausted,
                 served=frozenset(_served_at),
+                paired_tests=_paired_tests,
             )
         if _owner_admits:
             _by_test: dict[str, dict[FnLocator, set[str]]] = {}

@@ -177,6 +177,7 @@ def escalate_to_measured_owners(
     already_owned: Collection[FnLocator],
     permanently_exhausted: Collection[FnLocator] = (),
     served: Collection[FnLocator] = (),
+    paired_tests: Collection[str] = (),
 ) -> dict[FnLocator, set[str]]:
     """Admit coverage-slice owners once every attributed-or-escalated unit
     has been served (or is already unable to pay).
@@ -196,14 +197,26 @@ def escalate_to_measured_owners(
     unit already graded flat. Admissions are owner-map units minus dead
     minus already-owned minus permanently exhausted minus graded. No
     live test or unit name is a parameter.
+
+    ``paired_tests`` are leftovers whose attribution already resolved a
+    hop pair (dispatcher plus implementer). Those tests do not admit
+    coverage-spine owners: the pair is the paying fill, and widening
+    after the pair members were served is the spend that cannot pay
+    (run ``675471-0f3105f2``, 2026-09-10: the three format leftovers
+    had a hop pair; measured-owners then admitted 26 coverage locators
+    and the never-served per-fn of those locators opened before the
+    pair). Empty (the default) preserves every existing fire.
     """
     served_keys = frozenset(served)
     unable_set = frozenset(unable)
     already = frozenset(already_owned)
     exhausted = frozenset(permanently_exhausted)
     graded_set = frozenset(graded)
+    paired = frozenset(paired_tests)
     out: dict[FnLocator, set[str]] = {}
     for tname, owner_set in owners.items():
+        if tname in paired:
+            continue
         cohort = frozenset(units_by_test.get(tname, ()))
         if not cohort:
             continue

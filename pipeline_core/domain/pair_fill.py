@@ -31,7 +31,9 @@ from dataclasses import replace
 from typing import NamedTuple
 
 from pipeline_core.domain.attribution import (
-    FormatterPair, container_key, key_as_site,
+    FormatterPair,
+    container_key,
+    key_as_site,
 )
 from pipeline_core.domain.body_ledger import body_sha
 from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock

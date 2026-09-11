@@ -286,3 +286,38 @@ def test_9872_service_fire_admits_owners_grade_unanimity_does_not() -> None:
     assert _DEBUG not in got
     assert _WRITE_STR not in got
     assert _ERASE not in got
+
+
+def test_a_paired_test_does_not_admit_coverage_owners() -> None:
+    """A leftover whose attribution already resolved a hop pair does not
+    widen to coverage-spine owners after the pair members were served.
+    The pair is that test's fill. Control: the same maps without
+    paired_tests still admit the spine unit."""
+    disp = FnLocator("src/d.rs", "fmt")
+    impl = FnLocator("src/i.rs", "debug")
+    spine = FnLocator("src/d.rs", "drop")
+    owners = {"t_fmt": frozenset({disp, impl, spine})}
+    units = {"t_fmt": {disp, impl}}
+    served = {disp, impl}
+    got = escalate_to_measured_owners(
+        owners=owners,
+        units_by_test=units,
+        graded=frozenset(),
+        unable=frozenset(),
+        already_owned=served,
+        served=served,
+        paired_tests={"t_fmt"},
+    )
+    assert got == {}
+    control = escalate_to_measured_owners(
+        owners=owners,
+        units_by_test=units,
+        graded=frozenset(),
+        unable=frozenset(),
+        already_owned=served,
+        served=served,
+    )
+    assert spine in control
+    assert control[spine] == {"t_fmt"}
+    assert disp not in control
+    assert impl not in control

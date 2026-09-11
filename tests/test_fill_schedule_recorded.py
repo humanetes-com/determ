@@ -9,7 +9,10 @@ that scored 97 (13 never-served runs, packing fitted 0).
 `1577437-c93d5c26_iter4.json` is fill 4 of the 2026-09-06 22:15 UTC run,
 whose `file src/error.rs` run reverted on attempt 1 (`compile failed;
 codes=['E0596']`) and kept on attempt 2 (`FILE FILLED 14 fn(s)`) and was
-rowed `REVERTED … kept 0, reverted 11`. Distilled by
+rowed `REVERTED … kept 0, reverted 11`.
+`675471-0f3105f2_iter1.json` is fill 1 of the 2026-09-10 18:58 UTC run:
+three leftover format tests, a hop pair at served rank 8, a never-served
+file and a 26-body per-fn of coverage locators first. Distilled by
 `tools/distill_fill.py` from `logs/events.jsonl`.
 
 Sentences pinned here, with the fixed pre-schedule walk as the control:
@@ -31,6 +34,8 @@ from __future__ import annotations
 from pipeline_core.domain.fill_schedule import (
     TODAY_ORDER,
     RouteKind,
+    RouteLedgerRow,
+    RouteRun,
     RunOutcome,
     schedule,
 )
@@ -318,3 +323,41 @@ def test_the_3500465_per_fn_run_aims_at_completing_binaries_and_stays_open() -> 
         r for r in runs[RouteKind.SESSION]
         if r.target_tests == frozenset({"test_downcast_ref", "test_drop"}))
     assert run_is_unmeasurable(downcast_session, crashed_tests, crash_blamed_of(fix))
+
+
+def test_the_675471_fill_opens_the_served_pair_before_coverage_spine_refills() -> None:
+    """Need: the hop pair is the paying transaction. Fill 1 of
+    `675471-0f3105f2` recorded `file src/error.rs` first (never_served)
+    and the pair at slot 8 (served) while both aimed at the same three
+    leftovers; the per-fn of 26 coverage locators then classified ten
+    landings unreachable. Control: the fixture's own `schedule_runs`
+    order is that recorded ranking (novelty over need)."""
+    fix = load_fill("675471-0f3105f2_iter1")
+    recorded = [str(raw["label"]) for raw in fix["schedule_runs"]]
+    assert recorded[0] == "file src/error.rs"
+    assert recorded[6].startswith("per-fn")
+    assert recorded[7] == "pair src/error.rs::fmt + src/fmt.rs::debug"
+    assert fix["schedule_runs"][7]["reason"] == "served"
+    runs = _planned(fix)
+    pair = next(r for r in runs if r.kind is RouteKind.PAIR)
+    assert pair.label == recorded[7]
+    # The pair ranked served: a prior row on the same work under a
+    # different body identity (the class `_rank_of` maps to rank 2).
+    prior = RouteRun(
+        kind=pair.kind, label=pair.label, targets=pair.targets,
+        target_tests=pair.target_tests, files=pair.files, bodies_sha="old")
+    rows = [RouteLedgerRow(
+        kind=prior.kind, label=prior.label,
+        targets=tuple(sorted((f, fn) for f, fn in prior.targets)),
+        bodies_sha=prior.bodies_sha, oracle_fp="o",
+        outcome=RunOutcome.FLAT,
+        target_tests=tuple(sorted(prior.target_tests)))]
+    sched = schedule(runs, rows, oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered][0] == pair.label
+    assert sched.ordered[0].reason == "served"
+    waiting = {s.run.label for s in sched.ordered if pair.label in s.blocked_by}
+    assert "file src/error.rs" in waiting
+    assert any(lab.startswith("per-fn") for lab in waiting)
+    assert "impl src/error.rs" in waiting
+    # Negative control: the live schedule event's order.
+    assert recorded[0] != pair.label

@@ -95,6 +95,79 @@ def _pair(label: str, units: set[FnLocator], tests: set[str]) -> RouteRun:
                     files=tuple(sorted({u.file for u in units})), bodies_sha="pair")
 
 
+def _row(run: RouteRun, outcome: RunOutcome, delta: int = 0,
+         oracle: str = "o") -> RouteLedgerRow:
+    return RouteLedgerRow(
+        kind=run.kind, label=run.label,
+        targets=tuple(sorted((f, fn) for f, fn in run.targets)),
+        bodies_sha=run.bodies_sha, oracle_fp=oracle, outcome=outcome,
+        net_pass_delta=delta,
+        target_tests=tuple(sorted(run.target_tests)))
+
+
+def test_a_served_pair_precedes_never_served_runs_of_the_same_leftovers() -> None:
+    """Need: the hop pair is the paying transaction. A never-served per-fn
+    or file that shares its leftover tests waits, even when the pair is
+    already served. Control: without a pair those runs open first; a pair
+    that shares no leftover test does not move them."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    prior = RouteRun(
+        kind=pair.kind, label=pair.label, targets=pair.targets,
+        target_tests=pair.target_tests, files=pair.files, bodies_sha="old")
+    per_fn = RouteRun(
+        kind=RouteKind.PER_FN, label="per-fn 0 stub(s), 6 re-fill(s)",
+        targets=frozenset({_FMT, _STUB}), target_tests=frozenset({"t_fmt"}),
+        bodies_sha="p")
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    rows = [_row(prior, RunOutcome.FLAT, 0)]
+    sched = schedule([per_fn, file_run, pair], rows, oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered] == [
+        "pair src/x.rs::fmt + src/y.rs::new",
+        "file src/x.rs",
+        "per-fn 0 stub(s), 6 re-fill(s)",
+    ]
+    assert sched.ordered[0].reason == "served"
+    assert sched.ordered[1].blocked_by == (
+        "pair src/x.rs::fmt + src/y.rs::new",)
+    assert sched.ordered[2].blocked_by == (
+        "pair src/x.rs::fmt + src/y.rs::new",)
+    no_pair = schedule([per_fn, file_run], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in no_pair.ordered] == [
+        "file src/x.rs", "per-fn 0 stub(s), 6 re-fill(s)"]
+    other = _pair("pair src/y.rs::new + src/y.rs::next", {_NEW}, {"t_other"})
+    other_sched = schedule(
+        [per_fn, file_run, other], [_row(other, RunOutcome.FLAT, 0)],
+        oracle_fp="o", hollow={})
+    assert [s.run.label for s in other_sched.ordered][:2] == [
+        "file src/x.rs", "per-fn 0 stub(s), 6 re-fill(s)"]
+    assert not run_blocks(other, per_fn, {})
+    assert run_blocks(pair, per_fn, {})
+    assert run_blocks(pair, file_run, {})
+    assert not run_blocks(per_fn, pair, {})
+    budgeted = schedule(
+        [per_fn, file_run, pair], rows, oracle_fp="o", hollow={},
+        budget_minutes=60)
+    assert budgeted.ordered[0].run.label == pair.label
+    assert {s.run.label for s in budgeted.ordered} >= {pair.label, file_run.label}
+
+
+def test_a_stub_run_that_hollows_the_pairs_leftovers_still_goes_first() -> None:
+    """Blockers-first outranks the pair wait: a file that fills the stub
+    making the leftover hollow does not wait on the pair. Control: the
+    same file with no blocking stub does wait."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_hollow"})
+    holder = _file("file src/x.rs", {_STUB, _FMT}, {_STUB}, {"t_hollow"})
+    assert not run_blocks(pair, holder, _hollow())
+    sched = schedule([pair, holder], [], oracle_fp="o", hollow=_hollow())
+    assert [s.run.label for s in sched.ordered] == [
+        "file src/x.rs", "pair src/x.rs::fmt + src/y.rs::new"]
+    empty = _file("file src/x.rs", {_FMT}, set(), {"t_hollow"})
+    assert run_blocks(pair, empty, {})
+    filled = schedule([pair, empty], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in filled.ordered] == [
+        "pair src/x.rs::fmt + src/y.rs::new", "file src/x.rs"]
+
+
 def test_a_pair_sharing_a_sessions_units_goes_before_that_session() -> None:
     """Plan: the pair is the two-file transaction; a session that can write
     either member waits. Control: TODAY_ORDER puts the session first, and
@@ -128,16 +201,6 @@ def test_a_run_whose_tests_are_hollow_goes_after_the_run_holding_its_stub() -> N
     sched = schedule([consumer, holder], [], oracle_fp="o", hollow=_hollow())
     assert [s.run.label for s in sched.ordered] == ["file src/x.rs", "impl src/y.rs"]
     assert sched.ordered[1].blocked_by == ("file src/x.rs",)
-
-
-def _row(run: RouteRun, outcome: RunOutcome, delta: int = 0,
-         oracle: str = "o") -> RouteLedgerRow:
-    return RouteLedgerRow(
-        kind=run.kind, label=run.label,
-        targets=tuple(sorted((f, fn) for f, fn in run.targets)),
-        bodies_sha=run.bodies_sha, oracle_fp=oracle, outcome=outcome,
-        net_pass_delta=delta,
-        target_tests=tuple(sorted(run.target_tests)))
 
 
 def test_a_reverted_pair_retries_instead_of_deferring_under_a_budget() -> None:

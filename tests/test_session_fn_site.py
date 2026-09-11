@@ -358,6 +358,77 @@ def test_debug_dispatcher_that_already_calls_debug_does_not_need_display() -> No
     assert next(iter(pairs)).implementer.fn_name == "debug"
 
 
+# A format dispatcher whose body names no crate qualifier (chain collect
+# + std Display::fmt) used to be treated as self-contained, so the hop
+# recorded no pair and a FILE pull of the implementer's file admitted
+# nothing. Computed 2026-09-10 on run 511277-e4cf5ade: the filled Debug
+# dispatcher body had no Qual::debug / Qual::display, complements were
+# std-trait tokens, and src/fmt.rs::debug stayed dead.
+_DISP_REC_NO_QUAL = {
+    **_DISP_REC,
+    "body_text": (
+        "\n        let xs = self.chain().collect();\n"
+        "        core::fmt::Display::fmt(&xs[0], f)\n    "
+    ),
+}
+
+
+def test_dispatcher_that_names_no_crate_qualifier_pairs_the_inherent_trait_method() -> None:
+    """Plan: a format dispatcher whose body names no crate qualifier
+    still records a pair with the tree's inherent method named
+    trait.lower(), and slices_with_pair_hops puts that site in a
+    session that only held the dispatcher.
+
+    Negative control 1: the same dispatcher with no inherent method on
+    the tree records no pair (it IS the implementer — pre-fix).
+    Negative control 2: a Display leftover on the same tree pairs the
+    inherent display, not debug — trait.lower(), not a Debug branch."""
+    assert _format_impl_calls(
+        _DISP_REC_NO_QUAL["body_text"], ("fmt", "debug")) == {
+            ("Display", "fmt"), ("core", "fmt")}
+    assert ("Inner", "debug") not in _called_qualifier_complements(
+        "Debug", _DISP_REC_NO_QUAL["body_text"])
+    pairs: set[FormatterPair] = set()
+    frontier: dict = {}
+    sites: dict = {}
+    _attribute_format_only_test(
+        "t_wrap", _TSRC, _TSRC,
+        {"fmt": [_DISP_REC_NO_QUAL], "debug": [_IMPL_REC]},
+        frontier, sites, log=lambda _m: None, pairs_out=pairs)
+    assert len(pairs) == 1, pairs
+    pair = next(iter(pairs))
+    assert pair.implementer.fn_name == "debug"
+    assert pair.implementer.file == "src/i.rs"
+    assert pair.cross_file
+    owners = {"t_wrap": {canon_site(FnSite(
+        "src/w.rs", "fmt", "impl Debug for Wrapper < T >"))}}
+    hopped = slices_with_pair_hops(owners, [(pair.dispatcher, pair.implementer)])
+    assert pair.implementer in hopped["t_wrap"]
+    # Negative 1: no inherent method → no pair (pre-fix).
+    none: set[FormatterPair] = set()
+    _attribute_format_only_test(
+        "t_wrap", _TSRC, _TSRC,
+        {"fmt": [_DISP_REC_NO_QUAL]},
+        {}, {}, log=lambda _m: None, pairs_out=none)
+    assert none == set()
+    # Negative 2: Display leftover pairs display, not debug.
+    disp_src = (
+        "#[test]\nfn t_wrap() {\n    let w: Wrapper<u8> = make();\n"
+        "    let s = format!(\"{}\", w);\n    assert!(s.contains(\"x\"));\n}\n"
+    )
+    disp_fmt = {
+        **_DISP_REC,
+        "container": "impl Display for Wrapper < T >",
+        "body_text": _DISP_REC_NO_QUAL["body_text"],
+    }
+    d_pairs: set[FormatterPair] = set()
+    _attribute_format_only_test(
+        "t_wrap", disp_src, disp_src,
+        {"fmt": [disp_fmt], "debug": [_IMPL_REC], "display": [_DISPLAY_IMPL_REC]},
+        {}, {}, log=lambda _m: None, pairs_out=d_pairs)
+    assert {p.implementer.fn_name for p in d_pairs} == {"display"}, d_pairs
+
+
 def test_a_file_request_admits_the_uncalled_qualifier_method() -> None:
     """Plan: a FILE request for the file that holds Qual::debug admits
     that unit when an editable Debug dispatcher currently calls
@@ -391,9 +462,47 @@ def test_a_file_request_admits_the_uncalled_qualifier_method() -> None:
         file="src/w.rs", fn_name="fmt",
         container="impl Display for Wrapper < T >",
         body_text=_DISP_REC_VIA_DISPLAY["body_text"])
-    assert admit_format_siblings_for_file(
+    # Display leftover: inherent display is fair game; debug is not.
+    admitted_for_display = admit_format_siblings_for_file(
         "src/i.rs", {record_site(disp_for_display): disp_for_display},
-        tree) == ()
+        tree)
+    assert [r.fn_name for r in admitted_for_display] == ["display"]
+
+
+def test_a_file_request_admits_the_inherent_trait_method_when_dispatcher_names_no_qualifier() -> None:
+    """Plan: a FILE request for the file that holds the inherent
+    trait.lower() method admits that unit when an editable format
+    dispatcher named no crate qualifier. Control: the same request
+    admits display, not debug, for a Display dispatcher; a request for
+    a different file admits nothing."""
+    disp = FnRecord(
+        file=_DISP_REC_NO_QUAL["file"],
+        fn_name=_DISP_REC_NO_QUAL["fn_name"],
+        container=_DISP_REC_NO_QUAL["container"],
+        sig_text=_DISP_REC["sig_text"],
+        body_text=_DISP_REC_NO_QUAL["body_text"])
+    debug = FnRecord(
+        file=_IMPL_REC["file"], fn_name="debug",
+        container=_IMPL_REC["container"],
+        sig_text=_IMPL_REC["sig_text"],
+        body_text=_IMPL_REC["body_text"])
+    display = FnRecord(
+        file=_IMPL_REC["file"], fn_name="display",
+        container=_IMPL_REC["container"],
+        sig_text=_IMPL_REC["sig_text"],
+        body_text=_IMPL_REC["body_text"])
+    tree = (disp, debug, display)
+    admitted = admit_format_siblings_for_file(
+        "src/i.rs", {record_site(disp): disp}, tree)
+    assert [r.fn_name for r in admitted] == ["debug"]
+    assert admit_format_siblings_for_file("src/other.rs", {record_site(disp): disp}, tree) == ()
+    disp_for_display = FnRecord(
+        file="src/w.rs", fn_name="fmt",
+        container="impl Display for Wrapper < T >",
+        body_text=_DISP_REC_NO_QUAL["body_text"])
+    admitted_display = admit_format_siblings_for_file(
+        "src/i.rs", {record_site(disp_for_display): disp_for_display}, tree)
+    assert [r.fn_name for r in admitted_display] == ["display"]
 
 
 def test_live_filled_debug_dispatcher_that_calls_display_pairs_debug() -> None:
@@ -439,6 +548,59 @@ def test_live_filled_debug_dispatcher_that_calls_display_pairs_debug() -> None:
         pairs_out=pairs)
     impls = {(p.implementer.file, p.implementer.fn_name) for p in pairs}
     assert ("src/fmt.rs", "debug") in impls, impls
+
+
+def test_live_filled_debug_dispatcher_without_crate_qualifier_pairs_inherent_debug() -> None:
+    """Plan fixture, computed 2026-09-10 on the filled stable tree (not
+    described): `impl Debug for Error` body names no crate qualifier
+    (`::debug` / `::display` of a crate type absent); the hop records
+    the pair onto the inherent `debug` in src/fmt.rs.
+
+    Skip when the tree is absent or the dispatcher is back to a Qual
+    call — the unit tests above pin the mechanism either way. Negative
+    control of this shape is
+    `test_dispatcher_that_names_no_crate_qualifier_pairs_the_inherent_trait_method`
+    with the inherent method deleted."""
+    filled = (Path(__file__).resolve().parents[1]
+              / "tmp" / "anyhow" / ".skeleton-filled" / "stable")
+    if not _BIN.exists() or not filled.exists():
+        pytest.skip("filled stable tree or extractor binary missing")
+    recs = CliExtractor(_BIN).enumerate_fns(filled) or []
+    by_name: dict[str, list] = {}
+    disp = None
+    for r in recs:
+        by_name.setdefault(r.fn_name, []).append(r.to_dict())
+        cont = r.container or ""
+        if (r.fn_name == "fmt"
+                and impl_trait_name(cont) == "Debug"
+                and impl_self_type(cont) == "Error"):
+            disp = r
+    if disp is None:
+        pytest.skip("no Debug-for-Error dispatcher on the filled tree")
+    body = disp.body_text or ""
+    # Skip when the Qual hop already follows a crate self-type — that
+    # shape is `test_live_filled_debug_dispatcher_that_calls_display_pairs_debug`.
+    followed = False
+    for qual, method in (
+            _format_impl_calls(body, ("fmt", "debug"))
+            | _called_qualifier_complements("Debug", body)):
+        for irec in by_name.get(method, []):
+            if qual == (impl_self_type(str(irec.get("container") or "")) or ""):
+                followed = True
+    if followed:
+        pytest.skip("dispatcher currently names a crate qualifier")
+    tsrc = (
+        "use crate::Error;\n#[test]\nfn t_debug() {\n"
+        "    let e: Error = make();\n"
+        "    let s = format!(\"{:?}\", e);\n    assert!(s.contains(\"x\"));\n}\n"
+    )
+    pairs: set[FormatterPair] = set()
+    _attribute_format_only_test(
+        "t_debug", tsrc, tsrc, by_name, {}, {}, log=lambda _m: None,
+        pairs_out=pairs)
+    impls = {(p.implementer.file, p.implementer.fn_name, p.implementer.container)
+             for p in pairs}
+    assert any(f == "src/fmt.rs" and n == "debug" for f, n, _c in impls), impls
 
 
 # ---- locator-only attributions expand over the tree ------------------------

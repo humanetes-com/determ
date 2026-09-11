@@ -1,8 +1,29 @@
 # CLAUDE.md — conventions for code written in this repo
 
+## Current reading — replace this block when the 252 schedule line has been taken
+
+A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
+
+Focus: fill order (technical debt 252). The next fill must open the hop pair `src/error.rs::fmt + src/fmt.rs::debug`, not `file src/error.rs` or a coverage-spine per-fn of the three leftover Debug tests. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+
+Launch, after committing the uncommitted 252 batch if it is still dirty (`./commit.sh -a`, message in `last_commit_message.txt`): `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
+
 ## Replies to the user
 
 Chat replies are short and plain. No markdown: no headings, lists, tables, bold, fences, or backticks. Name files and symbols in ordinary words. Lead with the answer. Do not recap what the user can already see. This file and the code stay as they are.
+
+## After every implementation, name the launch command — never probe whether a pipeline is running
+
+A finished fix, mechanism, or gate is not finished until the reply names the exact command that starts the reading that can see it. The assistant does not pgrep, does not inspect live pids, does not curl a process list, and does not hedge with "if something is already running". The user owns the live process. `--y` on the launcher stops whatever is live; that is the stop, not a pre-check.
+
+Pick one lever from "Pick the restart lever by the phase your fix lives in" by the phase that executes the change, and write that command (pre_run.sh first — the stamp moved). The cases:
+
+- driver-half on the existing filled tree (dispatch, hop, attribution, charging, keep/revert, schedule, pair fill, session): `bash pre_run.sh` then `bash continue.sh --y --no-tail`. If that phase is already marked done in pipeline_state.md, `bash restart_from.sh task2a --force` instead (anyhow). Fills stay on disk.
+- construction of the tree (t1.5 layout, bake, strip, FR synthesis): `bash pre_run.sh` then `bash redo.sh --full --force`. A tree built by the old code cannot measure this class.
+- hardcrate recovery smoke: `bash pre_run.sh` then `bash run_hardcrate.sh`. Add `--from=STAGE` only when the fills in tmp/hardcrate are the state the reading needs.
+- stop only, no relaunch: `touch /tmp/pipeline_graceful_stop`.
+
+Never wrap any of these in timeout. `--no-tail` is required on continue.sh. The launch command is the last fact of the implementation reply, after last_commit_message.txt.
 
 ## What this file is FOR: breaking the plateau — an analysis is judged by whether the next iteration progresses
 
@@ -1183,6 +1204,8 @@ Every launch goes through `continue.sh`, so **`bash pre_run.sh` comes first, alw
 — `restart_from.sh` and `redo.sh` both `exec continue.sh`, which recomputes the
 stamp and exits 3 when it moved. Answer this before choosing: which phase executes
 the code I changed, and does validating it need a tree that has not seen it?
+Name that command in the implementation reply (previous section). Do not probe
+whether a pipeline is already running; `--y` is the stop.
 
 **Every launch is detached (`--no-tail`).** `continue.sh` already `nohup`s the
 pipeline; `--no-tail` makes the launcher exit instead of `tail -f`. A Cursor

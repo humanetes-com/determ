@@ -28,13 +28,20 @@ test, unit or crate name is an input:
   go later in the same fill). This is the producer-before-consumer rule the
   sweep applies when it defers blocked consumers, one level up. Within that,
   a run whose own tests are hollow because of a stub another run holds goes
-  after that run.
+  after that run. A hop pair is the same kind of blocker for every other run
+  that shares its leftover tests or members: the pair is the paying
+  two-file transaction, and a never-served file / impl / per-fn of units
+  those tests merely execute through is not a new try, it is a split of
+  that transaction (run ``675471-0f3105f2``, 2026-09-10: the pair sat at
+  served rank 2 while a never-served 26-body per-fn of coverage locators
+  opened first and classified every landing unreachable).
 - never-served before re-buys — a run with no ledger row on its identity (the
   route, the targets, the targets' bodies, the oracle, and for a session the
   tests it aims at) ranks ahead of one whose last identical try moved no
   verdict, which ranks ahead of one whose last identical try was reverted. A
   run whose last identical try PAID keeps the never-served rank. The service
-  order applies the same rule to units.
+  order applies the same rule to units. Novelty does not outrank a hop pair
+  that aims at the same leftovers.
 - budget follows payoff — shares are weights over the fill budget; a zero
   weight (a re-buy) is DEFERRED rather than run, unless every candidate is a
   re-buy or the run has been deferred `readmit_after` times already (the
@@ -226,20 +233,27 @@ def run_blocks(a: RouteRun, b: RouteRun,
                hollow: Mapping[str, frozenset[FnLocator]]) -> bool:
     """True when `a` must land before `b` can be judged.
 
-    A hop pair is the two-file transaction for its members. A session that
-    can write either member (or that aims at the same leftover tests)
-    waits: run ``19980-f9ea6adb`` (2026-09-10) opened the overlapping
-    session first, wrote both halves plus a hanging companion, peeled the
-    set apart, and ``PairRoute`` would have skipped once a session had
-    served either member. The pre-schedule walk still puts SESSION before
-    PAIR; this rule is the schedule's.
+    A hop pair is the two-file transaction for its members. Any other run
+    that can write either member, or that aims at the same leftover tests,
+    waits — unless that other run fills a stub which makes a leftover test
+    hollow, which is still blockers-first. Run ``19980-f9ea6adb``
+    (2026-09-10) opened the overlapping session first, wrote both halves
+    plus a hanging companion, peeled the set apart, and ``PairRoute``
+    would have skipped once a session had served either member. The same
+    split, one route down: run ``675471-0f3105f2`` opened a never-served
+    per-fn of coverage locators (and a never-served file of the dispatcher)
+    before the served pair, and every per-fn landing came back unreachable.
+    The pre-schedule walk still puts SESSION before PAIR; this rule is the
+    schedule's. Restricting the wait to SESSION left file / impl / per-fn
+    free to spend the fill on units the hop already said cannot pay.
 
     Otherwise: `b`'s own tests are hollow because of a stub `a` holds and
     `b` does not."""
     if a is b:
         return False
-    if (a.kind is RouteKind.PAIR and b.kind is RouteKind.SESSION
-            and (a.targets & b.targets or a.target_tests & b.target_tests)):
+    if (a.kind is RouteKind.PAIR and b.kind is not RouteKind.PAIR
+            and (a.targets & b.targets or a.target_tests & b.target_tests)
+            and not _blocking_stubs(b, hollow)):
         return True
     if not a.stubs_in_targets or not b.target_tests:
         return False

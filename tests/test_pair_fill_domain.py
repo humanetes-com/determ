@@ -9,7 +9,9 @@ import json
 from pathlib import Path
 
 from pipeline_core.domain.attribution import (
-    FailureFrontier, FormatterPair, pair_for_unit,
+    FailureFrontier,
+    FormatterPair,
+    pair_for_unit,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from pipeline_core.domain.pair_fill import (

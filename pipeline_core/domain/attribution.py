@@ -23,8 +23,10 @@ class FormatterPair(NamedTuple):
     Error::fmt` and `Display for Error::fmt` share a locator).
 
     Recorded whenever the hop follows a dispatcher's call to a crate
-    formatting implementer, in EITHER attribution direction. The pair is a
-    dispatch unit of its own when the two members live in different files:
+    formatting implementer, or — when the body named no crate qualifier —
+    the inherent method `trait.lower()` on the tree, in EITHER attribution
+    direction. The pair is a dispatch unit of its own when the two members
+    live in different files:
     the paying write can be co-dependent — a delegation arm in the
     dispatcher plus the section it delegates to in the implementer — and
     file-scoped fills judged independently are each rejected by the revert
