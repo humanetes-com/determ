@@ -34,7 +34,14 @@ test, unit or crate name is an input:
   those tests merely execute through is not a new try, it is a split of
   that transaction (run ``675471-0f3105f2``, 2026-09-10: the pair sat at
   served rank 2 while a never-served 26-body per-fn of coverage locators
-  opened first and classified every landing unreachable).
+  opened first and classified every landing unreachable). Those blocked
+  runs are deferred this fill (reason ``pair_wait``), not queued after
+  the pair with a share (run ``12120-78b991d3``, 2026-09-11: the pair
+  opened first and two coverage sessions, a per-fn, a file and an impl
+  of the same leftovers still sat in ordered). A leftover-aiming run
+  that writes coverage locators whose files are not files of the
+  attributed members it holds waits behind the attributed write of
+  those leftovers (reason ``coverage_split``).
 - never-served before re-buys — a run with no ledger row on its identity (the
   route, the targets, the targets' bodies, the oracle, and for a session the
   tests it aims at) ranks ahead of one whose last identical try moved no
@@ -50,7 +57,8 @@ test, unit or crate name is an input:
   fill's unspent budget; a run that produced nothing in its share stops
   claiming new units. No unit, turn or session in flight is interrupted.
 
-`budget_minutes = 0` means ORDER ONLY: no shares, nothing deferred.
+`budget_minutes = 0` means ORDER ONLY: no shares, no weight-zero deferral.
+pair_wait, coverage-split and kind_cap still defer at budget 0.
 
 Deliberately not here: any route's own preconditions (what a session may
 edit, which blocks the impl route covers), the keep contract applied to a
@@ -531,6 +539,33 @@ def _run_is_unmeasurable(
 run_is_unmeasurable = _run_is_unmeasurable
 
 
+def _is_coverage_split(
+    run: RouteRun,
+    attributed: Collection[FnLocator],
+) -> bool:
+    """True when this leftover-aiming run writes coverage locators that
+    are not the attributed write of those leftovers.
+
+    Empty ``attributed`` is not this class — every recorded fill fixture
+    that does not pass the snapshot keeps today's order. A run that names
+    no leftover test is not this class. Same-file extras on an attributed
+    member are that file's installable complement, not a split; extras
+    whose file is not a file of the attributed members this run holds
+    (a session that packed the coverage spine) are.
+    """
+    if not attributed or not run.target_tests:
+        return False
+    attr = frozenset(attributed)
+    extra = run.targets - attr
+    if not extra:
+        return False
+    attributed_here = run.targets & attr
+    if not attributed_here:
+        return True
+    attributed_files = {loc.file for loc in attributed_here}
+    return any(loc.file not in attributed_files for loc in extra)
+
+
 def schedule(
     runs: Sequence[RouteRun],
     rows: Iterable[RouteLedgerRow],
@@ -543,21 +578,26 @@ def schedule(
     unmeasurable_tests: Collection[str] = (),
     crash_blamed: Collection[FnLocator] = (),
     max_per_kind: Mapping[RouteKind, int] | None = None,
+    attributed: Collection[FnLocator] = (),
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
 
     Level 0 holds every run that fills a stub which makes a leftover test
-    hollow; level 1 the rest. Within a level a run goes after every run that
-    :func:`run_blocks` it (a stable topological order; a cycle falls back to
-    rank order for its members). Ties break on rank class, then the
-    caller's `today_order`, then the run's own sequence number.
+    hollow; level 1 the rest. Within a level a coverage-split (see
+    ``attributed``) sorts after an attributed write — that bit precedes
+    ledger rank, then the caller's `today_order`, then the run's own
+    sequence number. A run goes after every run that :func:`run_blocks`
+    it (a stable topological order; a cycle falls back to that sort for
+    its members). A hop-pair-blocked run is then deferred this fill
+    (reason ``pair_wait``), including at ``budget_minutes=0``.
 
     ``unmeasurable_tests`` / ``crash_blamed`` are optional; empty (the
     default) leaves every rank as the ledger would. A run whose every
     aimed test is unmeasurable and whose targets miss the crash-blamed
     set ranks as a flat re-buy (weight 0) even with no ledger row, so a
     positive budget defers it. ``budget_minutes=0`` still runs weight-zero
-    (order only).
+    (order only), except pair_wait / coverage-split / kind_cap which
+    defer at budget 0 the way kind_cap already did.
 
     ``max_per_kind`` caps how many runs of a route kind one fill opens, in
     schedule order: the runs beyond a kind's cap are DEFERRED (reason
@@ -567,6 +607,15 @@ def schedule(
     back for 4 h 18 min before the file and per-fn routes opened, so the
     sweep that reads the fill arrived five hours after the previous one.
     A cap of 0 or a missing kind means unbounded.
+
+    ``attributed`` is the locators leftover tests convict before
+    measured-owners admission. Empty (the default) skips coverage-split
+    marking. A leftover-aiming run whose extra targets live in a file
+    none of its attributed members occupy is a coverage-split: it sorts
+    after attributed writes and is deferred this fill (reason
+    ``coverage_split``) when a non-split run of the same leftovers is a
+    candidate. Same-file extras on an attributed member are that file's
+    installable complement, not a split.
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
@@ -580,6 +629,8 @@ def schedule(
         if r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
                              RunOutcome.UNMEASURED))
     order_index = {k: i for i, k in enumerate(today_order)}
+    attr = frozenset(attributed)
+    split_of: dict[str, bool] = {}
 
     ranked: list[tuple[RouteRun, int, str, int, int]] = []
     for run in runs:
@@ -588,11 +639,14 @@ def schedule(
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
             rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
         level = 0 if _blocking_stubs(run, hollow) else 1
+        split_of[run.key] = _is_coverage_split(run, attr)
         ranked.append((run, rank, reason, deferrals, level))
 
-    def _sort_key(item: tuple[RouteRun, int, str, int, int]) -> tuple[int, int, int, int]:
+    def _sort_key(item: tuple[RouteRun, int, str, int, int]
+                  ) -> tuple[int, int, int, int, int]:
         run, rank, _reason, _d, level = item
-        return (level, rank, order_index.get(run.kind, len(order_index)), run.seq)
+        return (level, int(split_of.get(run.key, False)), rank,
+                order_index.get(run.kind, len(order_index)), run.seq)
 
     ranked.sort(key=_sort_key)
 
@@ -628,10 +682,47 @@ def schedule(
             run=run, rank=rank, weight=weight, reason=reason, level=level,
             blocked_by=by))
 
+    # Pair-wait: a hop pair is this fill of its leftovers. A run it
+    # blocks is deferred (reason pair_wait, share 0), not queued with a
+    # share — the 12120-78b991d3 tail. Same path kind_cap already uses;
+    # also at budget 0 so order-only still defers the tail. Resolve by
+    # kind PAIR on the candidate runs, not by matching blocked_by labels.
+    # A stub run that hollows a leftover still opens (blockers-first;
+    # run_blocks already refuses to wait that run).
+    waiting: list[ScheduledRun] = []
+    pair_runs = [it[0] for it in ranked if it[0].kind is RouteKind.PAIR]
+    if pair_runs:
+        kept_pair: list[ScheduledRun] = []
+        for s in scheduled:
+            if (any(run_blocks(p, s.run, hollow) for p in pair_runs)
+                    and not _blocking_stubs(s.run, hollow)):
+                waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                       reason="pair_wait"))
+                continue
+            kept_pair.append(s)
+        scheduled = kept_pair
+
+    # Coverage-split deferral: a leftover-aiming run that writes coverage
+    # locators not in the attributed snapshot waits when a non-split write
+    # of the same leftovers is still a candidate. Empty attributed skips
+    # this entirely.
+    if attr:
+        kept_split: list[ScheduledRun] = []
+        non_split = [s for s in scheduled if not split_of.get(s.run.key, False)]
+        for s in scheduled:
+            if (split_of.get(s.run.key, False)
+                    and any(s.run.target_tests & o.run.target_tests
+                            for o in non_split)):
+                waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                       reason="coverage_split"))
+                continue
+            kept_split.append(s)
+        scheduled = kept_split
+
     # The per-kind cap, applied in schedule order so the runs the order put
     # first are the ones that open; the rest are deferred whatever the
     # budget says and are never-served candidates of the next fill.
-    capped: list[ScheduledRun] = []
+    capped: list[ScheduledRun] = list(waiting)
     if max_per_kind:
         opened: dict[RouteKind, int] = {}
         kept_sched: list[ScheduledRun] = []

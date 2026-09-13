@@ -103,6 +103,23 @@ def test_a_failing_test_absent_from_owners_still_gets_a_session() -> None:
     assert plan_slices(slices_with_pair_hops(today, [(_DISP, _RENDER)])) == []
 
 
+def test_a_paired_test_does_not_pack_coverage_into_a_session() -> None:
+    """A leftover that already has a hop pair does not union coverage
+    owners. The slice is the two hop members, not the spine. Control:
+    the same maps without paired_tests still include the spine."""
+    owners = {"t_fmt": {_DISP, _RENDER, _OTHER}}
+    units = {"t_fmt": {_DISP, _RENDER}}
+    pairs = [(_DISP, _RENDER)]
+    skipped = session_slices_for_failing(
+        {"t_fmt"}, owners=owners, units_by_test=units, pairs=pairs,
+        paired_tests={"t_fmt"})
+    assert skipped["t_fmt"] == frozenset({_DISP, _RENDER})
+    control = session_slices_for_failing(
+        {"t_fmt"}, owners=owners, units_by_test=units, pairs=pairs)
+    assert _OTHER in control["t_fmt"]
+    assert {_DISP, _RENDER} <= control["t_fmt"]
+
+
 def _records() -> dict[FnSite, FnRecord]:
     return {
         _DISP: FnRecord(file="src/lib.rs", fn_name="fmt",

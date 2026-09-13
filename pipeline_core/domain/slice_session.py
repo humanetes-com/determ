@@ -984,6 +984,7 @@ def session_slices_for_failing(
     owners: Mapping[str, Collection[FnSite]] | None = None,
     units_by_test: Mapping[str, Collection[FnSite]] | None = None,
     pairs: Iterable[tuple[FnSite, FnSite]] = (),
+    paired_tests: Collection[str] = (),
 ) -> dict[str, frozenset[FnSite]]:
     """Per-failing-test unit sets for the red-slice session.
 
@@ -994,13 +995,22 @@ def session_slices_for_failing(
     the owner map was ui with 0 units). Every failing name gets a
     slice — measured owners union attributed units — then the formatter
     pair hop. plan_slices still drops empty and hollow.
+
+    ``paired_tests`` are leftover names that already have a hop-pair
+    transaction. Those slices take attributed units only (then the hop);
+    they do not union coverage owners. Empty (the default) keeps every
+    existing call, including the coverage session that admitted an
+    unentered implementer.
     """
+    paired = {str(t).rsplit("::", 1)[-1] for t in paired_tests}
     raw: dict[str, set[FnSite]] = {}
     for item in failing:
         name = str(item)
         bare = name.rsplit("::", 1)[-1]
-        raw.setdefault(bare, set()).update(
-            _units_named(name, owners) | _units_named(name, units_by_test))
+        units = _units_named(name, units_by_test)
+        if bare not in paired:
+            units |= _units_named(name, owners)
+        raw.setdefault(bare, set()).update(units)
     return slices_with_pair_hops(raw, pairs)
 
 

@@ -1,12 +1,12 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when the 252 schedule line has been taken
+## Current reading — replace this block when the 253 schedule line has been taken
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: fill order (technical debt 252). The next fill must open the hop pair `src/error.rs::fmt + src/fmt.rs::debug`, not `file src/error.rs` or a coverage-spine per-fn of the three leftover Debug tests. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: fill order remainder (technical debt 253). 252's pair-first reading is taken on run `12120-78b991d3`. The next fill's `[phase-c/schedule]` line must open with the hop pair (or the attributed write) and must not then list a coverage session / file / per-fn of those leftovers as an ordered run with a share — those runs belong in deferred (`pair_wait` or `coverage_split`). Off-theory: `session[2 test(s), 29 unit(s)]` as run 2. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
-Launch, after committing the uncommitted 252 batch if it is still dirty (`./commit.sh -a`, message in `last_commit_message.txt`): `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
+Launch after the 253 levers ship: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 
 ## Replies to the user
 

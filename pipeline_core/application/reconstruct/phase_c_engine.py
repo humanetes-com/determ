@@ -19,7 +19,7 @@ import queue as _queue_mod
 import threading as _threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -296,6 +296,10 @@ class PhaseCFillEngine:
         # ranks a run whose every aimed test is in this set, and whose
         # targets miss crash_blamed, as a flat re-buy (weight 0).
         unmeasurable_tests: frozenset[str] = frozenset(),
+        # Locators leftover tests convict before owner-map admission
+        # (eligible plus hop-pair members). Empty skips coverage-split
+        # marking so a call that does not snapshot keeps today's order.
+        attributed: Collection[FnLocator] = (),
         # Per-unit blocker counts from the TDD driver (post-fill histogram
         # or the pre-dispatch deferral map). When set, stubs are ordered and
         # grouped by these ranks instead of leaf-name frequency, so a
@@ -522,6 +526,7 @@ class PhaseCFillEngine:
                 parallelism=self.config.parallelism,
                 unmeasurable_tests=unmeasurable_tests,
                 crash_blamed=crash_blamed or frozenset(),
+                attributed=frozenset(attributed),
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),
                 on_wave_kept=on_wave_kept))

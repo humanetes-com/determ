@@ -81,6 +81,12 @@ class FillExecutionDeps:
     #: ``max_per_kind``); the rest are deferred to the next fill. Empty =
     #: unbounded. The session cap is `SLICE_SESSION_MAX_PER_FILL`.
     max_per_kind: Mapping[RouteKind, int] = field(default_factory=dict)
+    #: Locators leftover tests convict before measured-owners admission
+    #: (eligible plus hop-pair members). Empty (the default) skips
+    #: coverage-split marking, so every recorded fill fixture's order is
+    #: unchanged by this argument. Snapshot before owner-map admission
+    #: or the spine locators become "attributed".
+    attributed: frozenset[FnLocator] = frozenset()
     #: Called once per wave, after the wave's route rows are flushed, with
     #: the units the wave's reports say they kept — and once more on the
     #: wave a graceful stop cut, before the stop propagates. The driver's
@@ -219,7 +225,8 @@ def execute_fill(
         readmit_after=deps.readmit_after,
         unmeasurable_tests=deps.unmeasurable_tests if deps.scheduled else (),
         crash_blamed=deps.crash_blamed if deps.scheduled else (),
-        max_per_kind=deps.max_per_kind if deps.scheduled else None)
+        max_per_kind=deps.max_per_kind if deps.scheduled else None,
+        attributed=deps.attributed if deps.scheduled else ())
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"

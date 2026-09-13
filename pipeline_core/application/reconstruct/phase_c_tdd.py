@@ -4490,6 +4490,11 @@ def run_phase_c_tdd(
         _paired_tests = frozenset(
             t for t, us in _units_for_owners.items()
             if us & _pair_locs)
+        # Snapshot before owner-map admission: spine locators the map
+        # would add are coverage, not the attributed write.
+        _leftover_bare = {bare_test_name(t) for t in cur_failed}
+        _attributed_locs = frozenset(_pair_locs).union(
+            *( _units_for_owners.get(_t, ()) for _t in _leftover_bare ))
         if _paired_tests:
             deps.log(
                 f"  {tag} [phase-c/dispatch] measured-owners: "
@@ -4592,7 +4597,8 @@ def run_phase_c_tdd(
                 cur_failed,
                 owners=_cov_owners,
                 units_by_test=_units_for_session,
-                pairs=((p.dispatcher, p.implementer) for p in _attr.pairs))
+                pairs=((p.dispatcher, p.implementer) for p in _attr.pairs),
+                paired_tests=_paired_tests)
         _before_svc = [k for k, _ in ordered]
         # The ranking reads the VERIFIED service view, not the fire's
         # inclusive `_served_at`: a floor stamp the route-scoped rule never
@@ -5370,6 +5376,7 @@ def run_phase_c_tdd(
                         bare_test_name(t) for t in cur_failed
                         if bare_test_name(t) not in {
                             bare_test_name(n) for _b, n in _f_pairs}),
+                    attributed=_attributed_locs,
                     dispatch_ranks=(
                         overlay_crash_on_ranks(_ranks, _crash_grades)
                         or None),

@@ -105,11 +105,7 @@ def _row(run: RouteRun, outcome: RunOutcome, delta: int = 0,
         target_tests=tuple(sorted(run.target_tests)))
 
 
-def test_a_served_pair_precedes_never_served_runs_of_the_same_leftovers() -> None:
-    """Need: the hop pair is the paying transaction. A never-served per-fn
-    or file that shares its leftover tests waits, even when the pair is
-    already served. Control: without a pair those runs open first; a pair
-    that shares no leftover test does not move them."""
+def _pair_blocked_inputs() -> tuple[RouteRun, RouteRun, RouteRun, list[RouteLedgerRow]]:
     pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
     prior = RouteRun(
         kind=pair.kind, label=pair.label, targets=pair.targets,
@@ -119,18 +115,22 @@ def test_a_served_pair_precedes_never_served_runs_of_the_same_leftovers() -> Non
         targets=frozenset({_FMT, _STUB}), target_tests=frozenset({"t_fmt"}),
         bodies_sha="p")
     file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
-    rows = [_row(prior, RunOutcome.FLAT, 0)]
+    return pair, per_fn, file_run, [_row(prior, RunOutcome.FLAT, 0)]
+
+
+def test_a_served_pair_precedes_never_served_runs_of_the_same_leftovers() -> None:
+    """252 control of pair_wait: the same inputs opened pair, then file,
+    then per-fn, and the budgeted case kept {pair, file} in ordered.
+    Live schedule() after pair_wait is
+    test_a_pair_blocked_run_is_deferred_this_fill."""
+    pair, per_fn, file_run, rows = _pair_blocked_inputs()
+    _252_ordered = [pair.label, file_run.label, per_fn.label]
     sched = schedule([per_fn, file_run, pair], rows, oracle_fp="o", hollow={})
-    assert [s.run.label for s in sched.ordered] == [
-        "pair src/x.rs::fmt + src/y.rs::new",
-        "file src/x.rs",
-        "per-fn 0 stub(s), 6 re-fill(s)",
-    ]
-    assert sched.ordered[0].reason == "served"
-    assert sched.ordered[1].blocked_by == (
-        "pair src/x.rs::fmt + src/y.rs::new",)
-    assert sched.ordered[2].blocked_by == (
-        "pair src/x.rs::fmt + src/y.rs::new",)
+    assert [s.run.label for s in sched.ordered] != _252_ordered
+    budgeted = schedule(
+        [per_fn, file_run, pair], rows, oracle_fp="o", hollow={},
+        budget_minutes=60)
+    assert not {pair.label, file_run.label} <= {s.run.label for s in budgeted.ordered}
     no_pair = schedule([per_fn, file_run], [], oracle_fp="o", hollow={})
     assert [s.run.label for s in no_pair.ordered] == [
         "file src/x.rs", "per-fn 0 stub(s), 6 re-fill(s)"]
@@ -144,11 +144,47 @@ def test_a_served_pair_precedes_never_served_runs_of_the_same_leftovers() -> Non
     assert run_blocks(pair, per_fn, {})
     assert run_blocks(pair, file_run, {})
     assert not run_blocks(per_fn, pair, {})
+
+
+def test_a_pair_blocked_run_is_deferred_this_fill() -> None:
+    """A hop pair is the fill; a run it blocks is deferred this fill
+    (pair_wait), not queued with a share. Also at budget 0. Control: the
+    252 order on the same inputs kept the file and per-fn in ordered
+    after the pair. A stub file that hollows the pair's leftovers still
+    opens first. A pair that shares no leftover does not defer them."""
+    pair, per_fn, file_run, rows = _pair_blocked_inputs()
+    _252_ordered = [pair.label, file_run.label, per_fn.label]
+    sched = schedule([per_fn, file_run, pair], rows, oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered] == [pair.label]
+    assert [s.run.label for s in sched.ordered] != _252_ordered
+    assert {s.run.label: s.reason for s in sched.deferred} == {
+        file_run.label: "pair_wait", per_fn.label: "pair_wait"}
+    assert all(s.deferred and s.share_minutes == 0.0 for s in sched.deferred)
+    zero = schedule([per_fn, file_run, pair], rows, oracle_fp="o", hollow={},
+                    budget_minutes=0)
+    assert [s.run.label for s in zero.ordered] == [pair.label]
+    assert {s.reason for s in zero.deferred} == {"pair_wait"}
     budgeted = schedule(
         [per_fn, file_run, pair], rows, oracle_fp="o", hollow={},
         budget_minutes=60)
-    assert budgeted.ordered[0].run.label == pair.label
-    assert {s.run.label for s in budgeted.ordered} >= {pair.label, file_run.label}
+    assert [s.run.label for s in budgeted.ordered] == [pair.label]
+    assert budgeted.ordered[0].share_minutes == 60.0
+    assert {s.reason for s in budgeted.deferred} == {"pair_wait"}
+    holder = _file("file src/x.rs", {_STUB, _FMT}, {_STUB}, {"t_hollow"})
+    hollow_pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW},
+                        {"t_hollow"})
+    stub_first = schedule([hollow_pair, holder], [], oracle_fp="o",
+                          hollow=_hollow())
+    assert [s.run.label for s in stub_first.ordered] == [
+        holder.label, hollow_pair.label]
+    assert not stub_first.deferred
+    other = _pair("pair src/y.rs::new + src/y.rs::next", {_NEW}, {"t_other"})
+    other_sched = schedule(
+        [per_fn, file_run, other], [_row(other, RunOutcome.FLAT, 0)],
+        oracle_fp="o", hollow={})
+    assert [s.run.label for s in other_sched.ordered][:2] == [
+        file_run.label, per_fn.label]
+    assert not other_sched.deferred
 
 
 def test_a_stub_run_that_hollows_the_pairs_leftovers_still_goes_first() -> None:
@@ -165,7 +201,9 @@ def test_a_stub_run_that_hollows_the_pairs_leftovers_still_goes_first() -> None:
     assert run_blocks(pair, empty, {})
     filled = schedule([pair, empty], [], oracle_fp="o", hollow={})
     assert [s.run.label for s in filled.ordered] == [
-        "pair src/x.rs::fmt + src/y.rs::new", "file src/x.rs"]
+        "pair src/x.rs::fmt + src/y.rs::new"]
+    assert [s.run.label for s in filled.deferred] == ["file src/x.rs"]
+    assert filled.deferred[0].reason == "pair_wait"
 
 
 def test_a_pair_sharing_a_sessions_units_goes_before_that_session() -> None:
@@ -178,8 +216,10 @@ def test_a_pair_sharing_a_sessions_units_goes_before_that_session() -> None:
     assert not run_blocks(session, pair, {})
     sched = schedule([session, pair], [], oracle_fp="o", hollow={})
     assert [s.run.label for s in sched.ordered] == [
-        "pair src/x.rs::fmt + src/y.rs::new", "session[1 test(s)]"]
-    assert sched.ordered[1].blocked_by == (
+        "pair src/x.rs::fmt + src/y.rs::new"]
+    assert [s.run.label for s in sched.deferred] == ["session[1 test(s)]"]
+    assert sched.deferred[0].reason == "pair_wait"
+    assert sched.deferred[0].blocked_by == (
         "pair src/x.rs::fmt + src/y.rs::new",)
     fixed = sorted([session, pair], key=lambda r: TODAY_ORDER.index(r.kind))
     assert fixed[0].kind is RouteKind.SESSION
@@ -189,6 +229,80 @@ def test_a_pair_sharing_a_sessions_units_goes_before_that_session() -> None:
     sched2 = schedule([session_fmt, other], [], oracle_fp="o", hollow={})
     assert [s.run.label for s in sched2.ordered] == [
         "session[1 test(s)]", "pair src/y.rs::new + src/y.rs::next"]
+
+
+def test_a_flat_pair_is_readmitted_when_pair_wait_empties_the_rest() -> None:
+    """A FLAT pair is still a rebuy. Today a FLAT pair plus never-served
+    sessions of the same leftovers opened the sessions. After pair_wait
+    the sessions leave scheduled; the pair is the only remaining
+    candidate; rebuy_readmitted opens the pair. Control: a FLAT pair
+    next to a session of different leftovers still defers as rebuy_flat.
+    Do not also flip pair FLAT to never_served."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    session = _session("session[1 test(s)]", {"t_fmt"}, {_FMT, _NEW})
+    rows = [_row(pair, RunOutcome.FLAT, 0)]
+    _pre_pair_wait_ordered = [session.label]
+    sched = schedule([pair, session], rows, oracle_fp="o", hollow={},
+                     budget_minutes=60)
+    assert [s.run.label for s in sched.ordered] == [pair.label]
+    assert [s.run.label for s in sched.ordered] != _pre_pair_wait_ordered
+    assert sched.ordered[0].reason == "rebuy_readmitted"
+    assert [s.run.label for s in sched.deferred] == [session.label]
+    assert sched.deferred[0].reason == "pair_wait"
+    other = _session("session[1 test(s)]", {"t_other"}, {_STUB})
+    mixed = schedule([pair, other], rows, oracle_fp="o", hollow={},
+                     budget_minutes=60)
+    assert [s.run.label for s in mixed.ordered] == [other.label]
+    assert mixed.deferred[0].run.label == pair.label
+    assert mixed.deferred[0].reason == "rebuy_flat"
+
+
+def test_an_attributed_write_defers_a_coverage_session_when_there_is_no_pair() -> None:
+    """Served file of an attributed unit; never-served session of that
+    unit plus a coverage locator in another file. With attributed={the
+    unit}, the file opens and the session is deferred coverage_split.
+    Control: today's schedule (no attributed) opens the session first.
+    A coverage-only run with no attributed write in the candidate set
+    still opens."""
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    session = _session("session[1 test(s)]", {"t_fmt"}, {_FMT, _NEW})
+    rows = [_row(file_run, RunOutcome.FLAT, 0)]
+    control = schedule([file_run, session], rows, oracle_fp="o", hollow={})
+    assert [s.run.label for s in control.ordered] == [
+        session.label, file_run.label]
+    assert not control.deferred
+    sched = schedule([file_run, session], rows, oracle_fp="o", hollow={},
+                     attributed={_FMT}, budget_minutes=60)
+    assert [s.run.label for s in sched.ordered] == [file_run.label]
+    assert [s.run.label for s in sched.deferred] == [session.label]
+    assert sched.deferred[0].reason == "coverage_split"
+    zero = schedule([file_run, session], rows, oracle_fp="o", hollow={},
+                    attributed={_FMT})
+    assert [s.run.label for s in zero.ordered] == [file_run.label]
+    assert zero.deferred[0].reason == "coverage_split"
+    only_session = schedule([session], [], oracle_fp="o", hollow={},
+                            attributed={_FMT})
+    assert [s.run.label for s in only_session.ordered] == [session.label]
+    assert not only_session.deferred
+
+
+def test_same_file_extras_are_the_installable_complement_not_a_split() -> None:
+    """A file of {attributed unit, same-file other} is not a coverage-split;
+    a session of {attributed unit, other-file spine} is. Control: the
+    written targets-minus-attributed-nonempty predicate would mark the
+    file a split too and, with no non-split attributed write, open the
+    session first."""
+    file_run = _file("file src/x.rs", {_FMT, _STUB}, set(), {"t_fmt"})
+    session = _session("session[1 test(s)]", {"t_fmt"}, {_FMT, _NEW})
+    naive_file_is_split = bool(file_run.targets - {_FMT}) and bool(file_run.target_tests)
+    assert naive_file_is_split
+    control = schedule([file_run, session], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in control.ordered][0] == session.label
+    sched = schedule([file_run, session], [], oracle_fp="o", hollow={},
+                     attributed={_FMT}, budget_minutes=60)
+    assert [s.run.label for s in sched.ordered] == [file_run.label]
+    assert [s.run.label for s in sched.deferred] == [session.label]
+    assert sched.deferred[0].reason == "coverage_split"
 
 
 def test_a_run_whose_tests_are_hollow_goes_after_the_run_holding_its_stub() -> None:

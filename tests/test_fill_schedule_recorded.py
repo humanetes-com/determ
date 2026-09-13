@@ -12,7 +12,10 @@ codes=['E0596']`) and kept on attempt 2 (`FILE FILLED 14 fn(s)`) and was
 rowed `REVERTED … kept 0, reverted 11`.
 `675471-0f3105f2_iter1.json` is fill 1 of the 2026-09-10 18:58 UTC run:
 three leftover format tests, a hop pair at served rank 8, a never-served
-file and a 26-body per-fn of coverage locators first. Distilled by
+file and a 26-body per-fn of coverage locators first.
+`12120-78b991d3_iter1.json` is fill 1 of the 2026-09-11 12:42 UTC run:
+the hop pair opened first and the same leftovers' two sessions, per-fn,
+file and impl still sat in ordered with a share. Distilled by
 `tools/distill_fill.py` from `logs/events.jsonl`.
 
 Sentences pinned here, with the fixed pre-schedule walk as the control:
@@ -353,11 +356,39 @@ def test_the_675471_fill_opens_the_served_pair_before_coverage_spine_refills() -
         outcome=RunOutcome.FLAT,
         target_tests=tuple(sorted(prior.target_tests)))]
     sched = schedule(runs, rows, oracle_fp="o", hollow={})
-    assert [s.run.label for s in sched.ordered][0] == pair.label
+    assert [s.run.label for s in sched.ordered] == [pair.label]
     assert sched.ordered[0].reason == "served"
-    waiting = {s.run.label for s in sched.ordered if pair.label in s.blocked_by}
-    assert "file src/error.rs" in waiting
-    assert any(lab.startswith("per-fn") for lab in waiting)
-    assert "impl src/error.rs" in waiting
-    # Negative control: the live schedule event's order.
+    waiting = {s.run.label: s.reason for s in sched.deferred}
+    assert waiting.get("file src/error.rs") == "pair_wait"
+    assert any(lab.startswith("per-fn") and reason == "pair_wait"
+               for lab, reason in waiting.items())
+    assert waiting.get("impl src/error.rs") == "pair_wait"
+    empty_attr = schedule(runs, rows, oracle_fp="o", hollow={}, attributed=())
+    assert [s.run.label for s in empty_attr.ordered] == [s.run.label for s in sched.ordered]
+    assert [s.reason for s in empty_attr.deferred] == [s.reason for s in sched.deferred]
+    # Negative control: the live schedule event's order (novelty over need).
     assert recorded[0] != pair.label
+
+
+def test_the_12120_fill_opens_only_the_pair() -> None:
+    """Fill 1 of `12120-78b991d3` recorded the hop pair first, then two
+    coverage sessions, a per-fn, a file and an impl of the same leftovers
+    — all in ordered with a share. With pair_wait, ordered is the pair
+    and the other five are deferred. Do not hand-make the six labels;
+    the fixture is the event."""
+    fix = load_fill("12120-78b991d3_iter1")
+    recorded = [str(raw["label"]) for raw in fix["schedule_runs"]]
+    assert recorded[0] == "pair src/error.rs::fmt + src/fmt.rs::debug"
+    assert recorded[1].startswith("session[2 test(s), 29 unit(s)]")
+    assert len(recorded) == 6
+    runs = _planned(fix)
+    assert {r.label for r in runs} == set(recorded)
+    sched = schedule(runs, ledger_of(fix), oracle_fp="o", hollow=hollow_of(fix),
+                     budget_minutes=200)
+    assert [s.run.label for s in sched.ordered] == [recorded[0]]
+    assert {s.run.label for s in sched.deferred} == set(recorded[1:])
+    assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
+               for s in sched.deferred)
+    assert sched.ordered[0].share_minutes == 200.0
+    # Negative control: the live schedule event's order.
+    assert recorded[1:] != []
