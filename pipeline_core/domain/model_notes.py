@@ -1141,9 +1141,7 @@ def _note_recommends(low: str, token: str) -> bool:
     if token.startswith("*"):
         # Type prescriptions: "receives a `*const T`", "treat this as *const".
         # "do not pass `*const T`" is the warning-against shape.
-        if "do not" in low or "don't" in low:
-            return False
-        return True
+        return not ("do not" in low or "don't" in low)
     return (f"use {token}" in low or f"use `{token}" in low
             or f"always use {token}" in low or f"{token}()" in low
             or f"{token}(),' " in low or f"::{token}()" in low)
