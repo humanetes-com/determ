@@ -1,10 +1,10 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when the pair prompt carries the crash verdict
+## Current reading — replace this block when the pair prompt carries the crash diagnosis
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: the hop-pair fill of the three leftover format tests. Fill order is taken on run `22062-a20ae3a2` (fills 1–6 ordered only the pair; coverage deferred pair_wait). The plateau after that line was wrong body: every pair fill crash-reverted because the crash diagnosis was retired as contradicts_target (removal verb's object was the pointer-as-value use; the pinned word sat in the causal tail) and LAST_ERROR did not carry the crash preview. The next fill's pair prompt must contain LAST_ERROR with CRASH or an honoured retrospective_guidance. Off-theory: a ~94518 char pair prompt with empty LAST_ERROR and empty RETROSPECTIVE_GUIDANCE, then the same five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: the hop-pair fill of the three leftover format tests. LAST_ERROR with CRASH is taken (run `106897-f7b6fb77`, every pair prompt). The plateau after that was still empty RETROSPECTIVE_GUIDANCE: rounds 9/10/14 retired as contradicts_target (pin word as a modifier of pointer/address/object; relative clause was not only `that caused`), and round 15 (no removal verb; use as_ptr instead of by_ref) retired as layout_contradicted with no log line (prose named ErrorImpl, claimed self.inner, Error is in lib.rs, pair halves are error.rs+fmt.rs). The next fill's pair prompt must contain an honoured RETROSPECTIVE_GUIDANCE that names the pointer/by_ref diagnosis. Off-theory: empty RETROSPECTIVE_GUIDANCE, or retro-retired contradicts_target / layout_contradicted, then the same five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 

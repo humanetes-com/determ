@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -422,7 +422,17 @@ def judge_note_against_layout(
     names none that this file declares, ``anchor_types`` (the self type of the
     impl the text was earned on) supplies it instead — without that fallback,
     text like "change the body to ``self._object.provide(request)``" carries a
-    field claim no sieve can place, and stays injected forever."""
+    field claim no sieve can place, and stays injected forever. When the
+    prose names at least one of ``anchor_types``, the remaining anchors
+    join the vocabulary: a two-member transaction whose prose names one
+    half and claims a field of the other is about those members, not a lie
+    about the named half (run `106897-f7b6fb77` fill 8: named ErrorImpl,
+    claimed `self.inner` of Error, retired as layout_contradicted with no
+    log line). A named type outside the anchors is still judged only
+    against what it names — the sibling-struct bias of
+    `test_anchor_is_a_fallback_not_an_override`. A leftover claim while a
+    self type is not declared in this file is unanchored (no evidence),
+    not contradicted."""
     if not note or not file_text:
         return LayoutJudgement.UNANCHORED
     cache = {} if cache is None else cache
@@ -445,7 +455,10 @@ def judge_note_against_layout(
         f = fields_of(tok.split("<", 1)[0])
         if f is not None:
             named[tok.split("<", 1)[0]] = f
-    if not named:
+    # Complete the unit's vocabulary when the prose names at least one of
+    # its self types. A named type outside the anchors still does not
+    # pick up the unit's fields (the sibling-struct bias).
+    if not named or (frozenset(named) & anchor_types):
         for anchor in anchor_types:
             f = fields_of(anchor)
             if f is not None:
@@ -453,7 +466,16 @@ def judge_note_against_layout(
     if not named:
         return LayoutJudgement.UNANCHORED
     known: frozenset[str] = frozenset().union(*named.values())
-    if any(c not in known for c in _field_claims(note, set(named))):
+    leftover = [c for c in _field_claims(note, set(named)) if c not in known]
+    if leftover:
+        # An unresolved self type is not in this file text — the leftover
+        # claim may be a field of that type. `struct_fields` already treats
+        # absence as no evidence; contradicting here is a lie about the
+        # named in-file type (run `106897-f7b6fb77` fill 8: Error lives in
+        # lib.rs, the pair's halves are error.rs+fmt.rs, `self.inner` was
+        # retired as a lie about ErrorImpl).
+        if any(fields_of(a) is None for a in anchor_types):
+            return LayoutJudgement.UNANCHORED
         return LayoutJudgement.CONTRADICTED
     return LayoutJudgement.CONSISTENT
 
@@ -475,10 +497,13 @@ def layout_contradicted_notes(
     Bias to retire: claims inside WRONG-example fragments count too — losing
     a true-but-redundant warning is cheap (the struct definition is already
     visible in the prompt), keeping a false recommendation poisons every
-    subsequent attempt. Same bias accepted for the anchor fallback: guidance
-    that names a sibling struct while claiming a field of its OWN type is
-    retired (its claim is judged against the named struct), because a wrong
-    retirement costs a few attempts and a wrong retention cost a plateau."""
+    subsequent attempt. A named type outside ``anchor_types`` is still
+    judged only against what it names. Named types that intersect the
+    anchors take the rest of the anchors into the vocabulary, so a
+    two-member write that names one half and claims a field of the other
+    is not retired as a lie about the named half. A leftover claim while
+    a self type is not declared in this file is unanchored, not
+    contradicted."""
     if not notes or not file_text:
         return []
     cache: dict[str, frozenset[str] | None] = {}
@@ -513,6 +538,28 @@ def layout_safe_guidance(
     """``guidance`` unless it contradicts the current layout, else ``""``."""
     return "" if guidance_contradicts_layout(
         guidance, file_text, anchor_types=anchor_types) else guidance
+
+
+def src_text_declaring(src_dir: Path, type_names: Iterable[str]) -> str:
+    """Concatenate every ``.rs`` file under ``src_dir`` that declares one of
+    ``type_names`` as a struct. Empty names or a missing dir yield "".
+
+    A pair's halves are the files it writes; a member's self type may be
+    declared in a third file (Error in lib.rs, the Debug impl in error.rs).
+    Judging the pair only against the halves treats a field of that type
+    as a lie about the in-file implementer."""
+    names = frozenset(n for n in type_names if n)
+    if not names or not src_dir.is_dir():
+        return ""
+    parts: list[str] = []
+    for path in sorted(src_dir.rglob("*.rs")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if any(struct_fields(text, n) is not None for n in names):
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def render_note_bullet(note: str) -> str:

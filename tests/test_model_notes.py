@@ -13,6 +13,7 @@ from pipeline_core.domain.model_notes import (
     preserve_model_notes,
     render_with_notes,
     slice_model_notes,
+    src_text_declaring,
     struct_fields,
 )
 
@@ -255,12 +256,73 @@ def test_anchor_type_judges_prose_that_names_no_struct() -> None:
 
 def test_anchor_is_a_fallback_not_an_override() -> None:
     # Prose that DOES name a declared struct is judged against that struct;
-    # the anchor never widens the vocabulary (accepted bias: guidance about
-    # its own type while naming a sibling is retired — a wrong retirement
-    # costs attempts, a wrong retention cost a plateau).
+    # an anchor that is not one of the named types never widens the
+    # vocabulary (accepted bias: guidance about a sibling type while
+    # claiming a field of the unit is retired — a wrong retirement costs
+    # attempts, a wrong retention cost a plateau).
     g = "ErrorImpl is the erased payload; call `self.object_drop` on it."
     assert layout_contradicted_notes(
         [g], AUTHORED_LAYOUT, anchor_types=frozenset({"ErrorVTable"})) == [g]
+
+
+def test_anchors_complete_the_vocabulary_when_the_prose_names_a_unit_type() -> None:
+    # A two-type transaction: the prose names one member's type and claims
+    # a field of the other. Pre-fix the named type was the only vocabulary
+    # and the lesson was retired as layout_contradicted (run
+    # `106897-f7b6fb77` fill 8). Negative control: the implementer alone
+    # still has no `inner`.
+    layout = """
+pub struct Error {
+    inner: Own<ErrorImpl>,
+}
+pub(crate) struct ErrorImpl<E = ()> {
+    vtable: &'static ErrorVTable,
+    backtrace: Option<Backtrace>,
+    _object: E,
+}
+"""
+    g = ("use `self.inner.as_ptr()` instead of `self.inner.by_ref()`, and "
+         "inside ErrorImpl::debug treat this as a raw pointer")
+    assert layout_contradicted_notes(
+        [g], layout, anchor_types=frozenset({"ErrorImpl"})) == [g]
+    assert layout_contradicted_notes(
+        [g], layout, anchor_types=frozenset({"Error", "ErrorImpl"})) == []
+
+
+def test_a_leftover_claim_is_kept_when_a_self_type_is_not_in_the_file() -> None:
+    # The pair writes error.rs + fmt.rs; Error is declared in lib.rs. The
+    # leftover `self.inner` is a field of the missing type, not a lie about
+    # ErrorImpl. Negative control: with only the in-file type as an anchor
+    # there is no missing self type, so the claim is still a contradiction.
+    impl_only = """
+pub(crate) struct ErrorImpl<E = ()> {
+    vtable: &'static ErrorVTable,
+    backtrace: Option<Backtrace>,
+    _object: E,
+}
+"""
+    g = ("use `self.inner.as_ptr()` instead of `self.inner.by_ref()`, and "
+         "inside ErrorImpl::debug treat this as a raw pointer")
+    assert layout_contradicted_notes(
+        [g], impl_only, anchor_types=frozenset({"ErrorImpl"})) == [g]
+    assert layout_contradicted_notes(
+        [g], impl_only, anchor_types=frozenset({"Error", "ErrorImpl"})) == []
+
+
+def test_src_text_declaring_concatenates_files_that_hold_the_structs(
+        tmp_path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text("pub struct Error { inner: u8 }\n")
+    (src / "fmt.rs").write_text("pub fn debug() {}\n")
+    (src / "error.rs").write_text(
+        "pub(crate) struct ErrorImpl { vtable: u8 }\n")
+    text = src_text_declaring(src, {"Error", "ErrorImpl"})
+    assert "pub struct Error" in text
+    assert "struct ErrorImpl" in text
+    assert "pub fn debug" not in text
+    assert src_text_declaring(src, set()) == ""
+    assert src_text_declaring(tmp_path / "missing", {"Error"}) == ""
 
 
 def test_method_calls_are_not_field_claims() -> None:

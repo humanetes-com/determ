@@ -170,6 +170,7 @@ from pipeline_core.domain.llm_output import (
     reply_audit,
 )
 from pipeline_core.domain.model_defaults import resolve_route_order
+from pipeline_core.domain.model_notes import src_text_declaring
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -4225,13 +4226,21 @@ def prepare_impl_fill(
         # re-judges the reddened tests), and `joint_body_sha` expires it the
         # moment any route lands a different body in either member.
         _halves_text = "\n".join(_htxt for _b, _htxt, _hwc in _half_ctx)
+        _pair_anchors = (
+            anchor_types_for_container(pd.dispatcher_block.container)
+            | anchor_types_for_container(pd.implementer_block.container))
+        # A member's self type may be declared in a file the pair does not
+        # write (Error in lib.rs, the Debug impl in error.rs). Without that
+        # declaration the sieve treats a field of the missing type as a lie
+        # about the in-file implementer.
+        _decl = src_text_declaring(target_src_dir, _pair_anchors)
+        if _decl:
+            _halves_text = _halves_text + "\n" + _decl
         _pair_answers = ConvictionEvidence(frozenset(
             t for loc in _pair_locs for t in _frontier_tests.tests_for(loc)))
         _pair_verdict = screen_guidance(
             _pair_rec, _halves_text, evidence=_pair_answers,
-            anchor_types=(
-                anchor_types_for_container(pd.dispatcher_block.container)
-                | anchor_types_for_container(pd.implementer_block.container)),
+            anchor_types=_pair_anchors,
             cluster=cluster_name,
             cfg_dead=(_cfg_dead_fns(pd.dispatcher_block.file)
                       | _cfg_dead_fns(pd.implementer_block.file)),

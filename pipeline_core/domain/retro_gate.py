@@ -614,6 +614,11 @@ def prescription_sacrifices_tests(
 # re-judges live when a caller passes `pins`, so a record stored before the
 # stamp existed is screened too.
 CONTRADICTS_TARGET = "contradicts_target"
+# `GuidanceScreening.retired_by` when `layout_safe_guidance` emptied the
+# text. Run `106897-f7b6fb77` fill 8 retired a pair crash diagnosis this
+# way and printed no line — the next fill looked as if the unit had no
+# record.
+LAYOUT_CONTRADICTED = "layout_contradicted"
 
 # Words a pinned literal can carry that name nothing: they occur in almost
 # any sentence of guidance, so a removal sentence carrying one would fire on
@@ -667,14 +672,24 @@ _REMOVAL_MARKER = re.compile(
     re.IGNORECASE)
 # Cuts the object of a remove/drop/omit verb off from the reason that
 # follows. A crash diagnosis names the pinned field as the thing the
-# bogus pointer was used to format ("this removes the invalid
-# pointer-as-value use that caused the segfault and the out-of-range
-# backtrace formatting") — whole-sentence overlap with "backtrace"
-# retired that lesson on run `22062-a20ae3a2` rounds 2–6 while every
-# pair fill crash-reverted. "Caused by" is a pinned literal, not this
-# tail: the tail is `that caused` / `which caused` / `because`.
-_CAUSAL_TAIL = re.compile(
-    r"\b(?:that|which)\s+caused\b|\bbecause\b", re.IGNORECASE)
+# bogus pointer was used to format — whole-sentence overlap with a pin
+# word retired those lessons while every pair fill crash-reverted
+# (run `22062-a20ae3a2` rounds 2–6 "that caused"; run `106897-f7b6fb77`
+# rounds 9/10/14 "that triggered" / "that was being chased" / "that
+# corrupts"). The tail is any relative clause (`that`/`which` + a word)
+# or `because`, not only `that caused`. "Caused by" is a pinned literal:
+# it has no `that`/`which` in front, so it stays in the object.
+_RELATIVE_CLAUSE = re.compile(
+    r"\b(?:that|which)\s+\w+\b|\bbecause\b", re.IGNORECASE)
+# A pin word used as a modifier of a runtime object (pointer, address,
+# handle, object, deref, slice) is naming the corrupted value, not
+# forbidding the printed observable. "removes the garbage backtrace
+# pointer" (run `106897-f7b6fb77` round 9) is that shape; "drop the
+# backtrace emission" / "with no backtrace" still hits because the
+# following word is not in this set.
+_RUNTIME_OBJECT_NOUN = frozenset({
+    "pointer", "address", "handle", "object", "deref", "slice",
+})
 # A sentence boundary: a newline, a `;`, or a `.` followed by whitespace or
 # the end of the text. The whitespace requirement is what keeps
 # `self.chain().collect()`, `src/error.rs::fmt` and `core::fmt::Debug::fmt`
@@ -726,6 +741,23 @@ def removal_sentence(guidance: str) -> str:
                  if _REMOVAL_MARKER.search(s)), "")
 
 
+def _removal_object_hits_pin(span: str, words: frozenset[str]) -> bool:
+    """True when a pin word in ``span`` is the thing being removed, not a
+    modifier of a runtime object (``_RUNTIME_OBJECT_NOUN``)."""
+    tokens = list(_WORD.finditer(span))
+    for i, m in enumerate(tokens):
+        low = m.group(0).lower()
+        if low not in words:
+            continue
+        if i + 1 < len(tokens):
+            nxt = tokens[i + 1].group(0).lower()
+            between = span[m.end():tokens[i + 1].start()]
+            if nxt in _RUNTIME_OBJECT_NOUN and re.fullmatch(r"[\s/`']*", between):
+                continue
+        return True
+    return False
+
+
 def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
     """Whether ``guidance`` instructs the next attempt to remove an
     observable that ``pins`` names: some sentence of it carries a removal
@@ -737,12 +769,14 @@ def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
     never meet. For a negated emission verb (`must not emit`, `never
     print`) the object is the whole sentence: that verb's object is
     everything it forbids printing. For remove/drop/omit/without the
-    object is the text after the marker, cut at a causal tail (`that
-    caused` / `which caused` / `because`) so a crash diagnosis that
-    removes the invalid pointer-as-value use *because* it garbled a
-    pinned field is not read as forbidding that field. Empty
-    ``guidance`` or empty ``pins`` is False: nothing to judge, or
-    nothing to judge against.
+    object is the text after the marker, cut at a relative clause
+    (`that`/`which` + a word, or `because`) so a crash diagnosis that
+    removes a pointer-as-value use *because* it garbled a pinned field
+    is not read as forbidding that field; a pin word that then remains
+    as a modifier of a runtime object (pointer, address, handle) is
+    still the corrupted value, not the emission. Empty ``guidance`` or
+    empty ``pins`` is False: nothing to judge, or nothing to judge
+    against.
 
     Pure text against text: no record, no unit, no test name. The same
     predicate fires for any crate whose retrospective prescribes away a
@@ -758,12 +792,14 @@ def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
             continue
         if _EMIT_REMOVAL.search(sentence):
             span = sentence
-        else:
-            span = sentence[m.end():]
-            cut = _CAUSAL_TAIL.search(span)
-            if cut:
-                span = span[:cut.start()]
-        if not words.isdisjoint(w.lower() for w in _WORD.findall(span)):
+            if not words.isdisjoint(w.lower() for w in _WORD.findall(span)):
+                return True
+            continue
+        span = sentence[m.end():]
+        cut = _RELATIVE_CLAUSE.search(span)
+        if cut:
+            span = span[:cut.start()]
+        if _removal_object_hits_pin(span, words):
             return True
     return False
 
@@ -1233,7 +1269,7 @@ def screen_guidance(
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return GuidanceScreening("", "stale_evidence")
     text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
-    return GuidanceScreening(text, "" if text else "layout_contradicted")
+    return GuidanceScreening(text, "" if text else LAYOUT_CONTRADICTED)
 
 
 def retired_guidance_line(
@@ -1248,6 +1284,16 @@ def retired_guidance_line(
     retirements keep their existing silence (the per-batch tally counts
     them)."""
     rec = record or {}
+    if verdict.retired_by == LAYOUT_CONTRADICTED:
+        # Same observability hole as CONTRADICTS_TARGET: the record stays
+        # on disk, the text is what was dropped, and fill 8 of run
+        # `106897-f7b6fb77` had no honoured line and no retired line.
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} claims a "
+                f"field none of the structs this unit is about declare — "
+                f"NOT injected ({LAYOUT_CONTRADICTED}): {head}")
     if verdict.retired_by == CONTRADICTS_TARGET:
         # The record stays on disk and was honoured with no signature but
         # the honoured line on run `3003-93e9a9bf`; quote the sentence that

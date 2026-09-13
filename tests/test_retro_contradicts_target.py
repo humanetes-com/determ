@@ -20,6 +20,7 @@ from pipeline_core.domain.retro_gate import (
     GUIDANCE_FROM_HOLLOW_TREE,
     JOINT_BODY_SHA,
     JOINT_MEMBERS,
+    LAYOUT_CONTRADICTED,
     BlockedOnStubs,
     ConvictionEvidence,
     GuidanceScreening,
@@ -174,6 +175,29 @@ def test_a_removal_whose_object_is_not_the_pinned_word_does_not_fire() -> None:
     assert prescription_removes_pinned_observable(
         "this removes the invalid pointer-as-value use and the out-of-range "
         "backtrace formatting", PINS)
+
+
+def test_a_crash_diagnosis_that_names_the_pinned_field_as_the_corrupted_object_does_not_fire() -> None:
+    # Run `106897-f7b6fb77` rounds 9, 10, 14: LAST_ERROR carried CRASH, the
+    # pair still crash-reverted, RETROSPECTIVE_GUIDANCE stayed empty. The
+    # previous cut was only `that caused`; these relative clauses and the
+    # pin word as a modifier of a pointer/address/object still fired.
+    # Negative control: the same pin word as the object head still meets
+    # (the 3003 drop-the-emission class).
+    assert not prescription_removes_pinned_observable(
+        "This stops the reference-handle being re-interpreted as an "
+        "address, removes the garbage backtrace pointer that triggered "
+        "the slice-range panic", PINS)
+    assert not prescription_removes_pinned_observable(
+        "This removes the garbage address produced by `by_ref`/incorrect "
+        "`deref` that was being chased by `chain`/`backtrace` and "
+        "corrupting the backtrace", PINS)
+    assert not prescription_removes_pinned_observable(
+        "this removes the use-after-borrow/pointer-misinterpretation that "
+        "corrupts the backtrace object and causes the out-of-range slice "
+        "panic", PINS)
+    assert prescription_removes_pinned_observable(
+        "this removes the backtrace", PINS)
 
 
 def test_a_removal_and_a_mention_in_different_sentences_do_not_meet() -> None:
@@ -400,6 +424,54 @@ def test_the_rule_is_judged_right_after_hollow_tree() -> None:
     unstamped = screen_guidance(_pair_record(), LAYOUT, evidence=CONVICTING,
                                 cluster="stable")
     assert unstamped.retired_by == "regression_scoped"
+
+
+def test_a_pair_crash_diagnosis_that_names_one_half_and_claims_the_other_halves_field_is_honoured() -> None:
+    # Fill 8 of run `106897-f7b6fb77`: the stored lesson named ErrorImpl
+    # and claimed `self.inner` (the other member's field). The sieve
+    # anchored only on the named type, retired it as layout_contradicted,
+    # and printed no line — the pair prompt had LAST_ERROR with CRASH and
+    # empty RETROSPECTIVE_GUIDANCE. Negative control: the implementer
+    # alone still has no `inner`.
+    g = (
+        "Pass the real inner pointer to the impl, e.g. use "
+        "`self.inner.as_ptr()` instead of `self.inner.by_ref()`, and "
+        "inside ErrorImpl::debug treat this as a raw pointer rather than "
+        "this.deref()")
+    rec = _pair_record(g)
+    both = frozenset({"Error", "ErrorImpl"})
+    verdict = screen_guidance(
+        rec, LAYOUT, evidence=CONVICTING, cluster="stable",
+        joint_members=MEMBERS, joint_body_sha=BODY_SHA, pins=PINS,
+        anchor_types=both)
+    assert verdict.retired_by == ""
+    assert verdict.text == g
+    only_impl = screen_guidance(
+        rec, LAYOUT, evidence=CONVICTING, cluster="stable",
+        joint_members=MEMBERS, joint_body_sha=BODY_SHA, pins=PINS,
+        anchor_types=frozenset({"ErrorImpl"}))
+    assert only_impl.retired_by == LAYOUT_CONTRADICTED
+    assert only_impl.text == ""
+    line = retired_guidance_line(
+        "src/error.rs::*pair*::src/error.rs::fmt+src/fmt.rs::debug",
+        rec, only_impl)
+    assert LAYOUT_CONTRADICTED in line
+    assert "self.inner.as_ptr()" in line
+    # Live shape: the pair's halves do not declare Error (it lives in
+    # another file). The leftover claim is no evidence, not a lie.
+    impl_only = """
+pub(crate) struct ErrorImpl<E = ()> {
+    vtable: &'static ErrorVTable,
+    backtrace: Option<Backtrace>,
+    _object: E,
+}
+"""
+    elsewhere = screen_guidance(
+        rec, impl_only, evidence=CONVICTING, cluster="stable",
+        joint_members=MEMBERS, joint_body_sha=BODY_SHA, pins=PINS,
+        anchor_types=both)
+    assert elsewhere.retired_by == ""
+    assert elsewhere.text == g
 
 
 def test_retired_line_names_the_class_and_quotes_the_removal_sentence() -> None:
