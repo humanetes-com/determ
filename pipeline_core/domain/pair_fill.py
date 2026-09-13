@@ -91,6 +91,25 @@ def crash_last_error(preview: str, failed_body: str) -> str:
     return f"{preview}\n\n{block}" if preview else block
 
 
+def pair_last_error(compile_err: str, preview: str, failed_body: str) -> str:
+    """LAST_ERROR for the next pair fill: compile excerpt and crash
+    bodies are both the rejected approach.
+
+    An exclusive or dropped the rustc lines on a compile-then-crash
+    (run `235765-62f1505b` fill 1 attempt 2 E0599, attempt 3 compiled
+    and crash-reverted, fill 2 LAST_ERROR was crash+bodies only). Empty
+    parts are omitted; all-empty is "".
+    """
+    parts: list[str] = []
+    c = (compile_err or "").strip()
+    if c:
+        parts.append(c)
+    crash = crash_last_error(preview, failed_body)
+    if crash:
+        parts.append(crash)
+    return "\n\n".join(parts)
+
+
 def pair_record_container(pair: FormatterPair) -> str:
     """The container half of a pair record's retro-store key — both
     endpoints, so a pair's memory can never collide with either member

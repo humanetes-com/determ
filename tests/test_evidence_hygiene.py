@@ -22,6 +22,7 @@ from pipeline_core.adapters.retros import (
 )
 from pipeline_core.domain.model_notes import (
     contradicted_notes,
+    found_types_in_errors,
     rejected_symbols_in_errors,
 )
 
@@ -170,3 +171,22 @@ def test_contradicted_notes_needs_compiler_evidence() -> None:
     note = "use MaybeUninit::<T>::uninit_array(), not array repetition."
     # no rejection diagnostic → nothing is disproved → nothing retired
     assert contradicted_notes([note], "error[E0308]: mismatched types") == []
+
+
+def test_contradicted_notes_retires_an_e0308_found_type_prescription() -> None:
+    err = (
+        "error[E0308]: mismatched types\n"
+        "expected `Ref<'_, Holder>`, found `*const _`\n"
+        "   = note:   expected struct `ptr::Ref<'_, Holder>`\n"
+        "           found raw pointer `*const _`")
+    assert "*const _" in found_types_in_errors(err)
+    recommending = (
+        "call Holder::show(self.inner.peek()) so show receives a "
+        "`*const Holder` and not a wrapper")
+    warning = "do not pass `*const Holder`; keep the wrapper the signature takes"
+    other_mismatch = "use MaybeUninit::<T>::uninit_array(), not array repetition."
+    got = contradicted_notes([recommending, warning, other_mismatch], err)
+    assert got == [recommending]
+    # Bare E0308 with no found type is still not this class (the control above).
+    assert contradicted_notes([recommending],
+                              "error[E0308]: mismatched types") == []

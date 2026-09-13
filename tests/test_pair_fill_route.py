@@ -665,3 +665,17 @@ def test_crash_last_error_quotes_the_previous_bodies() -> None:
     assert preview in out and "foo()" in out
     assert "Your previous attempt wrote:" in out
 
+
+def test_pair_last_error_keeps_compile_and_crash() -> None:
+    from pipeline_core.domain.pair_fill import pair_last_error
+    compile_err = "error[E0599]: no method named `foo` found"
+    preview = "This made test binaries ['t.rs'] CRASH"
+    body = '<FN name="fmt">foo()</FN>'
+    out = pair_last_error(compile_err, preview, body)
+    assert "no method named `foo`" in out
+    assert "CRASH" in out
+    assert "foo()" in out
+    assert pair_last_error("", preview, "") == preview
+    assert pair_last_error(compile_err, "", "") == compile_err
+    assert pair_last_error("", "", "") == ""
+

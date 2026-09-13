@@ -29,6 +29,7 @@ from typing import Any, NamedTuple
 from .coverage_slice import measured_entry_sets, unreached_by
 from .model_notes import (
     LayoutJudgement,
+    contradicted_notes,
     judge_note_against_layout,
     layout_safe_guidance,
     struct_fields,
@@ -619,6 +620,13 @@ CONTRADICTS_TARGET = "contradicts_target"
 # way and printed no line — the next fill looked as if the unit had no
 # record.
 LAYOUT_CONTRADICTED = "layout_contradicted"
+# rustc named a missing method that the stored lesson still prescribes as a
+# call. Run `235765-62f1505b` fill 1 attempt 2: E0599 `as_ptr` on Own;
+# attempt 3 compiled `by_ref` and crash-reverted, wiping the compile
+# error; fill 2 honoured the as_ptr lesson again and compiled the same
+# E0308. The notes channel already retires this shape
+# (`contradicted_notes`); the pair record did not consult it.
+COMPILER_REJECTED = "compiler_rejected"
 
 # Words a pinned literal can carry that name nothing: they occur in almost
 # any sentence of guidance, so a removal sentence carrying one would fire on
@@ -1154,6 +1162,15 @@ def screen_guidance(
     # entry premise flips to TRUE the moment the correct body is kept.
     if crash_earned_conviction(rec):
         return GuidanceScreening("", CRASH_EARNED)
+    # rustc already rejected the approach the lesson still prescribes
+    # (`contradicted_notes`: missing method, or E0308 found type). The
+    # pair's compile-then-crash path used to drop last_compile_error on
+    # the successful compile, so the next fill honoured as_ptr and
+    # rebuilt the E0308; and even with the excerpt kept, E0308 was not
+    # a missing-name code so the lesson still injected.
+    _cerr = str(rec.get("last_compile_error") or "")
+    if _cerr and contradicted_notes([guidance], _cerr):
+        return GuidanceScreening("", COMPILER_REJECTED)
     # The eleventh way, judged before every rule below because none of them
     # can see it: the lesson prescribes removing an observable the tests this
     # unit answers for pin. Obeyed, it re-creates the failure it explains —
@@ -1284,6 +1301,13 @@ def retired_guidance_line(
     retirements keep their existing silence (the per-batch tally counts
     them)."""
     rec = record or {}
+    if verdict.retired_by == COMPILER_REJECTED:
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} prescribes an "
+                f"approach rustc already rejected — NOT injected "
+                f"({COMPILER_REJECTED}): {head}")
     if verdict.retired_by == LAYOUT_CONTRADICTED:
         # Same observability hole as CONTRADICTS_TARGET: the record stays
         # on disk, the text is what was dropped, and fill 8 of run

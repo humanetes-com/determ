@@ -16,6 +16,7 @@ from typing import Any
 
 from pipeline_core.domain.refill_evidence import pinned_observables
 from pipeline_core.domain.retro_gate import (
+    COMPILER_REJECTED,
     CONTRADICTS_TARGET,
     GUIDANCE_FROM_HOLLOW_TREE,
     JOINT_BODY_SHA,
@@ -472,6 +473,64 @@ pub(crate) struct ErrorImpl<E = ()> {
         anchor_types=both)
     assert elsewhere.retired_by == ""
     assert elsewhere.text == g
+
+
+def test_guidance_that_calls_a_method_rustc_rejected_is_retired() -> None:
+    # Run `235765-62f1505b`: E0599 named a missing method, the next fill
+    # still honoured a lesson that prescribed that call. The notes channel
+    # already retires this shape; the pair record now consults it.
+    rec = _pair_record("pass the pointer with `self.inner.wobble()` instead")
+    rec["last_compile_error"] = (
+        "error[E0599]: no method named `wobble` found for struct `Own<T>`")
+    verdict = _same_transaction_read(rec, pins=PINS)
+    assert verdict.retired_by == COMPILER_REJECTED
+    assert verdict.text == ""
+    line = retired_guidance_line("k", rec, verdict)
+    assert COMPILER_REJECTED in line
+    # Negative: the same lesson with no compile excerpt, or an error that
+    # names a different method, is not this class.
+    rec2 = _pair_record("pass the pointer with `self.inner.wobble()` instead")
+    assert _same_transaction_read(rec2, pins=PINS).retired_by != COMPILER_REJECTED
+    rec3 = _pair_record("pass the pointer with `self.inner.wobble()` instead")
+    rec3["last_compile_error"] = (
+        "error[E0599]: no method named `blargh` found for struct `Own<T>`")
+    assert _same_transaction_read(rec3, pins=PINS).retired_by != COMPILER_REJECTED
+
+
+def test_guidance_that_prescribes_e0308_found_type_is_retired() -> None:
+    # Same run, fill 2: last_compile_error is E0308 (expected Ref, found
+    # raw pointer), not E0599. The missing-name parser sees nothing and
+    # the pair lesson still told the next fill to pass *const. The found
+    # type is the rejected approach; a lesson that still prescribes it
+    # is the same class as a missing-method note.
+    rec = _pair_record(
+        "call Holder::show(self.inner.peek()) so show receives a "
+        "`*const Holder` and not a wrapper")
+    rec["last_compile_error"] = (
+        "error[E0308]: mismatched types\n"
+        "expected `Ref<'_, Holder>`, found `*const _`\n"
+        "   = note:   expected struct `ptr::Ref<'_, Holder>`\n"
+        "           found raw pointer `*const _`\n"
+        "note: associated function defined here\n"
+        "pub(crate) unsafe fn show(this: Ref<Self>, f: &mut fmt::Formatter)")
+    verdict = _same_transaction_read(rec, pins=PINS)
+    assert verdict.retired_by == COMPILER_REJECTED
+    assert verdict.text == ""
+    # Negative: an E0308 whose found type the lesson does not prescribe,
+    # and a lesson that warns against the found type, stay.
+    rec2 = _pair_record(
+        "call Holder::show(self.inner.peek()) so show receives a "
+        "`*const Holder` and not a wrapper")
+    rec2["last_compile_error"] = (
+        "error[E0308]: mismatched types\n"
+        "expected `i32`, found `bool`")
+    assert _same_transaction_read(rec2, pins=PINS).retired_by != COMPILER_REJECTED
+    rec3 = _pair_record(
+        "do not pass `*const Holder`; keep the wrapper the signature takes")
+    rec3["last_compile_error"] = (
+        "error[E0308]: mismatched types\n"
+        "expected `Ref<'_, Holder>`, found `*const _`")
+    assert _same_transaction_read(rec3, pins=PINS).retired_by != COMPILER_REJECTED
 
 
 def test_retired_line_names_the_class_and_quotes_the_removal_sentence() -> None:

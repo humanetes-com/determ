@@ -1077,27 +1077,97 @@ def rejected_symbols_in_errors(error_text: str) -> frozenset[str]:
     return frozenset(out)
 
 
+def found_types_in_errors(error_text: str) -> frozenset[str]:
+    """Types rustc named as the ``found`` side of an E0308 mismatch.
+
+    Missing-name codes are :func:`rejected_symbols_in_errors`. A type
+    mismatch names the rejected approach as ``found `U` `` (and often a
+    note ``found raw pointer `U` ``). A lesson that still prescribes U is
+    teaching the mismatch: run ``235765-62f1505b`` fill 2's pair record
+    kept honouring ``*const`` after rustc printed ``expected Ref, found
+    `*const _` ``, because this parser did not exist and the missing-name
+    parser does not read E0308."""
+    out: set[str] = set()
+    in_e0308 = False
+    for raw in error_text.splitlines():
+        line = raw.strip()
+        if "error[E0308]" in line:
+            in_e0308 = True
+        elif line.startswith("error["):
+            in_e0308 = False
+        if not in_e0308:
+            continue
+        for marker in ("found raw pointer `", "found struct `",
+                       "found enum `", "found reference `", "found `"):
+            if marker in line:
+                ty = line.split(marker, 1)[1].split("`", 1)[0].strip()
+                if ty:
+                    out.add(ty)
+                break
+    return frozenset(out)
+
+
+def _found_type_needles(found: str) -> tuple[str, ...]:
+    """Search tokens a lesson uses when it still prescribes ``found``.
+
+    rustc writes ``*const _``; the lesson writes ``*const Holder``. The
+    distinctive prefix is the match, not the placeholder. A raw-pointer
+    found type also makes ``as_ptr`` a needle: that is the method that
+    produces ``*const`` / ``*mut``, and the live pair lesson prescribed
+    the call when the diagnostic named the pointer."""
+    t = (found or "").strip()
+    if not t:
+        return ()
+    needles = [t.lower()]
+    low = t.lower()
+    if low.startswith("*const"):
+        needles.append("*const")
+        needles.append("as_ptr")
+    elif low.startswith("*mut"):
+        needles.append("*mut")
+        needles.append("as_ptr")
+    return tuple(dict.fromkeys(needles))
+
+
+def _note_recommends(low: str, token: str) -> bool:
+    """True when ``low`` (already lowercased) prescribes ``token``, not
+    merely mentions it as the thing to avoid."""
+    if token not in low:
+        return False
+    if f"not {token}" in low and f"use {token}" not in low:
+        return False
+    if f"instead of {token}" in low and f"use {token}" not in low:
+        return False
+    if token.startswith("*"):
+        # Type prescriptions: "receives a `*const T`", "treat this as *const".
+        # "do not pass `*const T`" is the warning-against shape.
+        if "do not" in low or "don't" in low:
+            return False
+        return True
+    return (f"use {token}" in low or f"use `{token}" in low
+            or f"always use {token}" in low or f"{token}()" in low
+            or f"{token}(),' " in low or f"::{token}()" in low)
+
+
 def contradicted_notes(notes: list[str], error_text: str) -> list[str]:
-    """Notes whose advice recommends a symbol the compiler just rejected as
-    nonexistent — the model's own compile feedback disproves them (e.g. a
-    note prescribing ``MaybeUninit::uninit_array()`` after E0599 reported
-    that fn doesn't exist). Retiring them is mechanical validation by
-    compiler evidence, not human curation."""
-    rejected = rejected_symbols_in_errors(error_text)
+    """Notes whose advice recommends a symbol or type the compiler just
+    rejected — the model's own compile feedback disproves them.
+
+    Two diagnostic shapes, one retirement: E0599/E0425/E0433 name a
+    missing symbol (``MaybeUninit::uninit_array()`` after rustc said that
+    fn does not exist); E0308 names a ``found`` type the lesson still
+    tells the next fill to pass. Mechanical validation by compiler
+    evidence, not human curation."""
+    rejected = set(rejected_symbols_in_errors(error_text))
+    for ty in found_types_in_errors(error_text):
+        rejected.update(_found_type_needles(ty))
     if not rejected:
         return []
     out: list[str] = []
     for note in notes:
         low = note.lower()
-        # Only notes that RECOMMEND the symbol ("use X", "not Y" where X is
-        # the rejected one) — a note that already warns AGAINST it is fine.
         for sym in rejected:
-            s = sym.lower()
-            if s in low and (f"use {s}" in low or f"use `{s}" in low
-                             or f"always use {s}" in low or f"{s}()" in low
-                             or f"{s}(),' " in low or f"::{s}()" in low):
-                if f"not {s}" in low and f"use {s}" not in low:
-                    continue  # warns against it — keep
+            if _note_recommends(low, sym.lower()):
                 out.append(note)
                 break
     return out

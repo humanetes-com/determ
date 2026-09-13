@@ -1,10 +1,10 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when LAST_ERROR quotes the previous pair bodies
+## Current reading — the pair lesson is not the leftover lock
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: the hop-pair fill of the three leftover format tests. Honoured RETROSPECTIVE_GUIDANCE is taken on run `186665-40892dbd` (fills 1–3 named as_ptr instead of by_ref). The plateau after that is still wrong body: fill 1 and fill 2 attempt 1 resubmitted `self.inner.by_ref()` on the dispatcher; LAST_ERROR carried CRASH and not the previous bodies, so "do not resubmit the same approach" had no referent. Fill 2 attempt 2 compiled a private-field access then crash-reverted with `Ref::from_raw`. The next fill's pair LAST_ERROR must contain the previous FN bodies under "Your previous attempt wrote". Off-theory: LAST_ERROR with CRASH only (no previous bodies), then the same by_ref dispatcher and five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: the hop-pair fill of the three leftover format tests. LAST_ERROR quoting previous bodies is taken on run `235765-62f1505b` fill 2. The pair record's last_compile_error is E0308 (expected Ref, found *const); the 19-round lesson still prescribes *const / as_ptr. compiler_rejected now retires that against the found type, not only E0599 missing names. That is a lesson-channel close, not the leftover lock: the type-correct pair (by_ref into a callee that takes Ref) already compiled and crash-reverted (net -31, five binaries, panic in std backtrace Debug of a wild Backtrace). The crash is in a callee of debug (vtable object_backtrace / no_backtrace reading an erased ErrorImpl) which the pair does not write; pair_wait defers the file that does. Off-theory for the lesson: honoured as_ptr / *const guidance on an E0308 record. The leftover score does not move until a compiling pair crash-revert crash-blames those callees and pair_wait does not defer a run that holds them. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 

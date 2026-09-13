@@ -185,8 +185,8 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.pair_fill import (
     PairDispatch,
     blocks_after_pair_fill,
-    crash_last_error,
     pair_dispatches,
+    pair_last_error,
     pair_record_container,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
@@ -4287,8 +4287,8 @@ def prepare_impl_fill(
         # resubmit the same approach" had no referent, so run
         # `186665-40892dbd` fill 2 resubmitted fill 1's `by_ref` dispatcher
         # after an honoured diagnosis that named a different expression.
-        _compile_err = str(_pair_rec.get("last_compile_error") or "")
-        _raw_err = _compile_err or crash_last_error(
+        _raw_err = pair_last_error(
+            str(_pair_rec.get("last_compile_error") or ""),
             str(_pair_rec.get("last_error_preview") or ""),
             str(_pair_rec.get("last_failed_body") or ""))
         _last_error = with_blamed_type_api(
@@ -4389,8 +4389,8 @@ def prepare_impl_fill(
                     _blockers = BlockedOnStubs.at_conviction(
                         _reply[:_FAILED_BODY_CAP], _halves_text)
                     with _counters_lock:
-                        _kept_sha = str((retros_cache.get(_pair_key, {}) or {})
-                                        .get("last_prompt_sha") or "")
+                        _cached = dict(retros_cache.get(_pair_key, {}) or {})
+                        _kept_sha = str(_cached.get("last_prompt_sha") or "")
                         _rec = stamp_conviction({
                             "category": retro.get("category", ""),
                             "guidance": retro.get("guidance", ""),
@@ -4405,6 +4405,8 @@ def prepare_impl_fill(
                             "fully_exhausted": False,
                             "last_error_preview": _rdetail[:240],
                             "last_failed_body": _reply[:_FAILED_BODY_CAP],
+                            "last_compile_error": str(
+                                _cached.get("last_compile_error") or ""),
                         }, _prov, _pair_answers, _blockers,
                             regressed=tuple(sorted(_rcmp.newly_red)),
                             pins=pins_for_contradiction_guard(
@@ -4529,12 +4531,10 @@ def prepare_impl_fill(
                         retros_cache[_pair_key] = _crec
                         _save_retrospectives(project_dir, retros_cache)
                     return
-                with _counters_lock:
-                    _krec = dict(retros_cache.get(_pair_key, {}) or {})
-                    if _krec.get("last_compile_error"):
-                        _krec["last_compile_error"] = ""
-                        retros_cache[_pair_key] = _krec
-                        _save_retrospectives(project_dir, retros_cache)
+                # Do not clear last_compile_error here: a compile-ok that
+                # then crash-reverts must carry the rustc lines to the next
+                # fill (run `235765-62f1505b` fill 1 attempt 2 E0599 was
+                # wiped before the crash stamp). Cleared only on KEEP.
                 _pair_sites = frozenset(
                     FnSite(b.file, m.fn_name, b.container)
                     for b in halves
@@ -4607,6 +4607,13 @@ def prepare_impl_fill(
                 with _counters_lock:
                     fns_filled_total += _n_spliced
                     impls_filled += 1
+                    _krec = dict(retros_cache.get(_pair_key, {}) or {})
+                    if _krec.get("last_compile_error") or _krec.get(
+                            "last_failed_body"):
+                        _krec["last_compile_error"] = ""
+                        _krec["last_failed_body"] = ""
+                        retros_cache[_pair_key] = _krec
+                        _save_retrospectives(project_dir, retros_cache)
                 for _pf, _pnames in _spliced_by_file.items():
                     _note_kept(_pf, _pnames)
                 _cmp_p = last_comparison() if tdd_test_cmd else None
