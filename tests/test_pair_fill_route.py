@@ -287,6 +287,27 @@ def _regressing_guard(monkeypatch) -> None:
                  "test(s): ['t_keep'] (cluster pass count 1→0).")))
 
 
+_CRASH_DETAIL = (
+    "This made test binaries ['tests/keep_gen_1.rs'] CRASH before "
+    "reporting results (e.g. segfault from bad unsafe code) — they "
+    "completed fine before this.")
+
+
+def _crash_guard(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.test_results import RegressionComparison
+    cmp = RegressionComparison(
+        newly_red=frozenset({"t_keep"}),
+        newly_crashed=("tests/keep_gen_1.rs",),
+        excluded_crashed=(), not_run=(), measured=("t_keep", "t_pair"),
+        base_pass=1, cur_pass=0, base_executed=2, cur_executed=2,
+        crash_lost_pass=1)
+    monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
+        baseline=lambda *a, **k: object(),
+        gate=lambda *a, **k: (cmp, _CRASH_DETAIL)))
+
+
 def _run_with_tests(ws: Path, tests: list[Path]) -> pipeline.ClusterFillResult:
     return pipeline._phase_c_fill_impl_blocks(  # type: ignore[no-any-return]
         project_dir=ws, target_src_dir=ws / "src", tests_dir_files=tests,
@@ -585,4 +606,42 @@ def test_a_compile_fail_retries_with_last_error_and_does_not_lock_the_next_pass(
         "cleared sha must allow the next pass to send the LAST_ERROR prompt")
     assert "<LAST_ERROR>" in second_wave[n]
     assert "from_bytes" in second_wave[n]
+
+
+def test_a_crash_revert_puts_the_verdict_in_last_error_on_the_next_fill(
+        monkeypatch, tmp_path):
+    """A compiling pair that CRASHes sibling binaries stores the crash
+    summary on last_error_preview. The next fill's pair prompt must carry
+    that verdict in LAST_ERROR — compile already had this slot; a crash
+    left it empty, so run `22062-a20ae3a2` fills 1–5 sent the same 94518
+    char no-error prompt after every crash-revert.
+
+    Negative control: the first fill of this test has no LAST_ERROR (same
+    as the compile-fail test's attempt 1)."""
+    import json as _json
+
+    from pipeline_core.adapters.retros import retrospectives_path
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _crash_guard(monkeypatch)
+    _run_with_tests(ws, tests)
+    first_wave = [p for p in prompts if "PAIRED WRITE" in p]
+    assert first_wave, "the pair must dispatch"
+    assert "<LAST_ERROR>" not in first_wave[0]
+    data = _json.loads(retrospectives_path(ws).read_text())
+    (key,) = [k for k in data if "*pair*" in k]
+    rec = data[key]
+    assert "CRASH" in str(rec.get("last_error_preview") or "")
+    n = len(first_wave)
+    _run_with_tests(ws, tests)
+    second_wave = [p for p in prompts if "PAIRED WRITE" in p]
+    assert len(second_wave) > n, (
+        "a crash verdict must change the next prompt so it is not refused "
+        "as a resample")
+    assert "<LAST_ERROR>" in second_wave[n]
+    assert "CRASH" in second_wave[n]
+    assert "keep_gen_1.rs" in second_wave[n]
 

@@ -4271,9 +4271,17 @@ def prepare_impl_fill(
                 fr_path=fr_path,
                 partner_block=pd.implementer_block)
 
+        # Compile diagnostic first (this call already answered); else the
+        # stored verdict of the last joint revert — a crash summary lives
+        # only in last_error_preview, and leaving LAST_ERROR empty made
+        # every next fill of run `22062-a20ae3a2` a no-error resample of
+        # the same pair prompt (94518 chars, five crash-reverts).
+        _raw_err = str(
+            _pair_rec.get("last_compile_error")
+            or _pair_rec.get("last_error_preview")
+            or "")
         _last_error = with_blamed_type_api(
-            str(_pair_rec.get("last_compile_error") or ""),
-            _crate_type_records) if _pair_rec.get("last_compile_error") else ""
+            _raw_err, _crate_type_records) if _raw_err else ""
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
             prompt = _make_pair_prompt(_last_error)
             # Compare against the sha of the last prompt SENT (the cache,

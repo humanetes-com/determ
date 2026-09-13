@@ -160,6 +160,22 @@ def test_empty_guidance_or_empty_pins_never_fire() -> None:
     assert not prescription_removes_pinned_observable("", "")
 
 
+def test_a_removal_whose_object_is_not_the_pinned_word_does_not_fire() -> None:
+    # A crash diagnosis: the removal verb's object is the invalid pointer
+    # use; the pinned word sits in the causal tail. Whole-sentence overlap
+    # retired this lesson on run `22062-a20ae3a2` rounds 2–6 (pair fill
+    # crash-reverted every time; RETROSPECTIVE_GUIDANCE was empty).
+    causal = (
+        "this removes the invalid pointer-as-value use that caused the "
+        "segfault and the out-of-range backtrace formatting")
+    assert not prescription_removes_pinned_observable(causal, PINS)
+    # The same two clauses with no causal tail still meet — the pinned
+    # word is in the object.
+    assert prescription_removes_pinned_observable(
+        "this removes the invalid pointer-as-value use and the out-of-range "
+        "backtrace formatting", PINS)
+
+
 def test_a_removal_and_a_mention_in_different_sentences_do_not_meet() -> None:
     # Sentence-scoped: the removal is about an import, the pinned words sit
     # in the next sentence, which keeps them.
@@ -253,6 +269,23 @@ def test_stamp_marks_a_lesson_that_removes_a_pinned_observable() -> None:
     sibling = stamp_conviction(_pair_record(SIBLING_GUIDANCE), prov,
                                CONVICTING, regressed=REGRESSED, pins=PINS)
     assert sibling[CONTRADICTS_TARGET] is True
+
+
+def test_stamp_leaves_the_key_absent_for_a_causal_tail_crash_diagnosis() -> None:
+    # The rounds 2–6 pair record of run `22062-a20ae3a2`: remove the
+    # pointer-as-value use because it garbled the pinned field. Pre-fix
+    # the stamp was True and the next prompt dropped the diagnosis.
+    causal = (
+        "this removes the invalid pointer-as-value use that caused the "
+        "segfault and the out-of-range backtrace formatting")
+    prov = RetroProvenance.current("stable", LAYOUT)
+    rec = stamp_conviction(_pair_record(causal), prov, CONVICTING,
+                           BlockedOnStubs(frozenset()),
+                           regressed=REGRESSED, pins=PINS)
+    assert CONTRADICTS_TARGET not in rec
+    verdict = _same_transaction_read(rec, pins=PINS)
+    assert verdict.retired_by != CONTRADICTS_TARGET
+    assert verdict.text == causal
 
 
 def test_stamp_leaves_the_key_absent_for_a_lesson_that_keeps_the_observable() -> None:

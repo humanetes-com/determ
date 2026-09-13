@@ -1,12 +1,12 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when the 253 schedule line has been taken
+## Current reading — replace this block when the pair prompt carries the crash verdict
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: fill order remainder (technical debt 253). 252's pair-first reading is taken on run `12120-78b991d3`. The next fill's `[phase-c/schedule]` line must open with the hop pair (or the attributed write) and must not then list a coverage session / file / per-fn of those leftovers as an ordered run with a share — those runs belong in deferred (`pair_wait` or `coverage_split`). Off-theory: `session[2 test(s), 29 unit(s)]` as run 2. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: the hop-pair fill of the three leftover format tests. Fill order is taken on run `22062-a20ae3a2` (fills 1–6 ordered only the pair; coverage deferred pair_wait). The plateau after that line was wrong body: every pair fill crash-reverted because the crash diagnosis was retired as contradicts_target (removal verb's object was the pointer-as-value use; the pinned word sat in the causal tail) and LAST_ERROR did not carry the crash preview. The next fill's pair prompt must contain LAST_ERROR with CRASH or an honoured retrospective_guidance. Off-theory: a ~94518 char pair prompt with empty LAST_ERROR and empty RETROSPECTIVE_GUIDANCE, then the same five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
-Launch after the 253 levers ship: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
+Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 
 ## Replies to the user
 

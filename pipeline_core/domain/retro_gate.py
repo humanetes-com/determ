@@ -647,6 +647,10 @@ _PIN_WORD_MIN_CHARS = 4
 # `Drop` trait, and `without` matches a preserving "without changing"; a
 # false positive here withholds one lesson from one prompt, which is the
 # cheap side of this class.
+_EMIT_REMOVAL = re.compile(
+    r"\b(?:(?:must|do|does|did|should|will|would)\s*(?:not|n[’']t)|never)"
+    r"\s+(?:emit|print|write|output)\b",
+    re.IGNORECASE)
 _REMOVAL_MARKER = re.compile(
     r"\b(?:(?:must|do|does|did|should|will|would)\s*(?:not|n[’']t)|never)"
     r"\s+(?:emit|print|write|output)\b"
@@ -661,6 +665,16 @@ _REMOVAL_MARKER = re.compile(
     r"|\bentirely from\b"
     r"|\bwith no\b",
     re.IGNORECASE)
+# Cuts the object of a remove/drop/omit verb off from the reason that
+# follows. A crash diagnosis names the pinned field as the thing the
+# bogus pointer was used to format ("this removes the invalid
+# pointer-as-value use that caused the segfault and the out-of-range
+# backtrace formatting") — whole-sentence overlap with "backtrace"
+# retired that lesson on run `22062-a20ae3a2` rounds 2–6 while every
+# pair fill crash-reverted. "Caused by" is a pinned literal, not this
+# tail: the tail is `that caused` / `which caused` / `because`.
+_CAUSAL_TAIL = re.compile(
+    r"\b(?:that|which)\s+caused\b|\bbecause\b", re.IGNORECASE)
 # A sentence boundary: a newline, a `;`, or a `.` followed by whitespace or
 # the end of the text. The whitespace requirement is what keeps
 # `self.chain().collect()`, `src/error.rs::fmt` and `core::fmt::Debug::fmt`
@@ -716,10 +730,19 @@ def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
     """Whether ``guidance`` instructs the next attempt to remove an
     observable that ``pins`` names: some sentence of it carries a removal
     marker (`_REMOVAL_MARKER`) AND, as a whole word, a word of one of the
-    pinned literals (`pinned_words`). Sentence-scoped on purpose — "Remove
-    the unused import. Then write `Stack backtrace:` before the frames" is
-    a removal and a mention that never meet. Empty ``guidance`` or empty
-    ``pins`` is False: nothing to judge, or nothing to judge against.
+    pinned literals (`pinned_words`) sits in the removal's object.
+
+    Sentence-scoped on purpose — "Remove the unused import. Then write
+    `Stack backtrace:` before the frames" is a removal and a mention that
+    never meet. For a negated emission verb (`must not emit`, `never
+    print`) the object is the whole sentence: that verb's object is
+    everything it forbids printing. For remove/drop/omit/without the
+    object is the text after the marker, cut at a causal tail (`that
+    caused` / `which caused` / `because`) so a crash diagnosis that
+    removes the invalid pointer-as-value use *because* it garbled a
+    pinned field is not read as forbidding that field. Empty
+    ``guidance`` or empty ``pins`` is False: nothing to judge, or
+    nothing to judge against.
 
     Pure text against text: no record, no unit, no test name. The same
     predicate fires for any crate whose retrospective prescribes away a
@@ -730,9 +753,17 @@ def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
     if not words:
         return False
     for sentence in guidance_sentences(guidance):
-        if not _REMOVAL_MARKER.search(sentence):
+        m = _REMOVAL_MARKER.search(sentence)
+        if not m:
             continue
-        if not words.isdisjoint(w.lower() for w in _WORD.findall(sentence)):
+        if _EMIT_REMOVAL.search(sentence):
+            span = sentence
+        else:
+            span = sentence[m.end():]
+            cut = _CAUSAL_TAIL.search(span)
+            if cut:
+                span = span[:cut.start()]
+        if not words.isdisjoint(w.lower() for w in _WORD.findall(span)):
             return True
     return False
 
