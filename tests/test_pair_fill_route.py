@@ -644,4 +644,24 @@ def test_a_crash_revert_puts_the_verdict_in_last_error_on_the_next_fill(
     assert "<LAST_ERROR>" in second_wave[n]
     assert "CRASH" in second_wave[n]
     assert "keep_gen_1.rs" in second_wave[n]
+    # Compile quotes the rustc line as the approach not to resubmit; a
+    # crash summary named the binaries and not the bodies, so run
+    # `186665-40892dbd` fill 2 resubmitted fill 1's dispatcher. The
+    # previous bodies are the approach.
+    assert rec.get("last_failed_body")
+    assert "PAIRED" in str(rec.get("last_failed_body") or "")
+    assert "PAIRED" in second_wave[n]
+    assert "Your previous attempt wrote:" in second_wave[n]
+
+
+def test_crash_last_error_quotes_the_previous_bodies() -> None:
+    from pipeline_core.domain.pair_fill import crash_last_error
+    preview = "This made test binaries ['t.rs'] CRASH before reporting results"
+    body = '<FN name="fmt">foo()</FN>'
+    assert crash_last_error(preview, "") == preview
+    assert crash_last_error("", "") == ""
+    assert "foo()" in crash_last_error("", body)
+    out = crash_last_error(preview, body)
+    assert preview in out and "foo()" in out
+    assert "Your previous attempt wrote:" in out
 

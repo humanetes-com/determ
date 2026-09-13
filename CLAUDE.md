@@ -1,10 +1,10 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when the pair prompt carries the crash diagnosis
+## Current reading — replace this block when LAST_ERROR quotes the previous pair bodies
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: the hop-pair fill of the three leftover format tests. LAST_ERROR with CRASH is taken (run `106897-f7b6fb77`, every pair prompt). The plateau after that was still empty RETROSPECTIVE_GUIDANCE: rounds 9/10/14 retired as contradicts_target (pin word as a modifier of pointer/address/object; relative clause was not only `that caused`), and round 15 (no removal verb; use as_ptr instead of by_ref) retired as layout_contradicted with no log line (prose named ErrorImpl, claimed self.inner, Error is in lib.rs, pair halves are error.rs+fmt.rs). The next fill's pair prompt must contain an honoured RETROSPECTIVE_GUIDANCE that names the pointer/by_ref diagnosis. Off-theory: empty RETROSPECTIVE_GUIDANCE, or retro-retired contradicts_target / layout_contradicted, then the same five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: the hop-pair fill of the three leftover format tests. Honoured RETROSPECTIVE_GUIDANCE is taken on run `186665-40892dbd` (fills 1–3 named as_ptr instead of by_ref). The plateau after that is still wrong body: fill 1 and fill 2 attempt 1 resubmitted `self.inner.by_ref()` on the dispatcher; LAST_ERROR carried CRASH and not the previous bodies, so "do not resubmit the same approach" had no referent. Fill 2 attempt 2 compiled a private-field access then crash-reverted with `Ref::from_raw`. The next fill's pair LAST_ERROR must contain the previous FN bodies under "Your previous attempt wrote". Off-theory: LAST_ERROR with CRASH only (no previous bodies), then the same by_ref dispatcher and five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 

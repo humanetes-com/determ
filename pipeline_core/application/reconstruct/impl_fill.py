@@ -185,6 +185,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.pair_fill import (
     PairDispatch,
     blocks_after_pair_fill,
+    crash_last_error,
     pair_dispatches,
     pair_record_container,
 )
@@ -4281,14 +4282,15 @@ def prepare_impl_fill(
                 partner_block=pd.implementer_block)
 
         # Compile diagnostic first (this call already answered); else the
-        # stored verdict of the last joint revert — a crash summary lives
-        # only in last_error_preview, and leaving LAST_ERROR empty made
-        # every next fill of run `22062-a20ae3a2` a no-error resample of
-        # the same pair prompt (94518 chars, five crash-reverts).
-        _raw_err = str(
-            _pair_rec.get("last_compile_error")
-            or _pair_rec.get("last_error_preview")
-            or "")
+        # stored verdict of the last joint revert. A crash summary names
+        # the binaries; without the previous bodies LAST_ERROR's "do not
+        # resubmit the same approach" had no referent, so run
+        # `186665-40892dbd` fill 2 resubmitted fill 1's `by_ref` dispatcher
+        # after an honoured diagnosis that named a different expression.
+        _compile_err = str(_pair_rec.get("last_compile_error") or "")
+        _raw_err = _compile_err or crash_last_error(
+            str(_pair_rec.get("last_error_preview") or ""),
+            str(_pair_rec.get("last_failed_body") or ""))
         _last_error = with_blamed_type_api(
             _raw_err, _crate_type_records) if _raw_err else ""
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
@@ -4402,6 +4404,7 @@ def prepare_impl_fill(
                             # that own retry budgets.
                             "fully_exhausted": False,
                             "last_error_preview": _rdetail[:240],
+                            "last_failed_body": _reply[:_FAILED_BODY_CAP],
                         }, _prov, _pair_answers, _blockers,
                             regressed=tuple(sorted(_rcmp.newly_red)),
                             pins=pins_for_contradiction_guard(

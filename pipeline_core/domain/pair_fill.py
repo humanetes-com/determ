@@ -73,6 +73,24 @@ class PairDispatch(NamedTuple):
         return body_sha(texts)
 
 
+def crash_last_error(preview: str, failed_body: str) -> str:
+    """LAST_ERROR text for a pair whose last joint revert was a crash.
+
+    Compile already quotes the rustc line as the approach not to resubmit.
+    A crash summary names the binaries and not the bodies, so the next
+    fill of run `186665-40892dbd` resubmitted fill 1's `by_ref` dispatcher
+    after an honoured diagnosis that named a different pointer expression.
+    The previous bodies are the approach the LAST_ERROR prefix's "do not
+    resubmit the same approach" refers to. Empty ``failed_body`` is the
+    preview alone (the pre-fix crash slot)."""
+    preview = (preview or "").strip()
+    body = (failed_body or "").strip()
+    if not body:
+        return preview
+    block = "Your previous attempt wrote:\n```rust\n" + body + "\n```"
+    return f"{preview}\n\n{block}" if preview else block
+
+
 def pair_record_container(pair: FormatterPair) -> str:
     """The container half of a pair record's retro-store key — both
     endpoints, so a pair's memory can never collide with either member
