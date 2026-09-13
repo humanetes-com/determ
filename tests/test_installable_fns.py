@@ -11,10 +11,13 @@ from __future__ import annotations
 from pipeline_core.domain.installable_fns import (
     _canon,
     _norm,
+    crash_vtable_callees,
+    crash_vtable_callees_from_store,
     fn_decl_shape,
     fn_pointer_shape,
     installable_fns,
     offer_producers,
+    panic_file_stems,
     producer_bypasses,
     wrapper_producers,
 )
@@ -371,3 +374,78 @@ def test_producer_name_absence_is_a_token_test() -> None:
         [producer, caller], [VTABLE, ty],
         frozenset({FnLocator(REL, "construct")}), REL)
     assert [(b.fn_name, b.producer) for b in got] == [("maker", "construct")]
+
+
+# Inverse hop: a compiling fill crash-reverts in std, the filled body
+# called a crate fn whose return type matches the panic file, that fn
+# loads a table field, the installed free fns matching the field are
+# the write set. Toy crate (Holder/Table/Thing), not a leftover name.
+
+_TABLE = TypeRecord(file="src/hold.rs", kind="struct", name="Table", fields=(
+    FieldRecord(name="slot",
+                ty="unsafe fn(Ref<Holder>) -> Option<&Thing>"),
+))
+_PEEK = {
+    "file": "src/hold.rs", "fn_name": "peek", "container": "",
+    "sig_text": "fn peek(e: Ref<Holder>) -> Option<&Thing>",
+    "body_text": "e.deref().thing.as_ref()",
+}
+_LOAD = {
+    "file": "src/hold.rs", "fn_name": "load", "container": "impl Holder",
+    "sig_text": "fn load(this: Ref<Holder>) -> &Thing",
+    "body_text": "let vtbl = table(this.ptr);\n(vtbl.slot)(this).expect(\"missing\")",
+}
+_OTHER = {
+    "file": "src/hold.rs", "fn_name": "chain", "container": "impl Holder",
+    "sig_text": "fn chain(this: Ref<Holder>) -> Chain",
+    "body_text": "Chain::new(this)",
+}
+_FAILED = (
+    '<FN name="fmt">unsafe { Holder::load(self.inner.by_ref()) }</FN>\n'
+    '<FN name="show">let item = unsafe { Holder::load(this) };\n'
+    "core::fmt::Debug::fmt(item, f)</FN>"
+)
+_PANIC = (
+    "thread 't' panicked at /rustc/abc/library/std/src/thing.rs:10:1:\n"
+    "range start index 99 out of range for slice of length 1"
+)
+
+
+def test_panic_file_stems_read_the_rs_basename() -> None:
+    assert panic_file_stems(_PANIC) == frozenset({"thing"})
+    assert panic_file_stems("no panic here") == frozenset()
+    preview = ("This made test binaries ['tests/error_gen_2.rs', "
+               "'tests/lib_gen_1.rs'] CRASH before reporting")
+    assert panic_file_stems(preview) == frozenset()
+    assert panic_file_stems(preview + "\n" + _PANIC) == frozenset({"thing"})
+
+
+def test_crash_vtable_callees_follow_the_loaded_field() -> None:
+    """The filled body calls load (-> &Thing); load loads Table.slot;
+    peek matches the field. chain returns Chain and is not followed.
+    Control: a panic in other.rs, or a load body that does not load
+    slot, yields nothing."""
+    recs = [_PEEK, _LOAD, _OTHER]
+    got = crash_vtable_callees(_FAILED, _PANIC, recs, [_TABLE])
+    assert got == frozenset({FnLocator("src/hold.rs", "peek")})
+    other_panic = "panicked at /rustc/abc/library/std/src/other.rs:1:1:"
+    assert crash_vtable_callees(_FAILED, other_panic, recs, [_TABLE]) == frozenset()
+    silent = {**_LOAD, "body_text": "this.deref().thing"}
+    assert crash_vtable_callees(
+        _FAILED, _PANIC, [_PEEK, silent, _OTHER], [_TABLE]) == frozenset()
+    assert crash_vtable_callees(_FAILED, "", recs, [_TABLE]) == frozenset()
+
+
+def test_crash_vtable_callees_from_store_reads_the_crash_record() -> None:
+    rec = {
+        "last_failed_body": _FAILED,
+        "last_error_preview": "This made test binaries ['t.rs'] CRASH",
+        "regressed_output": {"t": _PANIC},
+    }
+    got = crash_vtable_callees_from_store(
+        {"k": rec}, [_PEEK, _LOAD, _OTHER], [_TABLE])
+    assert got == frozenset({FnLocator("src/hold.rs", "peek")})
+    assert crash_vtable_callees_from_store(
+        {"k": {"last_failed_body": _FAILED}}, [_PEEK, _LOAD], [_TABLE]
+    ) == frozenset()
+    assert crash_vtable_callees_from_store({}, [_PEEK, _LOAD], [_TABLE]) == frozenset()

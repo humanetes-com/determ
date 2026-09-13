@@ -157,6 +157,7 @@ from pipeline_core.domain.impl_routing import (
 )
 from pipeline_core.domain.installable_fns import (
     ProducerBypass,
+    crash_vtable_callees_from_store,
     installable_fns,
     offer_producers,
     producer_bypasses,
@@ -1032,6 +1033,41 @@ def prepare_impl_fill(
                 dispatched_fns=(), fill_classes=_fill_classes.histogram()),
             bodies_sha=lambda _t: "")
 
+    # A compiling pair crash-revert leaves no sweep crash to localize
+    # (the tree rolled back). Recover the table fns the filled body
+    # called from the retro store and admit them as crash_blamed so
+    # pair_wait does not defer the run that can write them. Run
+    # `269600-aa403030` fill 1: lesson retired, type-correct pair
+    # compiled, five binaries crashed in std, file src/error.rs waited.
+    retros_cache = _load_retrospectives(project_dir)
+    _pair_crash_callees = crash_vtable_callees_from_store(
+        retros_cache,
+        _enumerate_fns_via_extractor(target_src_dir) or [],
+        _cluster_filter_type_members(
+            _enumerate_types_via_extractor(target_src_dir) or [], cluster))
+    if _pair_crash_callees:
+        crash_blamed = (crash_blamed or frozenset()) | _pair_crash_callees
+        tdd_frontier_keys = set(tdd_frontier_keys or ()) | set(
+            _pair_crash_callees)
+        _ev = dict(crash_evidence or {})
+        _why = (
+            "A compiling pair fill crash-reverted with a panic outside "
+            "the pair write set. This fn is the table slot that fill "
+            "called. Rewrite it; the pair cannot pay until this body "
+            "stops fabricating the value the panic named.")
+        for _loc in _pair_crash_callees:
+            _ev.setdefault(_loc, _why)
+        crash_evidence = _ev
+        _log("  [phase-c/pair] " + str(len(_pair_crash_callees))
+             + " vtable callee(s) of a compiling pair crash-revert — "
+             "admitted as crash-blamed (not pair_wait deferred): "
+             + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                for k in _pair_crash_callees)[:8]))
+        _emit("phase_c.pair.crash_callees", data={
+            "cluster": cluster_name,
+            "callees": sorted(f"{k.file}::{k.fn_name}"
+                              for k in _pair_crash_callees)})
+
     # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
     # co-designed block is re-attacked WHOLE in one call instead of leaving
@@ -1207,8 +1243,6 @@ def prepare_impl_fill(
             if _nm in toks:
                 return _f
         return None
-
-    retros_cache = _load_retrospectives(project_dir)
 
     _impl_full_stalls = int(os.getenv("PHASE_C_IMPL_MAX_STALLS", "3"))
 
@@ -5321,7 +5355,8 @@ def prepare_impl_fill(
         routes.append(_session_route)
     routes.extend((_pair_route, _file_route, _impl_route))
     return PreparedFill(routes=tuple(routes), hollow=_hollow, finish=_finish,
-                        bodies_sha=_bodies_sha, landed=lambda: fns_filled_total)
+                        bodies_sha=_bodies_sha, landed=lambda: fns_filled_total,
+                        crash_callees=_pair_crash_callees)
 
 
 def fill_impl_blocks(

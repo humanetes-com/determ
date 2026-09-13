@@ -238,22 +238,26 @@ def _blocking_stubs(run: RouteRun,
 
 
 def run_blocks(a: RouteRun, b: RouteRun,
-               hollow: Mapping[str, frozenset[FnLocator]]) -> bool:
+               hollow: Mapping[str, frozenset[FnLocator]],
+               crash_blamed: Collection[FnLocator] = ()) -> bool:
     """True when `a` must land before `b` can be judged.
 
     A hop pair is the two-file transaction for its members. Any other run
     that can write either member, or that aims at the same leftover tests,
     waits — unless that other run fills a stub which makes a leftover test
-    hollow, which is still blockers-first. Run ``19980-f9ea6adb``
-    (2026-09-10) opened the overlapping session first, wrote both halves
-    plus a hanging companion, peeled the set apart, and ``PairRoute``
-    would have skipped once a session had served either member. The same
-    split, one route down: run ``675471-0f3105f2`` opened a never-served
-    per-fn of coverage locators (and a never-served file of the dispatcher)
-    before the served pair, and every per-fn landing came back unreachable.
-    The pre-schedule walk still puts SESSION before PAIR; this rule is the
-    schedule's. Restricting the wait to SESSION left file / impl / per-fn
-    free to spend the fill on units the hop already said cannot pay.
+    hollow, which is still blockers-first, or holds a crash-blamed
+    locator a compiling pair revert recovered (the table fn the pair
+    called, whose panic sits outside the pair write set). Run
+    ``19980-f9ea6adb`` (2026-09-10) opened the overlapping session first,
+    wrote both halves plus a hanging companion, peeled the set apart, and
+    ``PairRoute`` would have skipped once a session had served either
+    member. The same split, one route down: run ``675471-0f3105f2`` opened
+    a never-served per-fn of coverage locators (and a never-served file of
+    the dispatcher) before the served pair, and every per-fn landing came
+    back unreachable. The pre-schedule walk still puts SESSION before
+    PAIR; this rule is the schedule's. Restricting the wait to SESSION
+    left file / impl / per-fn free to spend the fill on units the hop
+    already said cannot pay.
 
     Otherwise: `b`'s own tests are hollow because of a stub `a` holds and
     `b` does not."""
@@ -261,7 +265,8 @@ def run_blocks(a: RouteRun, b: RouteRun,
         return False
     if (a.kind is RouteKind.PAIR and b.kind is not RouteKind.PAIR
             and (a.targets & b.targets or a.target_tests & b.target_tests)
-            and not _blocking_stubs(b, hollow)):
+            and not _blocking_stubs(b, hollow)
+            and not (b.targets & frozenset(crash_blamed))):
         return True
     if not a.stubs_in_targets or not b.target_tests:
         return False
@@ -631,6 +636,7 @@ def schedule(
     order_index = {k: i for i, k in enumerate(today_order)}
     attr = frozenset(attributed)
     split_of: dict[str, bool] = {}
+    blamed = frozenset(crash_blamed)
 
     ranked: list[tuple[RouteRun, int, str, int, int]] = []
     for run in runs:
@@ -638,7 +644,8 @@ def schedule(
             run, oracle_fp, history, served_targets, readmit_after=readmit_after)
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
             rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
-        level = 0 if _blocking_stubs(run, hollow) else 1
+        level = 0 if (_blocking_stubs(run, hollow)
+                      or (run.targets & blamed)) else 1
         split_of[run.key] = _is_coverage_split(run, attr)
         ranked.append((run, rank, reason, deferrals, level))
 
@@ -656,12 +663,14 @@ def schedule(
     blockers_of: dict[str, tuple[str, ...]] = {
         it[0].key: tuple(
             other[0].label for other in ranked
-            if other[0] is not it[0] and run_blocks(other[0], it[0], hollow))
+            if other[0] is not it[0]
+            and run_blocks(other[0], it[0], hollow, blamed))
         for it in ranked}
     blocker_keys: dict[str, set[str]] = {
         it[0].key: {
             other[0].key for other in ranked
-            if other[0] is not it[0] and run_blocks(other[0], it[0], hollow)}
+            if other[0] is not it[0]
+            and run_blocks(other[0], it[0], hollow, blamed)}
         for it in ranked}
     ordered_items: list[tuple[RouteRun, int, str, int, int, tuple[str, ...]]] = []
     pending = list(ranked)
@@ -694,8 +703,9 @@ def schedule(
     if pair_runs:
         kept_pair: list[ScheduledRun] = []
         for s in scheduled:
-            if (any(run_blocks(p, s.run, hollow) for p in pair_runs)
-                    and not _blocking_stubs(s.run, hollow)):
+            if (any(run_blocks(p, s.run, hollow, blamed) for p in pair_runs)
+                    and not _blocking_stubs(s.run, hollow)
+                    and not (s.run.targets & blamed)):
                 waiting.append(replace(s, deferred=True, share_minutes=0.0,
                                        reason="pair_wait"))
                 continue

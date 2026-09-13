@@ -30,6 +30,7 @@ from pipeline_core.domain.models import FnLocator, FnSite
 _STUB = FnLocator("src/x.rs", "drop_rest")
 _FMT = FnLocator("src/x.rs", "fmt")
 _NEW = FnLocator("src/y.rs", "new")
+_PEEK = FnLocator("src/x.rs", "peek")
 
 
 def _session(label: str, tests: set[str], units: set[FnLocator], seq: int = 0) -> RouteRun:
@@ -185,6 +186,29 @@ def test_a_pair_blocked_run_is_deferred_this_fill() -> None:
     assert [s.run.label for s in other_sched.ordered][:2] == [
         file_run.label, per_fn.label]
     assert not other_sched.deferred
+
+
+def test_a_crash_blamed_run_of_the_pairs_callee_does_not_wait() -> None:
+    """A compiling pair crash-revert recovered a table fn outside the
+    write set. pair_wait must not defer a run that holds that locator
+    (same exception as a blocking stub). Control: the same file without
+    the blamed locator still waits."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    holder = _file("file src/x.rs", {_PEEK, _FMT}, set(), {"t_fmt"})
+    assert not run_blocks(pair, holder, {}, crash_blamed={_PEEK})
+    sched = schedule([pair, holder], [], oracle_fp="o", hollow={},
+                     crash_blamed={_PEEK})
+    assert [s.run.label for s in sched.ordered] == [
+        holder.label, pair.label]
+    assert not sched.deferred
+    assert sched.ordered[0].level == 0
+    empty = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    assert run_blocks(pair, empty, {}, crash_blamed={_PEEK})
+    waiting = schedule([pair, empty], [], oracle_fp="o", hollow={},
+                       crash_blamed={_PEEK})
+    assert [s.run.label for s in waiting.ordered] == [pair.label]
+    assert [s.run.label for s in waiting.deferred] == [empty.label]
+    assert waiting.deferred[0].reason == "pair_wait"
 
 
 def test_a_stub_run_that_hollows_the_pairs_leftovers_still_goes_first() -> None:

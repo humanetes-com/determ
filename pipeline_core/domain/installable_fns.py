@@ -42,6 +42,7 @@ from pipeline_core.domain.rust_idents import (
     identifier_tokens,
     impl_self_type,
 )
+from pipeline_core.domain.rust_scan import names_method_call
 from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
 
@@ -618,3 +619,144 @@ def producer_bypasses(
                 break
     out.sort(key=lambda b: (b.fn_name, b.container))
     return tuple(out[:cap])
+
+
+def panic_file_stems(crash_text: str) -> frozenset[str]:
+    """Bare ``.rs`` stems named in a panic or crash excerpt.
+
+    ``panicked at /rustc/…/library/std/src/backtrace.rs:183`` yields
+    ``backtrace``. A stdlib panic names no crate frame; the stem is how a
+    callee's return type is matched to the panic without cataloguing a
+    language type.
+    """
+    out: set[str] = set()
+    for raw in (crash_text or "").replace("\\", "/").splitlines():
+        # Binary lists in a CRASH preview name tests/foo.rs; those are
+        # not the panic site. Only the rustc/std `panicked at` line
+        # (or an ASAN frame) names the module whose type the callee
+        # returned.
+        if "panicked at" not in raw and "asan" not in raw.lower():
+            continue
+        for part in raw.replace(":", " ").split():
+            if ".rs" not in part:
+                continue
+            head = part.split(".rs", 1)[0]
+            stem = head.rsplit("/", 1)[-1].strip()
+            if stem:
+                out.add(stem.lower())
+    return frozenset(out)
+
+
+def _return_idents(sig: str) -> frozenset[str]:
+    """Lowercased identifier tokens of a signature's return type."""
+    arrow = (sig or "").find("->")
+    if arrow < 0:
+        return frozenset()
+    return frozenset(t.lower() for t in identifier_tokens(sig[arrow + 2:]))
+
+
+def crash_vtable_callees(
+    failed_body: str,
+    crash_text: str,
+    fn_records: Sequence[Mapping[str, object]],
+    type_records: Iterable[TypeRecord],
+    *,
+    cap: int = 12,
+) -> frozenset[FnLocator]:
+    """Fns a compiling fill's crash-revert actually ran through a table.
+
+    Inverse of :func:`installable_fns`: that starts from a producer that
+    BUILDS a fn-pointer table; this starts from a body that compiled,
+    crash-reverted with a panic outside the write set, and CALLED a crate
+    fn whose return type matches the panic file stem, whose body loads a
+    table field. The locators are the free fns whose signature matches
+    that field — the same match installable_fns uses.
+
+    Run ``269600-aa403030`` fill 1 retired the as_ptr lesson and wrote
+    the type-correct call; the splice compiled and crash-reverted (net
+    -31, panic in std backtrace Debug). pair_wait then deferred the file
+    that holds the table's installed fn. Empty crash text, no matching
+    return type, or no field load returns empty, so recorded fills that
+    did not crash this way are unchanged.
+    """
+    stems = panic_file_stems(crash_text)
+    if not stems or not (failed_body or "").strip():
+        return frozenset()
+    records = list(fn_records)
+    bodies = [failed_body]
+    for r in records:
+        name = str(r.get("fn_name") or "")
+        if not name or not names_method_call(failed_body, name):
+            continue
+        if not (_return_idents(str(r.get("sig_text") or "")) & stems):
+            continue
+        text = str(r.get("body_text") or "")
+        if text:
+            bodies.append(text)
+    wanted: list[tuple[bool, tuple[str, ...], str]] = []
+    seen_shape: set[tuple[bool, tuple[str, ...], str]] = set()
+    for tr in type_records:
+        if not tr.name or tr.kind not in ("struct", "enum"):
+            continue
+        for f in tr.fields:
+            shape = fn_pointer_shape(f.ty)
+            if shape is None or not f.name:
+                continue
+            if not any(names_method_call(b, f.name) for b in bodies):
+                continue
+            if shape in seen_shape:
+                continue
+            seen_shape.add(shape)
+            wanted.append(shape)
+    if not wanted:
+        return frozenset()
+    out: list[FnLocator] = []
+    seen: set[tuple[str, str]] = set()
+    for r in records:
+        name = str(r.get("fn_name") or "")
+        file_ = str(r.get("file") or "")
+        if not name or not file_ or str(r.get("container") or ""):
+            continue
+        key = (file_, name)
+        if key in seen:
+            continue
+        shape = fn_decl_shape(str(r.get("sig_text") or ""))
+        if shape is None:
+            continue
+        if any(_coercible(shape, want) for want in wanted):
+            seen.add(key)
+            out.append(FnLocator(file_, name))
+            if len(out) >= cap:
+                break
+    return frozenset(out)
+
+
+def crash_vtable_callees_from_store(
+    records: Mapping[str, object],
+    fn_records: Sequence[Mapping[str, object]],
+    type_records: Iterable[TypeRecord],
+) -> frozenset[FnLocator]:
+    """Union of :func:`crash_vtable_callees` over stored fill records that
+    still hold a compiling crash-revert's body and panic text.
+
+    A pair that crash-reverted then rolled back leaves no sweep crash to
+    localize; the durable memory is the retro store's last_failed_body
+    and last_error_preview / regressed_output. Empty store, or records
+    with no crash excerpt, returns empty.
+    """
+    out: set[FnLocator] = set()
+    for raw in (records or {}).values():
+        if not isinstance(raw, dict):
+            continue
+        body = str(raw.get("last_failed_body") or "")
+        if not body.strip():
+            continue
+        parts = [str(raw.get("last_error_preview") or "")]
+        extra = raw.get("regressed_output")
+        if isinstance(extra, dict):
+            parts.extend(str(v) for v in extra.values())
+        crash = "\n".join(parts)
+        if "CRASH" not in crash.upper() and "panicked at" not in crash:
+            continue
+        out |= crash_vtable_callees(body, crash, fn_records, type_records)
+    return frozenset(out)

@@ -489,6 +489,11 @@ class PhaseCFillEngine:
                 session_slices=session_slices,
                 session_owners=session_owners,
             )
+            if _prepared_fill.crash_callees:
+                crash_blamed = (crash_blamed or frozenset()) | (
+                    _prepared_fill.crash_callees)
+                tdd_frontier_keys = set(tdd_frontier_keys or ()) | set(
+                    _prepared_fill.crash_callees)
         _per_fn_route = _PerFnRoute(
             self,
             project_dir=project_dir, target_src_dir=target_src_dir,

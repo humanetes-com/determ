@@ -144,6 +144,12 @@ class PreparedFill:
     bodies_sha: Callable[[frozenset[FnLocator]], str]
     #: How many bodies the four routes have landed so far this fill.
     landed: Callable[[], int] = lambda: 0
+    #: Locators recovered from a compiling pair crash-revert through a
+    #: vtable field the filled body called. The engine unions them into
+    #: crash_blamed so per-fn and the schedule see the same set the file
+    #: route already stamped. Empty (the default) is every fill that did
+    #: not crash this way.
+    crash_callees: frozenset[FnLocator] = frozenset()
 
 
 @runtime_checkable

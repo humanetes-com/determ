@@ -1,10 +1,10 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — the pair lesson is not the leftover lock
+## Current reading — replace this block when pair_wait opens a crash-callee run
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: the hop-pair fill of the three leftover format tests. LAST_ERROR quoting previous bodies is taken on run `235765-62f1505b` fill 2. The pair record's last_compile_error is E0308 (expected Ref, found *const); the 19-round lesson still prescribes *const / as_ptr. compiler_rejected now retires that against the found type, not only E0599 missing names. That is a lesson-channel close, not the leftover lock: the type-correct pair (by_ref into a callee that takes Ref) already compiled and crash-reverted (net -31, five binaries, panic in std backtrace Debug of a wild Backtrace). The crash is in a callee of debug (vtable object_backtrace / no_backtrace reading an erased ErrorImpl) which the pair does not write; pair_wait defers the file that does. Off-theory for the lesson: honoured as_ptr / *const guidance on an E0308 record. The leftover score does not move until a compiling pair crash-revert crash-blames those callees and pair_wait does not defer a run that holds them. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: the hop-pair fill of the three leftover format tests. compiler_rejected on the E0308 as_ptr lesson is taken on run `269600-aa403030` fill 1. The plateau after that is the predicted leftover lock: the type-correct pair compiled and crash-reverted (net -31, five binaries, panic in std backtrace Debug). The next fill's schedule must admit the vtable callees of that crash (crash_vtable_callees from the pair record) as crash-blamed and must not pair_wait a run that holds them. On-theory: `[phase-c/pair] N vtable callee(s)` then ordered includes a file or per-fn of those locators, not only the pair. Off-theory: fill N still `1 run(s) — 1. pair …` with file src/error.rs pair_wait, then the same five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 
