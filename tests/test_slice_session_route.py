@@ -132,23 +132,28 @@ def _install_turns(monkeypatch, replies: list[str]) -> list[list[dict]]:
     return transcripts
 
 
-def _frontier() -> FailureFrontier:
+def _frontier(*, pairs=()) -> FailureFrontier:
+    # A hop-pair candidate defers the session this fill (pair_wait), so
+    # session-route tests omit the pair unless they are the pair's own
+    # control. The slice is still the two units; the pair record is what
+    # plans the PAIR run.
     return FailureFrontier.build(
         {_DISP: {"t_pair"}, _IMPL: {"t_pair"}},
         {_DISP: {"t_pair"}, _IMPL: {"t_pair"}},
         evidence={"t_pair": ('panicked at tests/display_gen_1.rs:4:5: assertion '
                              '`left == right` failed\n  left: "hi"\n  right: '
                              '"rendered hi"')},
-        pairs=(_PAIR,))
+        pairs=pairs)
 
 
-def _run(ws: Path, tests: list[Path], *, slices=None) -> pipeline.ClusterFillResult:
+def _run(ws: Path, tests: list[Path], *, slices=None,
+         pairs=()) -> pipeline.ClusterFillResult:
     return pipeline._phase_c_fill_impl_blocks(  # type: ignore[no-any-return]
         project_dir=ws, target_src_dir=ws, tests_dir_files=tests,
         module_name="m", cluster_name="t", cluster=None,
         check_cmd="cargo check", cluster_env={}, fr_path=None,
         tdd_frontier_keys={_DISP},
-        tdd_frontier_tests=_frontier(),
+        tdd_frontier_tests=_frontier(pairs=pairs),
         tdd_test_cmd="cargo test",
         session_slices=slices,
     )
@@ -244,16 +249,20 @@ def test_negative_control_with_the_session_off_the_pair_route_rebuilds_a_prompt(
 
     monkeypatch.setattr(pipeline, "_ask_raw", _ask)
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=(0, _GREEN))
-    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
+    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})},
+         pairs=(_PAIR,))
     assert transcripts == []
     assert any("PAIRED WRITE" in p for p in prompts)
 
 
 def test_a_session_that_lands_nothing_does_not_block_the_pair_route(
         monkeypatch, tmp_path):
-    """A no_change session used to union the whole slice into served and
-    drop those units from pair/per-fn this call — GPU spent, tree unchanged,
-    the only other route that could move the tests never ran."""
+    """A hop pair is this fill of its leftovers; a session of those same
+    units is deferred (pair_wait) and the pair still cashes. A no_change
+    session used to union the whole slice into served and drop those
+    units from pair/per-fn this call — GPU spent, tree unchanged, the
+    only other route that could move the tests never ran. That
+    composition does not open: the session does not spend this fill."""
     ws, tests = _setup(monkeypatch, tmp_path)
     monkeypatch.setenv("SLICE_SESSION_MAX_TURNS", "1")
     transcripts = _install_turns(monkeypatch, ["<NOTES>nothing yet</NOTES>"])
@@ -267,8 +276,9 @@ def test_a_session_that_lands_nothing_does_not_block_the_pair_route(
     install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
         run=[(101, _RED), (0, _GREEN)])
-    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})})
-    assert transcripts  # the session ran
+    _run(ws, tests, slices={"t_pair": frozenset({_DISP_SITE, _IMPL_SITE})},
+         pairs=(_PAIR,))
+    assert not transcripts  # pair_wait: the session does not open
     assert any("PAIRED WRITE" in p for p in prompts)
     assert "rendered {}" in (ws / "src" / "lib.rs").read_text()
 
