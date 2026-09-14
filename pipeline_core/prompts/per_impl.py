@@ -6,6 +6,7 @@ come from :mod:`pipeline_core.prompts.runtime`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from pipeline_core.domain.construction_recipe import construction_recipes_for
@@ -58,6 +59,7 @@ def build_per_impl_prompt(
     *,
     fr_path: Path | None = None,
     partner_block: ImplBlock | None = None,
+    extra_blocks: Sequence[ImplBlock] = (),
 ) -> str:
     """Per-impl-block prompt — fills every stub fn in `block` and (when
     `related_blocks` is non-empty) jointly designs sibling impls of the
@@ -78,6 +80,10 @@ def build_per_impl_prompt(
     delegates to are each rejected by the revert gate alone; the pair
     lands them under one judgment). None leaves the prompt byte-identical
     to the single-block render.
+
+    `extra_blocks` are same-file table slots the pair also writes (a
+    compiling crash-revert recovered them; independently judged they
+    cannot pay). Empty (the default) leaves the two-block render.
     """
     types_section = sections.types
     invariants_section = sections.invariants
@@ -249,6 +255,14 @@ def build_per_impl_prompt(
                 "  // body (no outer braces, no signature)\n"
                 "</FN>"
             )
+    for eb in extra_blocks:
+        for m in (*eb.stub_members, *eb.refill_members)[:1]:
+            eblock = eb.container or "free fns"
+            output_example.append(
+                f'<FN name="{m.fn_name}" block="{eblock}">\n'
+                "  // body (no outer braces, no signature)\n"
+                "</FN>"
+            )
     output_example_str = (("\n".join(output_example) if output_example else
                            '<FN name="..." block="...">\nbody\n</FN>')
                           + "\n" + FN_LITERAL_RULE)
@@ -291,10 +305,44 @@ def build_per_impl_prompt(
             "pair. Debug or Display of a field cannot produce a substring "
             "that field's own formatter does not print — write the literal "
             "in the implementer.\n\n")
+    extra_section = ""
+    extra_names = ""
+    if extra_blocks:
+        extra_renders: list[str] = []
+        extra_name_bits: list[str] = []
+        for eb in extra_blocks:
+            _e_refills = frozenset(m.fn_name for m in eb.refill_members)
+            extra_renders.append(
+                f'<TARGET_IMPL_BLOCK file="{eb.file}">\n'
+                "```rust\n"
+                + format_impl_block_for_prompt(
+                    eb, mark_target=True,
+                    refill_fn_names=_e_refills,
+                    fill_fn_names=frozenset(
+                        m.fn_name for m in eb.stub_members),
+                    inferred_fn_names=sections.inferred_refill_names,
+                    crashed_fn_names=sections.crashed_refill_names,
+                    aimed_fn_names=sections.aimed_refill_names)
+                + "\n```\n</TARGET_IMPL_BLOCK>")
+            extra_name_bits.extend(
+                m.fn_name for m in (*eb.stub_members, *eb.refill_members))
+        extra_names = ", ".join(extra_name_bits)
+        extra_section = "\n" + "\n".join(extra_renders) + "\n"
+        pair_part += (
+            "TABLE SLOTS — this response also rewrites the same-file fns "
+            "listed below. A previous joint write compiled and crash-reverted "
+            "through fn-pointer fields these fns match. They are accepted or "
+            "rejected WITH the pair; rewriting the pair without them is the "
+            "split this write exists to close. Coverage of the current tree "
+            "showing they are unentered is expected: the current members do "
+            "not call them, which is why the last independently-judged fill "
+            "of those slots bought nothing.\n\n")
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
     if partner_names:
         stub_names = (f"{stub_names} ({file_rel}); "
                       f"{partner_names} ({partner_file})")
+    if extra_names:
+        stub_names = f"{stub_names}; {extra_names} (table slots)"
     _recipe_members = (*stub_members, *refill_members)
     recipe_text = construction_recipes_for(
         (m.fn_name for m in _recipe_members), container,
@@ -323,7 +371,7 @@ Stubs to fill in this response: {stub_names}
 {target_render}
 ```
 </TARGET_IMPL_BLOCK>
-{partner_section}{macros_block}
+{partner_section}{extra_section}{macros_block}
 Tests (read-only):
 {tests_section}
 
@@ -345,6 +393,6 @@ Rules:
   symbols not in this file's `use` block.
 - No `unimplemented!()` / `todo!()` / panic-only bodies. Omit an `<FN>`
   block if you cannot implement that fn; a later pass retries.
-- Each fn you emit MUST appear in the TARGET (or a RELATED) block above.
-  Emitting an `<FN>` for a fn name not in the block is rejected.
+- Each fn you emit MUST appear in a TARGET (or RELATED) block above.
+  Emitting an `<FN>` for a fn name not in those blocks is rejected.
 """

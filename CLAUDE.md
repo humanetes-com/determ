@@ -1,10 +1,10 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when pair_wait opens a crash-callee run
+## Current reading — replace this block when the pair writes its crash-recovered table slots
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: the hop-pair fill of the three leftover format tests. compiler_rejected on the E0308 as_ptr lesson is taken on run `269600-aa403030` fill 1. The plateau after that is the predicted leftover lock: the type-correct pair compiled and crash-reverted (net -31, five binaries, panic in std backtrace Debug). The next fill's schedule must admit the vtable callees of that crash (crash_vtable_callees from the pair record) as crash-blamed and must not pair_wait a run that holds them. On-theory: `[phase-c/pair] N vtable callee(s)` then ordered includes a file or per-fn of those locators, not only the pair. Off-theory: fill N still `1 run(s) — 1. pair …` with file src/error.rs pair_wait, then the same five-binary crash-revert. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: the hop-pair fill of the three leftover format tests. The sort (252/253) and the crash-callee admission (3aa66a5) both fired. Run `10959-9c95ea89` fill 1 recovered context_backtrace and no_backtrace, opened file src/error.rs first, kept those two FLAT net +0 (their tests already pass; they are dead on the kept tree), then the pair crash-reverted the same five binaries. Independently judging the slots on the rolled-back tree cannot pay. Same-file slots now join the pair write set. On-theory: `[phase-c/pair] N vtable callee(s)` then `same-file slot(s) join the pair write set`, schedule is `1 run(s) — 1. pair …` with file src/error.rs pair_wait, and the pair prompt carries TABLE SLOTS. Off-theory: fill N still opens `file src/error.rs` with a share, or the pair prompt has no table-slot fns. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
 
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 

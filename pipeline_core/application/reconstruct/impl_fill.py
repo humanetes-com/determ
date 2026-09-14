@@ -189,6 +189,7 @@ from pipeline_core.domain.pair_fill import (
     pair_dispatches,
     pair_last_error,
     pair_record_container,
+    pairs_to_dispatch,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
 from pipeline_core.domain.reasoning_cap import (
@@ -1035,10 +1036,11 @@ def prepare_impl_fill(
 
     # A compiling pair crash-revert leaves no sweep crash to localize
     # (the tree rolled back). Recover the table fns the filled body
-    # called from the retro store and admit them as crash_blamed so
-    # pair_wait does not defer the run that can write them. Run
-    # `269600-aa403030` fill 1: lesson retired, type-correct pair
-    # compiled, five binaries crashed in std, file src/error.rs waited.
+    # called from the retro store. Same-file slots join the pair write
+    # set (an independently judged file of them on the rolled-back tree
+    # cannot pay — run `10959-9c95ea89`). Other-file slots stay
+    # crash-blamed so pair_wait does not park a run the pair cannot
+    # write. Run `269600-aa403030` fill 1 recovered the class.
     retros_cache = _load_retrospectives(project_dir)
     _pair_crash_callees = crash_vtable_callees_from_store(
         retros_cache,
@@ -1053,20 +1055,36 @@ def prepare_impl_fill(
         _why = (
             "A compiling pair fill crash-reverted with a panic outside "
             "the pair write set. This fn is the table slot that fill "
-            "called. Rewrite it; the pair cannot pay until this body "
-            "stops fabricating the value the panic named.")
+            "called. Rewrite it with the pair; a separately-judged fill "
+            "of this slot on the rolled-back tree cannot pay.")
         for _loc in _pair_crash_callees:
             _ev.setdefault(_loc, _why)
         crash_evidence = _ev
+        _pair_files = {
+            s.file
+            for p in pairs_to_dispatch(_frontier_tests.pairs)
+            for s in (p.dispatcher, p.implementer)}
+        _same = sorted(
+            f"{k.file}::{k.fn_name}" for k in _pair_crash_callees
+            if k.file in _pair_files)
+        _other = sorted(
+            f"{k.file}::{k.fn_name}" for k in _pair_crash_callees
+            if k.file not in _pair_files)
         _log("  [phase-c/pair] " + str(len(_pair_crash_callees))
-             + " vtable callee(s) of a compiling pair crash-revert — "
-             "admitted as crash-blamed (not pair_wait deferred): "
-             + ", ".join(sorted(f"{k.file}::{k.fn_name}"
-                                for k in _pair_crash_callees)[:8]))
+             + " vtable callee(s) of a compiling pair crash-revert"
+             + ((" — " + str(len(_same))
+                 + " same-file slot(s) join the pair write set: "
+                 + ", ".join(_same[:8])) if _same else "")
+             + ((" — " + str(len(_other))
+                 + " other-file slot(s) admitted as crash-blamed "
+                 "(pair cannot write them): "
+                 + ", ".join(_other[:8])) if _other else ""))
         _emit("phase_c.pair.crash_callees", data={
             "cluster": cluster_name,
             "callees": sorted(f"{k.file}::{k.fn_name}"
-                              for k in _pair_crash_callees)})
+                              for k in _pair_crash_callees),
+            "same_file": _same,
+            "other_file": _other})
 
     # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
@@ -4182,6 +4200,7 @@ def prepare_impl_fill(
                 m.fn_name for m in (*b.stub_members, *b.refill_members))
             for b in halves)
         _pair_locs = pd.member_locators()
+        _pair_extra = tuple(pd.extra_blocks)
         _pair_tests: set[str] = set()
         for _loc in _pair_locs:
             _pair_tests |= _frontier_tests.convicting_for(_loc)
@@ -4215,7 +4234,8 @@ def prepare_impl_fill(
         # files, none holding its two convicting tests, and no evidence
         # block — the transaction was correct and the prompt was blind.
         _pair_ev = assemble_block_evidence(
-            (pd.dispatcher_block, pd.implementer_block), all_blocks,
+            (pd.dispatcher_block, pd.implementer_block, *_pair_extra),
+            all_blocks,
             _frontier_tests,
             find_tests=lambda leaf, mx: _find_tests_referencing_fn(
                 tests_dir_files, leaf, max_blocks=mx),
@@ -4309,11 +4329,12 @@ def prepare_impl_fill(
                     crashed_refill_names=_pair_ev.crashed_names,
                     aimed_refill_names=_pair_ev.aimed_names,
                     identity_must=_identity_must(
-                        *(m for b in halves
+                        *(m for b in (*halves, *_pair_extra)
                           for m in (*b.stub_members, *b.refill_members))),
                     last_error=_err),
                 fr_path=fr_path,
-                partner_block=pd.implementer_block)
+                partner_block=pd.implementer_block,
+                extra_blocks=_pair_extra)
 
         # Compile diagnostic first (this call already answered); else the
         # stored verdict of the last joint revert. A crash summary names
@@ -4359,7 +4380,10 @@ def prepare_impl_fill(
                 return
             _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
                  "implementer written under ONE judgment across "
-                 f"{len(halves)} files ({len(_pair_tests)} convicting test(s)).")
+                 f"{len(halves)} files ({len(_pair_tests)} convicting test(s)"
+                 + (f", {sum(len((*b.stub_members, *b.refill_members)) for b in _pair_extra)} table slot(s)"
+                    if _pair_extra else "")
+                 + ").")
             _emit("phase_c.pair.fill.start", data={
                 "cluster": cluster_name,
                 "dispatcher": site_payload(pair.dispatcher),
@@ -4465,7 +4489,7 @@ def prepare_impl_fill(
 
             with _splice_check_lock:
                 _snaps = {b.file: capture(target_src_dir / b.file, None)
-                          for b in halves}
+                          for b in (*halves, *_pair_extra)}
                 _pair_base_raw: list[str] = []
                 _pair_baseline = _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
@@ -4498,6 +4522,31 @@ def prepare_impl_fill(
                         else:
                             _log(f"  [phase-c/pair] {pair_id}: splice "
                                  f"`{_fd['fn_name']}` failed: {_reason}")
+                # Same-file table slots: splice by name, not by the model's
+                # block attr. A free fn has no header the pair prompt can
+                # name, and an invented one used to drop the body. The
+                # locator is already the write set.
+                _parsed_by_name = {p.get("fn_name"): p for p in _pair_parsed}
+                _extra_wanted: list[str] = []
+                for _eb in _pair_extra:
+                    for _em in (*_eb.stub_members, *_eb.refill_members):
+                        _extra_wanted.append(_em.fn_name)
+                        _efd = _parsed_by_name.get(_em.fn_name)
+                        if not _efd:
+                            _log(f"  [phase-c/pair] {pair_id}: table slot "
+                                 f"`{_em.fn_name}` missing from reply.")
+                            continue
+                        _ok, _reason, _delta = _splice_fn_with_where(
+                            target_src_dir / _eb.file, _eb.container,
+                            _em.fn_name, _efd["body"],
+                            _efd.get("where_clause"),
+                            allow_nonstub=True, sig_text=_em.sig_text)
+                        if _ok:
+                            _spliced_by_file.setdefault(_eb.file, []).append(
+                                _em.fn_name)
+                        else:
+                            _log(f"  [phase-c/pair] {pair_id}: splice "
+                                 f"`{_em.fn_name}` failed: {_reason}")
 
                 def _revert_pair(_kept: dict[str, PreImage] = _snaps,
                                  _names: dict[str, list[str]] = _spliced_by_file
@@ -4508,14 +4557,26 @@ def prepare_impl_fill(
                         _note_reverted(_pf, _pnames)
 
                 _n_spliced = sum(len(v) for v in _spliced_by_file.values())
-                if len(_spliced_by_file) < len(halves):
+                _spliced_names = {
+                    n for ns in _spliced_by_file.values() for n in ns}
+                _missing_extra = [n for n in _extra_wanted
+                                  if n not in _spliced_names]
+                if len(_spliced_by_file) < len(halves) or _missing_extra:
                     # HALF a pair on the tree is exactly the state this route
-                    # exists to never create — revert whatever landed.
+                    # exists to never create — revert whatever landed. A
+                    # pair without its table slots is the same split: the
+                    # independently-judged slot fill cannot pay.
                     if _n_spliced:
                         _revert_pair()
-                    _log(f"  [phase-c/pair] {pair_id}: reply covered "
-                         f"{len(_spliced_by_file)} of {len(halves)} files — "
-                         "nothing kept (the transaction needs both halves).")
+                    if _missing_extra:
+                        _log(f"  [phase-c/pair] {pair_id}: reply omitted "
+                             f"table slot(s) {', '.join(_missing_extra)} — "
+                             "nothing kept (the transaction needs the slots "
+                             "the last crash-revert called).")
+                    else:
+                        _log(f"  [phase-c/pair] {pair_id}: reply covered "
+                             f"{len(_spliced_by_file)} of {len(halves)} files — "
+                             "nothing kept (the transaction needs both halves).")
                     _cls(FillOutcomeClass.ANSWER_DROPPED, pair_id, "pair")
                     _emit("phase_c.pair.fill.partial", data={
                         "cluster": cluster_name,
@@ -4571,7 +4632,7 @@ def prepare_impl_fill(
                 # wiped before the crash stamp). Cleared only on KEEP.
                 _pair_sites = frozenset(
                     FnSite(b.file, m.fn_name, b.container)
-                    for b in halves
+                    for b in (*halves, *_pair_extra)
                     for m in (*b.stub_members, *b.refill_members))
                 _pair_u2 = _u2_test_gate(_pair_tests, _pair_sites, tdd_test_cmd,
                                          target_src_dir, cluster_env)
@@ -5194,7 +5255,9 @@ def prepare_impl_fill(
 
     _session_route = _make_session_route()
     _pair_served: set[FnLocator] = set()
-    _pair_jobs = pair_dispatches(_frontier_tests.pairs, all_blocks)
+    _pair_jobs = pair_dispatches(
+        _frontier_tests.pairs, all_blocks,
+        extra_locators=_pair_crash_callees)
     _stubs_all: frozenset[FnLocator] = frozenset(
         _scan_unimplemented_for_cluster(target_src_dir, cluster).units)
     _hollow = hollow_by_test(session_slices or {}, _stubs_all)

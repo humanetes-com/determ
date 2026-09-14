@@ -42,14 +42,30 @@ from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock
 class PairDispatch(NamedTuple):
     """One pair ready to dispatch: the pair plus each endpoint's block
     narrowed to that single member (stub if the body is still a stub,
-    refill otherwise)."""
+    refill otherwise).
+
+    ``extra_blocks`` are same-file table slots a compiling pair
+    crash-revert recovered (``crash_vtable_callees``). They live in a
+    member's file, so the pair can write them; a separately-judged file
+    of those locators on the rolled-back tree cannot — the current
+    members do not enter them, their attributed tests already pass, and
+    the pair that would enter them still crash-reverts (run
+    ``10959-9c95ea89``, 2026-09-14: two recovered slots filled FLAT
+    net +0, then the pair crash-reverted the same five binaries). Empty
+    (the default) is every recorded pair that did not crash this way.
+    """
 
     pair: FormatterPair
     dispatcher_block: ImplBlock
     implementer_block: ImplBlock
+    extra_blocks: tuple[ImplBlock, ...] = ()
 
     def member_locators(self) -> frozenset[FnLocator]:
-        return self.pair.member_locators()
+        extra = frozenset(
+            FnLocator(b.file, m.fn_name)
+            for b in self.extra_blocks
+            for m in (*b.stub_members, *b.refill_members))
+        return self.pair.member_locators() | extra
 
     def member_scope(self) -> frozenset[str]:
         """The transaction's member identity as `file::fn` strings — the
@@ -66,7 +82,8 @@ class PairDispatch(NamedTuple):
         lesson diagnoses a joint write against exactly this tree state and
         expires when any route lands a different body in either member."""
         texts = []
-        for b in (self.dispatcher_block, self.implementer_block):
+        for b in (self.dispatcher_block, self.implementer_block,
+                  *self.extra_blocks):
             for m in sorted((*b.stub_members, *b.refill_members),
                             key=lambda m: (b.file, m.fn_name)):
                 texts.append(m.body_text)
@@ -137,6 +154,31 @@ def _endpoint_block(
         if stub:
             return replace(b, stub_members=stub, refill_members=())
         member = tuple(m for m in b.members if m.fn_name == site.fn_name)
+        if member:
+            return replace(b, stub_members=(), refill_members=member)
+    return None
+
+
+def _block_for_locator(
+    loc: FnLocator, all_blocks: Sequence[ImplBlock],
+) -> ImplBlock | None:
+    """The block declaring ``loc``, narrowed to that one member.
+
+    Unlike :func:`_endpoint_block` this keys on file+name only, so a free
+    fn (container ``""``) is not matched to the first impl in the file.
+    Stub / refill classification is kept so the pair splice overwrites a
+    filled slot and fills a still-hollow one.
+    """
+    for b in all_blocks:
+        if b.file != loc.file:
+            continue
+        stub = tuple(m for m in b.stub_members if m.fn_name == loc.fn_name)
+        if stub:
+            return replace(b, stub_members=stub, refill_members=())
+        refill = tuple(m for m in b.refill_members if m.fn_name == loc.fn_name)
+        if refill:
+            return replace(b, stub_members=(), refill_members=refill)
+        member = tuple(m for m in b.members if m.fn_name == loc.fn_name)
         if member:
             return replace(b, stub_members=(), refill_members=member)
     return None
@@ -219,17 +261,40 @@ def dispatch_including_pairs(
 def pair_dispatches(
     pairs: Iterable[FormatterPair],
     all_blocks: Sequence[ImplBlock],
+    extra_locators: Collection[FnLocator] = (),
 ) -> list[PairDispatch]:
     """The hop's dispatchable pairs with both endpoint blocks resolved.
     A pair either of whose endpoints has no collected block (record drift,
-    a free fn) is dropped — the ordinary routes still own its members."""
+    a free fn) is dropped — the ordinary routes still own its members.
+
+    ``extra_locators`` whose file is a pair member's file join that pair's
+    write set (same-file table slots a compiling crash-revert recovered).
+    Empty (the default) leaves every recorded pair a two-member
+    transaction. A locator in a third file is skipped here: the pair
+    writes two files, and that run stays crash-blamed so pair_wait does
+    not park it.
+    """
+    extras = frozenset(extra_locators)
     out: list[PairDispatch] = []
     for p in pairs_to_dispatch(pairs):
         db = _endpoint_block(p.dispatcher, all_blocks)
         ib = _endpoint_block(p.implementer, all_blocks)
         if db is None or ib is None:
             continue
-        out.append(PairDispatch(p, db, ib))
+        member_files = {p.dispatcher.file, p.implementer.file}
+        member_locs = p.member_locators()
+        extra_blocks: list[ImplBlock] = []
+        seen: set[FnLocator] = set()
+        for loc in sorted(extras, key=lambda k: (k.file, k.fn_name)):
+            if (loc.file not in member_files or loc in member_locs
+                    or loc in seen):
+                continue
+            blk = _block_for_locator(loc, all_blocks)
+            if blk is None:
+                continue
+            seen.add(loc)
+            extra_blocks.append(blk)
+        out.append(PairDispatch(p, db, ib, tuple(extra_blocks)))
     return out
 
 

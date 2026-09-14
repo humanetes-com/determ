@@ -246,8 +246,11 @@ def run_blocks(a: RouteRun, b: RouteRun,
     that can write either member, or that aims at the same leftover tests,
     waits — unless that other run fills a stub which makes a leftover test
     hollow, which is still blockers-first, or holds a crash-blamed
-    locator a compiling pair revert recovered (the table fn the pair
-    called, whose panic sits outside the pair write set). Run
+    locator the pair does not already write (a table fn in a third file
+    the two-file pair cannot splice). A blamed locator the pair holds is
+    not an exemption: that run is a split of the joint write (run
+    ``10959-9c95ea89``, 2026-09-14: file of the recovered slots opened
+    first, kept FLAT net +0, pair still crash-reverted). Run
     ``19980-f9ea6adb`` (2026-09-10) opened the overlapping session first,
     wrote both halves plus a hanging companion, peeled the set apart, and
     ``PairRoute`` would have skipped once a session had served either
@@ -263,10 +266,11 @@ def run_blocks(a: RouteRun, b: RouteRun,
     `b` does not."""
     if a is b:
         return False
+    blamed = frozenset(crash_blamed)
     if (a.kind is RouteKind.PAIR and b.kind is not RouteKind.PAIR
             and (a.targets & b.targets or a.target_tests & b.target_tests)
             and not _blocking_stubs(b, hollow)
-            and not (b.targets & frozenset(crash_blamed))):
+            and not ((b.targets & blamed) - a.targets)):
         return True
     if not a.stubs_in_targets or not b.target_tests:
         return False
@@ -703,9 +707,7 @@ def schedule(
     if pair_runs:
         kept_pair: list[ScheduledRun] = []
         for s in scheduled:
-            if (any(run_blocks(p, s.run, hollow, blamed) for p in pair_runs)
-                    and not _blocking_stubs(s.run, hollow)
-                    and not (s.run.targets & blamed)):
+            if any(run_blocks(p, s.run, hollow, blamed) for p in pair_runs):
                 waiting.append(replace(s, deferred=True, share_minutes=0.0,
                                        reason="pair_wait"))
                 continue

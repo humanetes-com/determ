@@ -189,10 +189,10 @@ def test_a_pair_blocked_run_is_deferred_this_fill() -> None:
 
 
 def test_a_crash_blamed_run_of_the_pairs_callee_does_not_wait() -> None:
-    """A compiling pair crash-revert recovered a table fn outside the
-    write set. pair_wait must not defer a run that holds that locator
-    (same exception as a blocking stub). Control: the same file without
-    the blamed locator still waits."""
+    """A compiling pair crash-revert recovered a table fn the pair does
+    not write (a third file). pair_wait must not defer a run that holds
+    that locator (same exception as a blocking stub). Control: the same
+    file without the blamed locator still waits."""
     pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
     holder = _file("file src/x.rs", {_PEEK, _FMT}, set(), {"t_fmt"})
     assert not run_blocks(pair, holder, {}, crash_blamed={_PEEK})
@@ -209,6 +209,29 @@ def test_a_crash_blamed_run_of_the_pairs_callee_does_not_wait() -> None:
     assert [s.run.label for s in waiting.ordered] == [pair.label]
     assert [s.run.label for s in waiting.deferred] == [empty.label]
     assert waiting.deferred[0].reason == "pair_wait"
+
+
+def test_a_crash_callee_the_pair_holds_still_waits() -> None:
+    """Same-file table slots join the pair write set, so a file of those
+    locators is a split of the joint write and pair_waits. Control: today's
+    blamed exemption on a pair that does not hold the locator still opens
+    the file (test_a_crash_blamed_run_of_the_pairs_callee_does_not_wait)."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new",
+                 {_FMT, _NEW, _PEEK}, {"t_fmt"})
+    holder = _file("file src/x.rs", {_PEEK, _FMT}, set(), {"t_fmt"})
+    assert run_blocks(pair, holder, {}, crash_blamed={_PEEK})
+    sched = schedule([pair, holder], [], oracle_fp="o", hollow={},
+                     crash_blamed={_PEEK})
+    assert [s.run.label for s in sched.ordered] == [pair.label]
+    assert [s.run.label for s in sched.deferred] == [holder.label]
+    assert sched.deferred[0].reason == "pair_wait"
+    other = _file("file src/z.rs", {FnLocator("src/z.rs", "slot")}, set(),
+                  {"t_fmt"})
+    third = schedule(
+        [pair, other], [], oracle_fp="o", hollow={},
+        crash_blamed={FnLocator("src/z.rs", "slot")})
+    assert other.label in [s.run.label for s in third.ordered]
+    assert pair.label in [s.run.label for s in third.ordered]
 
 
 def test_a_stub_run_that_hollows_the_pairs_leftovers_still_goes_first() -> None:

@@ -137,6 +137,33 @@ def test_pair_dispatches_resolves_both_endpoint_blocks() -> None:
     assert pair_dispatches({_PAIR}, _blocks()[:2]) == []
 
 
+def test_pair_dispatches_joins_same_file_table_slots() -> None:
+    """A compiling crash-revert's table slots in a member's file join
+    the pair write set. A slot in a third file does not — the pair
+    writes two files. Control: empty extra_locators is the two-member
+    pair every recorded fill used."""
+    peek = _rec("src/error.rs", "peek", "")
+    other = _rec("src/z.rs", "slot", "")
+    blocks = _blocks() + [
+        ImplBlock(file="src/error.rs", container="",
+                  members=(peek,), refill_members=(peek,)),
+        ImplBlock(file="src/z.rs", container="",
+                  members=(other,), refill_members=(other,)),
+    ]
+    jobs = pair_dispatches(
+        {_PAIR}, blocks,
+        extra_locators={FnLocator("src/error.rs", "peek"),
+                        FnLocator("src/z.rs", "slot")})
+    assert len(jobs) == 1
+    assert FnLocator("src/error.rs", "peek") in jobs[0].member_locators()
+    assert FnLocator("src/z.rs", "slot") not in jobs[0].member_locators()
+    assert [m.fn_name for b in jobs[0].extra_blocks
+            for m in b.refill_members] == ["peek"]
+    bare = pair_dispatches({_PAIR}, blocks)
+    assert bare[0].extra_blocks == ()
+    assert bare[0].member_locators() == _PAIR.member_locators()
+
+
 def test_a_still_stubbed_endpoint_dispatches_as_a_stub() -> None:
     stub = _rec("src/fmt.rs", "debug", "impl ErrorImpl")
     blocks = _blocks()[:2] + [

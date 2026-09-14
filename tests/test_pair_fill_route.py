@@ -41,6 +41,8 @@ impl fmt::Display for Report {
         write!(f, "{}", self.msg)
     }
 }
+
+pub fn peek() -> u32 { 0 }
 """
 
 IMPLEMENTER_LIB = """pub struct Renderer { pub depth: u32 }
@@ -65,6 +67,9 @@ PAIR_REPLY = (
 )
 
 
+_PEEK = FnLocator("lib.rs", "peek")
+
+
 def _blocks() -> list[ImplBlock]:
     disp = FnRecord(file="lib.rs", fn_name="fmt",
                     container="impl fmt::Display for Report",
@@ -72,11 +77,15 @@ def _blocks() -> list[ImplBlock]:
     impl_ = FnRecord(file="render.rs", fn_name="render",
                      container="impl Renderer",
                      sig_text="pub fn render (& self) -> u32")
+    peek = FnRecord(file="lib.rs", fn_name="peek", container="",
+                    sig_text="pub fn peek () -> u32", body_text="0")
     return [
         ImplBlock(file="lib.rs", container="impl fmt::Display for Report",
                   members=(disp,), refill_members=(disp,)),
         ImplBlock(file="render.rs", container="impl Renderer",
                   members=(impl_,), refill_members=(impl_,)),
+        ImplBlock(file="lib.rs", container="",
+                  members=(peek,), refill_members=(peek,)),
     ]
 
 
@@ -664,6 +673,54 @@ def test_crash_last_error_quotes_the_previous_bodies() -> None:
     out = crash_last_error(preview, body)
     assert preview in out and "foo()" in out
     assert "Your previous attempt wrote:" in out
+
+
+PAIR_REPLY_WITH_SLOT = (
+    PAIR_REPLY + '\n<FN name="peek" block="free fns">1</FN>'
+)
+
+
+def _install_crash_callees(monkeypatch):
+    monkeypatch.setattr(
+        "pipeline_core.application.reconstruct.impl_fill."
+        "crash_vtable_callees_from_store",
+        lambda *a, **k: frozenset({_PEEK}))
+
+
+def test_same_file_table_slots_join_the_pair_write(
+        monkeypatch, tmp_path):
+    """A compiling crash-revert's same-file slot is in the pair prompt
+    and splices under the same judgment. Control: without the recovered
+    locator the pair is still the two members (existing tests)."""
+    ws = _setup(monkeypatch, tmp_path)
+    _install_crash_callees(monkeypatch)
+    prompts: list[str] = []
+    _install_model(monkeypatch, [PAIR_REPLY_WITH_SLOT], prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    lib = (ws / "src" / "lib.rs").read_text()
+    assert "PAIRED" in lib
+    assert "fn peek" in lib
+    assert "pub fn peek() -> u32 { 0 }" not in lib
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "TABLE SLOTS" in pair_prompt
+    assert "peek" in pair_prompt
+    assert (_PEEK[0], _PEEK[1]) in (res.dispatched_fns or ())
+
+
+def test_a_pair_reply_that_omits_its_table_slot_keeps_nothing(
+        monkeypatch, tmp_path):
+    """A pair that lands without the recovered slots is the independently
+    judged split. Control: the same reply without recovered slots is the
+    two-member keep (test_a_pair_dispatches_once)."""
+    ws = _setup(monkeypatch, tmp_path)
+    _install_crash_callees(monkeypatch)
+    prompts: list[str] = []
+    _install_model(monkeypatch, [PAIR_REPLY], prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    assert (ws / "src" / "lib.rs").read_text() == DISPATCHER_LIB
+    assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
 
 
 def test_pair_last_error_keeps_compile_and_crash() -> None:
