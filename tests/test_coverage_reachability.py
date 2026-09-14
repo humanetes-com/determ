@@ -30,6 +30,7 @@ from pipeline_core.domain.coverage_slice import (
     CoverageSlice,
     bind,
     convictors_never_enter,
+    entered_by_test,
     unreached_by,
 )
 from pipeline_core.domain.models import FnLocator, FnSite
@@ -155,8 +156,15 @@ def test_bound_reading_answers() -> None:
         assert unreached_by(_OK, ["test_trailer"]) == frozenset({"test_trailer"})
         assert unreached_by(_DEREF_MUT,
                             ["test_deref_mut_error_targets"]) is None
+        assert entered_by_test(_DEREF_MUT, "test_deref_mut_error_targets")
+        assert not entered_by_test(_OK, "test_trailer")
     finally:
         _unbind()
+
+
+def test_entered_by_test_unbound_is_not_proven() -> None:
+    _unbind()
+    assert not entered_by_test(_DEREF_MUT, "test_deref_mut_error_targets")
 
 
 # --------------------------------------------- the record already on disk

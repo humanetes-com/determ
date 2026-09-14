@@ -477,6 +477,23 @@ def unreached_by(unit: FnLocator, tests: Iterable[str]) -> frozenset[str] | None
     return convictors_never_enter(unit, tests, reading.owners)
 
 
+def entered_by_test(unit: FnLocator, test: str) -> bool:
+    """True only when the bound reading measured ``test``, it entered at
+    least one crate body, and ``unit`` is among them. Unbound, unmeasured,
+    or an empty owner set is False — not proven entered. The inverse of
+    :func:`unreached_by_test`'s positive-unentered case."""
+    reading = _bound
+    if reading is None:
+        return False
+    key = matching_test_key(test, reading.owners)
+    if key is None:
+        return False
+    entered = reading.owners.get(key)
+    if not entered:
+        return False
+    return unit in {locator_of(s) for s in entered}
+
+
 def unreached_by_test(unit: FnLocator, test: str) -> bool:
     """One test's positive-evidence read against the BOUND reading: True only
     when the test was measured, entered at least one crate body, and `unit`

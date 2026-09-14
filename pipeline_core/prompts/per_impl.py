@@ -100,6 +100,8 @@ def build_per_impl_prompt(
     stub_members = block.stub_members
     refill_members = block.refill_members
     _refill_names = frozenset(m.fn_name for m in refill_members)
+    _quoted_names = frozenset(
+        m.fn_name for m in extra_quoted_members(block))
     target_render = format_impl_block_for_prompt(
         block, mark_target=True,
         refill_fn_names=_refill_names,
@@ -107,6 +109,7 @@ def build_per_impl_prompt(
         # cfg never compiles is rendered as one the model must NOT answer
         # (see `format_impl_block_for_prompt`).
         fill_fn_names=frozenset(m.fn_name for m in stub_members),
+        companion_fn_names=_quoted_names,
         inferred_fn_names=sections.inferred_refill_names,
         crashed_fn_names=sections.crashed_refill_names,
         aimed_fn_names=sections.aimed_refill_names)
@@ -293,20 +296,34 @@ def build_per_impl_prompt(
         partner_names = ", ".join(
             m.fn_name for m in (*partner_block.stub_members,
                                 *partner_block.refill_members))
-        pair_part = (
-            "PAIRED WRITE — this response fills BOTH target blocks, in two "
-            "different files, as ONE design. The first block dispatches a "
-            "format trait; the second is the implementer it delegates to. "
-            "They are accepted or rejected TOGETHER, so design the "
-            "delegation and the implementation to agree: neither half is "
-            "correct alone. The implementer is a rewrite even when coverage "
-            "of the current tree shows the failing tests do not enter it: "
-            "they do not enter it because the dispatcher does not yet call "
-            "it on this arm, which is the other half of this write. A "
-            "pinned output substring in REFILL_TARGETS is emitted by this "
-            "pair. Debug or Display of a field cannot produce a substring "
-            "that field's own formatter does not print — write the literal "
-            "in the implementer.\n\n")
+        if extra_write_members(block):
+            pair_part = (
+                "PAIRED WRITE — this response fills BOTH target blocks, in two "
+                "different files, as ONE design. The first block dispatches a "
+                "format trait; the second is the implementer it delegates to. "
+                "They are accepted or rejected TOGETHER, so design the "
+                "delegation and the implementation to agree: neither half is "
+                "correct alone. The implementer is a rewrite even when coverage "
+                "of the current tree shows the failing tests do not enter it: "
+                "they do not enter it because the dispatcher does not yet call "
+                "it on this arm, which is the other half of this write. A "
+                "pinned output substring in REFILL_TARGETS is emitted by this "
+                "pair. Debug or Display of a field cannot produce a substring "
+                "that field's own formatter does not print — write the literal "
+                "in the implementer.\n\n")
+        else:
+            pair_part = (
+                "PAIRED WRITE — coverage shows failing tests already enter "
+                "the implementer through the current dispatcher. This "
+                "response rewrites the implementer only. The dispatcher is "
+                "marked FILLED: do NOT emit an <FN> for it. Wiring a "
+                "dispatcher arm that does not yet call the implementer in "
+                "the same keep is how a compiling pair crash-reverts — "
+                "that arm is a later write, after this one keeps. A pinned "
+                "output substring in REFILL_TARGETS is emitted by the "
+                "implementer. Debug or Display of a field cannot produce a "
+                "substring that field's own formatter does not print — "
+                "write the literal in the implementer.\n\n")
     extra_section = ""
     extra_names = ""
     if extra_blocks:

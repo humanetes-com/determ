@@ -18,8 +18,11 @@ from pipeline_core.domain.pair_fill import (
     PAIR_CRASH_CALLEES,
     blocks_after_pair_fill,
     dispatch_including_pairs,
+    extra_write_members,
     pair_dispatches,
+    pair_required_files,
     pairs_to_dispatch,
+    quote_dispatcher_when_implementer_entered,
     remembered_pair_callees,
     union_pair_callees,
 )
@@ -165,6 +168,72 @@ def test_pair_dispatches_joins_same_file_table_slots() -> None:
     bare = pair_dispatches({_PAIR}, blocks)
     assert bare[0].extra_blocks == ()
     assert bare[0].member_locators() == _PAIR.member_locators()
+
+
+def test_quote_dispatcher_when_implementer_entered() -> None:
+    """Plan: a convicting test already enters the implementer, so the
+    dispatcher is quoted not rewritten. Control: implementer unentered
+    keeps both as refill — the co-dependent write."""
+    jobs = pair_dispatches({_PAIR}, _blocks())
+    assert len(jobs) == 1
+    both = quote_dispatcher_when_implementer_entered(
+        jobs[0], implementer_entered=False)
+    assert extra_write_members(both.dispatcher_block)
+    assert extra_write_members(both.implementer_block)
+    quoted = quote_dispatcher_when_implementer_entered(
+        jobs[0], implementer_entered=True)
+    assert extra_write_members(quoted.dispatcher_block) == ()
+    assert [m.fn_name for m in quoted.dispatcher_block.members] == ["fmt"]
+    assert extra_write_members(quoted.implementer_block)
+    assert pair_required_files(quoted) == frozenset({"src/fmt.rs"})
+    assert pair_required_files(both) == frozenset(
+        {"src/error.rs", "src/fmt.rs"})
+    # A stub dispatcher stays a write.
+    stub = _rec("src/error.rs", "fmt", "impl Debug for Error")
+    stub_blocks = [
+        ImplBlock(file="src/error.rs", container="impl Debug for Error",
+                  members=(stub,), stub_members=(stub,)),
+        _blocks()[2],
+    ]
+    stub_jobs = pair_dispatches({_PAIR}, stub_blocks)
+    still = quote_dispatcher_when_implementer_entered(
+        stub_jobs[0], implementer_entered=True)
+    assert extra_write_members(still.dispatcher_block)
+
+
+def test_quoted_dispatcher_prompt_forbids_an_fn_for_it() -> None:
+    """The implementer-only pair prompt must not ask for a dispatcher FN.
+    Control: both-refill still says fills BOTH target blocks."""
+    from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
+    jobs = pair_dispatches({_PAIR}, _blocks())
+    quoted = quote_dispatcher_when_implementer_entered(
+        jobs[0], implementer_entered=True)
+    sections = PerImplSections(
+        types="", invariants="", notes="", crate_idioms="",
+        dispatch_family="", macros="", siblings="",
+        retrospective_guidance="", bound_methods="")
+    prompt = build_per_impl_prompt(
+        block=quoted.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=sections,
+        partner_block=quoted.implementer_block)
+    assert "rewrites the implementer only" in prompt
+    assert "do NOT emit an <FN> for it" in prompt
+    assert "fills BOTH target blocks" not in prompt
+    both = build_per_impl_prompt(
+        block=jobs[0].dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=sections,
+        partner_block=jobs[0].implementer_block)
+    assert "fills BOTH target blocks" in both
+    assert "rewrites the implementer only" not in both
 
 
 def test_pair_dispatches_quotes_a_passing_table_slot() -> None:

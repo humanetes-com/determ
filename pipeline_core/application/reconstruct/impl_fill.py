@@ -112,6 +112,7 @@ from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMus
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.cfg import cluster_cfg_set
+from pipeline_core.domain.coverage_slice import entered_by_test
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
 from pipeline_core.domain.crash_site import blame_outside_unit
@@ -187,10 +188,13 @@ from pipeline_core.domain.pair_fill import (
     PAIR_CRASH_CALLEES,
     PairDispatch,
     blocks_after_pair_fill,
+    extra_write_members,
     pair_dispatches,
     pair_last_error,
     pair_record_container,
+    pair_required_files,
     pairs_to_dispatch,
+    quote_dispatcher_when_implementer_entered,
     remembered_pair_callees,
     union_pair_callees,
 )
@@ -4214,7 +4218,9 @@ def prepare_impl_fill(
         halves = (pd.dispatcher_block, pd.implementer_block)
         pair_id = " + ".join(
             f"{b.file}::" + ",".join(
-                m.fn_name for m in (*b.stub_members, *b.refill_members))
+                dict.fromkeys(
+                    m.fn_name for m in (*b.stub_members, *b.refill_members,
+                                        *b.members)))
             for b in halves)
         _pair_locs = pd.member_locators()
         _pair_extra = tuple(pd.extra_blocks)
@@ -4599,11 +4605,15 @@ def prepare_impl_fill(
                     n for ns in _spliced_by_file.values() for n in ns}
                 _missing_extra = [n for n in _extra_wanted
                                   if n not in _spliced_names]
-                if len(_spliced_by_file) < len(halves) or _missing_extra:
+                _need_files = pair_required_files(pd)
+                _missing_files = _need_files - set(_spliced_by_file)
+                if _missing_files or _missing_extra:
                     # HALF a pair on the tree is exactly the state this route
                     # exists to never create — revert whatever landed. A
                     # pair without its table slots is the same split: the
-                    # independently-judged slot fill cannot pay.
+                    # independently-judged slot fill cannot pay. A quoted
+                    # half is not required: omitting its FN keeps the
+                    # current body.
                     if _n_spliced:
                         _revert_pair()
                     if _missing_extra:
@@ -4613,8 +4623,9 @@ def prepare_impl_fill(
                              "the last crash-revert called).")
                     else:
                         _log(f"  [phase-c/pair] {pair_id}: reply covered "
-                             f"{len(_spliced_by_file)} of {len(halves)} files — "
-                             "nothing kept (the transaction needs both halves).")
+                             f"{len(_spliced_by_file)} of {len(_need_files)} "
+                             "required file(s) — nothing kept (the "
+                             "transaction needs every rewritten half).")
                     _cls(FillOutcomeClass.ANSWER_DROPPED, pair_id, "pair")
                     _emit("phase_c.pair.fill.partial", data={
                         "cluster": cluster_name,
@@ -5294,9 +5305,27 @@ def prepare_impl_fill(
 
     _session_route = _make_session_route()
     _pair_served: set[FnLocator] = set()
-    _pair_jobs = pair_dispatches(
-        _frontier_tests.pairs, all_blocks,
-        extra_locators=_pair_extra_locs)
+    _pair_jobs = []
+    for _pd in pair_dispatches(
+            _frontier_tests.pairs, all_blocks,
+            extra_locators=_pair_extra_locs):
+        _impl_loc = FnLocator(
+            _pd.pair.implementer.file, _pd.pair.implementer.fn_name)
+        _pair_test_names: set[str] = set()
+        for _loc in _pd.member_locators():
+            _pair_test_names |= set(_frontier_tests.tests_for(_loc))
+            _pair_test_names |= set(_frontier_tests.convicting_for(_loc))
+        _entered = any(
+            entered_by_test(_impl_loc, t) for t in _pair_test_names)
+        _quoted = quote_dispatcher_when_implementer_entered(
+            _pd, implementer_entered=_entered)
+        if _entered and extra_write_members(_pd.dispatcher_block) and (
+                not extra_write_members(_quoted.dispatcher_block)):
+            _log(f"  [phase-c/pair] {_impl_loc.file}::{_impl_loc.fn_name} "
+                 "is entered by a convicting test — dispatcher quoted, not "
+                 "rewritten (wiring the unentered arm in the same keep "
+                 "crash-reverts).")
+        _pair_jobs.append(_quoted)
     _stubs_all: frozenset[FnLocator] = frozenset(
         _scan_unimplemented_for_cluster(target_src_dir, cluster).units)
     _hollow = hollow_by_test(session_slices or {}, _stubs_all)

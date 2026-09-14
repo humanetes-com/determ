@@ -286,6 +286,48 @@ def extra_quoted_members(block: ImplBlock) -> tuple[FnRecord, ...]:
     return tuple(m for m in block.members if m.fn_name not in written)
 
 
+def quote_dispatcher_when_implementer_entered(
+    pd: PairDispatch, *, implementer_entered: bool,
+) -> PairDispatch:
+    """A filled dispatcher is quoted, not rewritten, when some convicting
+    test already enters the implementer.
+
+    Wiring the dispatcher arm that does not yet call the implementer in
+    the same keep is how a compiling pair crash-reverts: that arm first
+    enters the implementer's unentered path, which crashes (2026-09-14
+    after 8c24980: LAST_ERROR was the crash and the crashing body, the
+    diagnostician still prescribed as_ptr, compiler_rejected dropped it,
+    every fill still always-called debug and died on five binaries).
+    Tests that already enter the implementer can cash from an
+    implementer-only rewrite. The unentered dispatcher arm is the next
+    pair write, once no convicting test enters the implementer.
+
+    Control: implementer_entered False keeps both as refill (the
+    co-dependent write). A still-stubbed dispatcher stays a write.
+    """
+    if not implementer_entered:
+        return pd
+    d = pd.dispatcher_block
+    if d.stub_members:
+        return pd
+    members = d.refill_members or d.members
+    if not members:
+        return pd
+    return pd._replace(
+        dispatcher_block=replace(
+            d, stub_members=(), refill_members=(), members=members))
+
+
+def pair_required_files(pd: PairDispatch) -> frozenset[str]:
+    """Files the splice must land. A quoted half (members only) is not
+    required — omitting its FN keeps the current body."""
+    out: set[str] = set()
+    for b in (pd.dispatcher_block, pd.implementer_block, *pd.extra_blocks):
+        if extra_write_members(b):
+            out.add(b.file)
+    return frozenset(out)
+
+
 def _as_loc(key: FnLocator | tuple[str, str]) -> FnLocator:
     if isinstance(key, FnLocator):
         return key
