@@ -35,11 +35,14 @@ Sentences pinned here, with the fixed pre-schedule walk as the control:
 from __future__ import annotations
 
 from pipeline_core.domain.fill_schedule import (
+    DEFAULT_UNPAID_GRACE,
     TODAY_ORDER,
     RouteKind,
     RouteLedgerRow,
     RouteRun,
     RunOutcome,
+    consecutive_unpaid,
+    rebuy_identity,
     schedule,
 )
 from tests.fills.harness import (
@@ -392,3 +395,91 @@ def test_the_12120_fill_opens_only_the_pair() -> None:
     assert sched.ordered[0].share_minutes == 200.0
     # Negative control: the live schedule event's order.
     assert recorded[1:] != []
+
+
+def test_the_681204_fill_stops_zeroing_the_runs_behind_a_pair_that_never_pays() -> None:
+    """Plan sentence, computed on fill 2 of `681204-b695ab3f` (2026-09-14).
+
+    The claim under test is NOT "builders sort first" or any paraphrase of
+    the implementation's rule. It is: on a fill whose hop pair has been
+    graded over and over without ever paying, the pair still goes FIRST
+    and the runs behind it get a share instead of zero.
+
+    The fixture is the record — the schedule event's own seven candidate
+    runs (one opened, six `pair_wait`) and the route-run rows those same
+    candidates had before this fill. The negative control is the shipped
+    behaviour, `unpaid_grace=0`, which must reproduce the recorded line:
+    one run ordered, six deferred, every one of them at share 0.
+    """
+    fix = load_fill("681204-b695ab3f_iter2")
+    recorded = [str(raw["label"]) for raw in fix["schedule_runs"]]
+    opened = [str(raw["label"]) for raw in fix["schedule_runs"]
+              if not raw.get("deferred")]
+    assert len(recorded) == 7 and len(opened) == 1
+    pair_label = opened[0]
+    assert pair_label.startswith("pair ")
+    assert all(str(raw["reason"]) == "pair_wait"
+               for raw in fix["schedule_runs"] if raw.get("deferred"))
+
+    rows = ledger_of(fix)
+    oracle = next(r.oracle_fp for r in rows if r.kind is RouteKind.PAIR)
+    runs = _planned(fix)
+    assert {r.label for r in runs} == set(recorded)
+    pair = next(r for r in runs if r.kind is RouteKind.PAIR)
+
+    # The history the bound reads, from the recorded rows: graded tries of
+    # this route and these targets that never paid. Keyed on the work key,
+    # NOT on the re-buy identity — the identity carries the bodies sha and
+    # the pair moves it every fill by keeping table slots no test runs, so
+    # an identity-keyed count is the reason the live schedule kept calling
+    # this route never-served.
+    unpaid = consecutive_unpaid(rows, pair, oracle)
+    assert unpaid >= DEFAULT_UNPAID_GRACE, unpaid
+    ident = rebuy_identity(pair.kind, pair.targets, pair.bodies_sha, oracle,
+                           target_tests=pair.target_tests)
+    same_identity = [r for r in rows if r.identity == ident]
+    assert len(same_identity) < unpaid
+    assert not any(r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0
+                   for r in rows if r.kind is RouteKind.PAIR)
+
+    # Negative control: the shipped behaviour reproduces the record.
+    control = schedule(runs, rows, oracle_fp=oracle, hollow=hollow_of(fix),
+                       budget_minutes=200, unpaid_grace=0)
+    assert [s.run.label for s in control.ordered] == [pair_label]
+    assert {s.run.label for s in control.deferred} == set(recorded) - {pair_label}
+    assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
+               for s in control.deferred)
+
+    # The change: the pair still goes first, nothing is zeroed behind it.
+    sched = schedule(runs, rows, oracle_fp=oracle, hollow=hollow_of(fix),
+                     budget_minutes=200)
+    assert sched.ordered[0].run.label == pair_label
+    assert sched.ordered[0].reason == "grace_spent"
+    assert not [s for s in sched.deferred if s.reason == "pair_wait"]
+    assert {s.run.label for s in sched.ordered} == set(recorded)
+    assert all(s.share_minutes and s.share_minutes > 0 for s in sched.ordered)
+    # Every run the pair blocks still queues behind it.
+    order = [s.run.label for s in sched.ordered]
+    assert all(order.index(lbl) > 0 for lbl in set(recorded) - {pair_label})
+
+
+def test_a_pair_inside_its_grace_still_defers_the_rest_on_the_681204_fill() -> None:
+    """The bound is a grace, not a removal: with the pair's own history
+    trimmed to fewer graded rows than the grace, the recorded fill
+    schedules exactly as it did — pair alone, six `pair_wait`. Same
+    records, same function, one input shortened."""
+    fix = load_fill("681204-b695ab3f_iter2")
+    rows = ledger_of(fix)
+    oracle = next(r.oracle_fp for r in rows if r.kind is RouteKind.PAIR)
+    runs = _planned(fix)
+    pair = next(r for r in runs if r.kind is RouteKind.PAIR)
+    pair_rows = [r for r in rows if r.kind is RouteKind.PAIR]
+    trimmed = [r for r in rows if r.kind is not RouteKind.PAIR]
+    trimmed += pair_rows[-(DEFAULT_UNPAID_GRACE - 1):]
+    assert consecutive_unpaid(trimmed, pair, oracle) < DEFAULT_UNPAID_GRACE
+
+    sched = schedule(runs, trimmed, oracle_fp=oracle, hollow=hollow_of(fix),
+                     budget_minutes=200)
+    assert [s.run.label for s in sched.ordered] == [pair.label]
+    assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
+               for s in sched.deferred)

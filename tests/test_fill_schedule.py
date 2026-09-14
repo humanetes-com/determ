@@ -11,7 +11,10 @@ the same sentences on the live 2026-09-06 fills.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pipeline_core.domain.fill_schedule import (
+    DEFAULT_UNPAID_GRACE,
     TODAY_ORDER,
     FillBudget,
     RouteKind,
@@ -20,6 +23,7 @@ from pipeline_core.domain.fill_schedule import (
     RunClock,
     RunOutcome,
     bodies_sha_of,
+    consecutive_unpaid,
     hollow_by_test,
     rebuy_identity,
     run_blocks,
@@ -687,3 +691,100 @@ def test_a_per_kind_cap_defers_the_sessions_beyond_it_in_schedule_order() -> Non
         free = schedule([*sessions, per_fn], [], oracle_fp="o", hollow={},
                         max_per_kind=cap)
         assert len(free.ordered) == 9 and not free.deferred
+
+
+def test_the_grace_counts_a_route_across_a_moved_bodies_sha() -> None:
+    """The sentence: a route that keeps writing SOMETHING still
+    accumulates a history. Keyed on the re-buy identity it would not —
+    the identity carries the bodies sha, and a hop pair moves it every
+    fill by keeping the table slots no test executes. That is why the
+    live schedule kept calling a route with dozens of graded, never-paying
+    rows `never_served`.
+
+    Negative control: the same rows counted the identity's way."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    rows = []
+    for i in range(5):
+        moved = replace(pair, bodies_sha=f"body{i}")
+        rows.append(_row(moved, RunOutcome.REVERTED, 0))
+    assert consecutive_unpaid(rows, pair, "o") == 5
+    ident = rebuy_identity(pair.kind, pair.targets, pair.bodies_sha, "o",
+                           target_tests=pair.target_tests)
+    assert len([r for r in rows if r.identity == ident]) == 0
+
+
+def test_the_grace_stops_at_a_row_that_paid() -> None:
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    rows = [_row(pair, RunOutcome.REVERTED) for _ in range(4)]
+    rows.insert(2, _row(pair, RunOutcome.CASHED, 3))
+    assert consecutive_unpaid(rows, pair, "o") == 2
+    rows.append(_row(pair, RunOutcome.FLAT, 2))          # a net gain also pays
+    assert consecutive_unpaid(rows, pair, "o") == 0
+
+
+def test_the_grace_ignores_rows_that_opened_no_judged_try() -> None:
+    """Deferred, empty, stopped and reasoning-capped rows bought no
+    verdict, so they neither count toward the grace nor interrupt it —
+    the same rule the re-buy detector already applies."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    rows = [_row(pair, RunOutcome.REVERTED),
+            _row(pair, RunOutcome.DEFERRED),
+            _row(pair, RunOutcome.EMPTY),
+            _row(pair, RunOutcome.STOPPED),
+            _row(pair, RunOutcome.UNMEASURED),
+            _row(pair, RunOutcome.REVERTED)]
+    assert consecutive_unpaid(rows, pair, "o") == 2
+
+
+def test_the_grace_does_not_read_rows_graded_under_another_oracle() -> None:
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    rows = [_row(pair, RunOutcome.REVERTED, oracle="other") for _ in range(9)]
+    assert consecutive_unpaid(rows, pair, "o") == 0
+    rows += [_row(pair, RunOutcome.REVERTED) for _ in range(3)]
+    assert consecutive_unpaid(rows, pair, "o") == 3
+
+
+def test_a_pair_past_its_grace_goes_first_and_the_rest_get_a_share() -> None:
+    """The plan's sentence. The pair still leads — a two-file transaction
+    written after one of its halves was peeled apart is the split every
+    pair_wait instance records — and the runs behind it stop being held
+    at zero.
+
+    Negative control: one fewer graded row and the fill is today's, pair
+    alone with everything else `pair_wait` at share 0."""
+    pair, per_fn, file_run, _ = _pair_blocked_inputs()
+    runs = [pair, per_fn, file_run]
+    spent = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.REVERTED)
+             for i in range(DEFAULT_UNPAID_GRACE)]
+
+    inside = spent[1:]
+    assert consecutive_unpaid(inside, pair, "o") == DEFAULT_UNPAID_GRACE - 1
+    control = schedule(runs, inside, oracle_fp="o", hollow={},
+                       budget_minutes=120)
+    assert [s.run.label for s in control.ordered] == [pair.label]
+    assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
+               for s in control.deferred)
+
+    sched = schedule(runs, spent, oracle_fp="o", hollow={},
+                     budget_minutes=120)
+    assert sched.ordered[0].run.label == pair.label
+    assert sched.ordered[0].reason == "grace_spent"
+    assert {s.run.label for s in sched.ordered} == {
+        pair.label, per_fn.label, file_run.label}
+    assert not [s for s in sched.deferred if s.reason == "pair_wait"]
+    assert all(s.share_minutes and s.share_minutes > 0 for s in sched.ordered)
+
+
+def test_the_grace_bound_is_switchable_off() -> None:
+    """`unpaid_grace=0` restores the unbounded exemptions, so a reading
+    can be taken against the old behaviour without reverting code."""
+    pair, per_fn, file_run, _ = _pair_blocked_inputs()
+    rows = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.REVERTED)
+            for i in range(20)]
+    sched = schedule([pair, per_fn, file_run], rows, oracle_fp="o", hollow={},
+                     budget_minutes=120, unpaid_grace=0)
+    assert [s.run.label for s in sched.ordered] == [pair.label]
+    assert sched.ordered[0].reason != "grace_spent"
+    assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
+               for s in sched.deferred)
+    assert {s.run.label for s in sched.deferred} == {per_fn.label, file_run.label}

@@ -88,6 +88,7 @@ import argparse
 import json
 import sys
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,58 @@ def _events(path: Path, run_id: str) -> list[dict[str, Any]]:
             if str(ev.get("run_id", "")) != run_id:
                 continue
             out.append(ev)
+    return out
+
+
+def _work_key(kind: str, targets: Iterable[Any]) -> str:
+    """The schedule's served-under-another-identity key, as a string —
+    kind plus targets, with the bodies sha deliberately OUT. That is the
+    key a route's history accumulates under: an identity carrying the
+    bodies sha restarts whenever a run keeps any body at all."""
+    # The two events spell a locator differently — the schedule event as
+    # "file::fn", the route-run row as ["file", "fn"] — so normalise
+    # before comparing. Matching the raw spellings silently found nothing
+    # and the fixture came back with an empty history.
+    names = sorted(
+        f"{t[0]}::{t[1]}" if isinstance(t, (list, tuple)) and len(t) == 2
+        else str(t)
+        for t in targets or ())
+    return f"{kind}|{','.join(names)}"
+
+
+def _prior_candidate_rows(path: Path, cluster: str,
+                          schedule_runs: list[dict[str, Any]],
+                          run_id: str) -> list[dict[str, Any]]:
+    """`phase_c.route.run` rows of OTHER runs, for this fill's candidates.
+
+    Scoped to the candidate runs' work keys and this cluster, so the
+    fixture carries the history the schedule would have read for the runs
+    it is choosing among, and not the rest of a ledger that grows without
+    bound. Ordered as the stream is, which is time.
+    """
+    wanted = {_work_key(str(r.get("kind", "")), r.get("targets") or [])
+              for r in schedule_runs}
+    if not wanted:
+        return []
+    out: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if "phase_c.route.run" not in line or cluster not in line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if _kind(ev) != "phase_c.route.run":
+                continue
+            if str(ev.get("run_id", "")) == run_id:
+                continue          # this run's rows come from the slice above
+            d = ev.get("data") or {}
+            if str(d.get("cluster", "")) != cluster:
+                continue
+            if _work_key(str(d.get("kind", "")),
+                         d.get("targets") or []) in wanted:
+                out.append(d)
     return out
 
 
@@ -266,7 +319,25 @@ def distil(run_id: str, iter_n: int, stubs: list[str], *,
     schedule_runs: list[dict[str, Any]] = []
     if sched is not None:
         sd = sched.get("data") or {}
-        schedule_runs = list(sd.get("runs") or [])
+        # Both halves of the event. Taking `runs` alone recorded only what
+        # the schedule OPENED, so a fill whose defect is what it deferred
+        # distilled to a one-run fixture and the deferred set — the thing
+        # under test — was not in the record at all (fill 2 of run
+        # `681204-b695ab3f`, 2026-09-14: one pair opened, six runs
+        # pair_wait). The candidate set is the union; `deferred` on each
+        # raw run says which side it was on.
+        schedule_runs = list(sd.get("runs") or []) + list(
+            sd.get("deferred") or [])
+    # The ledger a schedule reads is CROSS-RUN and this distiller sees one
+    # run, so the rows above are only a tail of it. Whatever history the
+    # fill's own candidates have is the part a recorded test needs: a rule
+    # that keys on "this route, these targets, graded N times without
+    # paying" is invisible in a five-row tail of a 674-row ledger (run
+    # `681204-b695ab3f` fill 2, 2026-09-14). Carry the earlier rows of
+    # those same candidates too, from the whole stream and nothing else,
+    # so the fixture stays small and the history in it is the record.
+    ledger_rows = _prior_candidate_rows(
+        events_path, cluster, schedule_runs, run_id) + ledger_rows
     crash_blamed: list[list[str]] = []
     seen_blame: set[tuple[str, str]] = set()
     for e in fill:

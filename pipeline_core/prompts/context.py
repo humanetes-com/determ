@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pipeline_core.domain.last_error import LastErrorKind
+
 
 @dataclass(frozen=True, slots=True)
 class PerFnSections:
@@ -86,6 +88,15 @@ class PerImplSections:
     # 18:58:59, both E0277 units of run `275772-425da59c`, 2026-08-19) and
     # bought one temperature resample of an unchanged question.
     last_error: str = ""
+    # What produced the excerpt above, from the code that MEASURED the
+    # failure. `UNKNOWN` (the default) means no provenance travelled with
+    # it and the builder falls back to reading the prose — which is the
+    # defect this field closes: the prose reader's substring and the
+    # renderer's wording drifted, so every compiling crash reached the
+    # prompt dressed as a rustc rejection and kept the joint-write
+    # sentence that re-orders the faulting call (run `681204-b695ab3f`,
+    # 2026-09-14, whose own launch carried the fix that reads it).
+    last_error_kind: LastErrorKind = LastErrorKind.UNKNOWN
     # Per re-fill member, what the record supports (`domain.refill_evidence`):
     # DIRECT vs INFERRED, the attributed tests, and their failure text. "" when
     # the block has no re-fill members. Replaces a section that asserted "its

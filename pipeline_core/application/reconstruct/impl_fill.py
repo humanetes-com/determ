@@ -164,6 +164,11 @@ from pipeline_core.domain.installable_fns import (
     producer_bypasses,
 )
 from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.domain.last_error import (
+    LAST_ERROR_KIND,
+    LastErrorKind,
+    kind_from_record,
+)
 from pipeline_core.domain.llm_output import (
     ReplyAudit,
     bind_headerless_names,
@@ -295,6 +300,7 @@ from pipeline_core.domain.test_results import (
     REGRESSED_OUTPUT,
     RegressionComparison,
     TestStateReading,
+    regression_detail_kind,
     strip_ansi,
 )
 from pipeline_core.domain.type_refs import hidden_symbols_from_types
@@ -2991,6 +2997,13 @@ def prepare_impl_fill(
                     _crate_type_records, block.file),
             )
         last_error_excerpt = ""
+        # What produced that excerpt, decided where the failure is MEASURED
+        # and carried to the prompt as data. The builder used to recover it
+        # by grepping the rendered prose, and the substring it looked for
+        # was not the one the renderer writes, so a body that compiled and
+        # aborted reached the model as "produced these errors — do not
+        # resubmit the same approach" (run `681204-b695ab3f`, 2026-09-14).
+        last_error_kind = LastErrorKind.UNKNOWN
         # The last failed attempt's REAL two-tier metric. Re-deriving it from
         # `last_error_excerpt` scores a compiled-but-red block as 0 errors —
         # test output carries no rustc E-codes — and 0 never beats a prior 0,
@@ -3124,6 +3137,7 @@ def prepare_impl_fill(
                     # implies the model is missing (`with_blamed_type_api`).
                     last_error=with_blamed_type_api(
                         last_error_excerpt or "", _crate_type_records),
+                    last_error_kind=last_error_kind,
                     bound_methods=_bound_methods_section_for(
                         _block_where, _crate_type_records, file_rel=block.file),
                     refill_evidence=_refill_evidence_text,
@@ -3166,7 +3180,8 @@ def prepare_impl_fill(
             """Route → splice → cargo-verify one parsed reply. Shared by the
             budgeted attempts and the maximal last-resort attempt."""
             nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
-                members_filled_this_block, block_already_complete, last_metric
+                members_filled_this_block, block_already_complete, \
+                last_metric, last_error_kind
             _last_regr_reverted[0] = False
             _last_crash_sites[0] = None
             # Hold the global splice+cargo lock while we mutate and check.
@@ -3385,6 +3400,9 @@ def prepare_impl_fill(
                          f"fn(s) — regressed sibling test(s): "
                          f"{_cmp.summary} (attempt {fix_attempt}).")
                     last_error_excerpt = _regr_detail
+                    # The gate runs the tests only after a clean compile,
+                    # so this branch is always a body rustc ACCEPTED.
+                    last_error_kind = regression_detail_kind(_cmp)
                     if _cmp.newly_crashed:
                         _last_crash_sites[0] = _cmp.crash_stub_sites
                     _rsig = _cmp.signature
@@ -3609,6 +3627,9 @@ def prepare_impl_fill(
                         locate=_site_locator(),
                         target_container=block.container)
                     or _focus_cargo_errors(cargo_out, block.file))
+                # rustc rejected it: it never ran, so there is no faulting
+                # call to order the next body away from.
+                last_error_kind = LastErrorKind.COMPILE
                 _record_error_codes_seen(cargo_out)
                 if deps.retire_contradicted_notes is not None and fr_path:
                     deps.retire_contradicted_notes(fr_path, cargo_out)
@@ -4378,7 +4399,7 @@ def prepare_impl_fill(
                 str(_pair_key), _pair_rec, _pair_verdict)):
             _log(f"  {_rline}")
 
-        def _make_pair_prompt(_err: str) -> str:
+        def _make_pair_prompt(_err: str, _kind: LastErrorKind) -> str:
             return _build_per_impl_prompt(
                 block=pd.dispatcher_block,
                 related_blocks=[],
@@ -4398,7 +4419,8 @@ def prepare_impl_fill(
                     identity_must=_identity_must(
                         *(m for b in (*halves, *_pair_extra)
                           for m in (*b.stub_members, *b.refill_members))),
-                    last_error=_err),
+                    last_error=_err,
+                    last_error_kind=_kind),
                 fr_path=fr_path,
                 partner_block=pd.implementer_block,
                 extra_blocks=_pair_extra)
@@ -4409,14 +4431,16 @@ def prepare_impl_fill(
         # resubmit the same approach" had no referent, so run
         # `186665-40892dbd` fill 2 resubmitted fill 1's `by_ref` dispatcher
         # after an honoured diagnosis that named a different expression.
-        _raw_err = pair_last_error(
+        _pair_err = pair_last_error(
             str(_pair_rec.get("last_compile_error") or ""),
             str(_pair_rec.get("last_error_preview") or ""),
-            str(_pair_rec.get("last_failed_body") or ""))
+            str(_pair_rec.get("last_failed_body") or ""),
+            kind=kind_from_record(_pair_rec))
+        _raw_err = _pair_err.text
         _last_error = with_blamed_type_api(
             _raw_err, _crate_type_records) if _raw_err else ""
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
-            prompt = _make_pair_prompt(_last_error)
+            prompt = _make_pair_prompt(_last_error, _pair_err.kind)
             # Compare against the sha of the last prompt SENT (the cache,
             # which this loop updates), not the entry snapshot: an in-call
             # compile retry must see attempt 1's stamp. A compile retry
@@ -4530,6 +4554,13 @@ def prepare_impl_fill(
                             # that own retry budgets.
                             "fully_exhausted": False,
                             "last_error_preview": _rdetail[:240],
+                            # The verdict, beside the excerpt of it. The
+                            # preview's budget cuts the TAIL, which on a
+                            # wide crash is the whole instruction, and the
+                            # next prompt used to re-derive the class from
+                            # whatever prose survived.
+                            LAST_ERROR_KIND: regression_detail_kind(
+                                _rcmp).value,
                             "last_failed_body": _reply[:_FAILED_BODY_CAP],
                             "last_compile_error": str(
                                 _cached.get("last_compile_error") or ""),

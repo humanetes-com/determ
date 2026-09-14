@@ -16,6 +16,16 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import NamedTuple
 
+from pipeline_core.domain.last_error import (
+    CRASH_HEAD_MARK,
+    EXECUTED_DROP_MARK,
+    HANG_HEAD_MARK,
+    PASS_DROP_MARK,
+    RED_HEAD_MARK,
+    LastErrorKind,
+    instruction_for,
+)
+
 
 class ClusterStatus(StrEnum):
     """The strict per-cluster TASK 3 verdict. A `StrEnum` so existing
@@ -1990,6 +2000,31 @@ def compare_readings(base: TestStateReading,
         hung_tests=tuple(sorted(hung_tests)))
 
 
+def regression_detail_kind(cmp: RegressionComparison) -> LastErrorKind:
+    """What KIND of failure :func:`render_regression_detail` is about to
+    describe — the same branch order, decided here so the fact can travel
+    with the excerpt instead of being grepped back out of its prose.
+
+    Every branch of this function reaches a prompt through
+    `domain.last_error.LastErrorKind`; the reader consults the kind and
+    falls back to the text only when a record carries no kind. The two
+    functions are one contract and are tested together: a comparison that
+    renders a given head must classify as that head's kind, so a wording
+    change cannot silently re-answer the question.
+
+    A regression is by construction a body rustc ACCEPTED — the gate only
+    runs the tests after a clean compile — so no branch here returns
+    ``COMPILE``. That kind belongs to the diagnostics path.
+    """
+    if cmp.newly_hung:
+        return LastErrorKind.HUNG
+    if cmp.newly_crashed:
+        return LastErrorKind.CRASHED
+    if cmp.newly_red:
+        return LastErrorKind.REDDENED
+    return LastErrorKind.LOST_TESTS
+
+
 def render_regression_detail(cmp: RegressionComparison) -> str:
     """Prompt-ready explanation of a regression verdict. The opening sentence
     keeps the exact historical prefixes (the starvation classifier keys on
@@ -1998,34 +2033,30 @@ def render_regression_detail(cmp: RegressionComparison) -> str:
     cause."""
     if cmp.newly_hung:
         head = (f"This made test binar{'ies' if len(cmp.newly_hung) > 1 else 'y'} "
-                f"{list(cmp.newly_hung)} HANG: the run was cut by the timeout "
+                f"{list(cmp.newly_hung)} {HANG_HEAD_MARK} "
                 f"inside {list(cmp.hung_tests)}, which never returned, and "
                 "every test after it never ran. A hang is an infinite loop or "
                 "unbounded recursion in a body this change reaches — a "
                 "formatter or accessor that calls itself (directly, or through "
-                "a wrapper that forwards back to it) is the usual shape. Write "
-                "a body that terminates: a Display/Debug body must format the "
-                "inner value's own fields or delegate to a DIFFERENT impl, "
-                "never to the value being formatted.")
+                "a wrapper that forwards back to it) is the usual shape. "
+                + instruction_for(LastErrorKind.HUNG))
     elif cmp.newly_crashed:
         head = (f"This made test binar{'ies' if len(cmp.newly_crashed) > 1 else 'y'} "
-                f"{list(cmp.newly_crashed)} CRASH before reporting results "
+                f"{list(cmp.newly_crashed)} {CRASH_HEAD_MARK} "
                 "(e.g. segfault from bad unsafe code) — they completed fine "
                 f"before this change, where they passed {cmp.crash_lost_pass} "
-                "test(s). Write a body that lets every test binary build and "
-                "run to completion.")
+                "test(s). " + instruction_for(LastErrorKind.CRASHED))
     elif cmp.newly_red:
-        head = ("This compiled, but it REGRESSED previously-passing test(s): "
+        head = (f"This compiled, but it {RED_HEAD_MARK}: "
                 f"{sorted(cmp.newly_red)} (cluster pass count {cmp.base_pass}→"
-                f"{cmp.cur_pass}).\nKeep those tests passing while fixing the "
-                "target — do not change shared behavior they rely on.")
+                f"{cmp.cur_pass}).\n"
+                + instruction_for(LastErrorKind.REDDENED))
     elif cmp.cur_executed < cmp.base_executed:
-        head = (f"This dropped the number of tests that EXECUTE "
+        head = (f"This {EXECUTED_DROP_MARK} "
                 f"{cmp.base_executed}→{cmp.cur_executed} within the completed "
-                "test binaries. Write a body that lets every test build and "
-                "run.")
+                "test binaries. " + instruction_for(LastErrorKind.LOST_TESTS))
     else:
-        head = (f"This dropped the cluster pass count {cmp.base_pass}→"
+        head = (f"This {PASS_DROP_MARK} {cmp.base_pass}→"
                 f"{cmp.cur_pass} (tests that used to run/pass no longer do). "
                 "Revert the change that removed them.")
     if cmp.excluded_crashed:

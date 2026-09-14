@@ -876,14 +876,14 @@ def test_pair_last_error_a_compiling_crash_drops_the_prior_rustc_excerpt() -> No
     preview = "This made test binaries ['t.rs'] CRASH"
     body = '<FN name="fmt">unsafe { ErrorImpl::debug(self.inner.by_ref(), f) }</FN>'
     out = pair_last_error(compile_err, preview, body)
-    assert "CRASH" in out
-    assert "by_ref" in out
-    assert "as_ptr" not in out
-    assert "E0308" not in out
+    assert "CRASH" in out.text
+    assert "by_ref" in out.text
+    assert "as_ptr" not in out.text
+    assert "E0308" not in out.text
     # Negative control: the concatenation this function used to return.
     mixed = compile_err + "\n\n" + preview + "\n\n" + body
     assert "as_ptr" in mixed and "by_ref" in mixed
-    assert pair_last_error("", preview, "") == preview
-    assert pair_last_error(compile_err, "", "") == compile_err
-    assert pair_last_error("", "", "") == ""
+    assert pair_last_error("", preview, "").text == preview
+    assert pair_last_error(compile_err, "", "").text == compile_err
+    assert pair_last_error("", "", "").text == ""
 

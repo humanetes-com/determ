@@ -27,7 +27,7 @@ identically.
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 from pipeline_core.domain.attribution import (
@@ -36,6 +36,11 @@ from pipeline_core.domain.attribution import (
     key_as_site,
 )
 from pipeline_core.domain.body_ledger import body_sha
+from pipeline_core.domain.last_error import (
+    LastErrorKind,
+    instruction_for,
+    resolve_kind,
+)
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 
 
@@ -126,8 +131,36 @@ def crash_last_error(preview: str, failed_body: str) -> str:
     return f"{preview}\n\n{block}" if preview else block
 
 
-def pair_last_error(compile_err: str, preview: str, failed_body: str) -> str:
+@dataclass(frozen=True, slots=True)
+class PairLastError:
+    """The next pair prompt's LAST_ERROR: the text AND what produced it.
+
+    The kind is returned rather than left to be recovered from the text
+    because recovering it from the text is the defect this type exists to
+    close — the reader's substring and the renderer's wording drifted and
+    no test joined them, so every compiling crash reached the prompt
+    dressed as a rustc rejection (run `681204-b695ab3f`, 2026-09-14).
+    """
+
+    text: str
+    kind: LastErrorKind
+
+
+def pair_last_error(compile_err: str, preview: str, failed_body: str,
+                    *, kind: LastErrorKind | None = None) -> PairLastError:
     """LAST_ERROR for the next pair fill.
+
+    ``kind`` is the verdict the revert RECORDED, when the record carries
+    one. Records written before the kind was stored pass ``None`` and are
+    classified from the preview, which still carries the rendered head:
+    the store's budget cuts the TAIL, and the head marks sit at the front.
+
+    The stored preview is cut to a fixed character budget whose head grows
+    with the number of binaries it names, so the directive at the end is
+    what a wide crash loses: a five-binary preview of run
+    `681204-b695ab3f` ended `they completed fine before thi` and carried
+    no ask at all. The instruction is reconstructed from the kind, so a
+    truncated excerpt still reaches the model as a situation WITH one.
 
     A compiling crash's rejected approach is the crashing body. A prior
     compile excerpt is a different body — rustc already rejected it.
@@ -142,10 +175,37 @@ def pair_last_error(compile_err: str, preview: str, failed_body: str) -> str:
     re-honour the rejected call. Empty parts are omitted; all-empty is
     "".
     """
-    crash = crash_last_error(preview, failed_body)
-    if crash:
-        return crash
-    return (compile_err or "").strip()
+    if (preview or "").strip() or (failed_body or "").strip():
+        resolved = resolve_kind(kind, preview)
+        known = resolved.compiled
+        if not known:
+            # The crash slot is written only after a clean compile, so an
+            # excerpt whose own text says nothing is still a RUN failure.
+            # LOST_TESTS is the honest floor: compiled, with no stack this
+            # prompt may point the model away from. The ask is NOT
+            # restored in that case — putting a generic directive on an
+            # excerpt nothing classified would be inventing evidence.
+            resolved = LastErrorKind.LOST_TESTS
+        # Restore the ask against the PREVIEW, so it stays with the
+        # situation it belongs to rather than trailing the quoted body.
+        head = _with_instruction(preview, resolved) if known else (
+            (preview or "").strip())
+        return PairLastError(crash_last_error(head, failed_body), resolved)
+    err = (compile_err or "").strip()
+    return PairLastError(err, LastErrorKind.COMPILE if err
+                         else LastErrorKind.UNKNOWN)
+
+
+def _with_instruction(text: str, kind: LastErrorKind) -> str:
+    """Put back the directive a stored excerpt's character budget cut.
+
+    No-op on an empty excerpt and on one that still carries the ask, so a
+    full-length excerpt is unchanged and only a truncated one grows."""
+    body = (text or "").strip()
+    ask = instruction_for(kind)
+    if not body or not ask or ask in body:
+        return body
+    return f"{body}\n{ask}"
 
 
 def pair_record_container(pair: FormatterPair) -> str:
