@@ -167,6 +167,30 @@ def test_pair_dispatches_joins_same_file_table_slots() -> None:
     assert bare[0].member_locators() == _PAIR.member_locators()
 
 
+def test_pair_dispatches_quotes_a_passing_table_slot() -> None:
+    """A crash-recovered slot that is not already a refill (its tests
+    pass) still joins member_locators so pair_wait parks a run of it,
+    but is not a refill rewrite. Control: the same locator in
+    refill_members is still a rewrite
+    (test_pair_dispatches_joins_same_file_table_slots)."""
+    peek = _rec("src/error.rs", "peek", "")
+    blocks = _blocks() + [
+        ImplBlock(file="src/error.rs", container="",
+                  members=(peek,), refill_members=()),
+    ]
+    jobs = pair_dispatches(
+        {_PAIR}, blocks,
+        extra_locators={FnLocator("src/error.rs", "peek")})
+    assert len(jobs) == 1
+    assert FnLocator("src/error.rs", "peek") in jobs[0].member_locators()
+    assert [m.fn_name for b in jobs[0].extra_blocks
+            for m in b.refill_members] == []
+    assert [m.fn_name for b in jobs[0].extra_blocks
+            for m in b.members] == ["peek"]
+    assert [m.fn_name for b in jobs[0].extra_blocks
+            for m in b.stub_members] == []
+
+
 def test_remembered_pair_callees_survive_a_pair_only_record() -> None:
     """A later pair-only write must not drop slots a joint write remembered.
     Control: empty crash_callees yields nothing."""

@@ -14,6 +14,7 @@ from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import ImplBlock
+from pipeline_core.domain.pair_fill import extra_quoted_members, extra_write_members
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
@@ -81,9 +82,10 @@ def build_per_impl_prompt(
     lands them under one judgment). None leaves the prompt byte-identical
     to the single-block render.
 
-    `extra_blocks` are same-file table slots the pair also writes (a
-    compiling crash-revert recovered them; independently judged they
-    cannot pay). Empty (the default) leaves the two-block render.
+    `extra_blocks` are same-file table slots a compiling crash-revert
+    recovered. Stub and refill extras are rewritten with the pair;
+    members-only extras (tests already pass) are quoted, not rewritten.
+    Empty (the default) leaves the two-block render.
     """
     types_section = sections.types
     invariants_section = sections.invariants
@@ -310,33 +312,46 @@ def build_per_impl_prompt(
     if extra_blocks:
         extra_renders: list[str] = []
         extra_name_bits: list[str] = []
+        extra_quote_bits: list[str] = []
         for eb in extra_blocks:
             _e_refills = frozenset(m.fn_name for m in eb.refill_members)
+            _e_fills = frozenset(m.fn_name for m in eb.stub_members)
+            _e_quoted = frozenset(
+                m.fn_name for m in extra_quoted_members(eb))
             extra_renders.append(
                 f'<TARGET_IMPL_BLOCK file="{eb.file}">\n'
                 "```rust\n"
                 + format_impl_block_for_prompt(
                     eb, mark_target=True,
                     refill_fn_names=_e_refills,
-                    fill_fn_names=frozenset(
-                        m.fn_name for m in eb.stub_members),
+                    fill_fn_names=_e_fills,
+                    companion_fn_names=_e_quoted,
                     inferred_fn_names=sections.inferred_refill_names,
                     crashed_fn_names=sections.crashed_refill_names,
                     aimed_fn_names=sections.aimed_refill_names)
                 + "\n```\n</TARGET_IMPL_BLOCK>")
             extra_name_bits.extend(
-                m.fn_name for m in (*eb.stub_members, *eb.refill_members))
+                m.fn_name for m in extra_write_members(eb))
+            extra_quote_bits.extend(sorted(_e_quoted))
         extra_names = ", ".join(extra_name_bits)
         extra_section = "\n" + "\n".join(extra_renders) + "\n"
-        pair_part += (
-            "TABLE SLOTS — this response also rewrites the same-file fns "
-            "listed below. A previous joint write compiled and crash-reverted "
-            "through fn-pointer fields these fns match. They are accepted or "
-            "rejected WITH the pair; rewriting the pair without them is the "
-            "split this write exists to close. Coverage of the current tree "
-            "showing they are unentered is expected: the current members do "
-            "not call them, which is why the last independently-judged fill "
-            "of those slots bought nothing.\n\n")
+        if extra_name_bits:
+            pair_part += (
+                "TABLE SLOTS — this response also rewrites the same-file "
+                "fns listed below as [STUB]/[REFILL]. A previous joint "
+                "write compiled and crash-reverted through fn-pointer "
+                "fields these fns match. They are accepted or rejected "
+                "WITH the pair; rewriting the pair without them is the "
+                "split this write exists to close.\n\n")
+        if extra_quote_bits:
+            pair_part += (
+                "TABLE SLOTS — the same-file fns marked FILLED below are "
+                "the current bodies a previous joint write called through "
+                "fn-pointer fields. They compile and their tests pass. "
+                "Call them from the pair; do NOT emit an <FN> for them. "
+                "Rewriting them is how a joint write reddens tests those "
+                "bodies already pay. Coverage showing they are unentered "
+                "is expected: the current pair members do not call them.\n\n")
     stub_names = ", ".join(m.fn_name for m in (*stub_members, *refill_members))
     if partner_names:
         stub_names = (f"{stub_names} ({file_rel}); "

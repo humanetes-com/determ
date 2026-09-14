@@ -122,6 +122,44 @@ def test_prompt_carries_the_pins_the_unit_answers_for():
         failed_body_cap=10, fix_err_cap=10, pinned_observables="  ")
 
 
+def test_diagnose_passes_compiled_through_to_the_prompt():
+    seen: list[str] = []
+
+    def ask(prompt: str) -> str:
+        seen.append(prompt)
+        return "CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: x"
+
+    deps = PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+    diagnose_phase_c(
+        "f", "fn f()", "impl X", "src/x.rs", "c",
+        "self.inner.by_ref()", "CRASH", 1, deps, compiled=True)
+    assert seen and "compiled and then crashed" in seen[0]
+    assert "could not be made to compile" not in seen[0]
+
+
+def test_prompt_for_a_compiling_crash_does_not_say_compile_failed():
+    """A pair regression is diagnosed after rustc accepted the body.
+    Saying 'failed to compile' is how the 2026-09-14 pair diagnostician
+    classified a by_ref crash as WRONG_DEREF as_ptr. Control: the
+    default (compile-fail) prompt still says compile failed."""
+    crash = build_phase_c_retro_prompt(
+        "f", "fn f()", "impl X", "src/x.rs", "c",
+        "self.inner.by_ref()",
+        "This made test binaries ['t.rs'] CRASH", 1, "", "",
+        failed_body_cap=2000, fix_err_cap=2000, compiled=True)
+    assert "compiled and then crashed or reddened tests" in crash
+    assert "rustc accepted it" in crash
+    assert "Crash / test failure from that attempt" in crash
+    assert "Do not prescribe replacing a call it type-checked" in crash
+    assert "could not be made to compile" not in crash
+    assert "Compile errors from that attempt" not in crash
+    compile_fail = _retro_prompt()
+    assert "could not be made to compile" in compile_fail
+    assert "Compile errors from that attempt" in compile_fail
+    assert "compiled and then crashed" not in compile_fail
+
+
 def test_prompt_forbids_signature_edits_body_only():
     # the retro must constrain guidance to BODY-ONLY edits so it
     # never proposes a frozen-signature/bound/where change → no re-submit thrash.

@@ -19,6 +19,7 @@ def build_phase_c_retro_prompt(
     *, failed_body_cap: int, fix_err_cap: int,
     bound_methods_section: str = "",
     pinned_observables: str = "",
+    compiled: bool = False,
 ) -> str:
     """`pinned_observables` is the oracle extraction of the tests the unit
     answers for (`domain.refill_evidence.pinned_observables_from_tests`).
@@ -48,17 +49,45 @@ def build_phase_c_retro_prompt(
     bound_section = (
         f"\n<BOUND_METHODS>\n{bound_methods_section}\n</BOUND_METHODS>\n"
     ) if bound_methods_section.strip() else ""
+    if compiled:
+        attempt_line = (
+            f"You are diagnosing why a reconstruction attempt for fn `{fn_name}` "
+            f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
+            f"compiled and then crashed or reddened tests after "
+            f"{fix_attempts} attempt(s).\n\n")
+        body_line = (
+            "Last attempted body (compiled; rustc accepted it):\n"
+            f"```rust\n{last_body[:failed_body_cap]}\n```\n\n")
+        error_line = (
+            "Crash / test failure from that attempt:\n"
+            f"```\n{error_excerpt[:fix_err_cap]}\n```\n")
+        compiled_rule = (
+            "rustc accepted this body. Do not prescribe replacing a call it "
+            "type-checked with one it has already rejected — that rejection "
+            "is a different attempt. Name the runtime failure: the panic or "
+            "crash line, and the expression in the body that reached it.\n\n")
+    else:
+        attempt_line = (
+            f"You are diagnosing why a reconstruction attempt for fn `{fn_name}` "
+            f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
+            f"could not be made to compile after {fix_attempts} attempt(s).\n\n")
+        body_line = (
+            "Last attempted body (failed to compile):\n"
+            f"```rust\n{last_body[:failed_body_cap]}\n```\n\n")
+        error_line = (
+            "Compile errors from that attempt:\n"
+            f"```\n{error_excerpt[:fix_err_cap]}\n```\n")
+        compiled_rule = ""
     return (
-        f"You are diagnosing why a reconstruction attempt for fn `{fn_name}` "
-        f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
-        f"could not be made to compile after {fix_attempts} attempt(s).\n\n"
-        f"Signature:\n```rust\n{sig_text}\n```\n\n"
-        f"Last attempted body (failed to compile):\n```rust\n{last_body[:failed_body_cap]}\n```\n\n"
-        f"Compile errors from that attempt:\n```\n{error_excerpt[:fix_err_cap]}\n```\n"
-        f"{prior_section}"
-        f"{siblings_section}"
-        f"{bound_section}"
-        f"{pins_section}\n"
+        attempt_line
+        + f"Signature:\n```rust\n{sig_text}\n```\n\n"
+        + body_line
+        + error_line
+        + compiled_rule
+        + f"{prior_section}"
+        + f"{siblings_section}"
+        + f"{bound_section}"
+        + f"{pins_section}\n"
         # The skeleton FREEZES the signature. The fixer can ONLY
         # rewrite the body, so guidance that proposes editing a bound / where /
         # generic / return type is un-actionable → identical re-submit → thrash.

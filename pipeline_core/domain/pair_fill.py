@@ -36,7 +36,7 @@ from pipeline_core.domain.attribution import (
     key_as_site,
 )
 from pipeline_core.domain.body_ledger import body_sha
-from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 
 
 class PairDispatch(NamedTuple):
@@ -46,13 +46,18 @@ class PairDispatch(NamedTuple):
 
     ``extra_blocks`` are same-file table slots a compiling pair
     crash-revert recovered (``crash_vtable_callees``). They live in a
-    member's file, so the pair can write them; a separately-judged file
-    of those locators on the rolled-back tree cannot — the current
-    members do not enter them, their attributed tests already pass, and
-    the pair that would enter them still crash-reverts (run
-    ``10959-9c95ea89``, 2026-09-14: two recovered slots filled FLAT
-    net +0, then the pair crash-reverted the same five binaries). Empty
-    (the default) is every recorded pair that did not crash this way.
+    member's file, so pair_wait parks a run of them; a separately-judged
+    file of those locators on the rolled-back tree cannot pay — the
+    current members do not enter them (run ``10959-9c95ea89``,
+    2026-09-14: two recovered slots filled FLAT net +0, then the pair
+    crash-reverted the same five binaries). A slot already in
+    ``refill_members`` or still a stub is a rewrite in the same
+    transaction. A filled slot that is only in ``members`` is quoted,
+    not rewritten: forcing refill is how run ``171582-cb964fb9`` spent
+    23 pair fills turning working table slots into ``None`` / a wild
+    deref, reddening ten already-passing tests or crashing five
+    binaries. Empty (the default) is every recorded pair that did not
+    crash this way.
     """
 
     pair: FormatterPair
@@ -64,7 +69,7 @@ class PairDispatch(NamedTuple):
         extra = frozenset(
             FnLocator(b.file, m.fn_name)
             for b in self.extra_blocks
-            for m in (*b.stub_members, *b.refill_members))
+            for m in (*b.stub_members, *b.refill_members, *b.members))
         return self.pair.member_locators() | extra
 
     def member_scope(self) -> frozenset[str]:
@@ -84,8 +89,13 @@ class PairDispatch(NamedTuple):
         texts = []
         for b in (self.dispatcher_block, self.implementer_block,
                   *self.extra_blocks):
-            for m in sorted((*b.stub_members, *b.refill_members),
-                            key=lambda m: (b.file, m.fn_name)):
+            seen: set[str] = set()
+            for m in sorted(
+                    (*b.stub_members, *b.refill_members, *b.members),
+                    key=lambda rec: (b.file, rec.fn_name)):
+                if m.fn_name in seen:
+                    continue
+                seen.add(m.fn_name)
                 texts.append(m.body_text)
         return body_sha(texts)
 
@@ -109,22 +119,25 @@ def crash_last_error(preview: str, failed_body: str) -> str:
 
 
 def pair_last_error(compile_err: str, preview: str, failed_body: str) -> str:
-    """LAST_ERROR for the next pair fill: compile excerpt and crash
-    bodies are both the rejected approach.
+    """LAST_ERROR for the next pair fill.
 
-    An exclusive or dropped the rustc lines on a compile-then-crash
-    (run `235765-62f1505b` fill 1 attempt 2 E0599, attempt 3 compiled
-    and crash-reverted, fill 2 LAST_ERROR was crash+bodies only). Empty
-    parts are omitted; all-empty is "".
+    A compiling crash's rejected approach is the crashing body. A prior
+    compile excerpt is a different body — rustc already rejected it.
+    Concatenating the two is how the live pair prompt of 2026-09-14
+    (run after e67f818, fill 3) showed E0308 as_ptr expected Ref found
+    *mut next to a by_ref crash; the diagnostician classified WRONG_DEREF
+    as_ptr, compiler_rejected retired that lesson, and the next fill
+    resubmitted the crash.
+
+    compiler_rejected still reads last_compile_error on the record, not
+    this prompt string, so dropping the rustc lines here does not
+    re-honour the rejected call. Empty parts are omitted; all-empty is
+    "".
     """
-    parts: list[str] = []
-    c = (compile_err or "").strip()
-    if c:
-        parts.append(c)
     crash = crash_last_error(preview, failed_body)
     if crash:
-        parts.append(crash)
-    return "\n\n".join(parts)
+        return crash
+    return (compile_err or "").strip()
 
 
 def pair_record_container(pair: FormatterPair) -> str:
@@ -219,13 +232,24 @@ def _block_for_locator(
             continue
         stub = tuple(m for m in b.stub_members if m.fn_name == loc.fn_name)
         if stub:
-            return replace(b, stub_members=stub, refill_members=())
+            return replace(b, stub_members=stub, refill_members=(),
+                           members=stub)
         refill = tuple(m for m in b.refill_members if m.fn_name == loc.fn_name)
         if refill:
-            return replace(b, stub_members=(), refill_members=refill)
+            return replace(b, stub_members=(), refill_members=refill,
+                           members=refill)
         member = tuple(m for m in b.members if m.fn_name == loc.fn_name)
         if member:
-            return replace(b, stub_members=(), refill_members=member)
+            # Filled, and collect_impl_refill_targets did not stamp it:
+            # its attributed tests already pass. Quote it in the pair
+            # prompt so the pair can call it; do not mark refill.
+            # Forcing refill here is how run `171582-cb964fb9` spent 23
+            # pair fills rewriting working table slots to `None` / a
+            # wild deref, reddening ten already-passing tests or
+            # crashing five binaries. pair_wait still parks a run of
+            # this locator (it is in extra_blocks.members).
+            return replace(b, stub_members=(), refill_members=(),
+                           members=member)
     return None
 
 
@@ -248,6 +272,18 @@ def pairs_to_dispatch(
         seen.add(p)
         out.append(p)
     return out
+
+
+def extra_write_members(block: ImplBlock) -> tuple[FnRecord, ...]:
+    """Stub and refill extras the pair splices. Members-only extras are
+    quoted, not in this tuple."""
+    return (*block.stub_members, *block.refill_members)
+
+
+def extra_quoted_members(block: ImplBlock) -> tuple[FnRecord, ...]:
+    """Filled extras whose tests already pass — shown, not rewritten."""
+    written = {m.fn_name for m in extra_write_members(block)}
+    return tuple(m for m in block.members if m.fn_name not in written)
 
 
 def _as_loc(key: FnLocator | tuple[str, str]) -> FnLocator:

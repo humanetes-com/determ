@@ -348,6 +348,26 @@ def test_format_impl_block_related_candidate_is_shown_in_full():
     assert "/* FILLED */" in plain and "/* ... */" in plain
 
 
+def test_format_impl_block_companion_is_quoted_not_refill():
+    """A crash-recovered table slot whose tests already pass is shown in
+    full with an instruction not to emit an FN. Marking it [REFILL]
+    rewrite is how a pair fill reddened tests that slot already paid.
+    Control: the same member in refill_fn_names is still a rewrite."""
+    body = "let ptr = e.as_ptr();\nunsafe { (*ptr).as_ref() }"
+    block = ImplBlock(container="",
+                      members=(_fn("slot", body=body),))
+    quoted = format_impl_block_for_prompt(
+        block, companion_fn_names=frozenset({"slot"}))
+    assert "this pair will call this body" in quoted
+    assert "do NOT emit an <FN> for it" in quoted
+    assert "unsafe { (*ptr).as_ref() }" in quoted
+    assert "its test below FAILS" not in quoted
+    refill = format_impl_block_for_prompt(
+        block, refill_fn_names=frozenset({"slot"}))
+    assert "[REFILL] compiles but its test below FAILS" in refill
+    assert "do NOT emit an <FN> for it" not in refill
+
+
 def test_repr_transparent_rendered_above_the_type_line():
     # A producer rewrite reasoning about a transparent wrapper needs the repr
     # to know the cast (object_downcast::<M>) is sound. The compact type line

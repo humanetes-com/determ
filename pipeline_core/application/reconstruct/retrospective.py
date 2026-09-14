@@ -66,6 +66,7 @@ def diagnose_phase_c(
     prior_retrospective: str = "", sibling_bodies: str = "",
     bound_methods_section: str = "",
     pinned_observables: str = "",
+    compiled: bool = False,
 ) -> dict[str, str]:
     if not last_body and not error_excerpt:
         return {"category": "", "guidance": "", "signal": "no_data"}
@@ -88,7 +89,7 @@ def diagnose_phase_c(
             "signal": "vtable_fast_exit",
         }
 
-    # Debt #28: a frozen where-bound the compiler proves unsatisfiable cannot be
+    # A frozen where-bound the compiler proves unsatisfiable cannot be
     # fixed by ANY body — park the fn structurally instead of letting the LLM
     # classifier oscillate TRAIT_BOUND_VIOLATION↔API_HALLUCINATION for 5-6
     # attempts. The cause is the module defining the frozen bound's trait
@@ -119,6 +120,7 @@ def diagnose_phase_c(
         failed_body_cap=deps.failed_body_cap, fix_err_cap=deps.fix_err_cap,
         bound_methods_section=bound_methods_section,
         pinned_observables=pinned_observables,
+        compiled=compiled,
     )
     # Retro runs think=True with a bounded output budget (think=False
     # returns empty content on the vLLM reasoning-parser endpoint). One retry on

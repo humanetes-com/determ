@@ -4241,7 +4241,7 @@ def prepare_impl_fill(
         _extra_locs = frozenset(
             FnLocator(b.file, m.fn_name)
             for b in _pair_extra
-            for m in (*b.stub_members, *b.refill_members))
+            for m in (*b.stub_members, *b.refill_members, *b.members))
         if _extra_locs:
             # Remember the slots before the reply can arrive: a
             # compile-fail or a later pair-only fill must not drop them.
@@ -4412,7 +4412,7 @@ def prepare_impl_fill(
             _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
                  "implementer written under ONE judgment across "
                  f"{len(halves)} files ({len(_pair_tests)} convicting test(s)"
-                 + (f", {sum(len((*b.stub_members, *b.refill_members)) for b in _pair_extra)} table slot(s)"
+                 + (f", {sum(len({m.fn_name for m in (*b.stub_members, *b.refill_members, *b.members)}) for b in _pair_extra)} table slot(s)"
                     if _pair_extra else "")
                  + ").")
             _emit("phase_c.pair.fill.start", data={
@@ -4470,7 +4470,8 @@ def prepare_impl_fill(
                         fix_attempts=1,
                         prior_retrospective=_pair_retro,
                         pinned_observables=pins_for_contradiction_guard(
-                            _pair_ev.pins, _pair_ev.observables))
+                            _pair_ev.pins, _pair_ev.observables),
+                        compiled=True)
                     _signal = retro.get("signal", "")
                     if _signal in ("llm_error", "empty_response"):
                         raise RuntimeError(f"transient retro signal: {_signal}")
@@ -4562,6 +4563,10 @@ def prepare_impl_fill(
                 _parsed_by_name = {p.get("fn_name"): p for p in _pair_parsed}
                 _extra_wanted: list[str] = []
                 for _eb in _pair_extra:
+                    # Members-only extras compile and their tests pass —
+                    # quote them, do not require a rewrite. Run
+                    # `171582-cb964fb9` spent 23 pair fills rewriting
+                    # those slots to None / a wild deref.
                     for _em in (*_eb.stub_members, *_eb.refill_members):
                         _extra_wanted.append(_em.fn_name)
                         _efd = _parsed_by_name.get(_em.fn_name)
@@ -4659,10 +4664,11 @@ def prepare_impl_fill(
                         retros_cache[_pair_key] = _crec
                         _save_retrospectives(project_dir, retros_cache)
                     return
-                # Do not clear last_compile_error here: a compile-ok that
-                # then crash-reverts must carry the rustc lines to the next
-                # fill (run `235765-62f1505b` fill 1 attempt 2 E0599 was
-                # wiped before the crash stamp). Cleared only on KEEP.
+                # Do not clear last_compile_error here: compiler_rejected
+                # reads it on the record so a later fill cannot honour a
+                # call rustc already rejected. The pair LAST_ERROR prompt
+                # does not concatenate it with a compiling crash — that
+                # mix is how a by_ref crash was diagnosed as as_ptr.
                 _pair_sites = frozenset(
                     FnSite(b.file, m.fn_name, b.container)
                     for b in (*halves, *_pair_extra)

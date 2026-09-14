@@ -990,6 +990,7 @@ def format_impl_block_for_prompt(
     crashed_fn_names: frozenset[str] = frozenset(),
     aimed_fn_names: frozenset[str] = frozenset(),
     candidate_fn_names: frozenset[str] = frozenset(),
+    companion_fn_names: frozenset[str] = frozenset(),
 ) -> str:
     """Render an impl block in TARGET form: the impl header followed by every
     member's signature + a one-line body status. Stub members are tagged
@@ -1034,6 +1035,12 @@ def format_impl_block_for_prompt(
     `candidate_fn_names` — for a RELATED block: members that are the
     same-named re-fill candidates for the same failing tests, shown in full
     as the other candidate rather than as a settled `/* FILLED */` preview.
+
+    `companion_fn_names` — filled members the pair will call and must not
+    rewrite (a crash-recovered table slot whose attributed tests already
+    pass). Shown in full with an instruction not to emit an `<FN>`. Empty
+    (the default) leaves every non-refill filled member as the truncated
+    `/* FILLED */` preview.
 
     `block` is an `ImplBlock` produced by `_collect_impl_blocks`.
     """
@@ -1091,6 +1098,13 @@ def format_impl_block_for_prompt(
             else:
                 lines.append(f"    {sig} {{ /* [REFILL] compiles but its test "
                               f"below FAILS — rewrite the BEHAVIOR */ {body} }}")
+        elif m.fn_name in companion_fn_names:
+            body = m.body_text.strip().replace("\n", "\n    ")
+            lines.append(
+                f"    {sig} {{ /* FILLED — this pair will call this body; "
+                f"do NOT emit an <FN> for it. It compiles and its tests "
+                f"pass; rewriting it reddens tests it already pays */ "
+                f"{body} }}")
         elif m.fn_name in candidate_fn_names:
             body = m.body_text.strip().replace("\n", "\n    ")
             lines.append(

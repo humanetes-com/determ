@@ -70,22 +70,27 @@ PAIR_REPLY = (
 _PEEK = FnLocator("lib.rs", "peek")
 
 
-def _blocks() -> list[ImplBlock]:
+def _peek_rec() -> FnRecord:
+    return FnRecord(file="lib.rs", fn_name="peek", container="",
+                    sig_text="pub fn peek () -> u32", body_text="0")
+
+
+def _blocks(peek_refill: bool = True) -> list[ImplBlock]:
     disp = FnRecord(file="lib.rs", fn_name="fmt",
                     container="impl fmt::Display for Report",
                     sig_text="fn fmt (& self , f : & mut fmt :: Formatter) -> fmt :: Result")
     impl_ = FnRecord(file="render.rs", fn_name="render",
                      container="impl Renderer",
                      sig_text="pub fn render (& self) -> u32")
-    peek = FnRecord(file="lib.rs", fn_name="peek", container="",
-                    sig_text="pub fn peek () -> u32", body_text="0")
+    peek = _peek_rec()
     return [
         ImplBlock(file="lib.rs", container="impl fmt::Display for Report",
                   members=(disp,), refill_members=(disp,)),
         ImplBlock(file="render.rs", container="impl Renderer",
                   members=(impl_,), refill_members=(impl_,)),
         ImplBlock(file="lib.rs", container="",
-                  members=(peek,), refill_members=(peek,)),
+                  members=(peek,),
+                  refill_members=(peek,) if peek_refill else ()),
     ]
 
 
@@ -728,15 +733,54 @@ def test_a_pair_reply_that_omits_its_table_slot_keeps_nothing(
     assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
 
 
-def test_pair_last_error_keeps_compile_and_crash() -> None:
+def test_a_passing_table_slot_is_quoted_not_rewritten(
+        monkeypatch, tmp_path):
+    """A crash-recovered slot whose tests already pass is quoted, not
+    marked refill. Omitting it from the reply keeps the pair — the tree
+    already holds the body. Control: the same slot in refill_members
+    still requires a rewrite
+    (test_a_pair_reply_that_omits_its_table_slot_keeps_nothing)."""
+    ws = _setup(monkeypatch, tmp_path)
+    install_cluster_scan(
+        monkeypatch, impl_blocks=lambda *a, **k: _blocks(peek_refill=False))
+    _install_crash_callees(monkeypatch)
+    prompts: list[str] = []
+    _install_model(monkeypatch, [PAIR_REPLY], prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    lib = (ws / "src" / "lib.rs").read_text()
+    assert "PAIRED" in lib
+    assert "pub fn peek() -> u32 { 0 }" in lib
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "TABLE SLOTS" in pair_prompt
+    assert "do NOT emit an <FN> for it" in pair_prompt
+    assert "this pair will call this body" in pair_prompt
+    assert "rewrite the BEHAVIOR */ 0" not in pair_prompt
+    assert (_DISP[0], _DISP[1]) in (res.dispatched_fns or ())
+
+
+def test_pair_last_error_a_compiling_crash_drops_the_prior_rustc_excerpt() -> None:
+    """Plan: a compiling crash's next LAST_ERROR is the crash and the
+    crashing body, not a prior E0308 of a different expression. The live
+    pair prompt of 2026-09-14 fill 3 concatenated as_ptr's E0308 with a
+    by_ref crash; the diagnostician prescribed as_ptr, compiler_rejected
+    retired it, the next fill resubmitted the crash. Control: compile
+    excerpt alone is still the LAST_ERROR when there is no crash."""
     from pipeline_core.domain.pair_fill import pair_last_error
-    compile_err = "error[E0599]: no method named `foo` found"
+    compile_err = (
+        "error[E0308]: mismatched types\n"
+        "expected `Ref<'_, ErrorImpl>`, found `*mut ErrorImpl`\n"
+        "self.inner.ptr.as_ptr()")
     preview = "This made test binaries ['t.rs'] CRASH"
-    body = '<FN name="fmt">foo()</FN>'
+    body = '<FN name="fmt">unsafe { ErrorImpl::debug(self.inner.by_ref(), f) }</FN>'
     out = pair_last_error(compile_err, preview, body)
-    assert "no method named `foo`" in out
     assert "CRASH" in out
-    assert "foo()" in out
+    assert "by_ref" in out
+    assert "as_ptr" not in out
+    assert "E0308" not in out
+    # Negative control: the concatenation this function used to return.
+    mixed = compile_err + "\n\n" + preview + "\n\n" + body
+    assert "as_ptr" in mixed and "by_ref" in mixed
     assert pair_last_error("", preview, "") == preview
     assert pair_last_error(compile_err, "", "") == compile_err
     assert pair_last_error("", "", "") == ""
