@@ -135,6 +135,51 @@ def pair_record_container(pair: FormatterPair) -> str:
     return f"{d.file}::{d.fn_name}+{i.file}::{i.fn_name}"
 
 
+# Durable extra locators a compiling pair crash-revert recovered.
+# Stamped on the pair retro record; a later pair-only write must not
+# drop them (run `100178-9c95ea89` fill 1 joined two slots then
+# compiled-and-reddened; fill 2's pair-only crash overwrote
+# joint_members and crash_vtable saw no panic on fill 1's last
+# record, so fill 2 dropped the slots).
+PAIR_CRASH_CALLEES = "crash_callees"
+
+
+def locators_from_scope(names: Iterable[str]) -> frozenset[FnLocator]:
+    """Parse ``file::fn`` strings (joint_members / crash_callees)."""
+    out: set[FnLocator] = set()
+    for raw in names:
+        s = str(raw)
+        if "::" not in s:
+            continue
+        file, fn = s.rsplit("::", 1)
+        if file and fn:
+            out.add(FnLocator(file, fn))
+    return frozenset(out)
+
+
+def remembered_pair_callees(
+    rec: Mapping[str, object] | None,
+    hop: Collection[FnLocator],
+) -> frozenset[FnLocator]:
+    """Table slots a pair record remembered, minus the hop endpoints."""
+    if not rec:
+        return frozenset()
+    raw = rec.get(PAIR_CRASH_CALLEES) or ()
+    if not isinstance(raw, (list, tuple)):
+        return frozenset()
+    return locators_from_scope(str(s) for s in raw) - frozenset(hop)
+
+
+def union_pair_callees(
+    rec: Mapping[str, object] | None,
+    extras: Collection[FnLocator],
+) -> list[str]:
+    """Union of remembered slots and this write's extras, as ``file::fn``."""
+    prev = remembered_pair_callees(rec, ())
+    now = frozenset(extras) | prev
+    return sorted(f"{k.file}::{k.fn_name}" for k in now)
+
+
 def _endpoint_block(
     site: FnSite, all_blocks: Sequence[ImplBlock],
 ) -> ImplBlock | None:

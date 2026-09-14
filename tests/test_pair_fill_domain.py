@@ -15,10 +15,13 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from pipeline_core.domain.pair_fill import (
+    PAIR_CRASH_CALLEES,
     blocks_after_pair_fill,
     dispatch_including_pairs,
     pair_dispatches,
     pairs_to_dispatch,
+    remembered_pair_callees,
+    union_pair_callees,
 )
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -162,6 +165,22 @@ def test_pair_dispatches_joins_same_file_table_slots() -> None:
     bare = pair_dispatches({_PAIR}, blocks)
     assert bare[0].extra_blocks == ()
     assert bare[0].member_locators() == _PAIR.member_locators()
+
+
+def test_remembered_pair_callees_survive_a_pair_only_record() -> None:
+    """A later pair-only write must not drop slots a joint write remembered.
+    Control: empty crash_callees yields nothing."""
+    hop = _PAIR.member_locators()
+    peek = FnLocator("src/error.rs", "peek")
+    rec = {PAIR_CRASH_CALLEES: ["src/error.rs::peek", "src/error.rs::fmt"]}
+    assert remembered_pair_callees(rec, hop) == frozenset({peek})
+    assert remembered_pair_callees({}, hop) == frozenset()
+    assert remembered_pair_callees(None, hop) == frozenset()
+    # Union keeps the remembered slot when this write has none.
+    assert "src/error.rs::peek" in union_pair_callees(rec, ())
+    # A hop endpoint in the stamp is not an extra.
+    assert FnLocator("src/error.rs", "fmt") not in remembered_pair_callees(
+        rec, hop)
 
 
 def test_a_still_stubbed_endpoint_dispatches_as_a_stub() -> None:

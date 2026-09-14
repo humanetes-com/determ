@@ -1,10 +1,10 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when the pair writes its crash-recovered table slots
+## Current reading — replace this block when the joint pair+slots write is not CRASHED-graded and does not drop the slots on the next fill
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 
-Focus: the hop-pair fill of the three leftover format tests. The sort (252/253) and the crash-callee admission (3aa66a5) both fired. Run `10959-9c95ea89` fill 1 recovered context_backtrace and no_backtrace, opened file src/error.rs first, kept those two FLAT net +0 (their tests already pass; they are dead on the kept tree), then the pair crash-reverted the same five binaries. Independently judging the slots on the rolled-back tree cannot pay. Same-file slots now join the pair write set. On-theory: `[phase-c/pair] N vtable callee(s)` then `same-file slot(s) join the pair write set`, schedule is `1 run(s) — 1. pair …` with file src/error.rs pair_wait, and the pair prompt carries TABLE SLOTS. Off-theory: fill N still opens `file src/error.rs` with a share, or the pair prompt has no table-slot fns. Do not cut `PIPELINE_PARALLELISM`. Do not start entry 222.
+Focus: read focus.md for eventual current focus
 
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 

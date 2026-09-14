@@ -184,12 +184,15 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.pair_fill import (
+    PAIR_CRASH_CALLEES,
     PairDispatch,
     blocks_after_pair_fill,
     pair_dispatches,
     pair_last_error,
     pair_record_container,
     pairs_to_dispatch,
+    remembered_pair_callees,
+    union_pair_callees,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
 from pipeline_core.domain.reasoning_cap import (
@@ -1047,44 +1050,58 @@ def prepare_impl_fill(
         _enumerate_fns_via_extractor(target_src_dir) or [],
         _cluster_filter_type_members(
             _enumerate_types_via_extractor(target_src_dir) or [], cluster))
-    if _pair_crash_callees:
-        crash_blamed = (crash_blamed or frozenset()) | _pair_crash_callees
+    _hop_pairs = pairs_to_dispatch(_frontier_tests.pairs)
+    _pair_files = {
+        s.file for p in _hop_pairs for s in (p.dispatcher, p.implementer)}
+    _stored_callees: set[FnLocator] = set()
+    for _p in _hop_pairs:
+        _stored_callees |= remembered_pair_callees(
+            retros_cache.get(_retro_key(
+                _p.dispatcher.file, "*pair*", pair_record_container(_p)),
+                {}) or {},
+            _p.member_locators())
+    # Same-file slots join the pair write set and are NOT crash-blamed:
+    # the CRASHED / faulting-frame grade is a lie for a table fn the
+    # pair called (run `100178` fill 1: that grade rewrote the slots,
+    # compiled, and reddened ten already-passing Debug tests). A
+    # third-file slot stays crash-blamed so pair_wait cannot park it.
+    _same_callees = frozenset(
+        k for k in (_pair_crash_callees | _stored_callees)
+        if k.file in _pair_files)
+    _other_callees = frozenset(
+        k for k in _pair_crash_callees if k.file not in _pair_files)
+    _pair_extra_locs = _same_callees
+    if _other_callees:
+        crash_blamed = (crash_blamed or frozenset()) | _other_callees
         tdd_frontier_keys = set(tdd_frontier_keys or ()) | set(
-            _pair_crash_callees)
+            _other_callees)
         _ev = dict(crash_evidence or {})
         _why = (
             "A compiling pair fill crash-reverted with a panic outside "
             "the pair write set. This fn is the table slot that fill "
-            "called. Rewrite it with the pair; a separately-judged fill "
-            "of this slot on the rolled-back tree cannot pay.")
-        for _loc in _pair_crash_callees:
+            "called, in a file the pair does not write.")
+        for _loc in _other_callees:
             _ev.setdefault(_loc, _why)
         crash_evidence = _ev
-        _pair_files = {
-            s.file
-            for p in pairs_to_dispatch(_frontier_tests.pairs)
-            for s in (p.dispatcher, p.implementer)}
-        _same = sorted(
-            f"{k.file}::{k.fn_name}" for k in _pair_crash_callees
-            if k.file in _pair_files)
-        _other = sorted(
-            f"{k.file}::{k.fn_name}" for k in _pair_crash_callees
-            if k.file not in _pair_files)
-        _log("  [phase-c/pair] " + str(len(_pair_crash_callees))
+    if _same_callees or _other_callees:
+        _same_s = sorted(f"{k.file}::{k.fn_name}" for k in _same_callees)
+        _other_s = sorted(f"{k.file}::{k.fn_name}" for k in _other_callees)
+        _log("  [phase-c/pair] "
+             + str(len(_pair_crash_callees | _stored_callees))
              + " vtable callee(s) of a compiling pair crash-revert"
-             + ((" — " + str(len(_same))
+             + ((" — " + str(len(_same_s))
                  + " same-file slot(s) join the pair write set: "
-                 + ", ".join(_same[:8])) if _same else "")
-             + ((" — " + str(len(_other))
+                 + ", ".join(_same_s[:8])) if _same_s else "")
+             + ((" — " + str(len(_other_s))
                  + " other-file slot(s) admitted as crash-blamed "
                  "(pair cannot write them): "
-                 + ", ".join(_other[:8])) if _other else ""))
+                 + ", ".join(_other_s[:8])) if _other_s else ""))
         _emit("phase_c.pair.crash_callees", data={
             "cluster": cluster_name,
             "callees": sorted(f"{k.file}::{k.fn_name}"
-                              for k in _pair_crash_callees),
-            "same_file": _same,
-            "other_file": _other})
+                              for k in (_pair_crash_callees | _stored_callees)),
+            "same_file": _same_s,
+            "other_file": _other_s})
 
     # Stamp `refill_members` onto blocks that have an
     # already-filled, compiling member with a failing attributed test, so the
@@ -4221,6 +4238,20 @@ def prepare_impl_fill(
         _pair_key = _retro_key(pair.dispatcher.file, "*pair*",
                                pair_record_container(pair))
         _pair_rec = retros_cache.get(_pair_key, {}) or {}
+        _extra_locs = frozenset(
+            FnLocator(b.file, m.fn_name)
+            for b in _pair_extra
+            for m in (*b.stub_members, *b.refill_members))
+        if _extra_locs:
+            # Remember the slots before the reply can arrive: a
+            # compile-fail or a later pair-only fill must not drop them.
+            with _counters_lock:
+                _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                _crec[PAIR_CRASH_CALLEES] = union_pair_callees(
+                    _crec, _extra_locs)
+                retros_cache[_pair_key] = _crec
+                _save_retrospectives(project_dir, retros_cache)
+            _pair_rec = retros_cache.get(_pair_key, {}) or {}
         _prior_regressed = tuple(
             str(t) for t in (_pair_rec.get("regressed") or []))
         _prior_regressed_output = {
@@ -4473,6 +4504,8 @@ def prepare_impl_fill(
                                               if _rcmp.newly_crashed else None))
                         _rec[JOINT_MEMBERS] = sorted(pd.member_scope())
                         _rec[JOINT_BODY_SHA] = pd.member_body_sha()
+                        _rec[PAIR_CRASH_CALLEES] = union_pair_callees(
+                            _cached, _extra_locs)
                         # What the reddened tests printed, beside their
                         # names: the next prompt renders both.
                         _rec[REGRESSED_OUTPUT] = dict(_rcmp.newly_red_output)
@@ -5257,7 +5290,7 @@ def prepare_impl_fill(
     _pair_served: set[FnLocator] = set()
     _pair_jobs = pair_dispatches(
         _frontier_tests.pairs, all_blocks,
-        extra_locators=_pair_crash_callees)
+        extra_locators=_pair_extra_locs)
     _stubs_all: frozenset[FnLocator] = frozenset(
         _scan_unimplemented_for_cluster(target_src_dir, cluster).units)
     _hollow = hollow_by_test(session_slices or {}, _stubs_all)
@@ -5419,7 +5452,7 @@ def prepare_impl_fill(
     routes.extend((_pair_route, _file_route, _impl_route))
     return PreparedFill(routes=tuple(routes), hollow=_hollow, finish=_finish,
                         bodies_sha=_bodies_sha, landed=lambda: fns_filled_total,
-                        crash_callees=_pair_crash_callees)
+                        crash_callees=_other_callees)
 
 
 def fill_impl_blocks(

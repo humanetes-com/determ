@@ -705,6 +705,11 @@ def test_same_file_table_slots_join_the_pair_write(
     (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
     assert "TABLE SLOTS" in pair_prompt
     assert "peek" in pair_prompt
+    # Same-file slots are table slots, not the faulting frame. The CRASHED
+    # grade on fill 1 of run 100178 rewrote them as a memory-fault body
+    # and reddened ten already-passing tests.
+    assert "`peek` — CRASHED" not in pair_prompt
+    assert "faulting frame is this body" not in pair_prompt
     assert (_PEEK[0], _PEEK[1]) in (res.dispatched_fns or ())
 
 
