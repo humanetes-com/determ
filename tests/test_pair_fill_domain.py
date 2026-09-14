@@ -171,24 +171,35 @@ def test_pair_dispatches_joins_same_file_table_slots() -> None:
 
 
 def test_quote_dispatcher_when_implementer_entered() -> None:
-    """Plan: a convicting test already enters the implementer, so the
-    dispatcher is quoted not rewritten. Control: implementer unentered
-    keeps both as refill — the co-dependent write."""
+    """Plan: mixed leftovers keep both halves as refill. Controls on the
+    same pair, different entered-set: every leftover entered still quotes;
+    none entered still joint-writes; empty leftover set does not quote;
+    a stub dispatcher stays a write even when every leftover is entered."""
     jobs = pair_dispatches({_PAIR}, _blocks())
     assert len(jobs) == 1
-    both = quote_dispatcher_when_implementer_entered(
-        jobs[0], implementer_entered=False)
-    assert extra_write_members(both.dispatcher_block)
-    assert extra_write_members(both.implementer_block)
+    pd = jobs[0]
+    pair_tests = {"t_entered", "t_plain"}
+    both_files = frozenset({"src/error.rs", "src/fmt.rs"})
+    mixed = quote_dispatcher_when_implementer_entered(
+        pd, pair_tests=pair_tests, entered={"t_entered"})
+    assert extra_write_members(mixed.dispatcher_block)
+    assert extra_write_members(mixed.implementer_block)
+    assert pair_required_files(mixed) == both_files
     quoted = quote_dispatcher_when_implementer_entered(
-        jobs[0], implementer_entered=True)
+        pd, pair_tests=pair_tests, entered=pair_tests)
     assert extra_write_members(quoted.dispatcher_block) == ()
-    assert [m.fn_name for m in quoted.dispatcher_block.members] == ["fmt"]
     assert extra_write_members(quoted.implementer_block)
     assert pair_required_files(quoted) == frozenset({"src/fmt.rs"})
-    assert pair_required_files(both) == frozenset(
-        {"src/error.rs", "src/fmt.rs"})
-    # A stub dispatcher stays a write.
+    unentered = quote_dispatcher_when_implementer_entered(
+        pd, pair_tests=pair_tests, entered=set())
+    assert extra_write_members(unentered.dispatcher_block)
+    assert extra_write_members(unentered.implementer_block)
+    assert pair_required_files(unentered) == both_files
+    empty = quote_dispatcher_when_implementer_entered(
+        pd, pair_tests=set(), entered=pair_tests)
+    assert extra_write_members(empty.dispatcher_block)
+    assert extra_write_members(empty.implementer_block)
+    assert pair_required_files(empty) == both_files
     stub = _rec("src/error.rs", "fmt", "impl Debug for Error")
     stub_blocks = [
         ImplBlock(file="src/error.rs", container="impl Debug for Error",
@@ -197,18 +208,20 @@ def test_quote_dispatcher_when_implementer_entered() -> None:
     ]
     stub_jobs = pair_dispatches({_PAIR}, stub_blocks)
     still = quote_dispatcher_when_implementer_entered(
-        stub_jobs[0], implementer_entered=True)
+        stub_jobs[0], pair_tests=pair_tests, entered=pair_tests)
     assert extra_write_members(still.dispatcher_block)
 
 
 def test_quoted_dispatcher_prompt_forbids_an_fn_for_it() -> None:
     """The implementer-only pair prompt must not ask for a dispatcher FN.
-    Control: both-refill still says fills BOTH target blocks."""
+    Mixed leftovers keep the joint-write prompt. Control: both-refill
+    still says fills BOTH target blocks."""
     from pipeline_core.prompts.context import PerImplSections
     from pipeline_core.prompts.per_impl import build_per_impl_prompt
     jobs = pair_dispatches({_PAIR}, _blocks())
+    pair_tests = {"t_entered", "t_plain"}
     quoted = quote_dispatcher_when_implementer_entered(
-        jobs[0], implementer_entered=True)
+        jobs[0], pair_tests=pair_tests, entered=pair_tests)
     sections = PerImplSections(
         types="", invariants="", notes="", crate_idioms="",
         dispatch_family="", macros="", siblings="",
@@ -224,6 +237,20 @@ def test_quoted_dispatcher_prompt_forbids_an_fn_for_it() -> None:
     assert "rewrites the implementer only" in prompt
     assert "do NOT emit an <FN> for it" in prompt
     assert "fills BOTH target blocks" not in prompt
+    mixed = quote_dispatcher_when_implementer_entered(
+        jobs[0], pair_tests=pair_tests, entered={"t_entered"})
+    mixed_prompt = build_per_impl_prompt(
+        block=mixed.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=sections,
+        partner_block=mixed.implementer_block)
+    assert "fills BOTH target blocks" in mixed_prompt
+    assert "emitted by this pair" in mixed_prompt
+    assert "coverage shows failing tests already enter" not in mixed_prompt
+    assert "rewrites the implementer only" not in mixed_prompt
     both = build_per_impl_prompt(
         block=jobs[0].dispatcher_block,
         related_blocks=[],

@@ -5315,16 +5315,14 @@ def prepare_impl_fill(
         for _loc in _pd.member_locators():
             _pair_test_names |= set(_frontier_tests.tests_for(_loc))
             _pair_test_names |= set(_frontier_tests.convicting_for(_loc))
-        _entered = any(
-            entered_by_test(_impl_loc, t) for t in _pair_test_names)
+        _entered = {t for t in _pair_test_names if entered_by_test(_impl_loc, t)}
         _quoted = quote_dispatcher_when_implementer_entered(
-            _pd, implementer_entered=_entered)
-        if _entered and extra_write_members(_pd.dispatcher_block) and (
+            _pd, pair_tests=_pair_test_names, entered=_entered)
+        if extra_write_members(_pd.dispatcher_block) and (
                 not extra_write_members(_quoted.dispatcher_block)):
             _log(f"  [phase-c/pair] {_impl_loc.file}::{_impl_loc.fn_name} "
-                 "is entered by a convicting test — dispatcher quoted, not "
-                 "rewritten (wiring the unentered arm in the same keep "
-                 "crash-reverts).")
+                 "every leftover of the pair enters the implementer — "
+                 "dispatcher quoted, not rewritten.")
         _pair_jobs.append(_quoted)
     _stubs_all: frozenset[FnLocator] = frozenset(
         _scan_unimplemented_for_cluster(target_src_dir, cluster).units)

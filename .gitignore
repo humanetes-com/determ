@@ -28,7 +28,7 @@ tools/skeleton_extractor/target/
 !CONTRIBUTING.md
 !CLAUDE.md
 !docs/*.md
-
+.grok
 # Coverage data (xdist workers leave .coverage.<host>.<pid>.* shards).
 # The ratchet BASELINE is committed — it is the coverage floor, not data.
 .coverage*

@@ -288,6 +288,7 @@ if pipeline_running; then
     echo "Pipeline already running (PID $(pipeline_pids | head -1)). Not launching another."
     exit 0
 fi
+clear_graceful_stop_sentinel
 # Launched under lib/record_death.sh, which is the pipeline's PARENT and so
 # can read its exit status. Nothing could before: `nohup ... &` followed by an
 # exit or a `tail -f` throws away the one fact that separates an OOM-kill from

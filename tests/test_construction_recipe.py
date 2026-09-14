@@ -227,6 +227,9 @@ def test_generic_builders_pay_from_sig_on_a_crate_that_does_not_declare_the_wrap
     wrap_sig = (
         "fn from_payload(error: Box<dyn StdError + Send + Sync>, "
         "trace: Option<Trace>) -> Self")
+    wrap_from_sig = (
+        "the argument is unsized; wrap it in a sized type this crate already "
+        "declares")
     wrap_p = build_per_fn_prompt(
         file_text="fn from_payload() { unimplemented!() }",
         fn_name="from_payload",
@@ -235,7 +238,7 @@ def test_generic_builders_pay_from_sig_on_a_crate_that_does_not_declare_the_wrap
         module_name="demo", cluster_name="stable",
         file_rel="src/cell.rs", fr_path=None,
         sections=PerFnSections(**fn_empty))
-    assert "unsized" in wrap_p
+    assert wrap_from_sig in wrap_p
     assert "BoxedError" not in wrap_p
     assert WRAP_BOX_RECIPE not in wrap_p
     already = build_per_fn_prompt(
@@ -246,7 +249,9 @@ def test_generic_builders_pay_from_sig_on_a_crate_that_does_not_declare_the_wrap
         module_name="demo", cluster_name="stable",
         file_rel="src/cell.rs", fr_path=None,
         sections=PerFnSections(**fn_empty))
-    assert "unsized" not in already
+    # RECURRING_ERRORS names a possibly-unsized generic T; that is not
+    # the wrap recipe. from_boxed must not pay wrap-from-sig.
+    assert wrap_from_sig not in already
     ident = build_per_fn_prompt(
         file_text="fn and_then() { unimplemented!() }",
         fn_name="and_then",
@@ -265,7 +270,7 @@ def test_generic_builders_pay_from_sig_on_a_crate_that_does_not_declare_the_wrap
         sigs={"from_payload": wrap_sig,
               "and_then": "fn and_then<C>(self, extra: C) -> Self"})
     slot = max_p[max_p.index("File: src/cell.rs"):max_p.index("```rust")]
-    assert "unsized" in slot
+    assert wrap_from_sig in slot
     assert "erased identity type" in slot
     assert "BoxedError" not in slot
     assert "ContextError" not in slot

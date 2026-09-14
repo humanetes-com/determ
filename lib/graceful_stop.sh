@@ -15,6 +15,19 @@ _SENTINEL=/tmp/pipeline_graceful_stop
 # shellcheck source=lib/pipeline_pids.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pipeline_pids.sh"
 
+# Drop a leftover stop request immediately before launching a NEW process.
+# The file is a request for the process that was live when it was created.
+# Run 520338-26bbb7bb (2026-09-14) launched 8s after 485054 was SIGTERM'd
+# mid-pair-fill (exit 143); that stop's sentinel was still on disk, and the
+# replacement exited at TDD iter 1 after 12s with `stop sentinel detected`.
+# graceful_stop_pipeline already unlinks after a wait it itself started; this
+# covers --force, a touch then a later launch, and a launch with nothing
+# running. The in-process request_graceful_stop already refuses to write this
+# file for the same reason: a stop of this process must not kill the next one.
+clear_graceful_stop_sentinel() {
+    rm -f "$_SENTINEL"
+}
+
 graceful_stop_pipeline() {
     local interactive="${1:-1}"
 

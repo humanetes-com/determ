@@ -287,25 +287,24 @@ def extra_quoted_members(block: ImplBlock) -> tuple[FnRecord, ...]:
 
 
 def quote_dispatcher_when_implementer_entered(
-    pd: PairDispatch, *, implementer_entered: bool,
+    pd: PairDispatch,
+    *,
+    pair_tests: Collection[str],
+    entered: Collection[str],
 ) -> PairDispatch:
-    """A filled dispatcher is quoted, not rewritten, when some convicting
-    test already enters the implementer.
+    """A filled dispatcher is quoted, not rewritten, only when every
+    leftover of the pair is proven entered on the implementer.
 
-    Wiring the dispatcher arm that does not yet call the implementer in
-    the same keep is how a compiling pair crash-reverts: that arm first
-    enters the implementer's unentered path, which crashes (2026-09-14
-    after 8c24980: LAST_ERROR was the crash and the crashing body, the
-    diagnostician still prescribed as_ptr, compiler_rejected dropped it,
-    every fill still always-called debug and died on five binaries).
-    Tests that already enter the implementer can cash from an
-    implementer-only rewrite. The unentered dispatcher arm is the next
-    pair write, once no convicting test enters the implementer.
+    Mixed leftovers keep both halves as refill: an implementer-only
+    rewrite cannot cash the unentered tests, and quoting the dispatcher
+    is how those tests became unpayable (run 524736-e3b0c853). Empty
+    leftover set must not vacuously quote.
 
-    Control: implementer_entered False keeps both as refill (the
-    co-dependent write). A still-stubbed dispatcher stays a write.
+    Control: every leftover entered still quotes; every leftover
+    unentered still joint-writes; mixed joint-writes. A still-stubbed
+    dispatcher stays a write.
     """
-    if not implementer_entered:
+    if not pair_tests or not all(t in entered for t in pair_tests):
         return pd
     d = pd.dispatcher_block
     if d.stub_members:
