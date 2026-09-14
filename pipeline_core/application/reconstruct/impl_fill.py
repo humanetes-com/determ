@@ -1075,6 +1075,11 @@ def prepare_impl_fill(
     _other_callees = frozenset(
         k for k in _pair_crash_callees if k.file not in _pair_files)
     _pair_extra_locs = _same_callees
+    # Passing extras the *current* crash extract named are aimed refills;
+    # remembered-only extras stay quoted. Using the union as crash_named
+    # would re-force every remembered slot (run 171582).
+    _crash_named = frozenset(
+        k for k in _pair_crash_callees if k.file in _pair_files)
     if _other_callees:
         crash_blamed = (crash_blamed or frozenset()) | _other_callees
         tdd_frontier_keys = set(tdd_frontier_keys or ()) | set(
@@ -5308,7 +5313,8 @@ def prepare_impl_fill(
     _pair_jobs = []
     for _pd in pair_dispatches(
             _frontier_tests.pairs, all_blocks,
-            extra_locators=_pair_extra_locs):
+            extra_locators=_pair_extra_locs,
+            crash_named=_crash_named):
         _impl_loc = FnLocator(
             _pd.pair.implementer.file, _pd.pair.implementer.fn_name)
         _pair_test_names: set[str] = set()

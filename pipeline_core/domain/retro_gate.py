@@ -627,6 +627,16 @@ LAYOUT_CONTRADICTED = "layout_contradicted"
 # E0308. The notes channel already retires this shape
 # (`contradicted_notes`); the pair record did not consult it.
 COMPILER_REJECTED = "compiler_rejected"
+# A compiled-crash lesson that tells the next fill to drop a conversion
+# the rustc-accepted body used. Run `579131-0ef5e885` fill 1 compiled
+# `callee(self.inner.by_ref())` then panicked formatting a table-slot
+# return; the diagnostician prescribed `callee(self.inner)` (Own where
+# the signature is Ref); fill 2 honoured it and rustc said E0308.
+# `compiled_rule` in the retro prompt already forbade replacing a
+# type-checked call; the model ignored it. `compiler_rejected` cannot
+# see this: last_compile_error is empty or a prior excerpt of a
+# different expression. LAST_ERROR still carries the crashing body.
+TYPECHECKED_CALL = "typechecked_call"
 
 # Words a pinned literal can carry that name nothing: they occur in almost
 # any sentence of guidance, so a removal sentence carrying one would fire on
@@ -847,6 +857,41 @@ _CRASH_VERDICT_HEADS: tuple[str, ...] = (
     "Your body ABORTED the test process",
     "This made test binar",
 )
+
+
+# A call whose first argument is `recv.method()` — the compiled conversion
+# a crash lesson must not strip into a type error. `Name::name` and
+# `name` both match; nested parens in the receiver do not (the live
+# bodies are `self.inner.by_ref()`).
+_COMPILED_CONV_CALL = re.compile(
+    r"((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*\(\s*"
+    r"((?:[A-Za-z_]\w*(?:\.\w+)*)\.[A-Za-z_]\w*\s*\(\s*\))"
+)
+
+
+def prescription_drops_compiled_conversion(
+    guidance: str, failed_body: str,
+) -> bool:
+    """True when ``guidance`` tells the next fill to pass ``recv`` to a
+    callee the compiled body invoked as ``callee(recv.method())``.
+
+    The live fill 1 body was ``ErrorImpl::debug(self.inner.by_ref(),
+    formatter)``; the lesson prescribed ``ErrorImpl::debug(self.inner,
+    formatter)``. A lesson that keeps the conversion (``callee(recv.method()``)
+    does not match: after ``recv`` comes ``.method()``, not a comma or
+    close-paren. Empty either side is not this class.
+    """
+    if not (guidance or "").strip() or not (failed_body or "").strip():
+        return False
+    for m in _COMPILED_CONV_CALL.finditer(failed_body):
+        callee, conv_arg = m.group(1), m.group(2).strip()
+        recv = conv_arg.rsplit(".", 1)[0]
+        if re.search(
+                re.escape(callee) + r"\s*\(\s*" + re.escape(recv)
+                + r"\s*[,)]",
+                guidance):
+            return True
+    return False
 
 
 def crash_earned_conviction(record: Mapping[str, Any] | None) -> bool:
@@ -1171,6 +1216,19 @@ def screen_guidance(
     _cerr = str(rec.get("last_compile_error") or "")
     if _cerr and contradicted_notes([guidance], _cerr):
         return GuidanceScreening("", COMPILER_REJECTED)
+    # rustc accepted the last body, then a crash. A lesson that drops a
+    # conversion that body used (recv.method() → recv as the callee
+    # argument) is the type-error oscillation compiler_rejected cannot
+    # see until rustc spends the next attempt. Control: error_count > 0
+    # is a compile failure (compiler_rejected owns it); a crash preview
+    # that keeps the compiled call is not this class.
+    _preview = str(rec.get("last_error_preview") or "")
+    _failed = str(rec.get("last_failed_body") or "")
+    _crashy = ("panicked at" in _preview.lower()
+               or "crash" in _preview.lower())
+    if (int(rec.get("error_count") or 0) == 0 and _crashy
+            and prescription_drops_compiled_conversion(guidance, _failed)):
+        return GuidanceScreening("", TYPECHECKED_CALL)
     # The eleventh way, judged before every rule below because none of them
     # can see it: the lesson prescribes removing an observable the tests this
     # unit answers for pin. Obeyed, it re-creates the failure it explains —
@@ -1308,6 +1366,13 @@ def retired_guidance_line(
                 f"rounds={rec.get('retrospective_count') or 0} prescribes an "
                 f"approach rustc already rejected — NOT injected "
                 f"({COMPILER_REJECTED}): {head}")
+    if verdict.retired_by == TYPECHECKED_CALL:
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} replaces a "
+                f"call rustc already type-checked — NOT injected "
+                f"({TYPECHECKED_CALL}): {head}")
     if verdict.retired_by == LAYOUT_CONTRADICTED:
         # Same observability hole as CONTRADICTS_TARGET: the record stays
         # on disk, the text is what was dropped, and fill 8 of run

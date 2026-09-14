@@ -84,8 +84,11 @@ def build_per_impl_prompt(
 
     `extra_blocks` are same-file table slots a compiling crash-revert
     recovered. Stub and refill extras are rewritten with the pair;
-    members-only extras (tests already pass) are quoted, not rewritten.
-    Empty (the default) leaves the two-block render.
+    refill extras are tagged aimed (callee of the faulting formatter),
+    never "its test below FAILS" — those tests often still pass.
+    Members-only extras (remembered, current crash extract did not
+    name them) are quoted, not rewritten. Empty (the default) leaves
+    the two-block render.
     """
     types_section = sections.types
     invariants_section = sections.invariants
@@ -335,6 +338,12 @@ def build_per_impl_prompt(
             _e_fills = frozenset(m.fn_name for m in eb.stub_members)
             _e_quoted = frozenset(
                 m.fn_name for m in extra_quoted_members(eb))
+            # Crash-named extras arrive as refill because the panic stem
+            # matched their return, not because their attributed tests
+            # fail. The FAILS tag is a lie for them; aimed is the
+            # callee-of-the-faulting-formatter instruction that already
+            # exists. Union, do not replace: a slot the evidence already
+            # aimed stays aimed.
             extra_renders.append(
                 f'<TARGET_IMPL_BLOCK file="{eb.file}">\n'
                 "```rust\n"
@@ -345,7 +354,7 @@ def build_per_impl_prompt(
                     companion_fn_names=_e_quoted,
                     inferred_fn_names=sections.inferred_refill_names,
                     crashed_fn_names=sections.crashed_refill_names,
-                    aimed_fn_names=sections.aimed_refill_names)
+                    aimed_fn_names=sections.aimed_refill_names | _e_refills)
                 + "\n```\n</TARGET_IMPL_BLOCK>")
             extra_name_bits.extend(
                 m.fn_name for m in extra_write_members(eb))

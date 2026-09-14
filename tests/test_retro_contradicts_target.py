@@ -22,6 +22,7 @@ from pipeline_core.domain.retro_gate import (
     JOINT_BODY_SHA,
     JOINT_MEMBERS,
     LAYOUT_CONTRADICTED,
+    TYPECHECKED_CALL,
     BlockedOnStubs,
     ConvictionEvidence,
     GuidanceScreening,
@@ -531,6 +532,47 @@ def test_guidance_that_prescribes_e0308_found_type_is_retired() -> None:
         "error[E0308]: mismatched types\n"
         "expected `Ref<'_, Holder>`, found `*const _`")
     assert _same_transaction_read(rec3, pins=PINS).retired_by != COMPILER_REJECTED
+
+
+def test_guidance_that_drops_a_typechecked_conversion_is_retired() -> None:
+    """Plan: a compiled-crash lesson that prescribes callee(recv) where
+    the rustc-accepted body was callee(recv.method()) is retired before
+    rustc spends the next attempt. Live: fill 1 compiled
+    Holder::show(self.inner.by_ref()) then crashed; the lesson prescribed
+    Holder::show(self.inner) and fill 2 got E0308 Own vs Ref.
+    Controls: keeping the conversion; a redden preview with no crash;
+    a compile-fail record (compiler_rejected's job). crash_stub_sites
+    empty so crash_earned does not swallow this class."""
+    rec = _pair_record(
+        "Pass the wrapper itself directly, e.g. "
+        "`unsafe { Holder::show(self.inner, formatter) }`, so this is "
+        "the payload and not the wrapper produced by by_ref")
+    rec["last_failed_body"] = (
+        '<FN name="fmt">unsafe { Holder::show(self.inner.by_ref(), '
+        "formatter) }</FN>")
+    rec["last_error_preview"] = (
+        "This made test binaries ['t.rs'] CRASH before reporting results")
+    rec["crash_stub_sites"] = []
+    verdict = _same_transaction_read(rec, pins=PINS)
+    assert verdict.retired_by == TYPECHECKED_CALL
+    assert verdict.text == ""
+    line = retired_guidance_line("k", rec, verdict)
+    assert TYPECHECKED_CALL in line
+    assert "Holder::show(self.inner" in line
+    keeps = _pair_record(
+        "Keep `Holder::show(self.inner.by_ref(), formatter)` and rewrite "
+        "the slot that produced the panicking return")
+    keeps["last_failed_body"] = rec["last_failed_body"]
+    keeps["last_error_preview"] = rec["last_error_preview"]
+    keeps["crash_stub_sites"] = []
+    assert _same_transaction_read(keeps, pins=PINS).retired_by != TYPECHECKED_CALL
+    redden = dict(rec)
+    redden["last_error_preview"] = "newly red: ['t_keep'] (net -1)"
+    assert _same_transaction_read(redden, pins=PINS).retired_by != TYPECHECKED_CALL
+    compile_fail = dict(rec)
+    compile_fail["error_count"] = 1
+    assert _same_transaction_read(
+        compile_fail, pins=PINS).retired_by != TYPECHECKED_CALL
 
 
 def test_retired_line_names_the_class_and_quotes_the_removal_sentence() -> None:

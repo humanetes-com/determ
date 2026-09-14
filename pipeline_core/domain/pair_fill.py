@@ -52,12 +52,16 @@ class PairDispatch(NamedTuple):
     2026-09-14: two recovered slots filled FLAT net +0, then the pair
     crash-reverted the same five binaries). A slot already in
     ``refill_members`` or still a stub is a rewrite in the same
-    transaction. A filled slot that is only in ``members`` is quoted,
-    not rewritten: forcing refill is how run ``171582-cb964fb9`` spent
-    23 pair fills turning working table slots into ``None`` / a wild
-    deref, reddening ten already-passing tests or crashing five
-    binaries. Empty (the default) is every recorded pair that did not
-    crash this way.
+    transaction. A filled slot the *current* crash extract named is
+    also a rewrite (aimed): quoting it is how run ``579131-0ef5e885``
+    fill 1 was forbidden from rewriting the callees
+    ``crash_vtable_callees`` had already matched to the panic stem, so
+    the pair crash-reverted formatting a return those slots produced.
+    A filled slot that is only remembered, not in the current extract,
+    stays quoted: forcing every remembered slot to refill is how run
+    ``171582-cb964fb9`` spent 23 pair fills turning working table slots
+    into ``None`` / a wild deref. Empty (the default) is every recorded
+    pair that did not crash this way.
     """
 
     pair: FormatterPair
@@ -219,6 +223,8 @@ def _endpoint_block(
 
 def _block_for_locator(
     loc: FnLocator, all_blocks: Sequence[ImplBlock],
+    *,
+    crash_named: Collection[FnLocator] = (),
 ) -> ImplBlock | None:
     """The block declaring ``loc``, narrowed to that one member.
 
@@ -226,7 +232,17 @@ def _block_for_locator(
     fn (container ``""``) is not matched to the first impl in the file.
     Stub / refill classification is kept so the pair splice overwrites a
     filled slot and fills a still-hollow one.
+
+    ``crash_named`` is the current compiling crash extract
+    (``crash_vtable_callees`` of the last failed body and panic text). A
+    filled member in that set is a refill even when its attributed tests
+    pass: those tests often bind the return and never format it, so a
+    garbage value still passes them, and quoting the slot forbids the
+    pair from rewriting the callee the panic stem already named (run
+    ``579131-0ef5e885`` fill 1). A filled member not in that set stays
+    quoted — remembered-only extras, the 171582 protection.
     """
+    named = frozenset(crash_named)
     for b in all_blocks:
         if b.file != loc.file:
             continue
@@ -240,13 +256,16 @@ def _block_for_locator(
                            members=refill)
         member = tuple(m for m in b.members if m.fn_name == loc.fn_name)
         if member:
+            if loc in named:
+                return replace(b, stub_members=(), refill_members=member,
+                               members=member)
             # Filled, and collect_impl_refill_targets did not stamp it:
-            # its attributed tests already pass. Quote it in the pair
-            # prompt so the pair can call it; do not mark refill.
-            # Forcing refill here is how run `171582-cb964fb9` spent 23
-            # pair fills rewriting working table slots to `None` / a
-            # wild deref, reddening ten already-passing tests or
-            # crashing five binaries. pair_wait still parks a run of
+            # its attributed tests already pass, and the current crash
+            # extract did not name it. Quote it in the pair prompt so
+            # the pair can call it; do not mark refill. Forcing every
+            # remembered slot to refill is how run `171582-cb964fb9`
+            # spent 23 pair fills rewriting working table slots to
+            # `None` / a wild deref. pair_wait still parks a run of
             # this locator (it is in extra_blocks.members).
             return replace(b, stub_members=(), refill_members=(),
                            members=member)
@@ -384,6 +403,7 @@ def pair_dispatches(
     pairs: Iterable[FormatterPair],
     all_blocks: Sequence[ImplBlock],
     extra_locators: Collection[FnLocator] = (),
+    crash_named: Collection[FnLocator] = (),
 ) -> list[PairDispatch]:
     """The hop's dispatchable pairs with both endpoint blocks resolved.
     A pair either of whose endpoints has no collected block (record drift,
@@ -395,8 +415,14 @@ def pair_dispatches(
     transaction. A locator in a third file is skipped here: the pair
     writes two files, and that run stays crash-blamed so pair_wait does
     not park it.
+
+    ``crash_named`` is the current crash extract. A passing extra in that
+    set is a refill (aimed); a passing extra only in ``extra_locators``
+    stays quoted. Empty (the default) quotes every passing extra — the
+    pre-fix behaviour, and the remembered-only case.
     """
     extras = frozenset(extra_locators)
+    named = frozenset(crash_named)
     out: list[PairDispatch] = []
     for p in pairs_to_dispatch(pairs):
         db = _endpoint_block(p.dispatcher, all_blocks)
@@ -411,7 +437,7 @@ def pair_dispatches(
             if (loc.file not in member_files or loc in member_locs
                     or loc in seen):
                 continue
-            blk = _block_for_locator(loc, all_blocks)
+            blk = _block_for_locator(loc, all_blocks, crash_named=named)
             if blk is None:
                 continue
             seen.add(loc)

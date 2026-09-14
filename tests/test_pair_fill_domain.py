@@ -263,12 +263,73 @@ def test_quoted_dispatcher_prompt_forbids_an_fn_for_it() -> None:
     assert "rewrites the implementer only" not in both
 
 
+def test_a_crash_named_slot_prompt_is_aimed_not_fails() -> None:
+    """Plan: a passing extra the crash extract named is tagged aimed
+    (callee of the faulting formatter), never 'its test below FAILS'.
+    Control: the same extra without crash_named stays FILLED / do not
+    emit. Display/Renderer crate, not leftover names."""
+    from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import build_per_impl_prompt
+    other = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/render.rs", "render", "impl Renderer"))
+    disp = _rec("src/lib.rs", "fmt", "impl Display for Report")
+    impl_ = _rec("src/render.rs", "render", "impl Renderer")
+    peek = FnRecord(file="src/lib.rs", fn_name="peek", container="",
+                    sig_text="fn peek() -> u32", body_text="0")
+    blocks = [
+        ImplBlock(file="src/lib.rs", container="impl Display for Report",
+                  members=(disp,), refill_members=(disp,)),
+        ImplBlock(file="src/render.rs", container="impl Renderer",
+                  members=(impl_,), refill_members=(impl_,)),
+        ImplBlock(file="src/lib.rs", container="",
+                  members=(peek,), refill_members=()),
+    ]
+    loc = FnLocator("src/lib.rs", "peek")
+    sections = PerImplSections(
+        types="", invariants="", notes="", crate_idioms="",
+        dispatch_family="", macros="", siblings="",
+        retrospective_guidance="", bound_methods="")
+    named = pair_dispatches(
+        {other}, blocks, extra_locators={loc}, crash_named={loc})[0]
+    named_prompt = build_per_impl_prompt(
+        block=named.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=sections,
+        partner_block=named.implementer_block,
+        extra_blocks=named.extra_blocks)
+    assert "callee of the faulting frame" in named_prompt
+    assert "this response also rewrites the same-file" in named_prompt
+    # The extra's body is `0`; the dispatcher/implementer still use the
+    # FAILS tag for their own failing tests. The lie this closes is that
+    # tag on the passing slot.
+    assert "FAILS — rewrite the BEHAVIOR */ 0" not in named_prompt
+    quoted = pair_dispatches(
+        {other}, blocks, extra_locators={loc})[0]
+    quoted_prompt = build_per_impl_prompt(
+        block=quoted.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=sections,
+        partner_block=quoted.implementer_block,
+        extra_blocks=quoted.extra_blocks)
+    assert "do NOT emit an <FN> for it" in quoted_prompt
+    assert "callee of the faulting frame" not in quoted_prompt
+
+
 def test_pair_dispatches_quotes_a_passing_table_slot() -> None:
     """A crash-recovered slot that is not already a refill (its tests
     pass) still joins member_locators so pair_wait parks a run of it,
     but is not a refill rewrite. Control: the same locator in
     refill_members is still a rewrite
-    (test_pair_dispatches_joins_same_file_table_slots)."""
+    (test_pair_dispatches_joins_same_file_table_slots). A passing slot
+    the current crash extract named is a refill
+    (test_a_crash_named_passing_slot_is_a_refill)."""
     peek = _rec("src/error.rs", "peek", "")
     blocks = _blocks() + [
         ImplBlock(file="src/error.rs", container="",
@@ -285,6 +346,43 @@ def test_pair_dispatches_quotes_a_passing_table_slot() -> None:
             for m in b.members] == ["peek"]
     assert [m.fn_name for b in jobs[0].extra_blocks
             for m in b.stub_members] == []
+
+
+def test_a_crash_named_passing_slot_is_a_refill() -> None:
+    """Plan: extras the current compiling crash extract named are refill
+    even when their attributed tests pass, so the pair can rewrite the
+    callee whose return the panic stem matched. Control: the same
+    passing slot not in crash_named stays quoted (the 171582
+    remembered-only case). The pair is a Display dispatcher in lib.rs
+    delegating to render.rs — not this crate's leftover names."""
+    other = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/render.rs", "render", "impl Renderer"))
+    disp = _rec("src/lib.rs", "fmt", "impl Display for Report")
+    impl_ = _rec("src/render.rs", "render", "impl Renderer")
+    peek = _rec("src/lib.rs", "peek", "")
+    blocks = [
+        ImplBlock(file="src/lib.rs", container="impl Display for Report",
+                  members=(disp,), refill_members=(disp,)),
+        ImplBlock(file="src/render.rs", container="impl Renderer",
+                  members=(impl_,), refill_members=(impl_,)),
+        ImplBlock(file="src/lib.rs", container="",
+                  members=(peek,), refill_members=()),
+    ]
+    loc = FnLocator("src/lib.rs", "peek")
+    named = pair_dispatches(
+        {other}, blocks, extra_locators={loc}, crash_named={loc})
+    assert len(named) == 1
+    assert loc in named[0].member_locators()
+    assert extra_write_members(named[0].extra_blocks[0])
+    assert [m.fn_name for b in named[0].extra_blocks
+            for m in b.refill_members] == ["peek"]
+    quoted = pair_dispatches(
+        {other}, blocks, extra_locators={loc})
+    assert extra_write_members(quoted[0].extra_blocks[0]) == ()
+    assert [m.fn_name for b in quoted[0].extra_blocks
+            for m in b.refill_members] == []
+    assert pair_required_files(named[0]) >= frozenset({"src/lib.rs"})
 
 
 def test_remembered_pair_callees_survive_a_pair_only_record() -> None:

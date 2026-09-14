@@ -733,17 +733,29 @@ def test_a_pair_reply_that_omits_its_table_slot_keeps_nothing(
     assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
 
 
+def _install_remembered_only_callees(monkeypatch):
+    """A remembered slot the current crash extract does not name."""
+    monkeypatch.setattr(
+        "pipeline_core.application.reconstruct.impl_fill."
+        "crash_vtable_callees_from_store",
+        lambda *a, **k: frozenset())
+    monkeypatch.setattr(
+        "pipeline_core.application.reconstruct.impl_fill."
+        "remembered_pair_callees",
+        lambda *a, **k: frozenset({_PEEK}))
+
+
 def test_a_passing_table_slot_is_quoted_not_rewritten(
         monkeypatch, tmp_path):
-    """A crash-recovered slot whose tests already pass is quoted, not
-    marked refill. Omitting it from the reply keeps the pair — the tree
-    already holds the body. Control: the same slot in refill_members
-    still requires a rewrite
-    (test_a_pair_reply_that_omits_its_table_slot_keeps_nothing)."""
+    """A remembered slot whose tests already pass, and that the current
+    crash extract did not name, is quoted, not marked refill. Omitting
+    it from the reply keeps the pair — the tree already holds the body.
+    Control: the same slot in the current crash extract is a rewrite
+    (test_a_crash_named_passing_slot_is_rewritten)."""
     ws = _setup(monkeypatch, tmp_path)
     install_cluster_scan(
         monkeypatch, impl_blocks=lambda *a, **k: _blocks(peek_refill=False))
-    _install_crash_callees(monkeypatch)
+    _install_remembered_only_callees(monkeypatch)
     prompts: list[str] = []
     _install_model(monkeypatch, [PAIR_REPLY], prompts)
     install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
@@ -756,7 +768,55 @@ def test_a_passing_table_slot_is_quoted_not_rewritten(
     assert "do NOT emit an <FN> for it" in pair_prompt
     assert "this pair will call this body" in pair_prompt
     assert "rewrite the BEHAVIOR */ 0" not in pair_prompt
+    assert "callee of the faulting frame" not in pair_prompt
     assert (_DISP[0], _DISP[1]) in (res.dispatched_fns or ())
+
+
+def test_a_crash_named_passing_slot_is_rewritten(
+        monkeypatch, tmp_path):
+    """Plan: a passing slot the current crash extract named is aimed
+    refill and splices under the same judgment. Pre-fix (quoting
+    because tests pass) kept the pair without rewriting the callee
+    the panic stem named. Control: omitting it reverts
+    (test_omitting_a_crash_named_passing_slot_keeps_nothing);
+    remembered-only still quotes
+    (test_a_passing_table_slot_is_quoted_not_rewritten)."""
+    ws = _setup(monkeypatch, tmp_path)
+    install_cluster_scan(
+        monkeypatch, impl_blocks=lambda *a, **k: _blocks(peek_refill=False))
+    _install_crash_callees(monkeypatch)
+    prompts: list[str] = []
+    _install_model(monkeypatch, [PAIR_REPLY_WITH_SLOT], prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    res = _run(ws)
+    lib = (ws / "src" / "lib.rs").read_text()
+    assert "PAIRED" in lib
+    assert "fn peek" in lib
+    assert "pub fn peek() -> u32 { 0 }" not in lib
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "callee of the faulting frame" in pair_prompt
+    assert "this response also rewrites the same-file" in pair_prompt
+    assert "FAILS — rewrite the BEHAVIOR */ 0" not in pair_prompt
+    assert (_PEEK[0], _PEEK[1]) in (res.dispatched_fns or ())
+
+
+def test_omitting_a_crash_named_passing_slot_keeps_nothing(
+        monkeypatch, tmp_path):
+    """Negative control for crash-named passing extras: a reply that
+    lands the pair halves but omits the slot is the independently
+    judged split. Pre-fix quoted the slot, so the same reply kept."""
+    ws = _setup(monkeypatch, tmp_path)
+    install_cluster_scan(
+        monkeypatch, impl_blocks=lambda *a, **k: _blocks(peek_refill=False))
+    _install_crash_callees(monkeypatch)
+    prompts: list[str] = []
+    _install_model(monkeypatch, [PAIR_REPLY], prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    assert (ws / "src" / "lib.rs").read_text() == DISPATCHER_LIB
+    assert (ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "callee of the faulting frame" in pair_prompt
 
 
 def test_pair_last_error_a_compiling_crash_drops_the_prior_rustc_excerpt() -> None:
