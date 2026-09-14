@@ -17,8 +17,10 @@ from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from pipeline_core.domain.pair_fill import (
     PAIR_CRASH_CALLEES,
     blocks_after_pair_fill,
+    crash_named_extras,
     dispatch_including_pairs,
     extra_write_members,
+    fn_names_in_failed_body,
     pair_dispatches,
     pair_required_files,
     pairs_to_dispatch,
@@ -383,6 +385,51 @@ def test_a_crash_named_passing_slot_is_a_refill() -> None:
     assert [m.fn_name for b in quoted[0].extra_blocks
             for m in b.refill_members] == []
     assert pair_required_files(named[0]) >= frozenset({"src/lib.rs"})
+
+
+def test_crash_named_omits_a_slot_the_last_failed_body_already_emitted() -> None:
+    """Plan: extras the last crashing pair reply already wrote are not
+    crash_named, even when the current extract still names them. Run
+    609480 fill 1 aimed slots that last_failed_body already contained;
+    the reply rewrote them and crash-reverted. Control: the same extract
+    with a body that omitted the extra still aims it (the 579131 hole
+    the extract exists to close). Display/Renderer crate, not leftover
+    names."""
+    peek = FnLocator("src/lib.rs", "peek")
+    extract = frozenset({peek})
+    wrote = (
+        '<FN name="fmt" block="impl Display for Report">x</FN>\n'
+        '<FN name="peek" block="free fns">None</FN>'
+    )
+    omitted = '<FN name="fmt" block="impl Display for Report">x</FN>'
+    assert fn_names_in_failed_body(wrote) == frozenset({"fmt", "peek"})
+    assert crash_named_extras(extract, failed_body=wrote) == frozenset()
+    assert crash_named_extras(extract, failed_body=omitted) == extract
+    assert crash_named_extras(extract, failed_body="") == extract
+    assert crash_named_extras(frozenset(), failed_body=wrote) == frozenset()
+    other = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/render.rs", "render", "impl Renderer"))
+    disp = _rec("src/lib.rs", "fmt", "impl Display for Report")
+    impl_ = _rec("src/render.rs", "render", "impl Renderer")
+    slot = _rec("src/lib.rs", "peek", "")
+    blocks = [
+        ImplBlock(file="src/lib.rs", container="impl Display for Report",
+                  members=(disp,), refill_members=(disp,)),
+        ImplBlock(file="src/render.rs", container="impl Renderer",
+                  members=(impl_,), refill_members=(impl_,)),
+        ImplBlock(file="src/lib.rs", container="",
+                  members=(slot,), refill_members=()),
+    ]
+    loc = FnLocator("src/lib.rs", "peek")
+    quoted = pair_dispatches(
+        {other}, blocks, extra_locators={loc},
+        crash_named=crash_named_extras({loc}, failed_body=wrote))
+    assert extra_write_members(quoted[0].extra_blocks[0]) == ()
+    aimed = pair_dispatches(
+        {other}, blocks, extra_locators={loc},
+        crash_named=crash_named_extras({loc}, failed_body=omitted))
+    assert extra_write_members(aimed[0].extra_blocks[0])
 
 
 def test_remembered_pair_callees_survive_a_pair_only_record() -> None:

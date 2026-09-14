@@ -64,6 +64,36 @@ def test_no_direct_donor_leaves_named_untouched() -> None:
     assert inferred_refill_names(named) == frozenset({"fmt", "render"})
 
 
+def test_a_named_extra_does_not_inherit_the_pair_leftover_tests() -> None:
+    """Plan: promote_pair_write_grades copies leftover tests onto hop
+    endpoints, not onto a same-file table slot in the same assembly.
+    Run 609480 fill 1 marked a passing extra DIRECT for the pair's
+    leftover tests; the model rewrote the extra as if those tests
+    failed because of it. Control: without endpoint_names the extra
+    still promotes (today's leak); with them the implementer still
+    becomes DIRECT. Display/Renderer names, not leftovers."""
+    named_impl = _ev("render", Attribution.NAMED)
+    named_extra = _ev("peek", Attribution.NAMED)
+    donor = _ev("fmt", Attribution.DIRECT, tests=("t_pair",))
+    leaked = promote_pair_write_grades((donor, named_impl, named_extra))
+    assert leaked[2].attribution is Attribution.DIRECT
+    assert leaked[2].tests == ("t_pair",)
+    out = promote_pair_write_grades(
+        (donor, named_impl, named_extra),
+        endpoint_names=("fmt", "render"))
+    grades = {e.fn_name: e.attribution for e in out}
+    assert grades == {
+        "fmt": Attribution.DIRECT,
+        "render": Attribution.DIRECT,
+        "peek": Attribution.NAMED,
+    }
+    assert out[2].tests == ()
+    text = render_refill_evidence(out)
+    assert "`render` — DIRECT:" in text
+    assert "`peek` — DIRECT:" not in text
+    assert "INFERRED" in text and "`peek`" in text
+
+
 def test_escalated_and_crashed_outrank_and_are_left_alone() -> None:
     donor = _ev("fmt", Attribution.DIRECT, tests=("t_pair",))
     crashed = _ev("drop", Attribution.CRASHED)
@@ -71,6 +101,32 @@ def test_escalated_and_crashed_outrank_and_are_left_alone() -> None:
     out = promote_pair_write_grades((donor, crashed, escalated))
     assert out[1].attribution is Attribution.CRASHED
     assert out[2].attribution is Attribution.ESCALATED
+
+
+def test_joint_rewrite_assembly_does_not_direct_an_extra() -> None:
+    """Plan: a same-file table slot in the pair assembly stays NAMED
+    (or AIMED) and does not inherit leftover tests. Control: the
+    unentered implementer still becomes DIRECT."""
+    disp = _block("lib.rs", "impl fmt::Display for Report", "fmt")
+    impl = _block("render.rs", "impl Renderer", "render")
+    peek_m = _member("lib.rs", "peek")
+    extra = ImplBlock(file="lib.rs", container="", members=(peek_m,),
+                      refill_members=(peek_m,))
+    fr = FailureFrontier.build(
+        {FnLocator("lib.rs", "fmt"): {"t_pair"},
+         FnLocator("render.rs", "render"): {"t_pair"}},
+        {FnLocator("lib.rs", "fmt"): {"t_pair"}})
+    joint = assemble_block_evidence(
+        (disp, impl, extra), [disp, impl, extra], fr,
+        find_tests=lambda leaf, mx: [],
+        joint_rewrite=True,
+        joint_endpoint_names=("fmt", "render"))
+    grades = {e.fn_name: e.attribution for e in joint.evidence}
+    assert grades["fmt"] is Attribution.DIRECT
+    assert grades["render"] is Attribution.DIRECT
+    assert grades["peek"] is Attribution.NAMED
+    assert "`peek` — DIRECT:" not in joint.refill_evidence
+    assert "`render` — DIRECT:" in joint.refill_evidence
 
 
 def test_joint_rewrite_assembly_promotes_the_unentered_implementer() -> None:

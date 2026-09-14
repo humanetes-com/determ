@@ -23,7 +23,7 @@ it renders edges the frontier already holds.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -142,6 +142,8 @@ def render_prior_regression(
 
 def promote_pair_write_grades(
     evidence: tuple[RefillEvidence, ...],
+    *,
+    endpoint_names: Collection[str] = (),
 ) -> tuple[RefillEvidence, ...]:
     """A hop pair is one write. Coverage of the CURRENT tree often proves
     the failing tests enter the dispatcher and not the implementer — that
@@ -156,6 +158,14 @@ def promote_pair_write_grades(
     DIRECT, the tuple is returned unchanged — a pair with no convicting
     tests is still a name-match fill, not a silent promotion.
 
+    ``endpoint_names`` is the hop pair's two member names. When given,
+    only those NAMED members promote: a same-file table slot in the
+    assembly is not a hop endpoint, and stamping the pair's leftover
+    tests onto it as DIRECT is how run ``609480-8edf9bf2`` fill 1 told
+    the model a passing extra's body was what the leftover tests fail
+    on. Empty (the default) promotes every NAMED member — the one-pair
+    assembly with no extras, and the tests that pin that.
+
     Prompt rendering only: the frontier's test-to-unit edges are not
     touched. The same call on a Display dispatcher in `lib.rs` whose
     tests do not yet enter `render.rs` promotes identically.
@@ -165,9 +175,11 @@ def promote_pair_write_grades(
         return evidence
     tests = tuple(dict.fromkeys(t for e in donors for t in e.tests))
     excerpts = tuple(dict.fromkeys(x for e in donors for x in e.excerpts))
+    endpoints = frozenset(endpoint_names)
     out: list[RefillEvidence] = []
     for e in evidence:
-        if e.attribution is Attribution.NAMED:
+        if e.attribution is Attribution.NAMED and (
+                not endpoints or e.fn_name in endpoints):
             out.append(replace(
                 e, attribution=Attribution.DIRECT,
                 tests=e.tests or tests,
@@ -193,6 +205,7 @@ def assemble_block_evidence(
     prior_regressed: Sequence[str] = (),
     prior_regressed_output: Mapping[str, str] | None = None,
     joint_rewrite: bool = False,
+    joint_endpoint_names: Collection[str] = (),
     leaf_cap: int = ATTRIBUTED_TEST_LEAF_CAP,
     file_cap: int = ATTRIBUTED_TEST_FILE_CAP,
 ) -> BlockEvidence:
@@ -215,8 +228,9 @@ def assemble_block_evidence(
     so an unentered implementer is not graded INFERRED (run `719098-e021d93b`,
     2026-09-01: coverage redirected the leftovers onto the dispatcher, REFILL
     told the implementer to return unchanged, and the reply left
-    `Debug::fmt(bt, f)`). One-block callers leave this false and stay
-    byte-identical."""
+    `Debug::fmt(bt, f)`). `joint_endpoint_names` is those two member names;
+    extras in the assembly do not inherit the leftover tests. One-block
+    callers leave this false and stay byte-identical."""
     evs: list[RefillEvidence] = []
     for b in target_blocks:
         evs.extend(collect_refill_evidence(
@@ -227,7 +241,8 @@ def assemble_block_evidence(
                                       oracle_fp=oracle_fp)))
     evidence = tuple(evs)
     if joint_rewrite:
-        evidence = promote_pair_write_grades(evidence)
+        evidence = promote_pair_write_grades(
+            evidence, endpoint_names=joint_endpoint_names)
     leaves = attributed_test_leaves(evidence, cap=leaf_cap)
     test_blocks: list[tuple[str, str]] = attributed_test_blocks(
         leaves, lambda leaf: find_tests(leaf, 1),

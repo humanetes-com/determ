@@ -53,10 +53,14 @@ class PairDispatch(NamedTuple):
     crash-reverted the same five binaries). A slot already in
     ``refill_members`` or still a stub is a rewrite in the same
     transaction. A filled slot the *current* crash extract named is
-    also a rewrite (aimed): quoting it is how run ``579131-0ef5e885``
-    fill 1 was forbidden from rewriting the callees
-    ``crash_vtable_callees`` had already matched to the panic stem, so
-    the pair crash-reverted formatting a return those slots produced.
+    also a rewrite (aimed), unless the last failed reply already
+    emitted it: quoting a never-written callee is how run
+    ``579131-0ef5e885`` fill 1 was forbidden from rewriting the
+    callees ``crash_vtable_callees`` had already matched to the panic
+    stem. A filled slot the last failed body already wrote stays
+    quoted — run ``609480-8edf9bf2`` fill 1 aimed those slots, the
+    reply rewrote them, and the keep crash-reverted; fill 2 then
+    un-aimed them because the new panic stem no longer rematched.
     A filled slot that is only remembered, not in the current extract,
     stays quoted: forcing every remembered slot to refill is how run
     ``171582-cb964fb9`` spent 23 pair fills turning working table slots
@@ -174,6 +178,56 @@ def locators_from_scope(names: Iterable[str]) -> frozenset[FnLocator]:
     return frozenset(out)
 
 
+def fn_names_in_failed_body(body: str) -> frozenset[str]:
+    """``<FN name="…">`` names a last pair reply actually emitted.
+
+    Protocol parse of the stored failed body, not of crate source. An
+    extra whose name is here was already a write in that reply; one
+    whose name is absent was omitted (quoted, or the model skipped it).
+    """
+    out: set[str] = set()
+    lead = '<FN name="'
+    text = body or ""
+    i = 0
+    while True:
+        start = text.find(lead, i)
+        if start == -1:
+            return frozenset(out)
+        value = start + len(lead)
+        end = text.find('"', value)
+        if end in (-1, value):
+            i = start + 1
+            continue
+        name = text[value:end].strip()
+        if name:
+            out.add(name)
+        i = end + 1
+
+
+def crash_named_extras(
+    extract: Collection[FnLocator],
+    *,
+    failed_body: str = "",
+) -> frozenset[FnLocator]:
+    """Passing extras the current crash extract named, minus those the
+    last failed reply already emitted.
+
+    Extract-named extras the last reply omitted stay aimed (run
+    ``579131-0ef5e885``: quoting forbade rewriting the callee the panic
+    stem named). Extras the last failed body already wrote stay quoted
+    (run ``609480-8edf9bf2`` fill 1 aimed them, the reply rewrote them,
+    the keep crash-reverted; fill 2's rematch then used a different
+    panic stem and un-aimed them). Empty extract is the remembered-only
+    quote (run ``171582-cb964fb9``). Empty body leaves the extract
+    unchanged — the first fill after a rematch, before any reply.
+    """
+    named = frozenset(extract)
+    if not (failed_body or "").strip():
+        return named
+    emitted = fn_names_in_failed_body(failed_body)
+    return frozenset(loc for loc in named if loc.fn_name not in emitted)
+
+
 def remembered_pair_callees(
     rec: Mapping[str, object] | None,
     hop: Collection[FnLocator],
@@ -234,13 +288,15 @@ def _block_for_locator(
     filled slot and fills a still-hollow one.
 
     ``crash_named`` is the current compiling crash extract
-    (``crash_vtable_callees`` of the last failed body and panic text). A
-    filled member in that set is a refill even when its attributed tests
-    pass: those tests often bind the return and never format it, so a
-    garbage value still passes them, and quoting the slot forbids the
-    pair from rewriting the callee the panic stem already named (run
-    ``579131-0ef5e885`` fill 1). A filled member not in that set stays
-    quoted — remembered-only extras, the 171582 protection.
+    (``crash_vtable_callees`` of the last failed body and panic text),
+    minus extras that body already emitted (see
+    :func:`crash_named_extras`). A filled member in that set is a
+    refill even when its attributed tests pass: those tests often bind
+    the return and never format it, so a garbage value still passes
+    them, and quoting the slot forbids the pair from rewriting the
+    callee the panic stem already named (run ``579131-0ef5e885`` fill
+    1). A filled member not in that set stays quoted — remembered-only
+    extras, or extras the last crashing reply already wrote.
     """
     named = frozenset(crash_named)
     for b in all_blocks:
@@ -416,10 +472,12 @@ def pair_dispatches(
     writes two files, and that run stays crash-blamed so pair_wait does
     not park it.
 
-    ``crash_named`` is the current crash extract. A passing extra in that
-    set is a refill (aimed); a passing extra only in ``extra_locators``
-    stays quoted. Empty (the default) quotes every passing extra — the
-    pre-fix behaviour, and the remembered-only case.
+    ``crash_named`` is the current crash extract after
+    :func:`crash_named_extras`. A passing extra in that set is a refill
+    (aimed); a passing extra only in ``extra_locators`` stays quoted.
+    Empty (the default) quotes every passing extra — the pre-fix
+    behaviour, the remembered-only case, and extras the last failed
+    body already wrote.
     """
     extras = frozenset(extra_locators)
     named = frozenset(crash_named)

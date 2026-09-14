@@ -715,6 +715,8 @@ def test_same_file_table_slots_join_the_pair_write(
     # and reddened ten already-passing tests.
     assert "`peek` — CRASHED" not in pair_prompt
     assert "faulting frame is this body" not in pair_prompt
+    assert "`peek` — DIRECT:" not in pair_prompt
+    assert "`peek` — AIMED:" in pair_prompt
     assert (_PEEK[0], _PEEK[1]) in (res.dispatched_fns or ())
 
 
@@ -797,7 +799,47 @@ def test_a_crash_named_passing_slot_is_rewritten(
     assert "callee of the faulting frame" in pair_prompt
     assert "this response also rewrites the same-file" in pair_prompt
     assert "FAILS — rewrite the BEHAVIOR */ 0" not in pair_prompt
+    # Leftover tests belong to the hop endpoints. Stamping them DIRECT
+    # onto the extra is how run 609480 fill 1 rewrote a passing slot.
+    assert "`peek` — DIRECT:" not in pair_prompt
+    assert "`peek` — AIMED:" in pair_prompt
     assert (_PEEK[0], _PEEK[1]) in (res.dispatched_fns or ())
+
+
+def test_a_slot_already_in_the_last_failed_body_is_quoted(
+        monkeypatch, tmp_path):
+    """Plan: extras the last crashing reply already emitted stay quoted
+    even when the current extract still names them. Omitting them from
+    the reply can keep. Control: empty last_failed_body still aims
+    (test_a_crash_named_passing_slot_is_rewritten) and omitting then
+    keeps nothing (test_omitting_a_crash_named_passing_slot_keeps_nothing).
+    Display/Renderer crate."""
+    import json as _json
+
+    from pipeline_core.adapters.retros import retro_key, retrospectives_path
+    from pipeline_core.domain.pair_fill import pair_record_container
+    ws = _setup(monkeypatch, tmp_path)
+    install_cluster_scan(
+        monkeypatch, impl_blocks=lambda *a, **k: _blocks(peek_refill=False))
+    _install_crash_callees(monkeypatch)
+    key = str(retro_key(
+        _PAIR.dispatcher.file, "*pair*", pair_record_container(_PAIR)))
+    retrospectives_path(ws).write_text(_json.dumps({
+        key: {"last_failed_body": (
+            '<FN name="fmt" block="impl fmt::Display for Report">x</FN>\n'
+            '<FN name="peek" block="free fns">None</FN>'
+        )},
+    }))
+    prompts: list[str] = []
+    _install_model(monkeypatch, [PAIR_REPLY], prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    lib = (ws / "src" / "lib.rs").read_text()
+    assert "PAIRED" in lib
+    assert "pub fn peek() -> u32 { 0 }" in lib
+    (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
+    assert "do NOT emit an <FN> for it" in pair_prompt
+    assert "callee of the faulting frame" not in pair_prompt
 
 
 def test_omitting_a_crash_named_passing_slot_keeps_nothing(

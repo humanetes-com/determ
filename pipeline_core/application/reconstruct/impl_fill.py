@@ -188,6 +188,7 @@ from pipeline_core.domain.pair_fill import (
     PAIR_CRASH_CALLEES,
     PairDispatch,
     blocks_after_pair_fill,
+    crash_named_extras,
     extra_write_members,
     pair_dispatches,
     pair_last_error,
@@ -1077,9 +1078,28 @@ def prepare_impl_fill(
     _pair_extra_locs = _same_callees
     # Passing extras the *current* crash extract named are aimed refills;
     # remembered-only extras stay quoted. Using the union as crash_named
-    # would re-force every remembered slot (run 171582).
-    _crash_named = frozenset(
+    # would re-force every remembered slot (run 171582). Extras the last
+    # failed reply already emitted stay quoted too: run 609480 fill 1
+    # aimed them, the reply rewrote them, the keep crash-reverted, and
+    # fill 2's rematch then used a different panic stem and un-aimed.
+    _failed_bodies = []
+    for _p in _hop_pairs:
+        _failed_bodies.append(str((
+            retros_cache.get(_retro_key(
+                _p.dispatcher.file, "*pair*", pair_record_container(_p)),
+                {}) or {}).get("last_failed_body") or ""))
+    _extract_named = frozenset(
         k for k in _pair_crash_callees if k.file in _pair_files)
+    _crash_named = crash_named_extras(
+        _extract_named, failed_body="\n".join(_failed_bodies))
+    _quoted_emitted = _extract_named - _crash_named
+    if _quoted_emitted:
+        _log("  [phase-c/pair] "
+             + str(len(_quoted_emitted))
+             + " same-file slot(s) already emitted in the last failed "
+               "body — quoted, not aimed: "
+             + ", ".join(sorted(
+                 f"{k.file}::{k.fn_name}" for k in _quoted_emitted)[:8]))
     if _other_callees:
         crash_blamed = (crash_blamed or frozenset()) | _other_callees
         tdd_frontier_keys = set(tdd_frontier_keys or ()) | set(
@@ -4285,13 +4305,18 @@ def prepare_impl_fill(
             crashed=crash_blamed or frozenset(),
             aimed=frozenset(
                 loc for loc in (crash_evidence or {})
-                if loc not in (crash_blamed or frozenset())),
+                if loc not in (crash_blamed or frozenset())) | frozenset(
+                FnLocator(b.file, m.fn_name)
+                for b in _pair_extra
+                for m in extra_write_members(b)),
             read_source=_read_source,
             ledger_entries=ledger_entries, oracle_fp=oracle_fp,
             tuple_structs=_tuple_structs,
             prior_regressed=_prior_regressed,
             prior_regressed_output=_prior_regressed_output,
             joint_rewrite=True,
+            joint_endpoint_names=frozenset(
+                loc.fn_name for loc in pd.pair.member_locators()),
             leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
             file_cap=_ATTRIBUTED_TEST_FILE_CAP)
         _half_ctx: list[tuple[ImplBlock, str, str]] = []
