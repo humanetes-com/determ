@@ -28,6 +28,87 @@ SIBLING_FOLLOW_PREFIX = (
     "as a TARGET stub — follow the same structural pattern:\n```rust\n")
 
 
+def last_error_is_compiling_crash(last_error: str) -> bool:
+    """True when LAST_ERROR is a rustc-accepted body that then panicked.
+
+    A compile excerpt (`error[E…]`) is not this class. Used to pick the
+    joint-write opener and the LAST_ERROR prefix: the unentered-arm
+    sentence is how a compiling crash is resubmitted (run `642983-68b474a4`
+    fills 1–2: LAST_ERROR already said do not resubmit the same approach;
+    pair_part said call the implementer on this arm; the thinking quoted
+    pair_part).
+    """
+    text = (last_error or "").lower()
+    if not text:
+        return False
+    if "error[e" in text and "panicked at" not in text:
+        return False
+    return (
+        "panicked at" in text
+        or "addresssanitizer" in text
+        or "binaries crashed" in text
+    )
+
+
+def last_error_prefix(last_error: str) -> str:
+    """LAST_ERROR lead-in. A compiling crash names the faulting call;
+    a compile excerpt keeps the older errors / same-approach wording."""
+    if last_error_is_compiling_crash(last_error):
+        return (
+            "Your previous attempt compiled and then panicked — do not "
+            "emit the call the stack below shows reached the panic:\n"
+        )
+    return (
+        "Your previous attempt at this block produced these errors — "
+        "the bodies below must resolve them; do not resubmit the "
+        "same approach:\n"
+    )
+
+
+def pair_joint_write_paragraph(last_error: str) -> str:
+    """PAIRED WRITE opener when both halves stay refill.
+
+    After a compiling crash, do not tell the model the implementer is
+    unentered because the dispatcher does not yet call it: that call is
+    what LAST_ERROR shows panicked. Both halves still refill (a leftover
+    that already enters the implementer still fails). Control: empty or
+    compile-only LAST_ERROR keeps the unentered-arm sentence, which is
+    still the first-write instruction.
+    """
+    if last_error_is_compiling_crash(last_error):
+        return (
+            "PAIRED WRITE — this response fills BOTH target blocks, in two "
+            "different files, as ONE design. The first block dispatches a "
+            "format trait; the second is the implementer it delegates to. "
+            "They are accepted or rejected TOGETHER, so design the "
+            "delegation and the implementation to agree: neither half is "
+            "correct alone. LAST_ERROR below is a body rustc accepted that "
+            "then panicked. Do not emit the call that stack shows reached "
+            "the panic. The implementer is still a rewrite: a leftover that "
+            "already enters it still fails. Reach the implementer from the "
+            "arm that panicked by a call that is not that expression. A "
+            "pinned output substring in REFILL_TARGETS is emitted by this "
+            "pair. Debug or Display of a field cannot produce a substring "
+            "that field's own formatter does not print — write the literal "
+            "in the implementer.\n\n"
+        )
+    return (
+        "PAIRED WRITE — this response fills BOTH target blocks, in two "
+        "different files, as ONE design. The first block dispatches a "
+        "format trait; the second is the implementer it delegates to. "
+        "They are accepted or rejected TOGETHER, so design the "
+        "delegation and the implementation to agree: neither half is "
+        "correct alone. The implementer is a rewrite even when coverage "
+        "of the current tree shows the failing tests do not enter it: "
+        "they do not enter it because the dispatcher does not yet call "
+        "it on this arm, which is the other half of this write. A "
+        "pinned output substring in REFILL_TARGETS is emitted by this "
+        "pair. Debug or Display of a field cannot produce a substring "
+        "that field's own formatter does not print — write the literal "
+        "in the implementer.\n\n"
+    )
+
+
 def sibling_reference_prefix(rejected: tuple[str, ...]) -> str:
     """The SIBLING_REFERENCE lead-in. With no rejected expression in the
     sibling (attempt 1, or a sibling that does not carry what LAST_ERROR
@@ -176,9 +257,7 @@ def build_per_impl_prompt(
     # both attempts while other units' attempt-2 prompts differed).
     last_error_block = tag_block(
         "LAST_ERROR", sections.last_error,
-        prefix="Your previous attempt at this block produced these errors — "
-               "the bodies below must resolve them; do not resubmit the "
-               "same approach:\n")
+        prefix=last_error_prefix(sections.last_error))
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     trait_block = tag_block(
         "TRAIT_CONTRACT", language_driver().trait_contract(container))
@@ -300,20 +379,7 @@ def build_per_impl_prompt(
             m.fn_name for m in (*partner_block.stub_members,
                                 *partner_block.refill_members))
         if extra_write_members(block):
-            pair_part = (
-                "PAIRED WRITE — this response fills BOTH target blocks, in two "
-                "different files, as ONE design. The first block dispatches a "
-                "format trait; the second is the implementer it delegates to. "
-                "They are accepted or rejected TOGETHER, so design the "
-                "delegation and the implementation to agree: neither half is "
-                "correct alone. The implementer is a rewrite even when coverage "
-                "of the current tree shows the failing tests do not enter it: "
-                "they do not enter it because the dispatcher does not yet call "
-                "it on this arm, which is the other half of this write. A "
-                "pinned output substring in REFILL_TARGETS is emitted by this "
-                "pair. Debug or Display of a field cannot produce a substring "
-                "that field's own formatter does not print — write the literal "
-                "in the implementer.\n\n")
+            pair_part = pair_joint_write_paragraph(sections.last_error)
         else:
             pair_part = (
                 "PAIRED WRITE — coverage shows failing tests already enter "

@@ -265,6 +265,102 @@ def test_quoted_dispatcher_prompt_forbids_an_fn_for_it() -> None:
     assert "rewrites the implementer only" not in both
 
 
+def test_a_compiling_crash_joint_write_does_not_order_the_faulting_call() -> None:
+    """Plan: after a compiling crash, the joint-write prompt still fills
+    BOTH target blocks and does not say the implementer is unentered
+    because the dispatcher does not yet call it — that call is what
+    LAST_ERROR shows panicked. LAST_ERROR's prefix names the faulting
+    call. Display/Renderer crate, not leftover names.
+
+    Controls on the same pair: empty LAST_ERROR still has the
+    unentered-arm sentence (first write); a compile excerpt still has
+    it (not this class); quoted-dispatcher is unchanged.
+    """
+    from pipeline_core.prompts.context import PerImplSections
+    from pipeline_core.prompts.per_impl import (
+        build_per_impl_prompt,
+        last_error_is_compiling_crash,
+    )
+    other = FormatterPair(
+        FnSite("src/lib.rs", "fmt", "impl Display for Report"),
+        FnSite("src/render.rs", "render", "impl Renderer"))
+    disp = _rec("src/lib.rs", "fmt", "impl Display for Report")
+    impl_ = _rec("src/render.rs", "render", "impl Renderer")
+    blocks = [
+        ImplBlock(file="src/lib.rs", container="impl Display for Report",
+                  members=(disp,), refill_members=(disp,)),
+        ImplBlock(file="src/render.rs", container="impl Renderer",
+                  members=(impl_,), refill_members=(impl_,)),
+    ]
+    pd = pair_dispatches({other}, blocks)[0]
+    panic = "thread panicked at src/lib.rs:10:5:\nrange start index 1"
+    assert last_error_is_compiling_crash(panic)
+    assert not last_error_is_compiling_crash("")
+    assert not last_error_is_compiling_crash(
+        "error[E0308]: mismatched types\nexpected Ref, found Own")
+    crash_sections = PerImplSections(
+        types="", invariants="", notes="", crate_idioms="",
+        dispatch_family="", macros="", siblings="",
+        retrospective_guidance="", bound_methods="",
+        last_error=panic)
+    crash_prompt = build_per_impl_prompt(
+        block=pd.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=crash_sections,
+        partner_block=pd.implementer_block)
+    assert "fills BOTH target blocks" in crash_prompt
+    assert "does not yet call it on this arm" not in crash_prompt
+    assert "Do not emit the call that stack shows reached the panic" in crash_prompt
+    assert (
+        "do not emit the call the stack below shows reached the panic"
+        in crash_prompt)
+    assert "produced these errors" not in crash_prompt
+    empty_sections = PerImplSections(
+        types="", invariants="", notes="", crate_idioms="",
+        dispatch_family="", macros="", siblings="",
+        retrospective_guidance="", bound_methods="")
+    first = build_per_impl_prompt(
+        block=pd.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=empty_sections,
+        partner_block=pd.implementer_block)
+    assert "fills BOTH target blocks" in first
+    assert "does not yet call it on this arm" in first
+    compile_sections = PerImplSections(
+        types="", invariants="", notes="", crate_idioms="",
+        dispatch_family="", macros="", siblings="",
+        retrospective_guidance="", bound_methods="",
+        last_error="error[E0308]: mismatched types\nexpected Ref, found Own")
+    compile_prompt = build_per_impl_prompt(
+        block=pd.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=compile_sections,
+        partner_block=pd.implementer_block)
+    assert "does not yet call it on this arm" in compile_prompt
+    assert "produced these errors" in compile_prompt
+    quoted = quote_dispatcher_when_implementer_entered(
+        pd, pair_tests={"t_a", "t_b"}, entered={"t_a", "t_b"})
+    quoted_prompt = build_per_impl_prompt(
+        block=quoted.dispatcher_block,
+        related_blocks=[],
+        test_blocks=[],
+        module_name="m",
+        cluster_name="t",
+        sections=crash_sections,
+        partner_block=quoted.implementer_block)
+    assert "rewrites the implementer only" in quoted_prompt
+    assert "fills BOTH target blocks" not in quoted_prompt
+
+
 def test_a_crash_named_slot_prompt_is_aimed_not_fails() -> None:
     """Plan: a passing extra the crash extract named is tagged aimed
     (callee of the faulting formatter), never 'its test below FAILS'.
