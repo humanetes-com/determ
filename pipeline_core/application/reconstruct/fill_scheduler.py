@@ -147,7 +147,7 @@ def _pairs(locs: frozenset[FnLocator]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((loc.file, loc.fn_name) for loc in locs))
 
 
-_Kept = tuple[int, tuple[str, ...], tuple[str, ...]]
+_Kept = tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...]]
 
 
 def _row_for(
@@ -158,10 +158,16 @@ def _row_for(
     delta = 0
     red: tuple[str, ...] = ()
     crashed: tuple[str, ...] = ()
+    # Which tests the run turned green. None when no keep reading was taken
+    # for this row (deferred / budget-spent / re-graded at open): that row
+    # opened no judged try, and "unrecorded" must not read as "paid nobody".
+    green: tuple[str, ...] | None = None
+    if kept is not None:
+        green = kept[3]
     if report is not None and report.own_delta is not None:
         delta = report.own_delta
     elif kept is not None:
-        delta, red, crashed = kept
+        delta, red, crashed, _green = kept
     rep = report or RouteRunReport()
     return RouteLedgerRow(
         kind=s.run.kind, label=s.run.label, targets=_pairs(s.run.targets),
@@ -170,7 +176,7 @@ def _row_for(
         run_id=deps.run_id, iteration=deps.iteration, cluster=deps.cluster,
         started=started, minutes=minutes, model_calls=rep.model_calls,
         net_pass_delta=delta,
-        newly_red=red, newly_crashed=crashed,
+        newly_red=red, newly_crashed=crashed, newly_green=green,
         kept=_pairs(rep.kept), reverted=_pairs(rep.reverted),
         target_tests=tuple(sorted(s.run.target_tests)),
         classes=dict(rep.classes), share_minutes=share, reason=s.reason)

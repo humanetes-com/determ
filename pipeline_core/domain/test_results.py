@@ -1866,6 +1866,13 @@ class RegressionComparison:
     # comparison the gate did not judge crash-only, and on a crash with no
     # stub evidence (a segfault): `compare_readings` never fills it.
     crash_stub_sites: frozenset[tuple[str, int]] = frozenset()
+    # Tests failing at baseline and passing after, over the measured
+    # binaries only — the per-test half of ``net_pass_delta``. A delta says
+    # the change paid; this says WHOM it paid. Run `11358-e5de094e`
+    # (2026-09-15) kept a pair write at net +2 that turned two of its three
+    # aimed tests green; the route ledger recorded only the +2, and the
+    # third test's unpaid-buy count restarted on a row that never moved it.
+    newly_green: frozenset[str] = frozenset()
 
     @property
     def net_pass_delta(self) -> int:
@@ -1954,6 +1961,7 @@ def compare_readings(base: TestStateReading,
     newly_hung: list[str] = []
     hung_tests: list[str] = []
     newly_red: set[str] = set()
+    newly_green: set[str] = set()
     base_pass = cur_pass = base_exec = cur_exec = crash_lost = 0
     for label, b in base_by.items():
         c = cur_by.get(label)
@@ -1982,6 +1990,7 @@ def compare_readings(base: TestStateReading,
             continue
         measured.append(label)
         newly_red |= (c.failed - b.failed)
+        newly_green |= (c.passed & b.failed)
         base_pass += b.pass_count
         cur_pass += c.pass_count
         base_exec += b.executed
@@ -1997,7 +2006,8 @@ def compare_readings(base: TestStateReading,
         crashed_all_red=tuple(sorted(crashed_all_red)),
         crash_lost_pass=crash_lost,
         newly_hung=tuple(sorted(newly_hung)),
-        hung_tests=tuple(sorted(hung_tests)))
+        hung_tests=tuple(sorted(hung_tests)),
+        newly_green=frozenset(newly_green))
 
 
 def regression_detail_kind(cmp: RegressionComparison) -> LastErrorKind:

@@ -4814,10 +4814,24 @@ def prepare_impl_fill(
                     fns_filled_total += _n_spliced
                     impls_filled += 1
                     _krec = dict(retros_cache.get(_pair_key, {}) or {})
-                    if _krec.get("last_compile_error") or _krec.get(
-                            "last_failed_body"):
+                    # A kept joint write IS the last attempt, so no earlier
+                    # failure is its LAST_ERROR. Clearing only the compile
+                    # excerpt and the body left the revert's preview and
+                    # kind behind, and `pair_last_error` rendered them:
+                    # run `11358-e5de094e` (2026-09-15) sent fills 4 and 5
+                    # "Your previous attempt compiled and then panicked"
+                    # over fill 2's crash of tests/test_fmt.rs, after fill
+                    # 3 cashed +2 and fill 4 was kept. The diagnosis
+                    # (guidance, regressed output) is the retrospective's
+                    # and stays.
+                    if (_krec.get("last_compile_error")
+                            or _krec.get("last_failed_body")
+                            or _krec.get("last_error_preview")
+                            or _krec.get(LAST_ERROR_KIND)):
                         _krec["last_compile_error"] = ""
                         _krec["last_failed_body"] = ""
+                        _krec["last_error_preview"] = ""
+                        _krec.pop(LAST_ERROR_KIND, None)
                         retros_cache[_pair_key] = _krec
                         _save_retrospectives(project_dir, retros_cache)
                 for _pf, _pnames in _spliced_by_file.items():
@@ -5353,7 +5367,8 @@ def prepare_impl_fill(
             if _out.kept and _out.final is not None:
                 note_kept(_out.final.pass_delta,
                           newly_red=tuple(sorted(_out.newly_red)),
-                          newly_crashed=tuple(_out.final.crashed))
+                          newly_crashed=tuple(_out.final.crashed),
+                          newly_green=_out.final.newly_green)
             return RouteRunReport(
                 model_calls=_out.model_calls,
                 kept=frozenset(locator_of(u) for u in _out.kept),

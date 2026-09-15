@@ -318,6 +318,11 @@ class RouteLedgerRow:
     classes: Mapping[str, int] = field(default_factory=dict)
     share_minutes: float | None = None
     reason: str = ""
+    #: Bare names of the tests the run's keeps turned green. None is a row
+    #: that recorded no per-test reading — every row written before
+    #: 2026-09-15, and rows that opened no judged try — which is NOT the
+    #: same claim as ``()`` ("kept, and paid none of its tests").
+    newly_green: tuple[str, ...] | None = None
 
     @property
     def identity(self) -> str:
@@ -343,6 +348,8 @@ class RouteLedgerRow:
             "target_tests": list(self.target_tests),
             "classes": dict(self.classes),
             "share_minutes": self.share_minutes, "reason": self.reason,
+            "newly_green": (list(self.newly_green)
+                            if self.newly_green is not None else None),
         }
 
     @classmethod
@@ -357,6 +364,7 @@ class RouteLedgerRow:
             return tuple((str(a), str(b)) for a, b in raw.get(key) or ())
 
         share = raw.get("share_minutes")
+        green = raw.get("newly_green")
         return cls(
             kind=kind, label=str(raw.get("label", "")),
             targets=_pairs("targets"), bodies_sha=str(raw.get("bodies_sha", "")),
@@ -375,6 +383,8 @@ class RouteLedgerRow:
             classes={str(k): int(v) for k, v in dict(raw.get("classes") or {}).items()},
             share_minutes=float(share) if share is not None else None,
             reason=str(raw.get("reason", "")),
+            newly_green=(tuple(str(x) for x in green)
+                         if isinstance(green, list) else None),
         )
 
     def to_json(self) -> str:
@@ -418,6 +428,11 @@ class ScheduledRun:
     share_minutes: float | None = None
     deferred: bool = False
     blocked_by: tuple[str, ...] = ()
+    #: Deferrals this run would have taken and did not, because the run it
+    #: waited on spent its grace on the tests they share (``pair_wait``,
+    #: ``coverage_split``). Printed on the schedule line so a lapse is a
+    #: log fact, not an absence.
+    lapsed: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -426,6 +441,7 @@ class ScheduledRun:
             "share_minutes": (round(self.share_minutes, 2)
                               if self.share_minutes is not None else None),
             "deferred": self.deferred, "blocked_by": list(self.blocked_by),
+            "lapsed": list(self.lapsed),
         }
 
 
@@ -446,6 +462,8 @@ class FillSchedule:
             bits = [s.reason]
             if stub_n:
                 bits.append(f"{stub_n} stub(s)")
+            if s.lapsed:
+                bits.append("grace spent: " + ", ".join(s.lapsed))
             if s.blocked_by:
                 bits.append("after " + ", ".join(s.blocked_by))
             share = (f" share {s.share_minutes:.0f}m"
@@ -466,9 +484,42 @@ def _latest_by_identity(rows: Iterable[RouteLedgerRow]) -> dict[str, list[RouteL
     return out
 
 
+def _row_paid(r: RouteLedgerRow) -> bool:
+    return r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0
+
+
+def row_paid_test(r: RouteLedgerRow, test: str, *,
+                  aimed_later: bool = False) -> bool:
+    """Did this row pay `test` — turn it green — rather than merely pay?
+
+    A row that recorded its green set answers from it. A row that did not
+    (written before the set was recorded) has two answers, in order:
+
+    - ``aimed_later``: the SAME process wrote a row aimed at `test` at a
+      later iteration. Every row's aimed tests come from the sweep that
+      opened its fill, so `test` was failing at a sweep after this row's
+      keeps — the row did not leave it green. (A keep that reddens a passing
+      test is reverted by the regression gate, so "green at the keep, red at
+      the next sweep" is not a path the fill has.)
+    - otherwise the row-level fact, which every walk read before: a refusal
+      to spend that an unrecorded row could release would be releasing on no
+      evidence, the unrecorded-premise convention :func:`unpaid_pair_buys`
+      applies to an unwired oracle.
+
+    Run `11358-e5de094e` is the instance: fill 3's pair row cashed +2 aimed
+    at three tests, green on two, and the third test — still aimed at by
+    every row of iterations 4 and 5 — had its streak restarted on it.
+    """
+    if r.newly_green is None:
+        return False if aimed_later else _row_paid(r)
+    leaf = test.rsplit("::", 1)[-1]
+    return any(n.rsplit("::", 1)[-1] == leaf for n in r.newly_green)
+
+
 def _unpaid_streak(rows: Iterable[RouteLedgerRow],
                    match: Callable[[RouteLedgerRow], bool],
-                   oracle_fp: str) -> int:
+                   oracle_fp: str,
+                   paid: Callable[[RouteLedgerRow], bool] = _row_paid) -> int:
     """Graded rows matching `match`, newest first, until one paid.
 
     The ONE walk behind every "has this spend stopped paying" question, so
@@ -476,7 +527,9 @@ def _unpaid_streak(rows: Iterable[RouteLedgerRow],
     judged try. Rows under another oracle are not evidence about this one
     and are skipped, as the re-buy detector already skips them. Deferred,
     empty, stopped and reasoning-capped rows opened no judged try and
-    neither count nor interrupt the run.
+    neither count nor interrupt the run. `paid` is what "paid" means for
+    the question asked: the row paid (a route's rank), or the row paid one
+    test (a per-test exemption, :func:`row_paid_test`).
     """
     seen = 0
     for r in reversed(list(rows)):
@@ -485,10 +538,35 @@ def _unpaid_streak(rows: Iterable[RouteLedgerRow],
         if r.outcome in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
                          RunOutcome.STOPPED, RunOutcome.UNMEASURED):
             continue
-        if r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0:
+        if paid(r):
             break
         seen += 1
     return seen
+
+
+def unpaid_tries_for_test(
+    rows: Iterable[RouteLedgerRow], test: str, oracle_fp: str,
+    match: Callable[[RouteLedgerRow], bool] = lambda _r: True,
+) -> int:
+    """Graded rows aimed at `test` (and matching `match`) since the last
+    one that turned `test` green, newest first.
+
+    A row that paid a sibling of `test` is a try of `test` that did not
+    pay it: the exemption a route earns over one leftover is spent by
+    that leftover's own record, not by what the route did for another.
+    """
+    rows_list = list(rows)
+    # (run, iteration) of every row aimed at `test`, any outcome — a
+    # deferred row's aimed tests are that sweep's leftovers too.
+    aimed: dict[str, int] = {}
+    for r in rows_list:
+        if r.run_id and test in r.target_tests:
+            aimed[r.run_id] = max(aimed.get(r.run_id, r.iteration), r.iteration)
+    return _unpaid_streak(
+        rows_list, lambda r: test in r.target_tests and match(r), oracle_fp,
+        paid=lambda r: row_paid_test(
+            r, test, aimed_later=bool(r.run_id)
+            and aimed.get(r.run_id, r.iteration) > r.iteration))
 
 
 def unpaid_pair_buys(rows: Iterable[RouteLedgerRow], test: str,
@@ -517,10 +595,8 @@ def unpaid_pair_buys(rows: Iterable[RouteLedgerRow], test: str,
     """
     if not oracle_fp:
         return 0
-    return _unpaid_streak(
-        rows,
-        lambda r: r.kind is RouteKind.PAIR and test in r.target_tests,
-        oracle_fp)
+    return unpaid_tries_for_test(
+        rows, test, oracle_fp, match=lambda r: r.kind is RouteKind.PAIR)
 
 
 def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
@@ -684,17 +760,46 @@ def _is_coverage_split(
     whose file is not a file of the attributed members this run holds
     (a session that packed the coverage spine) are.
     """
-    if not attributed or not run.target_tests:
+    return _targets_split(run.targets, run.target_tests, attributed)
+
+
+def _targets_split(targets: Collection[FnLocator],
+                   target_tests: Collection[str],
+                   attributed: Collection[FnLocator]) -> bool:
+    """`_is_coverage_split` over bare targets, so a ledger row can be asked
+    the same question a candidate run is."""
+    if not attributed or not target_tests:
         return False
     attr = frozenset(attributed)
-    extra = run.targets - attr
+    tset = frozenset(targets)
+    extra = tset - attr
     if not extra:
         return False
-    attributed_here = run.targets & attr
+    attributed_here = tset & attr
     if not attributed_here:
         return True
     attributed_files = {loc.file for loc in attributed_here}
     return any(loc.file not in attributed_files for loc in extra)
+
+
+def unpaid_attributed_writes(rows: Iterable[RouteLedgerRow], test: str,
+                             attributed: Collection[FnLocator],
+                             oracle_fp: str) -> int:
+    """Graded non-split writes aimed at `test` since one turned it green.
+
+    "Non-split" is judged against the attributed set the schedule holds
+    NOW (:func:`_targets_split` on the row's targets), so a row is counted
+    as the attributed write of `test` exactly when a run with those
+    targets would be one today. This is the record a coverage-split's
+    deferral stands on: the attributed write goes first because it is the
+    write the leftover convicts, and after `unpaid_grace` of them in a row
+    have not moved the leftover, that premise has been measured false.
+    """
+    attr = frozenset(attributed)
+    return unpaid_tries_for_test(
+        rows, test, oracle_fp,
+        match=lambda r: not _targets_split(
+            [FnLocator(f, fn) for f, fn in r.targets], r.target_tests, attr))
 
 
 def schedule(
@@ -750,7 +855,12 @@ def schedule(
     establish, and "nothing else goes at all", which none of them does:
     on 2026-09-14 the stable cluster's ledger held 60 graded pair rows
     under one oracle, all reverted or flat, while the schedule opened
-    that pair and nothing else in 20 consecutive fills.
+    that pair and nothing else in 20 consecutive fills. A pair's grace
+    over a run that shares its leftover tests is ALSO spent when every
+    shared test has had `unpaid_grace` pair tries in a row that did not
+    turn it green (:func:`unpaid_tries_for_test`), so a pair that paid a
+    sibling test does not re-earn the right to zero the runs of the test
+    it did not move.
 
     ``attributed`` is the locators leftover tests convict before
     measured-owners admission. Empty (the default) skips coverage-split
@@ -759,7 +869,18 @@ def schedule(
     after attributed writes and is deferred this fill (reason
     ``coverage_split``) when a non-split run of the same leftovers is a
     candidate. Same-file extras on an attributed member are that file's
-    installable complement, not a split.
+    installable complement, not a split. That deferral is bounded by
+    `unpaid_grace` exactly as pair_wait is: a split run stops waiting once
+    every leftover it shares with the non-split candidates has had
+    `unpaid_grace` graded attributed writes in a row that did not turn it
+    green (:func:`unpaid_attributed_writes`). Without the bound the rule
+    had no release a fill could cause — the attributed write is re-planned
+    every fill, so it is always a candidate — and run `11358-e5de094e`
+    (2026-09-15) deferred every run holding the 27 measured owners its
+    leftovers' own coverage named, three fills running, while the
+    leftover whose failing assertion is printed by a unit in a third file
+    kept buying the two-file pair. ``unpaid_grace=0`` restores the
+    unbounded deferral.
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
@@ -860,18 +981,40 @@ def schedule(
     # never-paying rows for this pair's targets while the schedule opened
     # it and nothing else in 20 straight fills.
     waiting: list[ScheduledRun] = []
-    pair_runs = [it[0] for it in ranked
-                 if it[0].kind is RouteKind.PAIR
-                 and _served_key(it[0]) not in spent]
+    _per_test: dict[tuple[str, str], int] = {}
+
+    def _test_spent(kind: str, test: str) -> bool:
+        """`unpaid_grace` tries in a row of `kind`'s writes aimed at `test`
+        that did not turn it green. Cached per fill."""
+        if unpaid_grace <= 0:
+            return False
+        key = (kind, test)
+        if key not in _per_test:
+            _per_test[key] = (
+                unpaid_tries_for_test(
+                    rows_list, test, oracle_fp,
+                    match=lambda r: r.kind is RouteKind.PAIR)
+                if kind == "pair" else
+                unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
+        return _per_test[key] >= unpaid_grace
+
+    pair_runs = [it[0] for it in ranked if it[0].kind is RouteKind.PAIR]
     if pair_runs:
         kept_pair: list[ScheduledRun] = []
         for s in scheduled:
-            if any(run_blocks(p, s.run, hollow, blamed)
-                   for p in pair_runs):
+            blockers = [p for p in pair_runs
+                        if run_blocks(p, s.run, hollow, blamed)]
+            holding = [
+                p for p in blockers
+                if _served_key(p) not in spent
+                and not ((shared := p.target_tests & s.run.target_tests)
+                         and all(_test_spent("pair", t) for t in shared))]
+            if holding:
                 waiting.append(replace(s, deferred=True, share_minutes=0.0,
                                        reason="pair_wait"))
                 continue
-            kept_pair.append(s)
+            kept_pair.append(replace(s, lapsed=("pair_wait",))
+                             if blockers else s)
         scheduled = kept_pair
 
     # Coverage-split deferral: a leftover-aiming run that writes coverage
@@ -882,13 +1025,20 @@ def schedule(
         kept_split: list[ScheduledRun] = []
         non_split = [s for s in scheduled if not split_of.get(s.run.key, False)]
         for s in scheduled:
-            if (split_of.get(s.run.key, False)
-                    and any(s.run.target_tests & o.run.target_tests
-                            for o in non_split)):
+            if not split_of.get(s.run.key, False):
+                kept_split.append(s)
+                continue
+            shared = frozenset().union(*(
+                s.run.target_tests & o.run.target_tests for o in non_split))
+            if not shared:
+                kept_split.append(s)
+                continue
+            if not all(_test_spent("attributed", t) for t in shared):
                 waiting.append(replace(s, deferred=True, share_minutes=0.0,
                                        reason="coverage_split"))
                 continue
-            kept_split.append(s)
+            kept_split.append(replace(
+                s, lapsed=tuple(dict.fromkeys((*s.lapsed, "coverage_split")))))
         scheduled = kept_split
 
     # The per-kind cap, applied in schedule order so the runs the order put

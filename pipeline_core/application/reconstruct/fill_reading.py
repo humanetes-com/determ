@@ -170,15 +170,20 @@ def unmeasurable_tests_now() -> frozenset[str]:
 # never what it measured and reverted. Records carry the route/run label
 # bound by `fill_context.route_scope` in the thread that kept, so a wave of
 # concurrent runs is attributed per run.
-_KEPT: list[tuple[str, str, int, tuple[str, ...], tuple[str, ...]]] = []
+# The last element is the tests the keep turned green (bare names), so the
+# ledger can say which aimed test a run paid and not only that it paid.
+_KEPT: list[tuple[str, str, int, tuple[str, ...], tuple[str, ...],
+                  tuple[str, ...]]] = []
 
 
 def note_kept(delta: int, *, newly_red: tuple[str, ...] = (),
-              newly_crashed: tuple[str, ...] = ()) -> None:
+              newly_crashed: tuple[str, ...] = (),
+              newly_green: tuple[str, ...] = ()) -> None:
     route, label = current_route()
     with _LAST_LOCK:
         _KEPT.append((route, label, int(delta), tuple(newly_red),
-                      tuple(newly_crashed)))
+                      tuple(newly_crashed),
+                      tuple(bare_test_name(n) for n in newly_green)))
 
 
 def note_kept_comparison(cmp: RegressionComparison | None) -> None:
@@ -189,7 +194,8 @@ def note_kept_comparison(cmp: RegressionComparison | None) -> None:
     with _LAST_LOCK:
         _LAST_KEPT[0] = cmp
     note_kept(cmp.net_pass_delta, newly_red=tuple(sorted(cmp.newly_red)),
-              newly_crashed=tuple(cmp.newly_crashed))
+              newly_crashed=tuple(cmp.newly_crashed),
+              newly_green=tuple(sorted(cmp.newly_green)))
 
 
 def kept_mark() -> int:
@@ -198,22 +204,28 @@ def kept_mark() -> int:
 
 
 def kept_since(mark: int, label: str | None = None
-               ) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
-    """(delta, newly red, newly crashed) summed over the keeps recorded
-    since `mark` — those whose label is `label`, or every unlabelled one
-    when `label` is None (a single run executing alone)."""
+               ) -> tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """(delta, newly red, newly crashed, newly green) summed over the keeps
+    recorded since `mark` — those whose label is `label`, or every
+    unlabelled one when `label` is None (a single run executing alone).
+
+    A test a later keep of the same run turned red again is not green at
+    the run's end, so it leaves the green set."""
     with _LAST_LOCK:
         rows = list(_KEPT[mark:])
     delta = 0
     red: set[str] = set()
     crashed: set[str] = set()
-    for _route, lab, d, r, c in rows:
+    green: set[str] = set()
+    for _route, lab, d, r, c, g in rows:
         if label is not None and lab and lab != label:
             continue
         delta += d
         red.update(r)
         crashed.update(c)
-    return delta, tuple(sorted(red)), tuple(sorted(crashed))
+        green -= {bare_test_name(n) for n in r}
+        green.update(g)
+    return delta, tuple(sorted(red)), tuple(sorted(crashed)), tuple(sorted(green))
 
 
 def render_fill_reading(cmp: RegressionComparison) -> str:

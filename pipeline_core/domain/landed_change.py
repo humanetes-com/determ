@@ -170,6 +170,26 @@ def unattempted_units(
     return frozenset(frontier) - frozenset(attempted) - frozenset(landed)
 
 
+def pass_unopened(
+    units_at_close: Iterable[FnLocator],
+    *,
+    resumed: Iterable[FnLocator],
+    opened: Iterable[FnLocator],
+    landed: Iterable[FnLocator],
+) -> frozenset[FnLocator]:
+    """The closing pass's dispatched units that no route opened.
+
+    The cursor marks a unit attempted when a batch holds it; a route opens
+    it only if a run holding it was not deferred or refused. The units in
+    neither `opened` nor `landed` were dispatched and never written — not
+    a try. `resumed` (the cursor a previous process left) is excluded: this
+    process cannot know whether that process's routes opened them, and an
+    audit that claimed so would be inventing the record.
+    """
+    return (frozenset(units_at_close) - frozenset(resumed)
+            - frozenset(opened) - frozenset(landed))
+
+
 def _named(units: frozenset[FnLocator] | set[FnLocator], sample: int) -> str:
     named = ", ".join(sorted(f"{k.file}::{k.fn_name}" for k in units)[:sample])
     more = len(units) - min(len(units), sample)
@@ -180,6 +200,7 @@ def render_pass_audit(*, cohort_size: int, attempted: int,
                       landed: frozenset[FnLocator] | set[FnLocator],
                       unchanged: frozenset[FnLocator] | set[FnLocator],
                       declined: frozenset[FnLocator] | set[FnLocator] = frozenset(),
+                      unopened: frozenset[FnLocator] | set[FnLocator] = frozenset(),
                       sample: int = 12) -> str:
     """The completed pass's effective coverage, for the log line the
     post-pass verdict must be read against.
@@ -200,9 +221,20 @@ def render_pass_audit(*, cohort_size: int, attempted: int,
     have listed the honest outcome as a failed try). The body comparison
     cannot tell an instructed "unchanged" from a peeled fill of the same
     unit; the split is by conviction, which is the distinction the record
-    actually holds."""
+    actually holds.
+
+    `unopened` is the dispatched units NO route opened — every run holding
+    them was deferred or refused. They are neither a landing nor a failed
+    try, and the line names them separately so a flat sweep after the pass
+    is not read as refuting units the fill never wrote (run
+    `11358-e5de094e` iter 3, 2026-09-15: 26 of 27 filed as unchanged, most
+    of them never opened)."""
     return (f"cohort {cohort_size} unit(s), {attempted} dispatched, "
             f"{len(landed)} landed a semantic change"
+            + (f"; {len(unopened)} dispatched but NO route opened them "
+               "(every run holding them deferred or refused — not a try): "
+               f"{_named(unopened, sample)}"
+               if unopened else "")
             + (f"; {len(unchanged)} dispatched with NO landed change "
                "(byte-identical re-author, reverted/peeled fill, or "
                f"immutable-by-rule): {_named(unchanged, sample)}"

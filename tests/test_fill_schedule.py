@@ -26,8 +26,11 @@ from pipeline_core.domain.fill_schedule import (
     consecutive_unpaid,
     hollow_by_test,
     rebuy_identity,
+    row_paid_test,
     run_blocks,
     schedule,
+    unpaid_attributed_writes,
+    unpaid_tries_for_test,
 )
 from pipeline_core.domain.models import FnLocator, FnSite
 
@@ -788,3 +791,193 @@ def test_the_grace_bound_is_switchable_off() -> None:
     assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
                for s in sched.deferred)
     assert {s.run.label for s in sched.deferred} == {per_fn.label, file_run.label}
+
+
+# --- per-test pay: an exemption over one leftover is spent by that
+# leftover's own record, not by what the route did for a sibling.
+
+_OTHER = FnLocator("src/z.rs", "fmt")
+
+
+def test_a_row_that_paid_a_sibling_is_an_unpaid_try_of_the_other_test() -> None:
+    """Plan sentence: a row paid `t` only if it turned `t` green. A pair
+    aimed at two tests that cashed on one is a try of the other that did
+    not pay it, so the other's streak runs through it.
+
+    Negative control: the same row with no recorded green set (every row
+    written before the set existed) stops the walk for both tests — the
+    row-level answer every walk gave before, which is what restarted the
+    streak of a leftover the cash never moved."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW},
+                 {"t_a", "t_b"})
+    cash = replace(_row(pair, RunOutcome.CASHED, 2), newly_green=("t_a",))
+    rows = [_row(pair, RunOutcome.REVERTED), _row(pair, RunOutcome.REVERTED),
+            cash, _row(pair, RunOutcome.FLAT)]
+    assert row_paid_test(cash, "t_a") and not row_paid_test(cash, "t_b")
+    assert unpaid_tries_for_test(rows, "t_a", "o") == 1
+    assert unpaid_tries_for_test(rows, "t_b", "o") == 4
+    legacy = [*rows[:2], replace(cash, newly_green=None), rows[3]]
+    assert unpaid_tries_for_test(legacy, "t_b", "o") == 1
+    assert unpaid_tries_for_test(legacy, "t_a", "o") == 1
+    # A green name printed with its module path is the same test.
+    pathed = replace(cash, newly_green=("tests::t_b",))
+    assert row_paid_test(pathed, "t_b")
+
+
+def test_an_unrecorded_cash_the_same_process_aimed_at_again_did_not_pay_that_test() -> None:
+    """Plan sentence: a row with no green set did not pay a test that the
+    same process aimed a row at in a later iteration — that later row's
+    aimed tests are the later sweep's leftovers.
+
+    Negative controls: the same rows with the later row in ANOTHER process
+    (a relaunch: nothing ties its sweep to this row's keeps), and with the
+    later row aimed only at a sibling, both stop the walk at the cash."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW},
+                 {"t_a", "t_b"})
+    tries = [replace(_row(pair, RunOutcome.FLAT), run_id="p1", iteration=i)
+             for i in (1, 2)]
+    cash = replace(_row(pair, RunOutcome.CASHED, 2), run_id="p1", iteration=3)
+    later = replace(_row(replace(pair, target_tests=frozenset({"t_b"})),
+                         RunOutcome.FLAT), run_id="p1", iteration=4)
+    rows = [*tries, cash, later]
+    assert unpaid_tries_for_test(rows, "t_b", "o") == 4
+    assert unpaid_tries_for_test(rows, "t_a", "o") == 0
+    relaunched = [*tries, cash, replace(later, run_id="p2", iteration=1)]
+    assert unpaid_tries_for_test(relaunched, "t_b", "o") == 1
+    sibling = [*tries, cash, replace(
+        later, target_tests=("t_c",))]
+    assert unpaid_tries_for_test(sibling, "t_b", "o") == 0
+
+
+def test_a_recorded_green_set_that_is_empty_paid_nobody() -> None:
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_a"})
+    net_gain = replace(_row(pair, RunOutcome.CASHED, 1), newly_green=())
+    assert not row_paid_test(net_gain, "t_a")
+    assert row_paid_test(replace(net_gain, newly_green=None), "t_a")
+
+
+def test_the_green_set_survives_the_ledger_round_trip() -> None:
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_a"})
+    row = replace(_row(pair, RunOutcome.CASHED, 1), newly_green=("t_a",))
+    back = RouteLedgerRow.from_dict(row.to_dict())
+    assert back is not None and back.newly_green == ("t_a",)
+    empty = RouteLedgerRow.from_dict(replace(row, newly_green=()).to_dict())
+    assert empty is not None and empty.newly_green == ()
+    raw = row.to_dict()
+    del raw["newly_green"]                       # a row written before the field
+    legacy = RouteLedgerRow.from_dict(raw)
+    assert legacy is not None and legacy.newly_green is None
+
+
+def _split_inputs() -> tuple[RouteRun, RouteRun]:
+    """An attributed write of `t_a` in src/x.rs, and a never-served per-fn
+    of `t_a` holding a unit in a file no attributed member occupies."""
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_a"})
+    split = RouteRun(kind=RouteKind.PER_FN, label="per-fn 0 stub(s), 1 re-fill(s)",
+                     targets=frozenset({_OTHER}), target_tests=frozenset({"t_a"}),
+                     bodies_sha="p")
+    return file_run, split
+
+
+def test_a_coverage_split_stops_waiting_once_the_attributed_write_spent_its_grace() -> None:
+    """Plan sentence: the coverage-split deferral is bounded like
+    pair_wait. After `unpaid_grace` graded attributed writes of the
+    leftover in a row that did not turn it green, the split run opens —
+    behind the attributed write, with a share — and the schedule line
+    says the deferral lapsed.
+
+    Negative controls: one fewer graded write still defers it
+    `coverage_split`; `unpaid_grace=0` defers it however long the
+    attributed write has failed."""
+    file_run, split = _split_inputs()
+    runs = [file_run, split]
+    spent = [_row(replace(file_run, bodies_sha=f"b{i}"), RunOutcome.FLAT)
+             for i in range(DEFAULT_UNPAID_GRACE)]
+    assert unpaid_attributed_writes(spent, "t_a", {_FMT}, "o") == DEFAULT_UNPAID_GRACE
+
+    inside = schedule(runs, spent[1:], oracle_fp="o", hollow={},
+                      attributed={_FMT}, budget_minutes=120)
+    assert [s.run.label for s in inside.ordered] == [file_run.label]
+    assert [(s.run.label, s.reason) for s in inside.deferred] == [
+        (split.label, "coverage_split")]
+
+    sched = schedule(runs, spent, oracle_fp="o", hollow={},
+                     attributed={_FMT}, budget_minutes=120)
+    assert [s.run.label for s in sched.ordered] == [file_run.label, split.label]
+    opened = sched.ordered[1]
+    assert opened.lapsed == ("coverage_split",)
+    assert opened.share_minutes and opened.share_minutes > 0
+    assert "grace spent: coverage_split" in sched.render()
+    assert not sched.deferred
+
+    off = schedule(runs, spent * 5, oracle_fp="o", hollow={},
+                   attributed={_FMT}, budget_minutes=120, unpaid_grace=0)
+    assert [(s.run.label, s.reason) for s in off.deferred] == [
+        (split.label, "coverage_split")]
+
+
+def test_split_rows_are_not_the_attributed_writes_the_grace_counts() -> None:
+    """The count is over writes that are NOT splits against today's
+    attributed set: a split that ran (it lapsed earlier, or ran before the
+    rule) is not the attributed write failing, so it neither spends nor
+    restarts the attributed write's grace."""
+    file_run, split = _split_inputs()
+    rows = [_row(file_run, RunOutcome.FLAT),
+            _row(split, RunOutcome.FLAT), _row(split, RunOutcome.FLAT),
+            _row(file_run, RunOutcome.FLAT)]
+    assert unpaid_attributed_writes(rows, "t_a", {_FMT}, "o") == 2
+    rows.insert(2, replace(_row(split, RunOutcome.CASHED, 1),
+                           newly_green=("t_a",)))
+    assert unpaid_attributed_writes(rows, "t_a", {_FMT}, "o") == 2
+
+
+def test_a_split_sharing_two_leftovers_waits_while_either_is_unspent() -> None:
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_a", "t_b"})
+    split = RouteRun(kind=RouteKind.PER_FN, label="per-fn", bodies_sha="p",
+                     targets=frozenset({_OTHER}),
+                     target_tests=frozenset({"t_a", "t_b"}))
+    rows = [replace(_row(file_run, RunOutcome.CASHED, 1), newly_green=("t_b",))]
+    rows += [_row(replace(file_run, bodies_sha=f"b{i}"), RunOutcome.FLAT)
+             for i in range(DEFAULT_UNPAID_GRACE - 1)]
+    assert unpaid_attributed_writes(rows, "t_a", {_FMT}, "o") == DEFAULT_UNPAID_GRACE
+    assert unpaid_attributed_writes(rows, "t_b", {_FMT}, "o") == DEFAULT_UNPAID_GRACE - 1
+    sched = schedule([file_run, split], rows, oracle_fp="o", hollow={},
+                     attributed={_FMT}, budget_minutes=60)
+    assert [s.reason for s in sched.deferred] == ["coverage_split"]
+
+
+def test_a_pair_that_paid_a_sibling_does_not_keep_zeroing_the_other_tests_runs() -> None:
+    """Plan sentence: a pair's pair_wait over a run that shares its
+    leftover tests lapses when every shared test has spent the grace on
+    the pair's own tries, even if the pair cashed on another test since —
+    the route-level count restarted at that cash, the leftover's did not.
+
+    Negative controls: the same record with the cashing row carrying no
+    green set (the pre-field ledger) keeps the run at pair_wait; and a run
+    of the test the pair DID pay still waits."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW},
+                 {"t_a", "t_b"})
+    b_only = _session("session[1 test(s)] b", {"t_b"}, {_OTHER}, seq=1)
+    a_only = _session("session[1 test(s)] a", {"t_a"}, {_OTHER}, seq=2)
+    # Each graded try kept or moved a body, so each row sits on its own
+    # identity and the pair ranks served, as the live pair does.
+    cash = replace(_row(replace(pair, bodies_sha="cash"), RunOutcome.CASHED, 1),
+                   newly_green=("t_a",))
+    rows = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.REVERTED)
+            for i in range(DEFAULT_UNPAID_GRACE)] + [
+        cash, _row(replace(pair, bodies_sha="flat"), RunOutcome.FLAT)]
+    assert consecutive_unpaid(rows, pair, "o") == 1 < DEFAULT_UNPAID_GRACE
+    sched = schedule([pair, b_only, a_only], rows, oracle_fp="o", hollow={},
+                     budget_minutes=120)
+    assert sched.ordered[0].run.label == pair.label
+    assert b_only.label in [s.run.label for s in sched.ordered]
+    (opened,) = [s for s in sched.ordered if s.run.label == b_only.label]
+    assert opened.lapsed == ("pair_wait",)
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (a_only.label, "pair_wait")]
+
+    legacy = [*rows[:-2], replace(cash, newly_green=None), rows[-1]]
+    control = schedule([pair, b_only, a_only], legacy, oracle_fp="o",
+                       hollow={}, budget_minutes=120)
+    assert [s.run.label for s in control.ordered] == [pair.label]
+    assert {s.reason for s in control.deferred} == {"pair_wait"}

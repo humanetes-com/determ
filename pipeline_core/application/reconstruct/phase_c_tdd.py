@@ -132,6 +132,7 @@ from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
     declined_unchanged,
+    pass_unopened,
     render_pass_audit,
     split_reverted,
     unattempted_units,
@@ -1162,6 +1163,16 @@ def run_phase_c_tdd(
     # iter 3 while the prompt that dispatched them graded every one ESCALATED
     # — the audit split by conviction alone and could not see the grade.
     _pass_escalated: set[FnLocator] = set()
+    # Units a route actually OPENED this pass (`_attempted` per batch). The
+    # cursor marks a unit attempted at dispatch, so a unit every run of
+    # which the schedule deferred still closes the traversal; without this
+    # set the pass audit filed it under "dispatched with NO landed change"
+    # beside real failed tries. Run `11358-e5de094e` iter 3 (2026-09-15):
+    # "27 dispatched, 1 landed; 26 dispatched with NO landed change" while
+    # the landed-change lines of iters 1–3 named most of those 26 "no route
+    # attempted" (their runs were deferred `coverage_split` every fill).
+    # Not persisted: a resumed cursor's units are never claimed unopened.
+    _pass_opened: set[FnLocator] = set()
     # The frontier the current pass OPENED over. A traversal is over this set,
     # not over the frontier as it stands now: escalation and crash evidence add
     # units mid-pass, and a closure condition that waits for them cannot be met
@@ -2694,6 +2705,7 @@ def run_phase_c_tdd(
             _pass_landed.clear()
             _pass_declined.clear()
             _pass_escalated.clear()
+            _pass_opened.clear()
             _pass_cohort = None
             _resumed_cursor_window = frozenset()
         # `best_metric` is -inf until some iter improves, and a compile-broken
@@ -5165,6 +5177,7 @@ def run_phase_c_tdd(
                     _pass_landed = set()
                     _pass_declined = set()
                     _pass_escalated = set()
+                    _pass_opened = set()
                     _pass_cohort = None
                     _resumed_cursor_window = frozenset()
                     _unmoved = _unmoved.moved()
@@ -5876,6 +5889,7 @@ def run_phase_c_tdd(
             _pass_landed |= _batch_landed
             _pass_declined |= _batch_declined
             _pass_escalated |= _batch_escalated
+            _pass_opened |= _attempted
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: landed-change audit — "
                 f"{len(_batch_landed)} of {len(frontier_keys)} dispatched "
@@ -5948,7 +5962,13 @@ def run_phase_c_tdd(
                 "esc_capped": sorted(f"{k.file}::{k.fn_name}"
                                      for k in _batch_esc_capped)})
             if _batch.completes_pass:
-                _unchanged_pass = _pass_units_at_close - _pass_landed
+                # Dispatched by this process and opened by no route: not a
+                # try, so not in the unchanged (failed-try) list either.
+                _unopened_pass = pass_unopened(
+                    _pass_units_at_close, resumed=_resumed_cursor_window,
+                    opened=_pass_opened, landed=_pass_landed)
+                _unchanged_pass = (_pass_units_at_close - _pass_landed
+                                   - _unopened_pass)
                 # The pass's own record FIRST, the current conviction map
                 # as the fallback. `_pass_declined` travels with the cursor
                 # across a relaunch exactly as `_pass_landed` does, so a
@@ -5973,7 +5993,8 @@ def run_phase_c_tdd(
                         attempted=len(_pass_units_at_close),
                         landed=frozenset(_pass_landed),
                         unchanged=frozenset(_unchanged_pass),
-                        declined=_declined_pass))
+                        declined=_declined_pass,
+                        unopened=_unopened_pass))
                 deps.emit("phase_c.tdd.pass_audit", data={
                     "cluster": cluster.name, "iter": iter_n,
                     "traversal": _traversals,
@@ -5985,7 +6006,9 @@ def run_phase_c_tdd(
                     "unchanged": sorted(f"{k.file}::{k.fn_name}"
                                         for k in _unchanged_pass),
                     "declined": sorted(f"{k.file}::{k.fn_name}"
-                                       for k in _declined_pass)})
+                                       for k in _declined_pass),
+                    "unopened": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _unopened_pass)})
         elif _capped_m:
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: "
@@ -6012,6 +6035,7 @@ def run_phase_c_tdd(
             _pass_landed = set()
             _pass_declined = set()
             _pass_escalated = set()
+            _pass_opened = set()
         last_newly_filled = newly_filled   # hook 3: next iter attributes regressions to these
         for k in newly_filled:
             recently_filled.append(k)

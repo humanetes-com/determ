@@ -408,6 +408,7 @@ def run_slice_session(
             newly_red_observed={n: observed[n] for n in red_names if n in observed},
             crashed=tuple(cmp.newly_crashed), hung=hung,
             pass_delta=cmp.net_pass_delta,
+            newly_green=tuple(sorted(cmp.newly_green)),
             executed_shrank=cmp.cur_executed < cmp.base_executed)
         return reading, after
 

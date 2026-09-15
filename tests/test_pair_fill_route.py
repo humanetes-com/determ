@@ -668,6 +668,66 @@ def test_a_crash_revert_puts_the_verdict_in_last_error_on_the_next_fill(
     assert "Your previous attempt wrote:" in second_wave[n]
 
 
+def _clean_guard(monkeypatch) -> None:
+    from types import SimpleNamespace
+    monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
+        baseline=lambda *a, **k: object(),
+        gate=lambda *a, **k: None))
+
+
+def test_a_kept_pair_write_is_not_followed_by_the_reverted_attempts_last_error(
+        monkeypatch, tmp_path):
+    """A kept joint write is the last attempt, so the next pair prompt has
+    no LAST_ERROR. Run `11358-e5de094e` (2026-09-15) sent fills 4 and 5
+    "Your previous attempt compiled and then panicked" over fill 2's crash
+    after fill 3 cashed and fill 4 was kept: the keep cleared the compile
+    excerpt and the body and left the crash preview and its kind.
+
+    Negative control: before the keep, the same record puts the crash in
+    the next prompt (the crash-revert test above pins that sentence)."""
+    import json as _json
+
+    from pipeline_core.adapters.retros import retrospectives_path
+    from pipeline_core.domain.last_error import LAST_ERROR_KIND
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _crash_guard(monkeypatch)
+    _run_with_tests(ws, tests)
+    (key,) = [k for k in _json.loads(retrospectives_path(ws).read_text())
+              if "*pair*" in k]
+    crashed = _json.loads(retrospectives_path(ws).read_text())[key]
+    assert "CRASH" in str(crashed.get("last_error_preview") or "")
+    assert crashed.get(LAST_ERROR_KIND)
+
+    _clean_guard(monkeypatch)
+    n = len([p for p in prompts if "PAIRED WRITE" in p])
+    _run_with_tests(ws, tests)
+    kept_wave = [p for p in prompts if "PAIRED WRITE" in p][n:]
+    assert kept_wave, "the pair must dispatch on the crash's LAST_ERROR"
+    assert "<LAST_ERROR>" in kept_wave[0]
+    rec = _json.loads(retrospectives_path(ws).read_text())[key]
+    assert not rec.get("last_error_preview")
+    assert not rec.get(LAST_ERROR_KIND)
+    assert not rec.get("last_failed_body")
+
+    from pipeline_core.domain.last_error import kind_from_record
+    from pipeline_core.domain.pair_fill import pair_last_error
+    after_keep = pair_last_error(
+        str(rec.get("last_compile_error") or ""),
+        str(rec.get("last_error_preview") or ""),
+        str(rec.get("last_failed_body") or ""),
+        kind=kind_from_record(rec))
+    assert after_keep.text == ""
+    before_keep = pair_last_error(
+        "", str(crashed.get("last_error_preview") or ""),
+        str(crashed.get("last_failed_body") or ""),
+        kind=kind_from_record(crashed))
+    assert "CRASH" in before_keep.text
+
+
 def test_crash_last_error_quotes_the_previous_bodies() -> None:
     from pipeline_core.domain.pair_fill import crash_last_error
     preview = "This made test binaries ['t.rs'] CRASH before reporting results"

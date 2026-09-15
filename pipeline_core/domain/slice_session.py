@@ -676,6 +676,9 @@ class TurnReading:
     #: and what the transcript names as a hang rather than a crash.
     hung: tuple[str, ...] = ()
     pass_delta: int = 0
+    #: Tests failing at the session's baseline and passing at this turn
+    #: (`RegressionComparison.newly_green`) — whom `pass_delta` paid.
+    newly_green: tuple[str, ...] = ()
     #: A completed binary reported fewer verdicts than at baseline — oracle
     #: corruption, never traded away at any price (the sweep's rule).
     executed_shrank: bool = False

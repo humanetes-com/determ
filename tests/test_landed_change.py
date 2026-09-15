@@ -314,3 +314,25 @@ def test_render_pass_audit_keeps_inferred_unchanged_out_of_the_failed_tries() ->
     assert "1 dispatched with NO landed change" in both
     assert "src/error.rs::erase" in both.split("INFERRED", 1)[0]
     assert "src/context.rs::source" in both.split("INFERRED", 1)[1]
+
+
+def test_render_pass_audit_names_unopened_units_apart_from_failed_tries() -> None:
+    """A unit no route opened is not a try: the line names it under its own
+    clause, and the failed-try clause does not carry it."""
+    line = render_pass_audit(
+        cohort_size=3, attempted=3, landed=frozenset(),
+        unchanged=frozenset({_K2}), unopened=frozenset({_K}))
+    assert "1 dispatched but NO route opened them" in line
+    _, _, rest = line.partition("NO route opened them")
+    assert "src/context.rs::source" in rest.split("; 1 dispatched with NO")[0]
+    assert "1 dispatched with NO landed change" in line
+    assert render_pass_audit(cohort_size=1, attempted=1, landed=frozenset(),
+                             unchanged=frozenset()).count("NO route") == 0
+
+
+def test_pass_unopened_never_claims_a_resumed_cursors_units() -> None:
+    from pipeline_core.domain.landed_change import pass_unopened
+    got = pass_unopened({_K, _K2}, resumed={_K2}, opened=set(), landed=set())
+    assert got == frozenset({_K})
+    assert pass_unopened({_K, _K2}, resumed=set(), opened={_K},
+                         landed={_K2}) == frozenset()

@@ -74,3 +74,19 @@ def test_a_reverted_measurement_is_not_a_keep_and_a_new_fill_forgets() -> None:
     # ...while the catalog survives the fill boundary.
     fill_reading.note_kept_comparison(_cmp(crashed_all_red=(label,)))
     assert fill_reading.unmeasurable_tests_now() == frozenset({"t_x1", "t_x2"})
+
+
+def test_kept_since_names_the_tests_the_runs_keeps_left_green() -> None:
+    """The route row's green set is what the run's keeps turned green and
+    no later keep of the same run turned red again."""
+    from pipeline_core.domain.fill_context import route_scope
+
+    fill_reading.reset_last_comparison()
+    mark = fill_reading.kept_mark()
+    with route_scope("pair", "pair a+b"):
+        fill_reading.note_kept_comparison(_cmp(newly_green=frozenset({"t_a", "t_b"})))
+        fill_reading.note_kept_comparison(_cmp(newly_red=frozenset({"tests::t_b"})))
+    with route_scope("file", "file x"):
+        fill_reading.note_kept_comparison(_cmp(newly_green=frozenset({"t_c"})))
+    assert fill_reading.kept_since(mark, "pair a+b")[3] == ("t_a",)
+    assert fill_reading.kept_since(mark, "file x")[3] == ("t_c",)

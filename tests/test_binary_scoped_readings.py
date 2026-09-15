@@ -511,3 +511,24 @@ def test_should_panic_in_flight_line_is_the_bare_name() -> None:
     assert strip_libtest_qualifier("src/lib.rs - Error (line 12)") == (
         "src/lib.rs - Error (line 12)")
     assert strip_libtest_qualifier("plain") == "plain"
+
+
+def test_compare_names_the_tests_a_change_turned_green() -> None:
+    """`newly_green` is the per-test half of the net delta: failing at
+    baseline, passing after, in a binary complete in both readings. A
+    route ledger that recorded only the delta could not say which aimed
+    test a run paid. A name that flickers green in a binary crashed at
+    baseline is noise and is not named, exactly as it is not counted."""
+    base = _BASE
+    cur = (_BASE.replace("test y ... FAILED\ntest result: FAILED. 1 passed; "
+                         "1 failed; 0 ignored",
+                         "test y ... ok\ntest result: ok. 2 passed; "
+                         "0 failed; 0 ignored")
+           .replace("test p ... ok\ntest q ...\n",
+                    "test p ... ok\ntest q ... ok\n"
+                    "test result: ok. 2 passed; 0 failed; 0 ignored\n"))
+    cmp = compare_readings(_reading(base), _reading(cur))
+    assert cmp.newly_green == frozenset({"y"})
+    assert cmp.net_pass_delta == 1
+    same = compare_readings(_reading(base), _reading(base))
+    assert same.newly_green == frozenset()
