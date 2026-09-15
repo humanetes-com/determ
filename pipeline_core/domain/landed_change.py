@@ -190,6 +190,35 @@ def pass_unopened(
             - frozenset(opened) - frozenset(landed))
 
 
+def reoffer_unopened(
+    dispatched: Iterable[FnLocator],
+    *,
+    opened: Iterable[FnLocator],
+    landed: Iterable[FnLocator],
+    already: Iterable[FnLocator],
+) -> frozenset[FnLocator]:
+    """Dispatched units no route opened, that this pass has not re-offered.
+
+    The cursor marks a unit attempted when a batch holds it, so a unit every
+    run of which was deferred or refused had no turn and still counted as
+    one: the pass moved past it and, if it was the last batch, closed over
+    it. Run `11358-e5de094e` (2026-09-15) dispatched 27 units across three
+    batches and closed traversal 1 with most of them never written, their
+    runs deferred every fill. These units go back on the pass so the next
+    batch offers them again.
+
+    `already` bounds it: a unit is re-offered ONCE per pass. A unit the
+    routes refuse again stays on the cursor and the pass closes as before —
+    otherwise a unit whose runs are always deferred would hold the pass
+    open forever, and every stop denominated in completed passes would go
+    dead with it (`take_batch`'s traversal accounting names that lock).
+    A passenger — landed without being opened — had its body written and is
+    not re-offered.
+    """
+    return (frozenset(dispatched) - frozenset(opened) - frozenset(landed)
+            - frozenset(already))
+
+
 def _named(units: frozenset[FnLocator] | set[FnLocator], sample: int) -> str:
     named = ", ".join(sorted(f"{k.file}::{k.fn_name}" for k in units)[:sample])
     more = len(units) - min(len(units), sample)

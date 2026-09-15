@@ -46,6 +46,7 @@ from enum import StrEnum
 from typing import Any
 
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.test_report import compare_panic_sites
 
 GATE_VERSION = "bl1"
 """Bumped when the layout gate's meaning changes.
@@ -110,7 +111,23 @@ class BodyState(StrEnum):
     NOT re-seedable: a body whose convicting tests still fail is the later
     measurement of a try that did not pay, and a re-seed must not vouch for
     it on the strength of an earlier, weaker pass. `reseedable` stays
-    PROVEN/UNMEASURED only."""
+    PROVEN/UNMEASURED/ADVANCED only."""
+    ADVANCED = "advanced"
+    """The convicting tests ran and all still fail, and at least one of them
+    now panics at a LATER line of the same test file than at the sweep
+    before the landing (`compare_panic_sites`): every assertion before the
+    new panic passes under this body. Not FLAT — the try moved the test,
+    and a FLAT row is what retires a unit from dispatch
+    (`flat_standing_unchanged`) and what the prompt's try history lists as
+    a rewrite that bought nothing. Not PROVEN — the test is still red.
+
+    Run `11358-e5de094e` (2026-09-15) is the instance: fill 4 kept a pair
+    write whose aimed test went from failing at its first assertion (actual
+    `()`) to failing at its second, and the ledger graded the landing
+    `flat` beside a byte-identical verdict vector.
+
+    Re-seedable: the attributed tests ran, none regressed, and one of them
+    measurably got further — a stronger claim than UNMEASURED."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +304,8 @@ class LedgerEntry:
         what a backfilled entry is, and putting an unjudged body on the tree
         is how a seed defect becomes a 0-scoring sweep with no per-unit signal
         (`nightly 0/124 for 8.7 h`)."""
-        return self.state in (BodyState.PROVEN, BodyState.UNMEASURED)
+        return self.state in (BodyState.PROVEN, BodyState.UNMEASURED,
+                              BodyState.ADVANCED)
 
 
 # --- identity ----------------------------------------------------------------
@@ -626,6 +644,10 @@ class SweepView:
     failed: frozenset[str] = frozenset()
     intact: bool = True
     epoch: int = 0
+    #: bare test name -> (file, line) of the panic a failing test printed.
+    #: Absent for a failure that printed no location; never defaulted, since
+    #: a sentinel line would read as movement.
+    panic_sites: Mapping[str, tuple[str, int]] = field(default_factory=dict)
 
     @property
     def ran(self) -> frozenset[str]:
@@ -694,7 +716,9 @@ def classify(
     Proof is scoped to the tests that convicted the dispatch (attributed AND
     failing at `before`). Passing siblings cannot mint `proven`. Convicting
     tests that ran and all still fail are `flat`: a graded try with an empty
-    delta, not `unmeasured` (the tests ran) and not `proven`."""
+    delta, not `unmeasured` (the tests ran) and not `proven` — unless one of
+    them now panics at a later line of the same file than it did at `before`,
+    which is `advanced` (delta entries `(test, "advanced")`)."""
     names = frozenset(attributed)
     if not names or not (names & after.ran):
         return BodyState.UNMEASURED, ()
@@ -724,6 +748,14 @@ def classify(
         if not (convicting & after.ran):
             return BodyState.UNMEASURED, delta
         if not (convicting & after.passed):
+            _regressed, advanced = compare_panic_sites(
+                {t: site for t, site in before.panic_sites.items()
+                 if t in convicting},
+                {t: site for t, site in after.panic_sites.items()
+                 if t in convicting})
+            if advanced:
+                return BodyState.ADVANCED, delta + tuple(
+                    (t, "advanced") for t, _f, _a, _b in advanced)
             return BodyState.FLAT, delta
         return BodyState.PROVEN, delta
     if not (names & after.passed):

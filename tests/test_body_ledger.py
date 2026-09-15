@@ -838,3 +838,82 @@ def test_judgment_attributed_joins_the_dispatch_premise_and_only_that() -> None:
     state, _ = classify(row, attributed=frozenset(), before=before, after=after,
                         body_now_sha=row.body_sha)
     assert state is BodyState.UNMEASURED
+
+
+# --- assertion progress -----------------------------------------------------
+
+_LIBTEST_RED = """\
+     Running tests/test_x.rs (target/debug/deps/test_x-0123)
+
+running 1 test
+test test_new ... FAILED
+
+failures:
+
+---- test_new stdout ----
+
+thread 'test_new' panicked at tests/test_x.rs:{line}:5:
+assertion `left == right` failed
+
+failures:
+    test_new
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+
+def _red_at(line: int, *, file: str = "tests/test_x.rs") -> SweepView:
+    """A sweep view built the way the loop builds it: the failing test's
+    panic site parsed out of the libtest capture."""
+    from pipeline_core.domain.test_report import parse_test_output
+    text = _LIBTEST_RED.format(line=line).replace("tests/test_x.rs:", f"{file}:")
+    sites = {f.test_name.rsplit("::", 1)[-1]: (f.panic_file, f.panic_line)
+             for f in parse_test_output(text).failures
+             if f.panic_file and f.panic_line is not None}
+    return SweepView(frozenset(), frozenset({"test_new"}), True, 0,
+                     panic_sites=sites)
+
+
+def test_a_convicting_test_that_now_fails_a_later_assertion_is_advanced() -> None:
+    """Plan sentence: a landing whose convicting test still fails, but now
+    at a later line of the same test file, got the test past an assertion —
+    `advanced`, not `flat`. It is re-seedable, it carries a non-empty delta
+    (so the re-buy detector does not fire on it), and the flat exclusion
+    does not retire it.
+
+    Negative controls: the same line, an earlier line, a different file and
+    a failure that printed no location all stay `flat` — the pre-change
+    grade for every one of them."""
+    e = _entry(state=BodyState.LANDED)
+    before = _red_at(90)
+    assert before.panic_sites == {"test_new": ("tests/test_x.rs", 90)}
+    state, delta = classify(e, attributed={"test_new"}, before=before,
+                            after=_red_at(91), body_now_sha=e.body_sha)
+    assert state is BodyState.ADVANCED
+    assert delta == (("test_new", "advanced"),)
+    assert replace(e, state=state).reseedable
+    for after in (_red_at(90), _red_at(89), _red_at(95, file="tests/other.rs"),
+                  SweepView(frozenset(), frozenset({"test_new"}), True, 0)):
+        flat, flat_delta = classify(e, attributed={"test_new"}, before=before,
+                                    after=after, body_now_sha=e.body_sha)
+        assert flat is BodyState.FLAT and flat_delta == ()
+
+
+def test_an_advanced_row_is_not_a_flat_exclusion_or_a_rebuy() -> None:
+    from pipeline_core.domain.body_ledger import flat_standing_unchanged
+    row = _entry(state=BodyState.ADVANCED, convicting=("test_new",),
+                 evidence_fp="ev", verdict_delta=(("test_new", "advanced"),),
+                 run_id="prior")
+    standing = {_KEY: row}
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset({"test_new"})},
+        evidence_now={_KEY: "ev"}) == set()
+    assert flat_standing_unchanged(
+        {_KEY: replace(row, state=BodyState.FLAT)}, oracle_fp_now=_ORACLE,
+        convicting_now={_KEY: frozenset({"test_new"})},
+        evidence_now={_KEY: "ev"}) == {_KEY}
+    loc = FnLocator(_KEY.file, _KEY.fn_name)
+    assert rebuy_hits([loc], standing, project=_KEY.project,
+                      cluster=_KEY.cluster, run_id="now",
+                      oracle_fp=_ORACLE) == ()

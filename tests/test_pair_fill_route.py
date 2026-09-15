@@ -728,6 +728,50 @@ def test_a_kept_pair_write_is_not_followed_by_the_reverted_attempts_last_error(
     assert "CRASH" in before_keep.text
 
 
+def test_a_revert_a_later_keep_superseded_is_not_called_the_previous_attempt(
+        monkeypatch, tmp_path):
+    """After a joint revert that reddened a sibling, a clean kept pair write
+    makes the next pair prompt say an EARLIER attempt was reverted and a
+    later one kept — not "the PREVIOUS attempt ... was REVERTED". Run
+    `11358-e5de094e` (2026-09-15) sent that sentence in fills 4 and 5 over
+    fill 1's revert.
+
+    Negative control: the pre-stamp reading (every record read as the revert
+    that wrote it) injected into the same three fills keeps the old label."""
+    import pipeline_core.application.reconstruct.impl_fill as _impl
+
+    def _three_fills(ws, tests, prompts):
+        _regressing_guard(monkeypatch)
+        _run_with_tests(ws, tests)
+        _clean_guard(monkeypatch)
+        _run_with_tests(ws, tests)
+        n = len([p for p in prompts if "PAIRED WRITE" in p])
+        _run_with_tests(ws, tests)
+        return [p for p in prompts if "PAIRED WRITE" in p][n:]
+
+    ws = _setup(monkeypatch, tmp_path)
+    tests = _write_tests(ws)
+    prompts: list[str] = []
+    _install_routed_model(monkeypatch, prompts)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    third = _three_fills(ws, tests, prompts)
+    assert third, "the pair must dispatch after the keep"
+    assert "t_keep" in third[0]
+    assert "an EARLIER attempt at these blocks was REVERTED" in third[0]
+    assert "the PREVIOUS attempt at these blocks was REVERTED" not in third[0]
+
+    from pipeline_core.domain.test_results import RegressedAttempt
+    monkeypatch.setattr(_impl, "regressed_attempt_of",
+                        lambda *_a, **_k: RegressedAttempt.REVERTED)
+    ws2 = _setup(monkeypatch, tmp_path / "control")
+    tests2 = _write_tests(ws2)
+    prompts2: list[str] = []
+    _install_routed_model(monkeypatch, prompts2)
+    control = _three_fills(ws2, tests2, prompts2)
+    assert control
+    assert "the PREVIOUS attempt at these blocks was REVERTED" in control[0]
+
+
 def test_crash_last_error_quotes_the_previous_bodies() -> None:
     from pipeline_core.domain.pair_fill import crash_last_error
     preview = "This made test binaries ['t.rs'] CRASH before reporting results"

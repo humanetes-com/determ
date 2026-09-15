@@ -47,7 +47,10 @@ stated here rather than hidden in the fixture:
   extraction (`failure_evidence_by_test` → `FailureFrontier.evidence`)
   carries an entry per failing test — the seam the pair-evidence walk
   asserts on. The text is synthetic exactly as the names are; nothing in a
-  walk turns on what it says, only on it being present.
+  walk turns on what it says, only on it being present — except the panic
+  LINE, which a walk about assertion progress sets per sweep with
+  `panic_lines=` (every failing test panics at `tests/walk.rs:<line>:1`;
+  default line 1 on every sweep, so no other walk sees movement).
 
 Past the first iteration where the fix changes what the loop does, the recording
 stops describing anything real — the pipeline would have filled different fns
@@ -193,7 +196,8 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            dispatch_cap: str = "0", floor: dict | None = None,
            frontier: dict | None = None, enumerate_fns=None,
            coverage=None, attribute=None, recorded=None,
-           route_rows=None, oracle_fp=None) -> list[str]:
+           route_rows=None, oracle_fp=None,
+           panic_lines: list[int] | None = None) -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
     The cargo stub reads the loop's own `iter N: running cargo test` line to
@@ -211,6 +215,10 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
 
     sweeps = build_sweeps(walk, inventory=inventory,
                           chronic_vanished=chronic_vanished)
+    for i, line in enumerate(panic_lines or ()):
+        if i < len(sweeps):
+            sweeps[i] = sweeps[i].replace(
+                "tests/walk.rs:1:1:", f"tests/walk.rs:{line}:1:")
     inventory = inventory if inventory is not None else oracle_size(walk)
     names = frozenset(f"t{i}" for i in range(1, inventory + 1))
     logs: list[str] = []

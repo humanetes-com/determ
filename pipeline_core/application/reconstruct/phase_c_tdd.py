@@ -134,6 +134,7 @@ from pipeline_core.domain.landed_change import (
     declined_unchanged,
     pass_unopened,
     render_pass_audit,
+    reoffer_unopened,
     split_reverted,
     unattempted_units,
     unit_bodies,
@@ -212,6 +213,7 @@ from pipeline_core.domain.tdd_floor import (
 from pipeline_core.domain.test_cmd import expected_target_labels
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import (
+    compare_panic_sites,
     failure_evidence_by_test,
     merge_observations,
     parse_test_output,
@@ -1173,6 +1175,14 @@ def run_phase_c_tdd(
     # attempted" (their runs were deferred `coverage_split` every fill).
     # Not persisted: a resumed cursor's units are never claimed unopened.
     _pass_opened: set[FnLocator] = set()
+    # Units this pass already put back on the cursor because no route opened
+    # them (`reoffer_unopened`): the once-per-pass bound. Same lifetime as
+    # `_pass_opened`.
+    _pass_reoffered: set[FnLocator] = set()
+    # The commit-time closure of the current batch, kept so a fill that
+    # opened none of some units can take the closure back.
+    _closed_fact: PassClosed | None = None
+    _cohort_before_close: tuple[FnLocator, ...] | None = None
     # The frontier the current pass OPENED over. A traversal is over this set,
     # not over the frontier as it stands now: escalation and crash evidence add
     # units mid-pass, and a closure condition that waits for them cannot be met
@@ -2171,7 +2181,14 @@ def run_phase_c_tdd(
         _sweep_view = SweepView(
             passed=frozenset(bare_test_name(t_) for t_ in _measure.passed),
             failed=frozenset(bare_test_name(t_) for t_ in _measure.failed),
-            intact=_rec.reconciled, epoch=_destruction_epoch)
+            intact=_rec.reconciled, epoch=_destruction_epoch,
+            # Where each failing test panicked: the one reading that can
+            # tell a body which got a test past an assertion from one that
+            # moved nothing, when both leave the verdict vector identical.
+            panic_sites={
+                bare_test_name(f_.test_name): (f_.panic_file, f_.panic_line)
+                for f_ in parse_test_output(output).failures
+                if f_.panic_file and f_.panic_line is not None})
         if _ledger_rows and deps.ledger_append is not None:
             _judged: list[LedgerEntry] = []
             for _row in _ledger_rows:
@@ -2223,6 +2240,7 @@ def run_phase_c_tdd(
                 "units": sorted(f"{r.key.file}::{r.key.fn_name}: {r.state}"
                                 for r in _judged)})
             _ledger_rows = []
+        _sweep_prev = _ledger_before
         _ledger_before = _sweep_view
         # Per-binary breakdown so triage can see WHICH test set
         # changed between iters (vanished tests, not just pass→fail flips).
@@ -2269,7 +2287,37 @@ def run_phase_c_tdd(
         # one says nothing, and the grace window's own sweeps are excluded
         # because a re-stub is expected to move the vector down.
         _landed_since = total_filled - _filled_at_prev_sweep
+        # A byte-identical vector can still hide movement: a failing test
+        # that now panics at a later assertion of its own file got further.
+        # Run `11358-e5de094e` iter 5 printed "bought nothing" over a fill
+        # that took its aimed test from its first assertion to its second.
+        _advanced_now = (
+            compare_panic_sites(
+                {t: st for t, st in _sweep_prev.panic_sites.items()
+                 if t in _sweep_view.failed},
+                _sweep_view.panic_sites)[1]
+            if _sweep_prev is not None
+            and _sweep_prev.epoch == _sweep_view.epoch else ())
         if (_prev_bins and _bins == _prev_bins and _landed_since > 0
+                and not _grace.bodies_in_flight and _advanced_now):
+            # Movement the vector cannot see is still the loop doing
+            # something to the crate — the clock restarts, as for a moved
+            # verdict. Only ever LATER than before, so it can prevent no
+            # reading a stop was sized to.
+            _unmoved = _unmoved.moved()
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: {_landed_since} "
+                "body(ies) landed since the last sweep; no test changed "
+                f"verdict, but {len(_advanced_now)} failing test(s) now panic "
+                "at a LATER assertion (every assertion before it passes): "
+                + ", ".join(f"{t} {f}:{a}->{b}"
+                            for t, f, a, b in _advanced_now[:6]))
+            deps.emit("phase_c.tdd.assertion_advanced", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "filled_since": _landed_since,
+                "advanced": [{"test": t, "file": f, "before": a, "after": b}
+                             for t, f, a, b in _advanced_now]})
+        elif (_prev_bins and _bins == _prev_bins and _landed_since > 0
                 and not _grace.bodies_in_flight):
             _unmoved = _unmoved.unmoved(_landed_since)
             deps.log(
@@ -2706,6 +2754,7 @@ def run_phase_c_tdd(
             _pass_declined.clear()
             _pass_escalated.clear()
             _pass_opened.clear()
+            _pass_reoffered.clear()
             _pass_cohort = None
             _resumed_cursor_window = frozenset()
         # `best_metric` is -inf until some iter improves, and a compile-broken
@@ -5178,6 +5227,7 @@ def run_phase_c_tdd(
                     _pass_declined = set()
                     _pass_escalated = set()
                     _pass_opened = set()
+                    _pass_reoffered = set()
                     _pass_cohort = None
                     _resumed_cursor_window = frozenset()
                     _unmoved = _unmoved.moved()
@@ -5288,6 +5338,8 @@ def run_phase_c_tdd(
         # fired `test_altdebug` at iter 1).
         _pass_units_at_close = _pass_attempted | set(_batch.keys)
         _cohort_at_close = len(_pass_cohort or ())
+        _cohort_before_close = _pass_cohort
+        _closed_fact = None
         _dispatched_before_sweep = len(_batch.keys)
         _pass_attempted = (set() if _batch.completes_pass
                            else _pass_attempted | set(_batch.keys))
@@ -5302,10 +5354,11 @@ def run_phase_c_tdd(
             # The traversal, as a fact — `flat_score` counts pass closures out
             # of the stream rather than being handed a number by a local, so a
             # gate that both counts and decides stops existing.
-            _flat_facts.append(PassClosed(
+            _closed_fact = PassClosed(
                 iter=iter_n, cluster=cluster.name,
                 cohort_size=_cohort_at_close,
-                attempted=_batch.attempted_before + len(_batch.keys)))
+                attempted=_batch.attempted_before + len(_batch.keys))
+            _flat_facts.append(_closed_fact)
         # The cursor is on disk BEFORE the fill phase it describes: a stop
         # or a kill inside the hours that follow leaves a floor that says
         # which units this pass already spent a model call on, so the
@@ -5702,6 +5755,51 @@ def run_phase_c_tdd(
         # genuinely attempted afterwards, and reverted units.
         _attempted = _attempted - {
             FnLocator(*t) for t in sub.answer_lost_fns}
+        # The tree after the fill, read once here: the re-offer below needs
+        # the landed set before the cursor is persisted, and the landed-change
+        # audit further down reads the same records.
+        _recs_after_fill = (
+            (deps.enumerate_fns(target_src_dir) or [])
+            if _bodies_before is not None and deps.enumerate_fns is not None
+            else None)
+        _landed_after_fill: frozenset[FnLocator] = (
+            frozenset(changed_units(
+                _bodies_before, unit_bodies(_recs_after_fill, frontier_keys)))
+            if _recs_after_fill is not None and _bodies_before is not None
+            else frozenset())
+        # A unit no route opened had no turn: put it back on the pass once.
+        # If this batch closed the pass, the closure is taken back — the
+        # traversal it counted did not happen for these units.
+        _reoffer = reoffer_unopened(
+            frontier_keys, opened=_attempted, landed=_landed_after_fill,
+            already=_pass_reoffered)
+        _pass_closed_now = _batch.completes_pass
+        if _reoffer:
+            _pass_reoffered |= _reoffer
+            if _batch.completes_pass:
+                _pass_closed_now = False
+                _traversals -= 1
+                if _closed_fact is not None and _closed_fact in _flat_facts:
+                    _flat_facts.remove(_closed_fact)
+                _pass_cohort = _cohort_before_close
+                _pass_attempted = set(_pass_units_at_close) - _reoffer
+                _prev_pass_completed = False
+            else:
+                _pass_attempted -= _reoffer
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: pass cursor: "
+                f"{len(_reoffer)} dispatched unit(s) no route opened go back "
+                "on the pass (once per pass)"
+                + ("; the pass this batch closed is REOPENED for them"
+                   if _batch.completes_pass else "")
+                + ": " + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                          for k in _reoffer)[:8])
+                + (f" (+{len(_reoffer) - 8} more)" if len(_reoffer) > 8
+                   else ""))
+            deps.emit("phase_c.tdd.pass_reoffer", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "reopened": bool(_batch.completes_pass),
+                "units": sorted(f"{k.file}::{k.fn_name}" for k in _reoffer)})
         # Fill returned — this batch was served, but only the units a
         # route opened. A kill that never returned is not service (the
         # dispatch persist above left these keys off `_served_at` on
@@ -5746,11 +5844,9 @@ def run_phase_c_tdd(
         # them (the 2026-08-19 crawl's third batch: 4 byte-identical
         # re-authors incl. traversal step `src/error.rs::source`, 2 peeled
         # incl. the severed `src/context.rs::source`).
-        if _bodies_before is not None and deps.enumerate_fns is not None:
-            _recs_after = deps.enumerate_fns(target_src_dir) or []
-            _batch_landed = changed_units(
-                _bodies_before,
-                unit_bodies(_recs_after, frontier_keys))
+        if _recs_after_fill is not None and _bodies_before is not None:
+            _recs_after = _recs_after_fill
+            _batch_landed = _landed_after_fill
             # THE LEDGER'S WRITE PATH. The bodies are in hand at this exact
             # line and were thrown away here for the whole life of the
             # pipeline: `landed_change` emits the unit NAMES, and every
@@ -5961,7 +6057,7 @@ def run_phase_c_tdd(
                 # truncated call is not a measured refusal.
                 "esc_capped": sorted(f"{k.file}::{k.fn_name}"
                                      for k in _batch_esc_capped)})
-            if _batch.completes_pass:
+            if _pass_closed_now:
                 # Dispatched by this process and opened by no route: not a
                 # try, so not in the unchanged (failed-try) list either.
                 _unopened_pass = pass_unopened(
@@ -6031,11 +6127,12 @@ def run_phase_c_tdd(
         # The landed record's lifetime is the pass's, exactly like the
         # cursor: a closed pass releases both (the audit above has already
         # reported this one), and the next pass accumulates fresh.
-        if _batch.completes_pass:
+        if _pass_closed_now:
             _pass_landed = set()
             _pass_declined = set()
             _pass_escalated = set()
             _pass_opened = set()
+            _pass_reoffered = set()
         last_newly_filled = newly_filled   # hook 3: next iter attributes regressions to these
         for k in newly_filled:
             recently_filled.append(k)

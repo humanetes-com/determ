@@ -2094,6 +2094,50 @@ def render_regression_detail(cmp: RegressionComparison) -> str:
 REGRESSED_OUTPUT = "regressed_output"
 
 
+# Retro-store record key: WHICH attempt reddened the `regressed` tests, and
+# what has happened to the transaction since. The next prompt's label is a
+# claim about the tree ("the previous attempt was REVERTED"), and the stamp
+# outlives the attempt it describes: run `11358-e5de094e` (2026-09-15) sent
+# that sentence over fill 1's reverted pair write in fills 4 and 5, after
+# fill 3 cashed and fill 4 was kept.
+REGRESSED_ATTEMPT = "regressed_attempt"
+
+
+class RegressedAttempt(StrEnum):
+    #: The attempt that reddened them was reverted; nothing kept since.
+    REVERTED = "reverted"
+    #: The attempt that reddened them was KEPT on a net gain (the losses
+    #: were forgiven), so those tests are red on the tree now.
+    KEPT = "kept"
+    #: An attempt reddened them and was reverted; a later attempt of the
+    #: same units was kept, and its body is the one on the tree.
+    REVERTED_THEN_KEPT = "reverted_then_kept"
+
+
+def regressed_attempt_of(record: Mapping[str, object], *,
+                         keep_clears_failed_body: bool = False,
+                         ) -> RegressedAttempt:
+    """The stamp on `record`, or what a record written before it can say.
+
+    A record with no stamp was written by a revert (every writer of
+    `regressed` before the stamp was a revert or a forgiven keep that did not
+    exist yet), so it reads REVERTED — except on a record whose route clears
+    `last_failed_body` on every keep and sets it on every revert
+    (`keep_clears_failed_body`, the pair route): there, reddened tests beside
+    an empty failed body mean a keep happened after the revert.
+    """
+    raw = record.get(REGRESSED_ATTEMPT)
+    if isinstance(raw, str):
+        try:
+            return RegressedAttempt(raw)
+        except ValueError:
+            pass
+    if (keep_clears_failed_body and record.get("regressed")
+            and not str(record.get("last_failed_body") or "").strip()):
+        return RegressedAttempt.REVERTED_THEN_KEPT
+    return RegressedAttempt.REVERTED
+
+
 def render_newly_red_outputs(
     newly_red: Iterable[str], outputs: Mapping[str, str], *,
     indent: str = "  ", max_lines: int = 8,

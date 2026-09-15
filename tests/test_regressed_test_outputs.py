@@ -174,3 +174,67 @@ def test_observations_merge_into_the_sweep_evidence_by_bare_name() -> None:
     assert merged["mod::t_a"] == 'panicked at x\nobserved at line 3: s = "v"'
     assert merged["t_b"] == "panicked at y"
     assert merged["t_c"] == "observed at line 9: z = 1"
+
+
+# --- what became of the attempt that reddened them ----------------------------
+
+def test_the_label_says_what_became_of_the_attempt() -> None:
+    """The section's first sentence is a claim about the tree. A revert that
+    a later keep superseded is "an EARLIER attempt", and a keep that
+    forgave losses is not a revert at all. The default renders the revert
+    wording unchanged (the negative control: the only wording before the
+    stamp)."""
+    from pipeline_core.domain.test_results import RegressedAttempt
+    names, pins = ("t_keep",), '"hello"'
+    default = render_prior_regression(names, pins)
+    assert default.startswith("the PREVIOUS attempt at these blocks was REVERTED")
+    assert render_prior_regression(
+        names, pins, attempt=RegressedAttempt.REVERTED) == default
+    later = render_prior_regression(
+        names, pins, {"t_keep": "left: 1\nright: 2"},
+        RegressedAttempt.REVERTED_THEN_KEPT)
+    assert later.startswith("an EARLIER attempt") and "was KEPT" in later
+    assert "PREVIOUS attempt" not in later
+    assert "that earlier attempt reddened them" in later
+    kept = render_prior_regression(
+        names, pins, {"t_keep": "left: 1\nright: 2"}, RegressedAttempt.KEPT)
+    assert "KEPT on a net gain" in kept and "FAIL on the tree now" in kept
+    assert "the kept body produced" in kept and "REVERTED" not in kept
+
+
+def test_a_record_without_the_stamp_reads_as_the_revert_that_wrote_it() -> None:
+    from pipeline_core.domain.test_results import (
+        REGRESSED_ATTEMPT,
+        RegressedAttempt,
+        regressed_attempt_of,
+    )
+    legacy = {"regressed": ["t_keep"], "last_failed_body": ""}
+    assert regressed_attempt_of(legacy) is RegressedAttempt.REVERTED
+    # The pair route sets the body on every revert and clears it on every
+    # keep, so an empty body beside reddened tests is a keep after the revert.
+    assert (regressed_attempt_of(legacy, keep_clears_failed_body=True)
+            is RegressedAttempt.REVERTED_THEN_KEPT)
+    assert (regressed_attempt_of({**legacy, "last_failed_body": "<FN/>"},
+                                 keep_clears_failed_body=True)
+            is RegressedAttempt.REVERTED)
+    stamped = {**legacy, REGRESSED_ATTEMPT: "kept"}
+    assert (regressed_attempt_of(stamped, keep_clears_failed_body=True)
+            is RegressedAttempt.KEPT)
+
+
+def test_a_conviction_stamps_its_reddened_tests_as_reverted() -> None:
+    from pipeline_core.domain.retro_gate import (
+        BlockedOnStubs,
+        ConvictionEvidence,
+        RetroProvenance,
+        stamp_conviction,
+    )
+    from pipeline_core.domain.test_results import REGRESSED_ATTEMPT
+    prov = RetroProvenance.current("c", "")
+    ev = ConvictionEvidence(frozenset({"t_x"}))
+    rec = stamp_conviction({"error_count": 0}, prov, ev,
+                           BlockedOnStubs(frozenset()), regressed=("t_keep",))
+    assert rec[REGRESSED_ATTEMPT] == "reverted"
+    again = stamp_conviction({**rec, REGRESSED_ATTEMPT: "kept"}, prov, ev,
+                             BlockedOnStubs(frozenset()), regressed=())
+    assert REGRESSED_ATTEMPT not in again

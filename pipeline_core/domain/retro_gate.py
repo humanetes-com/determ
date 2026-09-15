@@ -37,6 +37,7 @@ from .model_notes import (
 from .models import FnLocator
 from .rust_idents import impl_self_type
 from .rust_scan import contains_word, struct_names, stubbed_fn_names
+from .test_results import REGRESSED_ATTEMPT, RegressedAttempt
 
 # Bumped whenever the ACCEPTANCE semantics change: a conviction says "every
 # attempt failed the gate", which means nothing once the gate is a different
@@ -1601,6 +1602,12 @@ def stamp_conviction(
     a legacy record."""
     stamped = evidence.stamp(provenance.stamp(record))
     stamped["regressed"] = sorted(regressed)
+    # A conviction is written by a failed attempt: whatever it reddened was
+    # reverted with it. An empty set carries no claim to label.
+    if stamped["regressed"]:
+        stamped[REGRESSED_ATTEMPT] = RegressedAttempt.REVERTED.value
+    else:
+        stamped.pop(REGRESSED_ATTEMPT, None)
     if crash_stub_sites is not None:
         _sites = sorted(f"{f}:{ln}" for f, ln in set(crash_stub_sites))
         stamped[CRASH_STUB_SITES] = _sites

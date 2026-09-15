@@ -297,9 +297,12 @@ from pipeline_core.domain.test_report import (
     parse_test_output,
 )
 from pipeline_core.domain.test_results import (
+    REGRESSED_ATTEMPT,
     REGRESSED_OUTPUT,
+    RegressedAttempt,
     RegressionComparison,
     TestStateReading,
+    regressed_attempt_of,
     regression_detail_kind,
     strip_ansi,
 )
@@ -814,37 +817,59 @@ def prepare_impl_fill(
         prompt for those units without `<PRIOR_REGRESSION>` — zero of the
         prompts on disk carried the tag and zero of 40 records carried
         `regressed`. The session passes its own reading here explicitly
-        because its comparisons are not the route gate's `last_comparison`."""
+        because its comparisons are not the route gate's `last_comparison`.
+
+        Every caller is a KEEP, so the stamp also says what became of the
+        attempt behind a record's `regressed`: a keep that forgave losses is
+        `KEPT`; a clean keep over a record a revert stamped makes it
+        `REVERTED_THEN_KEPT`, so the next prompt stops calling that revert
+        "the PREVIOUS attempt"."""
+        keys = list(keys)
         if newly_red is None:
             cmp = last_comparison()
-            if cmp is None or not cmp.newly_red:
-                return
-            newly_red = cmp.newly_red
-            newly_red_output = cmp.newly_red_output
-        red = sorted(str(n) for n in newly_red)
-        if not red:
-            return
+            if cmp is not None and cmp.newly_red:
+                newly_red = cmp.newly_red
+                newly_red_output = cmp.newly_red_output
+        red = sorted(str(n) for n in (newly_red or ()))
         with _counters_lock:
+            changed = False
             for key in keys:
                 rec = dict(retros_cache.get(key, {}) or {})
-                rec["regressed"] = red
-                rec[REGRESSED_OUTPUT] = dict(newly_red_output or {})
+                if red:
+                    rec["regressed"] = red
+                    rec[REGRESSED_OUTPUT] = dict(newly_red_output or {})
+                    rec[REGRESSED_ATTEMPT] = RegressedAttempt.KEPT.value
+                elif (rec.get("regressed")
+                      and regressed_attempt_of(rec)
+                      is RegressedAttempt.REVERTED):
+                    rec[REGRESSED_ATTEMPT] = (
+                        RegressedAttempt.REVERTED_THEN_KEPT.value)
+                else:
+                    continue
                 retros_cache[key] = rec
-            _save_retrospectives(project_dir, retros_cache)
+                changed = True
+            if changed:
+                _save_retrospectives(project_dir, retros_cache)
 
     def _prior_regression_for(keys: Iterable[RetroKey], pins: str) -> str:
         """The rendered PRIOR_REGRESSION section for a prompt over `keys`:
         the union of what those records say went red, with what it printed."""
-        names: list[str] = []
+        # Grouped by what became of the attempt that reddened them: one
+        # section per claim, so a kept unit's forgiven losses are not
+        # labelled as a sibling's revert.
+        names: dict[RegressedAttempt, list[str]] = {}
         outputs: dict[str, str] = {}
         for key in keys:
             rec = retros_cache.get(key, {}) or {}
+            group = names.setdefault(regressed_attempt_of(rec), [])
             for n in (rec.get("regressed") or []):
-                if str(n) not in names:
-                    names.append(str(n))
+                if str(n) not in group:
+                    group.append(str(n))
             outputs.update({str(k): str(v) for k, v in dict(
                 rec.get(REGRESSED_OUTPUT) or {}).items()})
-        return render_prior_regression(tuple(names), pins, outputs) if names else ""
+        return "\n".join(
+            render_prior_regression(tuple(ns), pins, outputs, attempt)
+            for attempt, ns in names.items() if ns)
 
     def _note_declined_units(
         file_rel: str, names: Sequence[str],
@@ -2894,6 +2919,7 @@ def prepare_impl_fill(
             prior_regressed_output={
                 str(k): str(v) for k, v in dict(
                     _retro_rec.get(REGRESSED_OUTPUT) or {}).items()},
+            prior_regressed_attempt=regressed_attempt_of(_retro_rec),
             leaf_cap=_ATTRIBUTED_TEST_LEAF_CAP,
             file_cap=_ATTRIBUTED_TEST_FILE_CAP)
         _inferred_refill = _block_ev.inferred_names
@@ -4335,6 +4361,11 @@ def prepare_impl_fill(
             tuple_structs=_tuple_structs,
             prior_regressed=_prior_regressed,
             prior_regressed_output=_prior_regressed_output,
+            # The pair's keep clears `last_failed_body` and its revert sets
+            # it, so a record from before the stamp still says whether a
+            # keep followed the revert.
+            prior_regressed_attempt=regressed_attempt_of(
+                _pair_rec, keep_clears_failed_body=True),
             joint_rewrite=True,
             joint_endpoint_names=frozenset(
                 loc.fn_name for loc in pd.pair.member_locators()),
@@ -5165,7 +5196,8 @@ def prepare_impl_fill(
                 tuple(str(t) for t in (_srec.get("regressed") or [])),
                 _spins,
                 {str(k): str(v) for k, v in dict(
-                    _srec.get(REGRESSED_OUTPUT) or {}).items()})
+                    _srec.get(REGRESSED_OUTPUT) or {}).items()},
+                regressed_attempt_of(_srec))
             _bp = ""
             if not _blueprint.empty:
                 _bp = _blueprint.slice_for(
@@ -5350,6 +5382,9 @@ def prepare_impl_fill(
                     "convicted_by": list(_sl.tests),
                     "regressed": sorted(_out.newly_red),
                     REGRESSED_OUTPUT: dict(_out.newly_red_output),
+                    REGRESSED_ATTEMPT: (RegressedAttempt.KEPT.value
+                                        if _out.kept else
+                                        RegressedAttempt.REVERTED.value),
                     JOINT_MEMBERS: sorted(_sl.member_scope()),
                     "session_outcome": _out.outcome,
                     "session_turns": _out.turns,

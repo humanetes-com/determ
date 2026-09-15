@@ -47,6 +47,7 @@ from pipeline_core.domain.refill_evidence import (
     render_refill_evidence,
     wraps_crate_tuple_struct,
 )
+from pipeline_core.domain.test_results import RegressedAttempt
 
 # One test lookup: (bare fn/test name, max_blocks) -> (path, text) pairs.
 TestLookup = Callable[[str, int], Sequence[tuple[str, str]]]
@@ -92,9 +93,41 @@ class BlockEvidence:
     escalated_names: frozenset[str]
 
 
+_PRIOR_HEAD = {
+    RegressedAttempt.REVERTED: (
+        "the PREVIOUS attempt at these blocks was REVERTED because it "
+        "reddened these previously-passing test(s) — the next write must "
+        "satisfy the targets above WITHOUT breaking these (their source is "
+        "under Tests below):"),
+    RegressedAttempt.REVERTED_THEN_KEPT: (
+        "an EARLIER attempt at these blocks was REVERTED because it reddened "
+        "these previously-passing test(s); a later attempt was KEPT and its "
+        "bodies are the ones on the tree now — the next write must still "
+        "satisfy the targets above WITHOUT breaking these (their source is "
+        "under Tests below):"),
+    RegressedAttempt.KEPT: (
+        "an attempt at these blocks was KEPT on a net gain although it "
+        "reddened these previously-passing test(s), so they FAIL on the tree "
+        "now — the next write must satisfy the targets above and turn these "
+        "green again (their source is under Tests below):"),
+}
+_PRIOR_OUTPUT_HEAD = {
+    RegressedAttempt.REVERTED: (
+        "  what they printed when that attempt reddened them (`left` is what "
+        "the reverted body produced, `right` what the test expects):"),
+    RegressedAttempt.REVERTED_THEN_KEPT: (
+        "  what they printed when that earlier attempt reddened them (`left` "
+        "is what the reverted body produced, `right` what the test expects):"),
+    RegressedAttempt.KEPT: (
+        "  what they printed when that attempt reddened them (`left` is what "
+        "the kept body produced, `right` what the test expects):"),
+}
+
+
 def render_prior_regression(
     regressed: Sequence[str], pins: str,
     outputs: Mapping[str, str] | None = None,
+    attempt: RegressedAttempt = RegressedAttempt.REVERTED,
 ) -> str:
     """The section a reverted joint write owes the next one: the tests the
     previous attempt reddened, what they assert, and — when the record kept
@@ -111,16 +144,16 @@ def render_prior_regression(
     binding describes the baseline tree, in which none of these tests enter
     the implementer at all, so naming a guilty half would be a guess dressed
     as one. The model is shown the expectations it broke; their source is in
-    the Tests section under the same file cap as the attributed channel."""
+    the Tests section under the same file cap as the attributed channel.
+
+    `attempt` is what the record says became of the attempt that reddened
+    them (`regressed_attempt_of`): the label is a claim about the tree, and
+    "the PREVIOUS attempt was REVERTED" is false once a later attempt was
+    kept, and false from the start for losses a keep forgave. The default
+    renders the revert wording byte-identically."""
     if not regressed:
         return ""
-    lines = [
-        "the PREVIOUS attempt at these blocks was REVERTED because it "
-        "reddened these previously-passing test(s) — the next write must "
-        "satisfy the targets above WITHOUT breaking these (their source is "
-        "under Tests below):",
-        "  " + ", ".join(regressed),
-    ]
+    lines = [_PRIOR_HEAD[attempt], "  " + ", ".join(regressed)]
     if pins:
         lines.append(f"  they assert: {pins}")
     if outputs:
@@ -133,9 +166,7 @@ def render_prior_regression(
             shown.append(f"    {name} said:\n"
                          + "\n".join(f"      {ln}" for ln in body))
         if shown:
-            lines.append("  what they printed when that attempt reddened them "
-                         "(`left` is what the reverted body produced, `right` "
-                         "what the test expects):")
+            lines.append(_PRIOR_OUTPUT_HEAD[attempt])
             lines.extend(shown)
     return "\n".join(lines)
 
@@ -204,6 +235,7 @@ def assemble_block_evidence(
     tuple_structs: Iterable[str] = (),
     prior_regressed: Sequence[str] = (),
     prior_regressed_output: Mapping[str, str] | None = None,
+    prior_regressed_attempt: RegressedAttempt = RegressedAttempt.REVERTED,
     joint_rewrite: bool = False,
     joint_endpoint_names: Collection[str] = (),
     leaf_cap: int = ATTRIBUTED_TEST_LEAF_CAP,
@@ -283,7 +315,8 @@ def assemble_block_evidence(
                 seen.add(path_str)
                 test_blocks.append((path_str, txt))
         section = render_prior_regression(
-            prior_leaves, prior_pins, prior_regressed_output)
+            prior_leaves, prior_pins, prior_regressed_output,
+            prior_regressed_attempt)
         rendered = f"{rendered}\n{section}" if rendered else section
     # Name-match fallback, after the attributed channel exactly as before.
     fill_target_names = [
