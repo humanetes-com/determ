@@ -36,7 +36,9 @@ _SHAPE_KEYWORDS = ("struct", "enum", "trait", "type", "union")
 
 
 def divergent_item_names(target_text: str, donor_text: str) -> frozenset[str]:
-    """Items both files declare but SHAPE differently.
+    """Names a body must not mention to be moved from `donor_text` into
+    `target_text`: the types both files declare with a different SHAPE, and the
+    fields of theirs that changed.
 
     A private layout is authored per cluster (`_layout_outcomes_<cluster>.json`),
     while filled bodies are shared across clusters ("fill once, propagate").
@@ -47,17 +49,28 @@ def divergent_item_names(target_text: str, donor_text: str) -> frozenset[str]:
     written against one cannot compile against the other, and no per-fn fill can
     repair it because the fix is a DECLARATION, not a body.
 
-    So the seed needs to know which names it must not move a body through. This
-    is that set: declared in both, and not textually identical. Whitespace is
-    normalised because the two files are rendered by the same extractor but not
-    necessarily wrapped identically.
+    Shape, not text (`rust_item_shape.shape_divergence`): an inline bound and a
+    `where` bound, a path spelled through an import and in full, a trailing
+    comma and a doc comment are the same declaration. Comparing whitespace-
+    normalised text refused 34 verified `stable` bodies at the `nightly` entry of
+    run `119837-09e3ac57` (2026-09-15) over exactly those spellings, and read
+    `where T: ?Sized` as a field named `T`.
 
-    The set also carries the donor-only FIELD names of each divergent type.
-    A body reaches a field through the receiver — `self._error`, never
-    `ErrorImpl::_error` — so type names alone caught only two thirds of the
-    damage (31 rustc errors down to 11, the remainder all `no field '_error'` /
-    `field 'ptr' is private`). What a body depends on is the field, so the field
-    is what has to be matched."""
+    What goes in the set follows what a body can depend on. A type whose kind,
+    attributes, generics or `#[repr(C)]` field order changed contributes its
+    name and every field of both sides. A type whose fields changed only
+    individually contributes those fields — a body reaches a field by name, and
+    a field can change without changing its name (`Mut.ptr` declared in both,
+    `pub(crate)` in only one, is `E0616 field 'ptr' is private`) — plus its own
+    name when the field SET differs, because a struct literal written against
+    the donor never names the field the target added. A declaration either side
+    cannot parse keeps the conservative whole-type answer on a text difference."""
+    from .rust_item_shape import (
+        WHOLE,
+        declaration_field_names,
+        item_shape,
+        shape_divergence,
+    )
     from .rust_scan import item_names, locate_item_declaration
 
     shared = set(item_names(target_text)) & set(item_names(donor_text))
@@ -70,30 +83,22 @@ def divergent_item_names(target_text: str, donor_text: str) -> frozenset[str]:
                 continue
             t_raw = target_text[t_span[0]:t_span[1]]
             d_raw = donor_text[d_span[0]:d_span[1]]
-            if " ".join(t_raw.split()) != " ".join(d_raw.split()):
+            t_shape = item_shape(target_text, kw, name)
+            d_shape = item_shape(donor_text, kw, name)
+            if t_shape is not None and d_shape is not None:
+                verdict = shape_divergence(t_shape, d_shape)
+            elif " ".join(t_raw.split()) != " ".join(d_raw.split()):
+                verdict = WHOLE
+            else:
+                verdict = frozenset()
+            if isinstance(verdict, frozenset):
+                out |= verdict
+            else:
                 out.add(name)
-                # EVERY field of a divergent type, not just the donor-only ones.
-                # A field can change without changing its name: `Mut.ptr` is
-                # declared in both and `pub(crate)` in only one, so a body using
-                # it compiled in the donor and is `E0616 field 'ptr' is private`
-                # here. Same name, different meaning — which is the whole class.
-                out |= _field_names(d_raw) | _field_names(t_raw)
+                out |= (declaration_field_names(t_shape, t_raw)
+                        | declaration_field_names(d_shape, d_raw))
             break
     return frozenset(out)
-
-
-def _field_names(decl: str) -> set[str]:
-    """Field names declared in a struct/enum body — the `ident` of each
-    `ident: Type`. Token-level, so a `:` inside a generic bound or a path
-    (`crate::backtrace::Backtrace`) contributes nothing."""
-    out: set[str] = set()
-    for chunk in decl.replace("{", " ").replace("}", " ").replace(",", " ").split():
-        if chunk.endswith(":") and not chunk.endswith("::"):
-            ident = chunk[:-1]
-            if ident and (ident[0].isalpha() or ident[0] == "_") and \
-                    all(c.isalnum() or c == "_" for c in ident):
-                out.add(ident)
-    return out
 
 
 @dataclass(frozen=True, slots=True)

@@ -194,3 +194,34 @@ def test_cfg_world_rules_are_silent_without_divergence() -> None:
                        prompt_nightly_rule="")
     assert "SAME predicate" not in cfg_world_rules([one]), \
         "one listed world has no cross-world guard rule to state"
+
+
+def test_fill_invariants_carry_the_cfg_world_the_fill_routes_never_had() -> None:
+    """Run `119837-09e3ac57`, 2026-09-15: the per-fn prompt for a nightly-only
+    world opened `Cluster: nightly`, showed only the active macro arm, and the
+    fill of a fn with a cfg-dependent path reasoned "used by nightly provide?
+    Possibly." The section every fill route hands its builder now states the
+    world from the cluster record."""
+    from pipeline_core.domain.cluster_plan import fill_invariants_section
+    from pipeline_core.domain.models import BuildCluster
+
+    world = BuildCluster(name="w", env_extra={"RUSTFLAGS": "--cfg some_atom"},
+                         tarpaulin_exclude_files=[], excluded_cfg=[],
+                         active_cfg=["some_atom"], prompt_nightly_rule="",
+                         default_features=["std"], requires_nightly=True)
+    macros = "Macros with multiple #[cfg]-gated variants — only the active expansion"
+    out = fill_invariants_section(world, no_std="", macro_invariants=macros)
+    assert "`some_atom` IS active" in out
+    assert "`#[cfg(not(some_atom))]` items DO NOT" in out
+    assert "NIGHTLY toolchain" in out
+    assert '`feature = "std"` IS enabled' in out
+    assert out.endswith(macros)
+    # Negative control: the assembly the fill routes used before — no-std fact
+    # plus the macro arms — says nothing about which atom is on.
+    before = "\n\n".join(s for s in ("", macros) if s)
+    assert "some_atom" not in before
+
+
+def test_fill_invariants_without_a_cluster_are_the_old_join() -> None:
+    from pipeline_core.domain.cluster_plan import fill_invariants_section
+    assert fill_invariants_section(None, no_std="n", macro_invariants="m") == "n\n\nm"

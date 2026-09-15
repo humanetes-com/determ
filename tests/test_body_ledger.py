@@ -249,6 +249,42 @@ def test_a_regression_inside_one_epoch_with_the_body_still_on_the_tree_refutes()
     assert state is BodyState.REFUTED and delta == (("test_new", "lost"),)
 
 
+def test_a_test_lost_to_an_aborted_binary_is_unmeasured_not_refuted() -> None:
+    """The sweep pads its failed set with tests whose binary aborted before
+    they reported (right for the score). Run `119837-09e3ac57`, 2026-09-15:
+    ten binaries aborted on panics inside still-stubbed siblings, and 8 of 12
+    landed bodies were graded `refuted` on `lost` tests that never ran —
+    `refuted` is the state that is never re-seeded."""
+    e = _entry(state=BodyState.LANDED)
+    before = SweepView.of_sweep(passed={"test_new", "test_conv"},
+                                failed=set(), vanished=(), intact=True,
+                                epoch=0, panic_sites={})
+    # What the sweep hands over: both names counted failing, both vanished.
+    after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_conv"},
+                               vanished={"test_new", "test_conv"}, intact=True,
+                               epoch=0, panic_sites={})
+    state, delta = classify(e, attributed={"test_new"}, before=before,
+                            after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.UNMEASURED and delta == ()
+    # Negative control: the same sweep with the vanished names left in
+    # `failed`, as the ledger read it before `of_sweep`.
+    padded = SweepView(frozenset(), frozenset({"test_new", "test_conv"}), True, 0)
+    state, delta = classify(e, attributed={"test_new"}, before=before,
+                            after=padded, body_now_sha=e.body_sha)
+    assert state is BodyState.REFUTED and delta == (("test_new", "lost"),)
+
+
+def test_a_test_that_really_failed_beside_an_aborted_binary_still_refutes() -> None:
+    e = _entry(state=BodyState.LANDED)
+    before, _ = _views(({"test_new"}, set()), (set(), set()))
+    after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_gone"},
+                               vanished={"test_gone"}, intact=True, epoch=0,
+                               panic_sites={})
+    state, _ = classify(e, attributed={"test_new"}, before=before, after=after,
+                        body_now_sha=e.body_sha)
+    assert state is BodyState.REFUTED
+
+
 def test_a_regression_across_a_destruction_epoch_is_unmeasured() -> None:
     """The standing rule, arriving in the entry whose whole subject is
     deliberate destruction: a body whose tests drop because a SIBLING was

@@ -59,6 +59,7 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.cfg import cluster_cfg_set
+from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
     impl_route_deferral_applies,
@@ -661,8 +662,8 @@ class PhaseCFillEngine:
         _macro_invariants = self.prompt.compute_cluster_macro_invariants(
             _src_for_macros, cluster)
         _no_std_invariant = self.prompt.detect_crate_no_std_invariant(target_src_dir)
-        invariants_section = "\n\n".join(
-            s for s in (_no_std_invariant, _macro_invariants) if s)
+        invariants_section = fill_invariants_section(
+            cluster, no_std=_no_std_invariant, macro_invariants=_macro_invariants)
         # Crate-wide type records, filtered to what THIS cfg-cluster compiles.
         _crate_type_records = self.ws.cluster_filter_type_members(
             self.ws.enumerate_types(target_src_dir) or [], cluster)

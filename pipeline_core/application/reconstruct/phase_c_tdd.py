@@ -2178,9 +2178,13 @@ def run_phase_c_tdd(
         # same-named test; for "did this unit's tests regress" that is the
         # question anyway, and the pair-level vector stays available to every
         # consumer that needs it.
-        _sweep_view = SweepView(
-            passed=frozenset(bare_test_name(t_) for t_ in _measure.passed),
-            failed=frozenset(bare_test_name(t_) for t_ in _measure.failed),
+        # `_measure.failed` carries the crash-vanished names the score counts
+        # as failing; `of_sweep` takes them back out, so a test whose binary
+        # aborted judges `unmeasured` rather than `lost`.
+        _sweep_view = SweepView.of_sweep(
+            passed=(bare_test_name(t_) for t_ in _measure.passed),
+            failed=(bare_test_name(t_) for t_ in _measure.failed),
+            vanished=_oracle.vanished,
             intact=_rec.reconciled, epoch=_destruction_epoch,
             # Where each failing test panicked: the one reading that can
             # tell a body which got a test past an assertion from one that

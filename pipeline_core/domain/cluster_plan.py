@@ -312,9 +312,19 @@ def cfg_world_rules(clusters: Iterable[BuildCluster]) -> str:
     parts: list[str] = []
     listed = [c for c in sorted(clusters, key=lambda c: c.name)
               if (getattr(c, "active_cfg", None)
-                  or getattr(c, "excluded_cfg", None))]
+                  or getattr(c, "excluded_cfg", None)
+                  or getattr(c, "requires_nightly", False)
+                  or getattr(c, "default_features", None))]
     for c in listed:
         lines = [f"- cfg world `{c.name}`:"]
+        if getattr(c, "requires_nightly", False):
+            lines.append("    built with the NIGHTLY toolchain.")
+        # The crate's own default-on features are part of every world, and
+        # `cluster_cfg_set` evaluates them as active; without this line a
+        # `#[cfg(feature = "…")]` arm reads as undecided.
+        for f in sorted(getattr(c, "default_features", None) or []):
+            lines.append(f"    `feature = \"{f}\"` IS enabled (crate default) — "
+                         f"`#[cfg(not(feature = \"{f}\"))]` items DO NOT exist.")
         for p in sorted(c.active_cfg or []):
             lines.append(f"    `{p}` IS active — `#[cfg({p})]` items exist; "
                          f"`#[cfg(not({p}))]` items DO NOT.")
@@ -330,6 +340,25 @@ def cfg_world_rules(clusters: Iterable[BuildCluster]) -> str:
             "unguarded reference compiles in one world and fails "
             "E0609/E0599/E0433 in the other.")
     return "\n".join(parts)
+
+
+def fill_invariants_section(
+    cluster: BuildCluster | None, *, no_std: str, macro_invariants: str,
+) -> str:
+    """The CLUSTER_INVARIANTS text every fill route hands its prompt builder:
+    the crate-level no_std fact, the cluster's cfg world, and the active macro
+    arms — one assembly, so the routes cannot drift apart.
+
+    The cfg world is the part the fill routes had never carried. Their prompts
+    opened `Cluster: nightly` and showed only the active macro arm, so the
+    model was handed a name and the quoted source's `#[cfg(X)]` and
+    `#[cfg(not(X))]` arms side by side. Run `119837-09e3ac57`, 2026-09-15,
+    cluster `nightly`: the per-fn fill of `ErrorImpl::backtrace` reasoned
+    "used by nightly provide? Possibly." and wrote a body that never takes the
+    active cfg's path. The task3 retry had rendered these facts since
+    2026-08-19; the fill routes did not."""
+    world = cfg_world_rules([cluster]) if cluster is not None else ""
+    return "\n\n".join(s for s in (no_std, world, macro_invariants) if s)
 
 
 def nightly_rules_for(cluster: object | None) -> str:

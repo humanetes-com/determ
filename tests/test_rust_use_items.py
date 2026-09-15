@@ -120,8 +120,12 @@ pub(crate) struct Same { a: u32 }
 def test_divergent_items_are_the_types_the_two_clusters_shaped_differently() -> None:
     from pipeline_core.domain.rust_use_items import divergent_item_names
     div = divergent_item_names(_NIGHTLY_ERROR, _STABLE_ERROR)
-    assert "ErrorImpl" in div
-    assert "Mut" in div
+    assert "ErrorImpl" in div       # its field SET differs: a literal cannot move
+    # `Mut` changed one field's visibility and nothing else. The field is what a
+    # body depending on the change must name; `Mut::…` calls that never touch
+    # `ptr` compile against either declaration.
+    assert "Mut" not in div
+    assert "ptr" in div
     assert "Same" not in div        # identical in both — nothing to refuse
 
 

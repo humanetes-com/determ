@@ -653,6 +653,33 @@ class SweepView:
     def ran(self) -> frozenset[str]:
         return self.passed | self.failed
 
+    @classmethod
+    def of_sweep(
+        cls, *, passed: Iterable[str], failed: Iterable[str],
+        vanished: Iterable[str], intact: bool, epoch: int,
+        panic_sites: Mapping[str, tuple[str, int]],
+    ) -> SweepView:
+        """The ledger's view of a sweep whose failed set the score has already
+        padded with crash-vanished tests.
+
+        The sweep counts a test that reported no verdict because its binary
+        aborted as FAILING — right for a score, which must not rise when a
+        binary dies. It is wrong for the ledger: `ran` is the guard that makes
+        a test in a crashed binary judge `unmeasured`, and a vanished name in
+        `failed` walks straight through it and mints `refuted` on a verdict
+        that was never produced. Run `119837-09e3ac57`, cluster `nightly`,
+        2026-09-15, iter 2: 102 tests vanished when ten binaries aborted on
+        panics inside still-stubbed fns; the batch ratchet declined to charge
+        exactly that drop, and the same sweep graded 8 of 12 landed bodies
+        `refuted` on `lost` tests that had not run — `ptr.rs::new`,
+        `ptr.rs::boxed` and `ptr.rs::read` among them. A refuted row is never
+        re-seeded. So vanished names are removed from `failed` here; they are
+        neither passed nor failed to the ledger."""
+        gone = frozenset(vanished)
+        return cls(passed=frozenset(passed),
+                   failed=frozenset(t for t in failed if t not in gone),
+                   intact=intact, epoch=epoch, panic_sites=panic_sites)
+
 
 def judgment_attributed(
     attributed: Iterable[str], entry: LedgerEntry,

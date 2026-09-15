@@ -112,6 +112,7 @@ from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMus
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.cfg import cluster_cfg_set
+from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.coverage_slice import entered_by_test
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
@@ -1230,8 +1231,8 @@ def prepare_impl_fill(
     _src_for_macros = target_src_dir / "src" if (target_src_dir / "src").exists() else target_src_dir
     _macro_invariants = _compute_cluster_macro_invariants(_src_for_macros, cluster)
     _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
-    invariants_section = "\n\n".join(
-        s for s in (_no_std_invariant, _macro_invariants) if s)
+    invariants_section = fill_invariants_section(
+        cluster, no_std=_no_std_invariant, macro_invariants=_macro_invariants)
     _crate_type_records = _cluster_filter_type_members(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
     # The crate's tuple structs — the wrappers a body can construct by
