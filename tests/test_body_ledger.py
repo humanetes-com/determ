@@ -638,41 +638,93 @@ def test_flat_exclusion_holds_only_while_the_rows_premise_holds() -> None:
     permanent lock (the pass-81 readmission deadlock shape). NEGATIVE
     CONTROL inline: the grade-alone read names every flat row below."""
     from pipeline_core.domain.body_ledger import flat_standing_unchanged
-    same = _entry(state=BodyState.FLAT, convicting=("test_altdebug",))
+    same = _entry(state=BodyState.FLAT, convicting=("test_altdebug",),
+                  evidence_fp="ev-1")
     standing = {_KEY: same}
-    # Same oracle, same convicting set: the try is already measured — exclude.
+    fresh = {_KEY: "ev-1"}
+    # Same oracle, same convicting set, same question — already measured.
     assert flat_standing_unchanged(
-        standing, oracle_fp_now=_ORACLE,
+        standing, oracle_fp_now=_ORACLE, evidence_now=fresh,
         convicting_now={_KEY: frozenset({"test_altdebug"})}) == {_KEY}
     # A convicting test got FIXED: the remainder was in the premise — exclude.
     assert flat_standing_unchanged(
-        standing, oracle_fp_now=_ORACLE,
+        standing, oracle_fp_now=_ORACLE, evidence_now=fresh,
         convicting_now={_KEY: frozenset()}) == {_KEY}
     # A NEW test convicts the unit: moved evidence — re-admit.
     assert flat_standing_unchanged(
-        standing, oracle_fp_now=_ORACLE,
+        standing, oracle_fp_now=_ORACLE, evidence_now=fresh,
         convicting_now={_KEY: frozenset({"test_altdebug",
                                          "test_trailer"})}) == set()
     # The oracle moved (tests regenerated): every grade is stale — re-admit.
     assert flat_standing_unchanged(
-        standing, oracle_fp_now="oracle-B",
+        standing, oracle_fp_now="oracle-B", evidence_now=fresh,
         convicting_now={_KEY: frozenset({"test_altdebug"})}) == set()
     # A row written before the premise field: evidence unknown — re-admit
     # once, so the re-grade mints a premised row instead of a forever-lock.
     legacy = _entry(state=BodyState.FLAT, convicting=())
     assert flat_standing_unchanged(
-        {_KEY: legacy}, oracle_fp_now=_ORACLE,
+        {_KEY: legacy}, oracle_fp_now=_ORACLE, evidence_now=fresh,
         convicting_now={_KEY: frozenset({"test_altdebug"})}) == set()
     # Only FLAT rows are the exclusion's business.
-    proven = _entry(state=BodyState.PROVEN, convicting=("test_altdebug",))
+    proven = _entry(state=BodyState.PROVEN, convicting=("test_altdebug",),
+                    evidence_fp="ev-1")
     assert flat_standing_unchanged(
-        {_KEY: proven}, oracle_fp_now=_ORACLE,
+        {_KEY: proven}, oracle_fp_now=_ORACLE, evidence_now=fresh,
         convicting_now={_KEY: frozenset({"test_altdebug"})}) == set()
     # NEGATIVE CONTROL — the pre-fix read (state alone) excludes all four
     # flat shapes above, including the moved-evidence and legacy ones.
     for e in (same, legacy):
         assert {k for k, r in {_KEY: e}.items()
                 if r.state is BodyState.FLAT} == {_KEY}
+
+
+def test_a_flat_grade_lapses_once_the_next_prompt_would_differ() -> None:
+    """THE FOURTH CLAUSE. The three clauses above all describe the world
+    AROUND the unit — the body on the tree, the oracle, the convicting
+    set — and on a stalled tree none of them can move: clause 1 holds
+    BECAUSE the flat body was kept (it compiles and regresses nothing,
+    which is why it was kept), the oracle has one identity per tree, and
+    the same tests fail every sweep. So a unit that lands a compiling,
+    non-regressing, non-paying body is retired by its own success. Run
+    `837207-ce5b1647` (2026-09-15) excluded `src/fmt.rs::debug` from
+    iteration 2 and `src/error.rs::fmt` from iteration 3 and then read
+    `dispatching 0 of 0 (0/0 this pass)` against `frontier=3 fn(s)` for
+    three hours.
+
+    The plan's sentence, pinned here: the exclusion stands while the
+    evidence the next prompt would carry is unchanged, and lapses once for
+    a unit whose next prompt would differ. NEGATIVE CONTROL inline — the
+    pre-fix read (the three clauses without this one) excludes the
+    moved-evidence row too."""
+    from pipeline_core.domain.body_ledger import flat_standing_unchanged
+    row = _entry(state=BodyState.FLAT, convicting=("test_altdebug",),
+                 evidence_fp="ev-at-grade")
+    standing = {_KEY: row}
+    convicting = {_KEY: frozenset({"test_altdebug"})}
+
+    def _excluded(evidence_now: dict) -> set:
+        return flat_standing_unchanged(
+            standing, oracle_fp_now=_ORACLE, convicting_now=convicting,
+            evidence_now=evidence_now)
+
+    # Same question — refuse to spend.
+    assert _excluded({_KEY: "ev-at-grade"}) == {_KEY}
+    # A sibling landed a body / the retro store gained a round / a fault
+    # now names the unit: a DIFFERENT question, asked once.
+    assert _excluded({_KEY: "ev-moved"}) == set()
+    # The loop could read none of the evidence channels: nothing observed,
+    # so nothing is claimed — the lock is what refusing here prevents.
+    assert _excluded({_KEY: ""}) == set()
+    assert _excluded({}) == set()
+    # A row written before the field: same reason, from the other side.
+    assert flat_standing_unchanged(
+        {_KEY: _entry(state=BodyState.FLAT, convicting=("test_altdebug",))},
+        oracle_fp_now=_ORACLE, convicting_now=convicting,
+        evidence_now={_KEY: "ev-at-grade"}) == set()
+    # NEGATIVE CONTROL — the three-clause read excludes on moved evidence,
+    # which is the lock this clause exists to break.
+    assert (row.state is BodyState.FLAT and row.oracle_fp == _ORACLE
+            and convicting[_KEY] <= frozenset(row.convicting))
 
 
 def test_flat_rows_carry_the_convicting_premise_they_are_scoped_to() -> None:
@@ -685,15 +737,30 @@ def test_flat_rows_carry_the_convicting_premise_they_are_scoped_to() -> None:
         [("src/error.rs", "new")], recs, project="anyhow", cluster="stable",
         state=BodyState.FLAT, items={}, file_of={}, file_fp={},
         run_id="r", iteration=1, epoch=0, oracle_fp="oracle-A",
-        convicting_of={("src/error.rs", "new"): ["test_b", "test_a"]})
+        convicting_of={("src/error.rs", "new"): ["test_b", "test_a"]},
+        evidence_of={("src/error.rs", "new"): "ev-at-dispatch"})
     assert rows[0].convicting == ("test_a", "test_b")
+    # ...and the evidence the dispatch that bought this try carried, so the
+    # exclusion can tell an unchanged question from a changed one.
+    assert rows[0].evidence_fp == "ev-at-dispatch"
     # Round-trips through the index encoding; a pre-field raw dict parses
-    # to the unrecorded premise.
+    # to the unrecorded premise, on both halves.
     assert LedgerEntry.from_dict(rows[0].to_dict()).convicting == (
         "test_a", "test_b")
+    assert LedgerEntry.from_dict(
+        rows[0].to_dict()).evidence_fp == "ev-at-dispatch"
     raw = rows[0].to_dict()
     del raw["convicting"]
+    del raw["evidence_fp"]
     assert LedgerEntry.from_dict(raw).convicting == ()
+    assert LedgerEntry.from_dict(raw).evidence_fp == ""
+    # A caller that supplies no evidence map leaves the premise unrecorded
+    # rather than minting a fingerprint nothing observed.
+    bare = rows_for_units(
+        [("src/error.rs", "new")], recs, project="anyhow", cluster="stable",
+        state=BodyState.FLAT, items={}, file_of={}, file_fp={},
+        run_id="r", iteration=1, epoch=0, oracle_fp="oracle-A")
+    assert bare[0].evidence_fp == ""
 
 
 _ESC_UNCHANGED_82157_ITER_1 = (

@@ -1,0 +1,2262 @@
+{
+ "source": "logs/route_ledger/anyhow/index.jsonl, 2026-09-15, project anyhow",
+ "note": "every PAIR row the ledger holds, in file order (file order is time; the ledger is append-only). Fields are the ones the predicate reads.",
+ "rows": [
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "200802-b835274e",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "af5e3d41594a6d26",
+   "cluster": "stable",
+   "started": "2026-09-10T08:59:10+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "12120-78b991d3",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-11T12:42:17+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "22062-a20ae3a2",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T15:11:35+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "22062-a20ae3a2",
+   "iteration": 2,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T15:31:05+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "22062-a20ae3a2",
+   "iteration": 3,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T15:53:12+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "22062-a20ae3a2",
+   "iteration": 4,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T16:03:35+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "22062-a20ae3a2",
+   "iteration": 5,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T16:16:18+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "22062-a20ae3a2",
+   "iteration": 6,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T16:23:38+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T16:40:41+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 2,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T16:50:57+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 3,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T16:58:38+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 4,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T17:10:49+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 5,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T17:19:34+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 6,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T17:28:33+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "106897-f7b6fb77",
+   "iteration": 7,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T17:44:53+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "186665-40892dbd",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T18:28:26+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "186665-40892dbd",
+   "iteration": 2,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T18:36:18+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "186665-40892dbd",
+   "iteration": 3,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T19:08:13+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "235765-62f1505b",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T19:21:37+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "269600-aa403030",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T20:27:14+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "269600-aa403030",
+   "iteration": 2,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-13T20:38:47+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "10959-9c95ea89",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "ff72a4cafca9f2ea",
+   "cluster": "stable",
+   "started": "2026-09-14T05:33:47+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "100178-a1923a70",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T06:55:08+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "100178-a1923a70",
+   "iteration": 2,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "1b7ba4e173323993",
+   "cluster": "stable",
+   "started": "2026-09-14T07:31:27+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "100178-a1923a70",
+   "iteration": 3,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T07:55:01+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 1,
+   "label": "pair src/error.rs::fmt + src/fmt.rs::debug",
+   "bodies_sha": "1b7ba4e173323993",
+   "cluster": "stable",
+   "started": "2026-09-14T08:22:15+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T08:48:46+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 3,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T09:11:53+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 4,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T09:21:11+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 5,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T09:29:18+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 6,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T09:40:14+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 7,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T09:47:25+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 8,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T10:23:28+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 9,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T10:34:23+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 10,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T10:40:57+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 11,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T10:49:30+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 12,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T11:18:04+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 13,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T11:27:21+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 14,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T11:51:24+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 15,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T12:11:05+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 16,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T12:42:41+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 17,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T12:56:59+00:00",
+   "model_calls": 3
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 18,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T13:28:22+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 19,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T13:51:23+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 20,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T14:08:24+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 21,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T14:26:41+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "171582-cb964fb9",
+   "iteration": 22,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T14:37:03+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "438301-720ceb90",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T15:12:37+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "438301-720ceb90",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T15:25:25+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "438301-720ceb90",
+   "iteration": 3,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T15:42:28+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "485054-7ebcf8a9",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T16:05:33+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "524736-e3b0c853",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "68e2604e94ee2eb9",
+   "cluster": "stable",
+   "started": "2026-09-14T16:42:35+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "524736-e3b0c853",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "3211d583a83283c0",
+   "cluster": "stable",
+   "started": "2026-09-14T17:04:35+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "579131-0ef5e885",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T17:33:58+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "609480-8edf9bf2",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T18:24:48+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "642983-68b474a4",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T19:23:57+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "642983-68b474a4",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T19:34:49+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "681204-b695ab3f",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T19:56:43+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "681204-b695ab3f",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T20:05:39+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "681204-b695ab3f",
+   "iteration": 3,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T20:24:14+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "681204-b695ab3f",
+   "iteration": 4,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T20:34:41+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "773295-dc1024ab",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T21:13:49+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "837207-ce5b1647",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "0c36c4284c3cf4d8",
+   "cluster": "stable",
+   "started": "2026-09-14T22:46:05+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "837207-ce5b1647",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "7dab36d8e3a97366",
+   "cluster": "stable",
+   "started": "2026-09-15T01:26:56+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "837207-ce5b1647",
+   "iteration": 3,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "e0901c92f2d33a4b",
+   "cluster": "stable",
+   "started": "2026-09-15T04:34:19+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "837207-ce5b1647",
+   "iteration": 4,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "e0901c92f2d33a4b",
+   "cluster": "stable",
+   "started": "2026-09-15T05:06:41+00:00",
+   "model_calls": 1
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "reverted",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "1158170-ce307ee7",
+   "iteration": 1,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "e0901c92f2d33a4b",
+   "cluster": "stable",
+   "started": "2026-09-15T06:25:54+00:00",
+   "model_calls": 2
+  },
+  {
+   "kind": "pair",
+   "oracle_fp": "e4957ec70ac8",
+   "outcome": "flat",
+   "net_pass_delta": 0,
+   "target_tests": [
+    "test_altdebug",
+    "test_debug_backtrace_captured_simple",
+    "test_debug_backtrace_captured_with_cause"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "fmt"
+    ],
+    [
+     "src/error.rs",
+     "no_backtrace"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ]
+   ],
+   "run_id": "1158170-ce307ee7",
+   "iteration": 2,
+   "label": "pair src/error.rs::context_backtrace + src/error.rs::fmt + src/error.rs::no_backtrace + src/fmt.rs::debug",
+   "bodies_sha": "da8b3d773d553e71",
+   "cluster": "stable",
+   "started": "2026-09-15T08:43:46+00:00",
+   "model_calls": 2
+  }
+ ]
+}

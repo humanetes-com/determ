@@ -93,9 +93,28 @@ def test_the_flat_row_then_excludes_the_unit_while_its_convictors_are_in_the_pre
         convict_now[row.key] = frozenset(row.convicting) & later.failed
         assert convict_now[row.key], "still convicted at iter 3 by premise tests"
     oracle = data["landed_iter1"][0]["oracle_fp"]
+    # The recorded rows predate `evidence_fp`, and a row with none refuses —
+    # that is the legacy one-time re-grade, asserted below. What the driver
+    # stamps is the fingerprint of the evidence the dispatch carried, so the
+    # exclusion is read here against an unchanged one.
+    evidence_now = {k: f"ev-{k.file}::{k.fn_name}" for k in standing}
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now=oracle, convicting_now=convict_now,
+        evidence_now=evidence_now) == set(), (
+        "a row written before the evidence premise existed re-enters once")
+    standing = {k: replace(e, evidence_fp=evidence_now[k])
+                for k, e in standing.items()}
     excluded = flat_standing_unchanged(standing, oracle_fp_now=oracle,
-                                       convicting_now=convict_now)
+                                       convicting_now=convict_now,
+                                       evidence_now=evidence_now)
     assert excluded == set(standing)
+    # ...and the fourth clause on the same rows: a sibling landing, a new
+    # retro round or a fault naming the unit moves what its next prompt
+    # would carry, and the try is no longer the try that was measured.
+    assert flat_standing_unchanged(
+        standing, oracle_fp_now=oracle, convicting_now=convict_now,
+        evidence_now={k: v + "-moved"
+                      for k, v in evidence_now.items()}) == set()
     # The dispatch-side effect on a cap-12 list that ranks these four first.
     ordered = [(FnLocator(k.file, k.fn_name), frozenset()) for k in standing]
     ordered += [(FnLocator("src/other.rs", f"u{i}"), frozenset()) for i in range(12)]
@@ -107,6 +126,7 @@ def test_the_flat_row_then_excludes_the_unit_while_its_convictors_are_in_the_pre
     erased = {k: replace(e, state=BodyState.UNMEASURED, convicting=())
               for k, e in standing.items()}
     assert flat_standing_unchanged(erased, oracle_fp_now=oracle,
-                                   convicting_now=convict_now) == set()
+                                   convicting_now=convict_now,
+                                   evidence_now=evidence_now) == set()
     control = take_batch([k for k, _ in ordered], set(), 12)
     assert set(control.keys) >= flat

@@ -192,7 +192,8 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            fill_phase_minutes: str = "0",
            dispatch_cap: str = "0", floor: dict | None = None,
            frontier: dict | None = None, enumerate_fns=None,
-           coverage=None, attribute=None, recorded=None) -> list[str]:
+           coverage=None, attribute=None, recorded=None,
+           route_rows=None, oracle_fp=None) -> list[str]:
     """Drive `run_phase_c_tdd` over the walk. Returns the loop's log lines.
 
     The cargo stub reads the loop's own `iter N: running cargo test` line to
@@ -287,6 +288,10 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
                      reverse_map=reverse_map, fill=fill,
                      coverage=coverage, attribute=attribute,
                      recorded=recorded,
+                     # The route ledger a walk about the measured-owners
+                     # withholding supplies; None keeps every other replay
+                     # reading no ledger, so a paired leftover withholds.
+                     route_rows=route_rows, oracle_fp=oracle_fp,
                      # A shared mutable dict models the on-disk floor file: a
                      # walk about the process BOUNDARY replays two processes
                      # against the same dict (`tests/walks/

@@ -197,6 +197,20 @@ class LedgerEntry:
     # refuses to exclude, so a legacy flat is re-graded once (minting a
     # premised row) instead of being locked out of dispatch forever.
     convicting: tuple[str, ...] = ()
+    # The identity of the EVIDENCE the dispatch that earned this grade
+    # bought — the file the prompt quotes, the retrospective rows it may
+    # inject, the crash excerpt naming the unit
+    # (`domain/evidence_premise.evidence_fingerprints`). The three clauses
+    # beside it all describe the world AROUND the unit, and on a stalled
+    # tree none of them can move, so a FLAT grade scoped to those alone
+    # retires a unit that lands a compiling, non-paying body permanently
+    # (run `837207-ce5b1647`, 2026-09-15: three such units, `dispatching
+    # 0 of 0` against `frontier=3` for the run's last three hours). This
+    # field is what the unit was TOLD, so an unchanged question can be
+    # refused and a changed one asked. Empty on every row written before
+    # the field existed — `flat_standing_unchanged` reads that as
+    # premise-unrecorded and refuses, exactly as it does for `convicting`.
+    evidence_fp: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +226,7 @@ class LedgerEntry:
             "source": self.source, "rejected_builds": self.rejected_builds,
             "oracle_fp": self.oracle_fp,
             "convicting": list(self.convicting),
+            "evidence_fp": self.evidence_fp,
         }
 
     @staticmethod
@@ -258,6 +273,9 @@ class LedgerEntry:
                 # Missing on pre-field rows: () reads as premise-unrecorded.
                 convicting=tuple(
                     str(t) for t in (raw.get("convicting") or ())),
+                # Missing on pre-field rows: "" reads as premise-unrecorded
+                # and `flat_standing_unchanged` refuses to exclude on it.
+                evidence_fp=str(raw.get("evidence_fp") or ""),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -459,6 +477,7 @@ def rows_for_units(
     file_fp: Mapping[str, str], run_id: str, iteration: int, epoch: int,
     oracle_fp: str,
     convicting_of: Mapping[tuple[str, str], Iterable[str]] | None = None,
+    evidence_of: Mapping[tuple[str, str], str] | None = None,
 ) -> list[LedgerEntry]:
     """One row per `(file, fn_name)` in `units`, built from the extractor's
     per-fn `records` as they stand NOW — the one construction both audit arms
@@ -508,7 +527,13 @@ def rows_for_units(
             # convicting`); the caller supplies the tests whose failure
             # bought THIS dispatch, per unit.
             convicting=tuple(sorted(
-                (convicting_of or {}).get((file, fn_name), ())))))
+                (convicting_of or {}).get((file, fn_name), ()))),
+            # ...and what the unit was TOLD when it was bought (see
+            # `LedgerEntry.evidence_fp`). The caller computes it at
+            # DISPATCH, so the value stamped here is the evidence the
+            # prompt this grade judges actually drew from — not a
+            # re-derivation taken after the fill moved the tree.
+            evidence_fp=str((evidence_of or {}).get((file, fn_name), ""))))
     return rows
 
 
@@ -791,6 +816,7 @@ def flat_standing_unchanged(
     *,
     oracle_fp_now: str,
     convicting_now: Mapping[LedgerKey, frozenset[str]],
+    evidence_now: Mapping[LedgerKey, str],
 ) -> set[LedgerKey]:
     """Units whose standing claim is FLAT and whose evidence has not moved.
 
@@ -810,13 +836,35 @@ def flat_standing_unchanged(
     * no NEW test convicts the unit — the tests convicting it now are a
       subset of the row's `convicting` premise. A shrunken set still
       excludes (the remaining convictors were already in the premise); an
-      empty current set excludes trivially (nothing left to buy).
+      empty current set excludes trivially (nothing left to buy);
+    * the unit would be asked the SAME question — equality on
+      `evidence_fp` (`domain/evidence_premise`), the identity of the file
+      the prompt quotes, the retrospective rows it may inject and the crash
+      excerpt naming it.
 
-    A row with an EMPTY premise (written before the field existed) refuses:
-    the trade is one re-grade of each legacy flat — run `9872-51b20f30`'s
-    17 on-tree flats re-enter dispatch once, come back graded with a
-    premised row, and are excluded honestly from then on — against a
-    lock class that would otherwise survive on every legacy row forever.
+    THE FOURTH CLAUSE IS WHY THE FIRST THREE ARE NOT ENOUGH. Every one of
+    them is satisfiable only by the world OUTSIDE the unit, and on a stalled
+    tree that world does not move: clause 1 holds *because* the flat body was
+    KEPT (it compiles and regresses nothing, which is exactly why it was
+    kept), clause 2 holds because the oracle has one identity per tree, and
+    clause 3 holds because the convicting set is the same failing tests every
+    sweep. So the premise stays perpetually FRESH and the unit is retired by
+    its own success — run `837207-ce5b1647` (2026-09-15) excluded
+    `src/fmt.rs::debug` from iteration 2, `src/error.rs::fmt` from iteration
+    3, and read `dispatching 0 of 0 (0/0 this pass)` against `frontier=3
+    fn(s)` for the last three hours of a 6h32m run. The fourth clause is
+    keyed on the one thing that DOES move: what the next prompt would carry.
+
+    A row with an EMPTY premise — no `convicting`, or no `evidence_fp`,
+    both of which mean the field did not exist when the row was written —
+    refuses: the trade is one re-grade of each legacy flat (run
+    `9872-51b20f30`'s 17 on-tree flats re-enter dispatch once, come back
+    graded with a premised row, and are excluded honestly from then on)
+    against a lock class that would otherwise survive on every legacy row
+    forever. An absent or empty CURRENT fingerprint refuses for the same
+    reason from the other side: a caller that could read none of the
+    evidence channels has not observed that the question is unchanged, and
+    a gate keyed on nothing observed is the lock again.
     """
     out: set[LedgerKey] = set()
     for k, e in standing.items():
@@ -825,6 +873,8 @@ def flat_standing_unchanged(
         if e.oracle_fp != oracle_fp_now:
             continue
         if not e.convicting:
+            continue
+        if not e.evidence_fp or e.evidence_fp != evidence_now.get(k, ""):
             continue
         if convicting_now.get(k, frozenset()) <= frozenset(e.convicting):
             out.add(k)

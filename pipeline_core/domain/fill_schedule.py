@@ -94,6 +94,7 @@ __all__ = [
     "rebuy_identity",
     "run_blocks",
     "schedule",
+    "unpaid_pair_buys",
 ]
 
 
@@ -465,6 +466,63 @@ def _latest_by_identity(rows: Iterable[RouteLedgerRow]) -> dict[str, list[RouteL
     return out
 
 
+def _unpaid_streak(rows: Iterable[RouteLedgerRow],
+                   match: Callable[[RouteLedgerRow], bool],
+                   oracle_fp: str) -> int:
+    """Graded rows matching `match`, newest first, until one paid.
+
+    The ONE walk behind every "has this spend stopped paying" question, so
+    a second consumer cannot drift from the first about which rows are a
+    judged try. Rows under another oracle are not evidence about this one
+    and are skipped, as the re-buy detector already skips them. Deferred,
+    empty, stopped and reasoning-capped rows opened no judged try and
+    neither count nor interrupt the run.
+    """
+    seen = 0
+    for r in reversed(list(rows)):
+        if r.oracle_fp != oracle_fp or not match(r):
+            continue
+        if r.outcome in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
+                         RunOutcome.STOPPED, RunOutcome.UNMEASURED):
+            continue
+        if r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0:
+            break
+        seen += 1
+    return seen
+
+
+def unpaid_pair_buys(rows: Iterable[RouteLedgerRow], test: str,
+                     oracle_fp: str) -> int:
+    """How many graded PAIR runs aimed at `test` have returned nothing,
+    newest first, stopping at the first that cashed.
+
+    The attribution side's reading of the same evidence the schedule ranks
+    on, and the reason it is keyed on the row's `target_tests` rather than
+    on :func:`_served_key`: a pair's write set is not its hop. The hop that
+    covers a leftover is two cross-file members, while the run the ledger
+    records also carries whatever same-file table slots the crash evidence
+    joined to it, so a key built from the hop's members matches no row the
+    pair ever wrote (live ledger, 2026-09-15: hop `src/error.rs::fmt +
+    src/fmt.rs::debug`, rows targeting all four of `context_backtrace`,
+    `fmt`, `no_backtrace`, `debug`). The test the run aimed at is the same
+    in both, and it is the granularity the question is asked at.
+
+    An empty `oracle_fp` is 0, never a match against rows that also carry
+    none. Unlike :func:`consecutive_unpaid`, whose answer only lowers a
+    route's rank, this one RELEASES a refusal to spend, and `""` is the
+    driver's word for "no oracle is wired" — the same unrecorded-premise
+    convention the flat ledger gate uses, pointing the same way: a caller
+    that could not read the tree's oracle has observed nothing about
+    whether the pair's record describes this tree.
+    """
+    if not oracle_fp:
+        return 0
+    return _unpaid_streak(
+        rows,
+        lambda r: r.kind is RouteKind.PAIR and test in r.target_tests,
+        oracle_fp)
+
+
 def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
                        oracle_fp: str) -> int:
     """How many graded rows this route+targets has run, newest first,
@@ -485,17 +543,7 @@ def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
     count nor interrupt the run.
     """
     key = _served_key(run)
-    seen = 0
-    for r in reversed(list(rows)):
-        if r.oracle_fp != oracle_fp or _served_key_of(r) != key:
-            continue
-        if r.outcome in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
-                         RunOutcome.STOPPED, RunOutcome.UNMEASURED):
-            continue
-        if r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0:
-            break
-        seen += 1
-    return seen
+    return _unpaid_streak(rows, lambda r: _served_key_of(r) == key, oracle_fp)
 
 
 def _rank_of(run: RouteRun, oracle_fp: str,

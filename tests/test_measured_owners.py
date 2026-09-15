@@ -15,7 +15,11 @@ stays silent.
 """
 from __future__ import annotations
 
-from pipeline_core.domain.escalation_lifetime import escalate_to_measured_owners
+from pipeline_core.domain.escalation_lifetime import (
+    escalate_to_measured_owners,
+    withholding_paired_tests,
+)
+from pipeline_core.domain.fill_schedule import DEFAULT_UNPAID_GRACE
 from pipeline_core.domain.models import FnLocator
 
 _ALT = "test_altdebug"
@@ -321,3 +325,62 @@ def test_a_paired_test_does_not_admit_coverage_owners() -> None:
     assert control[spine] == {"t_fmt"}
     assert disp not in control
     assert impl not in control
+
+
+def test_a_paired_test_withholds_only_while_its_pair_has_an_unspent_buy() -> None:
+    """The plan's sentence: a leftover whose hop pair has been bought
+    `DEFAULT_UNPAID_GRACE` times and returned nothing stops withholding its
+    coverage owners; one whose pair has fewer graded buys than that still
+    withholds. Control: the pre-fix behaviour is `unpaid_grace=0`, under
+    which both withhold however long the pair has been failing — the lock,
+    whose release condition is that the leftover stops having a pair.
+    """
+    spent = "t_spent"
+    fresh = "t_fresh"
+    buys = {spent: DEFAULT_UNPAID_GRACE, fresh: DEFAULT_UNPAID_GRACE - 1}
+    got = withholding_paired_tests([spent, fresh], unpaid_buys=buys)
+    assert got == frozenset({fresh})
+
+    control = withholding_paired_tests(
+        [spent, fresh], unpaid_buys=buys, unpaid_grace=0)
+    assert control == frozenset({spent, fresh})
+
+
+def test_a_pair_nobody_has_a_row_for_still_withholds() -> None:
+    """A missing count is not a lapse. A pair with no ledger row has not
+    been bought, so the premise it was given — that it is the paying fill —
+    is untested and stands."""
+    assert withholding_paired_tests(
+        ["t_fmt"], unpaid_buys={}) == frozenset({"t_fmt"})
+    assert withholding_paired_tests(
+        ["t_fmt"], unpaid_buys={"t_fmt": 0}) == frozenset({"t_fmt"})
+
+
+def test_a_lapsed_pair_admits_the_spine_the_unspent_one_withheld() -> None:
+    """The two halves joined, which is the sentence the driver executes:
+    the same owner maps and the same hop admit the coverage spine once the
+    pair's own record refutes it, and admit nothing while it does not. The
+    admission's other clauses are unchanged — the pair's own members are
+    already owned and are not re-admitted either way."""
+    disp = FnLocator("src/d.rs", "fmt")
+    impl = FnLocator("src/i.rs", "debug")
+    spine = FnLocator("src/d.rs", "drop")
+    owners = {"t_fmt": frozenset({disp, impl, spine})}
+    units = {"t_fmt": {disp, impl}}
+    served = {disp, impl}
+
+    def _admit(unpaid: int) -> dict[FnLocator, set[str]]:
+        return escalate_to_measured_owners(
+            owners=owners,
+            units_by_test=units,
+            graded=frozenset(),
+            unable=frozenset(),
+            already_owned=served,
+            served=served,
+            paired_tests=withholding_paired_tests(
+                ["t_fmt"], unpaid_buys={"t_fmt": unpaid}),
+        )
+
+    assert _admit(DEFAULT_UNPAID_GRACE - 1) == {}
+    lapsed = _admit(DEFAULT_UNPAID_GRACE)
+    assert lapsed == {spine: {"t_fmt"}}

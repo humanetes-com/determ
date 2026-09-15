@@ -266,7 +266,8 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
                  retires=None, logs=None, reset_returns=None,
                  localize=None, escalate=None, reverse_map=None,
                  floor=None, enumerate_fns=None, ledger=None, tree_stubs=None,
-                 coverage=None, attribute=None, recorded=None):
+                 coverage=None, attribute=None, recorded=None,
+                 route_rows=None, oracle_fp=None):
     from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
     from pipeline_core.domain.models import ClusterFillResult
 
@@ -337,6 +338,13 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         # red tests the coverage stub reports unmeasured. None keeps the
         # driver consulting no record.
         recorded_entry_sets=recorded,
+        # (project, cluster) -> the route ledger's rows, which the dispatch
+        # side reads to decide whether a hop pair's measured-owners
+        # withholding has been earned. None keeps the pre-lapse behaviour
+        # (every paired leftover withholds), which is what every walk that
+        # does not model the ledger wants.
+        route_ledger_rows=(None if route_rows is None
+                           else (lambda *a, **k: list(route_rows))),
         escalate_to_producers=escalate,
         # The extractor's per-fn records, so a replay can model the
         # landed-change reading. None (the default) is the pre-existing walk
@@ -351,7 +359,15 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
         # for the floor file: pass the SAME dict to two runs to model two
         # processes sharing it. Absent means the ledger is not wired at all,
         # which is the pre-ledger behaviour every other test wants.
-        **({} if ledger is None else {
+        #
+        # Merged into ONE dict rather than unpacked side by side: two `**`
+        # dicts sharing a key is a TypeError at the call, and `oracle_fp`
+        # below is a key both branches can carry (a walk models a constant
+        # identity; the ledger branch wires the real adapter, which wins).
+        **{
+            **({} if oracle_fp is None else {
+                "oracle_fp": lambda *a, **k: oracle_fp}),
+            **({} if ledger is None else {
             "ledger_load": lambda pd, cl: [
                 e for e in ledger.get("rows", []) if e.key.cluster == cl],
             "ledger_append": lambda pd, rows: (
@@ -367,11 +383,13 @@ def _driver_deps(run_cargo, inventory, events, retrigger=None, *,
             # tests are about is the driver reaching the adapters. A test
             # moves the oracle by writing a gen_tests sibling into `src/`.
             "oracle_fp": _oracle_fp_adapter(),
-        }),
-        **({} if floor is None else {
-            "load_tdd_floor": lambda *a, **k: floor.get("row"),
-            "save_tdd_floor": lambda p, c, row: floor.__setitem__("row", row),
-        }),
+            }),
+            **({} if floor is None else {
+                "load_tdd_floor": lambda *a, **k: floor.get("row"),
+                "save_tdd_floor": (
+                    lambda p, c, row: floor.__setitem__("row", row)),
+            }),
+        },
     )
 
 

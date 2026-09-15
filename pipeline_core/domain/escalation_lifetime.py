@@ -34,6 +34,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from pipeline_core.domain.fill_schedule import DEFAULT_UNPAID_GRACE
 from pipeline_core.domain.models import FnLocator
 
 #: Why a fired product was dropped this sweep.
@@ -168,6 +169,53 @@ def escalation_fire_due(
     return FireDecision(due=not unserved, unserved=unserved)
 
 
+def withholding_paired_tests(
+    paired: Collection[str],
+    *,
+    unpaid_buys: Mapping[str, int],
+    unpaid_grace: int = DEFAULT_UNPAID_GRACE,
+) -> frozenset[str]:
+    """Of the leftovers a hop pair covers, the ones that still withhold
+    their coverage owners — those whose pair has an UNSPENT buy.
+
+    ``paired`` is every leftover whose eligible units intersect a
+    cross-file pair's members. Withholding all of them, for as long as the
+    pair exists, is a lock and not a refusal to spend: the release
+    condition is that the leftover stops having a pair, and no fill can
+    cause that — the pair is re-derived from the same attribution every
+    iteration, and a pair that REVERTS keeps its hop. Run
+    `1158170-ce307ee7` (2026-09-15) measured the executed slice of its
+    three leftovers at 29 units and dispatched 3, at both of its
+    iterations, with every call of both fills spent inside the pair's two
+    files and the whole route mix returning wrong bodies.
+
+    So the withholding is earned, not free, and it is earned by the same
+    evidence and the same bound the schedule already uses to lapse a
+    route's exemptions (`DEFAULT_UNPAID_GRACE`, `unpaid_pair_buys`): while
+    the pair has fewer than `unpaid_grace` graded buys that returned
+    nothing under this oracle it is still the paying fill and the coverage
+    spine is the spend that cannot pay — the ordering defect that earned
+    this clause (run `675471-0f3105f2`, 2026-09-10: 26 coverage locators
+    admitted and their never-served per-fn opened before the pair). Past
+    that bound the premise is refuted by the pair's own record and the
+    leftover admits its measured owners. On the live stable ledger the
+    three leftovers stood at 68 unpaid pair buys against a grace of 3.
+
+    A test with no recorded count reads as 0 — a pair nobody has a row for
+    has not been bought, so it keeps the withholding. `unpaid_grace <= 0`
+    disables the lapse and restores the unconditional withholding.
+
+    This does not touch the ORDERING the 675471 complaint was really
+    about: `run_blocks` still waits every non-pair run that shares the
+    pair's leftover tests or members, so an admitted owner's route opens
+    after the pair, not before it.
+    """
+    if unpaid_grace <= 0:
+        return frozenset(paired)
+    return frozenset(
+        t for t in paired if int(unpaid_buys.get(t, 0)) < unpaid_grace)
+
+
 def escalate_to_measured_owners(
     *,
     owners: Mapping[str, Collection[FnLocator]],
@@ -199,13 +247,17 @@ def escalate_to_measured_owners(
     live test or unit name is a parameter.
 
     ``paired_tests`` are leftovers whose attribution already resolved a
-    hop pair (dispatcher plus implementer). Those tests do not admit
-    coverage-spine owners: the pair is the paying fill, and widening
-    after the pair members were served is the spend that cannot pay
-    (run ``675471-0f3105f2``, 2026-09-10: the three format leftovers
-    had a hop pair; measured-owners then admitted 26 coverage locators
-    and the never-served per-fn of those locators opened before the
-    pair). Empty (the default) preserves every existing fire.
+    hop pair (dispatcher plus implementer) AND whose pair still has an
+    unspent buy. Those tests do not admit coverage-spine owners: the pair
+    is the paying fill, and widening after the pair members were served is
+    the spend that cannot pay (run ``675471-0f3105f2``, 2026-09-10: the
+    three format leftovers had a hop pair; measured-owners then admitted
+    26 coverage locators and the never-served per-fn of those locators
+    opened before the pair). The caller earns that set through
+    :func:`withholding_paired_tests`, which drops a leftover once the
+    pair's own ledger rows refute the premise — without the lapse this
+    skip is a permanent lock, since nothing a fill does makes a leftover
+    stop having a pair. Empty (the default) preserves every existing fire.
     """
     served_keys = frozenset(served)
     unable_set = frozenset(unable)

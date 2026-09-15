@@ -112,8 +112,15 @@ from pipeline_core.domain.escalation_lifetime import (
     escalation_fire_due,
     product_addition_keys,
     sustain_escalation_products,
+    withholding_paired_tests,
 )
+from pipeline_core.domain.evidence_premise import evidence_fingerprints
 from pipeline_core.domain.fill_class import FillClassHistogram
+from pipeline_core.domain.fill_schedule import (
+    DEFAULT_UNPAID_GRACE,
+    RouteLedgerRow,
+    unpaid_pair_buys,
+)
 from pipeline_core.domain.flat_score import (
     FlatScoreDecision,
     ScoreReading,
@@ -446,6 +453,26 @@ class PhaseCTddDeps:
     # None means no record is consulted; an unmeasured test then clears
     # the dead set whole (`exempt_recorded_executors`).
     recorded_entry_sets: Callable[..., Mapping[str, frozenset[FnLocator]]] | None = None
+    # (project_dir) -> per-unit text of the retrospectives store's rows about
+    # it, the `retro` channel of the evidence premise
+    # (`domain/evidence_premise`, `adapters/retros.retro_evidence_texts`).
+    # That channel carries both the guidance a prompt may inject and the
+    # cross-fill LAST_ERROR the pair route reads off the same record, so
+    # without it a unit whose stored diagnosis has moved reads as asked the
+    # same question. None drops the channel: the premise then rests on the
+    # file the prompt quotes and the crash excerpt alone, which is the honest
+    # statement of what such a caller can observe.
+    retro_evidence_texts: Callable[..., Mapping[FnLocator, str]] | None = None
+    # (project, cluster) -> the route ledger's rows
+    # (`adapters/route_ledger_store.py`). The dispatch side reads them for
+    # one question the schedule already asks of the same rows: has the hop
+    # pair that covers a leftover been bought and returned nothing under
+    # this oracle (`domain/fill_schedule.unpaid_pair_buys`)? Without it the
+    # measured-owners withholding a pair earns cannot lapse, and a pair
+    # that keeps reverting holds the frontier at its own members for as
+    # long as the attribution keeps deriving it. None drops the lapse: every
+    # paired leftover then withholds, which is the pre-lapse behaviour.
+    route_ledger_rows: Callable[..., Sequence[RouteLedgerRow]] | None = None
     # The original crate's verdict vector for this project, so a FAIL
     # sweep whose remaining failures are all ones the original also fails
     # or skips can close the cluster. Task3 already judges this way; t2a
@@ -4097,6 +4124,42 @@ def run_phase_c_tdd(
                 "improved": improved, "stall": stall,
             })
             break
+        # THE ONLY MOVE LEFT, for every shape of undispatchable. Both
+        # entries below — an empty FRONTIER and an empty BATCH — re-admit
+        # what the loop itself holds exhausted before they consider
+        # stopping, and they share ONE budget: two counters over one store
+        # would let each shape spend the other's, and the store's own
+        # per-record cap would then be the only thing bounding a loop that
+        # has two ways to ask it.
+        def _spend_no_move_readmission(
+            reason: str,
+            # Bound at definition, this iteration's frontier: the helper is
+            # redefined per iteration and must not read the next one's.
+            _frontier: Mapping[FnLocator, Any] = frontier,
+        ) -> tuple[frozenset[FnLocator], list[str]]:
+            """Reopen the held units and the store's verdicts, charge one
+            re-admission, and return `(reopened locators, released store
+            keys)`. `(frozenset(), [])` when the budget is spent or there
+            was nothing to reopen — the caller then has no move left and
+            falls through to the stop."""
+            nonlocal _no_move_readmissions, permanently_exhausted
+            if _no_move_readmissions >= _reset_cap:
+                return frozenset(), []
+            held_now = set(_frontier) & permanently_exhausted
+            released = deps.reset_exhaustion_flags(project_dir, reason)
+            released_locs = {
+                FnLocator(parts[0], parts[1])
+                for parts in (str(k).split("::") for k in released)
+                if len(parts) >= 2}
+            if not (held_now or released):
+                return frozenset(), []
+            _no_move_readmissions += 1
+            reopened = held_now | released_locs
+            permanently_exhausted -= reopened
+            for loc in reopened:
+                refill_attempts.pop(loc, None)
+            return frozenset(reopened), list(released)
+
         if not eligible:
             _no_frontier_streak += 1
             # Nothing dispatchable. This is not "flat" and `max_stalls` never
@@ -4114,22 +4177,12 @@ def run_phase_c_tdd(
             # against. With `max_stalls=0` nothing ends it.
             _held = set(frontier) & permanently_exhausted
             _spin_regime = plateau_exit_disabled(max_stalls)
-            if _spin_regime and _no_move_readmissions < _reset_cap:
-                _disk = deps.reset_exhaustion_flags(
-                    project_dir,
+            if _spin_regime:
+                _reopen, _disk = _spend_no_move_readmission(
                     f"TDD iter {iter_n}: no actionable frontier — no other "
                     f"move (re-admission {_no_move_readmissions + 1}/"
                     f"{_reset_cap})")
-                _disk_locs = {
-                    FnLocator(_parts[0], _parts[1])
-                    for _parts in (str(_k).split("::") for _k in _disk)
-                    if len(_parts) >= 2}
-                if _held or _disk:
-                    _no_move_readmissions += 1
-                    _reopen = _held | _disk_locs
-                    permanently_exhausted -= _reopen
-                    for _loc in _reopen:
-                        refill_attempts.pop(_loc, None)
+                if _reopen:
                     deps.log(
                         f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
                         f"frontier and no other move — re-admitting "
@@ -4209,7 +4262,12 @@ def run_phase_c_tdd(
             # pick it up.)
             _score_grace(iter_n, pass_count)
             continue
-        _no_frontier_streak = 0
+        # The streak is NOT cleared here. A non-empty frontier used to clear
+        # it, which made the terminator above a statement about the frontier
+        # rather than about whether anything was dispatched — and the loop's
+        # own refusals (the flat exclusion, the pass cursor, a route cap) can
+        # empty the BATCH while the frontier still holds units. It is cleared
+        # where a unit is actually dispatched, below `take_batch`.
 
         # The batch is decided BEFORE the guard, and committed after it. Two
         # reasons, both about honesty at the stop: the stop line has to name
@@ -4314,12 +4372,18 @@ def run_phase_c_tdd(
                     f"  {tag} [phase-c/dispatch] product ahead: "
                     f"{len(_product_keys)} escalated addition(s) rank before "
                     "attributed accessors (crash evidence still outranks)")
+        # The tree as the extractor sees it, read ONCE for this dispatch: the
+        # producer ranking below and the evidence premise further down both
+        # want it, and two reads of one tree in one iteration are two chances
+        # to disagree about it.
+        _disp_recs: list[dict[str, Any]] = (
+            (deps.enumerate_fns(target_src_dir) or [])
+            if deps.enumerate_fns is not None else [])
         if (_esc_keys and deps.enumerate_fns is not None
                 and deps.enumerate_types is not None):
-            _pr_recs = deps.enumerate_fns(target_src_dir) or []
             _pr_types = deps.enumerate_types(target_src_dir) or []
             _builders, _callees = producer_dispatch_ranks(
-                _esc_keys, _pr_recs, _pr_types)
+                _esc_keys, _disp_recs, _pr_types)
             _before = [k for k, _ in ordered]
             ordered = promote_producers(ordered, _esc_keys, _builders, _callees)
             if [k for k, _ in ordered] != _before and _builders:
@@ -4350,21 +4414,43 @@ def run_phase_c_tdd(
         _stand = (standing_on_tree(_ledger_entries(), _body_now)
                   if _body_now else latest_by_unit(_ledger_entries()))
         # ...and scoped to the claim's PREMISE, not the bare grade: a FLAT
-        # row licenses exclusion only while the same oracle scores the tree
-        # and no NEW test convicts the unit (`flat_standing_unchanged`).
-        # Keyed on the grade alone the exclusion is a permanent lock,
-        # because dispatch is the only producer of the new body that could
-        # ever clear it.
+        # row licenses exclusion only while the same oracle scores the tree,
+        # no NEW test convicts the unit, AND the unit would be asked the same
+        # question (`flat_standing_unchanged`). Keyed on the grade alone the
+        # exclusion is a permanent lock, because dispatch is the only
+        # producer of the new body that could ever clear it.
         _bare_failed_now = frozenset(bare_test_name(t) for t in cur_failed)
         _convict_now = {
             LedgerKey(_proj, _cl, _u.file, _u.fn_name): frozenset(
                 bare_test_name(t) for t in _ts) & _bare_failed_now
             for _u, _ts in eligible.items()}
+        # WHAT THE UNIT WOULD BE TOLD, computed here and nowhere else. The
+        # three clauses above all describe the world AROUND the unit and on a
+        # stalled tree none of them moves — clause 1 holds BECAUSE the flat
+        # body was kept — so a unit that lands a compiling, non-regressing,
+        # non-paying body is retired by its own success. Run
+        # `837207-ce5b1647` (2026-09-15) excluded `src/fmt.rs::debug` from
+        # iter 2 and `src/error.rs::fmt` from iter 3 and then read
+        # `dispatching 0 of 0 (0/0 this pass)` against `frontier=3 fn(s)` for
+        # three hours until an external TERM. This value is BOTH the
+        # comparison and the stamp the fill's rows carry, so the question
+        # asked and the question recorded cannot drift apart.
+        _evidence_now = {
+            LedgerKey(_proj, _cl, _u.file, _u.fn_name): _fp
+            for _u, _fp in evidence_fingerprints(
+                [k for k, _ in ordered], _disp_recs,
+                retro=(deps.retro_evidence_texts(project_dir)
+                       if deps.retro_evidence_texts is not None else {}),
+                crash=crash_texts).items()}
+        _evidence_of = {
+            (_k.file, _k.fn_name): _fp
+            for _k, _fp in _evidence_now.items()}
         _flat_keys = {
             FnLocator(_k.file, _k.fn_name)
             for _k in flat_standing_unchanged(
                 _stand, oracle_fp_now=_oracle_fp(iter_n),
-                convicting_now=_convict_now)}
+                convicting_now=_convict_now,
+                evidence_now=_evidence_now)}
         _cov = None
         if deps.measure_coverage_slice is not None:
             # The failing set is what pass C profiles: the owner map exists
@@ -4487,9 +4573,34 @@ def run_phase_c_tdd(
             for p in (_attr.pairs or ())
             if p.cross_file
             for loc in p.member_locators())
-        _paired_tests = frozenset(
+        _has_pair = frozenset(
             t for t, us in _units_for_owners.items()
             if us & _pair_locs)
+        # Read per ITERATION, not once at cluster entry: the fill appends
+        # the rows this asks about, so a cluster-entry read would judge
+        # every iteration on the evidence the first one had.
+        _route_rows: Sequence[RouteLedgerRow] = (
+            deps.route_ledger_rows(project_dir.name, cluster.name)
+            if deps.route_ledger_rows is not None and _has_pair else ())
+        # ...and the withholding that buys is EARNED, on the pair's own
+        # record. Withholding for as long as the pair EXISTS is a lock and
+        # not a refusal to spend: the release condition is that the
+        # leftover stops having a pair, and no fill can cause that — the
+        # attribution re-derives the hop every iteration and a pair that
+        # reverts keeps it. Run `1158170-ce307ee7` (2026-09-15) measured
+        # the executed slice of its three leftovers at 29 units, dispatched
+        # 3, and spent both fills' 54 calls inside the pair's two files for
+        # a byte-identical verdict vector. The bound and the evidence are
+        # the schedule's own (`consecutive_unpaid` / `DEFAULT_UNPAID_GRACE`,
+        # which already ranked that pair `grace_spent`), read here per TEST
+        # because a pair's ledger row carries the same-file table slots the
+        # crash evidence joined to its write set and its hop does not.
+        _pair_unpaid = {
+            t: unpaid_pair_buys(_route_rows, t, _oracle_fp(iter_n))
+            for t in _has_pair}
+        _paired_tests = withholding_paired_tests(
+            _has_pair, unpaid_buys=_pair_unpaid)
+        _pair_lapsed = _has_pair - _paired_tests
         # Snapshot before owner-map admission: spine locators the map
         # would add are coverage, not the attributed write.
         _leftover_bare = {bare_test_name(t) for t in cur_failed}
@@ -4499,8 +4610,33 @@ def run_phase_c_tdd(
             deps.log(
                 f"  {tag} [phase-c/dispatch] measured-owners: "
                 f"{len(_paired_tests)} leftover test(s) already have a "
-                "hop-pair transaction — not admitting coverage owners "
-                "those tests execute through; the pair is the fill.")
+                "hop-pair transaction whose buy is unspent — not admitting "
+                "coverage owners those tests execute through; the pair is "
+                "the fill: "
+                + ", ".join(
+                    f"{t} (pair unpaid {_pair_unpaid.get(t, 0)}/"
+                    f"{DEFAULT_UNPAID_GRACE})"
+                    for t in sorted(_paired_tests)[:8]))
+        if _pair_lapsed:
+            deps.log(
+                f"  {tag} [phase-c/dispatch] measured-owners: "
+                f"{len(_pair_lapsed)} leftover test(s) have a hop pair that "
+                "has been bought and returned nothing under this oracle "
+                f"({DEFAULT_UNPAID_GRACE} graded buy(s) is the bound the "
+                "schedule already lapses a route's exemptions on) — the "
+                "withholding lapses and the coverage owners they execute "
+                "through are admissible: "
+                + ", ".join(
+                    f"{t} (pair unpaid {_pair_unpaid.get(t, 0)})"
+                    for t in sorted(_pair_lapsed)[:8]))
+            deps.emit("phase_c.dispatch.pair_withhold_lapsed", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "tests": sorted(_pair_lapsed),
+                "unpaid_buys": {t: _pair_unpaid.get(t, 0)
+                                for t in sorted(_pair_lapsed)},
+                "grace": DEFAULT_UNPAID_GRACE,
+                "still_withholding": sorted(_paired_tests),
+            })
         if _cov is not None and _owners_read:
             _owner_admits = escalate_to_measured_owners(
                 owners={bare_test_name(t): frozenset(
@@ -4715,17 +4851,25 @@ def run_phase_c_tdd(
             # frontier that never held the unit (runs 358833 → 216855,
             # 2026-09-01/02, read `flat` 1–3 with nothing naming the
             # excluded set).
-            _excl_names = sorted(f"{k.file}::{k.fn_name}" for k in _excluded)
+            _excl_fp = {
+                f"{k.file}::{k.fn_name}": _evidence_of.get(
+                    (k.file, k.fn_name), "")
+                for k in _excluded}
+            _excl_names = sorted(_excl_fp)
             deps.log(
                 f"  {tag} [phase-c/dispatch] iter {iter_n}: {len(_excluded)} "
                 "unit(s) EXCLUDED from the batch — standing FLAT under "
                 "evidence unchanged since the grade (same oracle, same body, "
-                "same convicting set); a refusal to spend, not a sink rank: "
-                + ", ".join(_excl_names[:8])
+                "same convicting set, and the same prompt evidence: file, "
+                "retrospective rows, crash excerpt); a refusal to spend, not "
+                "a sink rank: "
+                + ", ".join(f"{n} (evidence {_excl_fp[n]})"
+                            for n in _excl_names[:8])
                 + (f" … (+{len(_excl_names) - 8})" if len(_excl_names) > 8 else ""))
             deps.emit("phase_c.dispatch.flat_excluded", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "units": _excl_names,
+                "evidence_fp": _excl_fp,
                 "remaining": len(ordered),
             })
         if _pass_cohort is None:
@@ -4765,6 +4909,118 @@ def run_phase_c_tdd(
                    "absent from this sweep's frontier (withheld as exhausted, "
                    "or no longer a fill target): " + ", ".join(
                        f"{k.file}::{k.fn_name}" for k in _off[:8])))
+
+        # UNDISPATCHABLE IS A PROPERTY OF THE BATCH, NOT OF THE FRONTIER —
+        # and the terminator above could only see the frontier. Every one of
+        # the loop's own refusals empties the batch while leaving the
+        # frontier populated: the flat exclusion a few lines up, the pass
+        # cursor once a traversal is complete, a route cap. Run
+        # `837207-ce5b1647` (2026-09-15) read `frontier=3 fn(s)` with
+        # `dispatching 0 of 0 (0/0 this pass)` at iterations 3, 4 and 5, so
+        # `if not eligible` never fired, the streak was cleared on every one
+        # of those iterations, and `TDD_NO_FRONTIER_STOP=2` was structurally
+        # unreachable — no `no actionable frontier` line appears anywhere in
+        # the run, which went on re-buying one route for three more hours and
+        # ended on an external TERM rather than on any stop of its own.
+        #
+        # `improved` clears the streak as well as a dispatch does, because a
+        # route that CASHED is progress whatever the batch held: the
+        # condition is "no unit was dispatched and no route cashed", not "the
+        # batch was empty". And the stop cannot cost a reading — it needs two
+        # consecutive iterations that dispatched nothing and moved nothing, a
+        # state in which no verdict can move, so the sweep it would prevent
+        # is a sweep of the same tree under the same evidence.
+        if _batch.keys or improved:
+            _no_frontier_streak = 0
+        else:
+            _no_frontier_streak += 1
+            _held = set(frontier) & permanently_exhausted
+            _spin_regime = plateau_exit_disabled(max_stalls)
+            _empty_why = (
+                f"frontier={len(eligible)} unit(s) but the batch is empty — "
+                f"{len(_flat_keys)} standing FLAT under unchanged evidence, "
+                f"{_batch.attempted_before} already attempted this pass, "
+                f"{len(_held)} held as exhausted")
+            if _spin_regime:
+                _reopen, _disk = _spend_no_move_readmission(
+                    f"TDD iter {iter_n}: nothing dispatched and nothing "
+                    f"cashed — no other move (re-admission "
+                    f"{_no_move_readmissions + 1}/{_reset_cap})")
+                if _reopen:
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: nothing "
+                        f"dispatchable and no other move ({_empty_why}) — "
+                        f"re-admitting {len(_reopen)} unit(s) "
+                        f"({len(_disk)} stored verdict(s)) for one more "
+                        f"attempt ({_no_move_readmissions}/{_reset_cap}; "
+                        f"pass={pass_count}, fail={fail_count}): "
+                        + ", ".join(sorted(
+                            f"{k.file}::{k.fn_name}" for k in _reopen)[:8]))
+                    deps.emit("phase_c.tdd.no_move_readmission", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "held": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _held),
+                        "disk_released": sorted(_disk),
+                        "attempt": _no_move_readmissions,
+                        "cap": _reset_cap,
+                        "why": _empty_why,
+                    })
+                    deps.emit("phase_c.tdd.iter", data={
+                        **_prov,
+                        "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                        "frontier_size": len(eligible),
+                        "kind": "no_batch_readmit",
+                        "pass_count": pass_count, "fail_count": fail_count,
+                        "improved": improved, "stall": stall,
+                    })
+                    _score_grace(iter_n, pass_count)
+                    continue
+            if (_spin_regime and _no_frontier_stop_after > 0
+                    and _no_frontier_streak >= _no_frontier_stop_after):
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: NO_FRONTIER_STOP — "
+                    f"{_no_frontier_streak} consecutive iteration(s) "
+                    f"dispatched no unit and cashed nothing ({_empty_why}; "
+                    f"{fail_count} test(s) still failing) and the "
+                    "no-other-move re-admission budget is spent "
+                    f"({_no_move_readmissions}/{_reset_cap}). Reading "
+                    f"pass={pass_count} fail={fail_count}. Stopping the RUN "
+                    f"instead of spinning to the {_tdd_backstop}-iteration "
+                    "backstop. Nothing is convicted and every fill is on "
+                    "disk — `bash continue.sh` resumes here; "
+                    "TDD_NO_FRONTIER_STOP=0 disables this stop.")
+                _log_attribution_gap(deps, tag, iter_n, fail_count,
+                                     cur_failed, len(frontier), kind)
+                deps.emit("phase_c.tdd.no_frontier_stop", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "frontier_size": len(frontier),
+                    "held_exhausted": len(_held),
+                    "streak": _no_frontier_streak,
+                    "readmissions": _no_move_readmissions,
+                    "cap": _reset_cap,
+                    "why": _empty_why,
+                })
+                deps.emit("phase_c.tdd.iter", data={
+                    **_prov,
+                    "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                    "frontier_size": len(eligible),
+                    "kind": "no_batch_stop",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                request_graceful_stop()
+                break
+            # Not in the spin regime, or the stop is disabled: the routes
+            # below may still have work the batch does not express (a pair,
+            # a slice session), so this falls through to the fill rather
+            # than re-running a cached sweep. The streak stands, so a
+            # second such iteration reaches the stop above.
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: no unit dispatched "
+                f"and nothing cashed ({_empty_why}); streak "
+                f"{_no_frontier_streak}/{_no_frontier_stop_after or 0} — "
+                "the fill's routes still run.")
 
         # GPU protector, half 2 of 2 — the only thing below this line that costs
         # GPU is the dispatch, and this reading says the last one bought nothing
@@ -5210,6 +5466,7 @@ def run_phase_c_tdd(
             _iter: int = iter_n,
             _rows: list[LedgerEntry] = _ledger_rows,
             _written: dict[FnLocator, str] = _wave_written,
+            _evidence: Mapping[tuple[str, str], str] = _evidence_of,
         ) -> int:
             if (deps.ledger_append is None or deps.enumerate_fns is None
                     or _before is None):
@@ -5232,7 +5489,8 @@ def run_phase_c_tdd(
                             frozenset(bare_test_name(t)
                                       for t in _elig.get(k, ()))
                             & bare_failed_w)
-                        for k in landed_now})
+                        for k in landed_now},
+                    evidence_of=_evidence)
                 fresh = [r for r in rows_w
                          if _written.get(FnLocator(r.key.file, r.key.fn_name))
                          != r.body_sha]
@@ -5568,7 +5826,7 @@ def run_phase_c_tdd(
                     state=BodyState.LANDED, items=_items, file_of=_file_of,
                     file_fp=_fps, run_id=deps.run_id, iteration=iter_n,
                     epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n),
-                    convicting_of=_convicting_of)
+                    convicting_of=_convicting_of, evidence_of=_evidence_of)
                 # A row the wave writer already appended for this exact body
                 # is not written twice; a body a later wave moved again is a
                 # new row, as it should be.
@@ -5604,7 +5862,7 @@ def run_phase_c_tdd(
                     file_of=_file_of, file_fp=_fps, run_id=deps.run_id,
                     iteration=iter_n, epoch=_destruction_epoch,
                     oracle_fp=_oracle_fp(iter_n),
-                    convicting_of=_convicting_of)
+                    convicting_of=_convicting_of, evidence_of=_evidence_of)
                 if _flat_rows:
                     deps.ledger_append(project_dir, _flat_rows)
                     if _ledger_cache is not None:

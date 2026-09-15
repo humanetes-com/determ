@@ -12,8 +12,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.evidence_premise import retro_evidence_text
 from pipeline_core.domain.identity import RetroKey
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.pair_fill import locators_from_scope
 from pipeline_core.domain.retro_gate import FUTILITY_SUSPENDED, cleared_blockers
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.workspace_layout import PHASE_C_LOGS_DIR
@@ -23,8 +25,8 @@ __all__ = [
     "canon_container", "futile_suspension_keys", "is_fn_fully_exhausted",
     "load_retrospectives", "migrate_absolute_gate_retros",
     "migrate_confounded_retros", "reset_exhaustion_flags",
-    "retire_unblocked_convictions", "retro_key", "retrospectives_path",
-    "save_retrospectives", "suspend_futile_guidance",
+    "retire_unblocked_convictions", "retro_evidence_texts", "retro_key",
+    "retrospectives_path", "save_retrospectives", "suspend_futile_guidance",
 ]
 
 
@@ -309,6 +311,37 @@ def release_escalated_convictions(
     if not wanted:
         return []
     return reset_exhaustion_flags(project_dir, reason, only=wanted)
+
+
+def retro_evidence_texts(project_dir: Path) -> dict[FnLocator, str]:
+    """Per unit, the store's rows about it, as text a fingerprint can digest.
+
+    The `retro` channel of `domain/evidence_premise`: the rows that feed
+    `RETROSPECTIVE_GUIDANCE` and — on a pair record — the next fill's
+    `LAST_ERROR` (`last_compile_error` / `last_error_preview` /
+    `last_failed_body`, which `impl_fill` reads off this same record).
+
+    A row reaches a unit two ways, and both are read off the row itself
+    rather than off its key's shape. Its KEY is `file::fn::container`, so
+    the first two segments name the unit. And a JOINT row — the pair
+    route's, whose key is `<file>::*pair*::<dispatcher>+<implementer>` —
+    names its members in `joint_members`, so the pair's accumulated
+    diagnosis reaches `src/error.rs::fmt` and `src/fmt.rs::debug`
+    themselves instead of being filed under a `*pair*` unit no locator ever
+    equals. Nothing here parses the container.
+    """
+    store = load_retrospectives(project_dir)
+    by_unit: dict[FnLocator, dict[str, Any]] = {}
+    for key, rec in store.items():
+        parts = str(key).split("::")
+        units: set[FnLocator] = set()
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            units.add(FnLocator(parts[0], parts[1]))
+        if isinstance(rec, dict):
+            units |= locators_from_scope(rec.get("joint_members") or ())
+        for unit in units:
+            by_unit.setdefault(unit, {})[str(key)] = rec
+    return {unit: retro_evidence_text(rows) for unit, rows in by_unit.items()}
 
 
 def suspend_futile_guidance(

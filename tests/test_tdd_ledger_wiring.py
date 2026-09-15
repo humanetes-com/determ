@@ -74,6 +74,18 @@ def _tree(tmp_path: Path, layout: str = _LAYOUT) -> Path:
     return tmp_path / "src"
 
 
+def _records(src: Path) -> list[dict[str, Any]]:
+    """The extractor's per-fn records for the tree, the way the driver's
+    `enumerate_fns` dep returns them. One definition, because the evidence
+    premise is computed FROM these and a test that builds its own copy would
+    be pinning its copy."""
+    text = (src / "a.rs").read_text(encoding="utf-8")
+    return [{"file": "src/a.rs", "fn_name": name,
+             "sig_text": f"    pub fn {name}(&self) -> usize",
+             "body_text": body, "container": "impl Own"}
+            for name, body in _FN.findall(text)]
+
+
 def _oracle(tmp_path: Path) -> str:
     """The oracle of the test tree as it stands, through the REAL adapter —
     the same call the driver's dep makes (`_driver_deps` wires it)."""
@@ -100,7 +112,9 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
          stubbed: bool = True, layout: str = _LAYOUT,
          dispatched_fns: tuple[tuple[str, str], ...] | None = None,
          answer_lost_fns: tuple[tuple[str, str], ...] = (),
-         fill_write: Any = None, fill_hook: Any = None) -> None:
+         fill_write: Any = None, fill_hook: Any = None,
+         env: dict[str, str] | None = None,
+         reset_returns: list[str] | None = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
@@ -111,17 +125,15 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
     # wording, so pin them off here rather than read the live file.
     monkeypatch.setenv("TDD_FILL_PHASE_MAX_MINUTES", "0")
     monkeypatch.setenv("SLICE_SESSION_MAX_PER_FILL", "0")
+    for _k, _v in (env or {}).items():
+        monkeypatch.setenv(_k, _v)
     src = tmp_path / "src"
 
     def _cargo(*_a: Any, **_k: Any) -> tuple[int, str]:
         return 101, _SWEEP
 
     def _enumerate(_src: Any, **_kw: Any) -> list[dict[str, Any]]:
-        text = (src / "a.rs").read_text(encoding="utf-8")
-        return [{"file": "src/a.rs", "fn_name": name,
-                 "sig_text": f"    pub fn {name}(&self) -> usize",
-                 "body_text": body, "container": "impl Own"}
-                for name, body in _FN.findall(text)]
+        return _records(src)
 
     def _fill(**_kw: Any):
         from pipeline_core.domain.models import ClusterFillResult
@@ -147,6 +159,7 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
             events, None, frontier={_UNIT: {"t2"}}, logs=logs, fill=_fill,
             stubs=stubs, tree_stubs=stubs,
             reverse_map={"t2": {_UNIT}}, escalate=escalate,
+            reset_returns=reset_returns,
             enumerate_fns=_enumerate, ledger=ledger),
         project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
         cluster_tests=[("tests/t.rs", "fn t1() {}")], module="m",
@@ -727,6 +740,21 @@ def test_an_escalated_unit_whose_every_reply_was_capped_is_not_graded_flat(
     assert any("every reply capped" in ln for ln in logs)
 
 
+def _flat_row(tmp_path: Path, *, evidence_fp: str = "",
+              convicting: tuple[str, ...] = ("t2",)) -> LedgerEntry:
+    return replace(_proven_row(tmp_path), state=BodyState.FLAT,
+                   convicting=convicting, iteration=1,
+                   evidence_fp=evidence_fp)
+
+
+def _live_evidence(tmp_path: Path) -> str:
+    """The premise the driver will compute for `src/a.rs::depth` on this
+    tree, through the same domain function and the same records dep."""
+    from pipeline_core.domain.evidence_premise import evidence_fingerprints
+    return evidence_fingerprints(
+        [_UNIT], _records(tmp_path / "src"))[_UNIT]
+
+
 def test_the_flat_exclusion_is_logged_and_emitted_with_the_units_it_refuses(
         monkeypatch, tmp_path: Path) -> None:
     """A FLAT row whose premise still holds excludes its unit from the batch
@@ -734,13 +762,15 @@ def test_the_flat_exclusion_is_logged_and_emitted_with_the_units_it_refuses(
     `358833` → `216855` (2026-09-01/02) the only trace was a smaller `flat`
     count on the service-order line, which cannot be told from a frontier
     that never held the unit. The plan's sentence: the sweep names the
-    excluded units on its own line and in `phase_c.dispatch.flat_excluded`.
-    The negative control is the same row with its premise erased
-    (`convicting=()`), which the domain refuses to exclude — no line, no
-    event, and the unit is dispatched."""
+    excluded units on its own line and in `phase_c.dispatch.flat_excluded`,
+    with the evidence identity it refused on.
+
+    Two negative controls, each a premise the domain will not lock on: the
+    row with its convicting premise erased, and the row with no evidence
+    premise at all (every row written before that field existed). Both are
+    dispatched."""
     _tree(tmp_path, layout=_LAYOUT_TWO)
-    row = replace(_proven_row(tmp_path), state=BodyState.FLAT,
-                  convicting=("t2",), iteration=1)
+    row = _flat_row(tmp_path, evidence_fp=_live_evidence(tmp_path))
     events: list[tuple[str, dict]] = []
     logs: list[str] = []
     dispatched: list[str] = []
@@ -752,21 +782,177 @@ def test_the_flat_exclusion_is_logged_and_emitted_with_the_units_it_refuses(
     excl = [d for ev, d in events if ev == "phase_c.dispatch.flat_excluded"]
     assert excl and excl[0]["units"] == ["src/a.rs::depth"]
     assert excl[0]["remaining"] == 0
+    assert excl[0]["evidence_fp"] == {"src/a.rs::depth": row.evidence_fp}
 
+    for label, erased in (
+            ("convicting", _flat_row(tmp_path, convicting=(),
+                                     evidence_fp=_live_evidence(tmp_path))),
+            ("evidence", _flat_row(tmp_path))):
+        control = tmp_path / f"control_{label}"
+        (control / "src").mkdir(parents=True)
+        _tree(control, layout=_LAYOUT_TWO)
+        erased = replace(erased, key=replace(erased.key, project=control.name),
+                         oracle_fp=_oracle(control),
+                         layout_fp=authored_layout_fp(
+                             (control / ".skeleton" / "stable" / "src"
+                              / "a.rs").read_text(encoding="utf-8")))
+        c_events: list[tuple[str, dict]] = []
+        c_logs: list[str] = []
+        c_dispatched: list[str] = []
+        _run(monkeypatch, control, ledger={"rows": [erased]},
+             events=c_events, logs=c_logs, stubbed=False,
+             layout=_LAYOUT_TWO, max_stalls="2",
+             fill_write=lambda _src, _seen=c_dispatched: _seen.append("fill"))
+        assert not any("EXCLUDED from the batch" in ln for ln in c_logs), label
+        assert not any(ev == "phase_c.dispatch.flat_excluded"
+                       for ev, _ in c_events), label
+        assert c_dispatched, f"an erased {label} premise re-enters dispatch"
+
+
+def test_a_flat_unit_re_enters_when_the_evidence_its_prompt_carries_moves(
+        monkeypatch, tmp_path: Path) -> None:
+    """THE LOCK, AND ITS RELEASE, THROUGH THE DRIVER. `src/a.rs::depth` is
+    graded flat on the body the loop KEPT, so nothing about the body, the
+    oracle or the convicting set can ever move — and run
+    `837207-ce5b1647` (2026-09-15) shows where that ends: three units
+    excluded, `dispatching 0 of 0 (0/0 this pass)` against `frontier=3
+    fn(s)`, three hours of one re-bought route and an external TERM.
+
+    Here the row's evidence premise is taken on the tree as it stood at the
+    grade, and then a SIBLING (`width`) lands a body — which is what the
+    loop kept doing all night: `src/error.rs` gained `context` and `fmt`
+    between the dispatch that graded `fmt` and the iteration that excluded
+    it. The unit's next prompt quotes that file, so it is a different
+    question and is asked once. The control is the same run with the
+    sibling untouched, which stays excluded."""
+    _tree(tmp_path, layout=_LAYOUT_TWO)
+    at_grade = _live_evidence(tmp_path)
+    # The sibling lands a body: the file the prompt quotes has moved.
+    (tmp_path / "src" / "a.rs").write_text(
+        _LAYOUT_TWO.replace("self.ptr * 2", "self.ptr + self.ptr"),
+        encoding="utf-8")
+    assert _live_evidence(tmp_path) != at_grade, (
+        "the premise must see a sibling body land")
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    dispatched: list[str] = []
+    _run(monkeypatch, tmp_path,
+         ledger={"rows": [_flat_row(tmp_path, evidence_fp=at_grade)]},
+         events=events, logs=logs, stubbed=False, layout=_LAYOUT_TWO,
+         max_stalls="2", fill_write=lambda _src: dispatched.append("fill"))
+    assert not any("EXCLUDED from the batch" in ln for ln in logs), logs[-8:]
+    assert not any(ev == "phase_c.dispatch.flat_excluded" for ev, _ in events)
+    assert dispatched, "a changed question is asked once"
+
+    # CONTROL — the identical row on a tree whose sibling did NOT move.
     control = tmp_path / "control"
     (control / "src").mkdir(parents=True)
     _tree(control, layout=_LAYOUT_TWO)
-    erased = replace(_proven_row(control), state=BodyState.FLAT,
-                     convicting=(), iteration=1)
+    held = replace(_flat_row(control, evidence_fp=_live_evidence(control)),
+                   key=replace(_proven_row(control).key))
     c_events: list[tuple[str, dict]] = []
     c_logs: list[str] = []
-    c_dispatched: list[str] = []
-    _run(monkeypatch, control, ledger={"rows": [erased]}, events=c_events,
-         logs=c_logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="2",
-         fill_write=lambda _src: c_dispatched.append("fill"))
-    assert not any("EXCLUDED from the batch" in ln for ln in c_logs)
-    assert not any(ev == "phase_c.dispatch.flat_excluded" for ev, _ in c_events)
-    assert c_dispatched, "an erased premise re-enters dispatch"
+    _run(monkeypatch, control, ledger={"rows": [held]}, events=c_events,
+         logs=c_logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="2")
+    assert any("EXCLUDED from the batch" in ln for ln in c_logs), c_logs[-8:]
+
+
+def test_an_iteration_that_dispatches_nothing_charges_the_frontier_stop(
+        monkeypatch, tmp_path: Path) -> None:
+    """PART 2 — the terminator keyed on the FRONTIER and the loop's own
+    refusals empty the BATCH. `TDD_NO_FRONTIER_STOP` is active precisely
+    because `TDD_MAX_STALLS=0`, and on run `837207-ce5b1647` (2026-09-15)
+    iterations 3, 4 and 5 each dispatched nothing — `dispatching 0 of 0
+    (0/0 this pass)` against `frontier=3 fn(s)` — and it never fired: no
+    `no actionable frontier` line appears anywhere in the run, which went
+    on for three more hours and ended on an external TERM.
+
+    Here the flat exclusion empties the batch while the frontier still
+    holds its unit. The stop charges on "no unit dispatched and nothing
+    cashed" and ends the run under its own name, with the cluster left
+    resumable.
+
+    THE NEGATIVE CONTROL IS IN THE STOP'S OWN EVENT: `frontier_size` on
+    the stopping iteration is non-zero, so the pre-fix guard (`if not
+    eligible`) was false on it and cleared the streak instead of charging
+    it — which is exactly what the run recorded. And the second control
+    below is a dispatchable unit: the streak never charges, the stop never
+    fires, and the run walks to its backstop."""
+    _tree(tmp_path, layout=_LAYOUT_TWO)
+    row = _flat_row(tmp_path, evidence_fp=_live_evidence(tmp_path))
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, ledger={"rows": [row]}, events=events,
+         logs=logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="0",
+         env={"TDD_NO_FRONTIER_STOP": "1", "PHASE_C_TDD_BACKSTOP": "8"})
+    stop = [d for ev, d in events if ev == "phase_c.tdd.no_frontier_stop"]
+    assert stop, logs[-10:]
+    assert stop[0]["frontier_size"] >= 1, (
+        "the pre-fix guard keyed on an EMPTY frontier and this one is not")
+    assert "standing FLAT under unchanged evidence" in stop[0]["why"]
+    line = [ln for ln in logs if "NO_FRONTIER_STOP" in ln]
+    assert line and "dispatched no unit and cashed nothing" in line[0]
+    kinds = [d.get("kind") for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert "no_batch_stop" in kinds and "stall_exit" not in kinds
+
+    # CONTROL — the same run with the premise erased, so the unit is
+    # dispatchable every iteration: nothing charges and the stop is silent.
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control, layout=_LAYOUT_TWO)
+    c_events: list[tuple[str, dict]] = []
+    c_logs: list[str] = []
+    _run(monkeypatch, control, ledger={"rows": []}, events=c_events,
+         logs=c_logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="0",
+         env={"TDD_NO_FRONTIER_STOP": "1", "PHASE_C_TDD_BACKSTOP": "3"})
+    assert not any(ev == "phase_c.tdd.no_frontier_stop" for ev, _ in c_events)
+
+
+def test_an_empty_batch_spends_the_readmission_budget_before_it_stops(
+        monkeypatch, tmp_path: Path) -> None:
+    """THE ONLY MOVE LEFT, shared by both shapes of undispatchable. The
+    empty-frontier terminator spends the re-admission budget before it
+    stops — "first the only move left, then stop under a name" — and the
+    empty-batch entry goes through the SAME helper and the SAME counter:
+    two counters over one store would let each shape spend the other's.
+
+    Here the disk store releases a verdict, so the first undispatchable
+    iteration re-admits and continues instead of stopping, and the stop
+    arrives only once the budget is gone. The control is the same run with
+    nothing to release, where the first charge goes straight to the stop."""
+    _tree(tmp_path, layout=_LAYOUT_TWO)
+    row = _flat_row(tmp_path, evidence_fp=_live_evidence(tmp_path))
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, ledger={"rows": [row]}, events=events,
+         logs=logs, stubbed=False, layout=_LAYOUT_TWO, max_stalls="0",
+         reset_returns=["src/a.rs::depth::impl Own"],
+         env={"TDD_NO_FRONTIER_STOP": "1", "PHASE_C_TDD_BACKSTOP": "8",
+              "RETRO_RESET_MAX_ATTEMPTS": "2"})
+    kinds = [d.get("kind") for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert kinds.count("no_batch_readmit") == 2, kinds
+    assert "no_batch_stop" in kinds
+    assert kinds.index("no_batch_readmit") < kinds.index("no_batch_stop")
+    readmits = [d for ev, d in events
+                if ev == "phase_c.tdd.no_move_readmission"]
+    assert [d["attempt"] for d in readmits] == [1, 2], readmits
+    assert all("the batch is empty" in d["why"] for d in readmits)
+    assert any("nothing dispatchable and no other move" in ln for ln in logs)
+
+    # CONTROL — nothing to release: the first charge reaches the stop with
+    # the budget still unspent, and no re-admission is recorded.
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    _tree(control, layout=_LAYOUT_TWO)
+    held = _flat_row(control, evidence_fp=_live_evidence(control))
+    c_events: list[tuple[str, dict]] = []
+    _run(monkeypatch, control, ledger={"rows": [held]}, events=c_events,
+         logs=[], stubbed=False, layout=_LAYOUT_TWO, max_stalls="0",
+         env={"TDD_NO_FRONTIER_STOP": "1", "PHASE_C_TDD_BACKSTOP": "8"})
+    assert not any(ev == "phase_c.tdd.no_move_readmission"
+                   for ev, _ in c_events)
+    stop = [d for ev, d in c_events if ev == "phase_c.tdd.no_frontier_stop"]
+    assert stop and stop[0]["readmissions"] == 0
 
 
 def _filled_layout() -> str:

@@ -249,6 +249,9 @@ from pipeline_core.adapters.retros import (
     retire_unblocked_convictions as _retire_unblocked_convictions,
 )
 from pipeline_core.adapters.retros import (
+    retro_evidence_texts as _retro_evidence_texts,
+)
+from pipeline_core.adapters.retros import (
     retro_key as _retros_key,
 )
 from pipeline_core.adapters.retros import (
@@ -2606,6 +2609,16 @@ def build_app(
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
             measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
             recorded_entry_sets=_recorded_entry_sets_for,
+            # The `retro` channel of the evidence premise: what the store
+            # holds about each unit, which is both the guidance a prompt may
+            # inject and the cross-fill LAST_ERROR the pair route reads off
+            # the same record.
+            retro_evidence_texts=_retro_evidence_texts,
+            # The same rows the fill schedule ranks on, read at dispatch for
+            # one question: has the hop pair covering a leftover been bought
+            # and returned nothing under this oracle? Without it the
+            # measured-owners withholding a pair earns never lapses.
+            route_ledger_rows=fill_roles.route_ledger.load,
             reference_measurement=_reference,
         ),
         impl_fill_deps=ImplFillDeps(
