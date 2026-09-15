@@ -1,0 +1,1881 @@
+
+running 3 tests
+test fmt::gen_tests_3::no_digits ... ok
+test fmt::gen_tests_3::one_digit ... ok
+test fmt::gen_tests_3::two_digits ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test behaviour_probe_nightly_exact_format_0 ... FAILED
+test behaviour_probe_nightly_identity_0 ... FAILED
+
+failures:
+
+---- behaviour_probe_nightly_exact_format_0 stdout ----
+
+thread 'behaviour_probe_nightly_exact_format_0' (344789) panicked at src/nightly.rs:35:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- behaviour_probe_nightly_identity_0 stdout ----
+
+thread 'behaviour_probe_nightly_identity_0' (344790) panicked at src/nightly.rs:35:5:
+not implemented
+
+
+failures:
+    behaviour_probe_nightly_exact_format_0
+    behaviour_probe_nightly_identity_0
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test ui ... FAILED
+
+failures:
+
+---- ui stdout ----
+
+thread 'ui' (344793) panicked at /home/dev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trybuild-1.0.121/src/run.rs:63:13:
+tests failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 10 tests
+test option_context_none_returns_error_with_message ... 
+thread 'option_context_none_returns_error_with_message' (345034) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'option_context_none_returns_error_with_message' (345034) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 3 tests
+test context_error_provide_exercised ... 
+thread 'context_error_provide_exercised' (345041) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'context_error_provide_exercised' (345041) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 8 tests
+test option_context_none_returns_error_with_message_and_no_source ... 
+thread 'option_context_none_returns_error_with_message_and_no_source' (345054) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'option_context_none_returns_error_with_message_and_no_source' (345054) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test test_ensure_not_both_debug_dispatch ... 
+thread 'test_ensure_not_both_debug_dispatch' (345068) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_ensure_not_both_debug_dispatch' (345068) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+test test_anyhow_literal_hits_display_path ... 
+thread 'test_anyhow_literal_hits_display_path' (345083) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_anyhow_literal_hits_display_path' (345083) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 3 tests
+test test_from_boxed_creates_error_with_correct_display ... 
+thread 'test_from_boxed_creates_error_with_correct_display' (345091) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_from_boxed_creates_error_with_correct_display' (345091) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 4 tests
+test test_debug_format_deep_chain_hits_error_impl_debug_path ... 
+thread 'test_debug_format_deep_chain_hits_error_impl_debug_path' (345101) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_debug_format_deep_chain_hits_error_impl_debug_path' (345101) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 8 tests
+test test_deref_mut_ema_coercion ... 
+thread 'test_deref_mut_ema_coercion' (345112) panicked at src/error.rs:779:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_deref_mut_ema_coercion' (345112) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test test_debug_backtrace_captured_simple_egma ... 
+thread 'test_debug_backtrace_captured_simple_egma' (345126) panicked at src/error.rs:669:5:
+not implemented
+stack backtrace:
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+thread 'test_debug_backtrace_captured_simple_egma' (345126) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+test test_anyhow_interpolated_creates_string_error_via_format_err_else ... 
+thread 'test_anyhow_interpolated_creates_string_error_via_format_err_else' (345140) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_anyhow_interpolated_creates_string_error_via_format_err_else' (345140) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test test_example ... ok
+test test_own_clone_is_independent_copy ... ok
+test test_own_clone_preserves_pointer ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test test_example ... ok
+test test_mut_clone_preserves_pointer ... ok
+test test_own_clone_identity ... ok
+test test_ref_clone_preserves_pointer ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test test_ref_unwind_safe ... ok
+test test_send ... ok
+test test_sync ... ok
+test test_unpin ... ok
+test test_unwind_safe ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test test_backtrace ... FAILED
+
+failures:
+
+---- test_backtrace stdout ----
+
+thread 'test_backtrace' (345168) panicked at src/error.rs:660:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_backtrace
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test test_boxed_anyhow ... 
+thread 'test_boxed_anyhow' (345170) panicked at src/error.rs:850:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_boxed_anyhow' (345170) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 5 tests
+test test_clone ... 
+thread 'test_clone' (345178) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_clone' (345178) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 8 tests
+test test_downcast_high ... FAILED
+test test_downcast_low ... FAILED
+test test_downcast_mid ... FAILED
+test test_downcast_mut ... FAILED
+test test_downcast_ref ... FAILED
+test test_inference ... ok
+test test_root_cause ... FAILED
+test test_unsuccessful_downcast ... FAILED
+
+failures:
+
+---- test_downcast_high stdout ----
+
+thread 'test_downcast_high' (345190) panicked at src/nightly.rs:35:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_downcast_low stdout ----
+
+thread 'test_downcast_low' (345191) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_downcast_mid stdout ----
+
+thread 'test_downcast_mid' (345192) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_downcast_mut stdout ----
+
+thread 'test_downcast_mut' (345193) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_downcast_ref stdout ----
+
+thread 'test_downcast_ref' (345194) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_root_cause stdout ----
+
+thread 'test_root_cause' (345196) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_unsuccessful_downcast stdout ----
+
+thread 'test_unsuccessful_downcast' (345197) panicked at src/nightly.rs:35:5:
+not implemented
+
+
+failures:
+    test_downcast_high
+    test_downcast_low
+    test_downcast_mid
+    test_downcast_mut
+    test_downcast_ref
+    test_root_cause
+    test_unsuccessful_downcast
+
+test result: FAILED. 1 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test test_convert ... FAILED
+test test_convert_send ... FAILED
+test test_convert_send_sync ... FAILED
+test test_question_mark ... ok
+
+failures:
+
+---- test_convert stdout ----
+
+thread 'test_convert' (345201) panicked at src/nightly.rs:35:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_convert_send stdout ----
+
+thread 'test_convert_send' (345202) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_convert_send_sync stdout ----
+
+thread 'test_convert_send_sync' (345203) panicked at src/nightly.rs:35:5:
+not implemented
+
+
+failures:
+    test_convert
+    test_convert_send
+    test_convert_send_sync
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+test test_as_ref ... FAILED
+test test_downcast ... 
+running 18 tests
+test test_as ... 
+thread 'test_as' (345214) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_as' (345214) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test test_altdebug ... FAILED
+test test_altdisplay ... FAILED
+test test_debug ... FAILED
+test test_display ... FAILED
+
+failures:
+
+---- test_altdebug stdout ----
+
+thread 'test_altdebug' (345226) panicked at src/nightly.rs:35:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_altdisplay stdout ----
+
+thread 'test_altdisplay' (345229) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_debug stdout ----
+
+thread 'test_debug' (345230) panicked at src/nightly.rs:35:5:
+not implemented
+
+---- test_display stdout ----
+
+thread 'test_display' (345231) panicked at src/nightly.rs:35:5:
+not implemented
+
+
+failures:
+    test_altdebug
+    test_altdisplay
+    test_debug
+    test_display
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test test_brace_escape ... 
+thread 'test_brace_escape' (345233) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_brace_escape' (345233) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 4 tests
+test test_autotraits ... ok
+test test_drop ... FAILED
+test test_error_size ... ok
+test test_null_pointer_optimization ... ok
+
+failures:
+
+---- test_drop stdout ----
+
+thread 'test_drop' (345242) panicked at src/nightly.rs:35:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_drop
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test test_anyhow_from_anyhow ... 
+thread 'test_anyhow_from_anyhow' (345249) panicked at src/error.rs:850:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_anyhow_from_anyhow' (345249) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test boxed_error_provide_is_called_via_backtrace ... 
+thread 'boxed_error_provide_is_called_via_backtrace' (345262) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'boxed_error_provide_is_called_via_backtrace' (345262) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 4 tests
+test boxed_error_debug_via_from_boxed ... 
+thread 'boxed_error_debug_via_from_boxed' (345270) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'boxed_error_debug_via_from_boxed' (345270) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 4 tests
+test test_boxed_error_display_delegates ... 
+thread 'test_boxed_error_display_delegates' (345281) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_boxed_error_display_delegates' (345281) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 3 tests
+test test_boxed_error_source_none_under_nightly ... 
+thread 'test_boxed_error_source_none_under_nightly' (345291) panicked at src/error.rs:669:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'test_boxed_error_source_none_under_nightly' (345291) panicked at src/error.rs:660:5:
+not implemented
+stack backtrace:
+
+running 26 tests
+test src/context.rs - context::Option<T> (line 60) ... ok
+test src/error.rs - error::Error::chain (line 371) ... ok
+test src/error.rs - error::Error::context (line 265) ... ok
+test src/error.rs - error::Error::downcast_ref (line 444) ... FAILED
+test src/error.rs - error::Error::from_boxed (line 93) ... ok
+test src/error.rs - error::Error::into_boxed_dyn_error (line 520) ... ok
+test src/error.rs - error::Error::msg (line 50) ... ok
+test src/error.rs - error::Error::reallocate_into_boxed_dyn_error_without_backtrace (line 557) ... ok
+test src/lib.rs - (line 152) ... ok
+test src/lib.rs - (line 170) ... ok
+test src/lib.rs - (line 182) ... ok
+test src/lib.rs - (line 23) ... ok
+test src/lib.rs - (line 55) ... ok
+test src/lib.rs - (line 99) ... FAILED
+test src/lib.rs - Chain (line 383) ... ok
+test src/lib.rs - Context (line 460) ... ok
+test src/lib.rs - Context (line 524) ... FAILED
+test src/lib.rs - Context (line 564) ... FAILED
+test src/lib.rs - Error (line 355) ... ok
+test src/lib.rs - Result (line 409) ... ok
+test src/lib.rs - Result (line 423) ... ok
+test src/macros.rs - macros::anyhow (line 133) ... ok
+test src/macros.rs - macros::bail (line 14) ... ok
+test src/macros.rs - macros::bail (line 32) ... ok
+test src/macros.rs - macros::ensure (line 117) ... ok
+test src/macros.rs - macros::ensure (line 128) ... ok
+
+failures:
+
+---- src/error.rs - error::Error::downcast_ref (line 444) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (345418) panicked at src/error.rs:660:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- src/lib.rs - (line 99) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (345701) panicked at src/error.rs:660:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- src/lib.rs - Context (line 524) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (345785) panicked at src/nightly.rs:35:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- src/lib.rs - Context (line 564) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (345813) panicked at src/error.rs:660:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    src/error.rs - error::Error::downcast_ref (line 444)
+    src/lib.rs - (line 99)
+    src/lib.rs - Context (line 524)
+    src/lib.rs - Context (line 564)
+
+test result: FAILED. 22 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+
+--- stderr ---
+     Running unittests src/lib.rs (target/debug/deps/anyhow-ac2b934f70db1f3e)
+     Running tests/behaviour_nightly_gen_1.rs (target/debug/deps/behaviour_nightly_gen_1-82fb5c208e8a5c0f)
+error: test failed, to rerun pass `--test behaviour_nightly_gen_1`
+     Running tests/behaviour_stable_gen_1.rs (target/debug/deps/behaviour_stable_gen_1-91542d96f4d925d6)
+     Running tests/compiletest.rs (target/debug/deps/compiletest-c8fc9053bfede62c)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+    Checking futures-sink v0.3.34
+    Checking futures-core v0.3.34
+   Compiling thiserror v2.0.20
+    Checking pin-project-lite v0.2.17
+   Compiling rustversion v1.0.23
+    Checking futures-task v0.3.34
+    Checking futures-io v0.3.34
+    Checking anyhow v1.0.104 (/work/nightly)
+    Checking futures-channel v0.3.34
+    Checking futures-util v0.3.34
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/lib.rs:210:13
+    |
+210 | #![cfg_attr(error_generic_member_access, feature(error_generic_member_access))]
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 32 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition name: `anyhow_nightly_testing`
+   --> /work/nightly/src/lib.rs:237:11
+    |
+237 | #[cfg(all(anyhow_nightly_testing, feature = "std", not(error_generic_member_access)))]
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_nightly_testing)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_nightly_testing)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/lib.rs:237:56
+    |
+237 | #[cfg(all(anyhow_nightly_testing, feature = "std", not(error_generic_member_access)))]
+    |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/lib.rs:251:7
+    |
+251 | #[cfg(error_generic_member_access)]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/lib.rs:258:33
+    |
+258 | #[cfg(all(not(feature = "std"), anyhow_no_core_error))]
+    |                                 ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/lib.rs:262:32
+    |
+262 | #[cfg(not(any(feature = "std", anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/lib.rs:264:33
+    |
+264 | #[cfg(all(not(feature = "std"), anyhow_no_core_error))]
+    |                                 ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/lib.rs:396:32
+    |
+396 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+  --> /work/nightly/src/backtrace.rs:18:7
+   |
+18 | #[cfg(error_generic_member_access)]
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+  --> /work/nightly/src/backtrace.rs:25:15
+   |
+25 | #[cfg(all(not(error_generic_member_access), feature = "std"))]
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/backtrace.rs:31:15
+   |
+31 | #[cfg(all(not(anyhow_no_core_error), not(feature = "std")))]
+   |               ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/chain.rs:4:32
+  |
+4 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/chain.rs:6:32
+  |
+6 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/chain.rs:8:33
+  |
+8 | #[cfg(all(not(feature = "std"), anyhow_no_core_error))]
+  |                                 ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/chain.rs:59:32
+   |
+59 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/chain.rs:100:32
+    |
+100 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/chain.rs:18:36
+   |
+18 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+ --> /work/nightly/src/context.rs:6:7
+  |
+6 | #[cfg(error_generic_member_access)]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/context.rs:15:36
+   |
+15 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/context.rs:133:11
+    |
+133 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/context.rs:145:11
+    |
+145 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+ --> /work/nightly/src/error.rs:4:7
+  |
+4 | #[cfg(error_generic_member_access)]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/error.rs:6:32
+  |
+6 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/error.rs:14:32
+   |
+14 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:600:32
+    |
+600 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:610:32
+    |
+610 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:617:32
+    |
+617 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:671:32
+    |
+671 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:678:32
+    |
+678 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:697:15
+    |
+697 | #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:702:32
+    |
+702 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:714:32
+    |
+714 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:738:15
+    |
+738 | #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:825:32
+    |
+825 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:833:32
+    |
+833 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:840:32
+    |
+840 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:847:32
+    |
+847 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:853:32
+    |
+853 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/error.rs:28:36
+   |
+28 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:136:36
+    |
+136 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:142:36
+    |
+142 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:200:36
+    |
+200 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:223:36
+    |
+223 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:384:36
+    |
+384 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:396:36
+    |
+396 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:521:20
+    |
+521 |     #[cfg_attr(not(error_generic_member_access), doc = "# _ = stringify! {")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:539:20
+    |
+539 |     #[cfg_attr(not(error_generic_member_access), doc = "# };")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:543:36
+    |
+543 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:558:20
+    |
+558 |     #[cfg_attr(not(error_generic_member_access), doc = "# _ = stringify!{")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:577:20
+    |
+577 |     #[cfg_attr(not(error_generic_member_access), doc = "# };")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:579:36
+    |
+579 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:587:11
+    |
+587 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:594:11
+    |
+594 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:648:36
+    |
+648 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:650:36
+    |
+650 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:656:19
+    |
+656 |     #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/error.rs:775:36
+    |
+775 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:788:11
+    |
+788 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/nightly/src/error.rs:804:11
+    |
+804 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/kind.rs:4:32
+  |
+4 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/kind.rs:6:32
+  |
+6 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/kind.rs:55:32
+   |
+55 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/kind.rs:58:32
+   |
+58 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/kind.rs:66:32
+   |
+66 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/kind.rs:68:32
+   |
+68 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_clippy_format_args`
+  --> /work/nightly/src/macros.rs:58:16
+   |
+58 | #[cfg_attr(not(anyhow_no_clippy_format_args), clippy::format_args)]
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_clippy_format_args)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_clippy_format_args)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_clippy_format_args`
+   --> /work/nightly/src/macros.rs:148:16
+    |
+148 | #[cfg_attr(not(anyhow_no_clippy_format_args), clippy::format_args)]
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_clippy_format_args)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_clippy_format_args)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_clippy_format_args`
+   --> /work/nightly/src/macros.rs:113:36
+    |
+113 |     #[macro_export] #[cfg_attr(not(anyhow_no_clippy_format_args), clippy::format_args)]
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_clippy_format_args)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_clippy_format_args)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/nightly/src/wrapper.rs:4:32
+  |
+4 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+ --> /work/nightly/src/wrapper.rs:6:7
+  |
+6 | #[cfg(error_generic_member_access)]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/wrapper.rs:56:32
+   |
+56 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/wrapper.rs:59:32
+   |
+59 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/wrapper.rs:65:32
+   |
+65 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/nightly/src/wrapper.rs:71:32
+   |
+71 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+  --> /work/nightly/src/wrapper.rs:76:11
+   |
+76 |     #[cfg(error_generic_member_access)]
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/nightly/src/lib.rs:650:40
+    |
+650 |         #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                        ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`
+   --> /work/nightly/src/error.rs:149:45
+    |
+149 |             let vtable = Box::leak(Box::new(ErrorVTable {
+    |                                             ^^^^^^^^^^^ missing `object_backtrace`
+
+error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`
+   --> /work/nightly/src/error.rs:169:45
+    |
+169 |             let vtable = Box::leak(Box::new(ErrorVTable {
+    |                                             ^^^^^^^^^^^ missing `object_backtrace`
+
+error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`
+   --> /work/nightly/src/error.rs:189:45
+    |
+189 |             let vtable = Box::leak(Box::new(ErrorVTable {
+    |                                             ^^^^^^^^^^^ missing `object_backtrace`
+
+error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`
+   --> /work/nightly/src/error.rs:212:45
+    |
+212 |             let vtable = Box::leak(Box::new(ErrorVTable {
+    |                                             ^^^^^^^^^^^ missing `object_backtrace`
+
+error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`
+   --> /work/nightly/src/error.rs:230:45
+    |
+230 |             let vtable = Box::leak(Box::new(ErrorVTable {
+    |                                             ^^^^^^^^^^^ missing `object_backtrace`
+
+error[E0063]: missing field `object_backtrace` in initializer of `ErrorVTable`
+   --> /work/nightly/src/error.rs:317:45
+    |
+317 |             let vtable = Box::leak(Box::new(ErrorVTable {
+    |                                             ^^^^^^^^^^^ missing `object_backtrace`
+
+For more information about this error, try `rustc --explain E0063`.
+warning: `anyhow` (lib) generated 76 warnings
+error: could not compile `anyhow` (lib) due to 6 previous errors; 76 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+error: test failed, to rerun pass `--test compiletest`
+     Running tests/context_gen_1.rs (target/debug/deps/context_gen_1-a2770ee1b7279c9b)
+     Running tests/context_gen_2.rs (target/debug/deps/context_gen_2-9c1d8a7c032a4ca9)
+     Running tests/context_gen_3.rs (target/debug/deps/context_gen_3-9577d9f49aaf160d)
+
+thread 'option_context_none_returns_error_with_message' (345034) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test context_gen_3`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/context_gen_3-9577d9f49aaf160d --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/context_gen_4.rs (target/debug/deps/context_gen_4-1b4d012b776e4ba5)
+
+thread 'context_error_provide_exercised' (345041) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test context_gen_4`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/context_gen_4-1b4d012b776e4ba5 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/context_gen_5.rs (target/debug/deps/context_gen_5-7eade82ac59be428)
+
+thread 'option_context_none_returns_error_with_message_and_no_source' (345054) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test context_gen_5`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/context_gen_5-7eade82ac59be428 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/ensure_gen_1.rs (target/debug/deps/ensure_gen_1-2609343ae48fc396)
+     Running tests/ensure_gen_2.rs (target/debug/deps/ensure_gen_2-ce8009024c197db0)
+
+thread 'test_ensure_not_both_debug_dispatch' (345068) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test ensure_gen_2`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/ensure_gen_2-ce8009024c197db0 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/error_gen_1.rs (target/debug/deps/error_gen_1-e87686615b82d198)
+     Running tests/error_gen_2.rs (target/debug/deps/error_gen_2-4ad30c8ddfdd7318)
+     Running tests/error_gen_3.rs (target/debug/deps/error_gen_3-a974b2ef5a14f3ed)
+     Running tests/error_gen_4.rs (target/debug/deps/error_gen_4-0d0034c7db9d98d2)
+
+thread 'test_anyhow_literal_hits_display_path' (345083) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test error_gen_4`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/error_gen_4-0d0034c7db9d98d2 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/error_gen_5.rs (target/debug/deps/error_gen_5-ce4326e8c591dd06)
+
+thread 'test_from_boxed_creates_error_with_correct_display' (345091) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test error_gen_5`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/error_gen_5-ce4326e8c591dd06 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/error_gen_6.rs (target/debug/deps/error_gen_6-334447c84285e4b0)
+
+thread 'test_debug_format_deep_chain_hits_error_impl_debug_path' (345101) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test error_gen_6`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/error_gen_6-334447c84285e4b0 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/error_gen_7.rs (target/debug/deps/error_gen_7-4e9bd9812e5c447d)
+
+thread 'test_deref_mut_ema_coercion' (345112) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test error_gen_7`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/error_gen_7-4e9bd9812e5c447d --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/fmt_gen_1.rs (target/debug/deps/fmt_gen_1-fd7721dd089435fe)
+     Running tests/fmt_gen_2.rs (target/debug/deps/fmt_gen_2-4176f0434f69e72b)
+
+thread 'test_debug_backtrace_captured_simple_egma' (345126) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test fmt_gen_2`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/fmt_gen_2-4176f0434f69e72b --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/lib_gen_1.rs (target/debug/deps/lib_gen_1-582175956fadae7b)
+     Running tests/lib_gen_2.rs (target/debug/deps/lib_gen_2-f6436bc8918a8a9f)
+
+thread 'test_anyhow_interpolated_creates_string_error_via_format_err_else' (345140) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test lib_gen_2`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/lib_gen_2-f6436bc8918a8a9f --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/ptr_gen_1.rs (target/debug/deps/ptr_gen_1-ff6896c5ca4972ed)
+     Running tests/ptr_gen_2.rs (target/debug/deps/ptr_gen_2-a762862a2bd19526)
+     Running tests/ptr_gen_3.rs (target/debug/deps/ptr_gen_3-3512625c46f17859)
+     Running tests/test_autotrait.rs (target/debug/deps/test_autotrait-efe8883fefe42dc7)
+     Running tests/test_backtrace.rs (target/debug/deps/test_backtrace-64a1580fb4932f3b)
+error: test failed, to rerun pass `--test test_backtrace`
+     Running tests/test_boxed.rs (target/debug/deps/test_boxed-1e45c3d0f833b3ec)
+
+thread 'test_boxed_anyhow' (345170) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test test_boxed`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/test_boxed-1e45c3d0f833b3ec --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/test_chain.rs (target/debug/deps/test_chain-03237ab15cda67bb)
+
+thread 'test_clone' (345178) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test test_chain`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/test_chain-03237ab15cda67bb --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/test_context.rs (target/debug/deps/test_context-160a21ccc67fbf8c)
+error: test failed, to rerun pass `--test test_context`
+     Running tests/test_convert.rs (target/debug/deps/test_convert-2765b7c20370ddb1)
+error: test failed, to rerun pass `--test test_convert`
+     Running tests/test_downcast.rs (target/debug/deps/test_downcast-4a28697ccf27e77e)
+panicked at src/error.rs:669:5:
+not implemented
+thread panicked while processing panic. aborting.
+error: test failed, to rerun pass `--test test_downcast`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/test_downcast-4a28697ccf27e77e --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/test_ensure.rs (target/debug/deps/test_ensure-65f2095a0e3de872)
+
+thread 'test_as' (345214) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test test_ensure`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/test_ensure-65f2095a0e3de872 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/test_ffi.rs (target/debug/deps/test_ffi-e796b95876222255)
+     Running tests/test_fmt.rs (target/debug/deps/test_fmt-32d61a2ff9b73f74)
+error: test failed, to rerun pass `--test test_fmt`
+     Running tests/test_macros.rs (target/debug/deps/test_macros-7db8d11899a5e91b)
+
+thread 'test_brace_escape' (345233) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test test_macros`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/test_macros-7db8d11899a5e91b --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/test_repr.rs (target/debug/deps/test_repr-aa42ff2c93f076bf)
+error: test failed, to rerun pass `--test test_repr`
+     Running tests/test_source.rs (target/debug/deps/test_source-5726346d26777e58)
+
+thread 'test_anyhow_from_anyhow' (345249) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test test_source`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/test_source-5726346d26777e58 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/wrapper_gen_1.rs (target/debug/deps/wrapper_gen_1-df27e3d84dae2c60)
+     Running tests/wrapper_gen_2.rs (target/debug/deps/wrapper_gen_2-e52b6359b4394264)
+     Running tests/wrapper_gen_3.rs (target/debug/deps/wrapper_gen_3-3af59805c8326682)
+     Running tests/wrapper_gen_4.rs (target/debug/deps/wrapper_gen_4-d5f79c4c4f0e6a23)
+
+thread 'boxed_error_provide_is_called_via_backtrace' (345262) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test wrapper_gen_4`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/wrapper_gen_4-d5f79c4c4f0e6a23 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/wrapper_gen_5.rs (target/debug/deps/wrapper_gen_5-72177966939b509c)
+
+thread 'boxed_error_debug_via_from_boxed' (345270) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test wrapper_gen_5`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/wrapper_gen_5-72177966939b509c --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/wrapper_gen_6.rs (target/debug/deps/wrapper_gen_6-1185a9fc4b2a1615)
+
+thread 'test_boxed_error_display_delegates' (345281) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test wrapper_gen_6`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/wrapper_gen_6-1185a9fc4b2a1615 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+     Running tests/wrapper_gen_7.rs (target/debug/deps/wrapper_gen_7-7476db887551bf06)
+
+thread 'test_boxed_error_source_none_under_nightly' (345291) panicked at /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panicking.rs:233:5:
+panic in a destructor during cleanup
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--test wrapper_gen_7`
+
+Caused by:
+  process didn't exit successfully: `/work/nightly/target/debug/deps/wrapper_gen_7-7476db887551bf06 --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+   Doc-tests anyhow
+error: doctest failed, to rerun pass `--doc`
+error: 28 targets failed:
+    `--test behaviour_nightly_gen_1`
+    `--test compiletest`
+    `--test context_gen_3`
+    `--test context_gen_4`
+    `--test context_gen_5`
+    `--test ensure_gen_2`
+    `--test error_gen_4`
+    `--test error_gen_5`
+    `--test error_gen_6`
+    `--test error_gen_7`
+    `--test fmt_gen_2`
+    `--test lib_gen_2`
+    `--test test_backtrace`
+    `--test test_boxed`
+    `--test test_chain`
+    `--test test_context`
+    `--test test_convert`
+    `--test test_downcast`
+    `--test test_ensure`
+    `--test test_fmt`
+    `--test test_macros`
+    `--test test_repr`
+    `--test test_source`
+    `--test wrapper_gen_4`
+    `--test wrapper_gen_5`
+    `--test wrapper_gen_6`
+    `--test wrapper_gen_7`
+    `--doc`

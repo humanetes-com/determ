@@ -17,11 +17,13 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, overload
 
 if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
 
+from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
 from pipeline_core.application.reconstruct.body_reseed import (
     ReseedOutcome,
     TreeWriter,
@@ -213,10 +215,12 @@ from pipeline_core.domain.tdd_floor import (
 from pipeline_core.domain.test_cmd import expected_target_labels
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_report import (
+    StubAbortReading,
     compare_panic_sites,
     failure_evidence_by_test,
     merge_observations,
     parse_test_output,
+    stub_abort_reading,
 )
 from pipeline_core.domain.test_results import (
     BinaryResult,
@@ -3292,6 +3296,54 @@ def run_phase_c_tdd(
                 for _loc in crash_texts:
                     frontier.setdefault(_loc, set()).update(_oracle.vanished)
 
+        # STUB-ONLY ABORTS NAME THEIR OWN BLOCKERS. A binary whose only crate
+        # panics are stub panics died because those stubs panicked while a
+        # test was already unwinding; the fns are named at their own lines,
+        # with no localizer involved. The ratchet and the fill gates already
+        # read this to forgive a drop "until the stubs fill"; this is the
+        # reading that makes the stubs fill. Independent of the localizer on
+        # purpose — it defers on a stub-heavy tree and finds no native fault
+        # in a double panic, which is exactly when this evidence exists.
+        # EVIDENCE, never blame: the stubs get a prompt, a frontier entry, an
+        # exhaustion void and the crash cohort's site rank; `crash_blamed`
+        # stays the localizer's, so nothing here convicts or reverts a body.
+        _stub_aborts = StubAbortReading({})
+        _stub_hollow: dict[str, frozenset[FnSite]] = {}
+        if (_oracle.vanished and not _sweep_compile_broke
+                and deps.enumerate_fns is not None):
+            _stub_aborts = stub_abort_reading(output, make_fn_site_locator(
+                SimpleNamespace(enumerate_fns=deps.enumerate_fns),
+                target_src_dir))
+        if _stub_aborts.by_binary:
+            _stub_hollow = _stub_aborts.hollow(_oracle.vanished, _test_files)
+            for _site in sorted(_stub_aborts.blockers):
+                _binaries = sorted(b for b, s in _stub_aborts.by_binary.items()
+                                   if _site in s)
+                _loc = locator_of(_site)
+                crash_texts.setdefault(_loc, (
+                    f"This fn is still a stub, and its `unimplemented!()` panic "
+                    f"is the only crate panic in test binaries that abort "
+                    f"({', '.join(_binaries)}): it panics while another panic "
+                    "is unwinding, the process aborts, and every test in those "
+                    "binaries loses its verdict — including tests that already "
+                    "pass. Give it a real body; nothing in those binaries can "
+                    "be measured until it has one."))
+                frontier.setdefault(_loc, set()).update(
+                    t for t, s in _stub_hollow.items() if _site in s)
+            deps.log(
+                f"  {tag} [phase-c/crash] iter {iter_n}: "
+                f"{len(_stub_aborts.by_binary)} binary(ies) abort on stub "
+                f"panics alone — {len(_stub_aborts.blockers)} still-stubbed "
+                f"fn(s) block {len(_stub_hollow)} vanished test(s), ranked as "
+                "crash-site evidence: "
+                + ", ".join(sorted(f"{s.file}::{s.fn_name}"
+                                   for s in _stub_aborts.blockers)))
+            deps.emit("phase_c.crash.stub_aborts", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "binaries": {b: sorted(f"{s.file}::{s.fn_name}" for s in ss)
+                             for b, ss in _stub_aborts.by_binary.items()},
+                "hollow_tests": len(_stub_hollow)})
+
         # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by
         # rewrites that changed nothing — its accessors are the wrong target.
@@ -5710,6 +5762,15 @@ def run_phase_c_tdd(
                         or None),
                     session_slices=_session_slices or None,
                     session_owners=_session_owners or None,
+                    # The stub-only abort reading, for the schedule: its
+                    # blockers are the locators whose bodies can make an
+                    # aborted binary complete, and its hollow relation is the
+                    # one coverage cannot give for a binary that wrote none.
+                    stub_abort_blockers=frozenset(
+                        locator_of(s_) for s_ in _stub_aborts.blockers),
+                    stub_abort_hollow={
+                        t_: frozenset(locator_of(s_) for s_ in ss_)
+                        for t_, ss_ in _stub_hollow.items()},
                     on_wave_kept=lambda kept: _record_landed_rows("wave", kept),
                 )
         except BaseException:

@@ -633,6 +633,86 @@ def external_stub_crash_sites(
         crash_panics(raw_output, crashed), unit_sites, locate)
 
 
+@dataclass(frozen=True, slots=True)
+class StubAbortReading:
+    """What a sweep's aborted binaries say about the tree's holes.
+
+    ``by_binary`` maps each aborted binary whose only crate panics are stub
+    panics (:attr:`CrashPanics.stub_only`, judged on that binary's own
+    section) to the still-stubbed fns those panics resolve to. Those fns are
+    the whole reason the binary produced no verdicts: until they have bodies,
+    every test in that binary is unmeasurable, whatever else is filled.
+
+    The sweep already reads this evidence to FORGIVE — the batch ratchet's
+    closure exemption and the fill gates' crash-only keep both say "the charge
+    waits until the stubs fill". Nothing read it to FILL them. Dispatch took
+    crash blame only from the native localizer, which finds no fault in a panic
+    during unwind, and the schedule's hollow relation reads coverage, which an
+    aborted binary never writes. Run `119837-09e3ac57`, cluster `nightly`,
+    2026-09-15: ten binaries aborted on stub panics in five fns (23 at one
+    vtable drop fn, 18 at a nightly request helper, 15 at a vtable ref fn); all
+    five were attributed and on the frontier, logged "parked under the dispatch
+    cap, not served", while two fills spent their whole budget on a pair whose
+    tests sat in those binaries."""
+
+    by_binary: Mapping[str, frozenset[FnSite]]
+
+    @property
+    def blockers(self) -> frozenset[FnSite]:
+        out: set[FnSite] = set()
+        for sites in self.by_binary.values():
+            out |= sites
+        return frozenset(out)
+
+    def hollow(
+        self, tests: Iterable[str], test_files: Mapping[str, str],
+    ) -> dict[str, frozenset[FnSite]]:
+        """``{test: stubs}`` for each of ``tests`` declared in a binary this
+        reading holds — the abort proves the binary reached those stubs, which
+        is what "hollow" means to the schedule. A test declared under
+        ``tests/`` is its own binary (cargo labels it by that path); any other
+        declaring file compiles into the library's unit-test binary, labelled
+        ``unittests <lib path>``. A test the index does not place, or a binary
+        this reading does not hold, contributes nothing."""
+        lib_labels = [lab for lab in self.by_binary if lab.startswith("unittests ")]
+        out: dict[str, frozenset[FnSite]] = {}
+        for t in tests:
+            rel = test_files.get(t)
+            if rel is None:
+                continue
+            if rel.startswith("tests/"):
+                sites = self.by_binary.get(rel)
+            else:
+                sites = self.by_binary[lib_labels[0]] if len(lib_labels) == 1 else None
+            if sites:
+                out[t] = sites
+        return out
+
+
+def stub_abort_reading(
+    raw_output: str,
+    locate: Callable[[str, int], FnSite | None],
+) -> StubAbortReading:
+    """:class:`StubAbortReading` of a sweep's combined capture. Each aborted
+    section is judged alone, with the same rule the fill gates keep on
+    (:func:`crash_panics` over that one label): a section is admitted only when
+    every crate panic it printed is a stub panic and every stub site locates.
+    An assertion beside the stub panic, an unparseable panic line, or a site
+    that resolves to nothing leaves that binary out — the abort may be a body's
+    own doing, and a reading that names the wrong fn is worse than none."""
+    by_binary: dict[str, frozenset[FnSite]] = {}
+    for label in sorted({s.label for s in binary_output_sections(raw_output)
+                         if not s.completed}):
+        panics = crash_panics(raw_output, (label,))
+        if not panics.stub_only:
+            continue
+        located = [locate(f, ln) for f, ln in sorted(panics.stub_sites)]
+        if any(loc is None for loc in located):
+            continue
+        by_binary[label] = frozenset(loc for loc in located if loc is not None)
+    return StubAbortReading(by_binary)
+
+
 class U2Decision(Enum):
     ACCEPT = auto()               # tests pass / gate off / inconclusive
     ACCEPT_EXTERNAL_ONLY = auto()  # only-external failures — keep fill, don't charge
