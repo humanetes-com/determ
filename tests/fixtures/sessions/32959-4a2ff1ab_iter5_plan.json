@@ -1,0 +1,265 @@
+{
+ "cluster": "nightly",
+ "file_chars_charged_before": {
+  "src/ensure.rs": 36000,
+  "src/error.rs": 35886,
+  "src/fmt.rs": 4034,
+  "src/lib.rs": 21028,
+  "src/ptr.rs": 3919,
+  "src/wrapper.rs": 2453
+ },
+ "file_chars_rendered": {
+  "18000": {
+   "src/ensure.rs": 1727,
+   "src/error.rs": 8753,
+   "src/fmt.rs": 4126,
+   "src/lib.rs": 1143,
+   "src/ptr.rs": 4070,
+   "src/wrapper.rs": 2542
+  },
+  "36000": {
+   "src/ensure.rs": 1727,
+   "src/error.rs": 36162,
+   "src/fmt.rs": 4126,
+   "src/lib.rs": 21084,
+   "src/ptr.rs": 4070,
+   "src/wrapper.rs": 2542
+  },
+  "4500": {
+   "src/ensure.rs": 1727,
+   "src/error.rs": 8753,
+   "src/fmt.rs": 4126,
+   "src/lib.rs": 1143,
+   "src/ptr.rs": 4070,
+   "src/wrapper.rs": 2542
+  },
+  "9000": {
+   "src/ensure.rs": 1727,
+   "src/error.rs": 8753,
+   "src/fmt.rs": 4126,
+   "src/lib.rs": 1143,
+   "src/ptr.rs": 4070,
+   "src/wrapper.rs": 2542
+  }
+ },
+ "file_raw_chars": {
+  "src/ensure.rs": 56026,
+  "src/error.rs": 35886,
+  "src/fmt.rs": 4034,
+  "src/lib.rs": 21028,
+  "src/ptr.rs": 3919,
+  "src/wrapper.rs": 2453
+ },
+ "max_chars": 132019,
+ "max_units": 32,
+ "non_file_chars": 62978,
+ "non_file_chars_provenance": "TYPES_IN_SCOPE 27,144 computed on this tree with the extractor's type records, plus 35,834 for the fixed sections, the quoted test block and the quoted evidence \u2014 solved from the same run's own recorded estimate for its 13-unit test_downcast_mid session (95,479 chars, file term 44,828, types 14,817). Both arms of the test use the same value, so it cancels out of the comparison.",
+ "recorded": {
+  "empty": 1,
+  "log_clause": "3 failing test(s) \u2014 1 empty; 2 over SLICE_SESSION_MAX_UNITS=32 (20 unit(s))",
+  "opened": 0,
+  "over_cap": 2,
+  "over_cap_units": 20,
+  "units_union": 20
+ },
+ "run_id": "32959-4a2ff1ab",
+ "slices": {
+  "test_too_long": [
+   [
+    "src/ensure.rs",
+    "__dispatch_ensure",
+    "impl BothDebug for(A,B)"
+   ],
+   [
+    "src/ensure.rs",
+    "new",
+    "impl Buf"
+   ],
+   [
+    "src/ensure.rs",
+    "write_str",
+    "impl Write for Buf"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_drop",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/lib.rs",
+    "Ok",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "new",
+    "impl Own<T>"
+   ],
+   [
+    "src/wrapper.rs",
+    "fmt",
+    "impl Display for MessageError<M>"
+   ]
+  ],
+  "test_whitespace": [
+   [
+    "src/ensure.rs",
+    "__dispatch_ensure",
+    "impl BothDebug for(A,B)"
+   ],
+   [
+    "src/ensure.rs",
+    "new",
+    "impl Buf"
+   ],
+   [
+    "src/ensure.rs",
+    "write_str",
+    "impl Write for Buf"
+   ],
+   [
+    "src/error.rs",
+    "construct",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "construct_from_adhoc",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "drop",
+    "impl Drop for Error"
+   ],
+   [
+    "src/error.rs",
+    "error",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Debug for Error"
+   ],
+   [
+    "src/error.rs",
+    "fmt",
+    "impl Display for Error"
+   ],
+   [
+    "src/error.rs",
+    "msg",
+    "impl Error"
+   ],
+   [
+    "src/error.rs",
+    "object_drop",
+    ""
+   ],
+   [
+    "src/error.rs",
+    "object_ref",
+    ""
+   ],
+   [
+    "src/fmt.rs",
+    "debug",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/fmt.rs",
+    "display",
+    "impl ErrorImpl"
+   ],
+   [
+    "src/lib.rs",
+    "Ok",
+    ""
+   ],
+   [
+    "src/ptr.rs",
+    "as_ptr",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "by_ref",
+    "impl Own<T>"
+   ],
+   [
+    "src/ptr.rs",
+    "from_raw",
+    "impl Ref<'a,T>"
+   ],
+   [
+    "src/ptr.rs",
+    "new",
+    "impl Own<T>"
+   ],
+   [
+    "src/wrapper.rs",
+    "fmt",
+    "impl Display for MessageError<M>"
+   ]
+  ],
+  "ui": []
+ },
+ "ts": "2026-09-16T17:13:42.148+00:00",
+ "why": "The phase_c.session.plan event of run 32959-4a2ff1ab at 2026-09-16T17:13:42Z (cluster nightly, iter 5) \u2014 the plan that refused both of the cluster's remaining measurable red tests, with the per-threshold file rendering measured on that tree by render_slice_file (the same function turn 0 calls)."
+}

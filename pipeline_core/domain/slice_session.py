@@ -42,10 +42,18 @@ NOTES_CLOSE = "</NOTES>"
 @dataclass(frozen=True, slots=True)
 class SessionSlice:
     """One session's work: the failing tests it answers for and the units
-    it may write, with the units grouped by file for rendering."""
+    it may write, with the units grouped by file for rendering.
+
+    ``file_chars`` is the rendering threshold the planner sized this
+    session at — files longer than it are condensed in turn 0 (editable
+    fns in full, the rest as signatures). ``0`` means the renderer's own
+    default; a narrower value is how a slice that no packing can split
+    fits under the turn-0 char capacity instead of being dropped.
+    """
 
     tests: tuple[str, ...]
     units: tuple[FnSite, ...]
+    file_chars: int = 0
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -225,8 +233,26 @@ class SliceCosts:
     condenses above it, so a session's size is a function of the packing
     and the packing did not know it.
 
-    ``file_chars`` is each file's rendered size (already capped);
-    ``types_chars`` the TYPES_IN_SCOPE section each file's units pull in
+    ``file_chars`` maps a RENDERING THRESHOLD to what each file actually
+    renders to at it — the length of the `<FILE>` section the prompt
+    builder emits, measured by calling the same renderer, never the
+    threshold itself. The distinction is the whole point of the mapping:
+    the renderer sends a file whole below the threshold and condenses it
+    above (`use` lines, the editable fns in full, every other fn as a
+    signature), so a file over the threshold can render to a small
+    fraction of it. Charging the threshold instead put `src/ensure.rs`
+    (56,026 raw, 1,805 rendered) into run `32959-4a2ff1ab`'s cost at
+    36,000 and overcharged that 20-unit slice by 33,203 chars — 25% of
+    the capacity — which is why both of the cluster's remaining red tests
+    were refused a session on every fill of 2026-09-16.
+
+    A narrower threshold buys room without costing the session anything it
+    may write: the editable fns render in full at every threshold. So the
+    same slice has a cost per threshold and :meth:`fit_threshold` answers
+    the question the planner asks — the WIDEST rendering this packing fits
+    in, or ``None`` when even the narrowest is over capacity.
+
+    ``types_chars`` is the TYPES_IN_SCOPE section each file's units pull in
     (the largest single section of the recorded prompt: 81,217 of 253,828
     chars); ``test_chars`` each test's quoted block; ``evidence_chars``
     each test's quoted failure (panic site plus observed values);
@@ -237,23 +263,52 @@ class SliceCosts:
     leaving the rest for the session's result turns.
     """
 
-    file_chars: Mapping[str, int]
+    file_chars: Mapping[int, Mapping[str, int]]
     test_chars: Mapping[str, int]
     fixed_chars: int
     max_chars: int
     types_chars: Mapping[str, int] = field(default_factory=dict)
     evidence_chars: Mapping[str, int] = field(default_factory=dict)
 
-    def chars(self, tests: Collection[str], units: Collection[FnSite]) -> int:
+    @property
+    def thresholds(self) -> tuple[int, ...]:
+        """The rendering thresholds this cost table was measured at, widest
+        first. The widest is what a session renders at unless it has to
+        condense to fit."""
+        return tuple(sorted(self.file_chars, reverse=True))
+
+    def widest(self) -> int:
+        return self.thresholds[0] if self.thresholds else 0
+
+    def chars(self, tests: Collection[str], units: Collection[FnSite],
+              *, file_chars: int | None = None) -> int:
+        """Turn-0 size of this packing rendered at ``file_chars`` (the
+        widest measured threshold when omitted)."""
+        at = self.file_chars.get(
+            self.widest() if file_chars is None else file_chars, {})
         files = {u.file for u in units}
         return (self.fixed_chars
-                + sum(self.file_chars.get(f, 0) for f in files)
+                + sum(at.get(f, 0) for f in files)
                 + sum(self.types_chars.get(f, 0) for f in files)
                 + sum(self.test_chars.get(t, 0) for t in tests)
                 + sum(self.evidence_chars.get(t, 0) for t in tests))
 
-    def fits(self, tests: Collection[str], units: Collection[FnSite]) -> bool:
-        return self.max_chars <= 0 or self.chars(tests, units) <= self.max_chars
+    def fits(self, tests: Collection[str], units: Collection[FnSite],
+             *, file_chars: int | None = None) -> bool:
+        return (self.max_chars <= 0
+                or self.chars(tests, units, file_chars=file_chars)
+                <= self.max_chars)
+
+    def fit_threshold(self, tests: Collection[str],
+                      units: Collection[FnSite]) -> int | None:
+        """The widest rendering threshold at which this packing fits, or
+        ``None`` when none does. ``0`` means no capacity is in force."""
+        if self.max_chars <= 0:
+            return self.widest()
+        for t in self.thresholds:
+            if self.chars(tests, units, file_chars=t) <= self.max_chars:
+                return t
+        return None
 
 
 def _fit_under_cap(
@@ -261,12 +316,12 @@ def _fit_under_cap(
     pending: Mapping[str, frozenset[FnSite]],
     max_units: int,
     costs: SliceCosts | None = None,
-) -> tuple[list[tuple[list[str], set[FnSite]]], list[str]]:
+) -> tuple[list[tuple[list[str], set[FnSite]]], list[str], list[str]]:
     """Pack one merged group whose UNION is over the cap into sessions that
     are each under it, without truncating any test's slice.
 
-    Tests are placed in name order. A test whose own slice exceeds the cap
-    is returned in the second element and belongs to no session (the
+    Tests are placed in name order. A test whose own slice exceeds the unit
+    cap is returned in the second element and belongs to no session (the
     drop-not-truncate contract, unchanged). Every other test joins the
     session that already holds the most of its executed path — the fewest
     new units, ties to the earliest session — when the union stays under
@@ -274,9 +329,15 @@ def _fit_under_cap(
     the same way on every call.
 
     With `costs`, a session has a second capacity: its turn-0 prompt in
-    characters (:class:`SliceCosts`). A test joins a session only when both
-    hold; a single test whose own prompt exceeds `max_chars` is oversized
-    for the same reason a single test over `max_units` is.
+    characters (:class:`SliceCosts`). Joining prefers the WIDEST rendering:
+    a test joins a session only when the union still fits with every file
+    rendered whole, so a group that can be split is split rather than
+    condensed. A test that fits no session that way opens its own, which
+    may then be rendered narrower. Only a test that is over capacity even
+    at the narrowest measured rendering is dropped, and it is returned in
+    the THIRD element — a different drop from the unit-cap one, because it
+    is a statement about how much text the slice renders to rather than
+    about how many bodies the session may write.
 
     A hub unit every test executes (the crate's construction spine) lands in
     every session that needs it. Sessions run sequentially on one tree, so
@@ -284,14 +345,15 @@ def _fit_under_cap(
     under two judgments, which file-first already does every pass.
     """
     bins: list[tuple[list[str], set[FnSite]]] = []
-    oversized: list[str] = []
+    over_units: list[str] = []
+    over_chars: list[str] = []
     for test in sorted(dict.fromkeys(names)):
         units = pending[test]
         if len(units) > max_units:
-            oversized.append(test)
+            over_units.append(test)
             continue
-        if costs is not None and not costs.fits((test,), units):
-            oversized.append(test)
+        if costs is not None and costs.fit_threshold((test,), units) is None:
+            over_chars.append(test)
             continue
         fits = [i for i, (held_tests, held) in enumerate(bins)
                 if len(held | units) <= max_units
@@ -303,7 +365,7 @@ def _fit_under_cap(
         best = max(fits, key=lambda i: (len(bins[i][1] & units), -i))
         bins[best][0].append(test)
         bins[best][1].update(units)
-    return bins, oversized
+    return bins, over_units, over_chars
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,11 +377,20 @@ class SlicePlanGaps:
     clause, so a wake could not tell an empty leftover from an exploded
     coverage slice (run ``110993-6efa23be``, 2026-09-03).
 
-    ``over_cap`` counts TESTS whose own slice exceeds the cap — the only
-    drop left on this path. Before packing it counted merged GROUPS, and a
-    coverage-complete leftover set whose 32 tests each executed 8-23 sites
-    (union 54) was refused as one over-cap group on every fill of run
-    ``2965-453dd7a4`` (2026-09-05), so the session route never started.
+    ``over_cap`` counts TESTS whose own slice exceeds the UNIT cap. Before
+    packing it counted merged GROUPS, and a coverage-complete leftover set
+    whose 32 tests each executed 8-23 sites (union 54) was refused as one
+    over-cap group on every fill of run ``2965-453dd7a4`` (2026-09-05), so
+    the session route never started.
+
+    ``over_chars_single`` counts tests dropped for the OTHER capacity — a
+    turn-0 prompt over ``max_chars`` even with every file condensed. The
+    two shared ``over_cap`` and therefore shared one log clause, so run
+    ``32959-4a2ff1ab`` (2026-09-16) printed ``2 over
+    SLICE_SESSION_MAX_UNITS=32 (20 unit(s))`` for a 20-unit slice against a
+    cap of 32 — a refusal reported under a cap that had not fired, on the
+    cluster's only two remaining measurable red tests, on every fill from
+    11:56 UTC to the end of the run.
     """
 
     empty: int
@@ -336,6 +407,11 @@ class SlicePlanGaps:
     #: Groups under the unit cap that were packed anyway because their
     #: turn-0 prompt would have exceeded the char capacity.
     over_chars: int = 0
+    #: Tests dropped because their own turn-0 prompt is over the char
+    #: capacity at every measured rendering.
+    over_chars_single: int = 0
+    #: Planned sessions rendered narrower than the widest threshold to fit.
+    condensed: int = 0
 
     def log_clause(self) -> str:
         parts: list[str] = []
@@ -347,6 +423,10 @@ class SlicePlanGaps:
             parts.append(
                 f"{self.over_cap} over SLICE_SESSION_MAX_UNITS={self.max_units}"
                 f" ({self.over_cap_units} unit(s))")
+        if self.over_chars_single:
+            parts.append(
+                f"{self.over_chars_single} over SLICE_SESSION_TURN0_CHARS "
+                "even fully condensed")
         return "; ".join(parts) if parts else "no session"
 
     def fitted_clause(self) -> str:
@@ -365,6 +445,15 @@ class SlicePlanGaps:
                 "the char capacity (SLICE_SESSION_TURN0_CHARS)")
         return (f"{self.fitted} session(s) fitted under the cap from "
                 + " and ".join(parts))
+
+    def condensed_clause(self) -> str:
+        """The narrower-rendering statement, empty when every planned
+        session renders at the widest threshold."""
+        if not self.condensed:
+            return ""
+        return (f"{self.condensed} session(s) rendered below the widest "
+                "threshold to fit SLICE_SESSION_TURN0_CHARS (editable fns "
+                "still in full; non-editable siblings as signatures)")
 
 
 def _group_needs_packing(
@@ -393,16 +482,27 @@ def slice_plan_gaps(
     n_over_union = 0
     fitted_from = 0
     n_over_chars = 0
+    n_over_chars_single = 0
+    n_condensed = 0
     for names, members in _merge_pending(pending):
         if not names:
             continue
         over_u, over_c = _group_needs_packing(names, members, max_units, costs)
         if not over_u and not over_c:
+            if costs is not None and costs.fit_threshold(
+                    names, members) != costs.widest():
+                n_condensed += 1
             continue
-        bins, oversized = _fit_under_cap(names, pending, max_units, costs)
-        n_over += len(oversized)
-        for t in oversized:
+        bins, dropped_units, dropped_chars = _fit_under_cap(
+            names, pending, max_units, costs)
+        n_over += len(dropped_units)
+        n_over_chars_single += len(dropped_chars)
+        for t in dropped_units:
             over_units = max(over_units, len(pending[t]))
+        if costs is not None:
+            n_condensed += sum(
+                1 for bt, bu in bins
+                if costs.fit_threshold(bt, bu) != costs.widest())
         if bins:
             if over_u:
                 n_over_union += 1
@@ -412,7 +512,9 @@ def slice_plan_gaps(
             n_fitted += len(bins)
     return SlicePlanGaps(n_empty, n_hollow, n_over, over_units, max_units,
                          fitted=n_fitted, over_union=n_over_union,
-                         fitted_from_units=fitted_from, over_chars=n_over_chars)
+                         fitted_from_units=fitted_from, over_chars=n_over_chars,
+                         over_chars_single=n_over_chars_single,
+                         condensed=n_condensed)
 
 
 def locator_only_expansions(
@@ -467,7 +569,14 @@ def plan_slices(
     With `costs` (:class:`SliceCosts`) a group under the unit cap whose
     turn-0 prompt would exceed the char capacity is packed too — by the
     same first-fit — so a session is sized to leave its turns headroom
-    under the single-call limit.
+    under the single-call limit. What packing cannot split, RENDERING
+    shrinks: every planned session carries the widest threshold it fits at
+    (`SessionSlice.file_chars`), and a single test that no packing can
+    divide opens as a session rendered narrower rather than being dropped.
+    Condensing costs the session nothing it may write — the editable fns
+    render in full at every threshold; what shrinks is the non-editable
+    siblings' bodies, which become signatures. A test is dropped only when
+    even the narrowest measured rendering is over the capacity.
 
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
@@ -481,12 +590,15 @@ def plan_slices(
         if not over_u and not over_c:
             groups = [(list(names), set(members))]
         else:
-            groups, _oversized = _fit_under_cap(names, pending, max_units, costs)
+            groups, _o_units, _o_chars = _fit_under_cap(
+                names, pending, max_units, costs)
         for gnames, gmembers in groups:
             out.append(SessionSlice(
                 tests=tuple(sorted(dict.fromkeys(gnames))),
                 units=tuple(sorted(gmembers,
-                                   key=lambda u: (u.file, u.fn_name, u.container)))))
+                                   key=lambda u: (u.file, u.fn_name, u.container))),
+                file_chars=(0 if costs is None
+                            else costs.fit_threshold(gnames, gmembers) or 0)))
     return out
 
 
@@ -517,11 +629,16 @@ def slice_plan_payload(
         "fitted": gaps.fitted,
         "fitted_from_units": gaps.fitted_from_units,
         "over_chars": gaps.over_chars,
+        "over_chars_single": gaps.over_chars_single,
+        "condensed": gaps.condensed,
+        "thresholds": list(costs.thresholds) if costs is not None else [],
         "max_chars": costs.max_chars if costs is not None else 0,
         "slices": {t: sorted(site_label(u) for u in us)
                    for t, us in sorted(slices.items())},
         "sessions": [{"tests": list(p.tests), "units": len(p.units),
-                      "chars": (costs.chars(p.tests, p.units)
+                      "file_chars": p.file_chars,
+                      "chars": (costs.chars(p.tests, p.units,
+                                            file_chars=p.file_chars or None)
                                 if costs is not None else None)}
                      for p in plans],
     }

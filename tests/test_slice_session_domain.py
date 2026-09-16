@@ -456,8 +456,11 @@ def test_a_group_under_the_unit_cap_is_packed_when_its_prompt_is_over_the_char_c
     b = FnSite("src/b.rs", "g", "impl B")
     hub = FnSite("src/hub.rs", "construct", "impl Hub")
     leftover = {"t_a": {a, hub}, "t_b": {b, hub}}
+    # One rendering threshold: every file renders the same at every one, so
+    # the packing is the only lever and splitting is what has to happen.
+    flat = {"src/a.rs": 30_000, "src/b.rs": 30_000, "src/hub.rs": 10_000}
     costs = SliceCosts(
-        file_chars={"src/a.rs": 30_000, "src/b.rs": 30_000, "src/hub.rs": 10_000},
+        file_chars={36_000: flat, 18_000: flat},
         test_chars={"t_a": 2_000, "t_b": 2_000}, fixed_chars=5_000,
         max_chars=60_000)
     packed = plan_slices(leftover, costs=costs)
@@ -469,12 +472,24 @@ def test_a_group_under_the_unit_cap_is_packed_when_its_prompt_is_over_the_char_c
     # Control: unit-count packing alone keeps them together (union 3 <= 32).
     single = plan_slices(leftover)
     assert [p.tests for p in single] == [("t_a", "t_b")]
-    # A single test whose own prompt is over the capacity is dropped, as a
+    # A single test over the capacity at EVERY rendering is dropped, as a
     # single test over the unit cap is — never truncated.
-    too_big = SliceCosts(file_chars={"src/a.rs": 70_000, "src/hub.rs": 10_000},
+    huge = {"src/a.rs": 70_000, "src/hub.rs": 10_000}
+    too_big = SliceCosts(file_chars={36_000: huge, 18_000: huge},
                          test_chars={"t_a": 100}, fixed_chars=100, max_chars=60_000)
     assert plan_slices({"t_a": {a, hub}}, costs=too_big) == []
-    assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_cap == 1
+    assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_chars_single == 1
+    assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_cap == 0
+    # The same single test opens when a NARROWER rendering fits it: the
+    # planner condenses rather than dropping, and says which rendering.
+    shrinks = SliceCosts(
+        file_chars={36_000: huge, 18_000: {"src/a.rs": 55_000, "src/hub.rs": 10_000},
+                    9_000: {"src/a.rs": 8_000, "src/hub.rs": 4_000}},
+        test_chars={"t_a": 100}, fixed_chars=100, max_chars=60_000)
+    opened = plan_slices({"t_a": {a, hub}}, costs=shrinks)
+    assert [p.tests for p in opened] == [("t_a",)]
+    assert opened[0].file_chars == 9_000
+    assert slice_plan_gaps({"t_a": {a, hub}}, costs=shrinks).condensed == 1
 
 
 def test_a_hung_binary_renders_as_a_hang_and_regresses_at_any_gain() -> None:

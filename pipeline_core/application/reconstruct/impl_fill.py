@@ -326,7 +326,24 @@ from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.slice_session import (
     DEFAULT_FILE_CHARS as SESSION_FILE_CHARS,
 )
-from pipeline_core.prompts.slice_session import build_slice_session_prompt
+from pipeline_core.prompts.slice_session import (
+    build_slice_session_prompt,
+    render_slice_file,
+)
+
+# The rendering thresholds a session's turn 0 is sized at, widest first.
+# The widest is the renderer's own default — every file whole below it,
+# condensed above. Each halving condenses the next tier of files, and the
+# narrowest condenses all but the smallest: that is the room a slice no
+# packing can split has to fit under SLICE_SESSION_TURN0_CHARS, and
+# condensing costs the session nothing it may write (the editable fns
+# render in full at every threshold; the non-editable siblings become
+# signatures). Four tiers because on the live tree of run
+# `32959-4a2ff1ab` the 20-unit slice's file term measured 70,117 at the
+# default and 22,883 three halvings down, and nothing narrower changed it
+# — the remaining files are already smaller than the threshold.
+_SESSION_FILE_THRESHOLDS: tuple[int, ...] = tuple(
+    SESSION_FILE_CHARS >> n for n in range(4))
 
 # The escalated followup's thinking reserve. Default off: Muse@high finishes
 # at p90 73 718 reasoning chars against request_max = VLLM_THINKING_BUDGET +
@@ -5002,12 +5019,32 @@ def prepare_impl_fill(
 
         def _session_costs(
                 slices: Mapping[str, Collection[FnSite]]) -> SliceCosts | None:
-            """The turn-0 prompt's size as a function of the packing: each
-            file's rendered size (capped as the prompt caps it), each test's
+            """The turn-0 prompt's size as a function of the packing: what
+            each file RENDERS to at each rendering threshold, each test's
             quoted block, and the sections every session carries. Sized
             against `SLICE_SESSION_TURN0_CHARS`, default 45% of the
             single-call limit, so a session leaves its result turns room —
-            the 05:23 session of run `334902-2774708c` had 8%."""
+            the 05:23 session of run `334902-2774708c` had 8%.
+
+            The file term calls `render_slice_file`, the same function the
+            turn-0 builder calls, once per threshold. It used to charge
+            `min(len(text), SESSION_FILE_CHARS)`, which is the threshold at
+            which the renderer CONDENSES a file, not a size the renderer
+            ever emits: on run `32959-4a2ff1ab` (2026-09-16) `src/ensure.rs`
+            was 56,026 raw, rendered to 1,805, and was charged 36,000, so a
+            20-unit slice was charged 103,320 for a file term that renders
+            to 70,117 — 33,203 over, a quarter of the capacity — and both of
+            the cluster's remaining measurable red tests were refused a
+            session on every fill of that run's last six hours. Measuring
+            the renderer also gives the planner its second lever: the same
+            slice rendered at a narrower threshold, which costs it nothing
+            it may write.
+
+            The editable set per file is the UNION over every test in
+            `slices`; a packed session's own editable set is a subset, so
+            the charge is an upper bound on what that session renders —
+            conservative in the direction that cannot refuse a session
+            that would have fit."""
             limit = int(deps.single_call_char_limit or 0)
             raw_cap = os.getenv("SLICE_SESSION_TURN0_CHARS", "")
             try:
@@ -5016,22 +5053,28 @@ def prepare_impl_fill(
                 max_chars = int(limit * 0.45)
             if max_chars <= 0:
                 return None
-            file_chars: dict[str, int] = {}
+            file_chars: dict[int, dict[str, int]] = {
+                t: {} for t in _SESSION_FILE_THRESHOLDS}
             types_chars: dict[str, int] = {}
             by_file: dict[str, list[FnSite]] = {}
             for us in slices.values():
                 for u in us:
                     by_file.setdefault(u.file, []).append(u)
+            _tree_recs = list(_all_recs.values())
             for f, sites in by_file.items():
                 try:
                     text = (target_src_dir / f).read_text(
                         encoding="utf-8", errors="replace")
                 except OSError:
                     text = ""
-                file_chars[f] = min(len(text), SESSION_FILE_CHARS)
                 # The TYPES_IN_SCOPE section this file's units pull in — the
                 # same call the session makes per file when it opens.
                 recs = [_all_recs[u] for u in dict.fromkeys(sites) if u in _all_recs]
+                for _t in _SESSION_FILE_THRESHOLDS:
+                    file_chars[_t][f] = len(render_slice_file(
+                        f, text, recs, _tree_recs, file_chars=_t,
+                        executed=_executed_all or (),
+                        coverage_known=_executed_all is not None))
                 if recs and text:
                     types_chars[f] = len(_types_section_for_fix(
                         " ".join(r.sig_text for r in recs), text, "",
@@ -5087,13 +5130,19 @@ def prepare_impl_fill(
                 **slice_plan_payload(_slices, _plans, _gaps, _costs),
                 "opened": len(_plans)})
         if _costs is not None and _plans:
+            def _size_of(p: SessionSlice, i: int) -> str:
+                n = _costs.chars(p.tests, p.units,
+                                 file_chars=p.file_chars or None)
+                at = ("" if not p.file_chars or p.file_chars == _costs.widest()
+                      else f" rendered at {p.file_chars:,}")
+                return f"{p.label(seq=i)} {n:,} chars{at}"
             _log("  [phase-c/session] turn-0 size per session: "
-                 + ", ".join(
-                     f"{p.label(seq=i)} {_costs.chars(p.tests, p.units):,} chars"
-                     for i, p in enumerate(_plans))
+                 + ", ".join(_size_of(p, i) for i, p in enumerate(_plans))
                  + f" (capacity {_costs.max_chars:,})")
         if _gaps.fitted_clause():
             _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
+        if _gaps.condensed_clause():
+            _log(f"  [phase-c/session] {_gaps.condensed_clause()}")
         if not _plans:
             if session_slices:
                 _log(f"  [phase-c/session] no slice planned "
@@ -5217,7 +5266,8 @@ def prepare_impl_fill(
                 invariants=invariants_section, macros=macros_section,
                 notes=_prior_notes, prior_regression=_prior_regr,
                 blueprint=_bp, fr_path=fr_path,
-                max_turns=_max_turns, executed=_executed_all)
+                max_turns=_max_turns, executed=_executed_all,
+                file_chars=_sl.file_chars or SESSION_FILE_CHARS)
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:
