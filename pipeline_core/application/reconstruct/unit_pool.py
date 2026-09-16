@@ -21,9 +21,21 @@ and a bare `ThreadPoolExecutor` does not give:
   rather than aborts — and it is re-raised on the CALLING thread after the
   join, because `sys.exit()` in a worker kills that worker alone;
 * a unit that raises is logged and skipped; the pool keeps going.
+
+A fourth: a worker CONTINUES the context of the thread that spawned it. A
+plain `threading.Thread` starts on an empty context, so every ContextVar the
+fill binds around a route run — which route is executing
+(`domain/fill_context.py`, whose docstring already states the inheritance as
+a fact), which units a call serves, which observer collects that call's
+stream rows — was silently unset inside a pooled route's workers, and the
+records keyed on them came back unlabelled. Each worker gets its OWN copy of
+the spawning context (`contextvars.copy_context()` per thread, never one
+shared `Context` — a Context may not be entered from two threads at once),
+so a binding made inside a worker still scopes that worker alone.
 """
 from __future__ import annotations
 
+import contextvars
 import queue as _queue_mod
 import threading
 from collections.abc import Callable, Iterable
@@ -80,8 +92,12 @@ def run_units_concurrently[T](
             except Exception as exc:
                 log(f"  [{name_prefix}] worker error on {describe(unit)}: {exc}")
 
-    threads = [threading.Thread(target=_worker, name=f"{name_prefix}-w{i}")
-               for i in range(n)]
+    def _worker_in_context(ctx: contextvars.Context) -> Callable[[], None]:
+        return lambda: ctx.run(_worker)
+
+    threads = [threading.Thread(
+        target=_worker_in_context(contextvars.copy_context()),
+        name=f"{name_prefix}-w{i}") for i in range(n)]
     for t in threads:
         t.start()
     for t in threads:

@@ -242,6 +242,31 @@ def record_followup_meta(data: Mapping[str, Any]) -> None:
     _record({**data, _KIND: _FOLLOWUP})
 
 
+def run_all_replies_capped(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Every JOINED main-stream reply recorded in this window was
+    reasoning-capped — at least one reply, all of them capped.
+
+    The run-level twin of :func:`units_all_replies_capped`, for the caller
+    that grades a whole route run rather than a unit. Unjoined rows are
+    skipped for the reason the module docstring gives: a retrospective or a
+    classifier call is not the run's answer, and a route whose fill call was
+    truncated would otherwise read as measured because the diagnosis call
+    that followed it finished. Followup rows are the second completion of a
+    call the main row already reports.
+
+    False on no joined rows at all, so a transport that records nothing and
+    a route whose calls this window did not see both keep the grade they
+    have. Run `366282-7c585f74` iter 2 (2026-09-15, cluster `nightly`) is
+    what this answers: three pair runs, two of them a single fill call cut
+    at 120,000 reasoning chars whose forced completion carried 517 and 599
+    chars, one re-emitting the bodies already on the tree — and all three
+    rowed as graded tries the next schedule ranked on.
+    """
+    joined = [r for r in rows
+              if not _is_followup_row(r) and r.get("units")]
+    return bool(joined) and all(is_reasoning_capped(r) for r in joined)
+
+
 def units_all_replies_capped(
     rows: Sequence[Mapping[str, Any]],
 ) -> frozenset[str]:

@@ -725,17 +725,45 @@ def test_the_grace_stops_at_a_row_that_paid() -> None:
     assert consecutive_unpaid(rows, pair, "o") == 0
 
 
-def test_the_grace_ignores_rows_that_opened_no_judged_try() -> None:
-    """Deferred, empty, stopped and reasoning-capped rows bought no
-    verdict, so they neither count toward the grace nor interrupt it —
-    the same rule the re-buy detector already applies."""
+def test_the_grace_ignores_rows_that_spent_no_fill() -> None:
+    """A deferred row opened nothing, an empty row returned before its
+    first dispatch, a stopped row was cut by the operator's graceful stop:
+    none of the three consumed a fill, so none counts toward the grace or
+    interrupts it."""
     pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
     rows = [_row(pair, RunOutcome.REVERTED),
             _row(pair, RunOutcome.DEFERRED),
             _row(pair, RunOutcome.EMPTY),
             _row(pair, RunOutcome.STOPPED),
-            _row(pair, RunOutcome.UNMEASURED),
             _row(pair, RunOutcome.REVERTED)]
+    assert consecutive_unpaid(rows, pair, "o") == 2
+
+
+def test_a_truncated_run_spends_the_grace_it_does_not_earn_a_rank_from() -> None:
+    """An UNMEASURED row is not evidence that the route cannot pay — the
+    rank reads it as never served — but it IS a fill the route spent while
+    zeroing every competing run, which is the only question this clock
+    asks. Three truncated tries therefore lapse a grace of three.
+
+    The negative control is the rule this replaced: skipping them, the same
+    three rows read as 0 and the competitors stay deferred forever, since a
+    route that never finishes a deliberation never grades anything else
+    either."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    rows = [_row(pair, RunOutcome.UNMEASURED) for _ in range(3)]
+    assert consecutive_unpaid(rows, pair, "o") == 3
+    skipped = [r for r in rows if r.outcome is not RunOutcome.UNMEASURED]
+    assert consecutive_unpaid(skipped, pair, "o") == 0
+
+
+def test_a_cash_still_ends_the_streak_before_a_truncated_try() -> None:
+    """Counting truncated tries does not make the streak unstoppable: the
+    walk still stops at the newest row that paid."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    rows = [_row(pair, RunOutcome.UNMEASURED),
+            _row(pair, RunOutcome.CASHED),
+            _row(pair, RunOutcome.UNMEASURED),
+            _row(pair, RunOutcome.FLAT)]
     assert consecutive_unpaid(rows, pair, "o") == 2
 
 

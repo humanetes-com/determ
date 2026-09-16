@@ -5281,6 +5281,7 @@ def prepare_impl_fill(
                     _ports, target_src_dir=target_src_dir,
                     cluster_name=cluster_name, slice_=_sl, records=_records,
                     turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes,
+                    max_transcript_chars=int(deps.single_call_char_limit or 0),
                     all_records=list(_all_recs.values()))
             attempts.note_dispatched(
                 locator_of(u) for u in (_out.dispatched | _out.kept))
@@ -5411,7 +5412,7 @@ def prepare_impl_fill(
                 reverted=frozenset(locator_of(u) for u in _out.reverted),
                 dispatched=frozenset(locator_of(u) for u in _out.dispatched),
                 stopped=_out.outcome == "stopped",
-                unmeasured=_out.unmeasured)
+                unmeasured=_out.unmeasured, cap_owned=True)
 
         return SessionRoute(_plans, _run_one_session, served, log=_log)
 

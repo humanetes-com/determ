@@ -15,6 +15,7 @@ on a loaded one.
 """
 from __future__ import annotations
 
+import contextvars
 import threading
 
 import pytest
@@ -188,3 +189,62 @@ def test_the_stop_is_re_raised_on_the_calling_thread_after_a_join() -> None:
                                log=_noop_log, check_stop=_check)
 
     assert any(c.endswith("pool joined") for c in calls)
+
+
+def test_a_worker_continues_the_context_of_the_thread_that_spawned_it() -> None:
+    """The fill binds which route is executing, which units a call serves
+    and which observer collects its stream rows as ContextVars around a
+    route run. A pooled route's workers make the calls, so every one of
+    those records is keyed on a binding the worker must see.
+
+    The negative control is a plain `threading.Thread`, which is what this
+    pool was: it starts on an empty context and the same read comes back
+    unset, which is why a pooled route's keeps were recorded with no label
+    and its truncated calls could not be told from finished ones.
+    """
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("v", default="")
+    seen: list[str] = []
+    lock = threading.Lock()
+
+    def _read(_u: int) -> None:
+        with lock:
+            seen.append(var.get())
+
+    token = var.set("route")
+    try:
+        run_units_concurrently(range(4), workers=2, name_prefix="ff",
+                               run_unit=_read, describe=str, log=_noop_log)
+        assert seen == ["route"] * 4
+
+        control: list[str] = []
+        threads = [threading.Thread(target=lambda: control.append(var.get()))
+                   for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert control == ["", ""]
+    finally:
+        var.reset(token)
+
+
+def test_a_binding_made_inside_a_worker_scopes_that_worker_alone() -> None:
+    """Each worker gets its OWN copy of the spawning context, so a unit
+    that binds (the call site that names the units it serves) cannot leak
+    into the unit a sibling worker is running, and cannot leak back out."""
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("v", default="")
+    seen: list[tuple[int, str]] = []
+    lock = threading.Lock()
+    gate = threading.Barrier(2, timeout=10)
+
+    def _bind_then_read(u: int) -> None:
+        var.set(f"unit-{u}")
+        gate.wait()
+        with lock:
+            seen.append((u, var.get()))
+
+    run_units_concurrently(range(2), workers=2, name_prefix="ff",
+                           run_unit=_bind_then_read, describe=str,
+                           log=_noop_log)
+    assert sorted(seen) == [(0, "unit-0"), (1, "unit-1")]
+    assert var.get() == ""

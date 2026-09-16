@@ -50,6 +50,7 @@ from pipeline_core.domain.fill_schedule import (
     schedule,
 )
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
 
 __all__ = ["FillExecution", "FillExecutionDeps", "execute_fill"]
 
@@ -337,7 +338,17 @@ def execute_fill(
             _starts[w.run.key] = deps.now()
             with route_scope(w.run.kind.value, w.run.label,
                              cluster=deps.cluster, iteration=deps.iteration):
-                _reports[w.run.key] = _route.run(w.run, _clocks[w.run.key])
+                # The stream rows of the calls THIS run makes, so a run
+                # whose every fill reply was cut mid-deliberation is graded
+                # UNMEASURED rather than FLAT. The observer is bound here
+                # and not per route because every route reaches the model
+                # through the same client; a pooled route's workers see it
+                # because `run_units_concurrently` continues this context.
+                with observe_call() as _rows:
+                    _rep = _route.run(w.run, _clocks[w.run.key])
+                if not _rep.cap_owned and run_all_replies_capped(_rows):
+                    _rep = replace(_rep, unmeasured=True)
+                _reports[w.run.key] = _rep
             _ends[w.run.key] = deps.now()
 
         try:

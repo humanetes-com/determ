@@ -14,6 +14,7 @@ assertions and the fixed pre-schedule walk as the negative control.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from pipeline_core.adapters.route_ledger_store import RouteLedgerStore
@@ -31,6 +32,7 @@ from pipeline_core.domain.fill_schedule import (
     RunOutcome,
 )
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.reasoning_cap import record_stream_meta, serving_units
 
 _STUB = FnLocator("src/x.rs", "drop_rest")
 _FMT = FnLocator("src/x.rs", "fmt")
@@ -395,3 +397,92 @@ def test_every_wave_hands_its_kept_units_to_the_unit_ledger_writer(
         execute_fill(routes_control, hollow={}, bodies_sha=lambda _t: "s",
                      deps=_deps(control_dir, [], []))
     assert calls_control == calls
+
+
+class _StreamRoute(_Route):
+    """A route that records one stream row per call, as the transport does.
+
+    `finish_reason` is what the transport saw; `joined` says whether the
+    call was bound to the units it serves, which is the difference between
+    a fill call and a retrospective."""
+
+    def __init__(self, *a, rows: Sequence[tuple[str, bool]], **kw) -> None:
+        super().__init__(*a, **kw)
+        self._rows = list(rows)
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        self._calls.append(run.label)
+        for finish, joined in self._rows:
+            data = {"finish_reason": finish, "reasoning_chars": 120_000}
+            if joined:
+                with serving_units(f"{loc.file}::{loc.fn_name}"
+                                   for loc in run.targets):
+                    record_stream_meta(data)
+            else:
+                record_stream_meta(data)
+        return RouteRunReport(model_calls=len(self._rows), kept=run.targets)
+
+
+def _one_run_outcome(tmp_path: Path, rows: Sequence[tuple[str, bool]],
+                     **kw) -> RunOutcome:
+    fill_reading.reset_last_comparison()
+    calls: list[str] = []
+    route = _StreamRoute(RouteKind.PAIR, [RouteRun(
+        kind=RouteKind.PAIR, label="pair src/x.rs::fmt + src/y.rs::new",
+        targets=frozenset({_FMT}), target_tests=frozenset({"t_fmt"}))],
+        calls=calls, rows=rows, **kw)
+    out = execute_fill([route], hollow={}, bodies_sha=lambda _t: "b",
+                       deps=_deps(tmp_path, [], []))
+    return out.rows[0].outcome
+
+
+def test_a_run_whose_every_fill_reply_was_cut_is_graded_unmeasured(
+        tmp_path: Path) -> None:
+    """A truncated call is not a measured refusal, so the run that made it
+    is UNMEASURED and the next schedule ranks it as never served — the rule
+    the escalated batch route already applied per unit, at the route the
+    fill phase now opens first.
+
+    The negative control is the same run with the same keeps whose reply
+    FINISHED: that one is a measured try and stays FLAT, which is what
+    every capped run was graded before this."""
+    assert _one_run_outcome(tmp_path, [("length", True)]) is RunOutcome.UNMEASURED
+    assert _one_run_outcome(tmp_path / "b", [("stop", True)]) is RunOutcome.FLAT
+
+
+def test_a_finished_diagnosis_call_does_not_make_a_cut_fill_call_measured(
+        tmp_path: Path) -> None:
+    """The pair's revert records a diagnosis through a second, unjoined
+    call. It finishes; the fill call it describes did not. Only calls bound
+    to the units they serve answer for the run."""
+    assert _one_run_outcome(
+        tmp_path, [("length", True), ("stop", False)]) is RunOutcome.UNMEASURED
+
+
+def test_one_finished_fill_reply_among_several_keeps_the_run_measured(
+        tmp_path: Path) -> None:
+    """`unmeasured` is ALL of the run's fill replies, never any: a run that
+    got one full turn was tried, whatever happened to its other calls."""
+    assert _one_run_outcome(
+        tmp_path, [("length", True), ("stop", True)]) is RunOutcome.FLAT
+
+
+def test_the_executor_does_not_overrule_a_route_that_read_its_own_calls(
+        tmp_path: Path) -> None:
+    """The session grades itself: it can tell a capped reply that still
+    carried a change set (judged) from one that carried none, which the
+    stream rows alone cannot. A report that says it owns the reading keeps
+    it."""
+    fill_reading.reset_last_comparison()
+    calls: list[str] = []
+
+    class _OwnedRoute(_StreamRoute):
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            rep = super().run(run, clock)
+            return replace(rep, cap_owned=True)
+
+    route = _OwnedRoute(RouteKind.SESSION, [_session()], calls=calls,
+                        rows=[("length", True)])
+    out = execute_fill([route], hollow={}, bodies_sha=lambda _t: "b",
+                       deps=_deps(tmp_path, [], []))
+    assert out.rows[0].outcome is RunOutcome.FLAT

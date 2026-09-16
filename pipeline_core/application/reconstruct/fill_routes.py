@@ -76,6 +76,13 @@ class RouteRunReport:
     #: measured refusal, so the ledger grades such a run UNMEASURED rather
     #: than FLAT and the next schedule ranks it as never served.
     unmeasured: bool = False
+    #: This route computed `unmeasured` itself, from its own turns, and the
+    #: executor must not fold the window's stream rows over it. Only the
+    #: session route does: it can tell a capped reply that still carried a
+    #: change set (judged, measured) from one that carried none, which the
+    #: rows alone cannot. Every other route answers the simpler question the
+    #: executor folds — were ALL of this run's joined fill replies cut.
+    cap_owned: bool = False
 
     @classmethod
     def from_delta(cls, delta: AttemptsDelta,

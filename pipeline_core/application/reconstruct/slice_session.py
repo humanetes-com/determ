@@ -265,6 +265,7 @@ def run_slice_session(
     turn0: str,
     max_turns: int = 8,
     max_minutes: float = 90.0,
+    max_transcript_chars: int = 0,
     peel_max: int = 6,
     keep_best: bool = True,
     all_records: Sequence[FnRecord] = (),
@@ -277,7 +278,25 @@ def run_slice_session(
     `keep_best=False` is the rule before the best-state reference (the
     opening suite as the only reference, a worse judged turn left on the
     tree for the next turn) — the negative control of the recorded
-    replays, never a live setting."""
+    replays, never a live setting.
+
+    `max_transcript_chars` is the session's OWN bound on the transcript it
+    sends, and it is a fourth budget beside the turn count, the wall clock
+    and the fill share. The client that sends the turns does not fit them —
+    `ask_turns` warns past 90% of the single-call limit and sends the list
+    as it is, because the whole conversation is what the model must see —
+    so nothing bounded the growth: one reply that the server cut at its
+    token ceiling is appended like any other, and on run
+    `366282-7c585f74` (2026-09-15, cluster `nightly`) a 135,396-char reply
+    carrying no change set took the transcript from 160,389 chars to
+    296,189 in one turn, past the 293,376-char limit, and the next turn was
+    sent anyway. Checked BEFORE each call, so a turn is never sent over the
+    bound; the session ends on its best judged state exactly as the
+    wall-clock budget ends it. It deliberately does not trim or drop a
+    reply already in the transcript: the user turn that answers a request
+    refers to the turn that made it, and a conversation with a hole in it
+    is not a cheaper conversation. 0 disables the bound — the behaviour
+    before it, and the negative control."""
     label = slice_.label()
     files = list(slice_.files)
     # The write set starts as the planned slice and may grow when a FILE
@@ -423,6 +442,18 @@ def run_slice_session(
                 ports.log(f"  [phase-c/session] {label}: fill share spent "
                           f"after {turns} turn(s) and the last turn moved no "
                           "verdict — no further turn opened.")
+                break
+            sent_chars = sum(len(str(m.get("content") or ""))
+                             for m in messages)
+            if 0 < max_transcript_chars < sent_chars:
+                ports.log(
+                    f"  [phase-c/session] {label}: transcript "
+                    f"{sent_chars:,} chars over the single-call bound "
+                    f"({max_transcript_chars:,}) after {turns} turn(s) — no "
+                    "further turn opened.")
+                ports.emit("phase_c.session.transcript_stop", data={
+                    "cluster": cluster_name, "turn": turns + 1,
+                    "chars": sent_chars, "bound": max_transcript_chars})
                 break
             turns += 1
             try:

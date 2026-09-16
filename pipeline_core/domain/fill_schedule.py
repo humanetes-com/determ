@@ -520,23 +520,44 @@ def _unpaid_streak(rows: Iterable[RouteLedgerRow],
                    match: Callable[[RouteLedgerRow], bool],
                    oracle_fp: str,
                    paid: Callable[[RouteLedgerRow], bool] = _row_paid) -> int:
-    """Graded rows matching `match`, newest first, until one paid.
+    """Rows matching `match` that SPENT a fill, newest first, until one paid.
 
     The ONE walk behind every "has this spend stopped paying" question, so
     a second consumer cannot drift from the first about which rows are a
-    judged try. Rows under another oracle are not evidence about this one
-    and are skipped, as the re-buy detector already skips them. Deferred,
-    empty, stopped and reasoning-capped rows opened no judged try and
-    neither count nor interrupt the run. `paid` is what "paid" means for
-    the question asked: the row paid (a route's rank), or the row paid one
-    test (a per-test exemption, :func:`row_paid_test`).
+    try. Every caller is an exemption clock: the lapse of a pair's right to
+    zero its competitors (:func:`consecutive_unpaid`), and the two per-test
+    lapses (:func:`unpaid_tries_for_test`, :func:`unpaid_attributed_writes`).
+    Rows under another oracle are not evidence about this one and are
+    skipped, as the re-buy detector already skips them.
+
+    WHICH ROWS COUNT, and why it is not the same set the RANK reads. A
+    deferred row and an EMPTY row opened nothing and consumed nothing; a
+    STOPPED row was cut by a graceful stop, which is the operator's spend,
+    not the route's. Those three neither count nor interrupt the run. An
+    UNMEASURED row does count, and that is the one difference from
+    :func:`_rank_of`, deliberately: a run whose every reply was cut
+    mid-deliberation is not EVIDENCE that the route cannot pay — which is
+    the rank's question, and why the rank reads it as never served — but it
+    is a fill the route spent while deferring every competing run at share
+    zero, which is this clock's question. Skipping it here would make the
+    exemption unreachable exactly when the route is failing in the most
+    expensive way: run `366282-7c585f74` iter 2 (2026-09-15) spent 49
+    minutes on three pair runs, two of them a single truncated call, and it
+    was those three graded rows that let the next fill open the file runs
+    that then cashed +14. Under a clock that skipped the truncated two, the
+    streak would have read 1 of 3 and that fill would have deferred them
+    again.
+
+    `paid` is what "paid" means for the question asked: the row paid (a
+    route's exemption), or the row paid one test (a per-test exemption,
+    :func:`row_paid_test`).
     """
     seen = 0
     for r in reversed(list(rows)):
         if r.oracle_fp != oracle_fp or not match(r):
             continue
         if r.outcome in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
-                         RunOutcome.STOPPED, RunOutcome.UNMEASURED):
+                         RunOutcome.STOPPED):
             continue
         if paid(r):
             break
@@ -614,9 +635,10 @@ def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
     ``never_served`` on 45 of its 55 buys (2026-09-14, cluster `stable`).
 
     Rows under another oracle are not evidence about this one and are
-    skipped, as the re-buy detector already skips them. Deferred, empty,
-    stopped and reasoning-capped rows opened no judged try and neither
-    count nor interrupt the run.
+    skipped, as the re-buy detector already skips them. Deferred, empty and
+    stopped rows consumed no fill and neither count nor interrupt the run;
+    a reasoning-capped (UNMEASURED) row consumed one and counts — see
+    :func:`_unpaid_streak` for why this clock and the rank differ there.
     """
     key = _served_key(run)
     return _unpaid_streak(rows, lambda r: _served_key_of(r) == key, oracle_fp)
