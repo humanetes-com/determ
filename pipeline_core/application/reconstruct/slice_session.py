@@ -155,6 +155,11 @@ class SessionOutcome:
     #: The judged turn whose state the session ended on; None when no turn
     #: was judged. `final` is that turn's reading.
     best_turn: int | None = None
+    #: The turn the session's own preference order chose (targets first).
+    #: It differs from `best_turn` when that state is one the end-of-session
+    #: keep gate refuses and a judged turn the gate accepts was measured:
+    #: the session then ends on the accepted one.
+    preferred_turn: int | None = None
     #: Judged turns that were worse than the best state and were put back.
     restored_turns: int = 0
     #: Replies cut by the reasoning cap. One that carried no change set and
@@ -268,6 +273,7 @@ def run_slice_session(
     max_transcript_chars: int = 0,
     peel_max: int = 6,
     keep_best: bool = True,
+    end_on_keepable: bool = True,
     all_records: Sequence[FnRecord] = (),
 ) -> SessionOutcome:
     """Run one session and leave the tree in its accepted, kept, or
@@ -279,6 +285,11 @@ def run_slice_session(
     opening suite as the only reference, a worse judged turn left on the
     tree for the next turn) — the negative control of the recorded
     replays, never a live setting.
+
+    `end_on_keepable=False` is the rule before the session ended on the
+    best state its own keep gate accepts (the preferred state alone, the
+    peel from it the only way back) — the second negative control, also
+    never a live setting.
 
     `max_transcript_chars` is the session's OWN bound on the transcript it
     sends, and it is a fourth budget beside the turn count, the wall clock
@@ -343,6 +354,22 @@ def run_slice_session(
     # good (its targets, then losses beyond the best's, then the net)
     # becomes it; a worse one is put back to its bytes before the next turn.
     best: _JudgedState | None = None
+    # The best judged state the END-OF-SESSION KEEP GATE would leave on the
+    # tree. That gate is `TurnReading.regressed` (the sweep's rule: a strict
+    # net gain forgives a newly-red test, at or below zero any loss
+    # convicts), and it is a DIFFERENT order from the one that picks `best`
+    # above (`judge_against_best` ranks the session's own targets first), so
+    # a session can converge on a state the gate must refuse while every
+    # state the gate would have kept is put back as "worse". Run
+    # `504793-5774c226` (2026-09-16, cluster `nightly`, iter 1), the session
+    # on `test_whitespace`: 8 turns over 32 min on one unit
+    # (`src/ensure.rs::__dispatch_ensure`); turns 1/3/5/7 held the target
+    # green at net -12 (13 reddened passengers) and turns 4 and 8 measured
+    # net +1 with nothing newly red. Targets-first made 7 the best, 4 and 8
+    # were restored away as worse, the gate refused 7, the peel emptied the
+    # set and the session ended `kept 0`. The next fill re-bought the same
+    # unit in 8.8 min for the same +1.
+    keepable: _JudgedState | None = None
     restored_turns = 0
     capped_turns = 0
     judged_turns = 0
@@ -580,8 +607,18 @@ def run_slice_session(
                     restored_to = best.turn
                     restored_note = render_restored_note(verdict, best.turn)
                     restored_why = verdict.losses()
+            images: Mapping[str, PreImage] | None = None
             if restored_to is None:
-                best = _JudgedState(turns, reading, _images())
+                images = _images()
+                best = _JudgedState(turns, reading, images)
+            if keep_best and end_on_keepable and not reading.regressed and (
+                    keepable is None
+                    or judge_against_best(reading, keepable.reading).holds):
+                # Captured here, while this turn's bodies are still on the
+                # tree: the restore below puts the best's bytes back.
+                if images is None:
+                    images = _images()
+                keepable = _JudgedState(turns, reading, images)
             ports.emit("phase_c.session.turn", data={
                 "cluster": cluster_name, "turn": turns, "kind": "judged",
                 "units": [site_payload(u) for u in sorted(cs.units)],
@@ -641,12 +678,32 @@ def run_slice_session(
         # decision would have kept that state as it stands (not regressed
         # against the opening suite — no peel needed), else to the baseline.
         if not accepted:
-            if best is not None and not best.reading.regressed:
-                _restore(best.images)
+            end_state = (best if best is not None and not best.reading.regressed
+                         else keepable)
+            if end_state is not None:
+                _restore(end_state.images)
             else:
                 _restore(baseline_texts)
         raise
 
+    # The tree holds the best judged state, but the gate below decides
+    # whether it may stay by `TurnReading.regressed` — while the order that
+    # picked it ranks the targets first. When the preferred state is one the
+    # gate refuses, the session ends on the best state the gate ACCEPTS
+    # instead of walking back toward the baseline: a measured non-regressing
+    # reading is not evidence the session may throw away, and the peel can
+    # only reach a subset of the refused state, never the other turn's bodies.
+    ended: _JudgedState | None = best
+    if (not accepted and best is not None and best.reading.regressed
+            and keepable is not None and keepable.turn != best.turn):
+        _restore(keepable.images)
+        ended = keepable
+        ports.log(f"  [phase-c/session] {label}: turn {best.turn}'s state "
+                  f"({best.reading.pass_delta:+d}, "
+                  f"{len(best.reading.newly_red)} newly red) is one the keep "
+                  f"gate refuses — ended on turn {keepable.turn}'s state "
+                  f"instead ({keepable.reading.pass_delta:+d}, no regression), "
+                  "the best judged state the gate accepts.")
     current = dict(ports.enumerate_bodies())
     watch = frozenset(slice_.units) | frozenset(records)
     changed = frozenset(
@@ -660,7 +717,7 @@ def run_slice_session(
     # The tree holds the best judged state (every worse turn was put back),
     # so the decision reads that state's reading, and the peel — needed only
     # when the best state itself regresses the opening suite — walks from it.
-    final = best.reading if best is not None else None
+    final = ended.reading if ended is not None else None
     if accepted:
         outcome, kept = "accepted", changed
     elif changed:
@@ -696,7 +753,8 @@ def run_slice_session(
         final=final, compile_failures=compile_failures,
         transcript_chars=sum(len(str(m.get("content") or "")) for m in messages),
         newly_red=newly_red, newly_red_output=newly_red_output,
-        best_turn=best.turn if best is not None else None,
+        best_turn=ended.turn if ended is not None else None,
+        preferred_turn=best.turn if best is not None else None,
         restored_turns=restored_turns, capped_turns=capped_turns,
         judged_turns=judged_turns, judged_capped_turns=judged_capped)
     ports.emit("phase_c.session.end", data={
@@ -705,7 +763,8 @@ def run_slice_session(
         "kept": [site_payload(u) for u in sorted(kept)],
         "reverted": [site_payload(u) for u in sorted(reverted)],
         "notes_chars": len(notes),
-        "best_turn": result.best_turn, "restored_turns": restored_turns,
+        "best_turn": result.best_turn, "preferred_turn": result.preferred_turn,
+        "restored_turns": restored_turns,
         "capped_turns": capped_turns, "judged_turns": judged_turns,
         "judged_capped_turns": judged_capped, "unmeasured": result.unmeasured})
     ports.log(f"  [phase-c/session] {label}: {outcome.upper()} after {turns} turn(s) "

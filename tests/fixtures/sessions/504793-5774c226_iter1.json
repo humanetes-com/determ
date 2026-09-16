@@ -1,0 +1,339 @@
+{
+ "cluster": "nightly",
+ "iter": 1,
+ "run_id": "504793-5774c226",
+ "sessions": [
+  {
+   "baseline_pass": 149,
+   "end": {
+    "kept": [],
+    "model_calls": 8,
+    "outcome": "reverted",
+    "reverted": [
+     {
+      "container": "impl BothDebug for(A,B)",
+      "file": "src/ensure.rs",
+      "fn": "__dispatch_ensure"
+     }
+    ],
+    "turns": 8
+   },
+   "files": [
+    "src/ensure.rs",
+    "src/error.rs",
+    "src/fmt.rs",
+    "src/lib.rs",
+    "src/ptr.rs",
+    "src/wrapper.rs"
+   ],
+   "index": 0,
+   "max_turns": 8,
+   "row": {
+    "kept": [],
+    "label": "session[1 test(s), 20 unit(s)] #1",
+    "minutes": 31.963,
+    "model_calls": 8,
+    "net_pass_delta": 0,
+    "outcome": "reverted",
+    "reverted": [
+     [
+      "src/ensure.rs",
+      "__dispatch_ensure"
+     ]
+    ]
+   },
+   "tests": [
+    "test_whitespace"
+   ],
+   "ts": "2026-09-16T19:09:50.011+00:00",
+   "turns": [
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [
+      "test_as",
+      "test_atom",
+      "test_high_precedence_binary_operator",
+      "test_if",
+      "test_loop",
+      "test_low_precedence_binary_operator",
+      "test_macro",
+      "test_match",
+      "test_pat",
+      "test_path",
+      "test_raw_addr",
+      "test_trailer",
+      "test_unary"
+     ],
+     "pass_delta": -12,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 1,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [
+      "test_whitespace"
+     ],
+     "turn": 2,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [
+      "test_as",
+      "test_atom",
+      "test_high_precedence_binary_operator",
+      "test_if",
+      "test_loop",
+      "test_low_precedence_binary_operator",
+      "test_macro",
+      "test_match",
+      "test_pat",
+      "test_path",
+      "test_raw_addr",
+      "test_trailer",
+      "test_unary"
+     ],
+     "pass_delta": -12,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 3,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 1,
+     "rejected": 0,
+     "targets_failing": [
+      "test_whitespace"
+     ],
+     "turn": 4,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [
+      "test_as",
+      "test_atom",
+      "test_high_precedence_binary_operator",
+      "test_if",
+      "test_loop",
+      "test_low_precedence_binary_operator",
+      "test_macro",
+      "test_match",
+      "test_pat",
+      "test_path",
+      "test_raw_addr",
+      "test_trailer",
+      "test_unary"
+     ],
+     "pass_delta": -12,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 5,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "request",
+     "newly_red": [],
+     "pass_delta": 0,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 6,
+     "units": []
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [
+      "test_as",
+      "test_atom",
+      "test_high_precedence_binary_operator",
+      "test_if",
+      "test_loop",
+      "test_low_precedence_binary_operator",
+      "test_macro",
+      "test_match",
+      "test_pat",
+      "test_path",
+      "test_raw_addr",
+      "test_trailer",
+      "test_unary"
+     ],
+     "pass_delta": -12,
+     "rejected": 0,
+     "targets_failing": [],
+     "turn": 7,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    },
+    {
+     "crashed": [],
+     "kind": "judged",
+     "newly_red": [],
+     "pass_delta": 1,
+     "rejected": 0,
+     "targets_failing": [
+      "test_whitespace"
+     ],
+     "turn": 8,
+     "units": [
+      {
+       "container": "impl BothDebug for(A,B)",
+       "file": "src/ensure.rs",
+       "fn": "__dispatch_ensure"
+      }
+     ]
+    }
+   ],
+   "units": [
+    {
+     "container": "impl BothDebug for(A,B)",
+     "file": "src/ensure.rs",
+     "fn": "__dispatch_ensure"
+    },
+    {
+     "container": "impl Buf",
+     "file": "src/ensure.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Write for Buf",
+     "file": "src/ensure.rs",
+     "fn": "write_str"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "construct_from_adhoc"
+    },
+    {
+     "container": "impl Drop for Error",
+     "file": "src/error.rs",
+     "fn": "drop"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/error.rs",
+     "fn": "error"
+    },
+    {
+     "container": "impl Debug for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Display for Error",
+     "file": "src/error.rs",
+     "fn": "fmt"
+    },
+    {
+     "container": "impl Error",
+     "file": "src/error.rs",
+     "fn": "msg"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_drop"
+    },
+    {
+     "container": "",
+     "file": "src/error.rs",
+     "fn": "object_ref"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "debug"
+    },
+    {
+     "container": "impl ErrorImpl",
+     "file": "src/fmt.rs",
+     "fn": "display"
+    },
+    {
+     "container": "",
+     "file": "src/lib.rs",
+     "fn": "Ok"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "as_ptr"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "by_ref"
+    },
+    {
+     "container": "impl Ref<'a,T>",
+     "file": "src/ptr.rs",
+     "fn": "from_raw"
+    },
+    {
+     "container": "impl Own<T>",
+     "file": "src/ptr.rs",
+     "fn": "new"
+    },
+    {
+     "container": "impl Display for MessageError<M>",
+     "file": "src/wrapper.rs",
+     "fn": "fmt"
+    }
+   ]
+  }
+ ]
+}

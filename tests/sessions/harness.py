@@ -206,7 +206,8 @@ class _Suite:
 
 
 def replay(session: Mapping[str, Any], root: Path, *,
-           keep_best: bool = True, max_turns: int | None = None) -> Replay:
+           keep_best: bool = True, end_on_keepable: bool = True,
+           max_turns: int | None = None) -> Replay:
     units = sorted({site_of(u) for t in session["turns"] for u in t["units"]}
                    | {site_of(u) for u in session["units"]},
                    key=lambda u: (u.file, u.fn_name, u.container))
@@ -270,7 +271,7 @@ def replay(session: Mapping[str, Any], root: Path, *,
         ports, target_src_dir=root, cluster_name=str(session.get("cluster", "t")),
         slice_=slice_, records=records, turn0="turn0",
         max_turns=max_turns or int(session.get("max_turns", 8)),
-        keep_best=keep_best)
+        keep_best=keep_best, end_on_keepable=end_on_keepable)
     row = out.final.pass_delta if (out.kept and out.final is not None) else 0
     return Replay(outcome=out, final_bodies=tree.bodies(), row_delta=row,
                   log=log, events=events, user_turns=user_turns,
