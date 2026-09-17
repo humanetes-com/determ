@@ -829,6 +829,43 @@ def _calls_clause(targets: tuple[FnTarget, ...]) -> str:
             + ", ".join(f"`{tgt.site.fn_name}`" for tgt in targets) + ")")
 
 
+def _coverage_status_line(coverage: float, *, line_targets: int,
+                          fn_targets: tuple[FnTarget, ...],
+                          whole_file: bool) -> str:
+    """The "Coverage status:" sentence for a prompt carrying exactly these
+    targets, and no others.
+
+    Split-and-merge sends one request per subset of a file's uncovered lines,
+    and each request renders only its own fn_bodies and NEVER EXECUTED blocks.
+    A sentence built once from the file's totals and reused across the subsets
+    states a count the prompt under it contradicts: on run 3044-3c9670bf
+    (2026-09-17) 45 of the 54 task0c prompts carrying the never-executed clause
+    named more functions than they listed, and three named one function while
+    listing none and carrying no call instruction at all. So the counts come
+    from the caller's own targets, and `whole_file` decides whether the file's
+    other lines may be described as already covered — for a subset they are
+    another concurrent request's targets, not covered.
+    """
+    if coverage <= 0:
+        return ""
+    head = f"\nCoverage status: {coverage:.1f}% covered. "
+    if not line_targets and not fn_targets:
+        return head.rstrip() + "\n"
+    scope = ("are the ONLY remaining targets in this file — all other lines "
+             "are already covered."
+             if whole_file else
+             "are the ONLY targets of this request — the file's other uncovered "
+             "lines are targeted by a separate request running beside this one.")
+    return (
+        head
+        + (f"The {line_targets} line(s) in fn_bodies below " if line_targets else "")
+        + ("and " if line_targets and fn_targets else "")
+        + (f"{'the' if line_targets else 'The'} {len(fn_targets)} function(s) "
+           "listed as never executed " if fn_targets else "")
+        + scope + " Focus exclusively on these.\n"
+    )
+
+
 def _extract_existing_tests(source_text: str) -> str:
     """Extract the existing #[cfg(test)] mod tests block from a source file.
 
@@ -1817,19 +1854,28 @@ def _run_phase_c(
         # The cluster rules, with the target-scope half rendered from THIS
         # prompt's targets: which listed functions/lines only this cluster's
         # cfg compiles, and which are shared code no test here reaches.
-        _gated_line_n = 0
-        if _current_cluster is not None and _line_targets:
-            _gated_line_n = len(flipped_cfg_set(
-                _current_cluster.cfg_true, _current_cluster.cfg_false,
-            ).excluded_uncovered_lines(existing_text, _line_targets))
-        _cluster_rules = "\n".join(_r for _r in (
-            _nightly_rules_for_cluster(),
-            target_scope_rule(
-                _current_cluster,
-                gated_fns=[_ft.label for _ft in _file_fn_targets if _ft.cluster_gated],
-                shared_fns=[_ft.label for _ft in _file_fn_targets if not _ft.cluster_gated],
-                gated_lines=_gated_line_n,
-                shared_lines=len(_line_targets) - _gated_line_n)) if _r)
+        # A split-and-merge subset shows its own share of both, so the rule is
+        # a function of the targets the caller is about to render, never of the
+        # file's totals: on run 3044-3c9670bf (2026-09-17) the wrapper.rs subset
+        # that listed one never-executed body carried a rule naming five, one of
+        # them cfg-gated and absent from the prompt.
+        def _scope_rules(_targets: tuple[FnTarget, ...], _lines: set[int], *,
+                         existing_text: str = existing_text) -> str:
+            _gated_line_n = 0
+            if _current_cluster is not None and _lines:
+                _gated_line_n = len(flipped_cfg_set(
+                    _current_cluster.cfg_true, _current_cluster.cfg_false,
+                ).excluded_uncovered_lines(existing_text, _lines))
+            return "\n".join(_r for _r in (
+                _nightly_rules_for_cluster(),
+                target_scope_rule(
+                    _current_cluster,
+                    gated_fns=[_ft.label for _ft in _targets if _ft.cluster_gated],
+                    shared_fns=[_ft.label for _ft in _targets if not _ft.cluster_gated],
+                    gated_lines=_gated_line_n,
+                    shared_lines=len(_lines) - _gated_line_n)) if _r)
+
+        _cluster_rules = _scope_rules(_file_fn_targets, _line_targets)
 
         # The behaviours this file has not pinned yet: listed in the prompt and
         # required of the block when the target is on. `already_pinned` is what
@@ -1910,15 +1956,9 @@ def _run_phase_c(
         )
         _placement_rules = _integration_test_rules(
             crate_name=module_name, prelude_names=_prelude_names)
-        _coverage_status_probe = (
-            f"\nCoverage status: {coverage:.1f}% covered. "
-            + (f"The {len(_line_targets)} line(s) in fn_bodies below " if _line_targets else "")
-            + ("and " if _line_targets and _file_fn_targets else "")
-            + (f"{'the' if _line_targets else 'The'} {len(_file_fn_targets)} function(s) "
-               "listed as never executed " if _file_fn_targets else "")
-            + "are the ONLY remaining targets in this file — "
-            "all other lines are already covered. Focus exclusively on these.\n"
-        ) if coverage > 0 else ""
+        _coverage_status_probe = _coverage_status_line(
+            coverage, line_targets=len(_line_targets),
+            fn_targets=_file_fn_targets, whole_file=True)
         if ctx.behaviour_pass:
             _coverage_status_probe = (
                 "\nBehaviour pass: the fns in fn_bodies below are the ones the listed harvested "
@@ -2032,7 +2072,11 @@ project-specific import paths, type construction patterns, and hard constraints.
                            _behaviours_section: str = _behaviours_section,
                            _raw_text: str = _raw_text,
                            _file_fn_targets: tuple[FnTarget, ...] = _file_fn_targets,
-                           _fn_span_lines: set[int] = _fn_span_lines) -> str:
+                           _fn_span_lines: set[int] = _fn_span_lines,
+                           coverage: float = coverage,
+                           _behaviour_pass: bool = ctx.behaviour_pass,
+                           _scope_rules: Callable[[tuple[FnTarget, ...], set[int]], str]
+                           = _scope_rules) -> str:
             """Render a generation prompt targeting only a subset of the
                 file's uncovered lines (split-and-merge). Same file context as
                 the full prompt; only the fn_bodies/target section narrows, so
@@ -2044,6 +2088,13 @@ project-specific import paths, type construction patterns, and hard constraints.
             _sub_targets = tuple(
                 _ft for _ft in _file_fn_targets
                 if any(_ft.first_line <= _ln <= _ft.last_line for _ln in _subset_lines))
+            # Every claim about what this prompt targets is rendered from
+            # `_sub_targets`/`_sub_lines`, the two the sections below render:
+            # the status sentence, the cluster scope rule and the call list.
+            _sub_status = (_coverage_status_probe if _behaviour_pass else
+                           _coverage_status_line(
+                               coverage, line_targets=len(_sub_lines),
+                               fn_targets=_sub_targets, whole_file=False))
             _ssecs = _build_task0c_prompt_sections(
                 rel_path=rel_path,
                 existing_text=existing_text,
@@ -2059,11 +2110,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                 what_worked=file_what_worked.get(rel_path, ""),
                 retrospective=file_retrospectives.get(rel_path, ""),
                 uncov_lines=_subset_lines,
-                scaffold_chars=len(_scaffold_template),
+                scaffold_chars=(len(_scaffold_template)
+                                - len(_coverage_status_probe) + len(_sub_status)),
                 behaviours=_behaviours_section,
                 unexecuted_fns=_render_unexecuted_fns(_raw_text, _sub_targets),
             )
-            return _render_prompt(_ssecs, _coverage_status_probe,
+            return _render_prompt(_ssecs, _sub_status,
+                                  _cluster_rules=_scope_rules(_sub_targets, _sub_lines),
                                   _calls=_calls_clause(_sub_targets))
 
         # Retry generation — thinking mode sometimes returns empty output.

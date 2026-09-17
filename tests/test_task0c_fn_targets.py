@@ -14,16 +14,23 @@ the entry claims, asserted here:
   "stable lines are already covered", the static claim the baked rule used to
   carry beside a target list that contradicted it;
 - a block that compiled and ran charges one attempt to each target its lines
-  covered; a pass with no block charges nothing.
+  covered; a pass with no block charges nothing;
+- every claim a prompt makes about what it targets — the status sentence's
+  counts, the cluster scope rule's function lists, the call instruction — is
+  rendered from the targets that prompt itself shows, split-and-merge subsets
+  included (negative control: the file-level claims reused, as run
+  3044-3c9670bf sent them on 2026-09-17).
 """
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pipeline_core.application.tasks import task0c as task0c_mod
 from pipeline_core.application.tasks.task0c import (
     Task0cFileHistory,
     _PhaseCCtx,
@@ -53,7 +60,7 @@ def _files(h: _Harness, lines: dict[str, list[int]]) -> list[PerFileCoverage]:
 
 
 def _run(h: _Harness, cluster: Any, lines: dict[str, list[int]],
-         targets: tuple[FnTarget, ...]) -> _PhaseCOutcome:
+         targets: tuple[FnTarget, ...], *, split_n: int = 1) -> _PhaseCOutcome:
     deps = h.deps
     object.__setattr__(deps, "nightly_rules_for_cluster", lambda: nightly_rules_for(cluster))
     return _run_phase_c(
@@ -61,7 +68,7 @@ def _run(h: _Harness, cluster: Any, lines: dict[str, list[int]],
         project_context="", coverage_strategy="", attempt=4, coverage=95.0,
         covered_lines=3, files_data=_files(h, lines), hist=Task0cFileHistory(),
         ctx=_PhaseCCtx(deps=deps, current_cluster=cluster, cluster_label=cluster.name,
-                       split_n=1, allow_line="", prelude_block="", prelude_names="",
+                       split_n=split_n, allow_line="", prelude_block="", prelude_names="",
                        file_stall_limit=5, retro_deep_at_stall=1, stall_context=False),
         fn_targets=targets)
 
@@ -83,6 +90,11 @@ def test_the_prompt_lists_never_executed_bodies_and_rules_from_the_targets(
             "and 1 uncovered line(s)") in prompt
     assert "already covered" not in nightly_rules_for(_EXTRA)
     assert "stable lines are already covered" not in prompt
+    # The whole-file prompt renders the whole file's targets, so it keeps the
+    # claim a subset may not make.
+    assert ("The 1 line(s) in fn_bodies below and the 2 function(s) listed as never "
+            "executed are the ONLY remaining targets in this file — all other lines "
+            "are already covered.") in prompt
     # The admitted block ran: both targets it was written for are charged.
     assert outcome.blocks_admitted == 1
     assert outcome.fn_attempted == {_HINT.site, _ADD.site}
@@ -138,3 +150,76 @@ def test_the_scope_rule_is_rendered_from_targets_only() -> None:
     # The baked rule keeps the cfg facts, and no target-scope claim.
     assert "You MAY use any symbols gated behind `#[cfg(extra_cap)]`" in _EXTRA.prompt_nightly_rule
     assert "Only write tests for lines inside" not in _EXTRA.prompt_nightly_rule
+
+
+def _claimed_and_shown(prompt: str) -> tuple[int, int]:
+    """(functions the status sentence claims are listed, bodies it lists)."""
+    m = re.search(r"[Tt]he (\d+) function\(s\) listed as never executed", prompt)
+    return (int(m.group(1)) if m else 0,
+            prompt.count("// NEVER EXECUTED by any test:"))
+
+
+def _split_run(h: _Harness) -> tuple[str, str]:
+    """One file, two targets, three uncovered lines, partitioned so each
+    subset request carries exactly one never-executed function: `add`'s body
+    line alone, then `capacity_hint`'s body line beside a plain uncovered
+    line. Returns the two subset prompts in partition order."""
+    object.__setattr__(h.deps, "partition_uncovered_lines",
+                       lambda _text, _lines, _n: [{27}, {48, 55}])
+    _run(h, _EXTRA, {"src/lib.rs": [27, 48, 55]}, (_ADD, _HINT), split_n=2)
+    assert len(h.parallel_prompts) == 2
+    return h.parallel_prompts[0], h.parallel_prompts[1]
+
+
+def test_a_subset_prompt_claims_only_the_targets_it_renders(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    add_p, hint_p = _split_run(
+        _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[], target=0.0,
+                 specs=(), split_n=2))
+    assert _claimed_and_shown(add_p) == (1, 1)
+    assert _claimed_and_shown(hint_p) == (1, 1)
+
+    # The subset holding only `add`'s body: one function, no line target, and a
+    # scope rule that knows nothing of the gated function it does not show.
+    assert ("The 1 function(s) listed as never executed are the ONLY targets of "
+            "this request") in add_p
+    assert "// NEVER EXECUTED by any test: src/lib.rs::add" in add_p
+    assert "calling every function listed as NEVER EXECUTED (`add`)" in add_p
+    assert "`src/lib.rs::capacity_hint`" not in add_p
+    assert "Compiled ONLY under this cluster's cfg" not in add_p
+
+    # The other subset: its own line target, its own gated function.
+    assert ("The 1 line(s) in fn_bodies below and the 1 function(s) listed as "
+            "never executed are the ONLY targets of this request") in hint_p
+    assert ("Compiled ONLY under this cluster's cfg (`extra_cap` active): "
+            "function(s) `src/lib.rs::capacity_hint`") in hint_p
+    assert "`src/lib.rs::add`" not in hint_p
+
+    # Neither may tell a subset the file's other uncovered lines are covered:
+    # they are the concurrent request's targets.
+    assert all("all other lines are already covered" not in _p
+               for _p in (add_p, hint_p))
+
+
+def test_negative_control_the_file_level_claims_reused_contradict_the_subset(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pre-fix behaviour injected: both claims built once from the file's
+    totals — two functions, one line — and handed to every subset."""
+    _status, _rule = task0c_mod._coverage_status_line, task0c_mod.target_scope_rule
+    monkeypatch.setattr(task0c_mod, "_coverage_status_line",
+                        lambda cov, **_kw: _status(cov, line_targets=1,
+                                                   fn_targets=(_HINT, _ADD),
+                                                   whole_file=True))
+    monkeypatch.setattr(task0c_mod, "target_scope_rule",
+                        lambda cluster, **_kw: _rule(
+                            cluster, gated_fns=[_HINT.label], shared_fns=[_ADD.label],
+                            gated_lines=0, shared_lines=1))
+    add_p, _hint_p = _split_run(
+        _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[], target=0.0,
+                 specs=(), split_n=2))
+    # Claims two never-executed functions over a prompt that renders one, tells
+    # the subset the rest of the file is covered, and its scope rule names a
+    # cfg-gated function whose body is in the other request.
+    assert _claimed_and_shown(add_p) == (2, 1)
+    assert "all other lines are already covered" in add_p
+    assert "`src/lib.rs::capacity_hint`" in add_p
