@@ -25,6 +25,7 @@ from pipeline_core.domain.context_pull import (
     PullBudget,
     PullKind,
     extract_context_pulls,
+    window_lines,
 )
 from pipeline_core.prompts.pull_menu import (
     render_pull_budget_spent,
@@ -122,11 +123,19 @@ def reconstruction_file_reader(
     return _read
 
 
-def _cap(kind: PullKind, payload: str) -> tuple[str, bool]:
-    cap = _CAPS[kind]
-    if len(payload) > cap:
-        return payload[:cap], True
-    return payload, False
+def _windowed(pull: ContextPull, text: str) -> PullAnswer:
+    """The request's line window of `text` under its kind's cap. Every kind
+    is windowed the same way, so no capped answer is ever a head the model
+    cannot see past."""
+    win = window_lines(text, pull.from_line, _CAPS[pull.kind])
+    if win is None:
+        total = len(text.splitlines())
+        return PullAnswer(
+            pull, f"from_line {pull.from_line} is past the end "
+                  f"({total} line(s))", ok=False)
+    return PullAnswer(pull, win.text, truncated=win.truncated,
+                      first_line=win.first_line, last_line=win.last_line,
+                      total_lines=win.total_lines)
 
 
 def resolve_pull(pull: ContextPull, sources: PullSources) -> PullAnswer:
@@ -138,63 +147,78 @@ def resolve_pull(pull: ContextPull, sources: PullSources) -> PullAnswer:
             if text is None:
                 return PullAnswer(pull, f"no such file in this crate: {pull.arg}",
                                   ok=False)
-            payload, trunc = _cap(pull.kind, text)
-            return PullAnswer(pull, payload, truncated=trunc)
+            return _windowed(pull, text)
         if pull.kind is PullKind.TEST_SOURCE:
             text = sources.find_tests(pull.arg)
             if not text.strip():
                 return PullAnswer(pull, f"no test named {pull.arg} found", ok=False)
-            payload, trunc = _cap(pull.kind, text)
-            return PullAnswer(pull, payload, truncated=trunc)
+            return _windowed(pull, text)
         if pull.kind is PullKind.TYPE_DEF:
             text = sources.type_def(pull.arg)
             if not text.strip():
                 return PullAnswer(pull, f"no type named {pull.arg} in scope",
                                   ok=False)
-            payload, trunc = _cap(pull.kind, text)
-            return PullAnswer(pull, payload, truncated=trunc)
+            return _windowed(pull, text)
         if pull.kind is PullKind.FULL_ERROR:
-            payload, trunc = _cap(pull.kind, sources.full_error())
-            return PullAnswer(pull, payload or "(no compiler output captured)",
-                              ok=bool(payload), truncated=trunc)
+            text = sources.full_error()
+            if not text:
+                return PullAnswer(pull, "(no compiler output captured)", ok=False)
+            return _windowed(pull, text)
         if pull.kind is PullKind.MACRO_EXPANSION and sources.expand_macro:
-            payload, trunc = _cap(pull.kind, sources.expand_macro(pull.arg))
-            return PullAnswer(pull, payload, truncated=trunc)
+            return _windowed(pull, sources.expand_macro(pull.arg))
         return PullAnswer(pull, f"kind not available: {pull.kind}", ok=False)
     except Exception as e:  # a pull must never kill a fill
         return PullAnswer(pull, f"lookup failed: {e}", ok=False)
+
+
+#: What one task has already been sent, by request (window included): the
+#: payload bytes. Every caller keeps every answer in the conversation it
+#: re-asks with (the accumulated prompt, the ladder's augmented prompt, the
+#: session transcript), so a byte-identical answer is already above.
+ServedAnswers = dict[ContextPull, str]
 
 
 def _answer_affordable(
     pulls: Sequence[ContextPull],
     budget: PullBudget,
     sources: PullSources,
+    served: ServedAnswers,
     *,
     log: Callable[[str], None],
     emit: Callable[..., None],
-) -> tuple[list[PullAnswer], PullBudget, tuple[ContextPull, ...]]:
+) -> tuple[list[tuple[PullAnswer, bool]], PullBudget, tuple[ContextPull, ...]]:
     """Answer `pulls` in document order for as long as `budget` lasts.
 
-    Returns the answers, the reduced budget, and the requests the budget could
-    not reach. Every ANSWERED request costs one unit, so the cap stays a cap on
-    artifacts served: batching several into one reply buys the model fewer
-    round-trips, never more context."""
-    answers: list[PullAnswer] = []
+    Returns the answers each paired with whether it REPEATS a byte-identical
+    answer already served in this task, the reduced budget, and the requests
+    the budget could not reach. Every ANSWERED request costs one unit, repeats
+    included, so the cap stays a cap on round-trips: batching several into one
+    reply buys the model fewer round-trips, never more context, and a model
+    re-asking the same thing cannot loop."""
+    answers: list[tuple[PullAnswer, bool]] = []
     for i, pull in enumerate(pulls):
         spent = budget.spend()
         if spent is None:
             return answers, budget, tuple(pulls[i:])
         budget = spent
         answer = resolve_pull(pull, sources)
+        repeat = answer.ok and served.get(pull) == answer.payload
+        if answer.ok:
+            served[pull] = answer.payload
+        window = (f", lines {answer.first_line}-{answer.last_line} of "
+                  f"{answer.total_lines}" if answer.total_lines else "")
         log(f"  [pull] {pull.tag()} → "
             f"{'ok' if answer.ok else 'unavailable'} "
-            f"({len(answer.payload)} chars"
-            f"{', truncated' if answer.truncated else ''})")
+            f"({len(answer.payload)} chars{window}"
+            f"{', truncated' if answer.truncated else ''}"
+            f"{', repeat — not re-sent' if repeat else ''})")
         emit("pull.answer", data={
             "kind": str(pull.kind), "arg": pull.arg, "ok": answer.ok,
             "chars": len(answer.payload), "truncated": answer.truncated,
+            "from_line": pull.from_line, "last_line": answer.last_line,
+            "total_lines": answer.total_lines, "repeat": repeat,
             "remaining": budget.remaining})
-        answers.append(answer)
+        answers.append((answer, repeat))
     return answers, budget, ()
 
 
@@ -224,6 +248,7 @@ def make_request_answerer(
     spent budget, so the model asks again and rungs 2 and 3 go the same way."""
     budget = PullBudget(max_pulls)
     warned = False
+    served: ServedAnswers = {}
 
     def _answer(response: str) -> str | None:
         nonlocal budget, warned
@@ -231,7 +256,7 @@ def make_request_answerer(
         if not pulls:
             return None
         answers, budget, unanswered = _answer_affordable(
-            pulls, budget, sources, log=log, emit=emit)
+            pulls, budget, sources, served, log=log, emit=emit)
         if answers:
             return render_pull_followups(answers)
         if warned:
@@ -269,6 +294,7 @@ def ask_with_pulls(
     budget = PullBudget(max_pulls)
     current = prompt
     warned = False
+    served: ServedAnswers = {}
     while True:
         response = ask(current)
         if has_deliverable(response):
@@ -277,7 +303,7 @@ def ask_with_pulls(
         if not pulls:
             return response
         answers, budget, unanswered = _answer_affordable(
-            pulls, budget, sources, log=log, emit=emit)
+            pulls, budget, sources, served, log=log, emit=emit)
         if answers:
             current = current + render_pull_followups(answers)
             continue

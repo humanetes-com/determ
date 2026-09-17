@@ -35,24 +35,93 @@ class PullKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ContextPull:
-    """One parsed request."""
+    """One parsed request. `from_line` (1-based) is where the answer starts:
+    the address a cut-off answer hands back so the rest of the artifact is
+    reachable, rather than the same head served again."""
 
     kind: PullKind
     arg: str
+    from_line: int = 1
 
     def tag(self) -> str:
-        return f'<REQUEST kind="{self.kind}" arg="{self.arg}"/>'
+        start = f' from_line="{self.from_line}"' if self.from_line > 1 else ""
+        return f'<REQUEST kind="{self.kind}" arg="{self.arg}"{start}/>'
+
+    def continued_at(self, line: int) -> ContextPull:
+        return ContextPull(self.kind, self.arg, line)
 
 
 @dataclass(frozen=True, slots=True)
 class PullAnswer:
     """The resolver's reply. `ok` False means the request was legal but not
-    answerable (unknown path/type); `payload` then carries the reason."""
+    answerable (unknown path/type); `payload` then carries the reason.
+
+    `first_line`/`last_line`/`total_lines` describe the window served (0 when
+    nothing was windowed). A truncated answer's continuation is
+    `pull.continued_at(last_line + 1)`."""
 
     pull: ContextPull
     payload: str
     ok: bool = True
     truncated: bool = False
+    first_line: int = 0
+    last_line: int = 0
+    total_lines: int = 0
+
+    def continuation(self) -> ContextPull | None:
+        if not (self.ok and self.truncated and self.last_line < self.total_lines):
+            return None
+        return self.pull.continued_at(self.last_line + 1)
+
+
+@dataclass(frozen=True, slots=True)
+class LineWindow:
+    """A line-aligned slice of an artifact under a char cap."""
+
+    text: str
+    first_line: int
+    last_line: int
+    total_lines: int
+    #: The last line served was itself cut at the cap (one line longer than
+    #: the whole cap); its remainder has no line address.
+    cut_inside: bool = False
+
+    @property
+    def truncated(self) -> bool:
+        return self.cut_inside or self.last_line < self.total_lines
+
+
+def window_lines(text: str, from_line: int, cap: int) -> LineWindow | None:
+    """Lines `from_line`.. of `text`, as many whole lines as fit in `cap`
+    chars (at least one — a single line longer than the cap is cut inside it).
+    None when `from_line` is past the end of a non-empty text.
+
+    Why whole lines and a start address: the cap used to be a head cut,
+    `text[:cap]`, with a `truncated` flag and no way to ask for what followed.
+    Run `603120-24aabfc5` (2026-09-16): a slice session asked twice for a
+    55,930-char file and was served the same first 40,000 chars both times;
+    the code it was asking about sat past the cut, and the two identical
+    answers spent the transcript bound that ended the session."""
+    lines = text.splitlines(keepends=True)
+    total = len(lines)
+    start = max(1, from_line)
+    if total == 0:
+        return LineWindow("", 0, 0, 0) if start == 1 else None
+    if start > total:
+        return None
+    out: list[str] = []
+    used = 0
+    last = start - 1
+    for idx in range(start - 1, total):
+        ln = lines[idx]
+        if out and used + len(ln) > cap:
+            break
+        if not out and len(ln) > cap:
+            return LineWindow(ln[:cap], start, idx + 1, total, cut_inside=True)
+        out.append(ln)
+        used += len(ln)
+        last = idx + 1
+    return LineWindow("".join(out), start, last, total)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +166,9 @@ def _parse_one(response: str, i: int) -> tuple[ContextPull | None, int]:
     arg = (_attr(tag, "arg") or "").strip()
     if kind is not PullKind.FULL_ERROR and not arg:
         return None, nxt
-    return ContextPull(kind, arg), nxt
+    start_s = (_attr(tag, "from_line") or "").strip()
+    start = int(start_s) if start_s.isdigit() and int(start_s) >= 1 else 1
+    return ContextPull(kind, arg, start), nxt
 
 
 def extract_context_pulls(response: str) -> tuple[ContextPull, ...]:

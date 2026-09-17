@@ -58,6 +58,7 @@ from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.test_report import FailureKind as TestFailureKind
 from pipeline_core.domain.test_report import parse_test_output
 from pipeline_core.domain.test_results import (
+    build_phase_output,
     build_test_name_index,
     failing_test_names,
     identifiers_in,
@@ -744,9 +745,25 @@ def extract_tdd_compile_frontier(deps: AttributionDeps,
     `_extract_tdd_frontier` but with test names replaced by "<compile>"
     so the caller can distinguish. Sites keep the container the diagnostic
     resolved to.
+
+    Only the BUILD phase of the capture is read (`build_phase_output`): a
+    diagnostic printed after a test binary announced its tests is something
+    that test said, not this build failing. The sweep's red-build verdict
+    already reads that cut; this reader did not, and every caller hands it the
+    whole `cargo test` stream. Run `603120-24aabfc5` (2026-09-16, cluster
+    `nightly`) swept a tree that compiled with 150 of 152 tests passing, yet a
+    trybuild test inside the suite rebuilds the crate without the cluster's
+    `--cfg`; reproduced on the tree that run left, its six `error[E0063]`
+    lines after `running 1 test` resolve to six constructors under
+    `<compile>`. The escalation fired
+    on that sentinel as if it were a failing test, kept 21 units on the
+    frontier, and the file route spent 30 minutes rewriting bodies whose tests
+    all pass. A genuine red build runs no binary, so its capture is its build
+    phase in full and nothing is lost here.
     """
     frontier: Frontier = {}
     sites: SiteFrontier = {}
+    build_output = build_phase_output(build_output or "")
     if not build_output:
         return frontier, sites
     fn_records_by_file: dict[str, list[dict[str, Any]]] = {}

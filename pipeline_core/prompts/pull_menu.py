@@ -14,7 +14,9 @@ from collections.abc import Sequence
 from pipeline_core.domain.context_pull import ContextPull, PullAnswer, PullKind
 
 _KIND_LINES = {
-    PullKind.FILE: 'file — a path inside this crate, e.g. arg="src/helper.rs"',
+    PullKind.FILE: ('file — a path inside this crate, e.g. arg="src/helper.rs"; '
+                    'a long answer is cut at a line and names the from_line="N" '
+                    'that continues it'),
     PullKind.TEST_SOURCE: 'test_source — a test fn name, e.g. arg="test_roundtrip"',
     PullKind.TYPE_DEF: 'type_def — a type name, e.g. arg="Wrapper"',
     PullKind.FULL_ERROR: "full_error — the complete last compiler output (no arg)",
@@ -52,21 +54,41 @@ RIGHT (one reply, two tags, one round-trip):
 When you have what you need — or have none left — return the FN block(s)."""
 
 
-def render_pull_followups(answers: Sequence[PullAnswer]) -> str:
+def render_pull_followups(answers: Sequence[tuple[PullAnswer, bool]]) -> str:
     """Appended to the prompt for the re-ask after request(s) are answered.
 
     One `<REQUESTED_CONTEXT>` block per answer and ONE closing instruction:
-    repeating "now complete the task" after each block reads as several tasks."""
+    repeating "now complete the task" after each block reads as several tasks.
+
+    Each answer is paired with whether it repeats a byte-identical answer this
+    task already carries. A repeat is not re-sent — it is already in the
+    conversation — and says so. A cut answer names its window and the exact
+    tag that continues it: the old `truncated="true"` flag alone left the model
+    re-asking for the same head, which is all it could ask for."""
     if not answers:
         return ""
     blocks = []
-    for answer in answers:
-        body = (answer.payload if answer.ok
-                else f"(not available: {answer.payload})")
-        trunc = ' truncated="true"' if answer.truncated else ""
+    for answer, repeat in answers:
+        if not answer.ok:
+            body = f"(not available: {answer.payload})"
+        elif repeat:
+            body = ("(unchanged since it was sent above for this same "
+                    "request — not repeated; read it there)")
+        else:
+            body = answer.payload
+        attrs = ' truncated="true"' if answer.truncated else ""
+        if answer.ok and answer.total_lines and (
+                answer.truncated or answer.first_line > 1):
+            attrs += (f' lines="{answer.first_line}-{answer.last_line}"'
+                      f' of="{answer.total_lines}"')
+        tail = ""
+        nxt = answer.continuation()
+        if nxt is not None:
+            tail = (f"\nLines {answer.last_line + 1}-{answer.total_lines} were "
+                    f"not sent. To read them, reply {nxt.tag()}")
         blocks.append(f"\n\nYou requested: {answer.pull.tag()}\n"
-                      f"<REQUESTED_CONTEXT{trunc}>\n{body}\n"
-                      "</REQUESTED_CONTEXT>")
+                      f"<REQUESTED_CONTEXT{attrs}>\n{body}\n"
+                      f"</REQUESTED_CONTEXT>{tail}")
     return ("".join(blocks)
             + "\nNow complete the ORIGINAL task above and return the FN "
               "block(s).")

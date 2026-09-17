@@ -83,6 +83,11 @@ markers = [
     # from "is the code correct"; the default pytest run still includes them, so
     # the coverage they carry stays counted.
     "walk: replays a recorded run's iterations through the real loop",
+    # An integration test drives the real adapters (cargo, the syn extractor,
+    # the file readers) over an invented shape that reproduces one defect
+    # class, with no model. Cargo-backed ones skip unless INTEGRATION=1;
+    # `scripts/run_integration.sh` runs the whole set.
+    "integration: real adapters over an invented shape reproducing one defect class",
 ]
 
 # Enforce the clean-architecture dependency rule (CODE_ARCHITECTURE.md §1): a higher layer

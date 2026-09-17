@@ -4,6 +4,7 @@ bounded ask loop."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
@@ -382,3 +383,136 @@ def test_ladder_never_splices_request_text_as_body(tmp_path: Path) -> None:
         client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
         answer_request=_answerer_for(tmp_path, 0))
     assert body is None
+
+
+# --- windows, continuation, repeats -------------------------------------------
+#
+# The shape these pin (run `603120-24aabfc5`, 2026-09-16): a session asked twice
+# for a file longer than the FILE cap and was served the same head both times;
+# what it needed sat past the cut and the second copy spent the transcript
+# bound. The file below is invented; only its length matters.
+
+
+from pipeline_core.application.reconstruct import pull_resolver  # noqa: E402
+from pipeline_core.domain.context_pull import LineWindow, window_lines  # noqa: E402
+
+
+def _long_file(tmp_path: Path, lines: int = 3_000) -> Path:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    body = "".join(f"// filler line {i:05d} padding\n" for i in range(1, lines))
+    (tmp_path / "src/long.rs").write_text(body + "pub fn tail_marker() {}\n")
+    return tmp_path / "src/long.rs"
+
+
+def test_window_is_line_aligned_and_addresses_the_rest() -> None:
+    w = window_lines("aaaa\nbbbb\ncccc\n", 1, 11)
+    assert w == LineWindow("aaaa\nbbbb\n", 1, 2, 3)
+    assert w.truncated
+    assert window_lines("aaaa\nbbbb\ncccc\n", 3, 11) == LineWindow("cccc\n", 3, 3, 3)
+    assert window_lines("aaaa\n", 2, 11) is None
+
+
+def test_window_cuts_inside_a_line_longer_than_the_cap() -> None:
+    w = window_lines("x" * 20, 1, 8)
+    assert w is not None and w.text == "x" * 8 and w.truncated and w.cut_inside
+
+
+def test_from_line_parses_and_round_trips() -> None:
+    p = extract_context_pull('<REQUEST kind="file" arg="src/a.rs" from_line="812"/>')
+    assert p == ContextPull(PullKind.FILE, "src/a.rs", 812)
+    assert extract_context_pull(p.tag()) == p
+    bad = extract_context_pull('<REQUEST kind="file" arg="src/a.rs" from_line="x"/>')
+    assert bad == ContextPull(PullKind.FILE, "src/a.rs", 1)
+    assert ContextPull(PullKind.FILE, "src/a.rs").tag() == \
+        '<REQUEST kind="file" arg="src/a.rs"/>'
+
+
+def test_from_line_past_the_end_is_unavailable(tmp_path: Path) -> None:
+    _long_file(tmp_path, lines=10)
+    ans = resolve_pull(ContextPull(PullKind.FILE, "src/long.rs", 99), _sources(tmp_path))
+    assert not ans.ok and "past the end" in ans.payload
+
+
+def _session_like(tmp_path: Path, replies: list[str], max_pulls: int = 5):
+    """What a slice session does with the answerer: every follow-up lands in
+    the one growing transcript."""
+    answer = make_request_answerer(
+        _sources(tmp_path), log=lambda _m: None, emit=lambda *_a, **_k: None,
+        max_pulls=max_pulls)
+    transcript = ""
+    for r in replies:
+        add = answer(r)
+        if add:
+            transcript += add
+    return transcript
+
+
+def test_a_cut_file_names_its_continuation_and_the_tail_is_reachable(
+        tmp_path: Path) -> None:
+    _long_file(tmp_path)
+    answer = make_request_answerer(
+        _sources(tmp_path), log=lambda _m: None, emit=lambda *_a, **_k: None,
+        max_pulls=10)
+    reply = '<REQUEST kind="file" arg="src/long.rs"/>'
+    seen = ""
+    starts: list[int] = []
+    for _ in range(10):
+        add = answer(reply) or ""
+        seen += add
+        marker = "To read them, reply "
+        if marker not in add:
+            break
+        cont = extract_context_pull(add[add.index(marker):])
+        assert cont is not None
+        starts.append(cont.from_line)
+        reply = cont.tag()
+    assert "tail_marker" in seen
+    assert starts and starts == sorted(starts) and starts[0] > 1
+    # Every line is served exactly once across the windows.
+    assert seen.count("filler line 01500 ") == 1
+
+
+def test_negative_control_head_cut_serves_the_same_head_and_never_the_tail(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """The pre-fix cap: `text[:cap]` whatever the request asked for."""
+    _long_file(tmp_path)
+
+    def head_cut(text: str, _from_line: int, cap: int) -> LineWindow:
+        return LineWindow(text[:cap], 1, 1, 2)
+
+    monkeypatch.setattr(pull_resolver, "window_lines", head_cut)
+    out = _session_like(tmp_path, [
+        '<REQUEST kind="file" arg="src/long.rs"/>',
+        '<REQUEST kind="file" arg="src/long.rs" from_line="2000"/>'])
+    assert "tail_marker" not in out
+
+
+def test_an_identical_repeat_is_not_re_sent(tmp_path: Path) -> None:
+    _long_file(tmp_path)
+    req = '<REQUEST kind="file" arg="src/long.rs"/>'
+    once = _session_like(tmp_path, [req])
+    twice = _session_like(tmp_path, [req, req])
+    assert twice.count("filler line 00001") == 1
+    assert "not repeated" in twice
+    assert len(twice) < len(once) + 1_000
+
+
+def test_a_changed_artifact_is_re_sent(tmp_path: Path) -> None:
+    """The repeat is keyed on the bytes served, not on the request: a file the
+    session rewrote between two requests is new information."""
+    f = _long_file(tmp_path, lines=5)
+    answer = make_request_answerer(
+        _sources(tmp_path), log=lambda _m: None, emit=lambda *_a, **_k: None,
+        max_pulls=5)
+    req = '<REQUEST kind="file" arg="src/long.rs"/>'
+    a1 = answer(req) or ""
+    f.write_text(f.read_text() + "pub fn added_later() {}\n")
+    a2 = answer(req) or ""
+    assert "added_later" in a2 and "not repeated" not in a2 and a1 != a2
+
+
+def test_a_repeat_still_spends_the_budget(tmp_path: Path) -> None:
+    out, asked = _loop(['<REQUEST kind="full_error" arg=""/>'] * 3 + [_BODY],
+                       tmp_path, max_pulls=2)
+    assert out == _BODY
+    assert "no context requests left" in asked[-1]
