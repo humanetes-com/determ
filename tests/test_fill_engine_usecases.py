@@ -1288,6 +1288,116 @@ def test_a_partially_blocked_rejection_still_enters_the_fix_loop(
     assert not res.filled and fake.ask_calls > 1
 
 
+# ---- an unpayable unit stops on its first failed attempt ----
+# The two gates above only cleared the U2 signature. When the kept body then
+# reddened a sibling, the regression gate reverted it and the failure path
+# re-prompted; after the stall bound the retrospective refused the conviction
+# as coverage-unreached and still re-entered the loop. Run `33522-b27db63d`
+# (2026-09-17) rewrote one such unit 11 times in 41 minutes, each body
+# reddening a passing sibling test. On this harness the pre-fix wiring spent
+# 50 model asks and 25 retrospectives (24 re-entries) on the same shape.
+
+
+class _ImprovingRetro(RecordingFill):
+    """A retrospective that neither parks the unit nor claims it is hard —
+    the round that is allowed to re-enter the loop."""
+
+    def diagnose(self, **k: Any) -> dict[str, Any]:
+        self.diagnose_calls += 1
+        return {"signal": "", "category": "WRONG_TYPE_CHOICE", "guidance": "g"}
+
+
+def _bound(entered: bool) -> Any:
+    from pipeline_core.domain.coverage_slice import CoverageSlice
+    from pipeline_core.domain.models import FnSite
+    sites = {FnSite("lib.rs", "elsewhere", "impl Hub")}
+    if entered:
+        sites.add(FnSite("lib.rs", "answer", "impl Hub"))
+    return CoverageSlice(owners={"t_hub": frozenset(sites)})
+
+
+def _run_bound(fake: RecordingFill, ws: Path, ctx: PerFnPassCtx,
+               entered: bool) -> Any:
+    from pipeline_core.domain.coverage_slice import bind
+    bind(_bound(entered))
+    try:
+        return _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                                   ctx=ctx)
+    finally:
+        bind(None)
+
+
+def test_an_unreached_unit_whose_body_regresses_a_sibling_stops_after_one_call(
+        tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=_regressed(),
+                         body=("Ok(())", "R"))
+    res = _run_bound(fake, ws, _cov_ctx(ws), entered=False)
+    assert not res.filled
+    assert fake.ask_calls == 1, "no re-prompt after the sibling regression"
+    assert fake.diagnose_calls == 0 and not fake.saved, (
+        "no retrospective and no conviction for a unit the test never enters")
+    assert "phase_c.fn.unpayable_stop" in fake.events
+    assert fake.s.get("reverts"), "the regressing body is reverted"
+    assert res.fill_class == "mis"
+
+
+def test_a_sibling_blocked_unit_whose_body_regresses_a_sibling_stops_too(
+        tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=_regressed(),
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_hub_ctx(ws))
+    assert not res.filled
+    assert fake.ask_calls == 1 and fake.diagnose_calls == 0 and not fake.saved
+    assert "phase_c.fn.unpayable_stop" in fake.events
+
+
+def test_control_a_unit_the_test_enters_still_retries_after_a_regression(
+        tmp_path: Path) -> None:
+    """Over-refusal control: the same regression on a unit the failing test
+    does execute is real work — the loop re-prompts."""
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=_regressed(),
+                         body=("Ok(())", "R"))
+    res = _run_bound(fake, ws, _cov_ctx(ws), entered=True)
+    assert not res.filled
+    assert fake.ask_calls > 1
+    assert "phase_c.fn.unpayable_stop" not in fake.events
+
+
+def test_a_retrospective_refused_as_unreached_does_not_re_enter_the_loop(
+        tmp_path: Path) -> None:
+    """The write-side arm on a compile-failure loop, where no U2 gate ran:
+    the retrospective bought no evidence about the unit, so it is neither a
+    conviction nor a reason for another round."""
+    from dataclasses import replace
+    ws = _mk_ws(tmp_path)
+    ctx = replace(_cov_ctx(ws))
+    fake = _ImprovingRetro(run=(1, "error[E0308]: mismatched types"),
+                           body=("Ok(())", "R"))
+    res = _run_bound(fake, ws, ctx, entered=False)
+    assert not res.filled
+    assert fake.diagnose_calls == 1
+    assert "phase_c.fn.retro_retry" not in fake.events
+
+
+def test_control_an_improving_retrospective_on_an_entered_unit_re_enters(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Control for the arm above: with the test entering the body, the same
+    first-round retrospective re-enters the loop, so the refusal is the
+    coverage reading and not a broken retry path."""
+    monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
+    ws = _mk_ws(tmp_path)
+    fake = _ImprovingRetro(run=(1, "error[E0308]: mismatched types"),
+                           body=("Ok(())", "R"))
+    res = _run_bound(fake, ws, _cov_ctx(ws), entered=True)
+    assert not res.filled
+    assert "phase_c.fn.retro_retry" in fake.events
+    assert fake.diagnose_calls == 2
+
+
 # ---- the exhaustion summary agrees with the salvage decision ----
 # On the anyhow run `298540-f792975a` (2026-08-12), `src/chain.rs::new`
 # logged `KEEPING best compiling body` immediately followed by

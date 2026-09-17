@@ -238,6 +238,14 @@ class FillOneFn:
         # Non-empty iff the latest revert was a crash-only regression blamed
         # wholly outside this unit — holds the crash-block mark to persist.
         _crash_blocked_mark: list[str] = []
+        # Non-empty once a compiling attempt proved, by an attempt-invariant
+        # reading, that no rewrite of THIS body can move its failing tests —
+        # every one needs a still-stubbed sibling, or none executes the body.
+        # Holds the reason. From then on a failed attempt (a sibling
+        # regression the gate below reverts, or a compile error) ends the
+        # unit instead of re-prompting: the best a retry can reach is a body
+        # that regresses nothing and still pays nothing.
+        _unpayable_mark: list[str] = []
         # HOW the last judged attempt failed, and — when the test process
         # died under it — what the crashed binaries printed: the stub-panic
         # sites outside this unit (`None` while the last failure was not a
@@ -969,6 +977,9 @@ class FillOneFn:
                                 f"sibling(s): {_names} — no rewrite of this "
                                 "fn alone can pass them; fix loop skipped, "
                                 "deferred to outer loop).")
+                            _unpayable_mark[:] = [
+                                "every failing attributed test needs "
+                                f"still-stubbed sibling(s): {_names}"]
                             self.tel.emit(
                                 "phase_c.fn.u2_sibling_blocked", data={
                                     "cluster": ctx.cluster_name,
@@ -1008,6 +1019,10 @@ class FillOneFn:
                                 f"attributed test executes this body — "
                                 f"{_names} enter(s) the crate elsewhere; fix "
                                 "loop skipped, deferred to outer loop).")
+                            _unpayable_mark[:] = [
+                                "no failing attributed test executes this "
+                                f"body ({_names} enter(s) the crate "
+                                "elsewhere)"]
                             self.tel.emit(
                                 "phase_c.fn.u2_coverage_unreached", data={
                                     "cluster": ctx.cluster_name,
@@ -1244,6 +1259,30 @@ class FillOneFn:
                     "localized fault; re-prompting this unit buys the same "
                     "crash until the blamed file changes.")
                 return FixOutcome("stop")
+            if _unpayable_mark:
+                # Both gates above answer an attempt-invariant question and
+                # only clear the U2 signature; the regression gate then
+                # reverted a body that reddened a sibling, and this path used
+                # to re-prompt it as a fixable error. Run `33522-b27db63d`
+                # (2026-09-17): `src/fmt.rs::debug`, which the coverage
+                # reading proved `test_whitespace` never enters, was rewritten
+                # 11 times over 41 minutes, every body reddening `test_debug`,
+                # with three retrospective re-entries on top.
+                self.tel.log(
+                    f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: kept "
+                    f"reverted and STOPPING — {_unpayable_mark[0]}; this "
+                    + ("attempt regressed a sibling" if _u2_fail_sig is not None
+                       else "attempt did not compile")
+                    + ", and no rewrite of this body can move its failing "
+                    "tests, so a re-prompt can only buy back a body that "
+                    "changes nothing.")
+                self.tel.emit("phase_c.fn.unpayable_stop", data={
+                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "reason": _unpayable_mark[0],
+                    "attempt": fix_attempt,
+                })
+                return FixOutcome("stop")
             _codes = sorted(ecodes_in_text(cargo_out))
             _kind = "U2 test" if _u2_fail_sig is not None else "compile"
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: {_kind} failed "
@@ -1301,11 +1340,11 @@ class FillOneFn:
             )
             if success:
                 break
-            if _crash_blocked_mark:
+            if _crash_blocked_mark or _unpayable_mark:
                 # No retrospective and no conviction: the failure was never
                 # about this body, and a diagnosis of it would write guidance
                 # whose premise is false into the store the loop later
-                # believes. The unit exits crash-blocked below instead.
+                # believes. The unit exits crash-blocked or unpayable below.
                 break
 
             # retrospective: actively diagnose why the fix loop
@@ -1320,6 +1359,10 @@ class FillOneFn:
             # the fn stays eligible AND re-enters the fix loop below.
             # If it isn't, the fn is marked fully exhausted on the spot.
             _retry_informed = False
+            # Set when the diagnosis is drawn from tests that never enter
+            # this body: such a round bought no evidence about the unit, so
+            # it neither convicts nor earns another round.
+            _no_unit_evidence = False
             try:
                 _retros = self.retros.load(ctx.project_dir)
                 _retro_k = self.retros.retro_key(rel_file, fn_name, container)
@@ -1426,6 +1469,7 @@ class FillOneFn:
                         _unit_loc, _evidence.tests)
                     if _cov_unreached:
                         _full_exhaust = False
+                        _no_unit_evidence = True
                         _retro = {**_retro, "guidance": ""}
                         self.tel.log(
                             f"  [phase-c/retro] {rel_file}::{fn_name}: NOT "
@@ -1503,7 +1547,14 @@ class FillOneFn:
                     # round (the fix prompt reads ctx.retros_cache) and to
                     # every later dispatch in this pass.
                     ctx.retros_cache[_retro_k] = _retros[_retro_k]
-                    _retry_informed = not _full_exhaust and not _downstream
+                    # Not exhausting is not the same as having a reason to go
+                    # again: a round refused as coverage-unreached kept
+                    # `_full_exhaust` False and used to re-enter here with its
+                    # guidance emptied, up to PER_FN_RETRO_ROUNDS_MAX times
+                    # (reproduced on the engine harness: 50 asks, 25
+                    # retrospectives for one unit).
+                    _retry_informed = (not _full_exhaust and not _downstream
+                                       and not _no_unit_evidence)
                     self.tel.log(f"  [phase-c/retro] {fn_name} "
                                  f"[{_retro.get('category','?')}] "
                                  f"signal={_signal} "
@@ -1591,6 +1642,38 @@ class FillOneFn:
             })
             return FillResult(file=rec.file, fn_name=fn_name,
                               filled=False, attempts=attempts)
+        if not success and _unpayable_mark:
+            # Plain revert, like the crash-blocked exit: no salvage (every
+            # compiling attempt regressed a sibling or paid nothing), no
+            # annotated stub, no self-note, no conviction. The attempts were
+            # real calls and stay in the result; nothing persistent moves
+            # against the unit, and the next fill's reading decides again.
+            with ctx.splice_check_lock:
+                _revert_own_body()
+            self.tel.log(
+                f"  [phase-c/per-fn] {idx}/{ctx.total} {rel_file}::{fn_name}: "
+                f"reverted after {fix_attempt} attempt(s) — "
+                f"{_unpayable_mark[0]}; no retrospective, no conviction.")
+            self.tel.emit("phase_c.verdict", data={
+                **VerdictRecord(
+                    unit=str(_unit_key), route="per-fn", attempt=fix_attempt,
+                    disposition=Disposition.REVERT,
+                    reason=f"unpayable: {_unpayable_mark[0]}",
+                    outcome=GateOutcome.UNMEASURABLE,
+                    validity=ValidityVector(binary_completed=True,
+                                            tests_blocked=True),
+                    model_calls=attempts).to_json_dict(),
+                "cluster": ctx.cluster_name,
+            })
+            self.tel.emit("phase_c.fill.class", data={
+                "cluster": ctx.cluster_name,
+                "unit": f"{rel_file}::{fn_name}",
+                "route": "per-fn",
+                "class": FillOutcomeClass.MIS_TARGETED.value,
+            })
+            return FillResult(file=rel_file, fn_name=fn_name, filled=False,
+                              attempts=attempts,
+                              fill_class=FillOutcomeClass.MIS_TARGETED.value)
         if not success:
             # Restore the snapshot first (clears whatever broken body the
             # loop left in place), then splice an annotated stub that
