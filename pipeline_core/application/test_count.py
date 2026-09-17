@@ -24,6 +24,7 @@ from typing import Any
 from pipeline_core.domain.cargo_toml import cargo_default_features
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.doc_tests import count_doc_tests
+from pipeline_core.domain.fn_execution import mod_chain_active
 from pipeline_core.domain.generation import gen_tests_decl_blocks
 from pipeline_core.domain.models import DocItemRecord
 from pipeline_core.domain.rust_scan import mod_decls
@@ -73,19 +74,10 @@ def file_active_for_cluster(
         # Extractor unavailable: single-level gate (AST-less environments).
         pred = deps.file_cfg_predicate(src_dir, file_path.name)
         return pred is None or not cs.excludes_for_cargo(pred)
-    matches = [r for r in recs if r.name == stem or r.file == file_path.name]
-    if not matches:
-        return True
     # Dual-form decls (`#[cfg(X)] mod m;` / `#[cfg(not(X))] mod m;`): the file
-    # is active if ANY declaration chain is active.
-    for rec in matches:
-        if any(cs.excludes_for_cargo(p) for p in rec.cfg_predicates):
-            continue
-        if file_active_for_cluster(src_dir, Path(rec.declared_in),
-                                   cfg_true, cfg_false, deps,
-                                   _depth + 1, default_features):
-            return True
-    return False
+    # is active if ANY declaration chain is active. One owner of the chain
+    # rule, shared with the function-execution candidate set.
+    return mod_chain_active(file_path.name, recs, cs, _depth)
 
 
 def count_active_tests_for_cluster(

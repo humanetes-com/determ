@@ -47,62 +47,18 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.adapters.process import run_bounded
-from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.coverage_slice import (
     CountedBody,
     CoverageSlice,
     matching_test_key,
     slice_from_counts,
 )
+from pipeline_core.domain.fn_execution import SiteIndex as SiteIndex
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.test_results import parse_binary_results
 
 _PROF_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
 _BIN_HASH = re.compile(r"-[0-9a-f]{16}$")
-
-
-class SiteIndex:
-    """Which extractor site a coverage line belongs to, per file.
-
-    An llvm-cov export names a function by its FIRST region, and for a Rust
-    fn that region starts on the SIGNATURE line at the `fn` keyword's column
-    (`[8, 5, 8, 61, …]` for `    fn fmt(` at line 8 of the `dual_fmt`
-    fixture, computed 2026-09-03), while the extractor's `sig_byte_start` is
-    the byte of that keyword. Resolving by byte containment of the line's
-    column-0 offset therefore missed every indented fn — every impl method —
-    and the first site resolver emptied the owner map for any test that
-    entered only methods, which silently disarmed `unreached_by_test` and
-    the dispatcher redirect built on it. Lines are the unit both sides
-    agree on: a record spans from the line of `sig_byte_start` to the line
-    of `body_byte_end`, and a coverage line resolves to the innermost record
-    spanning it (a `fn` nested in a body is the inner one)."""
-
-    def __init__(self, records: Iterable[FnRecord],
-                 file_texts: Mapping[str, str]) -> None:
-        self._spans: dict[str, list[tuple[int, int, FnSite]]] = {}
-        for rec in records:
-            text = file_texts.get(rec.file)
-            if text is None:
-                continue
-            first = text.count("\n", 0, rec.sig_byte_start) + 1
-            last = text.count("\n", 0, rec.body_byte_end) + 1
-            self._spans.setdefault(rec.file, []).append(
-                (first, last, record_site(rec)))
-
-    def resolve(self, rel: str, line: int) -> tuple[FnSite, int, int] | None:
-        """`(site, first_line, last_line)` of the innermost record spanning
-        `line` in `rel`, or None when no crate fn does (a generated test, a
-        doc-test shim, a file the enumerator did not see)."""
-        best: tuple[int, int, FnSite] | None = None
-        for first, last, site in self._spans.get(rel, ()):
-            if first <= line <= last and (
-                    best is None or last - first < best[1] - best[0]):
-                best = (first, last, site)
-        return None if best is None else (best[2], best[0], best[1])
-
-    def site_at(self, rel: str, line: int) -> FnSite | None:
-        hit = self.resolve(rel, line)
-        return None if hit is None else hit[0]
 
 
 def _fn_records(enumerate_fns: Callable[[Path], Sequence[Any] | None],

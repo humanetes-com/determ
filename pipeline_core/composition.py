@@ -1564,14 +1564,20 @@ def build_app(
 
     def measure_coverage(project_dir: Path, module_name: str) -> CoverageMeasurement:
         t0 = _time.monotonic()
-        pct, files_data, covered, coverable = coverage_provider.measure(project_dir, module_name)
+        measured = coverage_provider.measure(project_dir, module_name)
         ports.emit(
             "coverage.measured", module=module_name,
             cluster=scope.active.name if scope.active is not None else None,
             duration_ms=int((_time.monotonic() - t0) * 1000),
-            data={"pct": pct, "covered": covered, "coverable": coverable,
-                  "backend": settings.coverage_backend, "file_count": len(files_data)})
-        return CoverageMeasurement(pct, files_data, covered, coverable)
+            data={"pct": measured.pct, "covered": measured.covered,
+                  "coverable": measured.coverable,
+                  "backend": settings.coverage_backend,
+                  "file_count": len(measured.files),
+                  "function_records": (None if measured.functions is None
+                                       else len(measured.functions))})
+        # Returned whole: re-packing the four line fields dropped the function
+        # counts the augmentation stop now reads.
+        return measured
 
     def test_augmentor_factory() -> Any:
         backend = _os.getenv("TEST_AUGMENTOR", "static").lower()
@@ -2183,6 +2189,7 @@ def build_app(
         scan_unimplemented_functions=scan_unimplemented_functions,
         load_baked_clusters=_load_baked_clusters,
         reference_hollow=_reference_hollow,
+        augmentation_fn_records=augment_store.all_fn_records,
     )
     reattach_deps = ReattachDeps(
         log=ports.log, emit=ports.emit, derive_gentest_prelude=helpers.derive_gentest_prelude,
@@ -2495,6 +2502,7 @@ def build_app(
         task3=_via("task3"),
         scan_unimplemented_functions=scan_unimplemented_functions,
         reference_hollow=_reference_hollow,
+        augmentation_fn_records=augment_store.all_fn_records,
     )
 
     _crash_localizer_deps = CrashLocalizerDeps(
@@ -2626,6 +2634,7 @@ def build_app(
             # measured-owners withholding a pair earns never lapses.
             route_ledger_rows=fill_roles.route_ledger.load,
             reference_measurement=_reference,
+            augmentation_fn_record=augment_store.cluster_fn_record,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,
@@ -2761,6 +2770,14 @@ def build_app(
             get_current_cluster=scope.get_active,
             coverage_provider=coverage_provider,
             check_stop=check_graceful_stop,
+            # The function-execution criterion: the same extractor seams the
+            # fill routes key their records with, over the pre-strip crate,
+            # and the store that persists the per-cluster record beside the
+            # augmentation sentinel.
+            enumerate_fns=enumerate_fns,
+            enumerate_mods=enumerate_mods,
+            load_fn_record=augment_store.cluster_fn_record,
+            save_fn_record=augment_store.save_cluster_fn_record,
         ),
         gen_fix_loop_deps=GenerateFixLoopDeps(
             set_current=set_current,

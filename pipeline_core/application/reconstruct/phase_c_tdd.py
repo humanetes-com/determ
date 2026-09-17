@@ -29,6 +29,7 @@ from pipeline_core.application.reconstruct.body_reseed import (
     TreeWriter,
     reseed,
 )
+from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
 from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
@@ -129,6 +130,7 @@ from pipeline_core.domain.flat_score import (
     UnmovedVerdicts,
     flat_score,
 )
+from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.graceful_stop import request_graceful_stop
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
@@ -486,6 +488,12 @@ class PhaseCTddDeps:
     # PhaseCTddDeps and a REFERENCE_FLOOR=0 launch keep the absolute
     # criterion.
     reference_measurement: Callable[..., Any] | None = None
+    # `(project_dir, cluster, module) -> FnCoverageRecord | None`: the
+    # function-execution record test augmentation persisted for this cluster.
+    # Read once, when the cluster closes green or on the floor, to classify the
+    # stubs it closes with (`close_stub_account`). None: the close says nothing
+    # about them, as before.
+    augmentation_fn_record: Callable[..., Any] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -1508,6 +1516,7 @@ def run_phase_c_tdd(
     # Set ONLY by the green exit. Every other way out of the loop leaves a
     # re-fill window's bet unsettled, and the two are not the same thing.
     _cluster_done = False
+    _close_kind = ""
     _bet_restored = False
 
     def _restore_abandoned_bet(how: str) -> None:
@@ -2370,6 +2379,7 @@ def run_phase_c_tdd(
             # intact oracle IS the bet paying off, window open or not, so the
             # restore below must not claim it rolled the winning tree back.
             _cluster_done = True
+            _close_kind = "green"
             break
         if rc == -1 and not _hung:
             # The timeout cut the run before any test section opened: the
@@ -2462,6 +2472,7 @@ def run_phase_c_tdd(
                     "fail_count": fail_count,
                 })
                 _cluster_done = True
+                _close_kind = "reference floor"
                 break
         # Red-build budget: identical compile digest across three consecutive
         # sweeps that fills were attempted between means the fills moved
@@ -6318,6 +6329,14 @@ def run_phase_c_tdd(
     # `break`, because every exit owes this and a future exit path would silently
     # not; the raising exits are covered at the two points they raise from.
     _restore_abandoned_bet("exited")
+
+    if _cluster_done and deps.augmentation_fn_record is not None:
+        _fn_rec = deps.augmentation_fn_record(project_dir, cluster.name, module)
+        report_close_stubs(
+            stubs=deps.scan_unimplemented_for_cluster(target_src_dir, cluster),
+            record=_fn_rec if isinstance(_fn_rec, FnCoverageRecord) else None,
+            cluster_name=cluster.name, close_kind=_close_kind, tag=tag,
+            log=deps.log, emit=deps.emit)
 
     return ClusterFillResult(
         fns_filled=total_filled,

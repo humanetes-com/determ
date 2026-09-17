@@ -467,11 +467,33 @@ class LlvmCovProvider(CoverageProvider):
         files_data: list[PerFileCoverage] = []
         current_file: str | None = None
         line_hits: dict[int, int] = {}
+        # `FN:<line>,<name>` / `FNDA:<count>,<name>` — the function records the
+        # line reading used to drop. One record per function per BINARY (the
+        # lib's copy and each test binary's copy carry different crate hashes
+        # in the mangled name, measured on an invented crate 2026-09-17) and
+        # one per generic instantiation, so the map keeps the max per
+        # `(file, first line)`, the rule `domain.fn_execution.executed_by_key`
+        # states. Names follow the FIRST comma; the ignore pragma is not
+        # applied here — a pragma is a line-level classification, and no
+        # classification removes a function from the execution criterion.
+        fn_lines: dict[str, int] = {}
+        fn_hits: dict[str, int] = {}
+        functions: dict[tuple[str, int], int] = {}
         project_str = str(project_dir)
         for raw in text.splitlines():
             if raw.startswith("SF:"):
                 current_file = raw[3:]
                 line_hits = {}
+                fn_lines = {}
+                fn_hits = {}
+            elif raw.startswith("FN:") and current_file is not None:
+                ln_s, _, name = raw[3:].partition(",")
+                if ln_s.strip().isdigit():
+                    fn_lines[name] = int(ln_s)
+            elif raw.startswith("FNDA:") and current_file is not None:
+                ct_s, _, name = raw[5:].partition(",")
+                if ct_s.strip().isdigit():
+                    fn_hits[name] = max(fn_hits.get(name, 0), int(ct_s))
             elif raw.startswith("DA:") and current_file is not None:
                 parts = raw[3:].split(",")
                 if len(parts) >= 2:
@@ -485,6 +507,11 @@ class LlvmCovProvider(CoverageProvider):
                 abs_path = current_file if os.path.isabs(current_file) else str(project_dir / current_file)
                 rel = os.path.relpath(abs_path, project_str)
                 if rel.startswith("src" + os.sep) or rel.startswith("src/"):
+                    rel_key = rel.replace(os.sep, "/")
+                    for name, fn_line in fn_lines.items():
+                        key = (rel_key, fn_line)
+                        functions[key] = max(functions.get(key, 0),
+                                             fn_hits.get(name, 0))
                     if ignore_pragma:
                         try:
                             src_lines = Path(abs_path).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -505,16 +532,21 @@ class LlvmCovProvider(CoverageProvider):
                     ))
                 current_file = None
                 line_hits = {}
+                fn_lines = {}
+                fn_hits = {}
         total_covered   = sum(f.covered   for f in files_data)
         total_coverable = sum(f.coverable for f in files_data)
         pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
+        # No FN record in any src/ file is a report WITHOUT function records
+        # (None), not a report that every function counted 0.
+        return CoverageMeasurement(pct, files_data, total_covered, total_coverable,
+                                   functions or None)
 
     def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         return self._run(project_dir, module_name)
 
     def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        pct, files_data, _, _ = self._run(project_dir, module_name, suffix="_quick")
+        files_data = self._run(project_dir, module_name, suffix="_quick")[1]
         abs_target = str(project_dir / rel_path)
         for fd in files_data:
             if fd.abs_path == abs_target:

@@ -14,9 +14,11 @@ the use-case is injected with the real concrete (no composition-root shim)."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from ..domain.models import AugmentVerdict
+from ..domain.fn_execution import FnCoverageRecord
+from ..domain.models import FN_EXECUTION_CRITERION, AugmentVerdict
 from ..domain.workspace_layout import CLUSTER_AUGMENTED_DIR, MODULE_AUGMENTED_DIR
 
 
@@ -60,10 +62,64 @@ class FileAugmentStore:
 
     def mark_cluster_augmented(self, project_dir: Path, cluster_name: str,
                                module_name: str, cov: float, *,
-                               reason: str = "", code_id: str = "") -> None:
+                               reason: str = "", code_id: str = "",
+                               functions: FnCoverageRecord | None = None) -> None:
+        """Write the verdict, stamped with the function-execution criterion
+        the current stop applies and `functions`' summary (none when nothing
+        could be measured). A verdict on disk WITHOUT the stamp was written by
+        a line-coverage stop, and a `done` of that kind does not bind again
+        (`AugmentVerdict.still_binding`)."""
         p = self.cluster_path(project_dir, cluster_name, module_name)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(AugmentVerdict(cov, reason, code_id).to_text())
+        rec = functions if functions is not None and functions.measured else None
+        p.write_text(AugmentVerdict(
+            cov, reason, code_id,
+            criterion=FN_EXECUTION_CRITERION,
+            fn_measured=rec is not None,
+            unexecuted=len(rec.pending) if rec is not None else 0,
+            unreached=tuple(f"{u.site.file}::{u.site.fn_name}"
+                            + (f" [{u.site.container}]" if u.site.container else "")
+                            for u in (rec.unreached if rec is not None else ())),
+        ).to_text())
+
+    def fn_record_path(self, project_dir: Path, cluster_name: str,
+                       module_name: str) -> Path:
+        return (project_dir / CLUSTER_AUGMENTED_DIR
+                / f"{cluster_name}__{module_name}.fns.json")
+
+    def cluster_fn_record(self, project_dir: Path, cluster_name: str,
+                          module_name: str) -> FnCoverageRecord | None:
+        """The function-execution record augmentation wrote for (cluster,
+        module); None when absent or written under another criterion."""
+        p = self.fn_record_path(project_dir, cluster_name, module_name)
+        try:
+            return FnCoverageRecord.from_json(p.read_text(encoding="utf-8"))
+        except OSError:
+            return None
+
+    def save_cluster_fn_record(self, project_dir: Path, cluster_name: str,
+                               module_name: str, record: FnCoverageRecord) -> None:
+        """Atomic: the record is read back on resume, and a torn write would
+        hand every function a fresh attempt budget."""
+        p = self.fn_record_path(project_dir, cluster_name, module_name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(record.to_json(), encoding="utf-8")
+        os.replace(tmp, p)
+
+    def all_fn_records(self, project_dir: Path) -> list[FnCoverageRecord]:
+        """Every cluster's function record in the workspace, for the gates
+        that classify a stub against what augmentation measured."""
+        d = project_dir / CLUSTER_AUGMENTED_DIR
+        out: list[FnCoverageRecord] = []
+        for p in sorted(d.glob("*.fns.json")) if d.is_dir() else ():
+            try:
+                rec = FnCoverageRecord.from_json(p.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if rec is not None:
+                out.append(rec)
+        return out
 
     def cluster_augmented_value(self, project_dir: Path, cluster_name: str,
                                 module_name: str) -> float:

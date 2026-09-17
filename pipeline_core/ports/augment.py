@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from pipeline_core.domain.coverage import CoverageMeasurement
+from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.models import AugmentVerdict, BuildCluster
 
 
@@ -29,8 +31,9 @@ class TestAugmentor(ABC):
     @abstractmethod
     def measure_coverage(
         self, project_dir: Path, module_name: str, module_dir: Path,
-    ) -> tuple[float, list[Any], int, int]:
-        """Measure test coverage. Returns (coverage_pct, files_data, covered_lines, coverable_lines)."""
+    ) -> CoverageMeasurement:
+        """Measure test coverage: the line fields (pct, files, covered,
+        coverable) and, when the backend reports them, the function counts."""
 
     @abstractmethod
     def is_applicable(self, crate_type: str) -> bool:
@@ -78,12 +81,20 @@ class AugmentStore(Protocol):
     def mark_cluster_augmented(
         self, project_dir: Path, cluster_name: str, module_name: str, cov: float,
         *, reason: str = "", code_id: str = "",
+        functions: FnCoverageRecord | None = None,
     ) -> None:
         """Record the coverage, the terminating status ("done" / "ceiling" /
         "hard_block" / "precheck_failed") and the pipeline `code_identity` it
         was reached under. A give-up reason recorded without a code_id can
         never bind again — that is the intended reading of an unattributable
-        verdict."""
+        verdict. The verdict is stamped with the function-execution criterion
+        and `functions`' summary; a `done` without the stamp does not bind."""
+        ...
+    def cluster_fn_record(
+        self, project_dir: Path, cluster_name: str, module_name: str,
+    ) -> FnCoverageRecord | None:
+        """The function-execution record augmentation persisted for (cluster,
+        module), or None."""
         ...
     def cluster_augmented_value(
         self, project_dir: Path, cluster_name: str, module_name: str,

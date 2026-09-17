@@ -132,6 +132,12 @@ class StubInventory:
         finding. The name says which cardinality the caller just chose."""
         return tuple((s.locator, s.cfg_predicates) for s in self.sites)
 
+    def site_preds(self) -> tuple[tuple[FnSite, tuple[str, ...] | None], ...]:
+        """One `(site, cfg_predicates)` pair PER SITE, container kept — the
+        shape a gate that reads augmentation's per-site function record needs,
+        where two `provide` impls in one file are two different findings."""
+        return tuple((s.site, s.cfg_predicates) for s in self.sites)
+
     # --- derived views ---------------------------------------------------
 
     def filter(self, keep: Callable[[StubSite], bool]) -> StubInventory:

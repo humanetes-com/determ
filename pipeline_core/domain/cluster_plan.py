@@ -21,7 +21,7 @@ classification and `BuildCluster` construction live here.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 
 from pipeline_core import log as _log
 from pipeline_core.domain.cfg import Leaf, parse_cfg_pred
@@ -194,10 +194,14 @@ def plan_clusters(
                 tarpaulin_exclude_files=[],
                 excluded_cfg=excl,
                 active_cfg=[pred],
+                # The cfg FACTS only. Which targets are gated and which are
+                # shared is rendered per prompt from the targets themselves
+                # (`target_scope_rule`): a static "focus on the gated lines"
+                # disagreed with the target list, which carries every
+                # uncovered line the cluster compiles.
                 prompt_nightly_rule=(
                     f"- COMPILER CLUSTER: feature/{pred}\n"
-                    f"  Cargo feature `{pred}` IS enabled. Code inside `#[cfg(feature=\"{pred}\")]` IS active.\n"
-                    f"  Focus your tests on lines inside these cfg blocks."
+                    f"  Cargo feature `{pred}` IS enabled. Code inside `#[cfg(feature=\"{pred}\")]` IS active."
                 ),
                 is_default=False,
                 gated_files=gated_for(excl),
@@ -210,11 +214,20 @@ def plan_clusters(
                 tarpaulin_exclude_files=[],
                 excluded_cfg=excl,
                 active_cfg=[pred],
+                # "Only write tests for lines inside `#[cfg(pred)]` blocks —
+                # stable lines are already covered" used to close this rule.
+                # It was asserted, never measured, and it contradicted the
+                # target list the same prompt carried: augmentation hands this
+                # cluster every uncovered line it compiles, shared ones
+                # included, and on anyhow's `nightly` the shared
+                # `src/ptr.rs` clones were executed by no test in either
+                # cluster (augmented tree, 2026-09-17). The target-derived
+                # rule (`target_scope_rule`) says which listed targets are
+                # gated and which are shared.
                 prompt_nightly_rule=(
                     f"- COMPILER CLUSTER: {name}\n"
                     f"  `{pred}` IS active (RUSTFLAGS=--cfg {pred}). All `#[cfg({pred})]` blocks ARE compiled.\n"
-                    f"  You MAY use any symbols gated behind `#[cfg({pred})]`.\n"
-                    f"  Only write tests for lines inside `#[cfg({pred})]` blocks — stable lines are already covered."
+                    f"  You MAY use any symbols gated behind `#[cfg({pred})]`."
                 ),
                 is_default=False,
                 gated_files=gated_for(excl),
@@ -378,6 +391,62 @@ def nightly_rules_for(cluster: object | None) -> str:
         f"- Do NOT write tests for code gated behind these excluded cfg predicates: {predicates}.\n"
         f"  Skip any source lines inside their `#[cfg(...)]` blocks — they are untestable on this toolchain."
     )
+
+
+def target_scope_rule(
+    cluster: object | None,
+    *,
+    gated_fns: Sequence[str] = (),
+    shared_fns: Sequence[str] = (),
+    gated_lines: int = 0,
+    shared_lines: int = 0,
+) -> str:
+    """The target-scope half of a test-generation prompt's cluster rules,
+    rendered from the targets that prompt lists.
+
+    `gated_*` are the targets the cluster's cfg identity compiles — code the
+    world with that identity inverted compiles out (`fn_execution
+    .flipped_cfg_set`): a test for them needs the gated items and is gated to
+    the cluster (`cluster_gate_for_sibling`). `shared_*` are targets every
+    cluster compiles and no test run under THIS cluster reaches yet. A
+    cluster with no cfg identity (a crate with one world) gets no rule; a
+    prompt with no target gets none either.
+
+    It replaces a static sentence baked into the cluster ("stable lines are
+    already covered") that asserted a measurement nobody took, beside a
+    target list that said otherwise."""
+    if cluster is None:
+        return ""
+    active = sorted(str(p) for p in (getattr(cluster, "active_cfg", None) or []))
+    excluded = sorted(str(p) for p in (getattr(cluster, "excluded_cfg", None) or []))
+    if not (active or excluded):
+        return ""
+    if not (gated_fns or shared_fns or gated_lines or shared_lines):
+        return ""
+    world = ", ".join([f"`{p}` active" for p in active]
+                      + [f"`{p}` NOT active" for p in excluded])
+
+    def _part(fns: Sequence[str], n_lines: int) -> str:
+        bits: list[str] = []
+        if fns:
+            bits.append("function(s) " + ", ".join(f"`{f}`" for f in fns))
+        if n_lines:
+            bits.append(f"{n_lines} uncovered line(s)")
+        return " and ".join(bits)
+
+    out = [f"- TARGETS BY CFG WORLD (cluster {getattr(cluster, 'name', '')}):"]
+    if gated_fns or gated_lines:
+        out.append(
+            f"  Compiled ONLY under this cluster's cfg ({world}): "
+            f"{_part(gated_fns, gated_lines)}. A test for these needs the "
+            "cfg-gated items, and its file is gated to this cluster.")
+    if shared_fns or shared_lines:
+        out.append(
+            f"  Shared code every cluster compiles, reached by no test run "
+            f"under this cluster yet: {_part(shared_fns, shared_lines)}. "
+            "Test these through the ordinary public API; no cfg-gated item "
+            "is needed for them.")
+    return "\n".join(out)
 
 
 def merged_view_cluster(clusters: Iterable[BuildCluster]) -> BuildCluster | None:

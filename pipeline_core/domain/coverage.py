@@ -54,12 +54,22 @@ class CoverageMeasurement(NamedTuple):
     ``pct`` is the overall line-coverage percent; ``files`` holds the per-file
     records; ``covered``/``coverable`` are the line totals. An all-zero
     ``CoverageMeasurement(0.0, [], 0, 0)`` is the "measurement unavailable /
-    failed" sentinel the backends return."""
+    failed" sentinel the backends return.
+
+    ``functions`` is the function-execution half of the same run:
+    ``(crate-relative file, first line of the body) -> execution count``, max
+    over instantiations and binaries (`domain.fn_execution`). ``None`` means
+    the backend reported no function records, which is NOT the same as every
+    function unexecuted — the llvm-cov lcov carries them, tarpaulin's JSON and
+    grcov's coveralls output do not. Augmentation stopped on the line fields
+    alone until 2026-09-17, and a function no test entered was
+    indistinguishable from a missed branch (run `301146-2d8a5f06`)."""
 
     pct: float
     files: list[PerFileCoverage]
     covered: int
     coverable: int
+    functions: dict[tuple[str, int], int] | None = None
 
 
 def coverage_pass_outcome(*, actionable_lines: int, had_model_call: bool) -> str:

@@ -127,7 +127,8 @@ def test_parse_lcov_basic_counts_and_schema(tmp_path: Path) -> None:
     m = _provider()._parse_lcov(lcov, tmp_path)
     assert isinstance(m, CoverageMeasurement)          # named result, still a tuple
     assert (m.pct, m.covered, m.coverable) == (m[0], m[2], m[3])
-    pct, files, covered, coverable = m                  # positional unpack unchanged
+    pct, files, covered, coverable, functions = m       # positional: the four line fields, then the function counts
+    assert functions is None                            # no FN record: no function reading
     assert (covered, coverable) == (2, 3)
     assert pct == pytest.approx(2 / 3 * 100.0)
     assert len(files) == 1
@@ -149,7 +150,7 @@ def test_parse_lcov_multiple_files_aggregate(tmp_path: Path) -> None:
     _write_lcov(lcov,
                 "SF:src/a.rs\nDA:1,1\nDA:2,0\nend_of_record\n"
                 "SF:src/b.rs\nDA:1,3\nend_of_record\n")
-    pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    pct, files, covered, coverable, _functions = _provider()._parse_lcov(lcov, tmp_path)
     assert {f.abs_path.rsplit(os.sep, 1)[-1] for f in files} == {"a.rs", "b.rs"}
     assert (covered, coverable) == (2, 3)  # a: 1/2, b: 1/1
 
@@ -162,7 +163,7 @@ def test_parse_lcov_skips_non_src_files(tmp_path: Path) -> None:
                 "SF:src/keep.rs\nDA:1,1\nend_of_record\n"
                 "SF:tests/drop.rs\nDA:1,1\nend_of_record\n"
                 "SF:examples/also_drop.rs\nDA:1,1\nend_of_record\n")
-    _pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    _pct, files, covered, coverable, _functions = _provider()._parse_lcov(lcov, tmp_path)
     assert [f.abs_path.rsplit(os.sep, 1)[-1] for f in files] == ["keep.rs"]
     assert (covered, coverable) == (1, 1)
 
@@ -172,7 +173,7 @@ def test_parse_lcov_absolute_sf_path_inside_src(tmp_path: Path) -> None:
     abs_sf = str(tmp_path / "src" / "abs.rs")
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, f"SF:{abs_sf}\nDA:1,4\nDA:2,0\nend_of_record\n")
-    _pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    _pct, files, covered, coverable, _functions = _provider()._parse_lcov(lcov, tmp_path)
     assert files[0].abs_path == abs_sf
     assert (covered, coverable) == (1, 2)
 
@@ -182,7 +183,7 @@ def test_parse_lcov_duplicate_da_keeps_max_hit(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, "SF:src/f.rs\nDA:1,0\nDA:1,7\nend_of_record\n")
-    _pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    _pct, files, covered, coverable, _functions = _provider()._parse_lcov(lcov, tmp_path)
     assert (covered, coverable) == (1, 1)
     assert files[0].traces == [{"line": 1, "stats": {"Line": 7}}]
 
@@ -192,7 +193,7 @@ def test_parse_lcov_ignores_malformed_da(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, "SF:src/f.rs\nDA:bad,nope\nDA:5\nDA:2,3\nend_of_record\n")
-    _pct, _files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    _pct, _files, covered, coverable, _functions = _provider()._parse_lcov(lcov, tmp_path)
     assert (covered, coverable) == (1, 1)  # only DA:2,3 parsed
 
 
@@ -200,14 +201,14 @@ def test_parse_lcov_file_with_no_da_is_zero_coverable(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, "SF:src/empty.rs\nend_of_record\n")
-    pct, files, covered, coverable = _provider()._parse_lcov(lcov, tmp_path)
+    pct, files, covered, coverable, _functions = _provider()._parse_lcov(lcov, tmp_path)
     assert (covered, coverable) == (0, 0)
     assert pct == 0.0  # no coverable lines anywhere → 0, not a ZeroDivisionError
     assert files[0].coverable == 0
 
 
 def test_parse_lcov_missing_file_returns_zeros(tmp_path: Path) -> None:
-    pct, files, covered, coverable = _provider()._parse_lcov(tmp_path / "absent.lcov", tmp_path)
+    pct, files, covered, coverable, _functions = _provider()._parse_lcov(tmp_path / "absent.lcov", tmp_path)
     assert (pct, files, covered, coverable) == (0.0, [], 0, 0)
 
 
@@ -219,7 +220,7 @@ def test_parse_lcov_pragma_excludes_marked_lines(tmp_path: Path) -> None:
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, "SF:src/f.rs\nDA:1,1\nDA:2,0\nDA:3,0\nend_of_record\n")
     prov = _provider(_deps(ignore_pragma="// EXCL"))
-    _pct, _files, covered, coverable = prov._parse_lcov(lcov, tmp_path)
+    _pct, _files, covered, coverable, _functions = prov._parse_lcov(lcov, tmp_path)
     # line 2 dropped → {1 (hit), 3 (miss)} → 1/2
     assert (covered, coverable) == (1, 2)
 
@@ -230,7 +231,7 @@ def test_parse_lcov_pragma_unreadable_source_is_tolerated(tmp_path: Path) -> Non
     lcov = tmp_path / "c.lcov"
     _write_lcov(lcov, "SF:src/f.rs\nDA:1,1\nDA:2,0\nend_of_record\n")
     prov = _provider(_deps(ignore_pragma="// EXCL"))
-    _pct, _files, covered, coverable = prov._parse_lcov(lcov, tmp_path)
+    _pct, _files, covered, coverable, _functions = prov._parse_lcov(lcov, tmp_path)
     assert (covered, coverable) == (1, 2)
 
 
@@ -266,7 +267,7 @@ def test_load_cached_reads_existing_lcov(tmp_path: Path, monkeypatch: pytest.Mon
     _write_lcov(lcov_path, "SF:src/f.rs\nDA:1,1\nDA:2,0\nend_of_record\n")
     result = prov.load_cached(tmp_path, module)
     assert result is not None
-    _pct, _files, covered, coverable = result
+    _pct, _files, covered, coverable, _functions = result
     assert (covered, coverable) == (1, 2)
 
 
@@ -274,3 +275,77 @@ def test_load_cached_missing_returns_none(tmp_path: Path, monkeypatch: pytest.Mo
     prov = _provider()
     monkeypatch.setattr(prov, "_lcov_path", lambda mod, suffix="": tmp_path / "nope.lcov")
     assert prov.load_cached(tmp_path, "mod") is None
+
+
+# --------------------------------------------------------------------------- function records
+#
+# The lcov reader used to keep only `DA:` lines; the function-execution
+# criterion (run `301146-2d8a5f06`, 2026-09-17) reads `FN:`/`FNDA:` into
+# `(file, first line) -> max count`. The per-binary duplication below is the
+# shape cargo-llvm-cov emitted for an invented crate the same day: one record
+# per function per binary, the lib's copy at 0 and the test binary's at the
+# real count, under different crate hashes in the mangled name.
+
+_FN_LCOV = """\
+SF:src/lib.rs
+FN:1,_RNvCsLIB_1m6called
+FN:5,_RNvCsLIB_1m5never
+FN:9,_RINvCsLIB_1m7genericpEB2_
+FN:1,_RNvCsTEST_1m6called
+FN:5,_RNvCsTEST_1m5never
+FN:9,_RINvCsTEST_1m7genericINtB_3u32EB2_
+FN:9,_RINvCsTEST_1m7genericINtB_3u64EB2_
+FNDA:0,_RNvCsLIB_1m6called
+FNDA:0,_RNvCsLIB_1m5never
+FNDA:0,_RINvCsLIB_1m7genericpEB2_
+FNDA:3,_RNvCsTEST_1m6called
+FNDA:0,_RNvCsTEST_1m5never
+FNDA:0,_RINvCsTEST_1m7genericINtB_3u32EB2_
+FNDA:2,_RINvCsTEST_1m7genericINtB_3u64EB2_
+DA:1,3
+DA:5,0
+end_of_record
+SF:tests/t.rs
+FN:1,_RNvCsTEST_1t1t
+FNDA:1,_RNvCsTEST_1t1t
+DA:1,1
+end_of_record
+"""
+
+
+def test_parse_lcov_reads_function_records_by_first_line_max_over_copies(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    lcov = tmp_path / "f.lcov"
+    _write_lcov(lcov, _FN_LCOV)
+    m = _provider()._parse_lcov(lcov, tmp_path)
+    assert m.functions == {("src/lib.rs", 1): 3, ("src/lib.rs", 5): 0, ("src/lib.rs", 9): 2}
+    # Line fields unchanged by the function records.
+    assert (m.covered, m.coverable) == (1, 2)
+
+
+def test_parse_lcov_without_function_records_reports_none_not_zero(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    lcov = tmp_path / "f.lcov"
+    _write_lcov(lcov, "SF:src/lib.rs\nDA:1,3\nDA:5,0\nend_of_record\n")
+    assert _provider()._parse_lcov(lcov, tmp_path).functions is None
+
+
+def test_lcov_and_json_export_give_one_map_for_one_shape(tmp_path: Path) -> None:
+    """The two readers of the same measurement agree: the lcov FN line is the
+    export's first region line, and both collapse copies by max."""
+    from pipeline_core.adapters.coverage_owner import _body_counts
+    crate = tmp_path / "crate"
+    (crate / "src").mkdir(parents=True)
+    lcov = tmp_path / "f.lcov"
+    _write_lcov(lcov, _FN_LCOV)
+    src = str(crate / "src" / "lib.rs")
+
+    def _fn(name: str, line: int, count: int) -> dict[str, object]:
+        return {"name": name, "count": count, "filenames": [src],
+                "regions": [[line, 5, line + 2, 2, count, 0, 0, 0]]}
+
+    export = {"data": [{"functions": [
+        _fn("called", 1, 0), _fn("never", 5, 0), _fn("generic", 9, 0),
+        _fn("called", 1, 3), _fn("never", 5, 0), _fn("generic", 9, 0), _fn("generic", 9, 2),
+    ]}]}
+    assert _body_counts(export, crate) == _provider()._parse_lcov(lcov, crate).functions

@@ -1949,7 +1949,7 @@ def test_coverage_measurement() -> None:
     module_name = m.group(1)
 
     print(f"  ... running {pipeline.COVERAGE_BACKEND} on {workspace.relative_to(REPO)}")
-    pct, files_data, covered, coverable = pipeline._coverage_provider.measure(
+    pct, files_data, covered, coverable, _functions = pipeline._coverage_provider.measure(
         workspace, module_name
     )
 
@@ -1998,7 +1998,7 @@ mod gen_tests_1 {
     assert m
     module_name = m.group(1)
 
-    pct, files_data, covered, coverable = pipeline._coverage_provider.measure(
+    pct, files_data, covered, coverable, _functions = pipeline._coverage_provider.measure(
         workspace, module_name
     )
     print(f"  ... with-sibling coverage: {pct:.1f}% ({covered}/{coverable})")
@@ -2298,7 +2298,7 @@ def test_coverage_workspace_adapters() -> None:
         (proj / "src" / "f.rs").write_text("a\nb // GRCOV_EXCL_LINE\nc\n")
         lcov = proj / "cov.lcov"
         lcov.write_text("SF:src/f.rs\nDA:1,5\nDA:2,0\nDA:3,0\nend_of_record\n")
-        pct, files, covd, total = prov._parse_lcov(lcov, proj)  # type: ignore[attr-defined]
+        pct, files, covd, total, _functions = prov._parse_lcov(lcov, proj)  # type: ignore[attr-defined]
         assert (covd, total) == (1, 2)  # line 2 dropped by pragma; 1 of {1,3} hit
         assert files and files[0].abs_path.endswith("src/f.rs")
 
@@ -2307,7 +2307,7 @@ def test_coverage_workspace_adapters() -> None:
         gj = Path("/tmp") / f"grcov_{mod}.json"
         gj.write_text(_json.dumps({"source_files": [{"name": "src/f.rs", "coverage": [1, 0, None, 2]}]}))
         try:
-            pct, files, covd, total = cov.load_grcov_json(proj, mod)
+            pct, files, covd, total, _functions = cov.load_grcov_json(proj, mod)
             assert (covd, total) == (2, 3)
         finally:
             gj.unlink(missing_ok=True)

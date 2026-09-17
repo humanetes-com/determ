@@ -645,6 +645,13 @@ class BuildCluster:
         return "nightly" if self.requires_nightly else None
 
 
+# Version of augmentation's function-execution criterion
+# (`domain.fn_execution`). A `done` verdict or a function record that does not
+# carry this exact value was produced by a stop that never asked whether each
+# function the cluster compiles is executed by some test.
+FN_EXECUTION_CRITERION = "fn-execution/1"
+
+
 @dataclass(frozen=True, slots=True)
 class AugmentVerdict:
     """Why a (cluster, module) stopped being augmented, and under which pipeline.
@@ -676,11 +683,24 @@ class AugmentVerdict:
     The canonical text form keeps the coverage on the first line, so a sentinel
     written before this field existed still reads back as a number. `from_text`
     also accepts a legacy `source_hash=` line as the code identity.
+
+    `criterion` is the function-execution criterion the stop applied
+    (`FN_EXECUTION_CRITERION`), with its summary: whether function execution
+    was measured, how many functions were still unexecuted within their
+    attempt budget, and the sites measured unreached. A `done` written without
+    it is a line-coverage `done` — on anyhow's `nightly` (run
+    `330242-0be2c3e1`, 2026-09-03) it recorded `95.2 / reason=done` over
+    functions no test had entered — and it does not bind: a resume under the
+    criterion re-augments instead of inheriting it.
     """
 
     coverage: float
     reason: str = ""
     code_id: str = ""
+    criterion: str = ""
+    fn_measured: bool = False
+    unexecuted: int = 0
+    unreached: tuple[str, ...] = ()
 
     def is_final(self) -> bool:
         """True when the verdict is a claim about the tree rather than about the
@@ -691,24 +711,44 @@ class AugmentVerdict:
     def still_binding(self, code_id: str) -> bool:
         """True when this verdict still answers "skip this cluster".
 
-        A final verdict always binds. A give-up verdict binds only while the
-        pipeline that produced it is the pipeline on disk (`code_identity`).
-        A verdict with no recorded provenance — a bare-number sentinel written
-        before this field existed — never binds, so the first run after the
-        change re-measures instead of inheriting an unattributable claim.
+        A final verdict binds under any pipeline code, but only when the stop
+        that wrote it applied the current function-execution criterion. A
+        give-up verdict binds only while the pipeline that produced it is the
+        pipeline on disk (`code_identity`). A verdict with no recorded
+        provenance — a bare-number sentinel written before this field existed
+        — never binds, so the first run after the change re-measures instead
+        of inheriting an unattributable claim.
         """
+        return not self.unbinding_reason(code_id)
+
+    def unbinding_reason(self, code_id: str) -> str:
+        """Why this verdict no longer binds ("" when it does)."""
         if self.is_final():
-            return True
+            if self.criterion != FN_EXECUTION_CRITERION:
+                return ("written by a stop that did not apply the function-"
+                        f"execution criterion (recorded "
+                        f"'{self.criterion or 'none'}', now "
+                        f"'{FN_EXECUTION_CRITERION}')")
+            return ""
         if not self.code_id:
-            return False
-        return self.code_id == code_id
+            return "no recorded pipeline identity"
+        if self.code_id != code_id:
+            return (f"from pipeline code that is no longer on disk (recorded "
+                    f"{self.code_id}, now {code_id})")
+        return ""
 
     def to_text(self) -> str:
         """The sentinel's canonical text: coverage first (legacy-readable), then
         the provenance this class exists to carry."""
-        return (f"{self.coverage:.1f}\n"
+        text = (f"{self.coverage:.1f}\n"
                 f"reason={self.reason}\n"
                 f"code_id={self.code_id}\n")
+        if self.criterion:
+            text += (f"criterion={self.criterion}\n"
+                     f"fn_measured={'yes' if self.fn_measured else 'no'}\n"
+                     f"unexecuted={self.unexecuted}\n"
+                     f"unreached={';'.join(self.unreached)}\n")
+        return text
 
     @classmethod
     def from_text(cls, text: str) -> AugmentVerdict:
@@ -726,9 +766,17 @@ class AugmentVerdict:
             key, sep, value = line.partition("=")
             if sep:
                 fields[key.strip()] = value.strip()
+        try:
+            unexecuted = int(fields.get("unexecuted", "0") or 0)
+        except ValueError:
+            unexecuted = 0
         return cls(coverage=coverage,
                    reason=fields.get("reason", ""),
-                   code_id=fields.get("code_id") or fields.get("source_hash", ""))
+                   code_id=fields.get("code_id") or fields.get("source_hash", ""),
+                   criterion=fields.get("criterion", ""),
+                   fn_measured=fields.get("fn_measured", "") == "yes",
+                   unexecuted=unexecuted,
+                   unreached=tuple(u for u in fields.get("unreached", "").split(";") if u))
 
 
 @dataclass
@@ -743,7 +791,9 @@ class ModuleAugmentState:
     Lifecycle:
       record_pass(...) is called after each task0c_augment_module() return.
       status(crate_type) returns one of:
-        'done'       — coverage 100%, or crate is proc-macro (cannot augment)
+        'done'       — coverage at target AND no function the cluster compiles is
+                       still unexecuted within its attempt budget, or crate is
+                       proc-macro (cannot augment)
         'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
         'hard_block' — stall_passes >= STALL_LIMIT (genuinely stuck)
         'retry'      — keep going
@@ -758,27 +808,39 @@ class ModuleAugmentState:
     last_covered: int = 0
     last_at_ceiling: bool = False
     target_pct: float = 100.0  # coverage % at/above which the module is 'done'
+    # Functions the cluster compiles that no test executes and that are still
+    # inside their targeted-attempt budget, as of the last pass (0 when the
+    # criterion could not be measured — the pass logged why).
+    last_fns_pending: int = 0
+    best_fns_pending: int = -1
 
     STALL_LIMIT: int = 10
     CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
 
-    def record_pass(self, pct: float, covered: int, at_ceiling: bool) -> None:
+    def record_pass(self, pct: float, covered: int, at_ceiling: bool,
+                    fns_pending: int = 0) -> None:
         self.total_passes += 1
         self.last_pct = pct
         self.last_covered = covered
         self.last_at_ceiling = at_ceiling
+        self.last_fns_pending = fns_pending
         if at_ceiling:
             self.ceiling_passes += 1
         else:
             self.ceiling_passes = 0
-        if covered > self.best_covered_lines:
-            self.best_covered_lines = covered
+        # Accounting a function (executed, or unreached after its budget) is
+        # progress on the stop's second half even when no line moved.
+        fns_improved = 0 <= fns_pending < self.best_fns_pending
+        if self.best_fns_pending < 0 or fns_pending < self.best_fns_pending:
+            self.best_fns_pending = fns_pending
+        if covered > self.best_covered_lines or fns_improved:
+            self.best_covered_lines = max(self.best_covered_lines, covered)
             self.stall_passes = 0
         else:
             self.stall_passes += 1
 
     def status(self, crate_type: str) -> str:
-        if self.last_pct >= self.target_pct:
+        if self.last_pct >= self.target_pct and self.last_fns_pending == 0:
             return 'done'
         if crate_type == 'proc-macro':
             return 'done'

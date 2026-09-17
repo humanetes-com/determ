@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.cluster_augment import AugmentContext, ClusterAugmentor
-from pipeline_core.domain.models import AugmentVerdict, BuildCluster
+from pipeline_core.domain.fn_execution import FnCoverageRecord
+from pipeline_core.domain.models import FN_EXECUTION_CRITERION, AugmentVerdict, BuildCluster
 
 
 def _cluster(name: str, **kw: Any) -> BuildCluster:
@@ -36,6 +37,11 @@ class FakeAdapter:
         self.behaviour_passes: list[tuple[str, str]] = []
         self.behaviour_reads: list[tuple[str, str]] = []
         self.cluster_sentinels: dict[tuple[str, str], AugmentVerdict] = {}
+        # Scripted function records, one consumed per augment pass (the last
+        # repeats); absent → the store has no record, as for a backend
+        # without function counts.
+        self.fn_scripts: dict[tuple[str, str], list[FnCoverageRecord]] = {}
+        self.marked_functions: dict[tuple[str, str], FnCoverageRecord | None] = {}
         self.module_sentinels: dict[str, float] = {}
         self.active: list[str | None] = []
         self.commits: list[str] = []
@@ -61,8 +67,18 @@ class FakeAdapter:
         return self.cluster_sentinels.get((c, m))
 
     def mark_cluster_augmented(self, pd: Path, c: str, m: str, cov: float, *,
-                               reason: str = "", code_id: str = "") -> None:
-        self.cluster_sentinels[(c, m)] = AugmentVerdict(cov, reason, code_id)
+                               reason: str = "", code_id: str = "",
+                               functions: FnCoverageRecord | None = None) -> None:
+        self.cluster_sentinels[(c, m)] = AugmentVerdict(
+            cov, reason, code_id, criterion=FN_EXECUTION_CRITERION,
+            fn_measured=functions is not None and functions.measured)
+        self.marked_functions[(c, m)] = functions
+
+    def cluster_fn_record(self, pd: Path, c: str, m: str) -> FnCoverageRecord | None:
+        seq = self.fn_scripts.get((c, m))
+        if not seq:
+            return None
+        return seq.pop(0) if len(seq) > 1 else seq[0]
 
     def cluster_augmented_value(self, pd: Path, c: str, m: str) -> float:
         v = self.cluster_sentinels.get((c, m))
@@ -222,7 +238,8 @@ def test_non_last_cluster_skips_main_sentinel() -> None:
 def test_resume_recovers_missing_main_sentinel_on_last_cluster() -> None:
     fake = FakeAdapter(augment_script={})
     # cluster already done from a prior run, but the crash left no main sentinel.
-    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(95.0, "done", "src-hash")
+    fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
+        95.0, "done", "src-hash", criterion=FN_EXECUTION_CRITERION)
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"]))
     assert fake.module_sentinels["anyhow"] == 95.0  # recovered from the cluster value
 
@@ -352,11 +369,68 @@ def test_a_done_verdict_binds_across_a_code_change() -> None:
     # every finished cluster on every commit.
     fake = FakeAdapter(augment_script={("stable", "anyhow"): [(100.0, 10, False, "")]})
     fake.cluster_sentinels[("stable", "anyhow")] = AugmentVerdict(
-        100.0, "done", _LIVE_CODE_ID)
+        100.0, "done", _LIVE_CODE_ID, criterion=FN_EXECUTION_CRITERION)
     _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"],
                              code_id=_LATER_CODE_ID))
     assert any("already done — skipping" in m for m in fake.logs)
     assert "cluster.sentinel.reopened" not in fake.events
+
+
+def test_a_line_coverage_done_reopens_under_the_function_criterion() -> None:
+    # The sentinel run 330242-0be2c3e1 left on `nightly`: done at 95.2 %, no
+    # criterion. It must re-augment, not skip.
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [(95.2, 793, False, "")]})
+    fake.cluster_sentinels[("nightly", "anyhow")] = AugmentVerdict(95.2, "done", "4b293605efff")
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
+    assert "cluster.sentinel.reopened" in fake.events
+    assert not any("already done — skipping" in m for m in fake.logs)
+    assert fake.cluster_sentinels[("nightly", "anyhow")].criterion == FN_EXECUTION_CRITERION
+
+
+def _pending_record(n: int) -> FnCoverageRecord:
+    from pipeline_core.domain.fn_execution import FnTarget, PendingFn
+    from pipeline_core.domain.models import FnSite
+    return FnCoverageRecord(
+        measured=True, candidates=10,
+        pending=tuple(PendingFn(FnTarget(FnSite("src/w.rs", f"f{i}", ""), 1, 3, True))
+                      for i in range(n)))
+
+
+def test_line_target_met_with_unexecuted_functions_is_not_done() -> None:
+    # Pass 1 meets the line target with two functions still inside their
+    # attempt budget → retry; pass 2 has them accounted → done. Coverage does
+    # not move between the passes, and the stall clock must not charge that.
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [
+        (95.2, 793, False, ""), (95.2, 793, False, "")]})
+    fake.fn_scripts[("nightly", "anyhow")] = [_pending_record(2), _pending_record(0)]
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
+    assert any("meets 90% but 2 function(s) no test executes" in m for m in fake.logs)
+    v = fake.cluster_sentinels[("nightly", "anyhow")]
+    assert v.reason == "done"
+    assert fake.events.count("task.done") == 2
+
+
+def test_negative_control_the_line_only_done_rule_stops_on_pass_one(monkeypatch: Any) -> None:
+    # Same scripted inputs, pre-fix `status`: the line target alone decides, so
+    # pass 1 — two functions no test executes — is recorded done and pass 2
+    # never runs.
+    from pipeline_core.domain.models import ModuleAugmentState
+
+    def _line_only(self: ModuleAugmentState, crate_type: str) -> str:
+        if self.last_pct >= self.target_pct or crate_type == "proc-macro":
+            return "done"
+        if self.ceiling_passes >= self.CEILING_CONFIRM:
+            return "ceiling"
+        return "hard_block" if self.stall_passes >= self.STALL_LIMIT else "retry"
+
+    monkeypatch.setattr(ModuleAugmentState, "status", _line_only)
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [
+        (95.2, 793, False, ""), (95.2, 793, False, "")]})
+    fake.fn_scripts[("nightly", "anyhow")] = [_pending_record(2), _pending_record(0)]
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
+    assert fake.cluster_sentinels[("nightly", "anyhow")].reason == "done"
+    assert fake.events.count("task.done") == 1                # pass 2 never ran
+    assert not any("function(s) no test executes" in m for m in fake.logs)
 
 
 def test_reaching_the_target_below_a_hundred_records_done() -> None:

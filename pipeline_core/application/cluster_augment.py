@@ -117,7 +117,10 @@ class ClusterAugmentor:
             is_last_cluster = (cluster == clusters[-1])
             for m in modules:
                 # A recorded verdict binds only while it still describes something
-                # true. "done" is a claim about the TREE and always binds; a give-up
+                # true. "done" is a claim about the TREE and binds under any code,
+                # but only when the stop that wrote it applied the current
+                # function-execution criterion (a line-coverage "done" sealed
+                # anyhow's `nightly` over functions no test entered); a give-up
                 # ("ceiling", "hard_block", "precheck_failed") is a claim about the
                 # pipeline, so it is dropped once `code_identity` moves. That is
                 # not the crate `source_hash` pipeline_state.md records on phase
@@ -132,16 +135,17 @@ class ClusterAugmentor:
                     tel.log(
                         f"  cluster/{cluster.name}: '{m}' sentinel records "
                         f"{verdict.coverage:.1f}% under a "
-                        f"'{verdict.reason or 'unattributed'}' verdict from pipeline "
-                        f"code that is no longer on disk "
-                        f"(recorded {verdict.code_id or '-'}, now {code_id}) — "
+                        f"'{verdict.reason or 'unattributed'}' verdict "
+                        f"{verdict.unbinding_reason(code_id)} — "
                         f"re-augmenting instead of inheriting it."
                     )
                     tel.emit("cluster.sentinel.reopened", cluster=cluster.name,
                              data={"module": m, "coverage": verdict.coverage,
                                    "reason": verdict.reason,
                                    "recorded_code_id": verdict.code_id,
-                                   "current_code_id": code_id})
+                                   "current_code_id": code_id,
+                                   "recorded_criterion": verdict.criterion,
+                                   "why": verdict.unbinding_reason(code_id)})
                 elif verdict is not None:
                     cluster_done.add(m)
                     tel.log(f"  cluster/{cluster.name}: '{m}' already done — skipping.")
@@ -216,8 +220,16 @@ class ClusterAugmentor:
                     mod_name, ModuleAugmentState(mod_name, cluster.name,
                                                  target_pct=ctx.target_pct)
                 )
-                state.record_pass(cov, covered, at_ceiling)
+                # The function-execution half of the stop, as task0c persisted
+                # it this pass. A line target met with functions still
+                # unexecuted inside their attempt budget is not done.
+                fn_record = store.cluster_fn_record(project_dir, cluster.name, mod_name)
+                fns_pending = (len(fn_record.pending)
+                               if fn_record is not None and fn_record.measured else 0)
+                state.record_pass(cov, covered, at_ceiling, fns_pending=fns_pending)
                 status = state.status(crate_type)
+                if fn_record is not None:
+                    tel.log(f"  TASK 0c [{cluster.name}]: '{mod_name}' {fn_record.summary()}")
 
                 # A blocked pass is deterministic: the harness survived the LLM fix
                 # attempts AND a full gen_tests strip (or is broken in protected
@@ -247,15 +259,20 @@ class ClusterAugmentor:
                         )
                     store.mark_cluster_augmented(
                         project_dir, cluster.name, mod_name, cov,
-                        reason=status, code_id=code_id)
+                        reason=status, code_id=code_id, functions=fn_record)
                     # Also write the main module sentinel when the last cluster finishes,
                     # so the strip/task1-4 loop sees it as done.
                     if cluster == clusters[-1]:
                         store.mark_module_augmented(project_dir, mod_name, cov)
                     cluster_done.add(mod_name)
                 else:
+                    _why = (f"coverage {cov:.1f}% < {ctx.target_pct:.0f}%"
+                            if cov < ctx.target_pct else
+                            f"coverage {cov:.1f}% meets {ctx.target_pct:.0f}% but "
+                            f"{fns_pending} function(s) no test executes are still "
+                            "inside their attempt budget")
                     tel.log(
-                        f"  HARD RULE: '{mod_name}' [{cluster.name}] coverage {cov:.1f}% < {ctx.target_pct:.0f}% "
+                        f"  HARD RULE: '{mod_name}' [{cluster.name}] {_why} "
                         f"(stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
                         f"total {state.total_passes}, best covered {state.best_covered_lines} lines). "
                         f"Retrying."

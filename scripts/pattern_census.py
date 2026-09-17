@@ -165,6 +165,18 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      process was SIGTERMed inside that batch, so the repeat is unread and
      the row grades ARMED rather than LOCKED.  P3 records the same run as
      `blamed NOBODY x6` and stops there.
+  P27 orphaned stub at a green end — every test passes and the end gate
+     exits 1 on reachable `unimplemented!()` bodies no test executes: the
+     fill loop dispatches only what a red test reaches, and augmentation had
+     stopped on a LINE percentage without asking whether each function runs.
+     Run 301146-2d8a5f06 (2026-09-17): `WARNING: all tests passed, but 6 fn(s)
+     are STILL unimplemented!()`, exit 1, after task0c stopped `nightly` at
+     95.2 % (run 330242-0be2c3e1).  Reaction: the gate annotates each orphan
+     from augmentation's function record (`EXECUTED this body at
+     augmentation` / `no augmentation record accounts for it`); a stub the
+     record measured unreached is a NOTE, not a WARNING, and not a hit.  A run
+     that swept no phase-c iteration (a resumed task3 finishing in seconds)
+     is below the default --min-iters; pass --min-iters 0 to see it.
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -470,6 +482,12 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         ("phase-c/hang_reverted", "hang-reverted"),
         ("phase-c/u2_hang", "hang-rejected"),
         ("hung inside ", "group-killed"),
+    ],
+    "P27": [
+        # The end gate classified each orphan against augmentation's
+        # function-execution record (printed on the lines after the warning).
+        ("EXECUTED this body at augmentation", "orphan-executed-upstream"),
+        ("no augmentation record accounts for it", "orphan-unaccounted"),
     ],
     "P26": [
         # The bound converted an unbounded coverage wait into a P25 hang.
@@ -2092,6 +2110,30 @@ def _p26_ts(raw: object) -> float | None:
         return None
 
 
+RE_ORPHANED_STUBS = re.compile(
+    r"WARNING: all tests passed, but (?P<n>\d+) fn\(s\) are STILL unimplemented")
+
+
+def detect_p27(run: Run, iters: list[dict]) -> list[dict]:
+    """The end gate's orphaned-stub exit after a green suite. Evidence names
+    the stubs from the indented lines that follow the warning."""
+    hits: list[dict] = []
+    for i, (ref, text) in enumerate(run.lines):
+        m = RE_ORPHANED_STUBS.search(text)
+        if not m:
+            continue
+        names: list[str] = []
+        for _r, nxt in run.lines[i + 1:i + 1 + int(m["n"])]:
+            s = nxt.strip()
+            if not s.startswith("src/"):
+                break
+            names.append(s.split(" — ", 1)[0])
+        hits.append({"evidence": (f"green suite, exit on {m['n']} orphaned stub(s): "
+                                  + ", ".join(names[:8])),
+                     "refs": [ref]})
+    return hits
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2105,7 +2147,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P17": detect_p17, "P18": detect_p18,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
-             "P25": detect_p25, "P26": detect_p26}
+             "P25": detect_p25, "P26": detect_p26, "P27": detect_p27}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2127,7 +2169,8 @@ CLASS_NAMES = {
     "P23": "declined unit (the model answered an empty body; pre-fix logged as a reader loss)",
     "P24": "crash-cohort lock (cohort > batch and exempt from the cursor: head re-dispatched, tail never reached)",
     "P25": "hung sweep (cargo test timed out inside a test; pre-fix the cluster was abandoned and the hung tree left on disk)",
-    "P26": "unbounded wait (a fill event then no non-audit event for longer than 5x the sweep timeout; pre-fix the coverage slice waited forever)"}
+    "P26": "unbounded wait (a fill event then no non-audit event for longer than 5x the sweep timeout; pre-fix the coverage slice waited forever)",
+    "P27": "orphaned stub at a green end (all tests pass, exit 1 on reachable stubs no test executes; augmentation stopped on line coverage alone)"}
 
 
 # -------------------------------------------------------------------- report

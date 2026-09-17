@@ -11,7 +11,7 @@ import argparse
 import os
 import shutil
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -23,9 +23,15 @@ from pipeline_core.application.tasks.task0d import run_task0d
 from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
+from pipeline_core.domain.fn_execution import (
+    FnCoverageRecord,
+    UnreachedFn,
+    classify_stub_sites,
+    site_label,
+)
 from pipeline_core.domain.generation import GenerationRequest
 from pipeline_core.domain.measurement import code_identity
-from pipeline_core.domain.models import BuildCluster, FnLocator
+from pipeline_core.domain.models import BuildCluster, FnLocator, FnSite
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -34,25 +40,39 @@ from pipeline_core.domain.workspace_layout import PRE_AUGMENT_TAG_PREFIX, plan_p
 
 @dataclass(frozen=True, slots=True)
 class StubVerdict:
-    """The three states a still-hollow fn can be in at completion time.
+    """The four states a still-hollow fn can be in at completion time.
 
-    Only `orphaned` is a defect. The other two exist because "every
+    Only `orphaned` is a defect. The other three exist because "every
     `unimplemented!()` is a hole we failed to fill" is false about real crates,
     and holding it cost a run its verdict after the whole cost was paid.
+
+    `unreached_by_tests` is the one augmentation MEASURED: its targeted
+    attempts wrote test blocks for the function that compiled and ran, and the
+    coverage run after them still counted 0 executions. No test in the suite
+    enters it, so no fill for it could be verified — the same standing as a
+    body no cfg-set compiles. `unreached_evidence` carries the attempts per
+    entry, in order. `executed_upstream` marks the orphaned sites the
+    augmentation record says the original's suite DID execute: the loudest
+    kind, because the reconstruction's green suite never reaches a body the
+    original's suite entered.
     """
 
     orphaned: tuple[FnLocator, ...] = ()
     unreachable: tuple[FnLocator, ...] = ()
     upstream_hollow: tuple[FnLocator, ...] = ()
+    unreached_by_tests: tuple[FnLocator, ...] = ()
+    unreached_evidence: tuple[str, ...] = ()
+    executed_upstream: frozenset[FnLocator] = frozenset()
 
 
 def classify_remaining_stubs(
-    stubs: Iterable[tuple[FnLocator, tuple[str, ...] | None]],
+    stubs: Iterable[tuple[FnLocator | FnSite, tuple[str, ...] | None]],
     cfg_sets: Iterable[CfgSet],
     reference_hollow: Iterable[tuple[str, str]] = (),
+    fn_records: Sequence[FnCoverageRecord] = (),
 ) -> StubVerdict:
     """Split the fns still holding `unimplemented!()` into un-attempted,
-    cfg-unreachable, and hollow-upstream-too.
+    cfg-unreachable, hollow-upstream-too, and unreached-by-tests.
 
     Two filters, and the ORDER matters. First reachability: a stub the union of
     the baked cfg-sets compiles out was never reachable by any cluster's Phase C
@@ -73,24 +93,49 @@ def classify_remaining_stubs(
     with no unreachable verdict at all, so a fully green suite still exited 1 on
     those three bodies while the multi-module FINAL — which those crates never
     reach — excused them correctly.
+
+    The third filter reads augmentation's per-cluster function records
+    (`fn_records`): a reachable, not-hollow-upstream stub every measured record
+    speaking about it lists as UNREACHED leaves as `unreached_by_tests`. A stub
+    a record lists as executed stays orphaned and is marked
+    `executed_upstream`. With no record the gate is exactly the two-filter form
+    — run `301146-2d8a5f06` (2026-09-17) exited 1 on six `provide`-path stubs
+    with no record to read. Stubs may be named by site (container kept) or by
+    locator; a locator reads the record's sites for it conservatively
+    (`FnCoverageRecord.classify_stub`).
     """
     sets = list(cfg_sets)
     unreachable: list[FnLocator] = []
-    reachable: list[FnLocator] = []
-    for loc, preds in stubs:
+    reachable: list[FnSite] = []
+    for key, preds in stubs:
+        site = key if isinstance(key, FnSite) else FnSite(key[0], key[1], "")
+        loc = FnLocator(site.file, site.fn_name)
         if preds and unreachable_under_every_cfg_set(preds, sets):
             unreachable.append(loc)
         else:
-            reachable.append(loc)
+            reachable.append(site)
     hollow_upstream = frozenset(reference_hollow)
     orphaned_keys = orphaned_stubs(
-        [(loc.file, loc.fn_name) for loc in reachable], hollow_upstream)
+        [(s.file, s.fn_name) for s in reachable], hollow_upstream)
+    candidates = [s for s in reachable if (s.file, s.fn_name) in orphaned_keys]
+    account = classify_stub_sites(candidates, fn_records)
+    unreached: dict[FnSite, UnreachedFn] = dict(account.unreached)
+    executed = frozenset(account.executed)
     return StubVerdict(
-        orphaned=tuple(loc for loc in reachable
-                       if (loc.file, loc.fn_name) in orphaned_keys),
+        orphaned=tuple(FnLocator(s.file, s.fn_name) for s in candidates
+                       if s not in unreached),
         unreachable=tuple(unreachable),
-        upstream_hollow=tuple(loc for loc in reachable
-                              if (loc.file, loc.fn_name) not in orphaned_keys),
+        upstream_hollow=tuple(FnLocator(s.file, s.fn_name) for s in reachable
+                              if (s.file, s.fn_name) not in orphaned_keys),
+        unreached_by_tests=tuple(FnLocator(s.file, s.fn_name) for s in candidates
+                                 if s in unreached),
+        unreached_evidence=tuple(
+            f"{site_label(s)}"
+            + (" (compiled only under its cluster's cfg)" if unreached[s].cluster_gated else "")
+            + " — targeted attempt(s) "
+            + (", ".join(str(a) for a in unreached[s].attempts) or "none recorded")
+            for s in candidates if s in unreached),
+        executed_upstream=frozenset(FnLocator(s.file, s.fn_name) for s in executed),
     )
 
 
@@ -111,12 +156,25 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
             "against this run:")
         for loc in verdict.upstream_hollow:
             log(f"    {loc.file}::{loc.fn_name}")
+    if verdict.unreached_by_tests:
+        log(f"\nNOTE: {len(verdict.unreached_by_tests)} fn(s) remain "
+            "unimplemented!() and test augmentation MEASURED them unreached: "
+            "test blocks written for each compiled and ran, and the coverage "
+            "run after them still counted 0 executions. No test in this suite "
+            "enters them, so no fill for them could have been verified. Not "
+            "counted against this run:")
+        for line in verdict.unreached_evidence:
+            log(f"    {line}")
     if verdict.orphaned:
         log(f"\nWARNING: all tests passed, but {len(verdict.orphaned)} fn(s) "
             "are STILL unimplemented!() — reachable under a baked cfg-set and "
             "implemented in the original:")
         for loc in verdict.orphaned:
-            log(f"    {loc.file}::{loc.fn_name}")
+            note = (" — the original's suite EXECUTED this body at augmentation; "
+                    "nothing this run's suite runs reaches it in the reconstruction"
+                    if loc in verdict.executed_upstream
+                    else " — no augmentation record accounts for it")
+            log(f"    {loc.file}::{loc.fn_name}{note}")
         log("         This is NOT a clean success — the fns above were never "
             "attempted.")
         return False
@@ -489,7 +547,7 @@ def next_module(
 def measure_baseline_coverage(
     modules: list[str], dep_graph: DepGraphView, *,
     tarpaulin_available: bool,
-    run_tarpaulin: Callable[[Path, str], tuple[float, Any, Any, Any]],
+    run_tarpaulin: Callable[[Path, str], tuple[Any, ...]],
     project_dir: Path,
     log: Callable[[str], None],
 ) -> dict[str, float]:
@@ -503,10 +561,8 @@ def measure_baseline_coverage(
     log("\nMeasuring baseline coverage to determine processing order...")
     for mod_name in modules:
         crate_type = dep_graph.crate_type(mod_name)
-        if "proc-macro" in crate_type.lower():
-            cov = 100.0
-        else:
-            cov, _, _, _ = run_tarpaulin(project_dir, mod_name)
+        cov = (100.0 if "proc-macro" in crate_type.lower()
+               else run_tarpaulin(project_dir, mod_name)[0])
         log(f"  {mod_name}: {cov:.1f}%")
         result[mod_name] = cov
     return result
@@ -531,6 +587,10 @@ class LockDeps:
     load_baked_clusters: Callable[[Path], list[Any]] = lambda _p: []
     reference_hollow: Callable[[Path], frozenset[tuple[str, str]]] = (
         lambda _p: frozenset())
+    # Every cluster's function-execution record from augmentation; empty
+    # degrades the gate to the reachability + reference form.
+    augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
+        lambda _p: ())
 
 
 def lock_or_complete(
@@ -584,8 +644,9 @@ def lock_or_complete(
         # One pair PER SITE: at completion every hollow site is its own
         # finding, and the inventory names that choice.
         _verdict = classify_remaining_stubs(
-            deps.scan_unimplemented_functions(project_dir).site_pairs(),
-            _cfg_sets, deps.reference_hollow(project_dir))
+            deps.scan_unimplemented_functions(project_dir).site_preds(),
+            _cfg_sets, deps.reference_hollow(project_dir),
+            deps.augmentation_fn_records(project_dir))
         _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
         if not _clean:
             if complete_commit_msg is not None:
@@ -700,6 +761,10 @@ class RunDeps:
     # could be measured, which degrades this gate to the reachability-only form.
     reference_hollow: Callable[[Path], frozenset[tuple[str, str]]] = (
         lambda _p: frozenset())
+    # Every cluster's function-execution record from augmentation (see
+    # `classify_remaining_stubs`); empty degrades to the two-filter form.
+    augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
+        lambda _p: ())
 
 
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
@@ -1281,8 +1346,9 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
                      for c in (deps.load_baked_clusters(project_dir) or [])]
         _verdict = classify_remaining_stubs(
-            deps.scan_unimplemented_functions(project_dir).site_pairs(), _cfg_sets,
-            deps.reference_hollow(project_dir))
+            deps.scan_unimplemented_functions(project_dir).site_preds(), _cfg_sets,
+            deps.reference_hollow(project_dir),
+            deps.augmentation_fn_records(project_dir))
         if not report_stub_verdict(_verdict, deps.log, len(_cfg_sets)):
             sys.exit(1)
         deps.log("\nSUCCESS: all tests passed.")

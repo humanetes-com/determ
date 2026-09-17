@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.adapters.augment_store import FileAugmentStore
-from pipeline_core.domain.models import AugmentVerdict
+from pipeline_core.domain.models import FN_EXECUTION_CRITERION, AugmentVerdict
 from pipeline_core.domain.workspace_layout import CLUSTER_AUGMENTED_DIR, MODULE_AUGMENTED_DIR
 
 
@@ -18,7 +18,8 @@ def test_cluster_sentinel_roundtrip(tmp_path: Path) -> None:
     assert s.cluster_augmented_value(tmp_path, "stable", "anyhow") == 98.5
     # coverage on the FIRST line (one decimal, no '%'), provenance under it.
     assert (tmp_path / CLUSTER_AUGMENTED_DIR / "stable__anyhow").read_text() == (
-        "98.5\nreason=done\ncode_id=abc\n")
+        "98.5\nreason=done\ncode_id=abc\n"
+        f"criterion={FN_EXECUTION_CRITERION}\nfn_measured=no\nunexecuted=0\nunreached=\n")
 
 
 def test_module_sentinel_roundtrip_and_clear(tmp_path: Path) -> None:
@@ -79,7 +80,8 @@ def test_a_give_up_verdict_binds_only_under_its_own_code() -> None:
 
 
 def test_a_done_verdict_binds_under_any_code() -> None:
-    done = AugmentVerdict(97.8, "done", "some-older-pipeline")
+    done = AugmentVerdict(97.8, "done", "some-older-pipeline",
+                          criterion=FN_EXECUTION_CRITERION)
     assert done.is_final() is True
     assert done.still_binding("anything-at-all") is True
 
@@ -99,3 +101,67 @@ def test_from_text_reads_a_source_hash_line_as_code_id() -> None:
     assert v.code_id == "3264439950bf"
     assert v.still_binding("3264439950bf") is True
     assert v.still_binding("4a6d8d3f3e95") is False
+
+
+# --- the function-execution criterion on the verdict --------------------------
+#
+# The live sentinel run `330242-0be2c3e1` wrote for anyhow's `nightly`
+# (2026-09-03): a line-coverage `done` at 95.2 % over functions no test had
+# entered. Under the old rule a `done` bound under any code, so no later run
+# would ever have re-augmented it.
+_LIVE_LINE_DONE = "95.2\nreason=done\ncode_id=4b293605efff\n"
+
+
+def test_a_line_coverage_done_without_the_criterion_no_longer_binds(tmp_path: Path) -> None:
+    s = FileAugmentStore()
+    p = s.cluster_path(tmp_path, "nightly", "anyhow")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_LIVE_LINE_DONE)
+    v = s.cluster_augmented_verdict(tmp_path, "nightly", "anyhow")
+    assert v is not None and v.is_final()
+    assert v.still_binding("4b293605efff") is False
+    assert "function-execution criterion" in v.unbinding_reason("4b293605efff")
+    # Negative control: the pre-fix rule — any final verdict binds.
+    assert v.is_final() is True
+
+
+def test_a_done_written_under_the_criterion_roundtrips_its_summary(tmp_path: Path) -> None:
+    from pipeline_core.domain.fn_execution import (
+        FnCoverageRecord,
+        FnTarget,
+        PendingFn,
+        UnreachedFn,
+    )
+    from pipeline_core.domain.models import FnSite
+    rec = FnCoverageRecord(
+        measured=True, candidates=4,
+        executed=(FnSite("src/a.rs", "f", ""),),
+        pending=(PendingFn(FnTarget(FnSite("src/a.rs", "g", ""), 3, 5, False), (1,)),),
+        unreached=(UnreachedFn(FnSite("src/b.rs", "h", "impl T for S"), (1, 2, 3), True),))
+    s = FileAugmentStore()
+    s.mark_cluster_augmented(tmp_path, "nightly", "m", 91.0, reason="done",
+                             code_id="x", functions=rec)
+    v = s.cluster_augmented_verdict(tmp_path, "nightly", "m")
+    assert v is not None
+    assert v.criterion == FN_EXECUTION_CRITERION and v.fn_measured is True
+    assert v.unexecuted == 1 and v.unreached == ("src/b.rs::h [impl T for S]",)
+    assert v.still_binding("any-later-code") is True
+    assert AugmentVerdict.from_text(v.to_text()) == v
+
+
+def test_the_function_record_persists_beside_the_sentinel(tmp_path: Path) -> None:
+    from pipeline_core.domain.fn_execution import FnCoverageRecord, FnTarget, PendingFn
+    from pipeline_core.domain.models import FnSite
+    s = FileAugmentStore()
+    assert s.cluster_fn_record(tmp_path, "stable", "m") is None
+    rec = FnCoverageRecord(
+        measured=True, candidates=2, executed=(FnSite("src/a.rs", "f", ""),),
+        pending=(PendingFn(FnTarget(FnSite("src/a.rs", "g", "impl X"), 7, 9, True), (2,)),))
+    s.save_cluster_fn_record(tmp_path, "stable", "m", rec)
+    assert s.cluster_fn_record(tmp_path, "stable", "m") == rec
+    assert s.all_fn_records(tmp_path) == [rec]
+    # The sentinel reader is untouched by the record beside it.
+    assert s.is_cluster_augmented(tmp_path, "stable", "m") is False
+    # A record of another criterion accounts for nothing.
+    s.fn_record_path(tmp_path, "stable", "m").write_text('{"criterion": "old"}')
+    assert s.cluster_fn_record(tmp_path, "stable", "m") is None

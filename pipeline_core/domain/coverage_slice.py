@@ -51,6 +51,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
 from pipeline_core.domain.attribution import locator_of
+from pipeline_core.domain.fn_execution import executed_by_key
 from pipeline_core.domain.models import FnLocator, FnSite
 
 DEAD_BODY = (
@@ -216,10 +217,15 @@ def slice_from_counts(
     grouped: dict[FnLocator, list[CountedBody]] = {}
     for body in bodies:
         grouped.setdefault(locator_of(body.locator), []).append(body)
+    # The join rule is shared with augmentation's function-execution
+    # criterion (`fn_execution.executed_by_key`): one statement of "a key is
+    # unexecuted only when every body under it counted 0".
+    executed = executed_by_key(
+        (loc, b.count) for loc, group in grouped.items() for b in group)
     dead: set[FnLocator] = set()
     regions: dict[FnLocator, str] = {}
     for loc, group in grouped.items():
-        if group and all(b.count == 0 for b in group):
+        if group and not executed.get(loc, True):
             dead.add(loc)
             continue
         if len(group) != 1:

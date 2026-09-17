@@ -15,9 +15,10 @@ import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from ..domain.cfg import CfgSet
+from ..domain.coverage import CoverageMeasurement
 from ..domain.models import BuildCluster
 from ..ports.augment import TestAugmentor
 
@@ -31,7 +32,7 @@ class StaticRustTestAugmentor(TestAugmentor):
         self, *,
         cargo_env: Callable[[], dict[str, str]],
         build_timeout: int,
-        measure_coverage: Callable[[Path, str], tuple[float, list[Any], int, int]],
+        measure_coverage: Callable[[Path, str], CoverageMeasurement],
     ) -> None:
         self._cargo_env = cargo_env
         self._build_timeout = build_timeout
@@ -55,7 +56,7 @@ class StaticRustTestAugmentor(TestAugmentor):
 
     def measure_coverage(
         self, project_dir: Path, module_name: str, module_dir: Path,
-    ) -> tuple[float, list[Any], int, int]:
+    ) -> CoverageMeasurement:
         return self._measure_coverage(project_dir, module_name)
 
     def is_applicable(self, crate_type: str) -> bool:
