@@ -23,6 +23,7 @@ def _deps() -> _CountDeps:
         mod_records=lambda _p: [],
         file_cfg_predicate=lambda _p, _r: None,
         is_gen_tests_file=lambda _n: False,
+        enumerate_doc_items=lambda _p: None,
     )
 
 
@@ -77,3 +78,87 @@ def test_a_stem_scoped_sweep_expects_no_doc_tests(tmp_path: Path) -> None:
     # `cargo test --lib --test t_a`, which runs only the latter.
     assert unscoped == 2
     assert scoped == 1
+
+
+# --- doc tests counted per item, under rustdoc's cfg set --------------------
+#
+# Run 185710-f6135a93 (2026-09-17): the merged tree keeps one cfg-gated copy of
+# each divergent item per cluster, doc comment included. The whole-file scan
+# counted every copy's examples — 33 where rustdoc ran 25 — so a clean `stable`
+# run (150 passed, 2 ignored, rc=0) read as incomplete against 160 expected and
+# the run ended non-converged. The shape below is invented: two gated copies of
+# one documented fn, a cluster that sets its cfg through RUSTFLAGS.
+
+_TWO_COPIES = (
+    "#[cfg(not(any(variant_b, feature = \"variant_b\")))]\n"
+    "/// ```\n/// let _ = 1;\n/// ```\n"
+    "pub fn make() {}\n"
+    "#[cfg(any(variant_b, feature = \"variant_b\"))]\n"
+    "/// ```\n/// let _ = 2;\n/// ```\n"
+    "/// ```\n/// let _ = 3;\n/// ```\n"
+    "pub fn make() {}\n")
+
+
+def _doc_records() -> list:
+    from pipeline_core.domain.models import DocItemRecord
+    return [
+        DocItemRecord(file="src/lib.rs", line=2,
+                      cfg_predicates=('not (any (variant_b , feature = "variant_b"))',),
+                      doc=" ```\n let _ = 1;\n ```"),
+        DocItemRecord(file="src/lib.rs", line=6,
+                      cfg_predicates=('any (variant_b , feature = "variant_b")',),
+                      doc=" ```\n let _ = 2;\n ```\n ```\n let _ = 3;\n ```"),
+    ]
+
+
+def _variant_cluster(env_extra: dict[str, str]):
+    from pipeline_core.domain.models import BuildCluster
+    return BuildCluster(name="b", env_extra=env_extra, tarpaulin_exclude_files=[],
+                        excluded_cfg=[], active_cfg=["variant_b"],
+                        prompt_nightly_rule="", is_default=False)
+
+
+def _base_cluster():
+    from pipeline_core.domain.models import BuildCluster
+    return BuildCluster(name="a", env_extra={}, tarpaulin_exclude_files=[],
+                        excluded_cfg=["variant_b"], active_cfg=[],
+                        prompt_nightly_rule="", is_default=True)
+
+
+def _with_records(records):
+    import dataclasses
+    return dataclasses.replace(_deps(), enumerate_doc_items=lambda _p: records)
+
+
+def test_doc_tests_of_a_cfg_gated_copy_count_only_where_rustdoc_collects_it(
+        tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(_TWO_COPIES)
+    deps = _with_records(_doc_records())
+    assert active_test_inventory_for_cluster(tmp_path, _base_cluster(), deps)[0] == 1
+    # RUSTFLAGS reaches rustc only: rustdoc documents the not-variant_b copy.
+    rustflags = _variant_cluster({"RUSTFLAGS": "--cfg variant_b"})
+    assert active_test_inventory_for_cluster(tmp_path, rustflags, deps)[0] == 1
+    # The same cfg handed to rustdoc too collects the other copy's two examples.
+    both = _variant_cluster({"RUSTFLAGS": "--cfg variant_b",
+                             "RUSTDOCFLAGS": "--cfg variant_b"})
+    assert active_test_inventory_for_cluster(tmp_path, both, deps)[0] == 2
+
+
+def test_without_doc_records_the_text_scan_counts_every_copy(tmp_path: Path) -> None:
+    # NEGATIVE CONTROL: the pre-fix reading (no records → whole-file scan)
+    # counts all three examples under every cluster.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(_TWO_COPIES)
+    for cluster in (_base_cluster(), _variant_cluster({"RUSTFLAGS": "--cfg variant_b"})):
+        assert active_test_inventory_for_cluster(tmp_path, cluster, _deps())[0] == 3
+
+
+def test_rustdoc_cfg_sets_drop_only_what_rustflags_alone_delivers() -> None:
+    from pipeline_core.domain.test_count import rustdoc_cfg_sets
+    true, false = rustdoc_cfg_sets(
+        ["x", 'feature = "x"', "y", 'feature = "std"'], ["z"],
+        {"RUSTFLAGS": "-A warnings --cfg x --cfg=y", "RUSTDOCFLAGS": "--cfg y"})
+    assert true == {"y", 'feature = "std"'}
+    assert false == {"z", "x", 'feature = "x"'}
+    assert rustdoc_cfg_sets(["x"], [], None) == ({"x"}, set())

@@ -645,6 +645,81 @@ def test_post_merge_green_exit_returns_true_when_all_clusters_green(
     assert "post_merge.cluster_oracle_red" not in fake.events
 
 
+_ORIGINAL_ALSO_FAILS = (
+    "     Running tests/basic.rs (target/debug/deps/basic-1)\n"
+    "\nrunning 2 tests\ntest a ... ok\ntest b ... ok\n\n"
+    "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+    "     Running tests/compiletest.rs (target/debug/deps/compiletest-2)\n"
+    "\nrunning 1 test\ntest ui ... FAILED\n\n"
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+)
+
+
+def _reference_failing(cluster: str, output: str) -> Any:
+    """A usable reference that fails exactly what `output` fails and passes
+    what it passes — built from the pipeline's own parser, so the pairs are the
+    ones the ruling compares."""
+    from pipeline_core.domain.reference_floor import (
+        ClusterReference,
+        ReferenceMeasurement,
+        pairs_of,
+    )
+    from pipeline_core.domain.test_results import parse_binary_results
+    passed, failed, _, _ = pairs_of(parse_binary_results(output))
+    return ReferenceMeasurement(key="k", clusters={cluster: ClusterReference(
+        cluster=cluster, passed=passed, failed=failed,
+        announced=len(passed) + len(failed), reported=len(passed) + len(failed),
+        rc=101)})
+
+
+def test_post_merge_cluster_failing_only_what_the_original_fails_is_not_red(
+        tmp_path: Path) -> None:
+    """Run 185710-f6135a93 (2026-09-17): task2a closed `nightly` on the
+    reference floor (its one failure is a trybuild test the original crate also
+    fails), task3 passed it on the same floor, and this sweep alone refused the
+    merged tree as RED under its own cfg, so task2c was never marked done. The
+    per-cluster sweep rules on the same floor."""
+    import dataclasses
+    c1, c2 = _cluster(), _cluster("extra_cap")
+    fake = FakeAdapter(clusters_list=[c1, c2],
+                       run_results=[(0, "ok"), (0, "ok"),
+                                    (101, _ORIGINAL_ALSO_FAILS)])
+    pd = _make_project(tmp_path, [c1, c2])
+    ref = _reference_failing("extra_cap", _ORIGINAL_ALSO_FAILS)
+    gen = dataclasses.replace(_gen(fake, _cfg(per_fn=True, tdd=True)),
+                              reference_measurement=lambda _pd: ref)
+    ok = gen._post_merge_fill_pass(project_dir=pd, clusters=fake.clusters_list,
+                                   module="crate", functional_req="")
+    assert ok is True
+    assert "post_merge.cluster_floor_met" in fake.events
+    assert "post_merge.cluster_oracle_red" not in fake.events
+
+
+def test_post_merge_cluster_red_without_a_reference_or_past_its_floor(
+        tmp_path: Path) -> None:
+    # NEGATIVE CONTROLS: the same sweep with no reference wired (the pre-fix
+    # gate), and with a reference whose original PASSES the failing test, both
+    # still refuse the merged tree.
+    import dataclasses
+    passing_ui = _ORIGINAL_ALSO_FAILS.replace(
+        "test ui ... FAILED", "test ui ... ok").replace(
+        "FAILED. 0 passed; 1 failed", "ok. 1 passed; 0 failed")
+    for wired in (None, _reference_failing("extra_cap", passing_ui)):
+        c1, c2 = _cluster(), _cluster("extra_cap")
+        fake = FakeAdapter(clusters_list=[c1, c2],
+                           run_results=[(0, "ok"), (0, "ok"),
+                                        (101, _ORIGINAL_ALSO_FAILS)])
+        pd = _make_project(tmp_path / str(wired is None), [c1, c2])
+        gen = _gen(fake, _cfg(per_fn=True, tdd=True))
+        if wired is not None:
+            gen = dataclasses.replace(gen, reference_measurement=lambda _pd, r=wired: r)
+        ok = gen._post_merge_fill_pass(
+            project_dir=pd, clusters=fake.clusters_list, module="crate",
+            functional_req="")
+        assert ok is False
+        assert "post_merge.cluster_oracle_red" in fake.events
+
+
 def test_post_merge_timeout(tmp_path: Path) -> None:
     c = _cluster()
     fake = FakeAdapter(clusters_list=[c], run_results=[(-1, "")])

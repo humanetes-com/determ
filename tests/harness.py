@@ -225,6 +225,10 @@ class FakeStructureReader:
     def enumerate_dispatch_families(self, src_dir):  # noqa: ANN001, ANN201
         return self._families
 
+    def enumerate_doc_items(self, src_dir):  # noqa: ANN001, ANN201
+        # None = extractor unavailable: the doc-test count takes its text scan.
+        return None
+
     def parse_ok(self, path):  # noqa: ANN001, ANN201 — F1 splice gate
         # Fail-open in tests: no real syn binary here, and the scripted fixtures
         # are trusted, so the parse gate never blocks a splice (mirrors the

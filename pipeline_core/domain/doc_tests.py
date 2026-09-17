@@ -13,6 +13,8 @@ Pure text analysis, no regex, matching rustdoc's own rule for what is a test.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 # rustdoc attributes that may appear in a fence's info string. Anything else is
 # a LANGUAGE tag, and a block in another language is documentation, not a test:
 # this crate's `toml` (2) and `console` (3) blocks are why a naive fence count
@@ -94,9 +96,20 @@ def count_doc_tests(text: str) -> int:
     which is how a first cut both over-counted `lib.rs` and lost two real doc
     tests in `macros.rs`.
     """
+    return _count_rust_fences(doc_lines(text))
+
+
+def count_doc_tests_in_doc(doc: str) -> int:
+    """How many doc tests one item's joined doc text contributes. rustdoc reads
+    each item's doc on its own, so a fence left open in one item never spills
+    into the next."""
+    return _count_rust_fences(doc.splitlines())
+
+
+def _count_rust_fences(lines: Iterable[str]) -> int:
     n = 0
     open_fence = False
-    for line in doc_lines(text):
+    for line in lines:
         body = line.strip()
         if not body.startswith("```"):
             continue

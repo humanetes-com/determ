@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_impls_distinct_by_trait_generic_args() {
-        // FR-025: two `impl AsRef<...> for Error` blocks that differ only in
+        // two `impl AsRef<...> for Error` blocks that differ only in
         // the trait's generic argument must NOT collapse into one impl (which
         // would produce E0201 duplicate + E0053 mismatch).
         let src = r#"
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_impls_distinct_by_where_clause() {
-        // FR-025: same trait/self-type but divergent where-clause → distinct.
+        // same trait/self-type but divergent where-clause → distinct.
         let src = r#"
             impl<'a, T> Mut<'a, T> {
                 pub unsafe fn read(self) -> T { unimplemented!() }
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn merge_preserves_cfg_gated_test_bodies() {
-        // FR-018 oracle immutability: cfg-gated #[test] fns (the reconstruction
+        // Oracle immutability: cfg-gated #[test] fns (the reconstruction
         // oracle) must survive merge byte-for-byte — never reconciled/overwritten
         // (the hardcrate run corrupted `default_cap_limit`'s body to `255`).
         let tests_src = r#"
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn merge_normalizes_multiline_doc_to_uniform_line_docs() {
-        // FR-033: a doc example must not render with mixed /// and /** */ —
+        // a doc example must not render with mixed /// and /** */ —
         // that splits the ``` fence and drops `# struct Foo;` from the doctest.
         let src = "#[doc = \" ```\\n # struct Foo;\\n let _ = Foo;\\n ```\"]\npub fn f() {}\n";
         let out = merge_cluster_files(vec![ClusterFile {
@@ -671,6 +671,82 @@ mod tests {
     }
 
     #[test]
+    fn doc_items_carry_the_enclosing_cfg_chain() {
+        // Two cfg-gated copies of one documented method, the shape a
+        // multi-cluster merge writes for a divergent item: each copy's doc
+        // record must carry its own gate plus the impl's, so a cluster can
+        // count only the copy it compiles. Doc text inside a fn body is not
+        // documentation rustdoc collects and must not be recorded.
+        use std::fs;
+        let tmp = std::env::temp_dir().join("skel_doc_items_test");
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).unwrap();
+        }
+        fs::create_dir_all(tmp.join("src")).unwrap();
+        fs::write(
+            tmp.join("src").join("lib.rs"),
+            r#"//! Crate doc.
+//! ```
+//! assert!(true);
+//! ```
+pub struct Widget;
+#[cfg(outer_gate)]
+impl Widget {
+    #[cfg(not(variant_b))]
+    /// A.
+    /// ```
+    /// let _ = 1;
+    /// ```
+    pub fn make() {}
+    #[cfg(variant_b)]
+    /// B.
+    /// ```
+    /// let _ = 2;
+    /// ```
+    pub fn make() {
+        /// not collected
+        struct Local;
+    }
+}
+pub enum Shape {
+    /// Variant doc.
+    Round,
+}
+#[cfg(outer_gate)]
+macro_rules! documented {
+    ($item:item) => {
+        #[doc = " Expanded."] #[doc = " ```"] #[doc = " let _ = 3;"] #[doc = " ```"] $item
+    };
+}
+"#,
+        )
+        .unwrap();
+        let recs = enumerate_doc_items_in_tree(&tmp).unwrap();
+        let docs: Vec<(&str, Vec<&str>)> = recs
+            .iter()
+            .map(|r| {
+                (
+                    r.doc.trim(),
+                    r.cfg_predicates.iter().map(|s| s.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(recs.len(), 5, "{docs:?}");
+        // A doc run inside a macro body is recorded once, under the macro's chain.
+        let m = recs.iter().find(|r| r.doc.contains("Expanded.")).unwrap();
+        assert_eq!(m.cfg_predicates, vec!["outer_gate"]);
+        assert!(m.doc.contains("let _ = 3;"), "{:?}", m.doc);
+        assert!(recs[0].doc.contains("Crate doc") && recs[0].cfg_predicates.is_empty());
+        assert_eq!(recs[0].line, 1);
+        let a = recs.iter().find(|r| r.doc.contains("A.")).unwrap();
+        assert_eq!(a.cfg_predicates, vec!["outer_gate", "not (variant_b)"]);
+        let b = recs.iter().find(|r| r.doc.contains("B.")).unwrap();
+        assert_eq!(b.cfg_predicates, vec!["outer_gate", "variant_b"]);
+        assert!(!recs.iter().any(|r| r.doc.contains("not collected")));
+        assert!(recs.iter().any(|r| r.doc.contains("Variant doc")));
+    }
+
+    #[test]
     fn enumerates_pub_consts_and_statics() {
         use std::fs;
         let tmp = std::env::temp_dir().join("skel_consts_test");
@@ -701,7 +777,7 @@ mod tests {
 
     #[test]
     fn detects_dispatch_family_and_excludes_spurious() {
-        // FR-027: shared method + macro dispatch = family; shared method
+        // shared method + macro dispatch = family; shared method
         // WITHOUT a macro that calls it = not a family.
         use std::fs;
         let tmp = std::env::temp_dir().join("skel_dispatch_test");

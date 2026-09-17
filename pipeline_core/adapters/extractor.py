@@ -21,6 +21,7 @@ from ..domain.models import (
     CfgOccurrence,
     ConstRecord,
     DispatchFamily,
+    DocItemRecord,
     FnRecord,
     ModRecord,
     SkeletoniseResult,
@@ -100,6 +101,10 @@ class CliExtractor:
     def enumerate_cfgs(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[CfgOccurrence] | None:
         rows = self._enumerate("--enumerate-cfgs", src_dir, cfg_true, cfg_false)
         return None if rows is None else [CfgOccurrence.from_dict(r) for r in rows]
+
+    def enumerate_doc_items(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[DocItemRecord] | None:
+        rows = self._enumerate("--enumerate-doc-items", src_dir, cfg_true, cfg_false)
+        return None if rows is None else [DocItemRecord.from_dict(r) for r in rows]
 
     # ── skeletonise : --input/--output tree, structured report dict ───────────
     def skeletonise(self, input_dir: Path, output_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> SkeletoniseResult:

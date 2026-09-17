@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long = "enumerate-cfgs")]
     enumerate_cfgs: bool,
 
+    /// Emit JSON array of DocItemRecord (per-item doc text + cfg chain) to stdout.
+    #[arg(long = "enumerate-doc-items")]
+    enumerate_doc_items: bool,
+
     /// Parse-check a single Rust FILE (`--input <file>`): exit 0 if syn parses
     /// it, non-zero otherwise. The transactional splice gate's signal.
     #[arg(long = "parse-check")]
@@ -197,6 +201,11 @@ fn main() -> Result<()> {
     }
     if cli.enumerate_cfgs {
         let records = skeleton_extractor::enumerate_cfgs_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&records)?);
+        return Ok(());
+    }
+    if cli.enumerate_doc_items {
+        let records = skeleton_extractor::enumerate_doc_items_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }

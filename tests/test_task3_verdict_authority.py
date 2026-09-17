@@ -205,7 +205,7 @@ def _write_workspace(ws: Path) -> None:
 
 
 def _count_active(project_dir: Path, cluster: BuildCluster) -> int:
-    """The FR-024 count over the live wiring (S73: composition-built, no
+    """The strict expected-test count over the live wiring (S73: composition-built, no
     pipeline delegate) — same collaborators build_app binds."""
     import pipeline
     from pipeline_core.adapters.discovery import is_gen_tests_file
@@ -219,6 +219,7 @@ def _count_active(project_dir: Path, cluster: BuildCluster) -> int:
         mod_records=sc.mod_records,
         file_cfg_predicate=sc.file_cfg_predicate,
         is_gen_tests_file=is_gen_tests_file,
+        enumerate_doc_items=pipeline._APP.structure.enumerate_doc_items,
     ))
 
 

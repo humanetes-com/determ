@@ -1046,6 +1046,244 @@ pub fn enumerate_cfgs_in_tree(input_dir: &Path) -> Result<Vec<CfgOccurrence>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Doc items — the doc text rustdoc collects examples from, per item, with the
+// item's accumulated cfg chain. Walks the places rustdoc documents (items,
+// impl/trait members, fields, variants, foreign items, inline mods) and never
+// enters a fn body or a const initializer, which rustdoc does not document.
+// ---------------------------------------------------------------------------
+
+struct DocCollector {
+    file: String,
+    cfg_stack: Vec<String>,
+    out: Vec<DocItemRecord>,
+}
+
+fn doc_fragments(attrs: &[syn::Attribute]) -> Option<(String, usize)> {
+    use syn::spanned::Spanned;
+    let mut parts: Vec<String> = Vec::new();
+    let mut line = 0;
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        if let syn::Meta::NameValue(nv) = &attr.meta
+            && let Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+        {
+            if parts.is_empty() {
+                line = attr.span().start().line;
+            }
+            parts.push(s.value());
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some((parts.join("\n"), line))
+    }
+}
+
+impl DocCollector {
+    /// Record `attrs`' doc text under the current chain plus `attrs`' own cfg,
+    /// then run `inner` with that cfg still pushed.
+    fn scoped(&mut self, attrs: &[syn::Attribute], inner: impl FnOnce(&mut Self)) {
+        let own = extract_cfg_predicates(attrs);
+        let pushed = own.len();
+        self.cfg_stack.extend(own);
+        if let Some((doc, line)) = doc_fragments(attrs) {
+            self.out.push(DocItemRecord {
+                file: self.file.clone(),
+                line,
+                cfg_predicates: self.cfg_stack.clone(),
+                doc,
+            });
+        }
+        inner(self);
+        self.cfg_stack.truncate(self.cfg_stack.len() - pushed);
+    }
+
+    /// Doc attributes written inside a macro's token stream (a `macro_rules!`
+    /// body, an item-position invocation) document whatever the expansion
+    /// produces, which no syntactic walk can evaluate. Each contiguous run of
+    /// `#[doc = "…"]` tokens is recorded under the macro item's own chain, the
+    /// same once-per-occurrence count a text scan gives it: anyhow's
+    /// `__ensure!` carries the two `ensure!` examples this way, and rustdoc
+    /// runs both.
+    fn macro_tokens(&mut self, tokens: &TokenStream) {
+        use proc_macro2::{Delimiter, TokenTree};
+        let trees: Vec<TokenTree> = tokens.clone().into_iter().collect();
+        let mut run: Vec<String> = Vec::new();
+        let mut run_line = 0;
+        let mut i = 0;
+        while i < trees.len() {
+            let doc = match (&trees[i], trees.get(i + 1)) {
+                (TokenTree::Punct(p), Some(TokenTree::Group(g)))
+                    if p.as_char() == '#' && g.delimiter() == Delimiter::Bracket =>
+                {
+                    syn::parse2::<syn::MetaNameValue>(g.stream())
+                        .ok()
+                        .filter(|nv| nv.path.is_ident("doc"))
+                        .and_then(|nv| match nv.value {
+                            Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(s),
+                                ..
+                            }) => Some((s.value(), p.span().start().line)),
+                            _ => None,
+                        })
+                }
+                _ => None,
+            };
+            if let Some((text, line)) = doc {
+                if run.is_empty() {
+                    run_line = line;
+                }
+                run.push(text);
+                i += 2;
+                continue;
+            }
+            self.flush_macro_run(&mut run, run_line);
+            if let TokenTree::Group(g) = &trees[i] {
+                self.macro_tokens(&g.stream());
+            }
+            i += 1;
+        }
+        self.flush_macro_run(&mut run, run_line);
+    }
+
+    fn flush_macro_run(&mut self, run: &mut Vec<String>, line: usize) {
+        if run.is_empty() {
+            return;
+        }
+        self.out.push(DocItemRecord {
+            file: self.file.clone(),
+            line,
+            cfg_predicates: self.cfg_stack.clone(),
+            doc: run.join("\n"),
+        });
+        run.clear();
+    }
+
+    fn fields(&mut self, fields: &syn::Fields) {
+        for f in fields {
+            self.scoped(&f.attrs, |_| {});
+        }
+    }
+
+    fn walk_items(&mut self, items: &[Item]) {
+        for item in items {
+            self.walk_item(item);
+        }
+    }
+
+    fn walk_item(&mut self, item: &Item) {
+        // `ItemMod.attrs` carries the inline mod's inner `#![doc]`/`#![cfg]` too.
+        self.scoped(item_attrs(item), |s| match item {
+            Item::Impl(i) => {
+                for ii in &i.items {
+                    let attrs: &[syn::Attribute] = match ii {
+                        ImplItem::Fn(x) => &x.attrs,
+                        ImplItem::Const(x) => &x.attrs,
+                        ImplItem::Type(x) => &x.attrs,
+                        ImplItem::Macro(x) => &x.attrs,
+                        _ => &[],
+                    };
+                    s.scoped(attrs, |s| {
+                        if let ImplItem::Macro(m) = ii {
+                            s.macro_tokens(&m.mac.tokens);
+                        }
+                    });
+                }
+            }
+            Item::Trait(t) => {
+                for ti in &t.items {
+                    let attrs: &[syn::Attribute] = match ti {
+                        TraitItem::Fn(x) => &x.attrs,
+                        TraitItem::Const(x) => &x.attrs,
+                        TraitItem::Type(x) => &x.attrs,
+                        TraitItem::Macro(x) => &x.attrs,
+                        _ => &[],
+                    };
+                    s.scoped(attrs, |s| {
+                        if let TraitItem::Macro(m) = ti {
+                            s.macro_tokens(&m.mac.tokens);
+                        }
+                    });
+                }
+            }
+            Item::Mod(m) => {
+                if let Some((_, items)) = &m.content {
+                    s.walk_items(items);
+                }
+            }
+            Item::Macro(m) => s.macro_tokens(&m.mac.tokens),
+            Item::Struct(st) => s.fields(&st.fields),
+            Item::Union(u) => {
+                for f in &u.fields.named {
+                    s.scoped(&f.attrs, |_| {});
+                }
+            }
+            Item::Enum(e) => {
+                for v in &e.variants {
+                    s.scoped(&v.attrs, |s| s.fields(&v.fields));
+                }
+            }
+            Item::ForeignMod(fm) => {
+                for fi in &fm.items {
+                    let attrs: &[syn::Attribute] = match fi {
+                        syn::ForeignItem::Fn(x) => &x.attrs,
+                        syn::ForeignItem::Static(x) => &x.attrs,
+                        syn::ForeignItem::Type(x) => &x.attrs,
+                        syn::ForeignItem::Macro(x) => &x.attrs,
+                        _ => &[],
+                    };
+                    s.scoped(attrs, |_| {});
+                }
+            }
+            _ => {}
+        });
+    }
+}
+
+/// Walk a tree and emit one [`DocItemRecord`] per item that carries doc text,
+/// with the item's accumulated cfg chain. The file's inner attributes (`//!`,
+/// `#![cfg]`) scope the whole file.
+pub fn enumerate_doc_items_in_tree(input_dir: &Path) -> Result<Vec<DocItemRecord>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(input_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = p.strip_prefix(input_dir).unwrap_or(p);
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s.starts_with('.') || s == "target"
+        }) {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(p) else {
+            continue;
+        };
+        let Ok(ast) = parse_file(&source) else {
+            continue;
+        };
+        let mut c = DocCollector {
+            file: rel.to_string_lossy().to_string(),
+            cfg_stack: Vec::new(),
+            out: Vec::new(),
+        };
+        c.scoped(&ast.attrs, |s| s.walk_items(&ast.items));
+        out.append(&mut c.out);
+    }
+    Ok(out)
+}
+
 /// Walk a macro body's token stream and collect every method name invoked as
 /// `.method(...)` — i.e. a `.` punct, then an ident, then a parenthesised
 /// group. Recurses into all delimiter groups. AST/token walk, no regex.

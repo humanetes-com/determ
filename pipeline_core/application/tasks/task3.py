@@ -21,8 +21,7 @@ from typing import Any
 from ...application.reconstruct.attribution import not_body_repairable_tests
 from ...domain.reference_floor import (
     ReferenceMeasurement,
-    judge_against_reference,
-    pairs_of,
+    judge_cluster_binaries,
 )
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
@@ -99,7 +98,7 @@ def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
 def run_clusters_strict(project_dir: Path, clusters: list[Any],
                         deps: Task3Deps) -> tuple[bool, str, list[dict[str, Any]]]:
     """Run every baked cluster under its own toolchain + env_extra and apply
-    the FR-024 strict verdict (`validate_task3_output_strict`, including the
+    the strict verdict (`validate_task3_output_strict`, including the
     expected-count "incomplete" case). THE single authority for "all tests
     pass": task3 and the post-task3 fix loop's check both gate here —
     validating with one bare cargo command is the false-SUCCESS bug
@@ -168,30 +167,28 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             # log blames the harness for a plain compile error.
             reason = compile_gate_reason(cluster.name, output) or reason
         floor_met = False
-        if status == ClusterStatus.FAIL and reference is not None:
-            cluster_ref = reference.for_cluster(cluster.name)
-            if cluster_ref is not None:
-                _ours_pass, _ours_fail, _, _ = pairs_of(parse_binary_results(output))
-                verdict = judge_against_reference(
-                    cluster_ref, _ours_pass, _ours_fail)
-                if verdict.met:
-                    floor_met = True
-                    status = ClusterStatus.PASS
-                    reason = (f"cluster '{cluster.name}': {pass_n} passed, "
-                              f"{fail_n} failing test(s) the original fails too, "
-                              f"{ign_n} ignored — {verdict.reason}")
-                    log(f"  [task3/{cluster.name}] the {fail_n} remaining "
-                        f"failure(s) are failures of the ORIGINAL crate on this "
-                        f"machine, not of the reconstruction — floor met.")
-                    emit("task3.floor_met", data={
-                        "cluster": cluster.name, "reference_key": reference.key,
-                        "exceeded": verdict.exceeded,
-                        "advisory_unmet": sorted(f"{a}::{b}" for a, b
-                                                 in verdict.advisory_unmet)})
-                elif verdict.advisory_unmet:
-                    log(f"  [task3/{cluster.name}] note: "
-                        f"{len(verdict.advisory_unmet)} doc test(s) the original "
-                        "passes are absent here (not gated).")
+        verdict = (judge_cluster_binaries(
+            reference, cluster.name, parse_binary_results(output))
+            if status == ClusterStatus.FAIL else None)
+        if verdict is not None and reference is not None:
+            if verdict.met:
+                floor_met = True
+                status = ClusterStatus.PASS
+                reason = (f"cluster '{cluster.name}': {pass_n} passed, "
+                          f"{fail_n} failing test(s) the original fails too, "
+                          f"{ign_n} ignored — {verdict.reason}")
+                log(f"  [task3/{cluster.name}] the {fail_n} remaining "
+                    f"failure(s) are failures of the ORIGINAL crate on this "
+                    f"machine, not of the reconstruction — floor met.")
+                emit("task3.floor_met", data={
+                    "cluster": cluster.name, "reference_key": reference.key,
+                    "exceeded": verdict.exceeded,
+                    "advisory_unmet": sorted(f"{a}::{b}" for a, b
+                                             in verdict.advisory_unmet)})
+            elif verdict.advisory_unmet:
+                log(f"  [task3/{cluster.name}] note: "
+                    f"{len(verdict.advisory_unmet)} doc test(s) the original "
+                    "passes are absent here (not gated).")
         log(f"  [task3/{cluster.name}] {status}: {reason} "
             f"(rc={rc}, {dt:.1f}s)")
         per_cluster_results.append({
@@ -221,7 +218,7 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
           _reverify_remaining: int = 2) -> Any:
     """TASK 3 — per-cluster strict-verdict test runner.
 
-    FR-024: SUCCESS only when every test in every cluster genuinely runs
+    SUCCESS only when every test in every cluster genuinely runs
     and passes. For each baked cluster:
       1. Compose `cargo test --no-fail-fast` with the cluster's toolchain
          and `env_extra` (RUSTFLAGS etc).
@@ -355,7 +352,7 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
                               else "failed_tests"),
                    "output": deps.store_prompt_content(aggregated_output)})
 
-        # FR-024 inline retry on the primary failing cluster. Uses the
+        # Inline retry on the primary failing cluster. Uses the
         # full attribution chain (panics → compile → classifier →
         # recently_filled → reverse_map) to identify fns to refix.
         if primary_test_output:

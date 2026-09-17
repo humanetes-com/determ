@@ -1,5 +1,5 @@
 """cfg-aware expected-test count — the cargo-faithful fix for the 2026-06-16
-hardcrate over-count bug (technical_debt #15).
+hardcrate over-count bug.
 
 A `#[cfg(extra_cap)]` test whose predicate is in NEITHER cfg_true NOR cfg_false
 (a custom `--cfg`/feature toggle that defined no cluster) used to evaluate
@@ -7,7 +7,7 @@ UNDECIDABLE → counted, but cargo (default build) never sets `extra_cap` → it
 doesn't run → "16 reported / 18 expected" false-incomplete, which drove the fix
 loop to defeat the cfg gating. `_cfg_false_for_cargo` now treats custom-off cfgs
 as cargo does (OFF) while leaving builtin/target cfgs undecidable (never
-over-excludes — FR-018)."""
+over-excludes, since an undercount can pass a tree whose tests never ran)."""
 from __future__ import annotations
 
 from pipeline_core.domain import cfg as _cfg
@@ -168,6 +168,7 @@ def test_undeclared_gen_tests_sibling_still_counts(tmp_path) -> None:
         mod_records=lambda p: None,
         file_cfg_predicate=lambda d, n: None,
         is_gen_tests_file=lambda n: ".gen_tests_" in n,
+        enumerate_doc_items=lambda p: None,
     )
 
     class _Cluster:
@@ -227,6 +228,7 @@ def test_active_test_inventory_names_and_stem_scope(tmp_path) -> None:
         mod_records=lambda p: None,
         file_cfg_predicate=lambda d, n: None,
         is_gen_tests_file=lambda n: ".gen_tests_" in n,
+        enumerate_doc_items=lambda p: None,
     )
 
     class _Cluster:
@@ -284,6 +286,7 @@ def test_active_test_inventory_subdir_module_counts_into_root_binary(
         mod_records=lambda p: None,
         file_cfg_predicate=lambda d, n: None,
         is_gen_tests_file=lambda n: ".gen_tests_" in n,
+        enumerate_doc_items=lambda p: None,
     )
 
     class _Cluster:

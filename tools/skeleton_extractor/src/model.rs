@@ -175,6 +175,24 @@ pub struct CfgOccurrence {
     pub atoms: Vec<CfgAtomWire>,
 }
 
+/// The doc text attached to one item, with the cfg chain that decides whether
+/// rustdoc collects the examples in it. Emitted by `--enumerate-doc-items`.
+///
+/// rustdoc only collects doc tests from items that compile under the build's
+/// cfg, so the chain is the item's own `#[cfg]` plus every enclosing impl,
+/// trait, inline mod and the file's inner `#![cfg]`. A merged multi-cluster
+/// tree keeps one cfg-gated copy of each divergent item per cluster, doc
+/// comment included; a text scan counts the examples of every copy.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocItemRecord {
+    pub file: String,
+    /// 1-based line of the item's first doc attribute.
+    pub line: usize,
+    pub cfg_predicates: Vec<String>,
+    /// The doc fragments joined by newlines, as rustdoc joins them.
+    pub doc: String,
+}
+
 /// A `const` or `static` item (public-API surface), enumerated by `--enumerate-consts`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConstRecord {

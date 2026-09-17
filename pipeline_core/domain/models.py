@@ -424,6 +424,25 @@ class ConstRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class DocItemRecord:
+    """One item's doc text and the cfg chain that decides whether rustdoc
+    collects its examples (model.rs DocItemRecord, `--enumerate-doc-items`)."""
+    file: str = ""
+    line: int = 0
+    cfg_predicates: tuple[str, ...] = ()
+    doc: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> DocItemRecord:
+        return cls(
+            file=d.get("file", ""),
+            line=int(d.get("line", 0) or 0),
+            cfg_predicates=_strs(d.get("cfg_predicates")),
+            doc=d.get("doc", ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DispatchFamily:
     """A method-dispatch family: trait + macro chain (model.rs DispatchFamily)."""
     method: str = ""

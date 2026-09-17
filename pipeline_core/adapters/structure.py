@@ -19,6 +19,7 @@ from pipeline_core.domain.models import (
     BuildCluster,
     ConstRecord,
     DispatchFamily,
+    DocItemRecord,
     ModRecord,
     TypeRecord,
     UseRecord,
@@ -209,6 +210,9 @@ class CliStructureReader:
 
     def enumerate_dispatch_families(self, src_dir: Path) -> list[DispatchFamily] | None:
         return self.extractor.enumerate_dispatch_families(src_dir)
+
+    def enumerate_doc_items(self, src_dir: Path) -> list[DocItemRecord] | None:
+        return self.extractor.enumerate_doc_items(src_dir)
 
     def parse_ok(self, path: Path) -> bool:
         """Syn parse-check one file via the extractor (`--parse-check`). The F1

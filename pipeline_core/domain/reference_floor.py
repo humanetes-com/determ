@@ -311,6 +311,32 @@ def judge_against_reference(
     )
 
 
+
+def judge_cluster_binaries(
+    reference: ReferenceMeasurement | None,
+    cluster: str,
+    binaries: Iterable[object],
+) -> FloorVerdict | None:
+    """The reference-floor ruling on one cluster sweep, or None when there is
+    no usable reference for that cluster.
+
+    THE one reading every "is this cluster done" gate takes: task2a's sweep
+    close, task3's per-cluster verdict and the post-merge per-cluster sweep.
+    Three open-coded copies had already drifted — the post-merge stage had
+    none, so on run 185710-f6135a93 (2026-09-17) it refused the merged tree
+    as "RED under its own cfg" over `nightly`'s one failure, the trybuild
+    `ui` test the original crate fails on this machine, which task2a had
+    closed the cluster on minutes earlier and task3 then passed.
+    `binaries` is `test_results.parse_binary_results` output."""
+    if reference is None or not reference.usable:
+        return None
+    cref = reference.for_cluster(cluster)
+    if cref is None:
+        return None
+    ours_passed, ours_failed, _, _ = pairs_of(binaries)
+    return judge_against_reference(cref, ours_passed, ours_failed)
+
+
 def reference_floor_close_reason(
     *,
     rc: int,

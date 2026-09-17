@@ -1216,6 +1216,9 @@ def build_app(
     def enumerate_mods(sd: Path) -> Any:
         return _live().structure.enumerate_mods(sd)
 
+    def enumerate_doc_items(sd: Path) -> Any:
+        return _live().structure.enumerate_doc_items(sd)
+
     def enumerate_uses(sd: Path) -> Any:
         return _live().structure.enumerate_uses(sd)
 
@@ -1329,6 +1332,7 @@ def build_app(
                 mod_records=sc.mod_records,
                 file_cfg_predicate=sc.file_cfg_predicate,
                 is_gen_tests_file=_disc_is_gen_tests_file,
+                enumerate_doc_items=enumerate_doc_items,
             ))
 
     def active_test_inventory_for_cluster(
@@ -1356,6 +1360,7 @@ def build_app(
                 mod_records=sc.mod_records,
                 file_cfg_predicate=sc.file_cfg_predicate,
                 is_gen_tests_file=_disc_is_gen_tests_file,
+                enumerate_doc_items=enumerate_doc_items,
             ), tests_dir_stems=tests_dir_stems,
             include_lib_sources=include_lib_sources, file_index=file_index)
 
@@ -2089,6 +2094,7 @@ def build_app(
             layout_sync=(load_private_surface, load_layout_records,
                          apply_layout_to_tree),
             layout_registry=load_layout_registry,
+            reference_measurement=_reference,
             blueprint_deps=BlueprintDeps(
                 ask=lambda *a, **k: helpers.ask_raw(*a, **k),
                 log=ports.log, emit=ports.emit,

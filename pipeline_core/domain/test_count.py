@@ -1,8 +1,9 @@
-"""Pure cfg-aware test-fn counting primitives (debt #29 extraction).
+"""Pure cfg-aware test and doc-test counting primitives.
 
-The FR-024 strict-verdict gate needs to know how many `#[test]` fns SHOULD run
+The strict per-cluster task3 verdict needs to know how many `#[test]` fns SHOULD run
 under a cluster's cfg, so cargo-cannot-compile tests don't inflate the expected
-count (an UNDERcount manufactures a fraudulent TASK-3 SUCCESS — FR-018/FR-022).
+count (an UNDERcount manufactures a fraudulent TASK-3 SUCCESS: every test the
+count fails to expect is one that may silently never run).
 
 These three functions are the PURE half: given already-read text / typed fn
 records plus the cluster's cfg sets, they count cargo-faithfully. No I/O, no
@@ -16,6 +17,8 @@ thin shims built it.
 """
 from __future__ import annotations
 
+import shlex
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pipeline_core.domain.cfg import (
@@ -23,6 +26,8 @@ from pipeline_core.domain.cfg import (
     cfg_inline_predicates,
     crate_cfg_predicates,
 )
+from pipeline_core.domain.doc_tests import count_doc_tests_in_doc
+from pipeline_core.domain.models import DocItemRecord
 from pipeline_core.domain.rust_scan import is_attr_line, is_test_attr_line
 
 
@@ -114,11 +119,79 @@ def count_test_fns_in_records(
         if not name:
             # Unidentifiable record: it cannot be PROVEN a duplicate, and
             # collapsing it would undercount — the one direction that
-            # manufactures a fraudulent pass (FR-018/FR-022).
+            # manufactures a fraudulent pass.
             unnamed += 1
             continue
         seen.add((str(r.get("mod_path", "")), name))
     return len(seen) + unnamed
+
+
+def count_doc_tests_in_records(
+    records: Iterable[DocItemRecord],
+    cfg_true: set[str],
+    cfg_false: set[str],
+    default_features: frozenset[str] | set[str] = frozenset(),
+) -> int:
+    """Doc tests rustdoc collects from these items under the cluster's cfg.
+
+    rustdoc only documents items that compile, so an item whose accumulated
+    cfg chain (its own gate, every enclosing impl/trait/mod, the file's inner
+    `#![cfg]`) excludes it contributes no doc test. A text scan cannot see that
+    chain. A merged multi-cluster tree keeps one cfg-gated copy of every
+    divergent item per cluster, doc comment included, and the scan counted the
+    examples of every copy: on the merged anyhow tree (run 185710-f6135a93,
+    2026-09-17) it expected 33 doc tests where rustdoc ran 25 under each
+    cluster, so task3 read a clean `stable` run (150 passed, 2 ignored, rc=0)
+    as incomplete against 160 expected and the run ended non-converged.
+
+    Same cfg evaluation as :func:`count_test_fns_in_records`: an undecidable
+    gate counts, so the expected count is never shrunk by a guess."""
+    cs = CfgSet.of(cfg_true, cfg_false, default_features)
+    return sum(
+        count_doc_tests_in_doc(r.doc) for r in records
+        if not any(cs.excludes_for_cargo(g) for g in r.cfg_predicates))
+
+
+
+def _cfg_flag_names(flags: str) -> set[str]:
+    """The `--cfg` names one RUSTFLAGS/RUSTDOCFLAGS value sets (`--cfg N` and
+    `--cfg=N`; a `key="value"` cfg keeps its whole spelling)."""
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        tokens = flags.split()
+    out: set[str] = set()
+    for i, tok in enumerate(tokens):
+        if tok == "--cfg" and i + 1 < len(tokens):
+            out.add(tokens[i + 1].strip())
+        elif tok.startswith("--cfg="):
+            out.add(tok[len("--cfg="):].strip())
+    return out
+
+
+def rustdoc_cfg_sets(
+    cfg_true: Iterable[str],
+    cfg_false: Iterable[str],
+    env_extra: Mapping[str, str] | None,
+) -> tuple[set[str], set[str]]:
+    """(true, false) cfg sets as RUSTDOC sees them for a cluster built under
+    `env_extra`.
+
+    cargo hands RUSTFLAGS to rustc and RUSTDOCFLAGS to rustdoc, so a cluster
+    that activates a cfg with `RUSTFLAGS=--cfg N` compiles `#[cfg(N)]` items
+    and still documents — and collects doc tests from — the `not(N)` arms.
+    A cluster's `cfg_true` lists both spellings of such an atom (`N` and
+    `feature = "N"`, since a cluster delivers one of the two); the `--cfg`
+    delivery reaches neither form for rustdoc, so both move to false.
+    Measured on the merged anyhow tree (run 185710-f6135a93, 2026-09-17): the
+    `nightly` cluster (`RUSTFLAGS=--cfg error_generic_member_access`) ran the
+    doc tests of the not-`error_generic_member_access` copies — 177 reported
+    where the rustc cfg set counted 178."""
+    rustc_only = _cfg_flag_names((env_extra or {}).get("RUSTFLAGS", "")) - \
+        _cfg_flag_names((env_extra or {}).get("RUSTDOCFLAGS", ""))
+    off = set(rustc_only) | {f'feature = "{n}"' for n in rustc_only}
+    return ({p for p in cfg_true if p not in off},
+            set(cfg_false) | off)
 
 
 def test_fn_names_in_records(

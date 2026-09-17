@@ -68,9 +68,18 @@ from ...domain.models import (
     FnLocator,
 )
 from ...domain.plateau import plateau_exit_disabled, plateau_exit_due
+from ...domain.reference_floor import (
+    ReferenceMeasurement,
+    judge_cluster_binaries,
+    reference_floor_close_reason,
+)
 from ...domain.rust_fn_headers import locate_all_fns
 from ...domain.rust_scan import item_names
-from ...domain.test_results import find_unreported_tests, parse_test_counts
+from ...domain.test_results import (
+    find_unreported_tests,
+    parse_binary_results,
+    parse_test_counts,
+)
 from ...domain.text import (
     extract_code_content,
     smart_truncate,
@@ -1056,6 +1065,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # The layout store is per cluster; the crate is not. Optional — omitted, a
     # cluster's own record stands, which is the pre-registry behaviour.
     layout_registry: Any = None
+    # `project_dir -> ReferenceMeasurement | None`: the original crate's verdict
+    # vector, the same floor task2a closes a cluster on and task3 passes one
+    # on. Omitted, the post-merge per-cluster sweep keeps the absolute rule.
+    reference_measurement: Callable[[Path], ReferenceMeasurement | None] | None = None
 
     def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
                                filled_dir: Path,
@@ -2958,7 +2971,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         module: str,
         functional_req: str,
     ) -> bool:
-        """FR-024 improvement-driven loop on the merged tree.
+        """Improvement-driven loop on the merged tree.
 
         Runs cargo test on `project_dir`, attributes failures via the full chain
         (runtime/compile/classifier/recently_filled/reverse_map), fills, repeats.
@@ -3141,6 +3154,31 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         timeout=test_timeout)
                     if _rc_c != 0:
                         _p_c, _f_c, _ = parse_test_counts(_out_c)
+                        # The same floor task2a and task3 rule on: failures
+                        # all in the original crate's failed-or-ignored set,
+                        # no binary gone silent, are not a red oracle.
+                        _floor_why = reference_floor_close_reason(
+                            rc=_rc_c, fail_count=_f_c,
+                            compile_broke=(_p_c + _f_c == 0),
+                            oracle_intact=not find_unreported_tests(_out_c),
+                            verdict=judge_cluster_binaries(
+                                self.reference_measurement(project_dir)
+                                if self.reference_measurement is not None
+                                else None,
+                                _c.name, parse_binary_results(_out_c)))
+                        if _floor_why:
+                            self.tel.log(
+                                f"  {tag} post-merge iter {iter_n}: cluster "
+                                f"'{_c.name}' ({_p_c} passed, {_f_c} failed) — "
+                                "the remaining failure(s) are failures of the "
+                                "ORIGINAL crate on this machine; floor met "
+                                f"({_floor_why}).")
+                            self.tel.emit("post_merge.cluster_floor_met", data={
+                                "iter": iter_n, "cluster": _c.name,
+                                "pass_count": _p_c, "fail_count": _f_c,
+                                "reason": _floor_why,
+                            })
+                            continue
                         self.tel.log(
                             f"  {tag} post-merge iter {iter_n}: default-env "
                             f"tests pass but cluster '{_c.name}' is RED under "

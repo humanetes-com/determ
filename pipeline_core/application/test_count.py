@@ -25,11 +25,14 @@ from pipeline_core.domain.cargo_toml import cargo_default_features
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.doc_tests import count_doc_tests
 from pipeline_core.domain.generation import gen_tests_decl_blocks
+from pipeline_core.domain.models import DocItemRecord
 from pipeline_core.domain.rust_scan import mod_decls
 from pipeline_core.domain.test_count import (
+    count_doc_tests_in_records,
     count_test_fns_cfg_aware,
     count_test_fns_in_records,
     file_top_cfg_excluded,
+    rustdoc_cfg_sets,
     test_fn_names_in_records,
 )
 
@@ -42,6 +45,7 @@ class TestCountDeps:
     mod_records: Callable[[Path], list[Any] | None]
     file_cfg_predicate: Callable[[Path, str], str | None]
     is_gen_tests_file: Callable[[str], bool]
+    enumerate_doc_items: Callable[[Path], list[DocItemRecord] | None]
 
 
 def file_active_for_cluster(
@@ -305,7 +309,25 @@ def active_test_inventory_for_cluster(
     #    `SweepOracle.intact` unsatisfiable — the state in which a cluster at
     #    100 % real pass can never be declared done. That is the same shape as
     #    the duplicate-record inflation `domain/test_count.py` describes.
+    #
+    #    Doc tests are counted per ITEM off the extractor's doc records, so an
+    #    item its cfg chain compiles out contributes none (see
+    #    `count_doc_tests_in_records`). A file the extractor did not parse has
+    #    no records and so no doc tests — cargo cannot build it either. Only an
+    #    unavailable extractor falls back to the whole-file text scan, which
+    #    over-counts cfg-divergent copies and so errs toward 'incomplete'.
+    #    They are evaluated under rustdoc's cfg set, not rustc's: a cfg the
+    #    cluster sets only through RUSTFLAGS never reaches rustdoc.
     _count_doc_tests = tests_dir_stems is None
+    docs_by_file: dict[str, list[DocItemRecord]] | None = None
+    doc_true, doc_false = rustdoc_cfg_sets(
+        cfg_true, cfg_false, getattr(cluster, "env_extra", None))
+    if _count_doc_tests:
+        doc_recs = deps.enumerate_doc_items(project_dir)
+        if doc_recs is not None:
+            docs_by_file = {}
+            for d in doc_recs:
+                docs_by_file.setdefault(d.file, []).append(d)
     for srf in src_dir.rglob("*.rs"):
         if deps.is_gen_tests_file(srf.name):
             continue
@@ -316,7 +338,13 @@ def active_test_inventory_for_cluster(
             stext = srf.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        _add(srf.relative_to(project_dir).as_posix(), stext)
-        if _count_doc_tests:
+        rel = srf.relative_to(project_dir).as_posix()
+        _add(rel, stext)
+        if not _count_doc_tests:
+            continue
+        if docs_by_file is None:
             total += count_doc_tests(stext)
+        else:
+            total += count_doc_tests_in_records(
+                docs_by_file.get(rel, ()), doc_true, doc_false, default_features)
     return total, frozenset(names)

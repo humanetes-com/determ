@@ -187,11 +187,8 @@ from pipeline_core.domain.reasoning_cap import (
     units_all_replies_capped,
 )
 from pipeline_core.domain.reference_floor import (
-    ClusterReference,
-    FloorVerdict,
     ReferenceMeasurement,
-    judge_against_reference,
-    pairs_of,
+    judge_cluster_binaries,
     reference_floor_close_reason,
 )
 from pipeline_core.domain.refill_stamp import format_traits_used
@@ -2439,13 +2436,9 @@ def run_phase_c_tdd(
                 and rc != 0 and fail_count > 0
                 and not _sweep_compile_broke and _oracle.intact):
             _refm = deps.reference_measurement(project_dir)
-            _cref: ClusterReference | None = None
-            if isinstance(_refm, ReferenceMeasurement) and _refm.usable:
-                _cref = _refm.for_cluster(cluster.name)
-            _floor_verdict: FloorVerdict | None = None
-            if _cref is not None:
-                _op, _of, _, _ = pairs_of(parse_binary_results(output))
-                _floor_verdict = judge_against_reference(_cref, _op, _of)
+            _floor_verdict = judge_cluster_binaries(
+                _refm if isinstance(_refm, ReferenceMeasurement) else None,
+                cluster.name, parse_binary_results(output))
             _floor_why = reference_floor_close_reason(
                 rc=rc, fail_count=fail_count,
                 compile_broke=_sweep_compile_broke,
