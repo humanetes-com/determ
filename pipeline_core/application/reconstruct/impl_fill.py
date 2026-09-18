@@ -912,7 +912,7 @@ def prepare_impl_fill(
 
         ``_make_record_locator`` memoizes records and file text on first
         use of a closure. A locator built once at ``fill_impl_blocks``
-        entry then overrode ``container_line_window`` (R3) with a
+        entry then overrode ``container_line_window`` with a
         pre-splice container, demoting the target's own error to
         ``cross``. Built at the post-splice ``focus_diagnostics`` call.
         """
@@ -2627,7 +2627,7 @@ def prepare_impl_fill(
 
     def _fill_one_block(block: ImplBlock) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
-        unit on `drive_fix_loop` (slice 8a f3 — replaces the hand-rolled
+        unit on `drive_fix_loop` (replaces the hand-rolled
         while loop), and exhausted-block bookkeeping (retro + fail emit)."""
         nonlocal fns_filled_total, impls_filled, impls_failed
         block_id = _impl_block_id(block.file, block.container)
@@ -3128,7 +3128,7 @@ def prepare_impl_fill(
             # positively-identified pipeline-side losses below overwrite it, so
             # the escalation stays available exactly where it was before.
             _last_loss[:] = [AttemptLoss.MODEL_FAILURE]
-            # Slice 8a: TYPES_IN_SCOPE re-selected each attempt from the
+            # TYPES_IN_SCOPE re-selected each attempt from the
             # member sigs + impl header + where clause + the current error
             # (E0277/E0599/E0046/E0053 routinely name a trait
             # the impl block's signatures don't mention).

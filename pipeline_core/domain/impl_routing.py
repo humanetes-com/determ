@@ -195,11 +195,22 @@ def route_fn_bodies(
     Rust it otherwise reads as an inherent impl on a TYPE of that name. Then
     the MEMBER-IDENTITY tier (below). A body matching nothing is dropped.
 
-    A body naming NO container at all routes to the TARGET. That is not a
-    guess: the prompt asked about one container, so an answer that declines to
-    repeat which one is about that one. An empty `block` can only mean the
-    attribute was absent — the tag reader demands ≥1 character of it — so this
-    tier can never fire on a model that named a container and got it wrong.
+    A body naming NO container (`block=""`, or whitespace) is the output
+    contract's own spelling of a FREE fn — the tag reader has accepted the
+    empty attribute since 2026-08-04, and the model writes it for every free
+    fn it answers. It routes to the fn's DECLARATION when the file declares
+    that name exactly once (carrying its `sig_text`), and to the TARGET only
+    when the name is not unique in the file or `members` was not passed — a
+    per-impl prompt asked about one container, so a bare body there is about
+    that one. Routing a unique free fn to the target was a claim the splice
+    silently overruled: `locate_fn_by_record` narrows by container only when
+    some record matches, so the body still landed in the free fn, while every
+    consumer of the ROUTED container — the fn-granular peel's per-body key
+    first — recorded `impl Error`. Run `3109629-f6bcbf01` (2026-09-18,
+    src/error.rs file-first, three attempts, 23 min): each reply's one error
+    sat in the free `object_ref`, the diagnostics resolved it to
+    `(object_ref, "")`, no landed body carried that key, and the peel refused
+    `none_implicated` every time, reverting fifteen compiling bodies with it.
 
     **Member identity** (`members`, from :func:`members_in_file`): when the
     attribute is not a container claim at all — a comment, or the fn's own
@@ -256,7 +267,13 @@ def route_fn_bodies(
     for fn_data in parsed:
         block_attr = fn_data.get("block") or ""
         if not block_attr.strip():
-            routed.append(RoutedBody(fn_data, target))
+            decls = [m for m in members
+                     if m.fn_name == str(fn_data.get("fn_name", ""))]
+            if len(decls) == 1:
+                routed.append(RoutedBody(
+                    fn_data, decls[0].container, sig_text=decls[0].sig_text))
+            else:
+                routed.append(RoutedBody(fn_data, target))
             continue
         if block_attr == target:
             routed.append(RoutedBody(fn_data, target))

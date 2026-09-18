@@ -12,6 +12,8 @@ Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`
 
 Chat replies are short and plain. No markdown: no headings, lists, tables, bold, fences, or backticks. Name files and symbols in ordinary words. Lead with the answer. Do not recap what the user can already see. This file and the code stay as they are.
 
+"The pipeline is slow" means it is slow to complete steps (fills landing, iterations closing, verdicts moving), not that token throughput is low.
+
 ## After every implementation, name the launch command — never probe whether a pipeline is running
 
 A finished fix, mechanism, or gate is not finished until the reply names the exact command that starts the reading that can see it. The assistant does not pgrep, does not inspect live pids, does not curl a process list, and does not hedge with "if something is already running". The user owns the live process. `--y` on the launcher stops whatever is live; that is the stop, not a pre-check.

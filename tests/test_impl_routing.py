@@ -404,10 +404,9 @@ def test_trait_default_tier_is_off_by_default() -> None:
 
 
 def test_a_body_naming_no_container_routes_to_the_target() -> None:
-    # The prompt asked about ONE container, so a reply that declines to repeat
-    # which one is about that one. `block=""` is unproducible by the tag reader
-    # (it demands >=1 char), so this tier cannot fire on a NAMED container that
-    # simply failed to match — those still drop, as below.
+    # With no member table (or a name the file does not declare exactly
+    # once), a bare body goes to the one container the prompt asked about.
+    # A NAMED container that simply failed to match still drops, as below.
     r = route_fn_bodies([_fn("source", "")],
                         target="impl StdError for E", related=["impl Other"])
     assert [rb.container for rb in r.routed] == ["impl StdError for E"]
@@ -418,6 +417,38 @@ def test_a_body_naming_no_container_routes_to_the_target() -> None:
     # a container that was named and matches nothing is still dropped
     r = route_fn_bodies([_fn("source", "impl Nope")], target="impl X", related=[])
     assert r.dropped_names == ("source",)
+
+
+def test_a_bare_body_for_a_free_fn_routes_to_the_free_fn_not_the_target() -> None:
+    # `block=""` is how the output contract spells a free fn. Routed to the
+    # target, the splice still landed it in the free fn (container narrowing
+    # falls back when nothing matches) while the peel keyed it `impl Target`,
+    # so a compile error inside it implicated no landed body and the whole
+    # reply reverted (run 3109629-f6bcbf01, 2026-09-18). The declaration is the
+    # answer when the file declares the name once; the target stays the answer
+    # for a name declared in several containers.
+    blocks = [
+        ImplBlock(file="src/shop.rs", container="impl Till", members=(
+            FnRecord(fn_name="open", sig_text="pub fn open() -> Till"),
+            FnRecord(fn_name="total", sig_text="pub fn total(&self) -> u32"),
+        )),
+        ImplBlock(file="src/shop.rs", container="", members=(
+            FnRecord(fn_name="round_up", sig_text="fn round_up(x: u32) -> u32"),
+            FnRecord(fn_name="total", sig_text="fn total(xs: &[u32]) -> u32"),
+        )),
+    ]
+    mems = members_in_file(blocks, "src/shop.rs")
+    r = route_fn_bodies(
+        [_fn("round_up", ""), _fn("open", ""), _fn("total", "")],
+        target="impl Till", related=[""], members=mems)
+    got = {rb.fn_data["fn_name"]: (rb.container, rb.sig_text) for rb in r.routed}
+    assert got["round_up"] == ("", "fn round_up(x: u32) -> u32")
+    assert got["open"] == ("impl Till", "pub fn open() -> Till")
+    assert got["total"] == ("impl Till", "")
+    # negative control: without the member table, the pre-fix behaviour
+    no_mems = route_fn_bodies([_fn("round_up", "")], target="impl Till",
+                              related=[""])
+    assert [rb.container for rb in no_mems.routed] == ["impl Till"]
 
 
 # --- member identity: the header is not always a container statement --------

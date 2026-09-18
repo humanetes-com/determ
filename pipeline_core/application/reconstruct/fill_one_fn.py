@@ -889,7 +889,7 @@ class FillOneFn:
                     validate_parse=self.mut.parse_validator())
                 if _rep is not None:
                     rc, cargo_out, _diags = _rep
-            # Plan 10 U2: compile is only a pre-gate — accept the fn only if
+            # U2: compile is only a pre-gate — accept the fn only if
             # its OWN tests pass. The SHARED u2_test_gate decides; on a test
             # failure it routes through the same fix loop as a compile error
             # (failing-test set as the stall signature).
@@ -1225,7 +1225,7 @@ class FillOneFn:
                 AttemptFailure.COMPILE if not _compiled
                 else AttemptFailure.ABORT if _last_crash_sites[0] is not None
                 else AttemptFailure.TEST)
-            # P2: record this failed attempt for the prior-attempts block.
+            # Record this failed attempt for the prior-attempts block.
             # We store the focused excerpt (already tier-sliced) so the
             # next prompt sees what really failed without re-paying budget.
             _focused = _excerpt(self.caps.fix_err_cap)
@@ -1747,9 +1747,9 @@ class FillOneFn:
                     error_excerpt=error_excerpt or first_error_excerpt,
                     fixed_body="",  # no fixed body — fix loop exhausted
                 )
-                # P6.4: tag exhausted-fail notes with the codes seen
+                # Tag exhausted-fail notes with the codes seen
                 # across the run so they re-surface for the same code.
-                # 204 N1: same premise record as the recovered path — an
+                # Same premise record as the recovered path — an
                 # exhausted lesson is the MORE dangerous one to leave
                 # premise-less, since nothing ever validated its advice.
                 _ecodes2 = ecodes_in_text((error_excerpt or "")

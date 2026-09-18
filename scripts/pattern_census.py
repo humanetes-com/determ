@@ -177,6 +177,17 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      record measured unreached is a NOTE, not a WARNING, and not a hit.  A run
      that swept no phase-c iteration (a resumed task3 finishing in seconds)
      is below the default --min-iters; pass --min-iters 0 to see it.
+  P28 unpeelable reply — a multi-body file-first reply failed to compile
+     and the fn-granular peel refused `none_implicated`, so the whole reply
+     reverted.  The live cause on run 3109629-f6bcbf01 (2026-09-18,
+     src/error.rs, three attempts, 23 min): free fns answered `block=""`
+     were routed to the prompt's target impl, the splice still landed them
+     in the free fn, and the peel keyed them by the routed container, so a
+     compile error inside one implicated no landed body.  Reaction: the
+     router resolves a bare body to the file's single declaration of that
+     name (`PEELED` on the next such reply).  A refusal that remains after
+     the fix is either a scaffold/import error (honest) or a new key seam —
+     read the refusal's diagnostic before trusting it.
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -482,6 +493,10 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         ("phase-c/hang_reverted", "hang-reverted"),
         ("phase-c/u2_hang", "hang-rejected"),
         ("hung inside ", "group-killed"),
+    ],
+    "P28": [
+        # The peel isolated the blamed bodies and kept the rest.
+        ("PEELED ", "peeled"),
     ],
     "P27": [
         # The end gate classified each orphan against augmentation's
@@ -2134,6 +2149,27 @@ def detect_p27(run: Run, iters: list[dict]) -> list[dict]:
     return hits
 
 
+RE_PEEL_NONE = re.compile(
+    r"\[phase-c/file\] (?P<file>\S+): peel refused \(none_implicated\)")
+
+
+def detect_p28(run: Run, iters: list[dict]) -> list[dict]:
+    """A whole-file revert after the peel found no landed body to blame.
+    One hit per run, counting the refusals and naming the files."""
+    refs: list[str] = []
+    files: list[str] = []
+    for ref, text in run.lines:
+        m = RE_PEEL_NONE.search(text)
+        if m:
+            refs.append(ref)
+            files.append(m["file"])
+    if not refs:
+        return []
+    return [{"evidence": (f"{len(refs)} whole-reply revert(s) on peel refused "
+                          f"none_implicated: {', '.join(sorted(set(files)))}"),
+             "refs": refs[:3]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2147,7 +2183,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P17": detect_p17, "P18": detect_p18,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
-             "P25": detect_p25, "P26": detect_p26, "P27": detect_p27}
+             "P25": detect_p25, "P26": detect_p26, "P27": detect_p27,
+             "P28": detect_p28}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2170,7 +2207,8 @@ CLASS_NAMES = {
     "P24": "crash-cohort lock (cohort > batch and exempt from the cursor: head re-dispatched, tail never reached)",
     "P25": "hung sweep (cargo test timed out inside a test; pre-fix the cluster was abandoned and the hung tree left on disk)",
     "P26": "unbounded wait (a fill event then no non-audit event for longer than 5x the sweep timeout; pre-fix the coverage slice waited forever)",
-    "P27": "orphaned stub at a green end (all tests pass, exit 1 on reachable stubs no test executes; augmentation stopped on line coverage alone)"}
+    "P27": "orphaned stub at a green end (all tests pass, exit 1 on reachable stubs no test executes; augmentation stopped on line coverage alone)",
+    "P28": "unpeelable reply (file-first compile failure, peel refused none_implicated, whole reply reverted; pre-fix a bare-block free fn was keyed by the target impl)"}
 
 
 # -------------------------------------------------------------------- report
