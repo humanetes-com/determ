@@ -1,6 +1,6 @@
 """Pre-strip preservation of inline unit tests into `gen_tests_N` siblings.
 
-Runs in the pre-strip window (Hard Rule 11), immediately before the API-surface
+Runs in the pre-strip window, immediately before the API-surface
 capture and the skeleton bake, so every later phase sees ONE shape: production
 code in the module file, tests in sibling files reached by a `#[cfg(test)] mod
 gen_tests_N;` path-decl. A module that kept its tests inline would hand them to

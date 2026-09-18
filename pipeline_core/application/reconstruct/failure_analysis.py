@@ -1,4 +1,4 @@
-"""FailureAnalysisStep (P5) — the TASK 4 tail of one reconstruction iteration.
+"""FailureAnalysisStep — the TASK 4 tail of one reconstruction iteration.
 
 Analyse the failure (TASK 4 → genesis update), detect a genesis stall, regen the
 coverage docs on a real update, append the failure journal, run the best-tree

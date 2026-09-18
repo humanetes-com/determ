@@ -1,4 +1,4 @@
-"""TASK 0 cfg scan — derive compiler clusters from source (use-case, Hard Rule 8).
+"""TASK 0 cfg scan — derive compiler clusters from source (use-case).
 
 Drives the syn extractor (via :class:`pipeline_core.ports.cluster_facts.ClusterFactReader`)
 for the `#[cfg]` facts, parses `Cargo.toml` features (domain), and hands both to the
@@ -67,7 +67,7 @@ def scan_build_clusters(project_dir: Path, reader: ClusterFactReader,
     src_dir = project_dir / "src"
     cargo_features, default_features = _cargo_features(project_dir)
 
-    # Hard Rule 8: cluster identity is derived from REAL source directives only.
+    # Cluster identity is derived from REAL source directives only.
     # `*.gen_tests_<N>.rs` siblings are LLM-authored augmented tests, not source —
     # a stray `#[cfg(not(anyhow_no_core_error))]` in one spawned a phantom cluster
     # whose harness never compiled (0% coverage → blind reconstruction). Drop them.

@@ -1140,7 +1140,7 @@ def attribute_failures(
       2. Compile errors — `_extract_tdd_compile_frontier`
       3. Behavioral attribution — `behavior_frontier_from_texts` over the
          caller's test texts (deterministic: failing test body → identifier
-         intersection with fn records; Hard Rule 9a — runs BEFORE the LLM
+         intersection with fn records; runs BEFORE the LLM
          classifier; skipped when the caller has no test texts)
       4. LLM classifier — `_classify_phase_c_test_failures`
       5. Recently-filled fallback — most recent fills are likely culprits

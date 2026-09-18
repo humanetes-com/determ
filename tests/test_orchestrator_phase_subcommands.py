@@ -56,7 +56,7 @@ def test_phase_a_no_source_refuses(tmp_path: Path) -> None:
     (pd / "src").mkdir(parents=True)  # empty src
     log: list[str] = []
     assert run_phase_a(_deps(log), pd) == 2
-    assert any("Hard Rule 11" in m for m in log)
+    assert any("no original source is read after strip" in m for m in log)
 
 
 def test_phase_a_bake_failure(tmp_path: Path) -> None:

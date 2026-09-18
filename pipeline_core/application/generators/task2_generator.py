@@ -1767,7 +1767,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if _cargo_toml.exists() and not (skeleton_dir / "Cargo.toml").exists():
             shutil.copy(_cargo_toml, skeleton_dir / "Cargo.toml")
         check_cmd = self._cluster_check_cmd(cluster)
-        # P3.8 diagnostic: log toolchain + final check_cmd so we can verify the
+        # Diagnostic: log toolchain + final check_cmd so we can verify the
         # nightly cluster is actually using +nightly.
         self.tel.log(f"  {tag} [skeleton-A] cluster.toolchain={cluster.toolchain!r} "
                      f"requires_nightly={getattr(cluster, 'requires_nightly', False)}")
@@ -1776,7 +1776,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             shlex.split(check_cmd), skeleton_dir, self._cluster_env(cluster), 180)
         if rc == -1:
             self.tel.log(f"  {tag} [skeleton-A] cargo check timed out; proceeding anyway.")
-        # P3.8: detect E0554 (nightly feature on stable channel) and retry with
+        # Detect E0554 (nightly feature on stable channel) and retry with
         # nightly toolchain. The cluster's requires_nightly flag is set by an
         # earlier TASK 0 phase only when its cargo build hits E0554; the skeleton
         # backend's Phase A may run BEFORE that phase, so we need a local catch.
@@ -2075,11 +2075,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
             for gt in sorted(_proj_src.iterdir()):
                 if not gt.is_file():
                     continue
-                _parsed = parse_gen_tests_filename(gt.name)  # R7: structured parse
+                _parsed = parse_gen_tests_filename(gt.name)  # structured parse
                 if not _parsed:
                     continue
                 _parent_stem, _pass_n = _parsed
-                # R9.6: skip + quarantine undeclared orphans (on disk but absent
+                # Skip + quarantine undeclared orphans (on disk but absent
                 # from a non-empty origin manifest) — they were never coverage-
                 # validated and must not be resurrected under a guessed gate.
                 if not self.gentests.propagate_or_quarantine_sibling(
@@ -2276,7 +2276,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # Per-cluster intermediate validation: cargo check the filled output.
         if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
             shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
-        # P3.12: end-of-cluster validation with a fix-loop. The per-fn check
+        # End-of-cluster validation with a fix-loop. The per-fn check
         # catches errors as they happen, but bodies that pass at splice-time can
         # still break integration when all fills are in place (cross-fn semantic
         # issues, stale fills from prior runs). When this cargo check fails,
@@ -3013,8 +3013,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
             test_reverse_map = {}
 
         permanently_exhausted: set[FnLocator] = set()
-        # The merge landed every cluster's fills — D3's "other fills landed"
-        # criterion holds globally, so cross-iter exhaustion gets one reset.
+        # The merge landed every cluster's fills — the exhaustion re-entry
+        # filter's "other fills landed" criterion holds globally, so
+        # cross-iter exhaustion gets one reset.
         self.fill.reset_exhaustion_flags(project_dir, "post-merge: merged tree is new context")
         recently_filled: list[FnLocator] = []
         recently_filled_max = self.cfg.recently_filled_max

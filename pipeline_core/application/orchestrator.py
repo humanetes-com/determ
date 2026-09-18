@@ -335,13 +335,15 @@ def _load_test_pairs(collect: Callable[[Path], Iterable[str]],
 def run_phase_a(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
     """Standalone Phase A: run the pre-strip skeleton bake on live source.
 
-    Per Hard Rule 11, the bake MUST run while the original source is still on
-    disk (before strip). Refuses to run if `src/` is missing or empty."""
+    The bake MUST run while the original source is still on disk (before
+    strip) — no original source is read after strip. Refuses to run if
+    `src/` is missing or empty."""
     deps.log(f"\n=== Phase A (skeleton bake) for {project_dir.name} ===")
     src_dir = project_dir / "src"
     if not src_dir.exists() or not any(src_dir.rglob("*.rs")):
         deps.log(f"  [phase-a] no source at {src_dir} — strip already ran. "
-                 "Cannot bake skeleton from absent source (Hard Rule 11).")
+                 "Cannot bake skeleton from absent source (no original source "
+                 "is read after strip).")
         return 2
     res = deps.bake_skeleton_artifacts(project_dir, project_dir.name)
     if not res.get("ok"):

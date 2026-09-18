@@ -1,4 +1,4 @@
-"""FillOneFn — the per-fn fill use-case (P2 / R3.3).
+"""FillOneFn — the per-fn fill use-case.
 
 The engine unit that reconstructs ONE `unimplemented!()` stub via the per-fn
 fix loop: locate → prompt → splice → cargo check → U2 test gate → accept or
@@ -541,11 +541,11 @@ class FillOneFn:
 
         # Notes loaded inside the fix-loop on every iteration so that
         # (a) notes added during this fn's own fix loop become visible
-        # to later iterations, and (b) the relevance filter (P3.4) can
+        # to later iterations, and (b) the relevance filter can
         # use the CURRENT cargo error excerpt to prioritise notes whose
         # error codes / keywords match.
 
-        # === Inner fix loop (slice 8a f2: unit fn + drive_fix_loop —
+        # === Inner fix loop (unit fn + drive_fix_loop —
         # the driver owns attempt counting, the FloorStall gauge, and the
         # stall/repeated terminations; this unit owns prompt/splice/lock/
         # verify/accept/revert) ===
@@ -576,11 +576,11 @@ class FillOneFn:
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""
-        # Corrected R2/R3: carry the bound-provided method inventory
+        # Carries the bound-provided method inventory
         # from the last gather so the exhaustion retro can redirect to a frozen
         # bound's trait method instead of mis-routing to GENUINELY_HARD.
         retro_bound_methods = ""
-        # P2 pulls for the per-fn ladder: bounded typed requests; a bodyless
+        # Pulls for the per-fn ladder: bounded typed requests; a bodyless
         # reply with a <REQUEST .../> re-asks the SAME rung with the answer.
         _pull_menu = ""
         _answerer = None
@@ -607,7 +607,7 @@ class FillOneFn:
             _answerer = make_request_answerer(
                 _pull_sources, log=self.tel.log, emit=self.tel.emit,
                 max_pulls=_max_pulls)
-        # P2: history of (body, error_sig, outcome) for THIS fn's fix loop.
+        # History of (body, error_sig, outcome) for THIS fn's fix loop.
         # Surfaced to the model in subsequent fix prompts so it sees the
         # search space it has already explored.
         per_fn_history: list[dict[str, Any]] = []
@@ -626,15 +626,15 @@ class FillOneFn:
             _last_crash_sites[0] = None
             _last_own_panics[0] = ()
             cur_text = file_path.read_text(encoding="utf-8")
-            # E/R3: strip inactive #[cfg] branches so the model sees only the
+            # Strip inactive #[cfg] branches so the model sees only the
             # active variant (e.g. one StdError definition, not three).
             if ctx.cluster_cfg_set is not None:
                 cur_text = filter_cfg_inactive_branches(cur_text, ctx.cluster_cfg_set)
-            # Slice 8a: one gather per attempt — notes re-filtered with the
-            # LATEST cargo error (P3.4), TYPES_IN_SCOPE re-selected from
+            # One gather per attempt — notes re-filtered with the
+            # LATEST cargo error, TYPES_IN_SCOPE re-selected from
             # sig + container + where + the PREVIOUS BODY (types the last
             # attempt actually manipulated — new) + the current error
-            # (Plan 9 F4: E0277/E0599/E0046/E0053 routinely name a
+            # (E0277/E0599/E0046/E0053 routinely name a
             # trait/type the signature doesn't mention).
             _fn_ctx = self.prompt.gather(
                 file_text=cur_text, file_rel=rel_file, fn_name=fn_name,
@@ -725,12 +725,12 @@ class FillOneFn:
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
                                 fn_name, container, sig_text),))),
-                    # P3.1: open the sig-change escape hatch after multiple
+                    # Open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.
                     allow_sig_change=(fix_attempt >= 5),
                     fr_path=ctx.fr_path,
-                    attempt_history=per_fn_history,  # P2
+                    attempt_history=per_fn_history,
                 )
 
             # The stream-meta rows of this call carry the unit they serve,
@@ -750,7 +750,7 @@ class FillOneFn:
                 })
                 return FixOutcome("stop")
 
-            # P3.1: if the model proposed a sig change, try it FIRST so
+            # If the model proposed a sig change, try it FIRST so
             # the body splice operates on the updated sig. Rolls back if
             # the resulting cargo check still fails (revert via snapshot).
             if fix_attempt >= 5:
@@ -1160,9 +1160,9 @@ class FillOneFn:
                         error_excerpt=first_error_excerpt,
                         fixed_body=body,
                     )
-                    # P6.4: tag the note with the error codes from the
+                    # Tag the note with the error codes from the
                     # original failure so it can be surfaced next time
-                    # any of those codes recurs. 204 N1: the premise rides
+                    # any of those codes recurs. The premise rides
                     # beside it — the prose may generalise, the record may
                     # not, and without the record the lesson is run-scoped.
                     _ecodes = ecodes_in_text(first_error_excerpt or "")
@@ -1204,10 +1204,10 @@ class FillOneFn:
                 first_failed_body = body
                 first_error_excerpt = _excerpt()
 
-            # P5.5: track error codes seen so we can promote recurring
+            # Track error codes seen so we can promote recurring
             # ones to every subsequent prompt.
             self.retros.record_error_codes(cargo_out)
-            # Plan 10 U2: when the failure is a TEST failure (not compile),
+            # When the failure is a TEST failure (not compile),
             # the stall signature is the failing-test set so floor-stall
             # works (a test output has no E-codes → cargo_err_sig would be
             # empty and never stall).

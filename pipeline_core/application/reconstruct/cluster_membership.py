@@ -100,7 +100,7 @@ def cluster_filter_type_members(
     records: list[TypeRecord], cluster: Any,
 ) -> list[TypeRecord]:
     """Drop what `cluster` does not compile so TYPES_IN_SCOPE advertises only
-    what exists here (Hard Rule 8): a METHOD whose cfg evaluates definitively
+    what exists here: a METHOD whose cfg evaluates definitively
     False, a FIELD whose effective cfg does, and a whole TYPE RECORD whose own
     leading cfg does. Undecidable predicates are kept (conservative).
     `cluster is None` → unchanged.
