@@ -170,9 +170,17 @@ fi
     printf '}\n'
 } >> "$BIRTHS"
 
+# Replace `$2` with the line `$1` in one rename, so a reader sees the old
+# content or the new, never the empty file a `>` truncation leaves between
+# its open and its write (a reader polling for the pid file caught exactly
+# that window on 2026-09-18 and parsed '' as the pid).
+_write_atomic() {
+    printf '%s\n' "$1" > "$2.tmp.$$" && mv -f "$2.tmp.$$" "$2"
+}
+
 # The child's PID, for anyone who wants it without pgrep. `pipeline_pids`
 # still resolves the real interpreter, and is what every other caller uses.
-echo "$_pipeline_pid" > "$PIDFILE"
+_write_atomic "$_pipeline_pid" "$PIDFILE"
 
 # A death nobody recorded is at least BOUNDED in time by this. The 03:05:36
 # disappearance was pinned only because the per-worker stream logs happened to
@@ -180,8 +188,7 @@ echo "$_pipeline_pid" > "$PIDFILE"
 # depending on that luck.
 _heartbeat_loop() {
     while :; do
-        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pipeline_pid" \
-            > "$HEARTBEAT"
+        _write_atomic "$(date -u +%Y-%m-%dT%H:%M:%SZ) $_pipeline_pid" "$HEARTBEAT"
         sleep "$HEARTBEAT_EVERY"
     done
 }

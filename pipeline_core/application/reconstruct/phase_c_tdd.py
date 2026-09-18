@@ -122,6 +122,7 @@ from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     RouteLedgerRow,
+    unopened_pair_fills,
     unpaid_pair_buys,
 )
 from pipeline_core.domain.flat_score import (
@@ -4719,8 +4720,12 @@ def run_phase_c_tdd(
         _pair_unpaid = {
             t: unpaid_pair_buys(_route_rows, t, _oracle_fp(iter_n))
             for t in _has_pair}
+        _pair_unopened = {
+            t: unopened_pair_fills(_route_rows, t, _oracle_fp(iter_n))
+            for t in _has_pair}
         _paired_tests = withholding_paired_tests(
-            _has_pair, unpaid_buys=_pair_unpaid)
+            _has_pair, unpaid_buys=_pair_unpaid,
+            unopened_fills=_pair_unopened)
         _pair_lapsed = _has_pair - _paired_tests
         # Snapshot before owner-map admission: spine locators the map
         # would add are coverage, not the attributed write.
@@ -4742,19 +4747,22 @@ def run_phase_c_tdd(
             deps.log(
                 f"  {tag} [phase-c/dispatch] measured-owners: "
                 f"{len(_pair_lapsed)} leftover test(s) have a hop pair that "
-                "has been bought and returned nothing under this oracle "
-                f"({DEFAULT_UNPAID_GRACE} graded buy(s) is the bound the "
-                "schedule already lapses a route's exemptions on) — the "
-                "withholding lapses and the coverage owners they execute "
-                "through are admissible: "
+                "has been bought and returned nothing, or has not opened, "
+                f"in {DEFAULT_UNPAID_GRACE} fill(s) under this oracle (the "
+                "bound the schedule already lapses a route's exemptions "
+                "on) — the withholding lapses and the coverage owners they "
+                "execute through are admissible: "
                 + ", ".join(
-                    f"{t} (pair unpaid {_pair_unpaid.get(t, 0)})"
+                    f"{t} (pair unpaid {_pair_unpaid.get(t, 0)}, "
+                    f"unopened {_pair_unopened.get(t, 0)})"
                     for t in sorted(_pair_lapsed)[:8]))
             deps.emit("phase_c.dispatch.pair_withhold_lapsed", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "tests": sorted(_pair_lapsed),
                 "unpaid_buys": {t: _pair_unpaid.get(t, 0)
                                 for t in sorted(_pair_lapsed)},
+                "unopened_fills": {t: _pair_unopened.get(t, 0)
+                                   for t in sorted(_pair_lapsed)},
                 "grace": DEFAULT_UNPAID_GRACE,
                 "still_withholding": sorted(_paired_tests),
             })

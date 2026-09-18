@@ -6,6 +6,7 @@ import re
 
 import monitor as m
 from pipeline_core.monitor import render as _render
+from pipeline_core.monitor.frame import SplitLayout
 
 
 def test_plain_strips_ansi_like_old_regex() -> None:
@@ -233,12 +234,11 @@ def test_iteration_progress_rows_sweep_bar_falls_back_to_the_frontier() -> None:
 def _render_frame(monkeypatch, cols: int, split: bool, view: str) -> list[str]:
     monkeypatch.setattr(m, "_term_w", lambda: cols)
     monkeypatch.setattr(m, "_h", lambda: 30)
-    monkeypatch.setattr(m, "_split", split)
-    monkeypatch.setattr(m, "_split_w", 0)
+    monkeypatch.setattr(m, "_layout", SplitLayout(enabled=split))
     monkeypatch.setattr(m, "_view", view)
     monkeypatch.setattr(m, "gpu", lambda: ["gpu row " + "x" * 300])
-    monkeypatch.setattr(m, "pipeline_status", lambda: ["pipeline row " + "y" * 300])
-    monkeypatch.setattr(m, "generation", lambda: ["gen row"])
+    monkeypatch.setattr(m, "pipeline_status", lambda width: ["pipeline row " + "y" * 300])
+    monkeypatch.setattr(m, "generation", lambda width: ["gen row"])
     m._buf.clear()
     m._render_all()
     frame = list(m._buf)

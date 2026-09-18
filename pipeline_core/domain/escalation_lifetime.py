@@ -173,6 +173,7 @@ def withholding_paired_tests(
     paired: Collection[str],
     *,
     unpaid_buys: Mapping[str, int],
+    unopened_fills: Mapping[str, int] | None = None,
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
 ) -> frozenset[str]:
     """Of the leftovers a hop pair covers, the ones that still withhold
@@ -205,6 +206,14 @@ def withholding_paired_tests(
     has not been bought, so it keeps the withholding. `unpaid_grace <= 0`
     disables the lapse and restores the unconditional withholding.
 
+    A pair that does not OPEN earns nothing either: ``unopened_fills`` is
+    how many fills in a row had the pair as a candidate for the test and
+    opened it in none (`fill_schedule.unopened_pair_fills`). A graded buy
+    is the only thing the unpaid clock counts, so without this bound a
+    pair the schedule keeps deferring withholds for ever — run
+    `3127-6763a5c6` (2026-09-18) withheld 117 leftovers at `pair unpaid
+    0/3` across five fills that opened no pair. The same grace bounds it.
+
     This does not touch the ORDERING the 675471 complaint was really
     about: `run_blocks` still waits every non-pair run that shares the
     pair's leftover tests or members, so an admitted owner's route opens
@@ -212,8 +221,11 @@ def withholding_paired_tests(
     """
     if unpaid_grace <= 0:
         return frozenset(paired)
+    unopened = unopened_fills or {}
     return frozenset(
-        t for t in paired if int(unpaid_buys.get(t, 0)) < unpaid_grace)
+        t for t in paired
+        if int(unpaid_buys.get(t, 0)) < unpaid_grace
+        and int(unopened.get(t, 0)) < unpaid_grace)
 
 
 def escalate_to_measured_owners(

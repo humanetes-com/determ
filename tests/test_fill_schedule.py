@@ -1009,3 +1009,162 @@ def test_a_pair_that_paid_a_sibling_does_not_keep_zeroing_the_other_tests_runs()
                        hollow={}, budget_minutes=120)
     assert [s.run.label for s in control.ordered] == [pair.label]
     assert {s.reason for s in control.deferred} == {"pair_wait"}
+
+
+# --- a deferral is only ever a wait for a run that opens -------------------
+#
+# Invented shape: one dispatcher `draw` reached by every test, two
+# cross-file pairs through it (`draw + outline`, `draw + shade`), and a
+# per-fn holding a stub (`area`) both tests also execute. Every unit is a
+# stub, so every test is hollow on stubs held by more than one run — the
+# fresh-tree regime. The pre-fix rule deferred every run a pair blocks,
+# whether or not that pair itself opened.
+
+_DRAW = FnLocator("src/shape.rs", "draw")
+_OUTLINE = FnLocator("src/paint.rs", "outline")
+_SHADE = FnLocator("src/paint.rs", "shade")
+_AREA = FnLocator("src/shape.rs", "area")
+
+
+def _fresh_tree() -> tuple[list[RouteRun], dict[str, frozenset[FnLocator]]]:
+    slices = {
+        "t_outline": {FnSite("src/shape.rs", "draw", ""),
+                      FnSite("src/paint.rs", "outline", ""),
+                      FnSite("src/shape.rs", "area", "")},
+        "t_shade": {FnSite("src/shape.rs", "draw", ""),
+                    FnSite("src/paint.rs", "shade", ""),
+                    FnSite("src/shape.rs", "area", "")},
+    }
+    hollow = hollow_by_test(slices, {_DRAW, _OUTLINE, _SHADE, _AREA})
+    tests = frozenset(slices)
+    pair_o = RouteRun(kind=RouteKind.PAIR, label="pair draw + outline",
+                      targets=frozenset({_DRAW, _OUTLINE}),
+                      target_tests=tests,
+                      stubs_in_targets=frozenset({_DRAW, _OUTLINE}),
+                      files=("src/shape.rs", "src/paint.rs"), seq=1,
+                      bodies_sha="po")
+    pair_s = RouteRun(kind=RouteKind.PAIR, label="pair draw + shade",
+                      targets=frozenset({_DRAW, _SHADE}),
+                      target_tests=tests,
+                      stubs_in_targets=frozenset({_DRAW, _SHADE}),
+                      files=("src/shape.rs", "src/paint.rs"), seq=2,
+                      bodies_sha="ps")
+    per_fn = RouteRun(kind=RouteKind.PER_FN, label="per-fn area",
+                      targets=frozenset({_AREA}), target_tests=tests,
+                      stubs_in_targets=frozenset({_AREA}), seq=3,
+                      bodies_sha="pf")
+    return [pair_o, pair_s, per_fn], hollow
+
+
+def _pre_fix_pair_wait(runs: list[RouteRun],
+                       hollow: dict[str, frozenset[FnLocator]]) -> list[str]:
+    """The deferral before 2026-09-18, with no ledger (every pair inside its
+    grace): a run is deferred when ANY candidate pair blocks it, opened or
+    not."""
+    pairs = [r for r in runs if r.kind is RouteKind.PAIR]
+    return [r.label for r in runs
+            if any(run_blocks(p, r, hollow) for p in pairs)]
+
+
+def test_two_pairs_through_one_dispatcher_on_a_stub_tree_all_open() -> None:
+    """Plan sentence: a run is held only by a run that opens, and a pair
+    does not hold a run its own tests are hollow on. On the fresh-tree
+    shape every candidate opens. Control: the pre-fix rule defers all
+    three, so the fill opens nothing and no grace clock can ever run
+    (a deferred run writes no graded row)."""
+    runs, hollow = _fresh_tree()
+    pair_o, pair_s, per_fn = runs
+    # The shape IS the cycle: each pair blocks the other and the per-fn,
+    # and the per-fn blocks both pairs.
+    assert run_blocks(pair_o, pair_s, hollow) and run_blocks(pair_s, pair_o, hollow)
+    assert run_blocks(pair_o, per_fn, hollow) and run_blocks(per_fn, pair_o, hollow)
+    assert sorted(_pre_fix_pair_wait(runs, hollow)) == sorted(
+        r.label for r in runs)
+    for budget in (0, 200):
+        sched = schedule(runs, [], oracle_fp="o", hollow=hollow,
+                         budget_minutes=budget)
+        assert not sched.deferred
+        assert {s.run.label for s in sched.ordered} == {
+            r.label for r in runs}
+        released = [s for s in sched.ordered if s.mutual]
+        assert released and all(not s.lapsed for s in released)
+        assert "not held, the pair waits on it" in sched.render()
+
+
+def test_the_endgame_pair_still_holds_a_run_its_tests_do_not_need() -> None:
+    """The same pair on a tree whose leftovers are hollow on nothing (the
+    endgame the pair_wait instances were measured on) still defers a
+    stub-free file of its members. Control for the test above: the mutual
+    release is keyed on the hollow relation, not on the pair's shape."""
+    runs, _hollow_map = _fresh_tree()
+    pair_o = replace(runs[0], stubs_in_targets=frozenset())
+    file_run = RouteRun(kind=RouteKind.FILE, label="file src/paint.rs",
+                        targets=frozenset({_OUTLINE, _SHADE}),
+                        target_tests=pair_o.target_tests,
+                        files=("src/paint.rs",), seq=4, bodies_sha="fp")
+    sched = schedule([pair_o, file_run], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered] == [pair_o.label]
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (file_run.label, "pair_wait")]
+
+
+def test_a_pair_the_kind_cap_defers_holds_nothing() -> None:
+    """A holder that does not open holds nothing: with one pair per fill,
+    the second pair is capped and the file only it blocks opens. Control:
+    the pre-fix order (pair_wait decided before the cap) deferred the file
+    behind a pair that never ran."""
+    runs, _h = _fresh_tree()
+    pair_o = replace(runs[0], stubs_in_targets=frozenset(),
+                     target_tests=frozenset({"t_outline"}))
+    pair_s = replace(runs[1], stubs_in_targets=frozenset(),
+                     target_tests=frozenset({"t_shade"}),
+                     targets=frozenset({_SHADE, FnLocator("src/ink.rs", "tone")}))
+    file_run = RouteRun(kind=RouteKind.FILE, label="file src/ink.rs",
+                        targets=frozenset({FnLocator("src/ink.rs", "tone")}),
+                        target_tests=frozenset({"t_shade"}),
+                        files=("src/ink.rs",), seq=5, bodies_sha="fi")
+    assert run_blocks(pair_s, file_run, {})
+    assert not run_blocks(pair_o, file_run, {})
+    assert _pre_fix_pair_wait([pair_o, pair_s, file_run], {}) == [
+        file_run.label]
+    sched = schedule([pair_o, pair_s, file_run], [], oracle_fp="o",
+                     hollow={}, max_per_kind={RouteKind.PAIR: 1})
+    assert {s.run.label for s in sched.ordered} == {
+        pair_o.label, file_run.label}
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (pair_s.label, "kind_cap")]
+
+
+def test_a_fill_with_candidates_always_opens_one() -> None:
+    """The progress guarantee, over generated shapes: whatever the blocking
+    relation among pairs, stub holders and coverage runs, a schedule with at
+    least one candidate opens at least one run (the first in order is held
+    by nothing, since nothing opened before it). Control: the pre-fix rule
+    opened nothing on some of the same shapes."""
+    import random
+    rng = random.Random(20260918)
+    files = ["src/a.rs", "src/b.rs", "src/c.rs"]
+    units = [FnLocator(f, n) for f in files for n in ("p", "q", "r")]
+    kinds = [RouteKind.PAIR, RouteKind.FILE, RouteKind.IMPL,
+             RouteKind.PER_FN, RouteKind.SESSION]
+    pre_fix_empty = 0
+    for i in range(400):
+        tests = [f"t{j}" for j in range(rng.randint(1, 4))]
+        stubs = set(rng.sample(units, rng.randint(0, len(units))))
+        slices = {t: {FnSite(u.file, u.fn_name, "")
+                      for u in rng.sample(units, rng.randint(1, 5))}
+                  for t in tests}
+        hollow = hollow_by_test(slices, stubs)
+        runs = []
+        for seq in range(rng.randint(1, 7)):
+            tg = frozenset(rng.sample(units, rng.randint(1, 3)))
+            runs.append(RouteRun(
+                kind=rng.choice(kinds), label=f"run{i}.{seq}", targets=tg,
+                target_tests=frozenset(rng.sample(tests, rng.randint(1, len(tests)))),
+                stubs_in_targets=tg & frozenset(stubs), seq=seq,
+                files=tuple(sorted({u.file for u in tg})), bodies_sha=f"b{seq}"))
+        sched = schedule(runs, [], oracle_fp="o", hollow=hollow)
+        assert sched.ordered, (runs, hollow)
+        if len(_pre_fix_pair_wait(runs, hollow)) == len(runs):
+            pre_fix_empty += 1
+    assert pre_fix_empty > 0

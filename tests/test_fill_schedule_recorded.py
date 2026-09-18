@@ -15,7 +15,12 @@ three leftover format tests, a hop pair at served rank 8, a never-served
 file and a 26-body per-fn of coverage locators first.
 `12120-78b991d3_iter1.json` is fill 1 of the 2026-09-11 12:42 UTC run:
 the hop pair opened first and the same leftovers' two sessions, per-fn,
-file and impl still sat in ordered with a share. Distilled by
+file and impl still sat in ordered with a share.
+`3127-6763a5c6_iter2.json` is fill 2 of the 2026-09-18 run on a fresh
+stable tree (pass 37 of 184, hollow 142): two hop pairs through one
+dispatcher, each holding a stub the other's tests are hollow on, and
+every file, impl and per-fn run both blocked by and blocking them; the
+recorded schedule opened 0 runs, as did fills 3-6. Distilled by
 `tools/distill_fill.py` from `logs/events.jsonl`.
 
 Sentences pinned here, with the fixed pre-schedule walk as the control:
@@ -43,6 +48,7 @@ from pipeline_core.domain.fill_schedule import (
     RunOutcome,
     consecutive_unpaid,
     rebuy_identity,
+    run_blocks,
     schedule,
 )
 from tests.fills.harness import (
@@ -483,3 +489,27 @@ def test_a_pair_inside_its_grace_still_defers_the_rest_on_the_681204_fill() -> N
     assert [s.run.label for s in sched.ordered] == [pair.label]
     assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
                for s in sched.deferred)
+
+
+def test_the_fresh_tree_fill_opens_every_run_instead_of_none() -> None:
+    """Plan sentence: a run is held only by a run that opens, and a pair
+    does not hold a run its own tests are hollow on — so the recorded fill
+    that opened nothing opens every candidate, both pairs included.
+    Control: the recorded schedule event itself (0 opened, every run
+    `pair_wait`), and the pre-fix predicate on the fixture's own runs and
+    hollow relation, which defers all ten."""
+    fix = load_fill("3127-6763a5c6_iter2")
+    assert fix["stubs_source"] == "schedule_event"
+    hollow = hollow_of(fix)
+    assert len(hollow) == fix["hollow_recorded"] == 142
+    runs = [r for rs in candidate_runs(fix).values() for r in rs]
+    assert len(runs) == 10
+    pairs = [r for r in runs if r.kind is RouteKind.PAIR]
+    assert len(pairs) == 2
+    pre_fix_deferred = [r.label for r in runs
+                        if any(run_blocks(p, r, hollow) for p in pairs)]
+    assert len(pre_fix_deferred) == len(runs)
+    out, opened = replay(fix, budget=200.0, rows=ledger_of(fix))
+    assert sorted(opened) == sorted(r.label for r in runs)
+    assert not out.schedule.deferred
+    assert {p.label for p in pairs} <= set(opened)

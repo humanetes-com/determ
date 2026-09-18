@@ -94,6 +94,7 @@ __all__ = [
     "rebuy_identity",
     "run_blocks",
     "schedule",
+    "unopened_pair_fills",
     "unpaid_pair_buys",
 ]
 
@@ -433,6 +434,11 @@ class ScheduledRun:
     #: ``coverage_split``). Printed on the schedule line so a lapse is a
     #: log fact, not an absence.
     lapsed: tuple[str, ...] = ()
+    #: Pairs that block this run and did not hold it because this run must
+    #: land before the PAIR can be judged (a stub the pair's tests are
+    #: hollow on). Printed apart from ``lapsed``: nothing was spent, the
+    #: wait would have made the pair's own verdict unreachable.
+    mutual: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -441,7 +447,7 @@ class ScheduledRun:
             "share_minutes": (round(self.share_minutes, 2)
                               if self.share_minutes is not None else None),
             "deferred": self.deferred, "blocked_by": list(self.blocked_by),
-            "lapsed": list(self.lapsed),
+            "lapsed": list(self.lapsed), "mutual": list(self.mutual),
         }
 
 
@@ -464,6 +470,9 @@ class FillSchedule:
                 bits.append(f"{stub_n} stub(s)")
             if s.lapsed:
                 bits.append("grace spent: " + ", ".join(s.lapsed))
+            if s.mutual:
+                bits.append("not held, the pair waits on it: "
+                            + ", ".join(s.mutual))
             if s.blocked_by:
                 bits.append("after " + ", ".join(s.blocked_by))
             share = (f" share {s.share_minutes:.0f}m"
@@ -618,6 +627,43 @@ def unpaid_pair_buys(rows: Iterable[RouteLedgerRow], test: str,
         return 0
     return unpaid_tries_for_test(
         rows, test, oracle_fp, match=lambda r: r.kind is RouteKind.PAIR)
+
+
+def unopened_pair_fills(rows: Iterable[RouteLedgerRow], test: str,
+                        oracle_fp: str) -> int:
+    """How many fills in a row, newest first, had a PAIR aimed at `test`
+    and opened none of them (every such row DEFERRED or EMPTY).
+
+    The other half of :func:`unpaid_pair_buys`. That clock releases a
+    refusal to spend once the pair has been graded `grace` times; a pair
+    that never opens is never graded, so a refusal earned by the pair's
+    unspent buy would hold for as long as the pair keeps not opening —
+    the wait-for-a-run-that-never-runs lock the schedule's pair_wait had
+    until 2026-09-18 (run `3127-6763a5c6`, cluster `stable`: fills 2-6
+    opened no run, both pairs deferred, and the measured-owners
+    withholding for their 117 leftovers read `pair unpaid 0/3` on every
+    iteration). A fill is one (run id, iteration); a STOPPED row is the
+    operator's and neither counts nor interrupts. Other oracles are not
+    evidence about this one. An empty `oracle_fp` is 0, as in
+    :func:`unpaid_pair_buys`.
+    """
+    if not oracle_fp:
+        return 0
+    fills: dict[tuple[str, int], bool] = {}
+    for r in rows:
+        if (r.kind is not RouteKind.PAIR or r.oracle_fp != oracle_fp
+                or test not in r.target_tests
+                or r.outcome is RunOutcome.STOPPED):
+            continue
+        key = (r.run_id, r.iteration)
+        opened = r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY)
+        fills[key] = fills.get(key, False) or opened
+    seen = 0
+    for opened in reversed(list(fills.values())):
+        if opened:
+            break
+        seen += 1
+    return seen
 
 
 def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
@@ -984,24 +1030,30 @@ def schedule(
             run=run, rank=rank, weight=weight, reason=reason, level=level,
             blocked_by=by))
 
-    # Pair-wait: a hop pair is this fill of its leftovers. A run it
-    # blocks is deferred (reason pair_wait, share 0), not queued with a
-    # share — the 12120-78b991d3 tail. Same path kind_cap already uses;
-    # also at budget 0 so order-only still defers the tail. Resolve by
-    # kind PAIR on the candidate runs, not by matching blocked_by labels.
-    # A stub run that hollows a leftover still opens (blockers-first;
-    # run_blocks already refuses to wait that run).
+    # ONE pass in schedule order decides every deferral, and a run is held
+    # only by a run this pass has already OPENED. Every deferral above is
+    # "wait for X": if X is itself deferred, waiting for it is waiting for
+    # nothing, and a deferred run writes no graded row, so no grace clock
+    # (`_unpaid_streak` skips deferred rows) can ever release it. Run
+    # `3127-6763a5c6` (2026-09-18, cluster `stable`, the first fresh tree
+    # since these deferrals shipped: hollow 142) is that lock: two hop
+    # pairs sharing one dispatcher each held the other (each holds a stub
+    # the other's tests are hollow on), and each held every file, impl and
+    # per-fn run, which in turn held them. Fills 2-6 opened 0 runs, fill 7
+    # opened only the one run sharing nothing with either pair; the score
+    # sat at 37/184 with 142 hollow tests. The pass can open nothing only
+    # when there is nothing to open: the first run in order has no opened
+    # run before it, so it is never held.
     #
-    # A pair that has SPENT its grace keeps its place in the order above
-    # (run_blocks is unchanged, so the two-file transaction is still
-    # written before anything that could peel it) and stops zeroing the
-    # rest: they queue behind it with a share. The instances this rule
-    # was written for all establish which run goes FIRST; none of them
-    # establishes a share of zero for every competitor for as long as the
-    # pair keeps failing. On 2026-09-14 that difference was the cluster's
-    # whole fill phase — the stable ledger held 36 consecutive graded,
-    # never-paying rows for this pair's targets while the schedule opened
-    # it and nothing else in 20 straight fills.
+    # A pair also does not hold a run that must land before the PAIR can
+    # be judged (`run_blocks(run, pair)`): deferring it makes the pair's
+    # own verdict unreachable, which is the split pair_wait exists to
+    # prevent, in the other direction. On the endgame trees these rules
+    # were measured on (hollow 0) no run blocks a pair, so this changes
+    # nothing there.
+    #
+    # The kind cap is applied in the same pass for the same reason: a
+    # holder the cap then defers held its waiters for nothing.
     waiting: list[ScheduledRun] = []
     _per_test: dict[tuple[str, str], int] = {}
 
@@ -1020,65 +1072,60 @@ def schedule(
                 unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
         return _per_test[key] >= unpaid_grace
 
-    pair_runs = [it[0] for it in ranked if it[0].kind is RouteKind.PAIR]
-    if pair_runs:
-        kept_pair: list[ScheduledRun] = []
-        for s in scheduled:
-            blockers = [p for p in pair_runs
-                        if run_blocks(p, s.run, hollow, blamed)]
-            holding = [
-                p for p in blockers
-                if _served_key(p) not in spent
-                and not ((shared := p.target_tests & s.run.target_tests)
-                         and all(_test_spent("pair", t) for t in shared))]
-            if holding:
-                waiting.append(replace(s, deferred=True, share_minutes=0.0,
-                                       reason="pair_wait"))
-                continue
-            kept_pair.append(replace(s, lapsed=("pair_wait",))
-                             if blockers else s)
-        scheduled = kept_pair
+    def _grace_left(p: RouteRun, run: RouteRun) -> bool:
+        return (_served_key(p) not in spent
+                and not ((shared := p.target_tests & run.target_tests)
+                         and all(_test_spent("pair", t) for t in shared)))
 
-    # Coverage-split deferral: a leftover-aiming run that writes coverage
-    # locators not in the attributed snapshot waits when a non-split write
-    # of the same leftovers is still a candidate. Empty attributed skips
-    # this entirely.
-    if attr:
-        kept_split: list[ScheduledRun] = []
-        non_split = [s for s in scheduled if not split_of.get(s.run.key, False)]
-        for s in scheduled:
-            if not split_of.get(s.run.key, False):
-                kept_split.append(s)
-                continue
+    # A coverage-split waits on a non-split candidate of the same
+    # leftovers. The candidates are every non-split run in order; the
+    # holders among them are only the ones that open (checked below).
+    non_split_runs = [s.run for s in scheduled
+                      if not split_of.get(s.run.key, False)]
+    opened_runs: list[RouteRun] = []
+    opened_per_kind: dict[RouteKind, int] = {}
+    kept: list[ScheduledRun] = []
+    for s in scheduled:
+        run = s.run
+        blocking_pairs = [p for p in opened_runs
+                          if p.kind is RouteKind.PAIR
+                          and run_blocks(p, run, hollow, blamed)]
+        mutual = [p for p in blocking_pairs
+                  if run_blocks(run, p, hollow, blamed)]
+        with_grace = [p for p in blocking_pairs if _grace_left(p, run)]
+        if any(p not in mutual for p in with_grace):
+            waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                   reason="pair_wait"))
+            continue
+        if with_grace:
+            s = replace(s, mutual=tuple(p.label for p in with_grace))
+        elif blocking_pairs:
+            s = replace(s, lapsed=("pair_wait",))
+        if attr and split_of.get(run.key, False):
             shared = frozenset().union(*(
-                s.run.target_tests & o.run.target_tests for o in non_split))
-            if not shared:
-                kept_split.append(s)
-                continue
-            if not all(_test_spent("attributed", t) for t in shared):
-                waiting.append(replace(s, deferred=True, share_minutes=0.0,
-                                       reason="coverage_split"))
-                continue
-            kept_split.append(replace(
-                s, lapsed=tuple(dict.fromkeys((*s.lapsed, "coverage_split")))))
-        scheduled = kept_split
-
-    # The per-kind cap, applied in schedule order so the runs the order put
-    # first are the ones that open; the rest are deferred whatever the
-    # budget says and are never-served candidates of the next fill.
-    capped: list[ScheduledRun] = list(waiting)
-    if max_per_kind:
-        opened: dict[RouteKind, int] = {}
-        kept_sched: list[ScheduledRun] = []
-        for s in scheduled:
-            cap = int(max_per_kind.get(s.run.kind, 0) or 0)
-            if cap > 0 and opened.get(s.run.kind, 0) >= cap:
-                capped.append(replace(s, deferred=True, share_minutes=0.0,
-                                      reason="kind_cap"))
-                continue
-            opened[s.run.kind] = opened.get(s.run.kind, 0) + 1
-            kept_sched.append(s)
-        scheduled = kept_sched
+                run.target_tests & o.target_tests for o in non_split_runs))
+            if shared:
+                held = any(
+                    o in opened_runs and (run.target_tests & o.target_tests)
+                    for o in non_split_runs)
+                if held and not all(_test_spent("attributed", t)
+                                    for t in shared):
+                    waiting.append(replace(s, deferred=True,
+                                           share_minutes=0.0,
+                                           reason="coverage_split"))
+                    continue
+                s = replace(s, lapsed=tuple(dict.fromkeys(
+                    (*s.lapsed, "coverage_split"))))
+        cap = int((max_per_kind or {}).get(run.kind, 0) or 0)
+        if cap > 0 and opened_per_kind.get(run.kind, 0) >= cap:
+            waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                   reason="kind_cap"))
+            continue
+        opened_per_kind[run.kind] = opened_per_kind.get(run.kind, 0) + 1
+        opened_runs.append(run)
+        kept.append(s)
+    scheduled = kept
+    capped: list[ScheduledRun] = waiting
 
     if budget_minutes <= 0:
         return FillSchedule(tuple(scheduled), tuple(capped), 0.0)
