@@ -25,6 +25,7 @@ from pipeline_core.domain.last_error import (
     LastErrorKind,
     instruction_for,
 )
+from pipeline_core.domain.reference_floor import doc_test_line
 
 
 class ClusterStatus(StrEnum):
@@ -1395,6 +1396,18 @@ class BinaryResult:
     # it as VANISHED and charges it as a failure — fabricating a crash signal
     # for a test that was never meant to run here.
     ignored: frozenset[str] = frozenset()
+    # Tests whose OWN process died (a signal, a double panic) when the
+    # binary was re-run one test per process (`test_isolation`). Each is
+    # also in ``failed``: an abort is a failing verdict of that test and of
+    # no other. Read off the failure block's `ABORT_MARK` line, so every
+    # reader of a capture sees the same typed outcome.
+    aborted: frozenset[str] = frozenset()
+    # The subset of ``aborted`` whose own failure block printed no panic at
+    # all: the process died on a signal with nothing the runtime announced —
+    # a native fault (a segfault, a sanitizer abort, undefined behaviour).
+    # These are what the crash localizer re-runs under gdb / ASAN; an abort
+    # that printed a panic already names its site in the block.
+    aborted_silent: frozenset[str] = frozenset()
 
     @property
     def executed(self) -> int:
@@ -1469,6 +1482,22 @@ class TestStateReading:
         return sum(b.executed for b in self.binaries)
 
     @property
+    def aborted_names(self) -> frozenset[str]:
+        """Tests whose own isolated process died (see `BinaryResult.aborted`)."""
+        out: set[str] = set()
+        for b in self.binaries:
+            out |= b.aborted
+        return frozenset(out)
+
+    @property
+    def aborted_silent_names(self) -> frozenset[str]:
+        """Aborted tests whose own block printed no panic — native faults."""
+        out: set[str] = set()
+        for b in self.binaries:
+            out |= b.aborted_silent
+        return frozenset(out)
+
+    @property
     def crashed(self) -> tuple[BinaryResult, ...]:
         return tuple(b for b in self.binaries if not b.completed)
 
@@ -1493,6 +1522,22 @@ class TestStateReading:
 # Treating an unknown token as "no verdict" is what lets the localizer name
 # the in-flight test from a real crash capture.
 _LIBTEST_VERDICTS = ("ok", "FAILED", "ignored", "bench")
+
+# The first line of an aborted test's failure block in a section rebuilt by
+# `test_isolation`: the test's own process died, so libtest printed no
+# verdict for it and this line records that it is a failure by abort. Not a
+# libtest string, deliberately — nothing libtest prints can be mistaken for
+# it, and every parser of a capture reads the same outcome off it.
+ABORT_MARK = "determ-isolation: test process aborted"
+
+
+def failure_block_name(line: str) -> str | None:
+    """``---- NAME stdout ----`` (libtest's per-failure block header) → NAME."""
+    head, tail = "---- ", " stdout ----"
+    if not (line.startswith(head) and line.endswith(tail)):
+        return None
+    name = line[len(head):-len(tail)]
+    return name if name and " " not in name else None
 
 
 def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
@@ -1539,6 +1584,12 @@ def _target_label(line: str) -> tuple[str, str | None] | None:
 def _is_section_header(line: str) -> bool:
     """libtest's ``running N tests`` / ``running 1 test`` preamble."""
     return line.startswith("running ") and line.endswith(("tests", "test"))
+
+
+# Public names for the two line rules the capture's section pairing rests on,
+# so `test_isolation` splices by exactly the rules the parsers read by.
+target_label = _target_label
+is_section_header = _is_section_header
 
 
 def _opens_implicit_section(line: str) -> bool:
@@ -1679,13 +1730,18 @@ def parse_binary_results(
             labels.append(_lab)
 
     class _Section:
-        __slots__ = ("passed", "failed", "ignored", "completed", "dangling",
-                     "pass_count", "fail_count")
+        __slots__ = ("passed", "failed", "ignored", "aborted", "block",
+                     "panicked", "completed", "dangling", "pass_count",
+                     "fail_count")
 
         def __init__(self) -> None:
             self.passed: set[str] = set()
             self.failed: set[str] = set()
             self.ignored: set[str] = set()
+            self.aborted: set[str] = set()
+            self.block: str | None = None
+            # Blocks that printed a `panicked at` line.
+            self.panicked: set[str] = set()
             self.completed = False
             self.dangling: str | None = None
             self.pass_count = 0
@@ -1723,6 +1779,15 @@ def parse_binary_results(
             current.completed = True
             current.pass_count, current.fail_count = _counts_on_result_line(line)
             continue
+        _blk = failure_block_name(line)
+        if _blk is not None:
+            current.block = _blk
+            continue
+        if line.startswith(ABORT_MARK) and current.block is not None:
+            current.aborted.add(current.block)
+            continue
+        if current.block is not None and "panicked at " in line:
+            current.panicked.add(current.block)
         parsed = _verdict_of_test_line(line)
         if parsed is None:
             continue
@@ -1775,6 +1840,9 @@ def parse_binary_results(
             dangling=None if sec.completed else sec.dangling,
             exe_path=exe,
             ignored=frozenset(sec.ignored),
+            aborted=frozenset(sec.aborted & sec.failed),
+            aborted_silent=frozenset((sec.aborted & sec.failed)
+                                     - sec.panicked),
             hung=bool(timed_out and i == last_open),
         ))
     return tuple(out)
@@ -1942,6 +2010,33 @@ class RegressionComparison:
         return frozenset()
 
 
+def stable_test_keys(b: BinaryResult) -> dict[str, str]:
+    """Each test name of ``b`` → the identity it keeps across two trees.
+
+    A doc test's cargo name ends in the line its ``` block opens on, so a
+    fill that lengthens a body ABOVE it renames it: on the 2026-09-19
+    `construct` replay (run `3213361-9d582ae7`, iter-2 checkpoint) the
+    unchanged failing example `src/error.rs - error::Error::downcast_ref`
+    read as a NEW failure at line 414 and convicted the fill. The identity
+    is the name without its line plus the example's ordinal among the
+    binary's doc tests of that name in source order — the rule
+    `reference_floor.pairs_of` already compares trees by, applied to every
+    test the binary reported so the ordinal does not depend on verdicts.
+    Every other name is its own identity."""
+    names = b.passed | b.failed | b.ignored
+    out: dict[str, str] = {}
+    ordinal: dict[str, int] = {}
+    for n in sorted(names, key=lambda x: (doc_test_line(x) or 0, x)):
+        if doc_test_line(n) is None:
+            out[n] = n
+            continue
+        head = n.strip().rpartition(" (line ")[0].rstrip()
+        k = ordinal.get(head, 0)
+        ordinal[head] = k + 1
+        out[n] = f"{head}#{k}"
+    return out
+
+
 def compare_readings(base: TestStateReading,
                      cur: TestStateReading) -> RegressionComparison:
     """Binary-scoped regression comparison. Only binaries complete in BOTH
@@ -1989,8 +2084,10 @@ def compare_readings(base: TestStateReading,
                 crash_lost += b.pass_count
             continue
         measured.append(label)
-        newly_red |= (c.failed - b.failed)
-        newly_green |= (c.passed & b.failed)
+        b_key, c_key = stable_test_keys(b), stable_test_keys(c)
+        b_failed = {b_key[n] for n in b.failed}
+        newly_red |= {n for n in c.failed if c_key[n] not in b_failed}
+        newly_green |= {n for n in c.passed if c_key[n] in b_failed}
         base_pass += b.pass_count
         cur_pass += c.pass_count
         base_exec += b.executed

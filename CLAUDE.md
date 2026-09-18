@@ -410,6 +410,45 @@ debug"; a match on a leftover's language construct rather than on the
 shape (a qualifier the body named, a trait the test already mapped). On
 any of them, stop.
 
+**Every fix is the general solution, one that holds in every case — never
+one more branch for the case that just fired.** A mechanism that grows a
+condition per incident ("keep it if the crash is a stub", then "ignore the
+runtime's abort line", then "unless the test was already red and its
+thread later hit a stub") is a decision tree nobody can predict, and the
+next tree shape finds its gap — which is where the loop stalls. When a
+guard failed to fire, the question is not "which condition would have
+admitted this instance" but "what is the model this code should hold, so
+that this instance and every sibling are consequences of it". Prefer, in
+order: remove the situation at the layer that creates it (measure so the
+confusion cannot occur); then one typed model every consumer reads
+through one rule; never a predicate for the instance.
+
+**The rule, checkable.** Before adding a condition to a gate, exemption,
+router or classifier, count the special cases the function already
+holds. If the new one is another case of the same question, stop and
+write the model that answers the question, and delete the cases it
+subsumes in the same change. A fix is general only if it would decide
+correctly on a shape no run has produced yet. A fix that REMOVES a special
+case in favour of a lookup the code already has is the good direction.
+
+**The instances, 2026-09-18/19, runs `3109629-f6bcbf01` and
+`3213361-9d582ae7`.** Good direction: a body answered with `block=""` was
+routed to the prompt's target impl by a special case ("no container means
+the target"), so the peel keyed free fns by the wrong container and
+reverted whole replies; the fix replaced the case with the general lookup
+(the file's own declaration of that name). Wrong direction, stopped before
+shipping: the stub-crash exemption, already seven branches across the fill
+gate and the sweep ratchet (crash_all_red, crash_only_reverted, stub_free,
+introduced_stubs, crash_closure_kept, closure_withheld, runtime-abort
+handling), vetoed a correct `construct` because two already-red tests
+asserted before a Drop stub aborted their binary; the proposed eighth
+branch ("forgive an assertion if the test was red at baseline and its
+thread later hit a stub") was the instance patch. The general solution is
+two layers: run each test in its own process, so one abort cannot erase
+another test's verdict (the collateral class disappears), and give every
+test one typed outcome (passed / failed with its own panic / aborted with
+a named cause) that every judge compares to the baseline by one rule.
+
 ## Nothing leaves this machine
 
 **Never transmit repository or workspace content to any external service.**

@@ -3125,13 +3125,21 @@ def run_phase_c_tdd(
         # Gated on NAMED vanished tests, never the bare missing count: an
         # unnamed shortfall is an inventory gap, and sending gdb + an ASAN
         # rebuild after it burns a sweep to conclude "no native fault".
-        if _oracle.vanished and deps.localize_crashes is not None:
+        # A test whose own isolated process died WITHOUT printing a panic
+        # is a native fault by the capture's own evidence (a stub's abort
+        # prints the stub's panic in that test's block), so it is localized
+        # with no stub-confounding deferral: that deferral guesses from a
+        # vanished set, and an isolated capture has nothing to guess.
+        _silent_aborts = TestStateReading(
+            parse_binary_results(output)).aborted_silent_names
+        if ((_oracle.vanished or _silent_aborts)
+                and deps.localize_crashes is not None):
             # A second gate on the SAME expensive path: while the fns the
             # vanished tests reach are still >=half stubs, a stub panic (not a
             # native fault) is the likely cause — gdb + an ASAN rebuild would
             # only conclude "no fault". Defer until fills land; the frontier
             # already carries the vanished tests via extra_failed above.
-            if vanish_is_stub_confounded(
+            if not _silent_aborts and vanish_is_stub_confounded(
                     _oracle.vanished, test_reverse_map,
                     deps.scan_unimplemented_functions(src_dir).units):
                 deps.log(f"  {tag} [phase-c/crash] {len(_oracle.vanished)} "

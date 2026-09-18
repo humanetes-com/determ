@@ -25,7 +25,7 @@ concrete frames), and the exhaustion gate (crash evidence voids a prior
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pipeline_core.domain.crash_site import (
@@ -43,7 +43,7 @@ from pipeline_core.domain.crash_site import (
 )
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.oracle_immutability import is_oracle_path
-from pipeline_core.domain.test_results import parse_binary_results
+from pipeline_core.domain.test_results import BinaryResult, parse_binary_results
 
 # adapter signatures (composition injects the concrete fns)
 GdbLocalize = Callable[..., "tuple[str, list[dict[str, object]]] | None"]
@@ -270,12 +270,24 @@ def localize_crashes(
     Returns () when nothing crashed or nothing could be localized — callers
     must treat an empty result on a shrunken oracle as "unlocalized", never
     as health."""
-    crashed = [b for b in parse_binary_results(sweep_output) if not b.completed]
+    # Two shapes carry a native fault: a binary whose section never closed
+    # (it could not be re-run one test per process), and — the normal case
+    # since the capture isolates aborted binaries — a test whose OWN process
+    # died without printing a panic (`aborted_silent`). The second names its
+    # test exactly, so gdb re-runs that one test (`test_filter`) instead of
+    # the whole binary. An abort that printed a panic already names its site
+    # in its failure block and is not a localizer target.
+    crashed: list[tuple[BinaryResult, str | None]] = []
+    for b in parse_binary_results(sweep_output):
+        if not b.completed:
+            crashed.append((b, None))
+        for name in sorted(b.aborted_silent):
+            crashed.append((replace(b, dangling=name), name))
     if not crashed:
         return ()
     considered = crashed[:max_binaries]
     sites: list[CrashSite] = []
-    for b in considered:
+    for b, test_filter in considered:
         if not b.exe_path:
             # A crashed binary with no executable path cannot be re-run, so it
             # gets no backtrace and no ASAN blame — and the sweep still counts
@@ -288,7 +300,9 @@ def localize_crashes(
         exe = Path(b.exe_path)
         if not exe.is_absolute():
             exe = workspace_root / exe
-        got = deps.gdb_localize(exe, workspace_root, env)
+        got = (deps.gdb_localize(exe, workspace_root, env,
+                                 test_filter=test_filter)
+               if test_filter else deps.gdb_localize(exe, workspace_root, env))
         if got is None:
             continue
         signal, frames = got

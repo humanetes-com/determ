@@ -11,7 +11,9 @@ caller both a rendered-text view (prompts / logs) and structured diagnostics
 
 from __future__ import annotations
 
+import os
 import shlex
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -23,8 +25,19 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
 )
+from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
+from pipeline_core.domain.test_isolation import (
+    IsolatedTest,
+    is_isolatable_test_run,
+    listed_tests,
+    listing_args,
+    read_single_test_run,
+    render_isolated_section,
+    run_args,
+    splice_isolated_sections,
+)
 from pipeline_core.domain.test_report import (
     BlameVerdict,
     CrashPanics,
@@ -88,12 +101,98 @@ def run_cargo(
 ) -> tuple[int, str]:
     """Run one cargo command via the port; return (rc, combined_output).
     rc=-1 (timeout / binary-not-found) keeps the bare message (in stderr);
-    otherwise the stdout+stderr-block combined layout (legacy parity)."""
+    otherwise the stdout+stderr-block combined layout (legacy parity).
+
+    A command that runs test binaries has every binary whose section never
+    closed re-run one test per process and its section rebuilt
+    (`isolate_aborted_binaries`), so no reader of the capture ever sees one
+    test's abort erase another test's verdict. `PHASE_C_TEST_ISOLATION=0`
+    restores the shared-process capture (the negative control)."""
     p = cargo.run(cmd, cwd, env=env, timeout=timeout)
     if p.returncode == -1:
         # Keep the pre-kill partial stdout (names the hung test).
         return -1, (p.stdout + "\n" if p.stdout else "") + p.stderr
-    return p.returncode, _combined(p.stdout, p.stderr)
+    stdout, stderr = isolate_aborted_binaries(
+        cargo, cmd, cwd, env, p.stdout, p.stderr, timeout=timeout)
+    return p.returncode, _combined(stdout, stderr)
+
+
+def isolation_enabled() -> bool:
+    """`PHASE_C_TEST_ISOLATION` (default on). Read per call: it decides how
+    a capture is measured, and a reading must never mix two rules inside
+    one process only because an env var was read once at a different
+    boundary than the run that uses it."""
+    return os.environ.get("PHASE_C_TEST_ISOLATION", "1").strip() != "0"
+
+
+def isolate_aborted_binaries(
+    cargo: Cargo,
+    cmd: str,
+    cwd: Path,
+    env: dict[str, str],
+    stdout: str,
+    stderr: str,
+    *,
+    timeout: int,
+) -> tuple[str, str]:
+    """Re-run each aborted binary one test per process and splice its
+    rebuilt section into the capture (see `domain.test_isolation`).
+
+    A binary is re-run when its section opened and never printed a trailer
+    and cargo named its executable. Its tests are LISTED with the original
+    filters, then each runs alone under `--exact` on one thread. The whole
+    step gets one deadline equal to the caller's `timeout`; a binary the
+    deadline cuts, one whose executable is gone, or a capture whose shape
+    will not splice unambiguously keeps its original section — the
+    shared-process reading, never a guessed one. The environment is the
+    run's own plus `CARGO_MANIFEST_DIR` (cargo sets it when it runs a test
+    binary, and a harness may read it at runtime)."""
+    if not (isolation_enabled() and is_isolatable_test_run(cmd)):
+        return stdout, stderr
+    combined = parse_binary_results(_combined(stdout, stderr))
+    if len(combined) != len(parse_binary_results(stdout)):
+        return stdout, stderr
+    targets = [(i, b) for i, b in enumerate(combined)
+               if not b.completed and not b.hung and b.exe_path]
+    if not targets:
+        return stdout, stderr
+    deadline = time.monotonic() + max(1, timeout)
+    run_env = dict(env)
+    run_env.setdefault("CARGO_MANIFEST_DIR", str(cwd))
+    rebuilt: dict[int, str] = {}
+    for idx, b in targets:
+        exe = Path(str(b.exe_path))
+        if not exe.is_absolute():
+            exe = cwd / exe
+        if not exe.exists():
+            continue
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        listing = cargo.run(shlex.join([str(exe), *listing_args(cmd)]), cwd,
+                            env=run_env, timeout=int(max(1, left)))
+        if listing.returncode != 0:
+            continue
+        names = listed_tests(listing.stdout)
+        if not names:
+            continue
+        runs: list[IsolatedTest] = []
+        for name in names:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            one = cargo.run(shlex.join([str(exe), *run_args(cmd, name)]), cwd,
+                            env=run_env, timeout=int(max(1, min(left, timeout))))
+            timed_out = (one.returncode == -1
+                         and getattr(one, "failure", None) is not ProcessFailure.BINARY_MISSING)
+            runs.append(read_single_test_run(
+                name, one.returncode, _combined(one.stdout, one.stderr),
+                timed_out=timed_out, timeout=min(left, timeout)))
+        if len(runs) != len(names):
+            continue
+        rebuilt[idx] = render_isolated_section(runs)
+    spliced = splice_isolated_sections(stdout, stderr, rebuilt)
+    return spliced if spliced is not None else (stdout, stderr)
 
 
 def run_scoped_tests(
@@ -327,6 +426,12 @@ def test_regression_gate(
                   "The oracle score is the objective; a strict net gain is "
                   "not refused over an individual loss")
         return None
+    # Reached only for a binary the capture could NOT rebuild one test per
+    # process (`isolate_aborted_binaries`: no executable path, the deadline,
+    # an ambiguous splice, or `PHASE_C_TEST_ISOLATION=0`). An isolated binary
+    # always completes, its aborted tests are per-test failures, and the
+    # per-test comparison above already judged them; the branches below are
+    # the fallback reading of a shared-process abort, not a second rule.
     # A crash-only verdict is asked one more question before it may revert:
     # WHAT panicked, in the binaries that COST something. When every
     # completed binary held (no newly-red, no measured-scope count drop) and
