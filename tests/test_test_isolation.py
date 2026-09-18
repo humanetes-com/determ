@@ -9,6 +9,16 @@ invented; no crate-under-reconstruction name appears.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass as _dc
+from pathlib import Path
+
+import pytest
+
+from pipeline_core.application.reconstruct import cargo_runner as cr
+from pipeline_core.application.reconstruct.crash_localizer import (
+    CrashLocalizerDeps,
+    localize_crashes,
+)
 from pipeline_core.domain.test_isolation import (
     IsolatedStatus,
     IsolatedTest,
@@ -170,3 +180,110 @@ def test_negative_control_raw_names_read_the_shift_as_new_failures() -> None:
     assert c.failed - b.failed  # the pre-fix comparison: a "new" failure
     keys_b, keys_c = stable_test_keys(b), stable_test_keys(c)
     assert {keys_c[n] for n in c.failed} == {keys_b[n] for n in b.failed}
+
+
+# --- the runner half, driven through a fake cargo port -----------------------
+
+
+
+@_dc(frozen=True)
+class _Proc:
+    returncode: int
+    stdout: str
+    stderr: str
+    failure: object = None
+
+
+class _FakeCargo:
+    """A shared-process run where `a` aborts the binary before `b` reports,
+    and single-test runs that give each test its own outcome: `a` dies on a
+    stub panic during cleanup, `b` passes, `c` dies on a signal with no
+    panic."""
+
+    def __init__(self, exe: Path) -> None:
+        self.exe = str(exe)
+        self.calls: list[str] = []
+
+    def run(self, cmd: str, cwd: Path, *, env: dict[str, str],
+            timeout: int = 180) -> _Proc:
+        self.calls.append(cmd)
+        if cmd.startswith("cargo test"):
+            return _Proc(101, "\nrunning 3 tests\ntest a ... ",
+                         f"     Running tests/t.rs ({self.exe})\n"
+                         "thread 'a' panicked at src/s.rs:4:5:\nnot implemented\n"
+                         "error: test failed, to rerun pass `--test t`\n")
+        if "--list" in cmd:
+            return _Proc(0, "a: test\nb: test\nc: test\n", "")
+        name = cmd.rsplit(" ", 1)[-1]
+        if name == "b":
+            return _Proc(0, "\nrunning 1 test\ntest b ... ok\n\n"
+                         "test result: ok. 1 passed; 0 failed; 0 ignored; "
+                         "0 measured; 2 filtered out\n", "")
+        if name == "a":
+            return _Proc(134, "\nrunning 1 test\ntest a ... ",
+                         "thread 'a' panicked at tests/t.rs:3:5:\nown\n"
+                         "thread 'a' panicked at src/s.rs:4:5:\nnot implemented\n")
+        return _Proc(139, "\nrunning 1 test\ntest c ... ", "")
+
+
+@pytest.fixture
+def exe(tmp_path: Path) -> Path:
+    p = tmp_path / "t-bin"
+    p.write_text("")
+    return p
+
+
+def test_run_cargo_rebuilds_an_aborted_binary_per_test(
+        exe: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    cargo = _FakeCargo(exe)
+    rc, out = cr.run_cargo(cargo, "cargo test --no-fail-fast", tmp_path, {})
+    (b,) = parse_binary_results(out)
+    assert rc == 101 and b.completed and b.label == "tests/t.rs"
+    assert b.passed == {"b"} and b.aborted == {"a", "c"}
+    assert b.aborted_silent == {"c"}
+    assert "to rerun pass" not in out
+    assert any("--exact c" in c for c in cargo.calls)
+
+
+def test_negative_control_isolation_off_keeps_the_dead_section(
+        exe: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "0")
+    cargo = _FakeCargo(exe)
+    _rc, out = cr.run_cargo(cargo, "cargo test --no-fail-fast", tmp_path, {})
+    (b,) = parse_binary_results(out)
+    assert not b.completed and "b" not in b.passed
+    assert len(cargo.calls) == 1
+
+
+def test_a_missing_executable_keeps_the_original_section(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    cargo = _FakeCargo(tmp_path / "gone")
+    _rc, out = cr.run_cargo(cargo, "cargo test", tmp_path, {})
+    assert not parse_binary_results(out)[0].completed
+
+
+def test_the_localizer_reruns_a_silent_abort_by_its_own_test(
+        exe: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    _rc, out = cr.run_cargo(_FakeCargo(exe), "cargo test", tmp_path, {})
+    seen: list[object] = []
+
+    def gdb(exe_path: Path, cwd: Path, env: dict[str, str], *,
+            test_filter: str | None = None) -> None:
+        seen.append(test_filter)
+        return None
+
+    localize_crashes(CrashLocalizerDeps(gdb_localize=gdb, asan_sweep=None,
+                                        log=lambda _m: None),
+                     out, "cargo test", tmp_path, {})
+    # `a` printed its panics (a stub abort, attributable from its block);
+    # only the silent `c` is a native fault worth a gdb run.
+    assert seen == ["c"]
+
+
+def test_single_run_with_no_section_is_a_failure_never_a_pass() -> None:
+    t = read_single_test_run("x", 1, "error: could not execute",
+                             timed_out=False, timeout=5)
+    assert t.status is IsolatedStatus.FAILED and "could not execute" in t.body
