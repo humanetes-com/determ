@@ -193,9 +193,18 @@ _GPU_BW = {"3090": 936.2, "3080": 760.0, "4090": 1008.0, "4080": 716.8,
 
 # ── ANSI helpers ──────────────────────────────────────────────────────────────
 
-def _w():
+# Set while one column of the split layout renders, so every box, wrap and
+# panel that sizes itself on _w() sizes itself on its column instead.
+_width_override: int | None = None
+
+def _term_w():
     try: return os.get_terminal_size().columns
     except: return 80
+
+def _w():
+    if _width_override is not None:
+        return _width_override
+    return _term_w()
 
 def _h():
     try: return os.get_terminal_size().lines
@@ -799,6 +808,21 @@ def _detach(cmd):
 _view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields
 _scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0, "fields": 0}   # lines scrolled up from bottom (0=bottom)
 _show_hints  = True           # inline field-hint strip under the monitor view (toggle: [t])
+# Split layout (toggle: [v], or MONITOR_SPLIT=1 at start): [1]Monitor stays in
+# the left column and the selected detail view (2/3/4/legend/health/fields)
+# renders in the right column instead of replacing it. The right column is
+# The left column is the narrow one: MONITOR_SPLIT_WIDTH columns (0 = the cap),
+# never more than SPLIT_MAX_LEFT_PCT of the screen and never under
+# SPLIT_MIN_LEFT, adjustable with [<]/[>]; the detail view gets the rest, since
+# logs and events are what need the width. When the terminal cannot fit both
+# columns the tabbed layout is used and the bar says so.
+_split       = os.getenv("MONITOR_SPLIT", "0") == "1"
+_split_w     = int(os.getenv("MONITOR_SPLIT_WIDTH", "0") or 0)
+_last_detail = "stream"       # the detail view the right column shows while _view is monitor
+SPLIT_MAX_LEFT_PCT = 30
+SPLIT_MIN_LEFT  = 40
+SPLIT_MIN_RIGHT = 60
+SPLIT_STEP      = 10
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
 _graceful_pending = graceful_stop.SENTINEL_PATH.exists()  # survives monitor restart
 
@@ -889,15 +913,24 @@ def _prompt_url() -> str:
 def _bottom_bar():
     running = _pipeline_running()
 
+    split = _split_widths() is not None
+    shown = {"monitor", _pane_view()} if split else {_view}
     parts = []
     for vid, key, label in VIEWS:
         tag = f"[{key}]{label}"
-        parts.append(rev(bold(tag)) if vid == _view else dim(tag))
+        parts.append(rev(bold(tag)) if vid in shown else dim(tag))
     s_col = red if running else dim
+    if split:
+        split_tag = cyan("[v]split on [<>]")
+    elif _split:
+        split_tag = yellow("[v]split (too narrow)")
+    else:
+        split_tag = dim("[v]split")
     parts += [
-        rev(bold("[l]egend")) if _view == "legend" else dim("[l]egend"),
-        rev(bold("[h]ealth")) if _view == "health" else dim("[h]ealth"),
-        rev(bold("[f]ields")) if _view == "fields" else dim("[f]ields"),
+        rev(bold("[l]egend")) if "legend" in shown else dim("[l]egend"),
+        rev(bold("[h]ealth")) if "health" in shown else dim("[h]ealth"),
+        rev(bold("[f]ields")) if "fields" in shown else dim("[f]ields"),
+        split_tag,
         cyan("[t]ips on") if _show_hints else dim("[t]ips off"),
         green("[c]ontinue"),
         cyan("[g]raceful"),
@@ -926,7 +959,7 @@ BOTTOM_LINES = 2   # action/feedback msg + fixed legend
 
 def _log_lines(log_path, tail_bytes: int = 2 * 1024 * 1024):
     """Return word-wrapped lines from a log file (last tail_bytes only)."""
-    w = _w()
+    w = max(1, _w() - 3)   # a box's content width: "│ " + text + "│"
     try:
         with open(log_path, "rb") as fh:
             fh.seek(0, 2)
@@ -953,7 +986,7 @@ def _log_lines(log_path, tail_bytes: int = 2 * 1024 * 1024):
 
 def _event_lines(events_path: str, tail_bytes: int = 1024 * 1024) -> list[str]:
     """Word-wrap formatted events from the tail of events.jsonl."""
-    w = _w()
+    w = max(1, _w() - 3)   # a box's content width: "│ " + text + "│"
     try:
         with open(events_path, "rb") as fh:
             fh.seek(0, 2)
@@ -1014,9 +1047,11 @@ def _event_box(events_path: str, view_key: str, title: str, inner: int, header=(
     dashes = max(0, w - len(title) - len(s_plain) - 3)
     _ln(f"┌─ {bold(title)}{s_display} {'─' * dashes}┐")
     for h_line in header:
+        h_line = _truncate_visible(h_line, w - 1)
         pad = w - 1 - len(_plain(h_line))
         _ln(f"│ {h_line}{' ' * max(pad, 0)}│")
     for ln in view:
+        ln = _truncate_visible(ln, w - 1)
         pad = w - 1 - len(_plain(ln))
         _ln(f"│ {ln}{' ' * max(pad, 0)}│")
     for _ in range(scroll_inner - len(view)):
@@ -1052,9 +1087,11 @@ def _log_box(log_path, view_key, title, inner, header=()):
     dashes = max(0, w - len(title) - len(s_plain) - 3)
     _ln(f"┌─ {bold(title)}{s_display} {'─' * dashes}┐")
     for h_line in header:
+        h_line = _truncate_visible(h_line, w - 1)
         pad = w - 1 - len(_plain(h_line))
         _ln(f"│ {h_line}{' ' * max(pad, 0)}│")
     for ln in view:
+        ln = _truncate_visible(ln, w - 1)
         pad = w - 1 - len(_plain(ln))
         _ln(f"│ {ln}{' ' * max(pad, 0)}│")
     for _ in range(scroll_inner - len(view)):   # pad to fill exact height
@@ -1062,40 +1099,139 @@ def _log_box(log_path, view_key, title, inner, header=()):
     _ln("└" + "─" * w + "┘")
 
 
-def _render_all():
-    h = _h()
+def _split_widths() -> tuple[int, int] | None:
+    """(left, right) column widths when the split layout is on and fits, else None."""
+    if not _split:
+        return None
+    total = _term_w()
+    cap = total * SPLIT_MAX_LEFT_PCT // 100
+    left = min(_split_w or cap, cap)
+    right = total - left - 1   # one blank column between the two
+    if left < SPLIT_MIN_LEFT or right < SPLIT_MIN_RIGHT:
+        return None
+    return left, right
 
-    # ── Box 1: GPU (always compact) ──
-    gpu_rows = gpu()
+
+def _pane_view() -> str:
+    """The detail view the split layout's right column shows."""
+    return _view if _view != "monitor" else _last_detail
+
+
+def _fit(line: str, width: int) -> str:
+    """Pad or cut `line` to exactly `width` visible columns."""
+    visible = len(_plain(line))
+    if visible > width:
+        return _truncate_visible(line, width)
+    return line + " " * (width - visible)
+
+
+def _render_monitor_boxes(body_h, gpu_rows, pipeline_rows, gen_rows):
+    """View 1: GPU, Pipeline, Generation and the field hints, padded to body_h."""
     for row in box_lines("GPU", gpu_rows):
         _ln(row)
+    for row in box_lines("Pipeline", pipeline_rows):
+        _ln(row)
+    for row in box_lines("Generation", gen_rows):
+        _ln(row)
+    if _show_hints:
+        _plain_text = "\n".join(_plain(r) for r in pipeline_rows + gen_rows)
+        _hints = _hint_lines(_plain_text, _w() - 4)
+        if _hints:
+            for row in box_lines("field hints — [t] hide, [f] full glossary", [dim(hh) for hh in _hints]):
+                _ln(row)
+    while len(_buf) < body_h:
+        _ln()
+
+
+def _render_detail_box(view, inner, pipeline_rows, gen_rows):
+    """The one expanding box of a detail view, with `inner` content rows."""
+    if view == "pipeline":
+        _log_box(PIPELINE_LOG, "pipeline", "Pipeline Log", inner,
+                 header=(pipeline_rows[:1]))
+    elif view == "stream":
+        _log_box(STREAM_LOG, "stream", "Stream Log", inner,
+                 header=(gen_rows[:1]))
+    elif view == "events":
+        _event_box(EVENTS_LOG, "events", "Events (logs/events.jsonl)", inner,
+                   header=(pipeline_rows[:1] if pipeline_rows else ()))
+    else:
+        if view == "health":
+            title, rows = ("Run health (60s cache) — tools/run_health.py",
+                           _health_lines(PIPELINE_LOG,
+                                         SCRIPT_DIR + "/tmp/anyhow")[:inner])
+        elif view == "fields":
+            title, rows = ("Field glossary — what each stat/label on screen means",
+                            _field_glossary_window(_w() - 4, inner, _scroll["fields"]))
+        else:
+            title, rows = ("Legend — what each phase performs",
+                           _legend_window(_w() - 4, inner, _scroll["legend"]))
+        for row in box_lines(title, rows):
+            _ln(row)
+
+
+def _render_split(widths, gpu_rows, pipeline_rows, gen_rows):
+    """Monitor in the left column, the selected detail view in the right."""
+    global _width_override
+    left_w, right_w = widths
+    body_h = _h() - BOTTOM_LINES
+    try:
+        _width_override = left_w
+        _render_monitor_boxes(body_h, gpu_rows, pipeline_rows, gen_rows)
+        left = _buf[:body_h]
+        _buf.clear()
+        _width_override = right_w
+        _render_detail_box(_pane_view(), max(1, body_h - 2), pipeline_rows, gen_rows)
+        right = _buf[:body_h]
+        _buf.clear()
+    finally:
+        _width_override = None
+    for i in range(body_h):
+        l_row = left[i] if i < len(left) else ""
+        r_row = right[i] if i < len(right) else ""
+        _ln(f"{_fit(l_row, left_w)} {_fit(r_row, right_w)}")
+
+
+def _render_all():
+    h = _h()
+    widths = _split_widths()
+
+    # The panels size themselves on _w() when they are built, so in the split
+    # layout they are built at the left column's width.
+    global _width_override
+    _width_override = widths[0] if widths else None
+    try:
+        gpu_rows      = gpu()
+        pipeline_rows = pipeline_status()
+        gen_rows      = generation()
+    finally:
+        _width_override = None
+
+    if widths:
+        _render_split(widths, gpu_rows, pipeline_rows, gen_rows)
+        for row in _bottom_bar():
+            _ln(row)
+        return
+
+    # ── Box 1: GPU (always compact) ──
     gpu_h = len(gpu_rows) + 2
 
     # ── Boxes 2 & 3: layout depends on view ──
-    pipeline_rows = pipeline_status()
-    gen_rows      = generation()
     pipeline_h    = len(pipeline_rows) + 2
     gen_h         = len(gen_rows) + 2
 
     if _view == "monitor":
-        for row in box_lines("Pipeline", pipeline_rows):
+        _render_monitor_boxes(h - BOTTOM_LINES, gpu_rows, pipeline_rows, gen_rows)
+        for row in _bottom_bar():
             _ln(row)
-        for row in box_lines("Generation", gen_rows):
-            _ln(row)
-        if _show_hints:
-            _plain_text = "\n".join(_plain(r) for r in pipeline_rows + gen_rows)
-            _hints = _hint_lines(_plain_text, _w() - 4)
-            if _hints:
-                for row in box_lines("field hints — [t] hide, [f] full glossary", [dim(hh) for hh in _hints]):
-                    _ln(row)
-        while len(_buf) < h - BOTTOM_LINES:
-            _ln()
+        return
 
-    elif _view == "pipeline":
+    for row in box_lines("GPU", gpu_rows):
+        _ln(row)
+
+    if _view == "pipeline":
         # Box 2 expands; Box 3 compact at bottom
         inner = max(1, h - gpu_h - gen_h - 2 - BOTTOM_LINES)
-        _log_box(PIPELINE_LOG, "pipeline", "Pipeline Log", inner,
-                 header=(pipeline_rows[:1]))
+        _render_detail_box("pipeline", inner, pipeline_rows, gen_rows)
         for row in box_lines("Generation", gen_rows):
             _ln(row)
 
@@ -1114,31 +1250,18 @@ def _render_all():
             _ln(row)
         compact_h = len(compact_rows) + 2
         inner = max(1, h - gpu_h - compact_h - 2 - BOTTOM_LINES)
-        _log_box(STREAM_LOG, "stream", "Stream Log", inner,
-                 header=(gen_rows[:1]))
+        _render_detail_box("stream", inner, pipeline_rows, gen_rows)
 
     elif _view == "events":
         # Box 2 compact; events box expands at the bottom.
         for row in box_lines("Pipeline", pipeline_rows):
             _ln(row)
         inner = max(1, h - gpu_h - pipeline_h - 2 - BOTTOM_LINES)
-        _event_box(EVENTS_LOG, "events", "Events (logs/events.jsonl)", inner,
-                   header=(pipeline_rows[:1] if pipeline_rows else ()))
+        _render_detail_box("events", inner, pipeline_rows, gen_rows)
 
     elif _view in ("health", "legend", "fields"):
         inner = max(1, h - gpu_h - 2 - BOTTOM_LINES)
-        if _view == "health":
-            title, rows = ("Run health (60s cache) — tools/run_health.py",
-                           _health_lines(PIPELINE_LOG,
-                                         SCRIPT_DIR + "/tmp/anyhow")[:inner])
-        elif _view == "fields":
-            title, rows = ("Field glossary — what each stat/label on screen means",
-                            _field_glossary_window(_w() - 4, inner, _scroll["fields"]))
-        else:
-            title, rows = ("Legend — what each phase performs",
-                           _legend_window(_w() - 4, inner, _scroll["legend"]))
-        for row in box_lines(title, rows):
-            _ln(row)
+        _render_detail_box(_view, inner, pipeline_rows, gen_rows)
         while len(_buf) < h - BOTTOM_LINES:
             _ln()
 
@@ -1173,7 +1296,20 @@ def _augmentation_tag() -> str | None:
 
 
 def _run_action(key):
+    _apply_key(key)
+    if _view != "monitor":
+        global _last_detail
+        _last_detail = _view
+
+
+def _scroll_target() -> str:
+    """The view the scroll keys move: the right column's in the split layout."""
+    return _pane_view() if _split_widths() is not None else _view
+
+
+def _apply_key(key):
     global _action_msg, _view, _confirm, _graceful_pending, _show_hints
+    global _split, _split_w
     if _confirm == "wipe":
         if key == "y":
             _confirm = None
@@ -1291,15 +1427,33 @@ def _run_action(key):
         _set_auto_armed(not _auto_armed())
         _action_msg = (green("[a]uto mode ON — pipeline will fire operator_run.sh on stall")
                       if _auto_armed() else dim("[a]uto mode off"))
+    elif key == "v":
+        _split = not _split
+        if _split and _split_widths() is None:
+            _action_msg = yellow(f"split on, but the terminal is too narrow "
+                                 f"(needs {SPLIT_MIN_LEFT * 100 // SPLIT_MAX_LEFT_PCT + 1} columns) — tabs until it widens")
+        else:
+            _action_msg = ""
+    elif key in ("<", ">") and _split:
+        # [<]/[>] narrow/widen the left (overview) column within its bounds.
+        cap = _term_w() * SPLIT_MAX_LEFT_PCT // 100
+        current = min(_split_w or cap, cap)
+        step = SPLIT_STEP if key == ">" else -SPLIT_STEP
+        _split_w = max(SPLIT_MIN_LEFT, min(current + step, cap))
     elif key in ("1", "2", "3", "4"):
         _view = {"1": "monitor", "2": "pipeline", "3": "stream", "4": "events"}[key]
-    elif key == "UP"   and _view in _scroll: _scroll[_view] += SCROLL_STEP
-    elif key == "DOWN" and _view in _scroll: _scroll[_view] = max(0, _scroll[_view] - SCROLL_STEP)
-    elif key == "PGUP" and _view in _scroll: _scroll[_view] += available_lines()
-    elif key == "PGDN" and _view in _scroll: _scroll[_view] = max(0, _scroll[_view] - available_lines())
+    elif key in ("UP", "DOWN", "PGUP", "PGDN") and _scroll_target() in _scroll:
+        target = _scroll_target()
+        step = SCROLL_STEP if key in ("UP", "DOWN") else available_lines()
+        if key in ("UP", "PGUP"):
+            _scroll[target] += step
+        else:
+            _scroll[target] = max(0, _scroll[target] - step)
 
 def available_lines():
     h = _h()
+    if _split_widths() is not None:
+        return max(1, h - BOTTOM_LINES - 2)
     gpu_h = len(gpu()) + 2
     if _view == "pipeline":
         gen_h = len(generation()) + 2

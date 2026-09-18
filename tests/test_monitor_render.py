@@ -228,3 +228,44 @@ def test_iteration_progress_rows_sweep_bar_falls_back_to_the_frontier() -> None:
     text = _render.plain("\n".join(_render.iteration_progress_rows(state, now)))
     assert "35 unit(s)" in text and "past this iter's 21 unit(s)" in text
     assert "frontier fn(s)" not in text and "21/21" not in text
+
+
+def _render_frame(monkeypatch, cols: int, split: bool, view: str) -> list[str]:
+    monkeypatch.setattr(m, "_term_w", lambda: cols)
+    monkeypatch.setattr(m, "_h", lambda: 30)
+    monkeypatch.setattr(m, "_split", split)
+    monkeypatch.setattr(m, "_split_w", 0)
+    monkeypatch.setattr(m, "_view", view)
+    monkeypatch.setattr(m, "gpu", lambda: ["gpu row " + "x" * 300])
+    monkeypatch.setattr(m, "pipeline_status", lambda: ["pipeline row " + "y" * 300])
+    monkeypatch.setattr(m, "generation", lambda: ["gen row"])
+    m._buf.clear()
+    m._render_all()
+    frame = list(m._buf)
+    m._buf.clear()
+    return frame
+
+
+def test_split_keeps_monitor_left_and_detail_right(monkeypatch) -> None:
+    # A wide terminal with split on: every body row is exactly the terminal
+    # width (both columns padded or cut to their own width), the left column
+    # carries the monitor boxes and the right the selected detail view.
+    frame = _render_frame(monkeypatch, 200, True, "legend")
+    left_w, right_w = m._split_widths() or (0, 0)
+    assert left_w + 1 + right_w == 200
+    assert left_w <= 200 * 30 // 100 < right_w   # the overview is the narrow column
+    body = [m._plain(r) for r in frame[:-m.BOTTOM_LINES]]
+    assert len(body) == 30 - m.BOTTOM_LINES
+    assert {len(r) for r in body} == {200}
+    assert body[0][:left_w].startswith("┌─ GPU")
+    assert body[0][left_w + 1:].startswith("┌─ Legend")
+    assert body[0][left_w - 1] == "┐" and body[0][-1] == "┐"
+
+
+def test_split_falls_back_to_tabs_when_too_narrow(monkeypatch) -> None:
+    frame = _render_frame(monkeypatch, 100, True, "legend")
+    assert m._split_widths() is None
+    plain = [m._plain(r) for r in frame]
+    assert plain[0].startswith("┌─ GPU")
+    assert any(r.startswith("┌─ Legend") for r in plain)
+    assert not any("┐ ┌" in r for r in plain)   # no second column
