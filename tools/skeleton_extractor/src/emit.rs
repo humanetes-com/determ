@@ -128,7 +128,7 @@ fn with_gate(cfg_line: &str, text: &str) -> String {
 /// True when the item, or anything nested in it, carries a `#[doc = "…"]`
 /// whose string spans several lines.
 ///
-/// Such an item is rendered rather than spliced, so FR-033's normalisation
+/// Such an item is rendered rather than spliced, so the doc-normalisation pass
 /// still runs on it: a multi-line doc string is what makes prettyplease switch
 /// from `///` to `/** */`, and a run that alternates between the two splits a
 /// doctest's ``` fence across comment kinds so the example's hidden setup lines

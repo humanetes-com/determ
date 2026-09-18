@@ -1,7 +1,7 @@
 """Pure prompt assembly for the legacy whole-file-rewrite fix strategy (chunk H).
 
 `generate_fix_loop._do_fix` used to build this prompt inline. It is the
-straggler of the P3.A inline-fix-prompt set (the other four live in
+straggler of the inline-fix-prompt set (the other four live in
 `fix_prompts.py`); unlike those, it also owns the char-budget math (it caps the
 error/source/spec/extra-context sections to fit `single_call_char_limit`), so it
 lives in its own module and depends on `domain.text.smart_truncate`.

@@ -7,8 +7,8 @@ WHY
     open work"). The only precedent before this script was
     `tools/split_tech_debt.py` -- a one-shot with hardcoded line ranges,
     guarded to refuse ever running again. There was no reusable tool, so
-    every archival since session 281 has been a hand cut-and-paste: locate
-    the entry, cut it, paste it under a new archive header, and hope
+    every archival since that one-off split has been a hand cut-and-paste:
+    locate the entry, cut it, paste it under a new archive header, and hope
     nothing else in the same edit was still relying on the line numbers
     that move underneath it.
 

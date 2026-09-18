@@ -1,12 +1,12 @@
 """Byte-exact fn-body splice + syn-record locator — the regex-free core of
-the per-fn fill engine's source mutation (P2 slice 3; the name-match splice
+the per-fn fill engine's source mutation (the name-match splice
 siblings folded in 2026-06-29 / source-splice cluster).
 
 Two locate strategies: `locate_fn_by_record` uses the syn enumerator (canonical
 byte offsets) and takes it as a plain injected callable, so this layer never
 imports the extractor adapter (DIP without ceremony); the name-match siblings
 (`replace_fn_signature`/`splice_fn_body`/`splice_fn_with_where`) use the pure
-`domain.rust_fn_headers.locate_fn` char-space scan (regex-free since P7) as the
+`domain.rust_fn_headers.locate_fn` char-space scan (regex-free) as the
 extractor-absent fallback. pipeline.py keeps thin late-binding shims over these
 so the e2e harness's `_enumerate_fns_via_extractor` monkeypatch is resolved at
 CALL time.
@@ -302,7 +302,7 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
 
 def replace_fn_signature(file_path: Path, fn_name: str, new_sig: str,
                          validate_parse: ParseValidator | None = None) -> bool:
-    """P3.1: replace the verbatim signature line(s) of ``fn_name`` with
+    """Replace the verbatim signature line(s) of ``fn_name`` with
     ``new_sig``, leaving the body intact. Only for PRIVATE fns (changing a
     ``pub`` sig would break the test surface) and only when ``new_sig`` still
     declares ``fn_name`` (the model can't rename). Returns True iff applied.

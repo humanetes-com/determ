@@ -1,4 +1,4 @@
-"""Phase-B test-grouping use-case (P6 relocation of `pipeline._task2_group_tests`).
+"""Phase-B test-grouping use-case (relocation of `pipeline._task2_group_tests`).
 
 Asks the model to partition a cluster's test files into cohesive reconstruction
 units, validates/auto-recovers the JSON manifest, enforces the max-group-size

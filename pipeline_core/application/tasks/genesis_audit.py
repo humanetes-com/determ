@@ -1,6 +1,6 @@
 """Genesis audit task — review genesis.md for internal contradictions (LLM use case).
 
-First task extracted from pipeline.py (slice 5b). Body is verbatim; the former module-level
+First task extracted from pipeline.py. Body is verbatim; the former module-level
 collaborators (``ask``/``read``/``write``/``_log``/``with_retry``/``_extract_genesis`` and
 the genesis-format constants) are injected via :class:`GenesisAuditDeps` from the
 composition root, so this module imports only stdlib — never pipeline.py.

@@ -1,6 +1,6 @@
 """TASK 1 — functional-requirements synthesis dispatcher (+ proc-macro path).
 
-Extracted from pipeline.py (slice 5b, Option 1). `task1` is a thin dispatcher over a
+Extracted from pipeline.py. `task1` is a thin dispatcher over a
 Task1Synthesizer (built by an injected factory) with a special proc-macro path. The
 Rust-source regex (derive/attribute prefilter + static fallback) stays in pipeline.py
 behind injected helpers; only the incidental fence fallback is replaced with
@@ -192,8 +192,8 @@ def task1(req: Task1Request, deps: Task1Deps) -> bool:
     if genesis_exists:
         log("  genesis.md exists — will use as-is; only producing functional_requirements.md.")
     else:
-        # Seed the reconstruction methodology now (deterministic, debt #38) so
-        # every downstream prompt carries it even when TASK 4 never runs.
+        # Seed the reconstruction methodology now (deterministic) so every
+        # downstream prompt carries it even when TASK 4 never runs.
         write(genesis_path, GENESIS_SEED)
         log("  No genesis.md yet — seeded it with the reconstruction methodology.")
 

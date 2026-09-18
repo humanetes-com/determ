@@ -1,4 +1,4 @@
-"""Role-based ports for the TASK-1 requirements synthesizers (debt #14).
+"""Role-based ports for the TASK-1 requirements synthesizers.
 
 `application.generators.task1_synthesizer` use-cases depend on these narrow ROLE
 Protocols (ISP) instead of the older `configure()` module-global injection seam.

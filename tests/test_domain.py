@@ -1,4 +1,4 @@
-"""Behavioural unit tests for the pure domain layer (CODE_ARCHITECTURE.md §8 R4.2).
+"""Behavioural unit tests for the pure domain layer.
 
 These functions are the parsers/transformers contributors most often break: model-output
 extraction, prompt-budget truncation, and test-result parsing. Pure (no I/O, deterministic),
@@ -590,7 +590,7 @@ def test_parse_retrospective_matches_old_regex() -> None:
 
 
 def test_extract_code_blocks_matches_old_regex() -> None:
-    r"""P3.4: fenced code-block extractor equals the old inline
+    r"""Fenced code-block extractor equals the old inline
     re.findall(r'```[a-zA-Z0-9_-]*\n(.*?)```', resp, re.DOTALL)."""
     import re
     old = re.compile(r'```[a-zA-Z0-9_-]*\n(.*?)```', re.DOTALL)
@@ -607,7 +607,7 @@ def test_extract_code_blocks_matches_old_regex() -> None:
 
 
 def test_strip_uncovered_markers_matches_old_regex() -> None:
-    r"""P3.4: marker strip equals old re.sub(r'\s*//\s*!!\s*UNCOVERED[^\n]*', '', t)."""
+    r"""Marker strip equals old re.sub(r'\s*//\s*!!\s*UNCOVERED[^\n]*', '', t)."""
     import re
     old = re.compile(r'\s*//\s*!!\s*UNCOVERED[^\n]*')
     samples = [
@@ -622,7 +622,7 @@ def test_strip_uncovered_markers_matches_old_regex() -> None:
 
 
 def test_strip_think_blocks_matches_old_regex() -> None:
-    r"""P3.7: think-block strip equals old re.sub(r'<think>.*?</think>', '', t, DOTALL)."""
+    r"""Think-block strip equals old re.sub(r'<think>.*?</think>', '', t, DOTALL)."""
     import re
     old = re.compile(r'<think>.*?</think>', re.DOTALL)
     cases = [
@@ -689,7 +689,7 @@ def test_strip_trailing_file_tag_matches_old_regex() -> None:
 
 
 def test_strip_list_marker_matches_old_regex() -> None:
-    """Regex-free list-marker strip == the former `^[-*\\d]+[.):]?\\s*` sub (R7)."""
+    """Regex-free list-marker strip == the former `^[-*\\d]+[.):]?\\s*` sub."""
     old = lambda line: re.sub(r'^[\-\*\d]+[\.\):]?\s*', '', line)  # noqa: E731
     cases = [
         "- src/x.rs", "* a.rs", "1. file.rs", "2) y.rs", "3: z.rs", "10. ten.rs",
@@ -702,7 +702,7 @@ def test_strip_list_marker_matches_old_regex() -> None:
 
 
 def test_tagged_path_block_spans_matches_old_regex() -> None:
-    """Regex-free span finder == `\\n<tag path="[^"]*">.*?</tag>` (DOTALL, R7)."""
+    """Regex-free span finder == `\\n<tag path="[^"]*">.*?</tag>` (DOTALL)."""
     def old(t: str, tag: str) -> list[tuple[int, int]]:
         pat = re.compile(r'\n<' + re.escape(tag) + r' path="[^"]*">.*?</' + re.escape(tag) + r'>',
                          re.DOTALL)
@@ -735,7 +735,7 @@ def test_tagged_path_block_spans_requires_gt_after_quote() -> None:
 
 def test_sibling_comment_block_spans_matches_old_regex() -> None:
     """Regex-free `// --- name ---` block finder == the former
-    `\\n// --- [^\\n]+ ---\\n[^/]*?(?=\\n// ---|$)` (R7)."""
+    `\\n// --- [^\\n]+ ---\\n[^/]*?(?=\\n// ---|$)`."""
     def old(t: str) -> list[tuple[int, int]]:
         pat = re.compile(r'\n// --- [^\n]+ ---\n[^/]*?(?=\n// ---|$)', re.DOTALL)
         return [m.span() for m in pat.finditer(t)]

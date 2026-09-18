@@ -1,7 +1,7 @@
 """Flow-invariant audit — periodic + on-demand run-health reporting.
 
-Relocated from `pipeline.py` (Plan #77 S4: the run-loop's audit-thread resident
-becomes composition-owned). Holds the shared `RunState` by reference — `init_log`
+Relocated from `pipeline.py`: the run-loop's audit-thread resident
+becomes composition-owned. Holds the shared `RunState` by reference — `init_log`
 / run-registration populate it before the first report, and because it is the
 same object those writes are visible here — runs the domain audit
 (`pipeline_core.audit`) over the events log + prompts dir, and reports via the

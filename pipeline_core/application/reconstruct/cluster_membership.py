@@ -225,7 +225,7 @@ def propagate_or_quarantine_sibling(
     gt: Path, origin_manifest: dict[str, Any], parent_stem: str, pass_n: int,
     log_fn: Callable[[str], None] | None = None, tag: str = "",
 ) -> bool:
-    """R9.6: the origin manifest is authoritative for which gen_tests siblings
+    """The origin manifest is authoritative for which gen_tests siblings
     are legit. True → propagate (declared, or empty/absent manifest = legacy
     run). A sibling absent from a NON-empty manifest was never coverage-validated
     pre-strip → quarantine to `.broken` and return False (the cluster-leak class)."""
@@ -555,7 +555,7 @@ def fn_belongs_to_cluster(
     Evaluates the conjunction of the file's parent-mod cfg and the fn's own cfg
     attrs against the cluster's cfg_true / cfg_false sets.
 
-    `fn_cfg_preds` (R7.4a): the syn extractor's cfg list for THIS fn record —
+    `fn_cfg_preds`: the syn extractor's cfg list for THIS fn record —
     callers holding extractor records pass it ([] = ungated, trusted as-is).
     Only when None does the legacy text-walk run.
 

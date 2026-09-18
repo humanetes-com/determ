@@ -1,6 +1,6 @@
 """Tests for pipeline_core.adapters.api_surface.ApiSurfaceCapture.
 
-Focused on the pub-items manifest (debt #64): capture() must persist a
+Focused on the pub-items manifest: capture() must persist a
 STRUCTURED pub-item set (from the same extractor as the type manifest), not
 rely on a later regex over the human-readable listing text.
 """

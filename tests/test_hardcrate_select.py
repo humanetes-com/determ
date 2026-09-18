@@ -1,4 +1,4 @@
-"""Hardcrate complexity selector (R10.7) — level-N strips traps above N from a crate
+"""Hardcrate complexity selector — level-N strips traps above N from a crate
 copy, leaving a clean crate (no complexity cfg ever reaches the pipeline). Pure file
 ops, hermetic (no cargo)."""
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Cluster-aware macro-expansion invariants (P6 relocation).
+"""Cluster-aware macro-expansion invariants.
 
 For macros defined multiple times under different `#[cfg(...)]`, render the single
 variant active under the cluster's cfg-set — so the model doesn't have to reason

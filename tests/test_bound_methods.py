@@ -1,4 +1,4 @@
-"""Unit tests for the bound-provided method inventory (corrected R2/R3, debt #28).
+"""Unit tests for the bound-provided method inventory.
 
 Pure domain: given the FROZEN where-clause and the TypeRecords it references,
 surface the methods a bounded generic makes callable so the body routes through

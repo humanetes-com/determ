@@ -1,4 +1,4 @@
-"""Focused reconstruction role adapters (P6) — delegation + the one piece of
+"""Focused reconstruction role adapters — delegation + the one piece of
 real logic (FixerAdapter.diagnose_no_tests)."""
 from __future__ import annotations
 

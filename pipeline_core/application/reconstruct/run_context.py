@@ -1,4 +1,4 @@
-"""RunContext (P5) — the per-module loop-invariant data the reconstruction
+"""RunContext — the per-module loop-invariant data the reconstruction
 use-cases read. A plain value object (not behaviour): resolved once when a module
 is selected and passed to every phase, so no phase reaches for a loop local."""
 from __future__ import annotations

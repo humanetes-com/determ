@@ -1,4 +1,4 @@
-"""Role-based ports for the per-module reconstruction use-cases (P5).
+"""Role-based ports for the per-module reconstruction use-cases.
 
 These are the DIP seams the `application.reconstruct.module_loop` use-cases
 depend on. Each Protocol is a narrow ROLE (ISP) — a use-case receives only the

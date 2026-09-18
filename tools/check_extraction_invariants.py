@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structural invariants for the strangler-fig task extractions (CODE_ARCHITECTURE.md §5).
+"""Structural invariants for the strangler-fig task extractions.
 
 mypy/ruff catch undefined names and dead code, but they cannot verify the project-specific
 contract that every extracted task obeys: a task module exposes a frozen ``*Deps`` dataclass
@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = ROOT / "pipeline_core" / "application" / "tasks"
 PIPELINE = ROOT / "pipeline.py"
-# The composition root spans pipeline.py + the build_app factory (Phase 3): a
+# The composition root spans pipeline.py + the build_app factory, mid-migration: a
 # `_*_DEPS` construction site may live in either as wiring migrates into build_app.
 COMPOSITION = ROOT / "pipeline_core" / "composition.py"
 

@@ -1,4 +1,4 @@
-"""Characterization for the relocated disk-preserving fill merge (P6)."""
+"""Characterization for the relocated disk-preserving fill merge."""
 from __future__ import annotations
 
 from pipeline_core.application.reconstruct.fill_merge import (

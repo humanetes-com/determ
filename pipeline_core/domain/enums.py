@@ -146,7 +146,7 @@ class Task2Backend(_Coercible):
 
 class ProcessFailure(_Coercible):
     """Why a subprocess produced NO normal exit code (the rc=-1 sentinel made
-    explicit — plan #77/#79). TIMEOUT is retryable/slow; BINARY_MISSING is a
+    explicit). TIMEOUT is retryable/slow; BINARY_MISSING is a
     broken environment no retry can fix."""
 
     TIMEOUT = "timeout"

@@ -1,4 +1,4 @@
-"""Role-based ports for the TASK 0c cluster-augmentation phase (R2.2).
+"""Role-based ports for the TASK 0c cluster-augmentation phase.
 
 The DIP seams the `application.cluster_augment.ClusterAugmentor` use-case
 depends on. Each Protocol is a narrow ROLE (ISP) — the use-case receives only
@@ -17,7 +17,7 @@ from pipeline_core.domain.models import AugmentVerdict, BuildCluster
 
 
 class TestAugmentor(ABC):
-    """Language-agnostic interface for per-module coverage augmentation (FR-S5).
+    """Language-agnostic interface for per-module coverage augmentation.
     The concrete cargo/tarpaulin impl lives in `adapters.augment_engine`."""
 
     @abstractmethod

@@ -34,7 +34,7 @@ from pipeline_core.llm import (
 )
 from pipeline_core.llm.cleanup import strip_chat_boundaries, strip_think
 from pipeline_core.llm.thinktag import InlineThinkSplitter
-from pipeline_core.log import emit as _emit_event  # debt#7: structured event sink
+from pipeline_core.log import emit as _emit_event  # structured event sink
 
 MODEL = os.getenv("MODEL", "qwen2.5-coder:7b")
 
@@ -671,7 +671,7 @@ class SGLangTransport(_BaseTransport):
             extra_body["thinking_budget"] = self._thinking_budget
         # See _stream_compat: wrap connection/timeout failures as
         # TransportUnavailable so the controller's readiness poll handles a
-        # server restart/warmup rather than aborting the run (debt #30).
+        # server restart/warmup rather than aborting the run.
         try:
             with client.chat.completions.create(  # type: ignore[call-overload]
                 model=self._model_name,

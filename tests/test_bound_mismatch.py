@@ -1,4 +1,4 @@
-"""Debt #28 — frozen-bound mismatch detection (domain) + retro fast-path."""
+"""Frozen-bound mismatch detection (domain) + retro fast-path."""
 from __future__ import annotations
 
 from pipeline_core.domain.bound_mismatch import (

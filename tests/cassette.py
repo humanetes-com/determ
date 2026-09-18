@@ -1,4 +1,4 @@
-"""L2 cassette replay — CODE_ARCHITECTURE.md R10.3.
+"""L2 cassette replay.
 
 Build a `{prompt_sha → response_text}` map from a recorded run (`logs/events.jsonl`
 + the content-addressed `logs/prompts/` store) and replay it through the single
@@ -10,7 +10,7 @@ exactly the altered prompt** — a precise blast-radius signal, not a 5h re-run.
 Keying: `_store_prompt_content` (pipeline.py:404) hashes the prompt AFTER the
 context-guard trims it, and `_ask_raw` receives that same trimmed prompt — so
 `sha256(prompt_arg) == the recorded prompt sha`. Pairing prefers the explicit
-`prompt_sha` on the response event (R10.0); for older recordings that lack it,
+`prompt_sha` on the response event; for older recordings that lack it,
 it falls back to emission-order pairing (exact at PIPELINE_PARALLELISM=1).
 """
 from __future__ import annotations

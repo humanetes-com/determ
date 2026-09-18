@@ -1,5 +1,5 @@
 """Byte-equivalence pins for the regex-free helpers in `pipeline_core.domain.text`
-(P7 — think-block + code-fence stripping)."""
+(think-block + code-fence stripping)."""
 from __future__ import annotations
 
 import hashlib

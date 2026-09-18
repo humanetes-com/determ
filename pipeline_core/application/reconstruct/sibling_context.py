@@ -1,4 +1,4 @@
-"""Sibling fn body collection for per-fn prompt injection (G/P6, FR-024 fix 3).
+"""Sibling fn body collection for per-fn prompt injection.
 
 Extracted from pipeline._collect_sibling_filled_bodies. Pure: operates on
 source text, no I/O.

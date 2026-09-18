@@ -1,4 +1,4 @@
-"""Characterization for the relocated attribution-cluster diagnoses (P6).
+"""Characterization for the relocated attribution-cluster diagnoses.
 Each use-case is driven through INJECTED fakes (no monkeypatch), pinning the
 classifier parse, the regression-note hook, and the cargo-error implicator."""
 from __future__ import annotations

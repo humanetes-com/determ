@@ -75,7 +75,7 @@ def parse_run_start(log_lines: list[str]) -> str:
 
 
 def parse_run_id(log_lines: list[str]) -> str:
-    """`run_id=<id>` of the LAST 'PIPELINE STARTED' line (debt #21b), or "" when
+    """`run_id=<id>` of the LAST 'PIPELINE STARTED' line, or "" when
     absent (older logs). When present, `load_run` scopes events by this identity
     so a concurrent writer (e.g. an xdist worker on the SHARED events.jsonl) can
     never leak into the run's audit window."""
@@ -361,7 +361,7 @@ def check_cluster_coverage(run: RunData) -> Verdict:
     """C7: no task0c cluster pass may end at 0% coverage. A 0% cluster means
     its augmentation was skipped wholesale (e.g. broken harness) — the test
     oracle for that cluster's cfg-gated code is then missing, silently
-    weakening FR-018."""
+    weakening the functional-requirements signal."""
     done = run.task_done("task0c")
     if not done:
         return Verdict("C7 cluster-coverage", SKIP, "no task0c completions in run")

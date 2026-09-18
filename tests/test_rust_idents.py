@@ -1,4 +1,4 @@
-"""Unit tests for `pipeline_core.domain.rust_idents.fn_reference_counts` (P7).
+"""Unit tests for `pipeline_core.domain.rust_idents.fn_reference_counts`.
 
 Pins byte-equivalence to the original regex pair it replaced
 (`\\bfn\\s+([A-Za-z_]\\w*)` + per-name `\\b<name>\\b`) — the reference-frequency
@@ -116,7 +116,7 @@ def test_declares_fn_matches_regex():
         assert declares_fn(s, name) == expected, (s, name)
 
 
-# --- P7 step 1: source-regex→structured migrations (byte-equivalence pins) ---
+# --- source-regex→structured migrations (byte-equivalence pins) ---
 
 _FN_DECL_CASES = [
     "fn foo() {}", "pub fn bar<T>() {}", "fn  baz ()", "fn(i32)->i32", "fn /*c*/ x()",
@@ -310,7 +310,7 @@ def test_is_trait_impl_container():
 
 
 # ---------------------------------------------------------------------------
-# use_path_requirement_gaps — TASK 1.5 leaf-identifier matching (debt #37)
+# use_path_requirement_gaps — TASK 1.5 leaf-identifier matching
 # ---------------------------------------------------------------------------
 
 _FR_DOC = """# Functional Requirements: hardcrate

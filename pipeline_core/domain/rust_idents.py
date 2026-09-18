@@ -1,4 +1,4 @@
-"""Rust identifier tokenisation — pure domain (P7 source-regex→structured).
+"""Rust identifier tokenisation — pure domain (source-regex→structured).
 
 Replaces the ``\\bfn\\s+(\\w+)`` / ``\\b<name>\\b`` regex scans that built the
 leaf-order reference-count map in pipeline.py. A maximal-``\\w+``-run tokeniser

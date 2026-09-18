@@ -96,7 +96,7 @@ def test_format_type_empty_record():
 
 
 def test_format_type_pub_crate_method_not_rendered_as_pub():
-    # debt #85: `pub(crate) fn helper(...)` is NOT part of the crate's
+    # `pub(crate) fn helper(...)` is NOT part of the crate's
     # external API — rendering it as "pub fn ..." is a factually wrong claim
     # the model would act on. is_pub folds pub(crate) in; is_exactly_pub must
     # be what gates the literal "pub " text.

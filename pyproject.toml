@@ -1,5 +1,5 @@
 # Tooling config home for the Python side (ruff + mypy) AND the installable-package
-# metadata (P8). The heavy backend deps (vllm/transformers) still install via setup.sh
+# metadata. The heavy backend deps (vllm/transformers) still install via setup.sh
 # from the requirements-*.txt files; the `[project]` deps below are the minimal runtime
 # floor so `pip install .` yields a working CLI + console scripts.
 # `bash check.sh` is the gate; it invokes ruff/mypy which read the sections below.
@@ -51,7 +51,7 @@ extend-exclude = [".venv", "tmp", "tools/skeleton_extractor/target"]
 # B=bugbear, SIM=simplify, plus high-signal individual E codes.
 select = ["F", "I", "UP", "C4", "B", "SIM", "E711", "E714", "E741"]
 ignore = [
-    # B023 audited & fixed (R1.1b, 2026-06-10): loop vars bound as keyword-only
+    # B023 audited & fixed (2026-06-10): loop vars bound as keyword-only
     # defaults at def time; the per-fn worker takes its level queue explicitly.
     # The rule now GATES so the capture class cannot recur.
     # SIM102 (collapsible nested if): stylistic; one site needs a risky reindent in the
@@ -90,7 +90,7 @@ markers = [
     "integration: real adapters over an invented shape reproducing one defect class",
 ]
 
-# Enforce the clean-architecture dependency rule (CODE_ARCHITECTURE.md §1): a higher layer
+# Enforce the clean-architecture dependency rule: a higher layer
 # may import a lower one, never the reverse. domain is the floor (stdlib + the foundational
 # log/retry/io facades only — those aren't layers so the contract doesn't govern them).
 [tool.importlinter]

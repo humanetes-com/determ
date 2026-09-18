@@ -1,7 +1,7 @@
 """Pytest root config: put the repo root on sys.path so `import pipeline` / `pipeline_core`
-resolve from any test file (the tree has no installed package yet — see backlog R1.2).
+resolve from any test file (the tree has no installed package yet).
 
-Test ISOLATION of prod observability (debt #21): tests exercise real pipeline paths
+Test ISOLATION of prod observability: tests exercise real pipeline paths
 (generate_fix_loop, _ask_per_fn_body, …) that emit to `logs/events.jsonl` and write the
 content-addressed prompts store. Left unscoped, those land in the SHARED prod artifacts —
 and under pytest-xdist every worker is its own process named `MainThread`, so a test run

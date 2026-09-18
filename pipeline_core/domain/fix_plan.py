@@ -1,4 +1,4 @@
-"""How a compile frontier is PARTITIONED into repair units (P3.C).
+"""How a compile frontier is PARTITIONED into repair units.
 
 The per-fn and per-impl strategies each turned a `(file, fn)→errors` frontier
 into a set of fix units, with different grouping rules that were buried inline in

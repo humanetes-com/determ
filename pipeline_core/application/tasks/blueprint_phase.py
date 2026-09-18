@@ -1,4 +1,4 @@
-"""Blueprint phase use-case (july_plan P3): generate + validate + persist the
+"""Blueprint phase use-case: generate + validate + persist the
 model-authored design document, once per crate, after TASK 1 and before any
 fill. Idempotent — an existing non-empty blueprint is kept (its lifecycle is
 the FR's: wiping the FR wipes it, `--clean` regenerates both).

@@ -1,4 +1,4 @@
-"""Characterization for the relocated test-locator (P6). Pins the tier ranking
+"""Characterization for the relocated test-locator. Pins the tier ranking
 (container > direct > stem > macro) and the generic-fn container filter."""
 from __future__ import annotations
 

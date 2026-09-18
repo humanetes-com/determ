@@ -1,4 +1,4 @@
-"""Focused role adapters for the phase-C fill engine use-cases (P6).
+"""Focused role adapters for the phase-C fill engine use-cases.
 
 These replace the `_PhaseCFillAdapter` god-object: one narrow adapter per
 `ports.fill_engine` role (ISP), each constructor-injected with the resident
@@ -10,7 +10,7 @@ use-cases and the still-resident pipeline.py helpers.
 
 The one structural difference from the other role-adapter families: the
 `WorkspaceModelAdapter` carries the constructor-injected
-:class:`ports.structure.StructureReader` (the P1 DI seam) for `enumerate_fns` /
+:class:`ports.structure.StructureReader` (the constructor-DI seam) for `enumerate_fns` /
 `enumerate_types`; tests inject a fake reader via ``dataclasses.replace`` at the
 `_build_phase_c_engine(structure=…)` seam.
 

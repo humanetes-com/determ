@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Hardcrate complexity selector — CODE_ARCHITECTURE.md R10.7.
+"""Hardcrate complexity selector.
 
 The hardcrate is a difficulty LADDER so the same fixture scales from weak to strong
 local models. Each trap carries a complexity LEVEL; `--max-level N` strips every
 trap above N from a crate copy, leaving a clean crate the pipeline reconstructs with
 no idea complexity exists (decoupled from the cfg/cluster machinery — a complexity
-level is NOT a cfg/cluster, avoiding the debt #15 entanglement).
+level is NOT a cfg/cluster, avoiding the false-incomplete / cfg-leak bug a
+cfg-modeled complexity toggle once caused: an undecidable custom `#[cfg(...)]`
+predicate got miscounted as a test, then the fix loop made the gated code run
+in the default build to close the gap).
 
 Convention going forward: a new trap module = one `src/<name>.rs` (impl + round-trip
 unit tests) + one `tests/<name>.rs` (the holistic pin) + a registry row with its
@@ -36,7 +39,7 @@ TRAPS: dict[str, dict] = {
                 "lib": ["mod wire;", "pub use wire::{decode_id, encode_id};"]},
     "cap":     {"level": 1, "src": "src/cap.rs", "test": "tests/cap.rs",
                 "lib": ["mod cap;", "pub use cap::wrapping_total;"]},
-    # level 2 — harder than the level-1 codec (T5): a cross-fn protocol with three
+    # level 2 — harder than the level-1 codec: a cross-fn protocol with three
     # interacting rules whose accept/reject pins pull deframe in tension, meant to
     # need ≥3 outer iterations (C3/C4).
     "framing": {"level": 2, "src": "src/framing.rs", "test": "tests/framing.rs",
@@ -51,17 +54,19 @@ TRAPS: dict[str, dict] = {
                         "pub use sprawl::{abs_diff, clamp_u8, classify, count_set_bits, "
                         "digit_sum, is_ascii_upper, max3, min3, nth_byte, parity, "
                         "reverse_nibbles, saturating_sub_u8, sign, to_lower, Category};"]},
-    # level 4 — FROZEN-BOUND MISMATCH (R2/R3 / debt #28 reproducer): an impl with a
+    # level 4 — FROZEN-BOUND MISMATCH: an impl with a
     # frozen `where T: Describe` bound whose body must call the bound-provided
     # `T::describe`; the Display/Debug attractors are un-carried bounds → E0277. Pins
     # that the BOUND_METHODS prompt block lets the model fill via the bound method
     # without thrash / a GENUINELY_HARD skip.
     "label":   {"level": 4, "src": "src/label.rs", "test": "tests/label.rs",
                 "lib": ["mod label;", "pub use label::{Describe, Reason, Tagged};"]},
-    # level 5 — UNSAFE POINTER ARITHMETIC (V2 / §7.0b): raw-ptr read/write/offset fns
-    # that are `unsafe fn` with no trait bounds; the pipeline must route through
-    # _ask_per_fn_body with low temperature (B1 guard) and classify ≤2-attempt failures
-    # as GENUINELY_HARD (R4). Tests pin memory-round-trip correctness for each fn.
+    # level 5 — UNSAFE POINTER ARITHMETIC: raw-ptr read/write/offset fns that are
+    # `unsafe fn` with no trait bounds. This trap end-to-end-guards the per-fn
+    # repair loop's low-temperature route: the pipeline must route through
+    # _ask_per_fn_body with low temperature and classify ≤2-attempt failures as
+    # GENUINELY_HARD (no more thrash on vtable-shaped fns). Tests pin
+    # memory-round-trip correctness for each fn.
     "unsafe_ptr": {"level": 5, "src": "src/unsafe_ptr.rs", "test": "tests/unsafe_ptr.rs",
                    "lib": ["mod unsafe_ptr;",
                            "pub use unsafe_ptr::{copy_via_raw, ptr_distance, read_at, write_at};"]},

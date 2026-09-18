@@ -1,4 +1,4 @@
-"""L2 cargo-memoization tests — CODE_ARCHITECTURE.md R10.4. Offline: a counting
+"""L2 cargo-memoization tests. Offline: a counting
 fake runner stands in for cargo; no real compile."""
 from __future__ import annotations
 

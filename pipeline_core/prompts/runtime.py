@@ -1,9 +1,9 @@
-"""Impure collaborators the prompt builders call (slice 8).
+"""Impure collaborators the prompt builders call.
 
 The builders in this package are pure text→text. Three collaborators are
 pipeline-bound and stay in pipeline.py — the file-view annotator, the
 promoted-error rules (mutable run-state counters + FR-file I/O), and the
-repo-spec section. #14: instead of three independently-rebindable module globals
+repo-spec section. Instead of three independently-rebindable module globals
 set via `configure()`, the composition root binds ONE FROZEN, typed
 :class:`PromptRuntimeDeps` once via :func:`bind`; the inert default keeps prompt
 rendering working in unit tests without the pipeline. The thin module-level
@@ -35,7 +35,7 @@ def _repo_spec_section_default(
 @dataclass(frozen=True, slots=True)
 class PromptRuntimeDeps:
     """The pipeline-bound collaborators the prompt builders call. Frozen + typed;
-    bound once at the composition root (#14: replaces three mutable globals +
+    bound once at the composition root (replaces three mutable globals +
     configure())."""
     annotate_file_view: Callable[[str, str], str] = _annotate_file_view_default
     promoted_error_rules: Callable[[Path | None], str] = _promoted_error_rules_default

@@ -104,7 +104,7 @@ gate "skeleton-extractor cargo clippy + test + doc (rust $RUST_GATE_TOOLCHAIN)" 
 
 echo ""
 echo "Running pytest (xdist, all cores) + coverage ratchet (cargo coverage tests skip unless SMOKE_FULL=1)..."
-# Slice 13: coverage is gated on EVERYTHING under refactor — pipeline.py (the engine
+# Coverage is gated on EVERYTHING under refactor — pipeline.py (the engine
 # being decomposed) and all of pipeline_core (where refactored code lands) — via a
 # per-target ratchet (.coverage_ratchet.json): floors initialize from the first run,
 # auto-raise when new tests land, and FAIL any change that loses coverage.

@@ -77,7 +77,7 @@ def test_initial_floor_seeds_stall() -> None:
 
 
 def test_check_stop_hook_invoked() -> None:
-    # #14: check_stop is now an explicit per-call parameter (was a module global).
+    # check_stop is now an explicit per-call parameter (was a module global).
     contexts: list[str] = []
     one, _ = _runner([FixOutcome("accepted")])
     drive_fix_loop(one, hard_cap=2, max_stalls=2, stop_context="ctxlabel",

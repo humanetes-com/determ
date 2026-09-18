@@ -1,4 +1,4 @@
-"""R7 regression tests for monitor.py's render-half text helpers (ANSI strip,
+"""Regression tests for monitor.py's render-half text helpers (ANSI strip,
 pipeline_state done-key, CALL_START marker) — each pinned to the regex it replaced."""
 from __future__ import annotations
 

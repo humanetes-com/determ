@@ -1,5 +1,5 @@
 """Unit tests for the pure `macro_rules!` scanner
-(`pipeline_core.domain.rust_macros`) — P7 source-regex→structured.
+(`pipeline_core.domain.rust_macros`) — source-regex→structured.
 
 Pins byte-equivalence to the four regex+brace-counter scans it replaced in
 pipeline.py: the body-extracting consumers (`_enumerate_macro_variants`,

@@ -1,4 +1,4 @@
-"""CargoAugmentEngine — the TASK 0c cluster coverage-augmentation work (P6).
+"""CargoAugmentEngine — the TASK 0c cluster coverage-augmentation work.
 
 Satisfies :class:`pipeline_core.ports.augment.AugmentEngine`. Bundles the four
 engine operations the `ClusterAugmentor` use-case drives: the per-cluster ceiling
@@ -130,7 +130,7 @@ class CargoAugmentEngine:
                 continue
             lines = text.splitlines()
             n = len(lines)
-            # #20: one CfgSet evaluates BOTH sides (excluded-X and active-not(X)) so the
+            # One CfgSet evaluates BOTH sides (excluded-X and active-not(X)) so the
             # estimate matches the runtime filter (task0c subtracts both).
             ctx = CfgSet.of(cfg_true=cluster.cfg_true, cfg_false=cluster.cfg_false)
             excl = ctx.excluded_uncovered_lines(text, set(range(1, n + 1)))

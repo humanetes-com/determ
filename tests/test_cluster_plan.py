@@ -1,4 +1,4 @@
-"""Unit tests for the P5 cluster planner (`pipeline_core.domain.cluster_plan`) —
+"""Unit tests for the cluster planner (`pipeline_core.domain.cluster_plan`) —
 the pure derivation of `BuildCluster`s from cfg facts (Hard Rule 8). Drives the
 classification rules directly on constructed facts, no extractor/Cargo.toml I/O."""
 from __future__ import annotations
@@ -101,7 +101,7 @@ def test_cluster_name_for_custom_known_and_sanitized() -> None:
     assert cluster_name_for_custom("io_uring_support") == "io_uring"
 
 
-# --- #23: build-script reachability prunes phantom clusters ---
+# --- Build-script reachability prunes phantom clusters ---
 
 def test_bs_declared_but_unset_custom_cfg_is_dropped() -> None:
     # anyhow shape: 4 cfgs DECLARED via rustc-check-cfg but set on no available
@@ -133,7 +133,8 @@ def test_bs_set_under_default_cfg_is_intrinsic_not_a_cluster() -> None:
 
 
 def test_bs_unmentioned_custom_cfg_stays_a_cluster() -> None:
-    # A `--cfg` the build script never mentions = a user knob → keep (pre-#23).
+    # A `--cfg` the build script never mentions = a user knob → keep (before
+    # build-script reachability pruning).
     counts = {"extra_cap": 1}
     clusters = plan_clusters(
         counts, {}, cargo_features=[], default_features=[], feature_gate_cfgs=[],

@@ -1,5 +1,5 @@
 """Structured detectors for the four code "idioms" the sibling-hint builder scans
-for in generated fn bodies (P7 — replaces the `_IDIOM_*_RE` source regexes).
+for in generated fn bodies — replaces the `_IDIOM_*_RE` source regexes.
 
 Each detector is byte-equivalent to the regex it replaces — verified by large
 random fuzz against the original pattern — and returns matches in `finditer`

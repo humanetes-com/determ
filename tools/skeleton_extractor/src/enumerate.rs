@@ -1,5 +1,5 @@
 //! Enumeration subcommands: fns / types / mods / dispatch families / feature-gate cfgs.
-//! The structured records here are the JSON seam payloads. Moved verbatim from lib.rs (slice 7).
+//! The structured records here are the JSON seam payloads. Moved verbatim from lib.rs.
 
 use crate::cfg::*;
 use crate::error::{ExtractError, Result};
@@ -324,7 +324,7 @@ pub(crate) fn render_impl_header(item_impl: &ItemImpl) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Type records — P5.1: cross-file type definitions for prompt context.
+// Type records — cross-file type definitions for prompt context.
 // One record per struct/enum, including its fields and known method names.
 // Used by Python to inject relevant type definitions into per-fn prompts
 // so the model knows e.g. `Own<T>` has a `.ptr` field (not a `.foo()` method).
@@ -964,7 +964,7 @@ pub fn enumerate_uses_in_tree(input_dir: &Path) -> Result<Vec<UseRecord>> {
 }
 
 // ---------------------------------------------------------------------------
-// Cfg occurrences — P5: replaces the Python regex scan of `#[cfg(...)]` /
+// Cfg occurrences — replaces the Python regex scan of `#[cfg(...)]` /
 // `#[cfg_attr(...)]` predicates in `task0_cfg_scan`. A `syn::visit::Visit` walk
 // reaches EVERY attribute (items, fields, variants, statements, inner `#![cfg]`),
 // so cluster derivation no longer guesses predicates from line text.

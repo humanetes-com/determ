@@ -1,10 +1,10 @@
-"""Reattach saved gen_tests siblings to TASK 2's regenerated source (P5-S3).
+"""Reattach saved gen_tests siblings to TASK 2's regenerated source.
 
 Extracted verbatim from `main()`'s reconstruction loop. After TASK 2 rewrites a
-module's source files, the unit tests preserved through strip (FR-018) must be
+module's source files, the unit tests preserved through strip must be
 re-stitched back on: each saved `(pass_n, body)` becomes a sibling file plus a
 `#[cfg(test)] … mod gen_tests_N;` path-decl on the regenerated source. Per-cluster
-filled skeletons (FR-038) keep a test's content and its cfg gate together; the
+filled skeletons keep a test's content and its cfg gate together; the
 single-tree path is the non-cluster fallback. Compile failures of reattached
 siblings are reconstruction signal (left in place for Phase C), not gen_test bugs.
 
@@ -81,7 +81,7 @@ def reattach_gen_tests(
         for _c in _per_cluster_filled:
             _cdir = _filled_root / _c.name
             for _sf in sorted(_cdir.rglob("*.rs")):
-                if d.is_gen_tests_file(_sf.name):  # R7: structured parser, was regex
+                if d.is_gen_tests_file(_sf.name):  # structured parser, was regex
                     continue
                 _rel = str(_sf.relative_to(_cdir))
                 if _rel in existing_test_files:
@@ -221,7 +221,7 @@ def reattach_gen_tests(
                     for src_path, sibling, pass_n in _failing:
                         try:
                             ptext = src_path.read_text(encoding="utf-8")
-                            # #9: structured decl-strip (regex-free, R7).
+                            # Structured decl-strip (regex-free).
                             ptext_new = strip_gen_tests_decl(ptext, sibling.name, pass_n)
                             if ptext_new != ptext:
                                 src_path.write_text(ptext_new, encoding="utf-8")

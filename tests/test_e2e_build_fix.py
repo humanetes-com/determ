@@ -1,5 +1,5 @@
-"""R10 — offline e2e for `_task3_inline_retry`, retiring the "●●● await live"
-tag on R9.1 (BUILD mode) and R9.2 (compile-state-aware keep/revert).
+"""Offline e2e for `_task3_inline_retry`, retiring the "●●● await live"
+tag on BUILD mode and compile-state-aware keep/revert.
 
 Drives the real inline-retry logic with the scripted-cargo + scripted-model
 harness (no live LLM, no real cargo). The branches a live run rarely hits —
@@ -85,7 +85,7 @@ def test_build_mode_no_reproducible_diags_bails(monkeypatch, tmp_path):
 def test_build_mode_worsened_reverts_from_snapshot(monkeypatch, tmp_path):
     """BUILD fix raises the compile-error count above the initial floor ⇒ the
     src tree is reverted from snapshot and the initial output is returned
-    (R9.2: non-compiling-worse is strictly worse)."""
+    (non-compiling-worse is strictly worse)."""
     ws = _setup(monkeypatch, tmp_path)
     install_scripted_model(monkeypatch, per_fn_body=FIX_BODY)
     n = {"i": 0}

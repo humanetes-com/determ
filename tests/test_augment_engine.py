@@ -1,4 +1,4 @@
-"""CargoAugmentEngine pure bits + CallableCommitGate delegation (P6)."""
+"""CargoAugmentEngine pure bits + CallableCommitGate delegation."""
 from __future__ import annotations
 
 from pathlib import Path

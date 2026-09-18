@@ -1,4 +1,4 @@
-"""Pins for `_improvement_loop` — since slice 8a f5 an adapter over THE
+"""Pins for `_improvement_loop` — an adapter over THE
 refine driver (`run_refine_loop`). Encodes the unified contract, including
 the two semantics CORRECTED by the port (flagged below): post-fix
 re-measurement (no one-iteration lag, no spurious first-iteration stall)
@@ -57,7 +57,7 @@ def test_stall_budget_is_fix_count_and_measures_last_fix():
 
 
 def test_improvement_on_final_stall_iteration_continues():
-    # f5 CORRECTED semantics: a fix that improves on what would be the last
+    # CORRECTED semantics: a fix that improves on what would be the last
     # allowed iteration RESETS the stall budget instead of being discarded.
     # metrics: entry 10; post-fix: 10, 9 (improves at stall limit), 9, 9.
     check = _Seq((False, "e", 10), (False, "e", 10), (False, "e", 9),

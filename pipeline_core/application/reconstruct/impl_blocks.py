@@ -1,4 +1,4 @@
-"""Impl-block collection use-case (P6 engine-relocation series).
+"""Impl-block collection use-case.
 
 Groups every fn record the extractor reports into its impl/trait/mod container,
 keyed by the FULL impl header text (source slice between the `impl` keyword and

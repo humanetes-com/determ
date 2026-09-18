@@ -10,7 +10,7 @@ real: run by hand over `tmp/anyhow/.skeleton-filled/stable` on 2026-08-16, the
 first version of the selector returned EIGHT subjects over 323 fns — the five
 real ones plus `tests/drop/mod.rs::drop`, `tests/test_downcast.rs::test_drop`
 and `tests/test_repr.rs::test_drop`. A subject naming a test file is the defect
-entry 173.1 shipped a frame filter for: no fill writes a test, so the key lands
+a frame filter was shipped for: no fill writes a test, so the key lands
 in the frontier and buys a dispatch that cannot change anything.
 
 The fixture crate below is that shape in miniature — a drop family in `src/`, a

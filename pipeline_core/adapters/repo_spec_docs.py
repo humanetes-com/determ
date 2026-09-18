@@ -1,7 +1,7 @@
 """Mtime-cached loader for the repository-specification documents
 (genesis.md, functional_requirements_{module}.md, the api-surface artifact).
 
-Relocated from pipeline.py (P3 step 51): file IO + a process-lifetime cache —
+Relocated from pipeline.py: file IO + a process-lifetime cache —
 an adapter concern. The prompt-side RENDERING stays in prompts/repo_spec.
 """
 

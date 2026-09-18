@@ -1,5 +1,5 @@
 """Byte-equivalence pins for the regex-free tool-output helpers in
-`pipeline_core.domain.test_results` (P7)."""
+`pipeline_core.domain.test_results`."""
 from __future__ import annotations
 
 import re

@@ -1,5 +1,5 @@
 """Prompt-context: a factual description of the cargo subprocess test
-environment (P6 relocation).
+environment, relocated out of pipeline.py.
 
 The pipeline knows which env vars and cfg predicates the test process sees; the
 model doesn't — without this signal it proposes strategies that can't work

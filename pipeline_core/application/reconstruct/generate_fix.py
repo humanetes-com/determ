@@ -1,4 +1,4 @@
-"""The shared compile/test fix loop, as typed strategies over a driver (P3.C).
+"""The shared compile/test fix loop, as typed strategies over a driver.
 
 `generate_fix_loop` was a 700-line closure nest: an outer measure loop whose one
 attempt branched — by `(FixStrategy, FillUnit)` settings — into a whole-file

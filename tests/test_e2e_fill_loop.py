@@ -1,5 +1,5 @@
 """End-to-end harness tests for the per-fn fill loop (`_task2_fill_fns_one_by_one`
-→ `_process_one_stub`) — the net the FixLoop dedup (slice 8a) is built against.
+→ `_process_one_stub`) — the net the FixLoop dedup is built against.
 
 Scripted model + scripted cargo via tests/harness.py; the extractor seams are
 forced to their no-binary fallbacks so the loop runs the text-scan stub path.
@@ -180,7 +180,7 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
 
 
 def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
-    # P3.1 pin (pre-f2): after 4 compile failures with IMPROVING error counts
+    # Pin: after 4 compile failures with IMPROVING error counts
     # (so neither floor-stall nor repeated-sig exits first), attempt 5 opens
     # the sig-change hatch — a <SIGNATURE> block from a non-pub fn is applied
     # before the body splice. The hatch reads the RAW response, so this test

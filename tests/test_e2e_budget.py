@@ -1,6 +1,6 @@
-"""L1 e2e budget tests — CODE_ARCHITECTURE.md R10.2 (W3 + W4(e)).
+"""L1 e2e budget tests.
 
-Pins the ctx-budget-aware capping invariants that W3/W4 shipped, so a future cap
+Pins the ctx-budget-aware capping invariants, so a future cap
 change is decided by this test, not a 5h live run. `request_max_tokens` is pure —
 no model, no I/O.
 

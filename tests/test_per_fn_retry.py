@@ -312,7 +312,7 @@ def _reading(**per_cluster: tuple[bool, int]) -> TreeReading:
 
 
 def test_gate_reverts_only_the_body_that_regressed_another_cluster(tmp_path):
-    """#120 in one test: the primary cluster is the repair signal, but a body
+    """The primary cluster is the repair signal, but a body
     that fixes it and breaks the OTHER cluster is refused — and only that body
     is lost, not the batch around it.
 

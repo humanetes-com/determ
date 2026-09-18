@@ -1,4 +1,4 @@
-"""Application-layer cargo composition (P2 slice 6).
+"""Application-layer cargo composition.
 
 The `Cargo` port runs ONE command. Deriving the
 `--message-format=json-diagnostic-rendered-ansi` flag and parsing the JSON
@@ -64,7 +64,7 @@ from pipeline_core.ports import Cargo
 TestBaseline = "TestStateReading | None"
 
 # A "run one cargo command → (rc, combined_output)" operation. The production
-# binding is `pipeline._run_cargo` (itself port-composed, slice 8); injecting it
+# binding is `pipeline._run_cargo` (itself port-composed); injecting it
 # as a callable — rather than calling `run_cargo` directly — keeps the e2e/smoke
 # harness's `monkeypatch pipeline._run_cargo` seam intact.
 RunCargo = Callable[..., "tuple[int, str]"]

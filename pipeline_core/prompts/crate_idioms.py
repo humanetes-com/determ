@@ -1,4 +1,4 @@
-"""`<CRATE_IDIOMS>` prompt section — pure crate-pattern mining (P6 relocation).
+"""`<CRATE_IDIOMS>` prompt section — pure crate-pattern mining, relocated out of pipeline.py.
 
 The strongest reconstruction signal for a stub is how the SAME crate already does
 things in its other (already-filled) fns: recurring `Self::name(args)` constructors,
@@ -11,7 +11,7 @@ per-impl prompt injects alongside the generic gotchas.
 Generic over crates — no crate-specific code; smaller crates simply emit fewer
 idioms. The `_IDIOM_*`-style detectors here mine recurring TEXT shapes (fuzzy
 pattern-mining, not structured-fact extraction) so they are NOT a no-regex-on-source
-violation — see CODE_ARCHITECTURE.md §8 R7.5. Pure: operates on `ImplBlock` domain
+violation. Pure: operates on `ImplBlock` domain
 records, no I/O.
 """
 from __future__ import annotations

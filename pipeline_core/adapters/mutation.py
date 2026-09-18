@@ -1,8 +1,8 @@
-"""Mutation-testing behaviour hardening (P6 engine-relocation series).
+"""Mutation-testing behaviour hardening.
 
 cargo-mutants drives this: it finds SURVIVING ("missed") mutants — behaviour
-changes the current test suite is blind to (FR-039) — and the harden loop asks
-the model for BLACK-BOX behaviour tests (public API only, FR-036; the model
+changes the current test suite is blind to — and the harden loop asks
+the model for BLACK-BOX behaviour tests (public API only; the model
 never sees source bodies or mutant diffs) that compile, pass on the correct
 code, and lower the surviving-mutant count.
 
@@ -66,11 +66,11 @@ class MutationTester:
 
     def kill_check(self, project_dir: Path, cluster: Any, survivor: str,
                    test_code: str, target_rel: str, timeout: int = 900) -> tuple[bool, bool]:
-        """M2 discrimination harness. Returns (real_passes, kills_survivor).
+        """Discrimination harness. Returns (real_passes, kills_survivor).
         Attaches `test_code` as a test module to `target_rel`, runs the real
         suite (must pass on the correct code), then re-runs cargo-mutants scoped
         to the survivor's file and checks the survivor moved missed→caught.
-        Always restores the file. Black-box (FR-036)."""
+        Always restores the file. Black-box (public API only)."""
         surv_file = survivor.split(":", 1)[0] if survivor else None
         tgt = project_dir / target_rel
         if not tgt.exists():
@@ -105,7 +105,7 @@ class MutationTester:
 
     def harden_file(self, project_dir: Path, module_name: str, cluster: Any,
                     file_rel: str, max_rounds: int = 3, timeout: int = 900) -> str:
-        """M3: generate BLACK-BOX behaviour tests (public API only) that reduce
+        """Generate BLACK-BOX behaviour tests (public API only) that reduce
         the surviving mutants for `file_rel`. Tests are accepted only when they
         (a) compile + pass on the correct code and (b) actually lower the
         surviving-mutant count. Returns the accumulated kept test code."""

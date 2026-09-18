@@ -1,4 +1,4 @@
-//! Cross-cluster AST merge (syn + prettyplease). Moved verbatim from lib.rs (slice 7).
+//! Cross-cluster AST merge (syn + prettyplease). Moved verbatim from lib.rs.
 
 use crate::error::{ExtractError, Result};
 use proc_macro2::TokenStream;
@@ -102,7 +102,7 @@ fn item_kind_name(item: &syn::Item) -> (String, String) {
             ("macro".to_string(), name)
         }
         syn::Item::Impl(i) => {
-            // Identity = the FULL impl header (FR-025): impl generics, the
+            // Identity = the FULL impl header: impl generics, the
             // trait ref WITH its generic args, the self-type WITH its
             // generics, and the where-clause. `path_to_string` is NOT used
             // here because it drops generic arguments, which would collapse
@@ -849,7 +849,7 @@ pub(crate) fn make_doc_attr(style: syn::AttrStyle, line: &str) -> syn::Attribute
 }
 
 /// Split every multi-line `#[doc]` in `attrs` into one single-line `#[doc]` per
-/// line (FR-033). prettyplease renders single-line docs uniformly as `///` /
+/// line. prettyplease renders single-line docs uniformly as `///` /
 /// `//!`, but switches a doc string that contains an embedded newline to the
 /// `/** */` / `/*! */` block form — and a run that alternates between the two
 /// styles splits a doctest's ```` ``` ```` fence across comment kinds, so the

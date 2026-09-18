@@ -1,4 +1,4 @@
-"""FixPlan partition rules (P3.C) — pure, no cargo/model/tree."""
+"""FixPlan partition rules — pure, no cargo/model/tree."""
 from __future__ import annotations
 
 from pipeline_core.domain.fix_plan import plan_per_fn, plan_per_impl

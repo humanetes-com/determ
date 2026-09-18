@@ -1,4 +1,4 @@
-"""Reconstruction use-cases (P5): RequirementsPhase, ReconstructionStep,
+"""Reconstruction use-cases: RequirementsPhase, ReconstructionStep,
 FailureAnalysisStep, ModuleReconstructor — driven through their role ports with
 a single recording fake adapter."""
 from __future__ import annotations
@@ -264,7 +264,7 @@ def test_analysis_regression_restores_best(tmp_path: Path) -> None:
                             total_iters=0, coverage_strategy="x")
     assert "restore_best" in fa.calls                 # current 1 < best 5
     assert res.total_iters == 1
-    assert "genesis_audit" in fa.calls                # debt#12: regression fires audit off-interval
+    assert "genesis_audit" in fa.calls                # regression fires audit off-interval
 
 
 def test_analysis_no_regression_off_interval_skips_audit(tmp_path: Path) -> None:
@@ -298,7 +298,7 @@ def test_reconstructor_iterates_then_locks(tmp_path: Path) -> None:
 
 
 def test_reconstructor_plateau_aborts_nonconverging(tmp_path: Path) -> None:
-    """debt #16 follow-up: a module that never improves (constant 0-pass fail) must
+    """A module that never improves (constant 0-pass fail) must
     NOT loop forever — the fixed-point terminator breaks after `plateau_abort`
     consecutive non-improving iterations, emitting module.nonconverged."""
     fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,

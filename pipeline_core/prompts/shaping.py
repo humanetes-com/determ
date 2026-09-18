@@ -1,4 +1,4 @@
-"""Test-content prompt shaping (P6) — pure text helpers for assembling the test
+"""Test-content prompt shaping — pure text helpers for assembling the test
 material that TASK 1/2 prompts inject.
 
 Relocated verbatim from pipeline.py. These satisfy the `ports.synthesizer`
@@ -6,7 +6,7 @@ Relocated verbatim from pipeline.py. These satisfy the `ports.synthesizer`
 and the chunked-synthesis splitter. `prompt_budget` takes the single-call char
 limit as an argument (the composition root binds the configured value) so this
 module stays free of pipeline globals. The semantic-boundary splitter's regex
-matches TEST-CONTENT boundaries (R7.3 text class), not Rust source structure.
+matches TEST-CONTENT boundaries, not Rust source structure.
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ def chunk_test_files(test_files: list[tuple[str, str]], char_limit: int) -> list
 def chunk_test_files_by_file(
     test_files: list[tuple[str, str]], file_char_limit: int,
 ) -> list[list[tuple[str, str]]]:
-    """One chunk per test file (FR-001); files exceeding ``file_char_limit`` are
+    """One chunk per test file; files exceeding ``file_char_limit`` are
     split at semantic boundaries so the model always processes one complete,
     coherent, named file per extraction call."""
     chunks: list[list[tuple[str, str]]] = []

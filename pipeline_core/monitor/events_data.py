@@ -84,7 +84,7 @@ _TASKS_ORDER = ("task0a", "task0b", "task0c", "strip", "task1", "task2", "task3"
 
 
 def task_progression() -> dict[str, Any]:
-    """debt#7: derive the overall task-progression from STRUCTURED events — the
+    """Derive the overall task-progression from STRUCTURED events — the
     sole source (replaced `run_data.parse_task_pipeline`'s log regex-scrape).
 
     Replays this run's `task.start`/`task.done`/`module.iter`/`cluster.done` records
@@ -142,7 +142,7 @@ _PIPELINE_LOG_FACT_EVENTS = (
 
 
 def pipeline_log_facts() -> dict[str, Any]:
-    """debt#7: the task0c progress facts the monitor's loop panels consume,
+    """The task0c progress facts the monitor's loop panels consume,
     replayed from STRUCTURED events (replaces run_data.parse_pipeline_log's regex
     scrapes of the free-form log). `read_recent_events` already scopes to this run,
     so no PIPELINE-STARTED reset is needed. `last_line`/`age` are NOT facts — they
@@ -221,7 +221,7 @@ def pipeline_log_facts() -> dict[str, Any]:
 
 
 def vllm_runtime() -> dict[str, Any]:
-    """debt#7: vLLM runtime facts (adaptive token budget, chars-per-token EWM,
+    """vLLM runtime facts (adaptive token budget, chars-per-token EWM,
     400-retry count) from STRUCTURED events — replaces run_data.parse_max_tokens /
     parse_vllm_cpt's guard-log scrapes. Returns {max_tokens, cpt, retries}."""
     max_tokens: int | None = None
@@ -329,7 +329,7 @@ def read_recent_events(want: Callable[[str], bool]) -> list[dict[str, Any]]:
 
 
 def coverage_from_events() -> str:
-    """Latest module coverage from the structured coverage.measured event (R8.4).
+    """Latest module coverage from the structured coverage.measured event.
 
     Returns e.g. "83.9%" or "" when this run has emitted no measurement yet
     (callers fall back to the legacy text scrapes for old logs).
@@ -369,7 +369,7 @@ def phase_c_state() -> dict[str, Any]:
         "recent_fills": [], "hot_fn": None,
         "last_test_rc": None, "last_test_failed": None,
         "last_event_age_s": None,
-        # P4: progress bar fields (per-pass progress against stubs_at_pass_start).
+        # Progress bar fields (per-pass progress against stubs_at_pass_start).
         "pass_stubs_total": 0,
         # pass_fills_done/failed count each per-fn fill, each impl-block MEMBER,
         # and each whole-file fn — so the `frontier: A/B` progress segment stays

@@ -1,4 +1,4 @@
-"""Fake-adapter unit tests for `StaticSkeletonTask2Generator` (P4 slice 4).
+"""Fake-adapter unit tests for `StaticSkeletonTask2Generator`.
 
 The 4-phase skeleton generator is a use-case over the `ports.generator` roles
 (Cargo, FillEngine, Clusters, GenTests, SourceScan, Telemetry, Workspace). These
@@ -406,7 +406,7 @@ def test_cluster_exception_caught(tmp_path: Path) -> None:
 
 
 def test_clusters_run_serially_even_with_parallelism(tmp_path: Path) -> None:
-    # Debt #36: cluster-level parallelism is gone — shared-fn seeding needs the
+    # Cluster-level parallelism is gone — shared-fn seeding needs the
     # previous cluster's accepted bodies on disk before the next cluster starts.
     cs = [_cluster("default"), _cluster("nightly")]
     fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
@@ -489,7 +489,7 @@ def test_checkpointed_cluster_reruns_when_its_tree_is_gone(tmp_path: Path) -> No
 
 
 def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
-    # Debt #36: the default cluster fills `foo`; the nightly cluster must start
+    # The default cluster fills `foo`; the nightly cluster must start
     # from that body (seeded into its stub) instead of re-filling it.
     cs = [_cluster("default"), _cluster("nightly")]
     fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
@@ -514,7 +514,7 @@ def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
 
 
 def test_premerge_backfill_adopts_sibling_body(tmp_path: Path) -> None:
-    # Debt #36: a stub left in one cluster's tree adopts the body a sibling
+    # A stub left in one cluster's tree adopts the body a sibling
     # cluster accepted, so the merge never emits a dead unimplemented!() variant.
     cs = [_cluster("default"), _cluster("nightly")]
     fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],

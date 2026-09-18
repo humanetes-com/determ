@@ -1,6 +1,6 @@
-"""Slice 9 pins — application/workspace_lifecycle.py (save → maybe-wipe → stub).
+"""Pins application/workspace_lifecycle.py (save → maybe-wipe → stub).
 
-Pins the codified wipe⟺rerun invariant (session-59 wipe-vs-resume bug) and
+Pins the codified wipe⟺rerun invariant (the wipe-vs-resume bug) and
 the verbatim-moved save/wipe behavior, each wipe paired with its phase guard.
 """
 

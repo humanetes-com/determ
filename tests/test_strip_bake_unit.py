@@ -1,4 +1,4 @@
-"""strip_and_bake_module (P5-S3): guard short-circuits + the bake→commit→tag→
+"""strip_and_bake_module: guard short-circuits + the bake→commit→tag→
 strip→commit-and-mark happy path, all collaborators stubbed."""
 from __future__ import annotations
 

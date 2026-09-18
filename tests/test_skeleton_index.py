@@ -1,4 +1,4 @@
-"""Characterization for the relocated skeleton-index prompt builders (P6).
+"""Characterization for the relocated skeleton-index prompt builders.
 The base index is also covered by test_pipeline_smoke; here we pin the cluster
 cfg-filtering path of format_skeleton_index_for_cluster."""
 from __future__ import annotations

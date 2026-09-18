@@ -1,4 +1,4 @@
-"""P6 data-vs-render split: the monitor's log/state/backend readers (relocated to
+"""Data-vs-render split: the monitor's log/state/backend readers (relocated to
 pipeline_core.monitor.run_data) parse the pipeline log + pipeline_state.md + .env
 + coverage JSON into plain data."""
 from __future__ import annotations

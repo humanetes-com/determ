@@ -1,4 +1,4 @@
-"""prompts.shaping — relocated test-content prompt helpers (P6)."""
+"""prompts.shaping — relocated test-content prompt helpers."""
 from __future__ import annotations
 
 from pipeline_core.prompts.shaping import (

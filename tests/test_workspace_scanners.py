@@ -1,11 +1,11 @@
-"""Characterization tests for the deterministic workspace scanners (P4 net).
+"""Characterization tests for the deterministic workspace scanners.
 
 `StaticWorkspaceScanner` (markdown structure for TASK 2) and
 `StaticDependencyGraph` (module list / topo order / module-scoped commands) have
-no behavioural tests today — these pin their observable output so the P4
+no behavioural tests today — these pin their observable output so the
 relocation to adapters/ is a verbatim move check.sh can prove. The cargo-metadata
 path (subprocess) is forced off so the deterministic tomllib parser is exercised
-(also covers the R8 regex→tomllib dep-parser migration).
+(also covers the regex→tomllib dep-parser migration).
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def test_static_workspace_scanner_markdown(tmp_path) -> None:
 
 def test_llm_workspace_scanner_uses_injected_ask(tmp_path) -> None:
     """The LLM scanner collects manifests and wraps the model's reply; `ask` is
-    passed via WorkspaceScanDeps (#14), faked here so no live model is needed."""
+    passed via WorkspaceScanDeps, faked here so no live model is needed."""
     ws = _workspace(tmp_path)
     seen = {}
 

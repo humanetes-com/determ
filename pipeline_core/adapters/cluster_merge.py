@@ -1,4 +1,4 @@
-"""Cross-cluster skeleton merge (P6 engine-relocation series).
+"""Cross-cluster skeleton merge.
 
 Composes the per-cluster filled source dirs (`.skeleton-filled/{cluster}/src/`)
 into the project's `src/`, gating divergent items behind their cluster's cfg.
@@ -124,7 +124,7 @@ class ClusterMerger:
         files_written = 0
         cfg_gated_fns = 0
         # Divergence counter matches the atoms the clusters actually gate on
-        # (never a hardcoded crate-specific list — debt #35).
+        # (never a hardcoded crate-specific list).
         gate_atoms: tuple[str, ...] = tuple(sorted({
             atom
             for c in cluster_specs.values()

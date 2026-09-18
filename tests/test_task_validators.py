@@ -195,7 +195,7 @@ def test_api_conformance_drift(tmp_path: Path) -> None:
 
 
 def test_api_conformance_doc_comment_example_is_not_drift(tmp_path: Path) -> None:
-    # debt #64 regression: a `///` doc-comment usage example containing
+    # Regression: a `///` doc-comment usage example containing
     # `pub struct ImportantThing { ... }` must NOT be treated as a real
     # top-level item — the manifest is built from the structured extractor
     # (which never sees doc-comment text as AST), not a text-level scan of

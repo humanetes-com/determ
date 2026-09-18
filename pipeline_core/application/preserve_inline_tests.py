@@ -7,7 +7,7 @@ gen_tests_N;` path-decl. A module that kept its tests inline would hand them to
 the fill routes as ordinary file text — see `domain/inline_tests` for why that
 is unrepairable once a reply lands on one.
 
-Preservation is unconditional (FR-018): it does not matter whether TASK 0c
+Preservation is unconditional: it does not matter whether TASK 0c
 augmented this module, because the hazard is the tests' LOCATION, not their
 origin. The tests keep running — the sibling compiles into the same `--lib`
 binary from the same module position.

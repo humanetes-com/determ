@@ -1,4 +1,4 @@
-"""R10.3/R10.4 — the OFFLINE REPLAY path proven on the REAL fill engine.
+"""The OFFLINE REPLAY path proven on the REAL fill engine.
 
 The seam units (test_cassette / test_cargo_cache / test_replay_harness) cover the
 plumbing in isolation. This drives the actual `_task2_fill_fns_one_by_one` engine
@@ -6,7 +6,7 @@ plumbing in isolation. This drives the actual `_task2_fill_fns_one_by_one` engin
 round-trip: a recorded run's model cassette (`{prompt_sha→response}`) + cargo memo
 (`(tree_hash,cmd)→verdict`, BOTH `_run_cargo` and `_run_cargo_check_diag`) reproduce
 the run byte-identically with NO live model and NO real cargo — and a prompt-changing
-edit surfaces as a precise cassette MISS (the blast-radius signal R3 refactors lean on).
+edit surfaces as a precise cassette MISS (the blast-radius signal engine-decomposition refactors lean on).
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Byte-equivalence pins for `pipeline_core.domain.doc_render` (P7)."""
+"""Byte-equivalence pins for `pipeline_core.domain.doc_render`."""
 from __future__ import annotations
 
 import re

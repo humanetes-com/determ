@@ -1,6 +1,6 @@
 """TASK 1 requirements-synthesizer engine (StaticTask1Synthesizer / LLMTask1Synthesizer).
 
-Relocated verbatim from pipeline.py (P4). These are the LLM use cases that turn the
+Relocated verbatim from pipeline.py. These are the LLM use cases that turn the
 test files + skeleton API surface into functional_requirements.md. Truly-importable
 collaborators (domain text/output helpers, retry, io, log) are imported; the
 pipeline-bound collaborators (the `ask` LLM call, the chunk-cache + prompt-budget +
@@ -90,7 +90,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                    project_profile: str = "", project_context: str = "",
                    coverage_strategy: str = "", api_surface: str = "",
                    known_types: list[str] | tuple[str, ...] = ()) -> bool:
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         existing_genesis = read(genesis_path)
         total_chars = sum(len(c) for _, c in test_files)
@@ -118,7 +118,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                 test_files: list[tuple[str, str]], readme_text: str, existing_genesis: str,
                 project_profile: str = "", project_context: str = "",
                 coverage_strategy: str = "", api_surface: str = "") -> bool:
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         MODEL = self.cfg.model
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         _TASK1_MODEL = self.cfg.task1_model
@@ -173,7 +173,7 @@ class StaticTask1Synthesizer(Task1Synthesizer):
                        existing_genesis: str, coverage_strategy: str = "",
                        api_surface: str = "", context_section: str = "") -> str:
         """Return the prompt for single-call requirements extraction (overridable)."""
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
         _README_CAP = self.cfg.readme_cap
         _STRATEGY_CAP = self.cfg.strategy_cap
@@ -246,7 +246,7 @@ Test helpers vs. production API:
         single condensed intermediate summary. Called once per group.
         Returns the summary text, or None on failure.
         """
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         _README_CAP = self.cfg.readme_cap
         _TASK1_MODEL = self.cfg.task1_model
@@ -315,7 +315,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                  project_profile: str = "", project_context: str = "",
                  coverage_strategy: str = "", api_surface: str = "",
                  known_types: list[str] | tuple[str, ...] = ()) -> bool:
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         CHUNK_CACHE_DIR = self.cfg.chunk_cache_dir
         SYNTHESIS_GROUP_SIZE = self.cfg.synthesis_group_size
         _TASK1_MODEL = self.cfg.task1_model
@@ -329,9 +329,8 @@ Output a plain structured list of the merged requirements. No filler, no code, n
         # Deterministic, syn-extracted type manifest (baked pre-strip — see
         # _capture_api_surface) — known up front, so every chunk gets the SAME
         # header instead of an LLM-output-guessed one accumulated chunk-by-chunk.
-        # That accumulation was the only thing forcing chunks to run in sequence
-        # (debt #22); a fixed header lets every chunk needing a model call run
-        # concurrently.
+        # That accumulation was the only thing forcing chunks to run in sequence;
+        # a fixed header lets every chunk needing a model call run concurrently.
         type_manifest_header = ""
         if known_types:
             type_list = ", ".join(sorted(known_types)[:40])
@@ -425,9 +424,9 @@ Output a plain structured list of the merged requirements. No filler, no code, n
             try:
                 partial = with_retry(chunk_attempt)
             except InputTooLong as exc:
-                # debt #32: a chunk that still overflows ctx after the
-                # controller's replan degrades (skip it, keep the others) —
-                # never aborts the whole pipeline mid-run.
+                # A chunk that still overflows ctx after the controller's
+                # replan degrades (skip it, keep the others) — never aborts
+                # the whole pipeline mid-run.
                 progress.finish_chunk(i)
                 overflow_chunks.add(i)
                 _log(f"  WARNING: chunk {i}/{total_chunks} exceeds the model context "
@@ -546,7 +545,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
                           project_dir: Path | None = None,
                           api_surface: str = "") -> str:
         """Return the Stage-2 synthesis prompt (overridable by subclasses)."""
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         _README_CAP = self.cfg.readme_cap
@@ -620,7 +619,7 @@ Do NOT add requirements based on general knowledge of the project or language.
                       tests_section: str, profile_header: str, genesis: str = "",
                       coverage_strategy: str = "", api_surface: str = "") -> str:
         """Return the per-chunk extraction prompt (overridable by subclasses)."""
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         _README_CAP = self.cfg.readme_cap
         _STRATEGY_CAP = self.cfg.strategy_cap
         _TASK1_THINKING_DIRECTIVE = self.cfg.thinking_directive
@@ -677,7 +676,7 @@ class LLMTask1Synthesizer(StaticTask1Synthesizer):
                        api_surface: str = "", context_section: str = "") -> str:
         # genesis is always shown — empty placeholder on first iteration so the
         # LLM knows this is the document accumulating retrospective findings.
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
         _README_CAP = self.cfg.readme_cap
         _STRATEGY_CAP = self.cfg.strategy_cap
@@ -736,7 +735,7 @@ Rules:
                           coverage_strategy: str = "",
                           project_dir: Path | None = None,
                           api_surface: str = "") -> str:
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         FILE_FORMAT_INSTRUCTION = self.cfg.file_format_instruction
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         _README_CAP = self.cfg.readme_cap
@@ -814,7 +813,7 @@ Rules:
     def _chunk_prompt(self, chunk_idx: int, total_chunks: int, readme_text: str,
                       tests_section: str, profile_header: str, genesis: str = "",
                       coverage_strategy: str = "", api_surface: str = "") -> str:
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         _README_CAP = self.cfg.readme_cap
         _STRATEGY_CAP = self.cfg.strategy_cap
         _TASK1_THINKING_DIRECTIVE = self.cfg.thinking_directive
@@ -861,7 +860,7 @@ Rules:
         Merge a group of contract partials into a deduplicated intermediate contract list.
         Overrides the behavioral merge prompt with a contract-aware one.
         """
-        # debt #14: injected collaborators/config bound locally (bodies verbatim).
+        # Injected collaborators/config bound locally (bodies verbatim).
         SINGLE_CALL_CHAR_LIMIT = self.cfg.single_call_char_limit
         _README_CAP = self.cfg.readme_cap
         _TASK1_MODEL = self.cfg.task1_model

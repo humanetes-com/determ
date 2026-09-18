@@ -1,6 +1,6 @@
-"""Regression: TASK 3 re-verify must terminate — CODE_ARCHITECTURE.md R10.2.
+"""Regression: TASK 3 re-verify must terminate.
 
-The live microcrate run (session 58) crashed with RecursionError: task3 re-invoked
+The live microcrate run crashed with RecursionError: task3 re-invoked
 itself whenever the inline retry merely CHANGED the cargo text. cargo output isn't
 byte-deterministic (test ordering/timing), so a no-op retry "changed" it → infinite
 recursion. `_should_reverify` now gates on stable test COUNTS + a budget. These pin

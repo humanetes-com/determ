@@ -1,6 +1,6 @@
 """TASK 4 — failure analysis + genesis.md update (LLM use case).
 
-Extracted from pipeline.py (slice 5b). Body verbatim; infra (log/emit/retry), the pure
+Extracted from pipeline.py. Body verbatim; infra (log/emit/retry), the pure
 budget/parse helpers (domain.text / domain.test_results) and genesis extraction
 (domain.llm_output) are imported; the pipeline-bound collaborators (ask, read/write,
 the rule-store writer, model ids, char budgets, verbosity guard) are injected via

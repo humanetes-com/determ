@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""WHY. The consolidation program's step 2 (technical_debt.md entry 171) makes
-authority conditional on calibration: the shadow zero-payoff detector
+"""WHY. The consolidation program's step 2 makes authority conditional on
+calibration: the shadow zero-payoff detector
 (`domain/zero_payoff.py`, rebuilt 2026-08-16 onto the per-binary verdict axis)
 may only graduate from logging to acting once its firings have been compared
 against outcomes on live runs. That comparison had no instrument: the
@@ -10,7 +10,8 @@ cluster `stable`, iter 4, rule `unpaid_streak`, 30 targets — sat unexamined in
 later (12:31:20Z), i.e. the shadow led the authoritative stop by one sweep with
 a correct verdict, and nobody could cite that without re-deriving it by hand.
 This script IS the tally: run it after any run in which the shadow fired (or
-did not) and append the row it prints to the calibration record in entry 171.
+did not) and append the row it prints to that calibration record in
+technical_debt.md.
 
 USAGE.  python scripts/zp_shadow_calibration.py [--events logs/events.jsonl]
         [--horizon 3]
@@ -32,8 +33,8 @@ authoritative stop, then the tally:
   * MISSED on a stop row — no shadow firing preceded that authoritative stop
     within the horizon: a false negative of the detector, the population the
     unpaid-streak rule was added for.
-THE DECISION RULE (entry 171 step 2): authority is arguable when, over at
-least 5 firings spanning at least 3 distinct runs, FALSE ALARM = 0 and
+THE DECISION RULE: authority is arguable when, over at least
+5 firings spanning at least 3 distinct runs, FALSE ALARM = 0 and
 MISSED is not growing; a single false alarm resets the case — the cost of a
 wrong stop is a killed climb, which is the P1 class, and no lead time pays
 for one. Until those counts exist, the detector stays in shadow.
@@ -134,7 +135,7 @@ def main() -> int:
     print(f"\ntally: firings={firings} over {len(fired_runs)} run(s)  "
           f"vindicated={vindicated}  false_alarms={false_alarms}  "
           f"unresolved={unresolved}  stops_missed_by_shadow={missed}")
-    print("authority case (entry 171 step 2): needs >=5 firings over >=3 runs "
+    print("authority case: needs >=5 firings over >=3 runs "
           "with false_alarms=0; a false alarm resets the case.")
     return 0
 

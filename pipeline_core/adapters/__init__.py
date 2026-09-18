@@ -7,7 +7,7 @@ that keeps the dependency rule one-directional and avoids an import cycle.
 ``build_adapters`` is the composition-root factory: `pipeline.py` (the entrypoint /
 composition root) calls it once with the resolved :class:`Settings` and injects the
 results downward. During the strangler-fig migration the adapters are constructed and
-available; call sites move onto them one task at a time (slice 5).
+available; call sites move onto them one task at a time.
 """
 
 from __future__ import annotations

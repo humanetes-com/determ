@@ -1,4 +1,4 @@
-"""L2 cargo memoization — CODE_ARCHITECTURE.md R10.4.
+"""L2 cargo memoization.
 
 Replay reproduces byte-identical source trees (the cassette feeds identical model
 output → identical fills), so cargo's verdict on a given tree is reproducible and
@@ -100,7 +100,7 @@ class CargoCache:
 
 def install_cargo_cache(monkeypatch, cache: CargoCache) -> CargoCache:
     """Route BOTH cargo operations through `cache` (wrapping the live runner)
-    at the App port (P3-S2), so a full reconstruction replays offline."""
+    at the App port, so a full reconstruction replays offline."""
     import dataclasses as _dc
     real = pipeline._APP.cargo_runner
     run_memo = cache.wrap(real.run)

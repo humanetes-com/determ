@@ -1470,3 +1470,8 @@ Defense in depth, not a substitute for the deadline: write self-non-matching
 predicates (`pgrep -f "[p]ipeline.py --project anyhow"` — the bracket keeps
 the pattern from matching its own command line) and run the predicate once
 from the arming shell to see what it returns before trusting it.
+
+
+# Final rules
+
+You will never use multiple agents in parallel, the session limit will be hit soon and all agents will be blocked. Whenever there is a long task that can be parallelized, you will loop sequentially. 

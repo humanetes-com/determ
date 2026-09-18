@@ -1,6 +1,6 @@
-"""Regression: per-fn splice must use BYTE offsets in byte space — CODE_ARCHITECTURE R12.
+"""Regression: per-fn splice must use BYTE offsets in byte space.
 
-The live microcrate run (session 58) corrupted the file when filling `add`: the
+The live microcrate run corrupted the file when filling `add`: the
 splice ate the closing `}` and two `/` of the NEXT fn's `///` doc comment, because
 `_splice_fn_body_at` indexed a char `str` with the enumerator's BYTE offsets. The
 skeleton's doc comments contain em-dashes (`—`, 3 bytes / 1 char), so byte offset ≠

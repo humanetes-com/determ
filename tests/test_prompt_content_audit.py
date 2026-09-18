@@ -1,4 +1,4 @@
-"""Per-task prompt-content audit (CODE_ARCHITECTURE.md line 887; docs/PROMPT_CONTENT_AUDIT.md).
+"""Per-task prompt-content audit (docs/PROMPT_CONTENT_AUDIT.md).
 
 Pins, per task, that the spec docs the matrix claims reach a prompt ACTUALLY reach it —
 using unique sentinels through the real prompt builders, so a dropped injection fails

@@ -13,7 +13,7 @@ This replaces the string-slicing cfg helpers that used to live in ``pipeline.py`
 
 Evaluation is a clean recursive ``match`` over the tree instead of substring
 slicing, which is what the old code did and what made the space-sensitivity and
-operator bugs (R7.4b) possible. The whole-string membership pre-check at every
+operator bugs possible. The whole-string membership pre-check at every
 node is preserved, so behaviour is byte-identical to ``_eval_cfg_pred``.
 
 Pure domain: stdlib only, no I/O, no regex (predicates are parsed with a
@@ -223,7 +223,7 @@ def lines_are_cluster_specific(
     source_text: str, lines: set[int], contexts: Iterable[CfgSet],
 ) -> bool:
     """True if any of ``lines`` is compiled OUT under at least one cluster context
-    (#26) — i.e. the lines live inside a cluster-specific `#[cfg]` region, so a test
+    — i.e. the lines live inside a cluster-specific `#[cfg]` region, so a test
     covering them cannot be safely shared across clusters and must stay gated.
 
     When every line is compiled in under every context the test is cluster-agnostic
@@ -239,7 +239,7 @@ def cluster_specific_symbol_names(
     fn_records: Iterable[object], contexts: Iterable[CfgSet],
 ) -> frozenset[str]:
     """Names of fns whose `#[cfg(...)]` chain is compiled OUT under at least one
-    cluster context (#26 residual). A test BODY that references such a symbol
+    cluster context. A test BODY that references such a symbol
     cannot be shared across clusters even when the LINES it targets are agnostic
     — under a cluster that excludes the symbol the shared sibling fails to
     compile. Accepts FnRecord dicts (`fn_name`/`cfg_predicates`) or objects with
@@ -265,7 +265,7 @@ def body_uses_cluster_specific_symbol(
     body: str, names: frozenset[str] | set[str],
 ) -> bool:
     """True if `body` references any cluster-specific symbol name as a standalone
-    identifier (#26 residual). Word-boundary match so `new` does not match
+    identifier. Word-boundary match so `new` does not match
     `new_inner`."""
     if not body or not names:
         return False
@@ -702,7 +702,7 @@ class CfgSet:
 
         Replaces the two regex line-scanners ``_filter_cfg_incompatible_lines``
         (``not(X)`` for active X) and ``_filter_cfg_excluded_lines`` (bare X for
-        excluded X) with one structured pass over the typed predicate tree (#20):
+        excluded X) with one structured pass over the typed predicate tree:
         build a ``CfgSet`` with the cluster's active cfgs in ``true`` and excluded
         cfgs in ``false`` and both cases reduce to ``evaluate(P) is False``. Plain
         ``evaluate`` (not ``excludes_for_cargo``) — only explicit true/false atoms

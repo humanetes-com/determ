@@ -35,7 +35,7 @@ def _build_script_facts(
 ) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
     """(set-under-default, set-only-under-nightly, declared) cfgs from `build.rs`,
     captured under the available toolchains. Empty when no reader / no build script
-    — the planner then keeps every custom atom (pre-#23 behaviour)."""
+    — the planner then keeps every custom atom (the old, pre-pruning behaviour)."""
     if build_script is None:
         return frozenset(), frozenset(), frozenset()
     default = build_script.emitted_cfgs(project_dir, None) or BuildScriptCfg.empty()
@@ -62,8 +62,8 @@ def _cargo_features(project_dir: Path) -> tuple[set[str], set[str]]:
 def scan_build_clusters(project_dir: Path, reader: ClusterFactReader,
                         build_script: BuildScriptReader | None = None) -> ClusterScan:
     """Derive the cluster plan for ``project_dir`` from its source cfg facts,
-    pruned by what ``build.rs`` actually emits (#23) when a ``build_script`` reader
-    is supplied (else every custom cfg atom is kept — pre-#23 behaviour)."""
+    pruned by what ``build.rs`` actually emits when a ``build_script`` reader
+    is supplied (else every custom cfg atom is kept — the old, pre-pruning behaviour)."""
     src_dir = project_dir / "src"
     cargo_features, default_features = _cargo_features(project_dir)
 

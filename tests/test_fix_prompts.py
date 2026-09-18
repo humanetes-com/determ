@@ -1,4 +1,4 @@
-"""Characterization tests for the extracted fix-loop prompts (P3.A).
+"""Characterization tests for the extracted fix-loop prompts.
 
 Pin the byte-output of each builder so the relocation out of
 `generate_fix_loop` is provably behaviour-preserving. The literal expected

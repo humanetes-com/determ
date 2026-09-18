@@ -1,4 +1,4 @@
-"""Unit tests for the extracted fix-loop diagnostics (P3 slice 1)."""
+"""Unit tests for the extracted fix-loop diagnostics."""
 from __future__ import annotations
 
 from pathlib import Path

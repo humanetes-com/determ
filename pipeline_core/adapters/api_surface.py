@@ -1,4 +1,4 @@
-"""Pre-strip API-surface capture (P6 engine-relocation series).
+"""Pre-strip API-surface capture.
 
 Snapshots a module's public-API skeleton (signatures + type definitions, bodies
 elided) to `.original_structure/<module>.api.md` and a deterministic type-name

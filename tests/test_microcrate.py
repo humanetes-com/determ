@@ -1,4 +1,4 @@
-"""L3 fixture health — CODE_ARCHITECTURE.md R10.1/R10.5.
+"""L3 fixture health.
 
 Confirms the micro fixture crate is a well-formed, fast reconstruction target: it
 compiles and every test passes under real cargo, in BOTH clusters. This does

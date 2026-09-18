@@ -1,4 +1,4 @@
-"""P6 data-vs-render split: the monitor's events.jsonl readers (relocated to
+"""Data-vs-render split: the monitor's events.jsonl readers (relocated to
 pipeline_core.monitor.events_data) roll up the live run correctly and stay
 behind the run-start filter."""
 from __future__ import annotations
@@ -76,7 +76,7 @@ def test_read_recent_events_falls_back_to_the_clock_without_a_run_id(
 
 
 def test_task_progression_from_events(tmp_path, monkeypatch):
-    # debt#7: stage progression derived from structured events (no log scrape).
+    # Stage progression derived from structured events (no log scrape).
     ev = tmp_path / "events.jsonl"
     _write(
         ev,
@@ -120,7 +120,7 @@ def test_task_progression_resets_per_iteration(tmp_path, monkeypatch):
 
 
 def test_task_progression_baseline_without_events(tmp_path, monkeypatch):
-    # debt#7: events are now the sole source — no events → all-pending baseline.
+    # Events are now the sole source — no events → all-pending baseline.
     ev = tmp_path / "events.jsonl"
     _write(ev, {"event": "llm.request", "model": "m"})  # unrelated event only
     _patch(monkeypatch, ev, run_start=0.0)
@@ -130,7 +130,7 @@ def test_task_progression_baseline_without_events(tmp_path, monkeypatch):
 
 
 def test_pipeline_log_facts_replay(tmp_path, monkeypatch):
-    # debt#7: task0c progress facts derived from structured events (no log scrape).
+    # task0c progress facts derived from structured events (no log scrape).
     ev = tmp_path / "events.jsonl"
     _write(
         ev,

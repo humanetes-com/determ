@@ -1,6 +1,6 @@
 """TASK 0b — discovery pass producing coverage_strategy.md (LLM use case).
 
-Extracted from pipeline.py (slice 5b, Option 1). Inline regex (gen_tests filename match,
+Extracted from pipeline.py. Inline regex (gen_tests filename match,
 fence fallback) is replaced: the filename check goes through an injected predicate
 (`is_gen_tests_file`, regex stays in pipeline.py) and the fence fallback uses the relocated
 `strip_markdown_fences`. The source-condensing parser and other pipeline-coupled
@@ -22,7 +22,7 @@ from ...retry import with_retry
 
 # Pipeline scratch + build dirs that are NOT project source. rglob over project_dir
 # otherwise pulls in `.skeleton`/`.skeleton-filled` (each has its own `src/` + nested
-# `target/.../out/*.rs` build-script output) and bloats the discovery budget (R9.3).
+# `target/.../out/*.rs` build-script output) and bloats the discovery budget.
 _NON_SOURCE_DIRS = frozenset(
     {".skeleton", ".skeleton-filled", ".best_tree", "target", ".git"})
 
@@ -151,7 +151,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: Any,
     # (unsafe/cfg count) so the hardest-to-test files are included first. Alphabetical
     # order was dropping error.rs, ptr.rs, wrapper.rs — the most important files.
     # _iter_source_rs prunes target/ + pipeline scratch dirs (.skeleton, .skeleton-filled)
-    # which otherwise contribute build-script output + skeleton copies (R9.3).
+    # which otherwise contribute build-script output + skeleton copies.
     src_candidates: list[tuple[int, Path, str, str]] = []  # (priority, path, rel, condensed)
     for src_file in _iter_source_rs(project_dir):
         if deps.is_test_file(src_file, project_dir):

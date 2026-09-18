@@ -1,4 +1,4 @@
-"""ClusterAugmentor (R2.2) — the TASK 0c compiler-cluster augmentation phase,
+"""ClusterAugmentor — the TASK 0c compiler-cluster augmentation phase,
 driven through its role ports with a single in-memory fake adapter. No cargo, no
 LLM: the fake scripts task0c_augment_module's coverage returns and records every
 sentinel/commit/active-cluster side effect."""

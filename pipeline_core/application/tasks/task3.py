@@ -1,6 +1,6 @@
 """TASK 3 — per-cluster strict-verdict test runner (validation use case).
 
-Extracted from pipeline.py (slice 5b). Body verbatim; cross-cutting infra (log/emit) and
+Extracted from pipeline.py. Body verbatim; cross-cutting infra (log/emit) and
 the pure domain helpers (`parse_test_counts`, `validate_task3_output_strict`,
 `OUTPUT_SEPARATOR`) are imported, while the genuinely pipeline-coupled collaborators
 (phase tracking, cluster loading, cargo env, the inline-retry fix loop, the legacy path)
@@ -268,7 +268,7 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
         # Primary = first ACTIONABLE non-pass cluster: one whose output carries a
         # repairable signal (failing tests, or a nonzero exit with compiler
         # diagnostics). The inline retry must rebuild under ITS toolchain/env to
-        # reproduce the failure (R9). A clean-exit shortfall (rc==0, fail==0, but
+        # reproduce the failure. A clean-exit shortfall (rc==0, fail==0, but
         # fewer #[test]s than statically expected) is NOT actionable — sending it
         # to the fix loop only churns (no compile error, no failing test → floor
         # metric 0). When EVERY non-pass cluster is such a shortfall we skip the

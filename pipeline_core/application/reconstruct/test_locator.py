@@ -1,6 +1,6 @@
 """Test-locator use-case — find the tests relevant to one reconstructed fn.
 
-Verbatim relocation of pipeline.py's `_find_tests_for_fn` (P6 engine-relocation).
+Verbatim relocation of pipeline.py's `_find_tests_for_fn`.
 A layered, ranked heuristic over the crate's test files; all parsing goes through
 the `domain.rust_*` structured scanners (no regex on source). Reads test files via
 `Path` (application-layer I/O); the composition root re-imports `find_tests_for_fn`
@@ -66,7 +66,7 @@ def find_tests_for_fn(
     """Layered heuristic to find tests relevant to one fn.
 
     Order of attempts (each adds to the candidate set):
-      0. Container-type filter (P5.4) — when fn_name is generic (`new`,
+      0. Container-type filter — when fn_name is generic (`new`,
          `fmt`, `source`, etc.), match by the type name extracted from
          `container` rather than the fn name alone. Tests for
          `impl Display for ContextError::fmt` only count when they

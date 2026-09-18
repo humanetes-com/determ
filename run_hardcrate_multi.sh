@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# hardcrate_multi — SCALE + real-nightly-cluster smoke, sibling to run_hardcrate.sh
-# (CODE_ARCHITECTURE.md R10.7). Different axis from the hardcrate difficulty ladder:
+# hardcrate_multi — SCALE + real-nightly-cluster smoke, sibling to run_hardcrate.sh.
+# Different axis from the hardcrate difficulty ladder:
 # every fn here is intentionally EASY — the point is enough fns/files for
 # PIPELINE_PARALLELISM>1 to have genuine worker contention (both real bugs found
 # 2026-07-07 — the impl-fill file-affinity race and the graceful-stop thread bug —
@@ -10,7 +10,7 @@
 #
 # Runs `hcm_core` ALONE. The workspace's cross-crate half (`ext/`, consuming
 # `core`'s Scorer trait across a real crate boundary) needs the pipeline to grow
-# Cargo `[workspace]` awareness first — technical_debt.md #58, not yet built.
+# Cargo `[workspace]` awareness first — not yet built.
 # `cargo_package_name()` returns "" for a workspace-root Cargo.toml (no [package]
 # table), and there is no workspace-member-crate handling anywhere in the
 # pipeline today, so pointing `--repo` at the workspace root would fail

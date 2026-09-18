@@ -1,4 +1,4 @@
-"""build_app — the composition factory (Phase 3).
+"""build_app — the composition factory.
 
 The composition root, parameterized over its external ports. `main()` builds the
 real :class:`Adapters` and calls :func:`build_app`; tests call it with fake
@@ -7,7 +7,7 @@ through the constructor instead of monkeypatching `pipeline._x` globals.
 
 `App` is grown stage by stage: it currently holds the injected ports + run-scoped
 state + the boundary providers derived from them. Later stages move the
-`_X_DEPS` use-case wiring and the `main` run-loop here (see refactoring.md §Phase 3)."""
+`_X_DEPS` use-case wiring and the `main` run-loop here."""
 from __future__ import annotations
 
 import functools
@@ -853,7 +853,7 @@ class Ports:
     event emit, truncation guard, cargo env). During migration the composition
     root supplies lambdas over its module globals so the e2e test seam (which
     patches those globals) is preserved; at the end they become bound adapter
-    methods. See the late-binding bridge in refactoring.md §Phase 3."""
+    methods."""
 
     ask: Callable[..., str]
     log: Callable[[str], None]
@@ -897,7 +897,7 @@ class CompositionConfig:
     task1_thinking_directive: str
     task2_thinking_directive: str
     skeleton_extractor_bin: Path
-    # F11 layout authoring (t1.5) + M3 stall-exit re-trigger — env parsed once
+    # Layout authoring (t1.5) + stall-exit re-trigger — env parsed once
     # at the composition root (parse-don't-validate).
     layout_authoring_enabled: bool
     layout_retrigger_max_attempts: int
@@ -958,7 +958,7 @@ class Helpers:
     effective_stalls: Callable[..., Any]
     run_cargo: Callable[..., Any]
     task2_fill_fns_one_by_one: Callable[..., Any]
-    # Reconstruction-cluster collaborators (S3 slices 11-20):
+    # Reconstruction-cluster collaborators:
     load_model_notes: Callable[..., list[str]]
     genesis_rules_count: Callable[..., int]
     derive_gentest_prelude: Callable[..., tuple[str, str]]
@@ -981,7 +981,7 @@ class Helpers:
 @dataclass(frozen=True)
 class FillRoles:
     """The 9 ISP fill-engine role adapters (`adapters.fill_engine_roles`).
-    Constructed in `build_app` (S64): seam-sensitive collaborators bind through
+    Constructed in `build_app`: seam-sensitive collaborators bind through
     `Helpers` (late-binding lambdas over the pipeline globals the scripted-cargo/
     scripted-model tests patch) or `_via` (live-App swap); pure relocated fns
     bind direct. The per-call engine factory (`_build_phase_c_engine`) + the
@@ -1003,7 +1003,7 @@ class FillRoles:
 @dataclass(frozen=True)
 class AugmentRoles:
     """TASK-0c augmentation cluster (store + cargo engine + the ClusterAugmentor
-    use-case). Constructed in `build_app` (S67); the resident collaborators
+    use-case). Constructed in `build_app`; the resident collaborators
     (`collect_test_files`, `task0c_augment_module`, the git-bound commit-gate)
     bind through `Helpers` late-binding lambdas."""
 
@@ -1015,8 +1015,8 @@ class AugmentRoles:
 @dataclass(frozen=True)
 class App:
     """The wired application: external ports + run-scoped state + boundary
-    providers and use-case deps built from them. Grown one S3 slice at a time
-    (refactoring.md §Phase 3) as `_X_DEPS` blocks migrate out of pipeline.py."""
+    providers and use-case deps built from them. Grown incrementally, as
+    `_X_DEPS` blocks migrate out of pipeline.py."""
 
     adapters: Adapters
     settings: Settings
@@ -1120,18 +1120,18 @@ class App:
     # TASK-0c augmentation cluster — see AugmentRoles.
     augment_roles: AugmentRoles
     # Migrated use-case deps:
-    genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit (S3 slice 1)
-    discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery (S3 slice 2)
-    coverage_deps: CoverageDeps                # coverage I/O (S3 slice 3)
-    coverage_provider: CoverageProvider        # backend-selected coverage provider (S22)
-    # S3 slices 5-10 — migrated use-case deps:
-    ws_deps: WorkspaceDeps                      # git workspace I/O (S3 slice 5)
-    ws_scan_deps: WorkspaceScanDeps            # workspace structure scan (S3 slice 6)
-    task4_deps: Task4Deps                      # TASK-4 genesis rewrite (S3 slice 7)
-    task0_docs_deps: Task0DocsDeps             # TASK-0 profile/context docs (S3 slice 8)
-    phase_c_retro_deps: PhaseCRetroDeps        # phase-C retrospective (S3 slice 9)
-    validator_deps: Task2CheckerDeps           # TASK-2 output validators (S3 slice 10)
-    # Reconstruction use-case spine (S3 slices 11-20). NB: the role adapters +
+    genesis_audit_deps: GenesisAuditDeps       # TASK-4 genesis audit
+    discover_test_cmd_deps: DiscoverTestCommandDeps  # test-command discovery
+    coverage_deps: CoverageDeps                # coverage I/O
+    coverage_provider: CoverageProvider        # backend-selected coverage provider
+    # Migrated use-case deps:
+    ws_deps: WorkspaceDeps                      # git workspace I/O
+    ws_scan_deps: WorkspaceScanDeps            # workspace structure scan
+    task4_deps: Task4Deps                      # TASK-4 genesis rewrite
+    task0_docs_deps: Task0DocsDeps             # TASK-0 profile/context docs
+    phase_c_retro_deps: PhaseCRetroDeps        # phase-C retrospective
+    validator_deps: Task2CheckerDeps           # TASK-2 output validators
+    # Reconstruction use-case spine. NB: the role adapters +
     # lock/reattach/journal/artifacts/test_runner/coverage_docs/flow_audit/
     # docs_metrics/reconstruction_step/failure_analysis are consumed only as
     # build_app locals (to assemble the phase use-cases) → not exposed on App.
@@ -1439,7 +1439,7 @@ def build_app(
     def u2_test_gate(fn_tests: set[str], unit_fns: Any, test_cmd: str | None,
                      target_src_dir: Path, cluster_env: dict[str, str] | None,
                      baseline: Any = None) -> Any:
-        """F3 test-acceptance gate. run_cargo late-binds the pipeline seam via
+        """Test-acceptance gate. run_cargo late-binds the pipeline seam via
         helpers; enabled/timeout re-read settings_now() so a patched SETTINGS
         wins; structure resolves through the LIVE app (fake readers win)."""
         caps = helpers.settings_now().fix_caps
@@ -1511,7 +1511,7 @@ def build_app(
         task0c_model=settings.task_models.task0c,
         single_call_char_limit=cfg.single_call_char_limit,
     )
-    # S65: TASK-2 residual-cleanup deps (LLM pass over leftover unimplemented!()).
+    # TASK-2 residual-cleanup deps (LLM pass over leftover unimplemented!()).
     cleanup_residuals_deps = _cleanup_residuals.CleanupResidualsDeps(
         scan_unimplemented=scan_unimplemented_functions,
         load_skeleton_files=_load_skeleton_files,
@@ -1521,7 +1521,7 @@ def build_app(
         file_format_instruction=FILE_FORMAT_INSTRUCTION,
         log=ports.log,
     )
-    # S69: former pipeline delegate shims, bound direct (their bodies never
+    # Former pipeline delegate shims, bound direct (their bodies never
     # touched a patched module seam — the log/emit/deps they need are ports/locals).
     check_graceful_stop = functools.partial(_graceful_stop.check_graceful_stop, ports.log)
     check_auto_operator = functools.partial(_auto_op_check, ports.log)
@@ -1587,7 +1587,7 @@ def build_app(
             cargo_env=ports.cargo_env, build_timeout=cfg.build_timeout,
             measure_coverage=measure_coverage)
 
-    # S65: pre-strip API-surface capture (P6) + --restart-from-augmented restore.
+    # Pre-strip API-surface capture + --restart-from-augmented restore.
     api_surface = ApiSurfaceCapture(
         api_surface_path=_api_surface_path, type_manifest_path=_type_manifest_path,
         condense_to_signatures=_condense_rust_to_signatures,
@@ -1606,7 +1606,7 @@ def build_app(
         read_state=_state_read_state, write_state=_state_write_state, log=ports.log,
     )
 
-    # S71: per-run structure caches (mod records + cluster-specific symbols)
+    # Per-run structure caches (mod records + cluster-specific symbols)
     # with the cluster-membership queries bound to them. enumerate seams go
     # through helpers (late-bind → live _APP.structure, so fake extractors win);
     # impl-block collection through the swap-aware App seam.
@@ -1617,7 +1617,7 @@ def build_app(
         log=ports.log,
     )
 
-    # S67: TASK-0c augmentation cluster (S25 injected it pre-built).
+    # TASK-0c augmentation cluster (injected it pre-built).
     augment_store = FileAugmentStore()
     augment_engine = CargoAugmentEngine(
         log=ports.log, cargo_env=ports.cargo_env, build_timeout=cfg.build_timeout,
@@ -1639,7 +1639,7 @@ def build_app(
     def _typed_fn_records(sd: Path) -> list[FnRecord]:
         return [FnRecord.from_dict(d) for d in (enumerate_fns(sd) or [])]
 
-    # F11 t1.5 (M2) + M3 (S66): layout phase runner + stall-exit re-trigger.
+    # t1.5: layout phase runner + stall-exit re-trigger.
     run_layout_phase = build_layout_phase_runner(
         enabled=cfg.layout_authoring_enabled,
         ask=ask_client.ask, task2_model=settings.task_models.task2,
@@ -1664,7 +1664,7 @@ def build_app(
         derive_gentest_prelude=helpers.derive_gentest_prelude,
         is_gen_tests_file=helpers.is_gen_tests_file,
     )
-    # P5-S3/S66: strip/bake/commit pre-step deps + the pre-strip bake (Hard Rule 11).
+    # Strip/bake/commit pre-step deps + the pre-strip bake (Hard Rule 11).
     strip_bake_deps = StripBakeDeps(
         log=ports.log, phase_valid=phase_valid,
         module_augmented_path=augment_roles.store.module_path,
@@ -1782,7 +1782,7 @@ def build_app(
         filter_notes=model_notes_store.filter_for_prompt,
         guard=ports.guard,
     )
-    # S64: the 9 fill-engine ISP role adapters. Seam-sensitive collaborators go
+    # The 9 fill-engine ISP role adapters. Seam-sensitive collaborators go
     # through helpers (late-binding over the pipeline globals raw-scripting
     # tests patch) or _via (live-App swap); pure relocated fns bind direct.
     fill_roles = FillRoles(
@@ -2416,7 +2416,7 @@ def build_app(
         new_skeleton_generator=_new_skeleton_generator,
         manifest_name=_MANIFEST_NAME,
     )
-    # S72: the top-level run-loop deps (orchestrator.run_pipeline). Constants
+    # The top-level run-loop deps (orchestrator.run_pipeline). Constants
     # come from settings/cfg/domain vocabulary; drivers bind DIRECT to the
     # pipeline_core impls; only logging/telemetry init + the audit thread stay
     # helpers-late-bound (they mutate pipeline-side run globals).
@@ -2852,7 +2852,7 @@ def build_app(
         ),
         emitter=_emitter,
         ask_per_fn_body=helpers.ask_per_fn_body,
-        # S61: seam fields bound DIRECT to the pipeline_core impls (consumers
+        # Seam fields bound DIRECT to the pipeline_core impls (consumers
         # go through _via(...) so a test's replace on the live App wins).
         attribute_failures=functools.partial(_attribution.attribute_failures, _attr_deps),
         behavior_frontier=functools.partial(_attribution.behavior_frontier, _attr_deps),
@@ -2911,7 +2911,7 @@ def build_app(
         telemetry=telemetry,
         requirements_phase=requirements_phase,
         module_reconstructor=module_reconstructor,
-        # S27: task3 inline-retry deps — composed from the fill-role adapters
+        # task3 inline-retry deps — composed from the fill-role adapters
         # (whose lambdas late-bind the pipeline globals, so the scripted-cargo/
         # scripted-model e2e seams intercept at call time) + the Helpers shims
         # for the attribution/diag collaborators the fill roles don't carry.

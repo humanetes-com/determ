@@ -1,4 +1,4 @@
-"""Byte-equivalence pins for `pipeline_core.domain.rust_fn_headers` (P7).
+"""Byte-equivalence pins for `pipeline_core.domain.rust_fn_headers`.
 
 Each test compares a header projection against the exact regex it replaced in
 pipeline.py: the line-anchored fn/macro scans of `_condense_rust_to_signatures`

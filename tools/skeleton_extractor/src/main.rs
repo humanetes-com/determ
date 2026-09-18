@@ -1,7 +1,7 @@
 // Binary entry point for the skeleton extractor.
 //
-// CLI is clap-derive (slice 7); the flag NAMES are part of the Python↔Rust seam
-// (CODE_ARCHITECTURE.md §4 — `pipeline_core.adapters.extractor` shells these exact strings),
+// CLI is clap-derive; the flag NAMES are part of the Python↔Rust seam
+// (`pipeline_core.adapters.extractor` shells these exact strings),
 // so they are preserved byte-for-byte from the old hand-rolled parser. anyhow stays in the
 // binary; the library edge uses anyhow::Result too (thiserror migration deferred).
 

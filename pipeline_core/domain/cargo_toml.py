@@ -1,5 +1,5 @@
-"""Pure Cargo.toml accessors (R8: parse the structured format with tomllib,
-never regex). No I/O — callers read the file text and pass it in."""
+"""Pure Cargo.toml accessors — parse the structured format with tomllib,
+never regex. No I/O — callers read the file text and pass it in."""
 
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ def cargo_is_proc_macro(text: str) -> bool:
 
 def cargo_entry_point_paths(text: str) -> list[str]:
     """Explicit crate entry-point source paths declared in Cargo.toml, in
-    precedence order: `[lib] path`, then each `[[bin]] path`. Regex-free (R8 —
-    replaces the `\\[lib\\].*?path` / `\\[\\[bin\\]\\].*?path` DOTALL regexes)."""
+    precedence order: `[lib] path`, then each `[[bin]] path`. Regex-free —
+    replaces the `\\[lib\\].*?path` / `\\[\\[bin\\]\\].*?path` DOTALL regexes."""
     data = load_cargo_toml(text)
     out: list[str] = []
     lib = data.get("lib")

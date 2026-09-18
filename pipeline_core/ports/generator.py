@@ -1,4 +1,4 @@
-"""Role-based ports for the TASK-2 source generators (P4).
+"""Role-based ports for the TASK-2 source generators.
 
 The `application.generators.task2_generator` use-cases depend on these narrow
 ROLE Protocols (ISP) instead of reaching into `pipeline.py` globals. `pipeline.py`
@@ -89,7 +89,7 @@ class ContextDocs(Protocol):
     ) -> list[tuple[str, str]]: ...
 
 
-# --- Ports for the 4-phase StaticSkeletonTask2Generator (P4 slice 4) ---------
+# --- Ports for the 4-phase StaticSkeletonTask2Generator ---------------------
 # The skeleton generator orchestrates cargo, the LLM fill engines, the baked
 # cluster artefacts, the gen_tests sibling machinery, and the source scanners —
 # all `pipeline.py`-resident or adapter-layer. Each crosses one of the roles

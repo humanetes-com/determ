@@ -1,4 +1,4 @@
-"""Pure prompt-section renderers + curated guidance data (slice 8).
+"""Pure prompt-section renderers + curated guidance data.
 
 Text→text only: no I/O, no run state, no regex. The two impure
 collaborators the builders need (the pipeline's file-view annotator and
@@ -972,7 +972,7 @@ def gotchas_for_error(error_excerpt: str) -> str:
 def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> str:
     """Render one optional prompt section:
     `\\n<TAG>\\n{prefix}{content}{suffix}\\n</TAG>\\n`, or "" when content is
-    empty. Slice 8a: the one wrapper for every optional section — previously
+    empty. The one wrapper for every optional section — previously
     re-implemented inline per builder, which is how builders drifted apart
     (a section added to one but not the others)."""
     if not content:

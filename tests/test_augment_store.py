@@ -1,4 +1,4 @@
-"""FileAugmentStore — TASK 0c augmentation sentinel persistence (P6)."""
+"""FileAugmentStore — TASK 0c augmentation sentinel persistence."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,5 +1,5 @@
 """Source-strip adapter (ADAPTER: filesystem mutation + the strip_to_tests
-backend). Moved verbatim from pipeline.py (P5-S2). Removes a single module's
+backend). Moved verbatim from pipeline.py. Removes a single module's
 implementation source while preserving test content, recording the original
 file list first so TASK 2 has a deterministic file plan.
 """

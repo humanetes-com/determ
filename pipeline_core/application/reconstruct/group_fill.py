@@ -1,4 +1,4 @@
-"""Phase-C group fill (P4) — relocated from pipeline.py.
+"""Phase-C group fill — relocated from pipeline.py.
 
 Fills the skeleton in leaf-first GROUPS (whole-file-per-group LLM calls), the
 non-TDD Phase-C path. Collaborators injected via `GroupFillDeps` (composition root

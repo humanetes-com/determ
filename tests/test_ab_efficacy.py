@@ -1,4 +1,4 @@
-"""R13.1 A/B efficacy comparator — pure metric extraction + verdict over synthetic
+"""A/B efficacy comparator — pure metric extraction + verdict over synthetic
 event slices (no live run, no log scraping)."""
 from __future__ import annotations
 

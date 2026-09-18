@@ -1,6 +1,6 @@
-"""P1 proof — StructureReader is constructor-injected, not monkeypatched.
+"""StructureReader is constructor-injected, not monkeypatched.
 
-Demonstrates the pattern CODE_ARCHITECTURE §4 P1 establishes: the real
+Demonstrates the constructor-injection pattern: the real
 `CliStructureReader` wraps the `Extractor` seam (the `.to_dict()` logic that used to
 live in pipeline.py shims), and the fill-engine `WorkspaceModelAdapter` takes a
 `StructureReader` by CONSTRUCTOR so a test injects a fake (via

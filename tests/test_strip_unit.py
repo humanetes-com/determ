@@ -1,4 +1,4 @@
-"""Strip adapter (P5-S2): original-structure recording + language guard."""
+"""Strip adapter: original-structure recording + language guard."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,4 +1,4 @@
-"""Impl-block byte-range scanning — pure domain (P6 engine-relocation series).
+"""Impl-block byte-range scanning — pure domain.
 
 A hand-rolled, regex-free Rust lexer that finds the byte ranges of every
 `impl` block in a source string. It is NOT a syn parse (syn runs on the Rust
@@ -238,7 +238,7 @@ def impl_where_clause(file_text: str, container: str) -> str:
     `container` (the extractor's impl header with the impl's OWN generics stripped,
     e.g. ``impl Context<T, E> for Result<T, E>``); ``""`` if absent or unmatched.
 
-    Structural rewrite of the old regex locator (P7): the impl blocks are found by
+    Structural rewrite of the old regex locator: the impl blocks are found by
     the comment/string-aware brace scanner, so an ``impl …`` mention inside a
     comment or string can no longer be mistaken for a real impl, and the impl's
     own generics are stripped with BALANCED ``<>`` (the old ``<[^>]*>`` regex

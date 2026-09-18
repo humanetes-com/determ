@@ -1,4 +1,4 @@
-"""PhaseCFillEngine — the per-cluster phase-C fill coordinator (P2 / R3.3).
+"""PhaseCFillEngine — the per-cluster phase-C fill coordinator.
 
 Ported verbatim from `pipeline.py:_task2_fill_fns_one_by_one`: for each pass it
 scans the cluster's `unimplemented!()` stubs, orders them leaf-first into
@@ -10,7 +10,7 @@ progress.
 Every `pipeline.py` helper it used is now a narrow role port (`fill_engine`);
 the only behavioural change is the test-retry reverse-lookup, which dropped its
 `re.finditer(r"\\bfn ...")` source scan for the syn enumerator (`WorkspaceModel`)
-per the project's no-regex rule (R7 migrate-on-touch).
+per the project's no-regex rule (migrate on touch).
 """
 from __future__ import annotations
 
@@ -350,7 +350,7 @@ class PhaseCFillEngine:
         # suite per prompt (3.3 ms measured); the impl and per-fn routes
         # already loaded it once each. Same bytes, one parse.
         behaviour_specs = self.behaviour_loader(project_dir, cluster_name)
-        # P5 — per-impl-block path. New default unit of work: fill all stubs of
+        # Per-impl-block path. New default unit of work: fill all stubs of
         # one impl block in one LLM call. The per-impl path delegates free fns and
         # oversized blocks back to the per-fn path below — but only AFTER it has
         # run, which is the wrong order when one of those stubs is what blocks it:
@@ -652,7 +652,7 @@ class PhaseCFillEngine:
         bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
         fns_filled = 0
         attempts = 0
-        # P4: PIPELINE_PARALLELISM (global knob).
+        # PIPELINE_PARALLELISM (global knob).
         _parallelism = self.config.parallelism
         if _parallelism > 1:
             self.tel.log(f"  [phase-c/per-fn] parallelism={_parallelism} (LLM calls "
@@ -680,9 +680,9 @@ class PhaseCFillEngine:
         _crate_type_records = self.ws.cluster_filter_type_members(
             self.ws.enumerate_types(target_src_dir) or [], cluster)
 
-        # P7.6: floor-stall against (remaining_stubs + last_pass_failures).
+        # Floor-stall against (remaining_stubs + last_pass_failures).
         _pass_max_stalls = self.config.pass_max_stalls
-        _pass_gauge = FloorStall()  # slice 8a
+        _pass_gauge = FloorStall()
         _pass_last_fail_count = 0
         # Cumulative body-fills landed in this cluster across all passes — the
         # real-time progress signal emitted as `phase_c.fill.progress`. pass=
@@ -864,9 +864,9 @@ class PhaseCFillEngine:
             # — `progress_this_pass` counts bodies that LANDED,
             # which is not the same question as whether any could be judged.
             results_this_pass: list[FillResult] = []
-            pass_fail_floor = 0  # P7.6: this pass's failing-test floor
+            pass_fail_floor = 0  # this pass's failing-test floor
 
-            # P8: priority-level batching. Leaf-first: equal ref-counts share
+            # Priority-level batching. Leaf-first: equal ref-counts share
             # a level, a count change barriers (callees before callers).
             # Blocker ranks: one ranked pool — those counts are not a
             # compile-order proxy and almost never tie, so a count-change
@@ -885,7 +885,7 @@ class PhaseCFillEngine:
             # cross-iter exhausted skip: load the retrospectives map once.
             _retros_cache = self.retros.load(project_dir)
 
-            # P2 de-closure: per-pass ctx for the FillOneFn unit.
+            # De-closure: per-pass ctx for the FillOneFn unit.
             _pass_ctx = PerFnPassCtx(
                 project_dir=project_dir, target_src_dir=target_src_dir,
                 module_name=module_name, cluster_name=cluster_name,
@@ -971,7 +971,7 @@ class PhaseCFillEngine:
                         if res.error:
                             errors.append(res.error)
 
-            # P8 dispatch: process priority levels in order, barrier between them.
+            # Dispatch: process priority levels in order, barrier between them.
             for _level in _levels:
                 _work_queue: _queue_mod.Queue[tuple[int, Stub]] = _queue_mod.Queue()
                 for _item in _level:
@@ -1058,7 +1058,7 @@ class PhaseCFillEngine:
                     else:
                         self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: cargo test FAILED "
                                      f"(rc={rc}).")
-                        # === Per-pass test fix loop (slice 8a f4) ===
+                        # === Per-pass test fix loop ===
                         test_fix_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
                         _entry_fail_count = len(parse_failed_tests(test_out))
                         _stall_seen: dict[str, int] = {
@@ -1077,7 +1077,7 @@ class PhaseCFillEngine:
                             if not failed_tests:
                                 return FixOutcome("stop")  # rc!=0 but no parseable failed tests
                             cur_fail_count = len(failed_tests)
-                            # P3: classifier-driven retry candidates. Fires after
+                            # Classifier-driven retry candidates. Fires after
                             # one naive iteration stalls, OR on iter 1 when nothing
                             # was filled (no naive baseline exists).
                             classification: dict[str, dict[str, Any]] = {}
@@ -1118,7 +1118,7 @@ class PhaseCFillEngine:
                             if not fns_to_retry and not filled_this_pass:
                                 # Reverse-lookup fallback: for each failing test
                                 # binary, enumerate fns it exercises and feed those
-                                # as candidates. (R7: extractor, not regex.)
+                                # as candidates. (extractor, not regex.)
                                 test_fname_set = {
                                     t.split("::")[0].split("__")[0]
                                     for t in failed_tests
@@ -1152,7 +1152,7 @@ class PhaseCFillEngine:
                             # re-splices, restored through the transaction
                             # primitive when the re-splice breaks the check.
                             _touched: dict[Path, PreImage] = {}
-                            # P5.1 parity: map (file, fn) → container via the syn
+                            # Map (file, fn) → container via the syn
                             # enumerator so the self-type's definition gets injected.
                             _retry_containers = self.ws.fn_container_index(target_src_dir)
                             for rel_f, fn in fns_to_retry:
@@ -1193,7 +1193,7 @@ class PhaseCFillEngine:
                                     type_records=_crate_type_records,
                                     fr_path=fr_path,
                                 )
-                                # P5.4: container filter disambiguates tests for
+                                # Container filter disambiguates tests for
                                 # generic fn names (fmt/new/source).
                                 t_blocks = self.tests.find_tests_for_fn(
                                     tests_dir_files, fn,
@@ -1215,8 +1215,8 @@ class PhaseCFillEngine:
                                             behaviour_specs,
                                             units=(IdentityMustUnit(
                                                 fn, container_for_fn, sig_t),))),
-                                    fr_path=fr_path,  # P6.4 note recall
-                                    attempt_history=test_fix_history.get((rel_f, fn), []),  # P2
+                                    fr_path=fr_path,  # note recall
+                                    attempt_history=test_fix_history.get((rel_f, fn), []),
                                 )
                                 attempts += 1
                                 attempts_log_t: list[str] = []
@@ -1271,7 +1271,7 @@ class PhaseCFillEngine:
                                              f"PASSED after test-fix attempt {test_fix_attempt}.")
                                 return FixOutcome("accepted")
                             new_fail_count = len(parse_failed_tests(test_out))
-                            # P4: persist this iter's cargo test output for post-hoc.
+                            # Persist this iter's cargo test output for post-hoc.
                             self.tests.write_test_fix_log(
                                 project_dir=project_dir,
                                 cluster_name=cluster_name,
@@ -1330,10 +1330,10 @@ class PhaseCFillEngine:
                             initial_floor=FixProgress(0, _entry_fail_count),
                             check_stop=self.tel.check_stop,
                         )
-                        # P7.6 floor for the pass-level gauge.
+                        # Floor for the pass-level gauge.
                         pass_fail_floor = 0 if rc == 0 else int(_stall_seen["best"] or 0)
 
-            # P7.6: capture last-pass failure count for the pass-level floor.
+            # Capture last-pass failure count for the pass-level floor.
             _pass_last_fail_count = pass_fail_floor
             _remaining_pass = self.ws.scan_stub_tuples(target_src_dir, cluster).unit_count
             _pass_metric = _remaining_pass + _pass_last_fail_count

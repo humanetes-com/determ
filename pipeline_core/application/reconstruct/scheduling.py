@@ -1,4 +1,4 @@
-"""Per-fn pass scheduling (R11.3 determinism) — pure, no engine state."""
+"""Per-fn pass scheduling (determinism) — pure, no engine state."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def group_priority_levels(
 
     Leaf-name ref-count (`unit_ranks is None`): callees before callers. Equal
     counts share a level; a count change starts a new barrier. That is the
-    compile-order proxy (R11.3). An unsorted input shatters into singletons
+    compile-order proxy. An unsorted input shatters into singletons
     — run `1159463-b1e352e5` iter 3 ran 5.0 h at mean concurrency 1.09
     against PIPELINE_PARALLELISM=4 because the refill tail arrived in
     source-scan order. `match_records_to_order` exists so that does not recur.
@@ -106,7 +106,7 @@ def leaf_first_group_order(groups: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     A group sharing many `target_symbols` with others depends on more "other"
     groups' work, so should be filled later. Ties broken by group name for
-    determinism (R11.3). Pure: no engine state.
+    determinism. Pure: no engine state.
     """
     all_other_syms: list[set[str]] = [set(g.get("target_symbols", []) or []) for g in groups]
 
@@ -151,7 +151,7 @@ def order_frontier(
     leaf_name_counts: dict[str, int] | None,
     panic_depths: dict[FnLocator, int] | None = None,
 ) -> list[tuple[FnLocator, set[str]]]:
-    """Order frontier entries by D2's rule: shallowest panic depth first, then
+    """Order frontier entries: shallowest panic depth first, then
     most-callers, then alphabetical (file, fn) for reproducibility.
 
     `panic_depths` (optional) maps the same keys to integer panic stack depths.

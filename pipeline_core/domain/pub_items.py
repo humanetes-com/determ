@@ -7,7 +7,7 @@ post-generation conformance check (`application/validate.py`, called on the
 REGENERATED source) so both sides compare the output of the SAME structured
 extractor instead of one side re-deriving its set via regex over a condensed
 text listing (which cannot distinguish a real top-level `pub` item from the
-same syntax appearing inside a `///` doc-comment usage example — debt #64).
+same syntax appearing inside a `///` doc-comment usage example).
 """
 from __future__ import annotations
 

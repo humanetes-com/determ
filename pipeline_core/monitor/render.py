@@ -1,6 +1,6 @@
 """Pure ANSI / pipeline-line text helpers for the monitor TUI.
 
-These are the regex-free (R7) presentation-layer primitives the renderer reuses:
+These are the regex-free presentation-layer primitives the renderer reuses:
 visible-width measurement (ANSI escape stripping), the color-wrapping helpers,
 the two structured scrapes of pipeline-state / call-start log lines, and the
 event-log line formatter. They hold no I/O and no module state, so they live in
@@ -84,7 +84,7 @@ def event_format(ev: dict[str, Any]) -> str:
 
 def ansi_seq_len(s: str, i: int) -> int:
     r"""Length of the CSI escape sequence at ``s[i]`` (``\033[`` params final-letter),
-    or 0 if none (regex-free, R7; mirrors ``\033\[[0-9;]*[a-zA-Z]``)."""
+    or 0 if none (regex-free; mirrors ``\033\[[0-9;]*[a-zA-Z]``)."""
     if not s.startswith("\033[", i):
         return 0
     j = i + 2
@@ -112,7 +112,7 @@ def plain(s: str) -> str:
 
 def state_done_key(line: str) -> str | None:
     r"""Cluster key from a ``[<key>[/...]] done`` pipeline_state line, else None
-    (regex-free, R7; mirrors ``\[([^\]/]+)(?:/[^\]]*)?\]\s+done\b``)."""
+    (regex-free; mirrors ``\[([^\]/]+)(?:/[^\]]*)?\]\s+done\b``)."""
     if not line.startswith("["):
         return None
     rest = line[1:]
@@ -141,7 +141,7 @@ def state_done_key(line: str) -> str | None:
 
 def call_start_value(content: str) -> str | None:
     r"""The float-ish token from the first well-formed ``[CALL_START: <num>]``
-    marker, else None (regex-free, R7; mirrors ``\[CALL_START: ([\d.]+)\]``)."""
+    marker, else None (regex-free; mirrors ``\[CALL_START: ([\d.]+)\]``)."""
     marker = "[CALL_START: "
     start = 0
     while (i := content.find(marker, start)) >= 0:

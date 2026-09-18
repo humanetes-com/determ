@@ -1,4 +1,4 @@
-"""Fix-loop role records (P3 step 29): parameterized call-shaping records over
+"""Fix-loop role records: parameterized call-shaping records over
 injected callables — NO I/O, NO external boundary, so their correct layer is
 APPLICATION, not adapters. Living here lets the fix loop construct them
 directly instead of receiving the CLASSES through its deps record.

@@ -1,8 +1,8 @@
-"""Cargo error-text shaping for fix prompts (P2 slice 4) — warning strip,
-target-file error focusing, E-code scanning. All regex-free: the inputs are
-rustc's stable text format, parsed with plain line/boundary scans (the
-structured-diagnostics JSON path is preferred where diags exist — R8.3;
-these helpers shape arbitrary captured TEXT where they don't).
+"""Cargo error-text shaping for fix prompts — warning strip, target-file error
+focusing, E-code scanning. All regex-free: the inputs are rustc's stable text
+format, parsed with plain line/boundary scans (the structured-diagnostics JSON
+path is preferred where diags exist; these helpers shape arbitrary captured
+TEXT where they don't).
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
                       line_lo: int = 0, line_hi: int = 0,
                       locate: Callable[[str, int], FnSite | None] | None = None,
                       target_container: str = "") -> str:
-    """Diagnostics-first error focusing (P7): render rustc's OWN complete
+    """Diagnostics-first error focusing: render rustc's OWN complete
     blocks, capped by diagnostic COUNT — never by characters — so the model
     always sees a diagnostic whole (an E0308 cut before its expected/found
     lines is unactionable; starvation-miner evidence, runs 6390/187469).
@@ -214,7 +214,7 @@ def focus_diagnostics(diagnostics: list[Diagnostic], file_rel: str, *,
 def focus_cargo_errors(output: str, file_rel: str, max_chars: int) -> str:
     """Extract a focused error excerpt from cargo output.
 
-    P3.7 tiered output. Two groups of error blocks:
+    Tiered output. Two groups of error blocks:
       - In-target-file: blocks whose `-->` mentions `file_rel`'s basename
       - Cross-file: blocks whose `-->` mentions any other .rs file
     Returned with a header demarcating the two. Budget split 60/40 in favour
@@ -225,7 +225,7 @@ def focus_cargo_errors(output: str, file_rel: str, max_chars: int) -> str:
     not see the real symptom — only the absence of expected errors in its
     own file.
 
-    ANSI is stripped FIRST (P7): cargo's colored rendering prefixes `error[…]`
+    ANSI is stripped FIRST: cargo's colored rendering prefixes `error[…]`
     headers with SGR escapes, which silently defeated `is_error_header` — no
     blocks parsed, and the model got a head-truncated raw dump (starvation
     miner, runs 6390/187469).

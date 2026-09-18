@@ -27,7 +27,7 @@ class RunState:
 
 @dataclass(frozen=True, slots=True)
 class RunPlan:
-    """The parsed CLI contract (plan #77 T1, parse-don't-validate): argparse's
+    """The parsed CLI contract (parse-don't-validate): argparse's
     Namespace is read EXACTLY ONCE — in :meth:`from_args` — and everything
     downstream consumes this frozen, typed VO. Field set = the flags the run
     loop actually consumes (display-only flags like --best-models-list stay

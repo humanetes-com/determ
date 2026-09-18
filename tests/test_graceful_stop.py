@@ -52,7 +52,7 @@ def test_second_caller_still_exits_after_sentinel_is_gone(monkeypatch, tmp_path)
 
 
 def test_fill_phase_clock_expiry_stops_via_check_graceful_stop(monkeypatch):
-    """T3: an armed short bound trips FILL_PHASE_STOP then the same
+    """An armed short bound trips FILL_PHASE_STOP then the same
     process-wide exit a sentinel stop takes. Off at 0 never emits."""
     import time
 

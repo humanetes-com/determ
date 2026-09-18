@@ -1,4 +1,4 @@
-"""TASK-2 source generators (P4) — Clean-Architecture port of the pipeline.py
+"""TASK-2 source generators — Clean-Architecture port of the pipeline.py
 `Task2Generator` family.
 
 Each generator is a use-case that turns functional requirements + tests into
@@ -539,7 +539,7 @@ Output one file path per line, relative to the project root. No other text.
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            # Strip list markers: "- ", "* ", "1. ", "2) ", etc. (R7: structured).
+            # Strip list markers: "- ", "* ", "1. ", "2) ", etc. (structured).
             line = strip_list_marker(line)
             # Strip inline backticks and trailing punctuation (commas, semicolons, etc.)
             line = line.strip('`').strip(',;')
@@ -845,7 +845,7 @@ class StaticFileListTask2Generator(Task2Generator):
                 test_stem = Path(rel).name.split('.')[0]
                 if not _file_stem or not test_stem:
                     return False
-                norm_test = strip_test_prefix(test_stem)  # R7: structured prefix strip
+                norm_test = strip_test_prefix(test_stem)  # structured prefix strip
                 norm_file = _file_stem
                 return (
                     norm_test == norm_file
@@ -890,7 +890,7 @@ class StaticFileListTask2Generator(Task2Generator):
                                     head=_scl // 6, tail=_scl // 3)
 
             # Whole-project context — suppress when primary/secondary tests already
-            # cover the same TESTFILE blocks (R7: structured marker scan).
+            # cover the same TESTFILE blocks (structured marker scan).
             _wp_paths = set(testfile_paths(whole_project_context or ""))
             _have_paths = {p for p, _ in _primary_tests} | {p for p, _ in _secondary_tests}
             if _wp_paths and _wp_paths.issubset(_have_paths):
@@ -1050,10 +1050,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
     scan: SourceScan
     ws: Workspace
     cfg: SkeletonConfig
-    # P3 blueprint phase deps (BlueprintDeps, constructed by the composition
+    # Blueprint phase deps (BlueprintDeps, constructed by the composition
     # root; None → blueprint generation is skipped).
     blueprint_deps: Any = None
-    # F2 heal: the syn StructureReader (parse-check gate for the heal hierarchy).
+    # Heal: the syn StructureReader (parse-check gate for the heal hierarchy).
     # None → heal falls back to whole-file skeleton restore (legacy behaviour).
     structure: Any = None
     # Layout propagation: (load_private_surface, load_layout_records,

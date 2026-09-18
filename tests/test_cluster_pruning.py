@@ -1,5 +1,5 @@
 """Pure-domain characterization for `cluster_plan.prune_redundant_clusters`
-(P6 relocation of `pipeline._prune_redundant_clusters`).
+(relocation of `pipeline._prune_redundant_clusters`).
 
 The I/O fact-gathering (Cargo.toml + `src/` cfg counts) lives in the adapter
 `adapters.cluster_pruning` and is exercised end-to-end by

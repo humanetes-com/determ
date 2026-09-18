@@ -1,4 +1,4 @@
-"""Slice 8 pins — pipeline_core/prompts/ package.
+"""Pins pipeline_core/prompts/ package.
 
 Covers what the move changed (everything else is pinned by the existing
 smoke tests through the pipeline.py aliases):

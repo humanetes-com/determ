@@ -1,4 +1,4 @@
-"""run_pipeline happy-path coverage (S27/S4).
+"""run_pipeline happy-path coverage.
 
 `main`'s 476-line body was relocated verbatim into `orchestrator.run_pipeline`
 behind an injectable `RunDeps` bundle — the whole justification being that the

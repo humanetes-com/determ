@@ -1,6 +1,6 @@
 """Unit tests for the test-command discovery domain (`pipeline_core.domain.test_command`).
 
-Pins the P6 R7 migration: the structured `backtick_spans` char-scan replaces the old
+Pins the regex-to-structured-scan migration: the structured `backtick_spans` char-scan replaces the old
 ``re.finditer(r'`([^`]+)`', text)`` backtick scan. The `_old_regex_spans` reference here
 is the EXACT original regex — the equivalence test proves byte-for-byte parity so the
 relocation is behaviour-preserving.

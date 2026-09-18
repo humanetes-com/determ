@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # WHY: two independent fixes need comparable baselines before a full rebuild.
-#   (1) Behaviour capture→oracle (task0d emit, entry 236): commits from
+#   (1) Behaviour capture→oracle (task0d emit): commits from
 #       4103fb6 through 580fb7e — captures were prompt text only until
 #       emit_behaviour_tests.py; harvest reading was deferred until t2a finished.
-#   (2) Session site join (entry 238 / P18): attributed_units_for_session —
+#   (2) Session site join (P18): attributed_units_for_session —
 #       eligible filters site_frontier instead of being a unit source; uncommitted
 #       at session time on top of 07ac840.
 #   This script freezes the filled reconstruction pair (.skeleton +

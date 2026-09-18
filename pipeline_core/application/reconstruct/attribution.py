@@ -909,7 +909,7 @@ def compile_error_frontier(
     output: str, project_dir: Path, check_cmd: str,
     env: dict[str, str], timeout: int,
 ) -> Frontier:
-    """Structured-first compile-error frontier (R8.3): re-run the derived
+    """Structured-first compile-error frontier: re-run the derived
     check-only command for JSON diagnostics and attribute errors→fns via
     `_frontier_from_diags`. Regex-parsing `output` remains only as the
     fallback when no structured diagnostics came back (cargo unavailable /
@@ -1142,7 +1142,7 @@ def attribute_failures(
          caller's test texts (deterministic: failing test body → identifier
          intersection with fn records; Hard Rule 9a — runs BEFORE the LLM
          classifier; skipped when the caller has no test texts)
-      4. LLM classifier — `_classify_phase_c_test_failures` (P4.5)
+      4. LLM classifier — `_classify_phase_c_test_failures`
       5. Recently-filled fallback — most recent fills are likely culprits
          for new assertion failures
       6. Test-reverse-map fallback — every fn the failing tests could reach
@@ -1215,7 +1215,7 @@ def attribute_failures(
     def _unpack_pair(raw: Any) -> tuple[Frontier, SiteFrontier]:
         """Live extractors return ``(dispatch, sites)``. Tests monkeypatch
         a locator-only dict or a 2-tuple; lift those to empty-container
-        sites so T1a still holds on locators."""
+        sites so the RUNTIME-wins-the-test invariant still holds on locators."""
         if isinstance(raw, tuple) and len(raw) == 2:
             a, b = raw
             if (isinstance(b, dict) and b

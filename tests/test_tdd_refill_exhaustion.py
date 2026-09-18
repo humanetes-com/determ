@@ -1,4 +1,4 @@
-"""debt #46 residual: the TDD driver must BOUND behavioral re-fill retries.
+"""The TDD driver must BOUND behavioral re-fill retries.
 
 A frontier fn that is already filled (non-stub) with a compiling-but-wrong body
 is a re-fill target. If its test never passes it reappears in the frontier every

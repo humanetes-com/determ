@@ -96,7 +96,7 @@ class FailureAnalysisStep:
         improved = state.improved_over_prev(current_pass)
         total_iters += 1
 
-        # debt#12: regression-triggered genesis audit. `state` is still the
+        # Regression-triggered genesis audit. `state` is still the
         # PRE-update iteration here (next_state.advance happens below), so
         # `state.prev_pass_count` is last iteration's count — a drop below it is a
         # real regression. Audit fires on a regression OR on the fixed interval.

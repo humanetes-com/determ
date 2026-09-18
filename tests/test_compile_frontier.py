@@ -1,4 +1,4 @@
-"""R8.3: `_compile_error_frontier` builds the compile-error frontier from
+"""`_compile_error_frontier` builds the compile-error frontier from
 STRUCTURED cargo diagnostics (check-only re-run) and regex-parses the
 caller's rendered text only as a fallback when no diagnostics came back.
 """

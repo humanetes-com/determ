@@ -1,4 +1,4 @@
-"""Characterization for the relocated downstream-API scanner adapter (P6).
+"""Characterization for the relocated downstream-API scanner adapter.
 Pins the use-import inference and the empty-result contract over a tmp workspace."""
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """Role ports for the shared fix-loop use-case (`application.reconstruct.fix_unit`
-+ `application.reconstruct.generate_fix`, P3.C).
++ `application.reconstruct.generate_fix`).
 
 Each Protocol is a narrow ROLE (ISP) — a fix unit receives only the seams it
 needs: the compile probe, the model call, the source-tree splicer, and the
@@ -87,7 +87,7 @@ class FixPrompts(Protocol):
 @runtime_checkable
 class FrontierBuilder(Protocol):
     """Attribute a failure to (file, fn) repair targets. Each method returns an
-    ALREADY test-oracle-filtered frontier (FR-018): the compile-error frontier,
+    ALREADY test-oracle-filtered frontier: the compile-error frontier,
     the runtime-panic (unimplemented-stub) frontier, and the behavioural frontier
     (assertion/wrong-value failures attributed to the fns they exercise, paired
     with the failing tests' source for the prompt)."""

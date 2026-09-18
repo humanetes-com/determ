@@ -1,4 +1,4 @@
-"""The task3 inline-retry decision logic, as explicit types (P3.D).
+"""The task3 inline-retry decision logic, as explicit types.
 
 The retry ran in one of two implicit modes and ended on a tangle of inline
 comparisons deciding whether to keep the edits, revert them, recurse, or
@@ -9,7 +9,7 @@ escalate. This module names both:
   via the reverse-map/classifier).
 * :class:`RetryVerdict` + the two pure ``*_verdict`` functions — given the
   before/after counts, what to do. Pure: no I/O, so the revert-or-keep policy is
-  unit-testable on numbers alone (it was the subtlest part — R9.2: a tree that
+  unit-testable on numbers alone (it was the subtlest part: a tree that
   no longer compiles emits zero FAILED lines and must NOT read as "near success").
 """
 from __future__ import annotations

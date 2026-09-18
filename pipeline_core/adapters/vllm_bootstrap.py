@@ -1,4 +1,4 @@
-"""vLLM server bootstrap adapter (P6).
+"""vLLM server bootstrap adapter.
 
 The `BACKEND=vllm` startup concern lifted out of the pipeline.py god-file: probe
 the local server, launch `docker_vllm.sh` if it is down, then poll the inference

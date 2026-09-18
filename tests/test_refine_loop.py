@@ -1,4 +1,4 @@
-"""Unit tests for the refine-loop primitive (CODE_ARCHITECTURE.md §8 / the loop-unification work).
+"""Unit tests for the refine-loop primitive (the loop-unification work).
 
 The loop POLICY (stall detection, retro-on-stall, budget, meta-awareness rendering) is pure and
 deterministic — driven by a scripted fake strategy, no model or cargo. This is the net the engine
@@ -100,7 +100,7 @@ def test_driver_assigns_iteration_and_recomputes_improved() -> None:
     assert [a.improved for a in state.attempts] == [True, False]     # 5 < 10 → not improved
 
 
-# --- FloorStall (slice 8a) — pins the legacy best/stall/prev_sig semantics ---
+# --- FloorStall — pins the legacy best/stall/prev_sig semantics ---
 
 
 def test_floorstall_strict_decrease_resets_stall():

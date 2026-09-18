@@ -1,10 +1,10 @@
-"""L3-RECOVERY fixture health — CODE_ARCHITECTURE.md R10.7.
+"""L3-RECOVERY fixture health.
 
 Confirms the hardcrate is a well-formed, FULLY TEST-DETERMINED reconstruction
 target: it compiles and every test passes under real cargo in BOTH clusters (the
 ground-truth oracle is satisfiable), AND each trap carries the distinguishing test
 case that pins its rule uniquely (so a non-recovery is a pipeline gap, never an
-unsolvable ambiguity — FR-022). This does NOT run the pipeline; the full real-model
+unsolvable ambiguity). This does NOT run the pipeline; the full real-model
 recovery run is `run_hardcrate.sh` (on-demand/nightly, non-gating). cargo-gated.
 """
 from __future__ import annotations
@@ -74,7 +74,7 @@ def test_each_trap_carries_its_distinguishing_case() -> None:
     # wrapping distinguisher: a plain sum overflow-panics; 200+100 must wrap to 44.
     assert "wrapping_total(&[200, 100]), 44" in cap_src
 
-    # T5 cross-fn codec: the EXACT wire format lives ONLY in the integration test
+    # The wire trap's cross-fn codec: the EXACT wire format lives ONLY in the integration test
     # (the unit tests check round-trip alone), so per-fn fills can't see it without
     # the holistic pin — the lever meant to push recovery to task4.
     wire_unit = src("src/wire.rs")
@@ -88,7 +88,7 @@ def test_each_trap_carries_its_distinguishing_case() -> None:
     lib_src = src("src/lib.rs")
     assert "#[cfg(not(any(extra_cap" in lib_src and "fn cap_limit()" in lib_src
 
-    # T6 (level 2) frame protocol: exact wire bytes + validation pinned ONLY in the
+    # The framing trap (level 2): exact wire bytes + validation pinned ONLY in the
     # integration file; the unit checks round-trip alone.
     framing_unit = src("src/framing.rs")
     assert "deframe(&frame(&p))" in framing_unit              # unit = round-trip only

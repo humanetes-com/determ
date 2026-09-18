@@ -1,5 +1,5 @@
 """Characterization for the Phase-B test-grouping family
-(P6 relocation of `pipeline._task2_group_tests` + its helpers).
+(relocation of `pipeline._task2_group_tests` + its helpers).
 
 Pure rules → `domain.test_grouping`; prompt → `prompts.test_grouping`; use-case
 → `application.reconstruct.test_grouping.group_tests` (model/log/loader injected

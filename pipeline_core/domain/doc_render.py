@@ -1,5 +1,5 @@
-"""Markdown-in-Rust-doc-comment rendering helpers (P7 — replaces the doc-attr regexes
-in `_doc_attr_string` / `_condense_doc_run`).
+"""Markdown-in-Rust-doc-comment rendering helpers — replaces the doc-attr regexes
+in `_doc_attr_string` / `_condense_doc_run`.
 
 These operate on the text INSIDE Rust ``#[doc = "..."]`` attributes / doc comments when
 condensing them to a one-line prompt summary. Pure: stdlib only, no regex.
@@ -225,7 +225,7 @@ def condense_doc_attrs(text: str) -> str:
 
     Deterministic Python (Hard Rule 9) — preserves the author's intent overview
     at ~1 line instead of either dumping hundreds of chars of examples or
-    erasing the intent entirely (FR-026). String-literal-aware via
+    erasing the intent entirely. String-literal-aware via
     `attr_span_end`, so `[]` inside doc content can never desync the parse.
     """
     out: list[str] = []

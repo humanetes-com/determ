@@ -1,4 +1,4 @@
-"""T3 fill-phase clock: off at 0 never trips; an armed short bound trips once."""
+"""Fill-phase clock: off at 0 never trips; an armed short bound trips once."""
 from __future__ import annotations
 
 import time

@@ -174,7 +174,7 @@ def test_strip_gen_tests_decl_preserves_trailing_newline() -> None:
     assert out.endswith("\n") and "gen_tests_1" not in out
 
 
-# --- decl toolkit (R7 migration of the four legacy decl regexes) ---
+# --- decl toolkit (migration of the four legacy decl regexes) ---
 
 def test_iter_gen_tests_decls_captures_gate_name_pass() -> None:
     text = ("pub fn f() {}\n"
@@ -264,7 +264,7 @@ def test_attr_run_walk_back_stops_at_the_item_above() -> None:
     assert "#[derive(Debug)]" in out
 
 
-# --- P7: gen_tests artifact-naming pins (byte-equivalent to the old regexes) ---
+# --- gen_tests artifact-naming pins (byte-equivalent to the old regexes) ---
 
 import re  # noqa: E402
 

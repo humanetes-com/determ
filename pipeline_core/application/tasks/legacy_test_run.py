@@ -1,4 +1,4 @@
-"""Legacy single-command TASK 3 path (pre-FR-024 validation use case).
+"""Legacy single-command TASK 3 path.
 
 The single-shot test runner retained for pipelines without baked clusters
 (non-skeleton backends, plain-cargo projects). Body relocated verbatim from
@@ -45,7 +45,7 @@ def run_legacy_single(
     project_dir: Path, test_command: str, iteration: Any, output_dir: Any,
     genesis_path: Any, deps: LegacyTestRunDeps,
 ) -> tuple[bool, str]:
-    """Pre-FR-024 single-shot path. Uses the discovered ``test_command`` and the
+    """Legacy single-shot path. Uses the discovered ``test_command`` and the
     lenient classifier. New skeleton-backend runs never hit this path."""
     output_file = Path(output_dir) / f"tests_output_{iteration}.txt"
     env = deps.cargo_env()

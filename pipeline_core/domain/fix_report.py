@@ -1,4 +1,4 @@
-"""Typed outcome of one fix-loop attempt (P3.B).
+"""Typed outcome of one fix-loop attempt.
 
 `generate_fix_loop` (and the inner per-fn / per-impl loops) passed an untyped
 `dict[str, Any]` between the attempt and the loop driver — keys discovered by

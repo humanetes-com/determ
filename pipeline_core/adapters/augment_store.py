@@ -1,4 +1,4 @@
-"""FileAugmentStore — the on-disk TASK 0c augmentation sentinels (P6).
+"""FileAugmentStore — the on-disk TASK 0c augmentation sentinels.
 
 Satisfies :class:`pipeline_core.ports.augment.AugmentStore`. Each (cluster,
 module) and each module records in a sentinel file under the workspace the

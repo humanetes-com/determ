@@ -205,7 +205,7 @@ def _write_workspace(ws: Path) -> None:
 
 
 def _count_active(project_dir: Path, cluster: BuildCluster) -> int:
-    """The strict expected-test count over the live wiring (S73: composition-built, no
+    """The strict expected-test count over the live wiring (composition-built, no
     pipeline delegate) — same collaborators build_app binds."""
     import pipeline
     from pipeline_core.adapters.discovery import is_gen_tests_file

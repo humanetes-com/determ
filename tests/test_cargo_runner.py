@@ -1,4 +1,4 @@
-"""Pins for application/reconstruct/cargo_runner.py (P2 slice 6). The runner
+"""Pins for application/reconstruct/cargo_runner.py. The runner
 composes the Cargo PORT + diagnostics_from_json; a fake Cargo lets us assert
 the flag insertion, rendered-text reconstruction, and rc=-1 parity without a
 real cargo binary."""

@@ -1,12 +1,11 @@
-"""L1 e2e harness — CODE_ARCHITECTURE.md R10.
+"""L1 e2e harness.
 
 Drive the pipeline's ORCHESTRATION decisions (build-failure routing, keep/revert,
 caps, scheduling) with a scripted model + scripted cargo — no live LLM, no real
-cargo. These tests retire the "●●● await live run" tag on the logic items (R9.1,
-R9.2, W3, session-56 cfg-filter), which react to model+cargo OUTPUT, not model
-QUALITY.
+cargo. These tests retire the "●●● await live run" tag on the logic items, which
+react to model+cargo OUTPUT, not model QUALITY.
 
-Seams (the single injection points, verified session 58):
+Seams (the single injection points):
   pipeline._ask_per_fn_body / _ask_raw         ← scripted model
   pipeline._run_cargo / _run_cargo_check_diag  ← scripted cargo
   _APP.frontier_from_diags (install_app_seams) ← scripted attribution (skips the
@@ -106,7 +105,7 @@ def install_scripted_cargo(
 
     class _ScriptedCargoRunner:
         """ports.cargo_runner.CargoRunner over the scripts — injected on _APP
-        (port boundary, P3-S2) instead of patching the module fns."""
+        (port boundary) instead of patching the module fns."""
 
         def run(self, cmd, cwd, env, timeout=180):  # noqa: ANN001, ANN201
             return scripts["run"]()
@@ -161,7 +160,7 @@ def install_scripted_cargo(
 
 
 def install_app_seams(monkeypatch, **seams: Any) -> None:
-    """Swap named App seam fields (S61: attribute_failures, behavior_frontier,
+    """Swap named App seam fields (attribute_failures, behavior_frontier,
     collect_impl_blocks, compile_error_frontier, extract_tdd_frontier,
     fn_container_index, frontier_from_diags, u2_test_gate, ...) for scripted
     callables — the port-boundary form of the old `setattr(pipeline, "_x")`
@@ -189,7 +188,7 @@ def install_scripted_attribution(monkeypatch, frontier: Any, kind: str = "script
 
 
 class FakeStructureReader:
-    """A `ports.structure.StructureReader` over scripted values (P3-S2).
+    """A `ports.structure.StructureReader` over scripted values.
 
     Each field is a value or a callable evaluated per call (same `_Script`
     semantics as the model/cargo seams). Inject via
@@ -255,7 +254,7 @@ def install_fake_extractor(monkeypatch, *, fns: Any = None, types: Any = None,
 
 def install_cargo_runner(monkeypatch, run: Callable[..., Any],
                          check_diag: Callable[..., Any]) -> None:
-    """Swap the App's cargo runner for arbitrary callables (P3-S2/S5): the
+    """Swap the App's cargo runner for arbitrary callables: the
     port-boundary form of `setattr(pipeline, "_run_cargo…")`. `run` gets the
     (cmd, cwd, env, timeout) call and returns (rc, text); `check_diag`
     returns (rc, rendered, [Diagnostic])."""
@@ -274,7 +273,7 @@ def install_cargo_runner(monkeypatch, run: Callable[..., Any],
 
 def install_cluster_scan(monkeypatch, *, stub_records: Any = _UNSET,
                          impl_blocks: Any = _UNSET) -> None:
-    """Script the App's cluster-scoped structure queries (P3-S3): stub-record
+    """Script the App's cluster-scoped structure queries: stub-record
     scan and impl-block collection. Value-or-callable semantics like the other
     seams; omit a kwarg to keep the production behavior."""
     import dataclasses as _dc

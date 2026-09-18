@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage ratchet — per-target floors that only go up (slice 13).
+"""Coverage ratchet — per-target floors that only go up.
 
 Reads the combined coverage data produced by the check.sh pytest run and
 gates each target against `.coverage_ratchet.json` (repo root, committed):

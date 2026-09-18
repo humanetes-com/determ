@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# L3-RECOVERY smoke — CODE_ARCHITECTURE.md R10.7. Runs the full real-model pipeline
+# L3-RECOVERY smoke. Runs the full real-model pipeline
 # against the HARDCRATE (hard-on-purpose traps) and measures how much of the
 # FAILURE-RECOVERY loop the pipeline can drive: the flow-audit recovery invariants
 # C1/C2/C3/C4/C6 should PASS (they SKIP on the happy-path microcrate).

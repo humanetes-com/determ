@@ -1,10 +1,10 @@
-"""L1 scheduling-determinism tests — CODE_ARCHITECTURE.md R10.2 (pins R11.3).
+"""L1 scheduling-determinism tests.
 
 `_group_priority_levels` is the deterministic core of phase-c fill batching: it
 groups leaf-first-sorted stubs into equal-ref-count levels, and the dispatch loop
 puts a barrier between levels so callees fill before callers regardless of worker
 scheduling. These pin that grouping so the determinism guarantee can't silently
-regress (the bug class R11.3 fixed: free-for-all queue → unreproducible fills).
+regress (the bug class this fixed: free-for-all queue → unreproducible fills).
 """
 from __future__ import annotations
 

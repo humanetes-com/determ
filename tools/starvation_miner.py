@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Starvation miner CLI (july_plan P1).
+"""Starvation miner CLI.
 
 Ranks WHY fills failed in a run: for each phase_c fill-fail event, correlates
 the LLM exchanges that produced it (same thread, inside the fill window,

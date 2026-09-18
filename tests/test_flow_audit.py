@@ -1,4 +1,4 @@
-"""Pins for the flow-audit thread relocated from pipeline.py (Plan #77 S4).
+"""Pins for the flow-audit thread relocated from pipeline.py.
 
 FlowAuditor reads the SHARED RunState by reference and reports via injected
 log/emit — no pipeline globals. These pin the report gating, the emitted event

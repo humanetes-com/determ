@@ -1,4 +1,4 @@
-"""Pins for application/reconstruct/cargo_errors.py (P2 slice 4) — the
+"""Pins for application/reconstruct/cargo_errors.py — the
 regex-free rewrites must match the regexes they replaced, boundary cases
 included. The old patterns are kept HERE (test-only) as the spec."""
 from __future__ import annotations
@@ -164,7 +164,7 @@ def test_strip_cargo_warnings_drops_blocks() -> None:
 
 
 def test_error_type_signals_extracts_blamed_types() -> None:
-    """P3.6: word-aware type-name extraction from rendered rustc errors."""
+    """Word-aware type-name extraction from rendered rustc errors."""
     err = (
         "error[E0308]: mismatched types\n"
         "  expected type `MyStruct`, found `OtherType`\n"
@@ -179,7 +179,7 @@ def test_error_type_signals_extracts_blamed_types() -> None:
 
 
 def test_error_type_signals_no_substring_false_positive() -> None:
-    """P3.6 (the bug the old regex had): bare `struct` must NOT match inside the
+    """(The bug the old regex had): bare `struct` must NOT match inside the
     word `reconstruct` — word-boundary aware."""
     assert error_type_signals("could not reconstruct Foo from bytes") == []
     # but a real `struct Foo` is caught
@@ -187,7 +187,7 @@ def test_error_type_signals_no_substring_false_positive() -> None:
 
 
 def test_error_type_signals_requires_capitalized_ident() -> None:
-    """P3.6: lowercase / single-char names are ignored (old `[A-Z][a-zA-Z0-9]+`)."""
+    """Lowercase / single-char names are ignored (old `[A-Z][a-zA-Z0-9]+`)."""
     assert error_type_signals("expected type foo") == []      # lowercase
     assert error_type_signals("expected type `X`") == []      # single char (<2)
     assert dict(error_type_signals("expected type `Xy`")) == {"Xy": 15}
@@ -237,7 +237,7 @@ def test_focus_diagnostics_count_cap_and_empty() -> None:
 
 
 def test_focus_diagnostics_line_window_moves_out_of_span_to_elsewhere() -> None:
-    """Plan D4: a From block at lines 982–988 must not be told that
+    """A From block at lines 982–988 must not be told that
     impl Error's E0277 at line 145 is its own LAST_ERROR. Same-file
     diagnostics outside the window sit under a THIS-FILE header, not the
     crate-wide one (that header is ``downstream_only`` to retro).

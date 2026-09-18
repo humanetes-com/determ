@@ -1,7 +1,7 @@
 """Regex-free Task2 file-planning helpers, pinned against the regexes they replaced.
 
-- split_api_surface_by_file ← `<FILE path="([^"]+)">(.*?)</FILE>` (DOTALL, R8.5)
-- cargo_entry_point_paths   ← `[lib].*?path` / `[[bin]].*?path` Cargo.toml regexes (R8)
+- split_api_surface_by_file ← `<FILE path="([^"]+)">(.*?)</FILE>` (DOTALL)
+- cargo_entry_point_paths   ← `[lib].*?path` / `[[bin]].*?path` Cargo.toml regexes
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """Fake-adapter unit tests for the static/LLM/file-list TASK-2 generators
-(P4 slices 1–3, pinned at slice 5 when `generate` became `GenerationRequest`-driven).
+(pinned at the point `generate` became `GenerationRequest`-driven).
 
 One fake object satisfies the Telemetry/LLM/Workspace/ContextDocs roles; the
 generators are driven through their happy paths + the key fallback branches with

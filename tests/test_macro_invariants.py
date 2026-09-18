@@ -1,4 +1,4 @@
-"""Characterization for the relocated cluster macro-invariants (P6).
+"""Characterization for the relocated cluster macro-invariants.
 Pins variant enumeration + the cluster-active expansion selection."""
 from __future__ import annotations
 

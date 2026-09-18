@@ -1,4 +1,4 @@
-"""The application-facing cargo boundary (plan #77 P3-S2).
+"""The application-facing cargo boundary.
 
 Distinct from :class:`ports.Cargo` (the raw one-command subprocess port the
 ADAPTERS own): a `CargoRunner` is the pipeline's SEMANTIC view — combined

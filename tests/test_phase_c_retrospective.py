@@ -1,5 +1,5 @@
 """Unit tests for the Phase-C retrospective diagnosis use-case
-(`pipeline_core.application.reconstruct.retrospective`) relocated in P6.
+(`pipeline_core.application.reconstruct.retrospective`).
 
 Exercises the orchestration with a FAKE injected `ask_retrospective` (no LLM):
 the early no-data / downstream-only guards, the llm_error / empty_response

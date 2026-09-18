@@ -1,4 +1,4 @@
-"""Unit tests for `pipeline_core.adapters.mutation.MutationTester` (P6).
+"""Unit tests for `pipeline_core.adapters.mutation.MutationTester`.
 
 Covers the offline guards without invoking cargo-mutants: survivors→None when
 the binary is absent, and harden_file→"" when there is no baseline.

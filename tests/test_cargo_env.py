@@ -1,4 +1,4 @@
-"""Unit tests for the cargo env builder (P6 engine-core slice) — moved from
+"""Unit tests for the cargo env builder — moved from
 pipeline._cargo_env into pipeline_core.adapters.cargo, now scope-injected."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Unit tests for the failure-classification domain (P6 prerequisite slice) —
+"""Unit tests for the failure-classification domain —
 moved from pipeline.classify_failure, now returning a typed FailureCategory."""
 from __future__ import annotations
 

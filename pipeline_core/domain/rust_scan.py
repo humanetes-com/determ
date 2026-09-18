@@ -125,7 +125,7 @@ def count_macro_calls(text: str, name: str) -> int:
 def use_imports_symbol(block: str, prefixes: Sequence[str], symbol: str) -> bool:
     """True when `block` already has a `use <prefix>…<symbol>…` import — the
     presence check the gen-prelude injector uses to avoid double-importing
-    (regex-free, R7; replaces `use (?:std|alloc)::[^;]*\\bSymbol\\b`-style patterns).
+    (regex-free; replaces `use (?:std|alloc)::[^;]*\\bSymbol\\b`-style patterns).
     Scans each `use ` occurrence, requires the text right after `use ` to start
     with one of `prefixes`, and `symbol` to appear as a whole identifier token
     within that statement (up to its terminating `;`)."""
@@ -142,7 +142,7 @@ def use_imports_symbol(block: str, prefixes: Sequence[str], symbol: str) -> bool
 
 
 def find_mod_opener(text: str, *, gen_only: bool) -> tuple[int, int] | None:
-    """Locate the FIRST `[pub ]mod <name> {` opener (regex-free, R7; mirrors
+    """Locate the FIRST `[pub ]mod <name> {` opener (regex-free; mirrors
     `(?:pub\\s+)?mod\\s+(?:gen_)?\\w+\\s*\\{`). Returns `(start, brace)` where
     `start` is the insert-before index (the `pub` if present, else `mod`) and
     `brace` is the index of `{`; None when absent. `gen_only` requires the module
@@ -232,7 +232,7 @@ def mod_body(text: str) -> str | None:
 
 def count_test_attrs(block: str) -> int:
     """Number of `#[test]` attributes, incl. path-qualified `#[tokio::test]`
-    (regex-free, R7; mirrors `#\\[(?:\\w+::)*test\\]`)."""
+    (regex-free; mirrors `#\\[(?:\\w+::)*test\\]`)."""
     count = 0
     i = 0
     while (k := block.find("#[", i)) >= 0:
@@ -743,7 +743,7 @@ def rust_delimiters_balanced(text: str) -> bool:
     Catches the most common LLM-output corruption (extra closing paren, missing
     brace) without a full Rust parser. Used to validate gen_tests siblings before
     committing them and to detect already-broken siblings at startup. Regex-free
-    char scan (R7)."""
+    char scan."""
     if not text:
         return True
     pairs = {")": "(", "]": "[", "}": "{"}

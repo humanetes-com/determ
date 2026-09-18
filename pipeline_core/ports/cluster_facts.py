@@ -1,4 +1,4 @@
-"""ClusterFactReader port (P5) — the source facts the cluster planner needs.
+"""ClusterFactReader port — the source facts the cluster planner needs.
 
 Narrow, ISP-respecting view over the syn extractor: just the three reads
 ``application.tasks.cfg_scan`` consumes to derive compiler clusters. The real

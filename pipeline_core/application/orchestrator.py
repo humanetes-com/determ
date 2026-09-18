@@ -1,5 +1,5 @@
 """Orchestrator — the pipeline's composition/phase plumbing extracted from the
-`main()` god-function (P5). Grown strangler-fig: pure, engine-independent pieces
+`main()` god-function. Grown strangler-fig: pure, engine-independent pieces
 cross first (CLI parser), then the phase blocks behind explicit ports as their
 dependency surface shrinks. `pipeline.py:main()` stays the entrypoint and calls
 into here.
@@ -769,7 +769,7 @@ class RunDeps:
 
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     """The deterministic per-module reconstruction run, extracted verbatim from
-    pipeline.py:main (S27). `main` now only parses args, resolves `root`, builds
+    pipeline.py:main. `main` now only parses args, resolves `root`, builds
     `RunDeps`, and calls here."""
     workspace_dir = root / deps.WORKSPACE_DIR
 
@@ -807,7 +807,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         deps.log(f"  --audit: flow self-audit active (every iteration + every "
                  f"{os.getenv('AUDIT_INTERVAL_SEC', '900')}s).")
 
-    # P3.13: scan gen_tests siblings inherited from prior runs; quarantine
+    # Scan gen_tests siblings inherited from prior runs; quarantine
     # any with unbalanced delimiters and strip their decls from the parent
     # source. Prevents a broken file (an LLM-corrupted task0c output) from
     # blocking every future cargo invocation. The systemic guard at write
@@ -1096,7 +1096,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     if _from_spec:
         deps.log("  [from-spec] Skipping task0c cluster loop (no test augmentation needed).")
         _clusters = []  # ensure the loop below is a no-op
-    # TASK 0c cluster augmentation (R2.2 — application.cluster_augment.ClusterAugmentor).
+    # TASK 0c cluster augmentation (application.cluster_augment.ClusterAugmentor).
     # Per-module crate dir/type resolved up front; _from_spec leaves _clusters empty so
     # the use-case is a no-op (it still clears the active cluster on exit).
     _module_dirs = {m: (dep_graph.crate_dir(m) if is_multi_module else project_dir)
@@ -1202,7 +1202,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         deps.log(f"  Module test files: {len(module_test_files)} (before strip)")
 
         # Strip this module's source after baking Hard-Rule-11 artefacts
-        # (P5-S3 — extracted to application/strip_bake.py).
+        # (extracted to application/strip_bake.py).
         deps.strip_and_bake_module(
             project_dir, module_name, module_dir, crate_type=crate_type,
             from_spec=_from_spec, src_hash=_src_hash, deps=deps.strip_bake_deps,
@@ -1249,7 +1249,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
             else:
                 deps.log(f"  [from-spec] {module_req_path.name} already present — leaving as-is.")
 
-        # TASK 1: generate → validate → retry → escalate (P5 — RequirementsPhase use-case).
+        # TASK 1: generate → validate → retry → escalate (RequirementsPhase use-case).
         t1_valid = deps.requirements_phase.run(
             project_dir, module_name=module_name, module_req_path=module_req_path,
             genesis_path=genesis_path, failure_log_path=failure_log_path,
@@ -1273,9 +1273,9 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
             if is_multi_module else build_check_cmd
         )
 
-        # Slice 9: module-start lifecycle (save siblings → maybe-wipe → stub)
+        # Module-start lifecycle (save siblings → maybe-wipe → stub)
         # lives in application/workspace_lifecycle.py; the wipe is gated by
-        # the codified wipe⟺rerun invariant (session-59 t2c→t3 fall-through).
+        # the codified wipe⟺rerun invariant (the t2c→t3 fall-through).
         saved_gen_blocks: dict[str, list[tuple[int, str]]] = \
             deps.wl_save_gen_tests_siblings(
                 module_dir, project_dir, existing_test_files,
@@ -1290,7 +1290,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         if not module_has_tests:
             deps.log(f"  '{module_name}' has 0 test files — will use whole-project context in TASK 2.")
 
-        # --- TASK 2-4: reconstruction loop (P5 — ModuleReconstructor use-case). ---
+        # --- TASK 2-4: reconstruction loop (ModuleReconstructor use-case). ---
         run_ctx = RunContext(
             project_dir=project_dir, module_name=module_name, module_dir=module_dir,
             crate_type=crate_type, module_manifest=module_manifest,

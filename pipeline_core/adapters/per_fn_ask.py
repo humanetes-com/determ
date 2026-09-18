@@ -1,4 +1,4 @@
-"""Per-fn LLM ask adapter (G/P6).
+"""Per-fn LLM ask adapter.
 
 The 3-attempt response-extraction ladder for per-fn reconstruction prompts.
 Extracted from pipeline._ask_per_fn_body; all collaborators injected so the
@@ -42,7 +42,7 @@ def ask_per_fn_body(
     (env, default 0.1): rigid pointer/vtable bodies have one correct token
     sequence, not a range of creative choices.
 
-    ``answer_request`` (P2 pulls): a bodyless reply carrying a
+    ``answer_request`` (a context pull): a bodyless reply carrying a
     ``<REQUEST .../>`` is a context request, NOT a failed extraction — the
     answerer returns the prompt addition and the SAME rung re-asks (no
     think=False rung burned); the answerer's budget bounds the loop, and the

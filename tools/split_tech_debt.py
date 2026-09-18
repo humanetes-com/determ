@@ -1,4 +1,4 @@
-"""One-shot archival split of technical_debt.md (session 281).
+"""One-shot archival split of technical_debt.md (2026-07-26).
 
 Keeps the genuinely-open items in `technical_debt.md` and appends everything
 resolved to `completed_tech_debt.md`, preserving the original text verbatim so
@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DEBT = ROOT / "technical_debt.md"
 DONE = ROOT / "completed_tech_debt.md"
 
-# header+oracle, the two still-open BRAINSTORMs, B3, Plan #77
+# header+oracle, the two still-open BRAINSTORMs, B3
 KEEP = [(1, 67), (208, 210), (212, 212), (220, 251)]
-# plateau block, the RESOLVED sweep-oracle BRAINSTORM, the typing item, #88, #58
+# plateau block, the RESOLVED sweep-oracle BRAINSTORM, the typing item
 ARCHIVE = [(69, 206), (211, 211), (214, 218)]
 
 

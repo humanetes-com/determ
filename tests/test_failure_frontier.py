@@ -42,7 +42,7 @@ def test_escalated_unit_is_dispatched_but_never_convicted() -> None:
 
 
 def test_build_cannot_convict_beyond_what_it_dispatches() -> None:
-    """`convicting ⊆ dispatch` per key, and a key dropped from dispatch (D3
+    """`convicting ⊆ dispatch` per key, and a key dropped from dispatch (the
     exhaustion filter, blocked-consumer deferral) takes its conviction with it —
     otherwise a filtered-out unit could still be reverted for someone's test."""
     fr = FailureFrontier.build(
@@ -132,7 +132,7 @@ def test_site_tests_are_subset_of_dispatch_locator() -> None:
 
 def test_runtime_site_does_not_convict_from_homonym() -> None:
     """When only the construct_from_boxed SITE carries test_boxed_str,
-    convicting_for(from) is empty — the pre-S1 locator map put that test
+    convicting_for(from) is empty — the previous locator map put that test
     on every ``from``."""
     from pipeline_core.domain.models import FnSite
     boxed = FnSite("src/error.rs", "construct_from_boxed", "impl Error")
@@ -153,7 +153,7 @@ def test_runtime_site_does_not_convict_from_homonym() -> None:
 
 def test_extract_tdd_frontier_writes_the_located_site(monkeypatch: Any) -> None:
     """RUNTIME write: a stub panic inside construct_from_boxed convicts
-    that site only. Pre-S1 the same panic sat on FnLocator(..., 'from')
+    that site only. Previously the same panic sat on FnLocator(..., 'from')
     because make_fn_locator dropped the container."""
     from pathlib import Path
     from types import SimpleNamespace

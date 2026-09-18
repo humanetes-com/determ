@@ -1,4 +1,4 @@
-"""RequirementsPhase (P5) — TASK 1 as a single-responsibility use-case.
+"""RequirementsPhase — TASK 1 as a single-responsibility use-case.
 
 Generate functional_requirements for a module, validate it (anti-corruption),
 retry on rejection, and on exhaustion escalate to TASK 4 with a

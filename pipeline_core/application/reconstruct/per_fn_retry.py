@@ -263,7 +263,7 @@ def run_task3_inline_retry(
         max_stalls = int(os.getenv("TASK3_INLINE_MAX_STALLS", "3"))
     if hard_cap is None:
         hard_cap = int(os.getenv("TASK3_INLINE_HARD_CAP", "10"))
-    # R9 residual: be CLUSTER-AWARE. task3 runs each cluster with its own toolchain
+    # Be CLUSTER-AWARE. task3 runs each cluster with its own toolchain
     # + env_extra (RUSTFLAGS/cfg); the failing cluster is threaded in so the retry
     # reproduces THAT cluster's build under THAT env — the global cargo env would
     # use whatever cluster is stale-set, so a cluster-cfg-specific compile error

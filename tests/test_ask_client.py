@@ -1,5 +1,5 @@
 """Unit tests for the guarded LLM client (`pipeline_core.adapters.ask_client`)
-relocated from pipeline.ask in P6. Fully fake-injected — no model, no network.
+relocated from pipeline.ask. Fully fake-injected — no model, no network.
 
 Covers: request/response pairing, the network-retry loop (retry-then-success and
 exhaustion), non-network error pairing, the BaseException unpaired-terminal

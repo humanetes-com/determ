@@ -1,4 +1,4 @@
-"""Fill-replay characterisation tests (CODE_ARCHITECTURE.md §8 R4.3).
+"""Fill-replay characterisation tests.
 
 The per-impl fill engine (`_phase_c_fill_impl_blocks` / `_process_one_stub`) is closure-heavy and
 interleaves an LLM call, a cargo check, and a retrospective loop — not unit-testable end-to-end
@@ -6,7 +6,7 @@ without reconstructing its whole enclosing scope. But its *deterministic core* I
 a canned model response in the `<FN name="..." block="...">body</FN>` protocol, the engine parses
 it with `extract_fn_bodies` and applies each body with the container-aware splicer
 `_splice_fn_with_where`. These tests pin that parse→splice transform with real inputs, so the
-engine can be refactored (R3) against a net without a live model or cargo.
+engine can be refactored against a net without a live model or cargo.
 
 If one of these breaks during an engine refactor, the model-response → filled-file behaviour
 changed — which is exactly what must NOT change silently. (Free-fn fills use a different `sig=`

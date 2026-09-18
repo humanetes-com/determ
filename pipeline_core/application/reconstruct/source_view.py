@@ -181,7 +181,7 @@ def annotate_file_view(file_text: str, target_fn: str, *,
     status comment (the TARGET fn marked distinctly), so the model treats stubs
     as "to-be-filled later" rather than permanent gaps. Doc comments are kept in
     FULL when the view fits under ``doc_keep_full_limit`` (the crate's own usage
-    examples are concrete guidance, FR-026 amended); only large views are
+    examples are concrete guidance); only large views are
     condensed. Non-doc crate attrs are always dropped. PROMPT view only — the
     on-disk file is untouched."""
     # Big view → condense docs to protect budget; else drop only #![...] crate attrs.

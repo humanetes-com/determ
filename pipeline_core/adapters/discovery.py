@@ -1,5 +1,5 @@
 """Test/example file discovery (ADAPTER: pure filesystem walks). Moved verbatim
-from pipeline.py (P5). The skip-dir / test-dir conventions and the gen_tests
+from pipeline.py. The skip-dir / test-dir conventions and the gen_tests
 sibling-name parser live here; the one gen_tests-semantics predicate
 (`is_gen_tests_decl_only`) is passed explicitly by the caller (composition root)
 to the single function that needs it, so the gen_tests family stays in pipeline.py
@@ -81,7 +81,7 @@ def collect_test_files(
     - Pure test files: identified by name/location (is_test_file) — e.g. tests/*.rs
     - Rust source files with inline test blocks (#[cfg(test)] or #[test]) — e.g. src/lib.rs
 
-    `is_gen_tests_decl_only` (#14: explicit dep, was module-injected): returns True
+    `is_gen_tests_decl_only` (explicit dep, was module-injected): returns True
     when a stripped .rs file consists only of gen_tests path-mod decls and carries
     no test semantics of its own — those are skipped (their content lives in siblings).
 

@@ -35,7 +35,7 @@ def emit(event: str, **fields: Any) -> None:
 def caller_site(depth: int = 2) -> str:
     """`qualname (file:lineno)` of the frame `depth` levels up — used to tag
     llm.request with WHO issued it, so a C10 same-thread overlap can be traced
-    to the concurrent/reentrant call site instead of guessed (debt #6)."""
+    to the concurrent/reentrant call site instead of guessed."""
     try:
         f = sys._getframe(depth)
         return f"{f.f_code.co_qualname} ({f.f_code.co_filename.rsplit('/', 1)[-1]}:{f.f_lineno})"

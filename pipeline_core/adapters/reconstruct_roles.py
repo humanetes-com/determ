@@ -1,4 +1,4 @@
-"""Focused role adapters for the per-module reconstruction use-cases (P6).
+"""Focused role adapters for the per-module reconstruction use-cases.
 
 These replace the `_ReconstructAdapter` god-object: one narrow adapter per
 `ports.reconstruct` role (ISP), each constructor-injected with the resident

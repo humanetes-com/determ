@@ -1,4 +1,4 @@
-"""Unit tests for `pipeline_core.adapters.workspace_restore.RestoreFromAugmented` (P6).
+"""Unit tests for `pipeline_core.adapters.workspace_restore.RestoreFromAugmented`.
 
 Covers the loud-failure guards against a real temp git repo (no subprocess mocking):
 missing augmentation tag, and multi-tag → RuntimeError.

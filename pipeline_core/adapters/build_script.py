@@ -1,4 +1,4 @@
-"""CargoBuildScriptReader (#23) — runs a crate's ``build.rs`` under a chosen
+"""CargoBuildScriptReader — runs a crate's ``build.rs`` under a chosen
 toolchain and reports the cfgs it emits.
 
 Satisfies :class:`pipeline_core.ports.build_script.BuildScriptReader`. Uses an

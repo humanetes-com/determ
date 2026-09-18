@@ -1,4 +1,4 @@
-"""Rust ``macro_rules!`` definition scanning — pure domain (P7 source-regex→structured).
+"""Rust ``macro_rules!`` definition scanning — pure domain (source-regex→structured).
 
 Replaces the four ``re.finditer(r"macro_rules!\\s+(\\w+)\\s*\\{")`` source scans in
 pipeline.py with one structured scanner returning each definition's name, export

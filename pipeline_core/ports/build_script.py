@@ -1,4 +1,4 @@
-"""BuildScriptReader port (#23) — the build-script cfg facts the cluster planner
+"""BuildScriptReader port — the build-script cfg facts the cluster planner
 needs to tell reachable clusters from phantom source atoms.
 
 Narrow, ISP-respecting: one read, parameterised by toolchain. The real

@@ -1,6 +1,6 @@
 """File IO helpers — read/write a text file by path (ambient infra).
 
-Relocated verbatim from pipeline.py (slice 5b foundation). Trivial fs primitives used
+Relocated verbatim from pipeline.py. Trivial fs primitives used
 across the pipeline; given a home so callers import them instead of redefining. `read`
 swallows FileNotFoundError (returns "") and `write` creates parent dirs — the long-standing
 pipeline semantics, preserved exactly.

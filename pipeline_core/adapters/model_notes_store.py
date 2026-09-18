@@ -354,7 +354,7 @@ class FileModelNotesStore:
     # -- recurring-error promotion ----------------------------------------
     def record_error_codes_seen(self, output: str) -> None:
         """Tally each unique E0xxx code in ``output`` and keep a capped excerpt
-        per code for later type-token mining (P6.3)."""
+        per code for later type-token mining."""
         if not output:
             return
         for c in ecodes_in_text(output):

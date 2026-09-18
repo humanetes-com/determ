@@ -1,4 +1,4 @@
-"""Phase-B test-grouping prompt assembly (P6 relocation).
+"""Phase-B test-grouping prompt assembly, relocated out of pipeline.py.
 
 Pure string assembly: renders the implementation skeleton as `<FILE>` blocks and
 builds the LLM prompt that asks the model to partition the cluster's test files

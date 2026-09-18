@@ -1,6 +1,6 @@
 """Tests for pipeline_core.domain.rust_scan — regex-free Rust-ish text scanners.
 
-Each test pins behavior against the regex the helper replaced (Task2 R7 migration).
+Each test pins behavior against the regex the helper replaced (Task2 migration).
 """
 from __future__ import annotations
 

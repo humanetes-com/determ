@@ -1,4 +1,4 @@
-"""ModuleReconstructor (P5) — coordinates the TASK 2-4 reconstruction loop.
+"""ModuleReconstructor — coordinates the TASK 2-4 reconstruction loop.
 
 The thin state machine that was `main()`'s inner `while True`: iterate
 ReconstructionStep until a verdict locks the module; on each failure run
@@ -88,7 +88,7 @@ class ModuleReconstructor:
             self._tel.log(f"\n{'=' * 50}")
             self._tel.log(f"MODULE {ctx.module_name} — ITERATION {state.iteration}")
             self._tel.log(f"{'=' * 50}")
-            # debt#7: structured module/iteration boundary (monitor reads this instead
+            # Structured module/iteration boundary (monitor reads this instead
             # of scraping the "MODULE … — ITERATION …" log line).
             self._tel.emit("module.iter", module=ctx.module_name, iteration=state.iteration)
 

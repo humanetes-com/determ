@@ -1,4 +1,4 @@
-"""generate_fix strategies + driver (P3.C): select_strategy mapping, the
+"""generate_fix strategies + driver: select_strategy mapping, the
 whole-file delegate, and the per-impl one-shot fill on a clean-compile/failing
 -test frontier."""
 from __future__ import annotations

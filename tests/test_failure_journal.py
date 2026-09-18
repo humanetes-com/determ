@@ -1,4 +1,4 @@
-"""Unit tests for the failure-journal slice (P6 prerequisite): the domain
+"""Unit tests for the failure-journal slice: the domain
 `FailureEntry` VO + the `FileFailureJournal` adapter that replaced pipeline.py's
 `append_failure_log`/`load_failure_log` free functions."""
 from __future__ import annotations

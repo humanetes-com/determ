@@ -1,4 +1,4 @@
-"""The model-authored implementation blueprint (july_plan P3) — domain.
+"""The model-authored implementation blueprint — domain.
 
 Per-fn/per-impl fills each invent their piece of the crate LOCALLY, so
 cross-cutting schemes (error representation, dispatch families, macro

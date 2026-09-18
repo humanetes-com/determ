@@ -1,4 +1,4 @@
-"""R10.3 — the full-run offline replay harness wiring: cargo-memo persistence
+"""The full-run offline replay harness wiring: cargo-memo persistence
 (save/load) and `tests.replay` composing the cassette + cargo seams so a recorded
 run replays with no live model and no real cargo. Exercised here on a synthetic
 recorded run (hermetic; no model, no cargo binary)."""

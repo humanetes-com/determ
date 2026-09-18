@@ -1,4 +1,4 @@
-"""Slice 9 pins — pipeline_core/adapters/state.py (pipeline_state.md store).
+"""Pins pipeline_core/adapters/state.py (pipeline_state.md store).
 
 Pins the regex-free line parser against the legacy pattern's semantics
 (`[key]  status  hash=H  detail`) and the read/mark/set_current round-trip.

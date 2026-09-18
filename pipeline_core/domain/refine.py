@@ -270,7 +270,7 @@ class FloorStall:
     "identical errors two attempts running" early exit the fix loops share.
 
     Replaces the hand-rolled best/stall/prev_sig triples in the per-fn inner
-    loop, the per-impl block loop, and the pass-level gauge (slice 8a).
+    loop, the per-impl block loop, and the pass-level gauge.
     `LoopState` above is the full meta-awareness history for loops driven by
     `run_refine_loop`; FloorStall is the minimal gauge for inner loops that
     keep their own history/prompt machinery.
@@ -336,7 +336,7 @@ def is_retro_improvement(old: RetroCandidate, new: RetroCandidate) -> bool:
 
 def parse_retrospective_function(line: str) -> tuple[str, str] | None:
     """Parse a retrospective `FUNCTION <name>: [(x) ]<KEYWORD> …` line into
-    `(fn_name, keyword)` (regex-free, R7; mirrors
+    `(fn_name, keyword)` (regex-free; mirrors
     `FUNCTION\\s+([^:]+(?:::[^:]+)*):\\s*(?:\\([a-d]\\)\\s*)?(\\w+)`). The name may
     contain `::` path separators but ends at the first single `:`. Returns None
     when the line is not a parseable FUNCTION line."""

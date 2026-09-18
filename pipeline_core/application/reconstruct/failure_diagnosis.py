@@ -1,4 +1,4 @@
-"""Failure-diagnosis use-cases (P6 engine-relocation) — the attribution cluster's
+"""Failure-diagnosis use-cases — the attribution cluster's
 LLM-classifier, the TDD-regression note hook, and the cargo-error fn implicator.
 
 Verbatim relocation of pipeline.py's `_classify_phase_c_test_failures`,
@@ -7,7 +7,7 @@ the originals reached as a module global (the LLM `ask`, the `log` sink, the str
 reader, the model-note writer, the ctx-budget caps) is now an explicit injected
 parameter; the composition root binds them at the call site. All Rust parsing goes
 through the `domain.*` structured scanners / the syn extractor (no regex on source);
-the `-->` and `error[...]` parses read CARGO OUTPUT (legitimate, R7).
+the `-->` and `error[...]` parses read CARGO OUTPUT (legitimate regex).
 """
 from __future__ import annotations
 
@@ -211,7 +211,7 @@ def implicated_fns_from_cargo_errors(
 
     For each `error[...]` block: find the `--> file.rs:line:col` marker, then
     walk backward in that file from `line` to find the enclosing fn. Dedup
-    by (file, fn). Used by P3.12 end-of-cluster fix loop to identify which
+    by (file, fn). Used by the end-of-cluster fix loop to identify which
     fns to revert + retry.
     """
     if not cargo_output:

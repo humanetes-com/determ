@@ -1,4 +1,4 @@
-"""Test/example discovery adapter (P5): pure filesystem walks extracted from
+"""Test/example discovery adapter: pure filesystem walks extracted from
 pipeline.py."""
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def test_collect_test_and_protected_files(tmp_path: Path) -> None:
 
 def test_collect_test_files_skips_decl_only_src(tmp_path: Path) -> None:
     """A stripped src file holding only gen_tests decls is dropped via the
-    explicitly-passed predicate (#14); the real test content lives in the sibling."""
+    explicitly-passed predicate; the real test content lives in the sibling."""
     decl_only = ('#[cfg(test)]\n#[path = "lib.gen_tests_1.rs"]\nmod gen_tests_1;')
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(decl_only, encoding="utf-8")

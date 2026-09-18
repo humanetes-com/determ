@@ -1,6 +1,6 @@
 """Workspace adapter — the I/O layer for the git-managed project workspace under tmp/.
 
-Relocated verbatim from pipeline.py (slice 4b). Bodies are unchanged; former module
+Relocated verbatim from pipeline.py. Bodies are unchanged; former module
 globals (``_log``, ``_emit``, ``_git_managed``) become an injected :class:`WorkspaceDeps`
 and an explicit ``managed`` argument. Adapter imports only stdlib — never ``pipeline.py``.
 
@@ -8,7 +8,7 @@ Two shapes are offered:
 - module-level functions (``git_commit``/``git_tag``/…) that take ``deps`` + an explicit
   ``project_dir`` — the form pipeline.py's thin shims delegate to during migration;
 - :class:`GitWorkspace`, a root-bound object satisfying ports.Workspace, the target the
-  call sites move onto in slice 5.
+  call sites move onto.
 """
 
 from __future__ import annotations
@@ -269,7 +269,7 @@ def setup_workspace(deps: WorkspaceDeps, repo: str, workspace_dir: Path,
 
 
 class GitWorkspace:
-    """Root-bound git workspace satisfying ports.Workspace. Migration target (slice 5)."""
+    """Root-bound git workspace satisfying ports.Workspace. Migration target."""
 
     def __init__(self, root: Path, deps: WorkspaceDeps, *, managed: bool) -> None:
         self.root = Path(root)

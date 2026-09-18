@@ -1,5 +1,5 @@
 //! Skeletonisation: replace fn/method bodies with `unimplemented!()`, drop #[cfg(test)] mods,
-//! apply per-cluster cfg filtering. Moved verbatim from lib.rs (slice 7).
+//! apply per-cluster cfg filtering. Moved verbatim from lib.rs.
 
 use crate::cfg::*;
 use crate::error::{ExtractError, Result};
@@ -117,8 +117,8 @@ pub fn extract_file_with_cfg(
     // like `{ :: core :: unimplemented ! () }` and `# ! [doc = ...]`; the
     // text-based per-fn splicer miscut those offsets → dropped the model's body,
     // left `{ ::`, "unclosed delimiter" → false GENUINELY_HARD reverts (the
-    // phase-c non-convergence root cause). FR-033: normalise multi-line docs
-    // first so prettyplease keeps them as `///`/`//!` (no `/** */` switch).
+    // phase-c non-convergence root cause). Normalise multi-line docs first
+    // so prettyplease keeps them as `///`/`//!` (no `/** */` switch).
     crate::merge::normalize_doc_attrs(&mut ast.attrs);
     crate::merge::normalize_doc_attrs_in_items(&mut ast.items);
     let rendered = prettyplease::unparse(&ast);
@@ -360,6 +360,6 @@ pub(crate) fn body_looks_unimplemented(body: &str) -> bool {
     if s.len() < 60 && s.contains("unimplemented") {
         return true;
     }
-    // Annotated stub form (P3.12: failed-attempt comment + unimplemented at end).
+    // Annotated stub form (failed-attempt comment + unimplemented at end).
     s.contains("// SKELETON_STUB_FAILED_ATTEMPT")
 }

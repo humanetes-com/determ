@@ -1553,7 +1553,21 @@ class FillOneFn:
                     # guidance emptied, up to PER_FN_RETRO_ROUNDS_MAX times
                     # (reproduced on the engine harness: 50 asks, 25
                     # retrospectives for one unit).
-                    _retry_informed = (not _full_exhaust and not _downstream
+                    #
+                    # And not convicting is not the same as improving: the
+                    # splice, coverage and hollow-sibling arms above veto the
+                    # CONVICTION of a round that did not improve, and used to
+                    # hand it another round as a side effect. On run
+                    # `2657150-3139f958` (2026-09-18) `src/error.rs::construct`
+                    # read `improved=False` at the same floor (compiles, 141
+                    # failing) on rounds 2 to 7, each exempted by the
+                    # still-stubbed-sibling arm, and re-entered every time —
+                    # 1h40m of one worker on one unit while the other 13 units
+                    # of the run had finished, the run's 25-minute share long
+                    # spent. The re-entry is bought only by a strictly lower
+                    # floor, as this loop's header states.
+                    _retry_informed = (_improved and not _full_exhaust
+                                       and not _downstream
                                        and not _no_unit_evidence)
                     self.tel.log(f"  [phase-c/retro] {fn_name} "
                                  f"[{_retro.get('category','?')}] "

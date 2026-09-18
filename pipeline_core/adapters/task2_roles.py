@@ -1,4 +1,4 @@
-"""Focused role adapters for the TASK-1/TASK-2 generators (P6).
+"""Focused role adapters for the TASK-1/TASK-2 generators.
 
 These replace the `_Task2Adapter` god-object: one narrow adapter per
 `ports.generator` / `ports.synthesizer` role (ISP), each constructor-injected

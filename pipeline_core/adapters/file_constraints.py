@@ -1,4 +1,4 @@
-"""Per-file generation-constraints reader (P6).
+"""Per-file generation-constraints reader.
 
 Loads `project_configs/{project}.constraints.toml` — optional per-source-file
 constraint text injected into the task0c generation prompt. The `[stable]` table

@@ -1,4 +1,4 @@
-"""The result of one scoped compile check, as a named value (P3.C).
+"""The result of one scoped compile check, as a named value.
 
 The inner per-unit loops ran `cargo check`, rendered the diagnostics to plain
 text, and built a (file, fn)→errors frontier from the STRUCTURED diagnostics

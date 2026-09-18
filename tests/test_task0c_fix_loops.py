@@ -1,4 +1,4 @@
-"""Pins for the P1 FixLoop port of task0c's two hand-rolled loops (harness
+"""Pins for the FixLoop port of task0c's two hand-rolled loops (harness
 fix + gen_tests block fix) onto the shared `drive_fix_loop` driver.
 
 The headline property is TERMINATION: the old `while True` harness loop only
@@ -8,7 +8,7 @@ runaway backstop bound every path. The escalation ladder (targeted strip →
 full strip → git-restore probe) is preserved on exhaustion.
 
 Driven through `task0c_augment_module` with a fakes `Task0cDeps` (the
-established slice-5b pattern); a sentinel exception in `read_state` marks
+established pattern); a sentinel exception in `read_state` marks
 "harness section completed, augmentation began" for the heal path.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def _augmentor(harness: Any) -> Any:
 
 
 def test_harness_fix_changing_signatures_terminates(tmp_path: Path) -> None:
-    """THE P1 pin: ever-changing, never-resolving signatures bounded by
+    """Ever-changing, never-resolving signatures bounded by
     floor-stall instead of looping forever; exhaustion runs the strip ladder
     and returns the blocked verdict."""
     ws = _ws(tmp_path)
@@ -173,7 +173,7 @@ def test_harness_fix_llm_heals_and_augmentation_proceeds(tmp_path: Path) -> None
 
 
 def test_engine_get_history_formats_jsonl(tmp_path: Path) -> None:
-    """P3.1: relocated `_engine_get_history` reads the per-project JSONL attempt
+    """Relocated `_engine_get_history` reads the per-project JSONL attempt
     log and renders success (committed) vs failure entries, capping the stored
     compile error at deps.FIX_ERR_CAP from the front (tail kept)."""
     from pipeline_core.application.tasks.task0c import (
@@ -206,13 +206,13 @@ def test_engine_get_history_formats_jsonl(tmp_path: Path) -> None:
 
 
 def test_engine_get_history_imported_not_injected() -> None:
-    """P3.1 invariant: get_task0c_history is no longer a Task0cDeps field
+    """get_task0c_history is no longer a Task0cDeps field
     (the helper now lives in the module, not injected back)."""
     assert "get_task0c_history" not in Task0cDeps.__dataclass_fields__
 
 
 def test_engine_pragma_pass_writes_and_compiles(tmp_path: Path) -> None:
-    """P3.2: relocated `_engine_pragma_pass` annotates uncovered lines, asks the
+    """Relocated `_engine_pragma_pass` annotates uncovered lines, asks the
     LLM for a pragma'd file, and persists it only if the recompile succeeds."""
     from pipeline_core.application.tasks.task0c import _engine_pragma_pass
 
@@ -248,7 +248,7 @@ def test_engine_pragma_pass_writes_and_compiles(tmp_path: Path) -> None:
 
 
 def test_engine_pragma_pass_reverts_on_compile_fail(tmp_path: Path) -> None:
-    """P3.2: if the pragma'd file no longer compiles, the original is restored."""
+    """If the pragma'd file no longer compiles, the original is restored."""
     from pipeline_core.application.tasks.task0c import _engine_pragma_pass
 
     src_dir = tmp_path / "src"
@@ -276,7 +276,7 @@ def test_engine_pragma_pass_reverts_on_compile_fail(tmp_path: Path) -> None:
 
 
 def test_looks_like_fn_decl_matches_old_regex() -> None:
-    """P3.3 R7 equivalence pin: the regex-free fn-decl detector matches the old
+    """The regex-free fn-decl detector matches the old
     re.match(r'\\s*(pub\\s+)?fn\\s+', ln) it replaced, across edge cases."""
     import re as _re
 
@@ -308,7 +308,7 @@ def _tpragma_deps(**over: Any) -> SimpleNamespace:
 
 
 def test_engine_targeted_pragma_writes_on_compile(tmp_path: Path) -> None:
-    """P3.4: relocated `_engine_targeted_pragma` writes the LLM's pragma'd file
+    """Relocated `_engine_targeted_pragma` writes the LLM's pragma'd file
     when it recompiles, and reports success."""
     from pipeline_core.application.tasks.task0c import _engine_targeted_pragma
 
@@ -326,7 +326,7 @@ def test_engine_targeted_pragma_writes_on_compile(tmp_path: Path) -> None:
 
 
 def test_engine_targeted_pragma_codeblock_fallback(tmp_path: Path) -> None:
-    """P3.4: when no <FILE> tag is returned, it falls back to the largest fenced
+    """When no <FILE> tag is returned, it falls back to the largest fenced
     code block (the relocated extract_code_blocks helper)."""
     from pipeline_core.application.tasks.task0c import _engine_targeted_pragma
 
@@ -345,7 +345,7 @@ def test_engine_targeted_pragma_codeblock_fallback(tmp_path: Path) -> None:
 
 
 def test_engine_mutation_pass_persists_hardening(tmp_path: Path, monkeypatch) -> None:
-    """P3.5: relocated `_engine_mutation_pass` is opt-in (env-gated) and, when on,
+    """Relocated `_engine_mutation_pass` is opt-in (env-gated) and, when on,
     persists generated hardening tests as `tests/{stem}_gen_N.rs`."""
     from pipeline_core.application.tasks.task0c import _engine_mutation_pass
 
@@ -375,7 +375,7 @@ def test_engine_mutation_pass_persists_hardening(tmp_path: Path, monkeypatch) ->
 
 
 def test_engine_log_attempt_writes_jsonl_and_type_signals(tmp_path: Path) -> None:
-    """P3.6: relocated `_engine_log_attempt` appends a JSONL record and, on a
+    """Relocated `_engine_log_attempt` appends a JSONL record and, on a
     compile_error, feeds blamed type names to the injected type_signals_write."""
     from pipeline_core.application.tasks.task0c import (
         TASK0C_ATTEMPTS_LOG,
@@ -399,7 +399,7 @@ def test_engine_log_attempt_writes_jsonl_and_type_signals(tmp_path: Path) -> Non
 
 
 def test_engine_extract_existing_tests() -> None:
-    """P3.7: relocated pure helper extracts `mod tests` but not `mod gen_tests`."""
+    """Relocated pure helper extracts `mod tests` but not `mod gen_tests`."""
     from pipeline_core.application.tasks.task0c import _extract_existing_tests
 
     src = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test] fn t() {}\n}\n"
@@ -409,7 +409,7 @@ def test_engine_extract_existing_tests() -> None:
 
 
 def test_engine_build_prompt_sections_assembles(tmp_path: Path) -> None:
-    """P3.7: relocated `_engine_build_prompt_sections` assembles the section dict,
+    """Relocated `_engine_build_prompt_sections` assembles the section dict,
     strips <think> from the strategy, and surfaces the existing inline tests."""
     from pipeline_core.application.tasks.task0c import _engine_build_prompt_sections
 
@@ -442,7 +442,7 @@ def test_engine_build_prompt_sections_assembles(tmp_path: Path) -> None:
 
 
 def test_engine_build_prompt_sections_budget_truncation() -> None:
-    """P3.7: tight budget exercises the source/fn truncation + drop paths and
+    """Tight budget exercises the source/fn truncation + drop paths and
     both _guard calls (source_cap + budget-dropped)."""
     from pipeline_core.application.tasks.task0c import _engine_build_prompt_sections
 

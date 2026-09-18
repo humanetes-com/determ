@@ -1,5 +1,5 @@
 """Characterization for `adapters.workspace_lifecycle.clean_state`
-(P6 relocation of `pipeline.clean_state`).
+(relocation of `pipeline.clean_state`).
 
 `delete_source_files` is injected as a fake (records its call); everything else
 is real filesystem mutation against a temp workspace.

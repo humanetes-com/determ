@@ -1,4 +1,4 @@
-"""Prompt construction (slice 8): pure builders + section renderers.
+"""Prompt construction: pure builders + section renderers.
 
 pipeline.py keeps `_`-prefixed alias shims for all names so existing call
 sites and test pins are unchanged.

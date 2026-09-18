@@ -1,4 +1,4 @@
-"""THE single fix-loop driver (P3 unification, FINAL-RESULT PLAN).
+"""THE single fix-loop driver.
 
 One loop engine — :func:`run_fix_loop` — owns the shape every fix loop used to
 hand-roll: iterate up to a hard cap, run one attempt, and exit on
@@ -25,7 +25,7 @@ both ``FloorStall`` and ``LoopState`` satisfy it); the engine only *reads*
 ``attempt`` closure owns the mutation (``FloorStall.observe`` /
 ``LoopState.record``) and the I/O.
 
-`check_stop` is an explicit per-call hook (#14: was a module-global wired via
+`check_stop` is an explicit per-call hook (it was a module-global wired via
 `configure()`): each caller passes its graceful-stop check. The default no-op
 keeps the loop import-safe and tests hermetic.
 """
@@ -228,7 +228,7 @@ def drive_fix_loop(
 
 @dataclass(frozen=True)
 class GenerateFixLoopDeps:
-    """Collaborators for the per-fn / whole-file iterative fix loop (S28).
+    """Collaborators for the per-fn / whole-file iterative fix loop.
     Composition root (pipeline.py) binds these to resident shims + pipeline_core
     natives + constants; the loop body lives here, injected for testability."""
     BUILD_TIMEOUT: Any

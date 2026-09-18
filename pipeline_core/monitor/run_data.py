@@ -107,7 +107,7 @@ def parse_coverage_json(project_dir: str | None) -> dict[str, tuple[int, int]]:
 def baked_cluster_order() -> list[str]:
     """Authoritative cluster list+order from the pipeline log's
     'loaded N baked cluster(s): a, b, c' line. [] if unavailable — the panel
-    then falls back to clusters seen in events so far. (R7: structured line scan,
+    then falls back to clusters seen in events so far. (Structured line scan,
     equivalent to `loaded \\d+ baked cluster\\(s\\):\\s*([^\\n]+)`, last match wins.)"""
     try:
         with open(PIPELINE_LOG, encoding="utf-8", errors="replace") as f:
@@ -289,7 +289,7 @@ def log_tail_meta() -> dict[str, Any]:
     """Raw-log presentation facts the monitor shows verbatim: the last non-empty
     log line and the log's staleness (seconds since last write). These are NOT
     regex-scraped facts — the structured progress facts moved to
-    events_data.pipeline_log_facts() (debt#7). Returns {last_line, age}."""
+    events_data.pipeline_log_facts(). Returns {last_line, age}."""
     if not os.path.exists(PIPELINE_LOG):
         return {"last_line": "", "age": 0.0}
     try:
@@ -309,7 +309,7 @@ def log_tail_meta() -> dict[str, Any]:
 
 def read_backend() -> str:
     """The BACKEND value from .env (lowercased), defaulting to 'ollama'.
-    (R7: structured key=value scan, equivalent to `^\\s*BACKEND\\s*=\\s*(\\S+)`.)"""
+    (Structured key=value scan, equivalent to `^\\s*BACKEND\\s*=\\s*(\\S+)`.)"""
     try:
         with open(os.path.join(SCRIPT_DIR, ".env")) as _f:
             for line in _f:

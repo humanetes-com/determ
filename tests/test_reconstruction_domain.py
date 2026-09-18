@@ -1,4 +1,4 @@
-"""Reconstruction domain (P5): IterationState transitions + whole-project policy."""
+"""Reconstruction domain: IterationState transitions + whole-project policy."""
 from __future__ import annotations
 
 from pipeline_core.domain.reconstruction import (

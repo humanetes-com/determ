@@ -1,4 +1,4 @@
-"""Unit tests for model_interact transport helpers (P6 regex→str-ops migration)."""
+"""Unit tests for model_interact transport helpers (regex→str-ops migration)."""
 from __future__ import annotations
 
 import re

@@ -1,5 +1,5 @@
 """Unit tests for the pure impl-block byte-range scanner
-(`pipeline_core.domain.impl_block_ranges`) relocated from pipeline.py in P6.
+(`pipeline_core.domain.impl_block_ranges`) relocated from pipeline.py.
 
 Pins the regex-free lexer: it must find every impl block's byte range while
 ignoring `impl`-like text and braces inside comments, strings, raw strings,

@@ -1,4 +1,4 @@
-"""reconstruct — the phase-c fill engine's extracted units (P2/R3.3).
+"""reconstruct — the phase-c fill engine's extracted units.
 
 Grown strangler-fig style as the engine units leave `pipeline.py`:
 first the per-fn pass context + result plumbing; the fill units follow

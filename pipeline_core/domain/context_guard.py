@@ -1,4 +1,4 @@
-"""Section-aware context guard — pure domain (P6 / BL-015).
+"""Section-aware context guard — pure domain.
 
 When a prompt overflows the model's context window, drop whole low-priority
 SECTIONS (identified by their delimiter markers) before falling back to blind

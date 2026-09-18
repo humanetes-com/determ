@@ -230,7 +230,7 @@ def active_test_inventory_for_cluster(
         return total, frozenset(names)
 
     cs = CfgSet.of(cfg_true, cfg_false)
-    # 2. gen_tests siblings — gated by their parent #[path] decl (R7: decl scan).
+    # 2. gen_tests siblings — gated by their parent #[path] decl (decl scan).
     declared_sibs: set[str] = set()
     for parent in src_dir.glob("*.rs"):
         if deps.is_gen_tests_file(parent.name):

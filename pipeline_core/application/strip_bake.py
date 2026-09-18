@@ -1,4 +1,4 @@
-"""Strip-and-bake the module before reconstruction (P5-S3).
+"""Strip-and-bake the module before reconstruction.
 
 Extracted verbatim from `main()`'s reconstruction loop. Before TASK 1, each
 module's implementation source is removed, but first — the original bodies are

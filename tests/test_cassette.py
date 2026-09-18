@@ -1,4 +1,4 @@
-"""L2 cassette tests — CODE_ARCHITECTURE.md R10.3.
+"""L2 cassette tests.
 
 Offline: synthesizes a tiny events.jsonl + content-addressed prompts dir (NOT the
 370M live logs) so the builder/replay logic is CI-safe.
@@ -27,7 +27,7 @@ def _seed(td: str, events: list[dict], bodies: dict[str, str]) -> tuple[Path, Pa
 
 
 def test_build_from_explicit_prompt_sha() -> None:
-    """R10.0 path: response carries prompt_sha → exact pairing."""
+    """Response carries an explicit prompt_sha → exact pairing."""
     p_sha, r_sha = _sha("PROMPT-A"), "rrr1"
     events = [
         {"product": "anyhow", "pipeline_sha": "abc", "event": "llm.request",
@@ -42,7 +42,7 @@ def test_build_from_explicit_prompt_sha() -> None:
 
 
 def test_build_falls_back_to_order_pairing() -> None:
-    """Pre-R10.0 recording (no prompt_sha on response) → emission-order pairing."""
+    """A recording with no prompt_sha on the response → emission-order pairing."""
     p_sha, r_sha = _sha("PROMPT-B"), "rrr2"
     events = [
         {"event": "llm.request", "data": {"prompt": {"sha256": p_sha}}},

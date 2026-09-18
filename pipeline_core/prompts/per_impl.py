@@ -1,4 +1,4 @@
-"""Per-impl-block prompt builder (slice 8) — fills every stub in a block.
+"""Per-impl-block prompt builder — fills every stub in a block.
 
 Moved verbatim from pipeline.py. Pure text→text; impure collaborators
 come from :mod:`pipeline_core.prompts.runtime`.

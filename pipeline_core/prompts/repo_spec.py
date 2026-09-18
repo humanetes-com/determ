@@ -4,7 +4,7 @@ into EVERY code-producing prompt from TASK 2 onward.
 The set (user-defined, 2026-06-11): functional requirements + genesis (prose
 and structured rules) + API surface. Historically these were injected only by
 the legacy whole-file Task2 generators; the active skeleton/TDD path produced
-code without ever reading them (CODE_ARCHITECTURE R13), which broke the
+code without ever reading them, which broke the
 iterate-on-documents learning loop. This module is the single renderer every
 prompt path now shares.
 

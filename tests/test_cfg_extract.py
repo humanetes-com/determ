@@ -1,5 +1,5 @@
 """Byte-equivalence pins for the `#[cfg(...)]` extraction helpers in
-`pipeline_core.domain.cfg` (P7 step 2 — the cfg-attribute extraction regexes)."""
+`pipeline_core.domain.cfg` (the cfg-attribute extraction regexes)."""
 from __future__ import annotations
 
 import re

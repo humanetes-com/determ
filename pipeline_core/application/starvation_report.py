@@ -1,4 +1,4 @@
-"""Starvation miner core (july_plan P1) — correlate fill failures with the
+"""Starvation miner core — correlate fill failures with the
 LLM exchanges that produced them, classify each, rank the causes.
 
 Input is the run's event stream (`events.jsonl` dicts) plus a blob reader over

@@ -1,5 +1,5 @@
 """The immutable context one ``generate_fix_loop`` call shares across every fix
-unit it drives (P3.C).
+unit it drives.
 
 Before this VO the inner cargo-check loops (`_fix_single_fn`, `_fix_impl_block`)
 captured ~8 loop parameters by closure — project dir, the check command and its

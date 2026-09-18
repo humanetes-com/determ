@@ -1,4 +1,4 @@
-"""SourceSnapshot capture/restore + retry verdict logic (P3.D), pure."""
+"""SourceSnapshot capture/restore + retry verdict logic, pure."""
 from __future__ import annotations
 
 from pathlib import Path

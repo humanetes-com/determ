@@ -195,7 +195,7 @@ def test_behavior_does_not_convict_a_test_runtime_located_elsewhere(
 ) -> None:
     """RUNTIME located test_boxed_str at construct_from_boxed. BEHAVIOR also
     names it on `from` (Error token overlap). Dispatch still lists `from`;
-    convicting_for(`from`) does not contain the test — T1a, run
+    convicting_for(`from`) does not contain the test — run
     463713-b7c666c8's live mix."""
     import pipeline_core.application.reconstruct.attribution as attr
     boxed = FnLocator("src/error.rs", "construct_from_boxed")

@@ -70,7 +70,8 @@ class FixContextAssembler:
         file_rel: str = "",
         observables: frozenset[str] = frozenset(),
     ) -> str:
-        """TYPES_IN_SCOPE for retry/fix prompts (P5.1 parity). Selects from
+        """TYPES_IN_SCOPE for retry/fix prompts (parity with the initial-fill
+        path). Selects from
         everything that can name a type at fix time — the signature, the
         enclosing impl header (+ where clause), the CURRENT body (names the
         types the previous attempt actually manipulated), and the error

@@ -1,1 +1,1 @@
-"""Generator engines relocated from pipeline.py (P4)."""
+"""Generator engines relocated from pipeline.py."""

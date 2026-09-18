@@ -1,5 +1,5 @@
 """Compiler-cluster planning — pure derivation of `BuildCluster`s from cfg facts
-(CODE_ARCHITECTURE.md §4 P5, Hard Rule 8).
+(Hard Rule 8).
 
 A *cluster* is one set of source-compilation restrictions (which `#[cfg(...)]`
 predicates are active). This module turns the static cfg facts extracted from the
@@ -104,7 +104,7 @@ def _custom_cfg_is_reachable(
     pred: str, bs_set_default: frozenset[str],
     bs_set_nightly: frozenset[str], bs_declared: frozenset[str],
 ) -> bool:
-    """Does a custom `--cfg` predicate correspond to a REACHABLE build (#23)?
+    """Does a custom `--cfg` predicate correspond to a REACHABLE build?
 
     The crate's `build.rs` is the authority on which custom cfgs it sets, captured
     per available toolchain:
@@ -114,7 +114,7 @@ def _custom_cfg_is_reachable(
         controlled and off (e.g. anyhow's old-rustc / probe-only / CI-only cfgs) → DROP;
       * not mentioned by `build.rs` at all → a user-supplied `--cfg` knob → KEEP.
     When no build-script facts exist (no `build.rs`), every custom pred is KEPT —
-    preserving the pre-#23 behaviour exactly."""
+    preserving the original (unfiltered) behaviour exactly."""
     if pred in bs_set_default:
         return False
     if pred in bs_set_nightly:
@@ -155,10 +155,10 @@ def plan_clusters(
 ) -> list[BuildCluster]:
     """Build the stable cluster plus one cluster per interesting predicate.
 
-    ``bs_*`` are the build-script cfg facts (#23): cfgs `build.rs` sets under the
+    ``bs_*`` are the build-script cfg facts: cfgs `build.rs` sets under the
     default toolchain, sets only under nightly, and merely declares — used to drop
     custom `--cfg` atoms that no reachable build actually turns on. Empty (the
-    default) ⇒ pre-#23 behaviour (every custom atom is a cluster)."""
+    default) ⇒ unfiltered behaviour (every custom atom is a cluster)."""
     bs_nightly = frozenset(bs_set_nightly)
     interesting = _classify(
         counts, frozenset(cargo_features), frozenset(default_features),
@@ -303,7 +303,7 @@ def prune_redundant_clusters(
 
 
 def fill_order(clusters: Iterable[BuildCluster]) -> list[BuildCluster]:
-    """Deterministic task2a fill order (debt #36): the default cluster first —
+    """Deterministic task2a fill order: the default cluster first —
     it owns every cfg-agnostic item, and each later cluster seeds its stubs
     from the bodies earlier clusters already accepted — then the rest by name."""
     return sorted(clusters, key=lambda c: (not c.is_default, c.name))

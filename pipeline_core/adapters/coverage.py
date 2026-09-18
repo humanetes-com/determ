@@ -1,6 +1,6 @@
 """Coverage adapter — the I/O layer for coverage measurement (tarpaulin / grcov / llvm-cov).
 
-Relocated verbatim from pipeline.py (slice 4b). The bodies are unchanged; the only edits
+Relocated verbatim from pipeline.py. The bodies are unchanged; the only edits
 re-point former module-level free variables (``_log``, ``_cargo_env``, ``_current_cluster``,
 ``TARPAULIN_BIN``/``GRCOV_BIN``/``BUILD_TIMEOUT``/``COVERAGE_IGNORE_PRAGMA``) to a
 :class:`CoverageDeps` injected by the composition root. This keeps the dependency rule

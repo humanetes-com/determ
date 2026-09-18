@@ -1,5 +1,5 @@
 """What ONE fix unit repairs — the explicit target type behind the
-`_fix_single_fn` / `_fix_impl_block` split (P3.C).
+`_fix_single_fn` / `_fix_impl_block` split.
 
 The old loop branched on an untyped pair of nearly-identical closures: one fixed
 a single free fn, the other a whole impl block. The two differed in three

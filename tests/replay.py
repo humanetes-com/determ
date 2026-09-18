@@ -1,16 +1,16 @@
-"""Full-run offline replay harness — CODE_ARCHITECTURE.md R10.3 (the wiring that
+"""Full-run offline replay harness (the wiring that
 ties the cassette + cargo memo into one replayable run).
 
 A recorded run leaves two artefact sets behind:
   * the model seam  — `logs/events.jsonl` + the content-addressed `logs/prompts/`
-    store → a `{prompt_sha → response}` cassette (R10.3, :mod:`tests.cassette`);
+    store → a `{prompt_sha → response}` cassette (:mod:`tests.cassette`);
   * the cargo seam  — `(tree_hash, cmd) → (rc, out)` verdicts captured in RECORD
-    mode and persisted with `save_cargo_cache` (R10.4, :mod:`tests.cargo_cache`).
+    mode and persisted with `save_cargo_cache` (:mod:`tests.cargo_cache`).
 
 Replay installs BOTH seams at once: identical prompts hash to the same canned
 responses → identical source trees → cargo verdicts served from the memo. The run
 is then deterministic, instant, and needs neither a live model nor a real cargo.
-That is the validation path R3 (engine decomposition) was blocked on: refactors of
+That is the validation path the engine-decomposition refactor was blocked on: refactors of
 the fill engine can be exercised offline and any divergence surfaces as a precise
 **cassette miss** at the prompt that changed.
 

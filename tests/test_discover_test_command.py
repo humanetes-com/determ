@@ -1,5 +1,5 @@
 """Unit tests for the discover-test-command use-case
-(`pipeline_core.application.tasks.discover_test_command`), P6. Fake ask/sys_exit.
+(`pipeline_core.application.tasks.discover_test_command`). Fake ask/sys_exit.
 """
 from __future__ import annotations
 

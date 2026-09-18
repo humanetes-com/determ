@@ -1,4 +1,4 @@
-"""gen_tests reattach (P5-S3): single-tree fallback + per-cluster filled paths
+"""gen_tests reattach: single-tree fallback + per-cluster filled paths
 + the post-reattach compile-validate / quarantine branches."""
 from __future__ import annotations
 

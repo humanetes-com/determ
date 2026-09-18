@@ -1,7 +1,7 @@
-"""L1 e2e routing tests — CODE_ARCHITECTURE.md R10.2.
+"""L1 e2e routing tests.
 
-Retires the "●●● await live run" tag on R9.1 (build-failure → BUILD-mode fix path)
-and R9.2 (keep/revert decision). These drive `_task3_inline_retry` end-to-end with
+Retires the "●●● await live run" tag on the build-failure → BUILD-mode fix path
+and the keep/revert decision. These drive `_task3_inline_retry` end-to-end with
 a scripted model + scripted cargo: no LLM, no real cargo, deterministic, ms.
 
 The decision under test reacts to cargo error-count, not model quality — exactly
@@ -35,7 +35,7 @@ def _project(td: str) -> Path:
 
 
 def test_build_failure_reverts_when_fix_worsens(monkeypatch) -> None:
-    """R9.1+R9.2 BUILD mode: zero FAILED tests but a non-compiling tree → BUILD
+    """BUILD mode: zero FAILED tests but a non-compiling tree → BUILD
     mode attributes via diagnostics and re-splices; the splice raises the error
     count (2→3) → the tree is reverted from snapshot."""
     monkeypatch.setenv("TASK3_INLINE_MAX_STALLS", "1")
@@ -60,7 +60,7 @@ def test_build_failure_reverts_when_fix_worsens(monkeypatch) -> None:
 
 
 def test_build_failure_keeps_when_fix_compiles(monkeypatch) -> None:
-    """R9.1+R9.2 BUILD mode: the re-splice makes the tree COMPILE (2→0 errors) →
+    """BUILD mode: the re-splice makes the tree COMPILE (2→0 errors) →
     progress, kept (not reverted), task3 re-run signalled via non-initial output."""
     monkeypatch.setenv("TASK3_INLINE_MAX_STALLS", "1")
     with tempfile.TemporaryDirectory() as td:
@@ -88,7 +88,7 @@ _FAILING = "test result: FAILED. 1 passed; 1 failed\ntest tests::t1 ... FAILED\n
 
 
 def test_test_mode_reverts_when_fix_breaks_build(monkeypatch) -> None:
-    """R9.2 TEST mode: 1 failing test (tests ran) → fix re-splices but the result
+    """TEST mode: 1 failing test (tests ran) → fix re-splices but the result
     no longer COMPILES (tests stop running). broke_build = ran→not-ran → a
     non-compiling tree is strictly worse than 1 failing test → revert."""
     # max_stalls=2 so the loop re-checks AFTER the fix and observes the broken tree

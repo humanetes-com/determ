@@ -1,4 +1,4 @@
-"""Starvation-cause classification (july_plan P1).
+"""Starvation-cause classification.
 
 Why did a fill die? The pipeline PUSHES heuristic context slices at the model;
 when the slice misses the one fact the fn needed, the model hallucinates and
@@ -8,7 +8,7 @@ classifies one failed attempt (prompt, response, error) into a
 word-boundary walks, `path_leaf` from bound_mismatch for trait/type paths).
 
 The miner (`application/starvation_report.py` + `tools/starvation_miner.py`)
-aggregates these into the ranked evidence table that orders july_plan P2-P4.
+aggregates these into the ranked evidence table that orders remediation.
 """
 from __future__ import annotations
 
@@ -151,7 +151,7 @@ def classify_starvation(
     (missing ident/type, test-without-source, design conflict) beat the
     truncation check — a cut excerpt that still shows the cause is classified
     by the cause. `container` (the frozen impl header, when known) enables the
-    debt-#28 frozen-bound-mismatch detector."""
+    frozen-bound-mismatch detector."""
     err = strip_ansi(error_text or "")   # previews carry cargo's SGR colors
     prompt = prompt_text or ""
     response = response_text or ""

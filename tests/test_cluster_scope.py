@@ -1,4 +1,4 @@
-"""Unit tests for ClusterScope (P6 engine-core keystone) — the explicit run-state
+"""Unit tests for ClusterScope — the explicit run-state
 that replaced the `_current_cluster`/`_all_clusters` module globals."""
 from __future__ import annotations
 

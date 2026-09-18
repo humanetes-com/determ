@@ -111,7 +111,7 @@ class PipelineState(Protocol):
     """The pipeline_state.md store — phase markers + resume position.
 
     Single source of truth for which phases are complete; the wipe/rerun
-    invariant (slice 9) hangs off `phase_valid`.
+    invariant hangs off `phase_valid`.
     """
 
     def read_state(self, project_dir: Path) -> dict[str, Any]: ...

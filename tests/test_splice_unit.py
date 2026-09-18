@@ -114,7 +114,7 @@ def test_locate_ambiguous_picks_stub() -> None:
 
 
 def test_locate_cfg_tier_disambiguates_variant_pair() -> None:
-    """debt #17a: two same-name same-sig fns differing only by #[cfg] are
+    """Two same-name same-sig fns differing only by #[cfg] are
     distinguished when the caller passes the target's cfg_predicates."""
     extra = 'any (extra_cap , feature = "extra_cap")'
     stable = 'not (any (extra_cap , feature = "extra_cap"))'

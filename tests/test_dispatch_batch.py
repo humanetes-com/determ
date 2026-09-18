@@ -214,7 +214,7 @@ def test_promotion_without_evidence_changes_nothing():
 
 def test_rendered_marks_a_mid_pass_batch_for_the_iteration_line():
     """The iteration line is the one place a live run's cadence is visible, and
-    the census keys its P7 reaction marker on the mid-pass text."""
+    the census keys its reaction marker on the mid-pass text."""
     ordered = [f"u{i}" for i in range(30)]
     assert "mid-pass" in take_batch(ordered, set(), 12).rendered
     assert "mid-pass" not in take_batch(ordered, set(), 0).rendered

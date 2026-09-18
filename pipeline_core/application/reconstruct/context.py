@@ -1,4 +1,4 @@
-"""Per-fn pass context for the phase-c fill engine (P2 de-closure of
+"""Per-fn pass context for the phase-c fill engine (de-closure of
 `_process_one_stub` → `_fill_one_stub`)."""
 
 from __future__ import annotations
@@ -41,10 +41,10 @@ class PerFnPassCtx:
     idiom_blocks: list[ImplBlock]
     pass_n: int
     total: int
-    # E/R3: cluster cfg context for inactive-branch filtering at prompt-render time.
+    # Cluster cfg context for inactive-branch filtering at prompt-render time.
     cluster_cfg_set: CfgSet | None
-    # F10 Use-B (M5): behaviours harvested for this cluster, for the few-shot
-    # USAGE_EXAMPLES channel. Empty when no suite was baked (additive).
+    # Behaviours harvested for this cluster, for the few-shot USAGE_EXAMPLES
+    # channel. Empty when no suite was baked (additive).
     behaviour_specs: tuple[BehaviourSpec, ...] = ()
     # Localized crash evidence keyed by (file, fn_name): rendered faulting/
     # origin stacks for fns implicated in a binary crash. Drives a

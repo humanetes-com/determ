@@ -1,4 +1,4 @@
-"""Frozen-bound mismatch detection (debt #28).
+"""Frozen-bound mismatch detection.
 
 A per-fn fix loop whose errors are E0277 "the trait bound `P: Trait` is not
 satisfied" on a generic param `P` that the FROZEN signature/impl header already
@@ -201,7 +201,7 @@ def path_leaf(path: str) -> str:
 def detect_frozen_bound_mismatch(
     sig_text: str, container: str, error_excerpt: str,
 ) -> FrozenBoundMismatch | None:
-    """The structural tell of debt #28: an E0277 on a generic param whose frozen
+    """The structural tell: an E0277 on a generic param whose frozen
     bounds name a DIFFERENT trait (by leaf ident) than the one the compiler
     requires. Same-leaf requirements (path spelling differences) are not
     mismatches; unconstrained params keep the normal fix-loop behavior."""

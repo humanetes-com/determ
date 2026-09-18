@@ -1,4 +1,4 @@
-"""R13.4 — pin the model-notes relevance-filter + error-rule-promotion conduit.
+"""Pin the model-notes relevance-filter + error-rule-promotion conduit.
 
 This is the SOLE learning path into phase-c: per-fn prompts carry the relevance-
 filtered MODEL_NOTES block (`_filter_model_notes_for_prompt`) plus the promoted

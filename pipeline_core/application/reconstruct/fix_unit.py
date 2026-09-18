@@ -1,5 +1,5 @@
 """The fix UNIT — one re-fillable target driven by its own inner cargo-check
-loop (P3.C).
+loop.
 
 `_fix_single_fn` and `_fix_impl_block` were two ~80-line closures that shared a
 shape — verify the unit compiles, else render a prompt, ask the model, splice the
@@ -183,7 +183,7 @@ class _BaseFixUnit:
         return output[-cap:] if len(output) > cap else output
 
     def _ask(self, prompt: str, *, full_error: str) -> str:
-        """The unit's ask seam (P2): bounded pull round-trips when sources
+        """The unit's ask seam: bounded pull round-trips when sources
         are bound and CONTEXT_PULLS is on; plain model ask otherwise.
         `full_error` is THIS attempt's untruncated check output — the
         `full_error` pull kind serves it verbatim."""

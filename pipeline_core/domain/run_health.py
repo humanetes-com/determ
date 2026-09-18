@@ -228,7 +228,7 @@ def analyze(
             f"reading(s), stall {last.stall}/{last.stall_max}",
             f"{remaining} non-improving iteration(s) left before the inner "
             "loop stalls out; at stall-out below the historical best, "
-            "escalate (attribution debt #82 / tree diff)",
+            "escalate along the call graph via a tree diff",
         ))
 
     # -- 3. zero-payoff burn ------------------------------------------------
@@ -308,7 +308,7 @@ def analyze(
             f"{len(futile)} unit(s) stopped identically ≥{futile_min_stops}×: {top}",
             "every attributed fn is being rewritten to the same dead end — "
             "the defect likely sits in the CONSTRUCTION path of the type the "
-            "test exercises (debt #82: escalate along the call graph)",
+            "test exercises — escalate along the call graph",
         ))
 
     # -- 5. frozen stub counter / phase -------------------------------------

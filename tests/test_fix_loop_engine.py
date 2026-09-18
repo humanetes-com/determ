@@ -1,6 +1,6 @@
 """Unit tests for the unified loop engine (pipeline_core.application.fix_loop.
 run_fix_loop) — the single policy both the outcome view (drive_fix_loop) and the
-metric view (run_refine_loop) ride after the P3 unification.
+metric view (run_refine_loop) ride after the unification.
 
 The engine is pure: it reads a StallGauge's `stalls`/`repeated` and dispatches on
 the per-attempt StepStatus. A scripted gauge + scripted statuses drive it, no

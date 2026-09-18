@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""R13.1 — A/B efficacy comparator (does richer FR+genesis help convergence?).
+"""A/B efficacy comparator (does richer FR+genesis help convergence?).
 
 The pipeline's deliverable is `functional_requirements_{crate}.md` + `genesis.md`
-such that a fresh run converges in as few iterations as possible. R13.1 measures
+such that a fresh run converges in as few iterations as possible. This tool measures
 that hypothesis: run the SAME crate twice — (A) seeded with enriched docs from a
 prior converged run, (B) from blank stubs — and compare the convergence cost. This
 tool is the deterministic measurement half; the two live runs are the operator's.
 
 It reads the STRUCTURED events the pipeline already emits (no log scraping) and
 segments the shared `logs/events.jsonl` into per-run slices at each `pipeline.start`,
-so two runs in one file compare directly. Best run on the HARDCRATE (R10.7): there
+so two runs in one file compare directly. Best run on the HARDCRATE: there
 the model must actually recover, so docs *can* move the metrics — on the happy-path
-microcrate every run converges in iter 1 regardless, which is why R13.1 never ran.
+microcrate every run converges in iter 1 regardless, which is why this comparison never ran.
 
 Convergence-cost metrics (lower = cheaper = docs helped):
   iterations       max `module.iter` — outer repair loops

@@ -28,7 +28,7 @@ def api_surface_path(project_dir: Path, module_name: str) -> Path:
 def pub_items_manifest_path(project_dir: Path, module_name: str) -> Path:
     """Path where the pre-strip STRUCTURED pub-item manifest is saved — the
     same structured extraction used on the regenerated side of the TASK 2
-    conformance check (debt #64: this replaces a regex over the human-
+    conformance check (this replaces a regex over the human-
     readable `.api.md` listing, which cannot tell a real top-level `pub`
     item from the same syntax inside a `///` doc-comment example)."""
     return project_dir / ORIGINAL_STRUCTURE_DIR / f"{module_name}.pub_items.json"

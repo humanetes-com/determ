@@ -1,4 +1,4 @@
-"""Guarded LLM ask client — context-limit-enforcing transport (P6 engine-relocation).
+"""Guarded LLM ask client — context-limit-enforcing transport.
 
 Wraps the raw `model_interact.ask` transport with: the section-aware context
 guard (pure, in `domain.context_guard`), a budget-utilization warning, prompt

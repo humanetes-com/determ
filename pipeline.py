@@ -432,13 +432,13 @@ _CRATE_DISPLAY_NAME = ""
 # = 99K > VLLM_MAX_MODEL_LEN=98304, so _cap() hit its 512-token minimum, leaving
 # almost no content budget → model could not write a test block → empty response.
 #
-# REVERT if empty responses return or model output degrades (session 26 added this):
+# REVERT if empty responses return or model output degrades:
 #   1. In model_interact.py ~line 846: max(3.0, _vllm_cpt) → max(2.0, _vllm_cpt)
 #   2. Override the budget in Settings.from_env with the old empirical cap:
 #        _THINKING_MODEL_CHAR_LIMIT = 120_000
 #        single_call_char_limit = min(_THINKING_MODEL_CHAR_LIMIT, mcc * 3 // 4)
 #      (the safe-input math now lives in domain.model_caps.safe_input_char_limit).
-# slice 5b/Settings: the safe-input + single-call char budgets are now computed once in
+# The safe-input + single-call char budgets are now computed once in
 # Settings.from_env (pipeline_core.settings, via domain.model_caps.safe_input_char_limit).
 # These constants are single-sourced from SETTINGS; call sites are unchanged.
 _SAFE_INPUT_CHAR_LIMIT_TASK0C = SETTINGS.safe_input_char_limit_task0c
@@ -630,7 +630,7 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
 
 
 # flow self-audit (--audit): the audit thread + on-demand report moved to
-# pipeline_core.adapters.flow_audit.FlowAuditor (Plan #77 S4), constructed in
+# pipeline_core.adapters.flow_audit.FlowAuditor, constructed in
 # build_app from the shared RunState + events-log/prompts-dir. Read-only and
 # fail-safe — it observes the run, never steers it.
 
@@ -647,8 +647,8 @@ def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):
 
 
 
-# slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
-# slice 5b foundation: relocated to pipeline_core.domain.text (imported at top).
+# Relocated to pipeline_core.domain.text (imported at top).
+# Relocated to pipeline_core.domain.text (imported at top).
 # ---------------------------------------------------------------------------
 # BL-010: Rust source condenser — signatures and type definitions only
 # ---------------------------------------------------------------------------
@@ -660,7 +660,7 @@ from pipeline_core.adapters.pipeline_db import (  # noqa: E402
     genesis_rules_count,
 )
 
-# Cargo.toml accessors live in domain/cargo_toml.py (pure, tomllib — R8). Re-exported
+# Cargo.toml accessors live in domain/cargo_toml.py (pure, tomllib). Re-exported
 # under the legacy `_`-names so the ~15 call sites stay unchanged.
 _load_cargo_toml = _domain_load_cargo_toml
 _cargo_is_proc_macro = _domain_cargo_is_proc_macro
@@ -722,10 +722,10 @@ _SCOPE = ClusterScope()
 _cargo_env = CargoEnv(_SCOPE)
 
 
-# Slice 4b: git workspace I/O relocated to pipeline_core.adapters.workspace. These are
+# Git workspace I/O relocated to pipeline_core.adapters.workspace. These are
 # thin shims delegating to the adapter with injected log/emit and the live `_git_managed`
-# flag, until call sites migrate onto a GitWorkspace instance (slice 5).
-# S3.5: WorkspaceDeps construction migrated into build_app; re-exported above as _APP.ws_deps.
+# flag, until call sites migrate onto a GitWorkspace instance.
+# WorkspaceDeps construction migrated into build_app; re-exported above as _APP.ws_deps.
 
 
 # git_commit/git_tag construct in build_app (live ws_deps + run_state.git_managed).
@@ -744,19 +744,19 @@ _cargo_env = CargoEnv(_SCOPE)
 SKELETON_EXTRACTOR_BIN = Path(__file__).parent / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
 
 # Composition root (continued from SETTINGS): build the port adapters once, here where
-# the extractor-binary path is in scope. `pipeline.py` is the __main__/composition layer
-# (CODE_ARCHITECTURE.md §1), so it owns construction; call sites migrate onto ADAPTERS
-# one task at a time (slice 5). Adapters wrap real primitives and never import back here.
+# the extractor-binary path is in scope. `pipeline.py` is the __main__/composition layer,
+# so it owns construction; call sites migrate onto ADAPTERS
+# one task at a time. Adapters wrap real primitives and never import back here.
 ADAPTERS = build_adapters(SETTINGS, extractor_bin=SKELETON_EXTRACTOR_BIN, model=MODEL)
 # Run a genesis audit every this many total module iterations (across all modules).
 GENESIS_AUDIT_INTERVAL = 5
 # After this many consecutive module iterations with no pass-count improvement,
 # escalate to whole-project context in TASK 2.
 NO_IMPROVEMENT_THRESHOLD = 3
-# Phase 3 S1: the composition factory. main() will route through this; for now it
+# The composition factory. main() will route through this; for now it
 # owns the boundary providers (the extractor StructureReader) so subsequent stages
-# repoint call sites + tests onto `_APP.*` (see refactoring.md §Phase 3).
-# Phase 3: cross-cutting boundary callables, late-binding (lambdas read the live
+# repoint call sites + tests onto `_APP.*`.
+# Cross-cutting boundary callables, late-binding (lambdas read the live
 # module globals so the e2e monkeypatch seam is preserved while wiring migrates).
 _PORTS = _Ports(
     ask=lambda *a, **k: _ASK_CLIENT.ask(*a, **k),
@@ -799,14 +799,14 @@ _CFG = _CompositionConfig(
     layout_author_private_fields=os.getenv("LAYOUT_AUTHOR_PRIVATE_FIELDS", "1") == "1",
     setup_script=Path(__file__).parent / "setup.sh",
 )
-# Phase 3 S3.5-10: resident pipeline helpers the migrated deps need, late-binding.
+# Resident pipeline helpers the migrated deps need, late-binding.
 # Soft cap on stub members per impl block. Larger blocks fall back to the
 # per-fn path so the output budget always fits. Anyhow's `impl Error` is
 # the only block likely to exceed this in practice.
 _PER_IMPL_MAX_STUBS = int(os.getenv("PHASE_C_IMPL_MAX_STUBS", "12"))
 
 class _LateStructure:
-    """P2 backward-compat: late-binds `_enumerate_fns_via_extractor` so existing tests
+    """Backward-compat: late-binds `_enumerate_fns_via_extractor` so existing tests
     that monkeypatch that pipeline shim are still honoured by the attribution use-case.
     New tests inject a real `StructureReader` fake via `AttributionDeps.structure`.
 
@@ -881,7 +881,7 @@ _HELPERS = _Helpers(
     init_log=lambda *a, **k: init_log(*a, **k),
     init_events=lambda *a, **k: init_events(*a, **k),
 )
-# Phase 3 S3.4: TASK-1→4 reconstruction role callables, late-binding (the wrapped
+# TASK-1→4 reconstruction role callables, late-binding (the wrapped
 # fns are defined later in this module; lambdas resolve them at call time).
 # The reconstruction roles construct in build_app (ReconstructRoles dissolved).
 # The real StructureReader — injected into the fill engine (no monkeypatch seam).
@@ -895,11 +895,11 @@ _APP: _App = _build_app(ADAPTERS, SETTINGS, _RUN, _SCOPE, _PORTS, _CFG, _HELPERS
                   events_log=lambda: _EVENTS_LOG, prompts_dir=_PROMPTS_DIR,
                   run_context=_RUN_CONTEXT,
                   app_ref=lambda: _APP)
-# S3.5/6/10: these deps are consumed only inside `def` bodies (lazy), so their
+# These deps are consumed only inside `def` bodies (lazy), so their
 # construction migrates into build_app and they're re-exported here by name.
 # Coverage deps + backend-selected provider construct in build_app.
 _coverage_provider: _covmod.CoverageProvider = _APP.coverage_provider
-# #23: build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
+# build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 
 
 # _LateStructure hoisted above _HELPERS (step 22).
@@ -910,8 +910,8 @@ _coverage_provider: _covmod.CoverageProvider = _APP.coverage_provider
 # seam keeps working; the AttributionDeps record is the clean DI rail a fake can fill.
 # AttributionDeps constructed in build_app (App.attribution_deps).
 # The application-layer composition context. main()'s task dispatch migrates onto it
-# slice by slice (5b); for now it bundles the resolved settings + adapters.
-# Wire the cross-cutting infra seams to the pipeline's concrete sinks/config (slice 5b).
+# slice by slice; for now it bundles the resolved settings + adapters.
+# Wire the cross-cutting infra seams to the pipeline's concrete sinks/config.
 _pclog.set_sinks(_log, _emit)
 _pcretry.configure(max_retries=MAX_RETRIES)
 
@@ -999,7 +999,7 @@ _PER_PASS_TEST_FIX_HARD_CAP = SETTINGS.fix_caps.per_pass_test_fix_hard_cap
 # fn/impl/test-fix loop does a couple of attempts then reverts-to-stub and moves on,
 # giving an end-to-end run for controller/routing telemetry without grinding to
 # convergence. PIPELINE_CONVERGE_MODULE names ONE module exempt from the collapse —
-# it keeps full budgets and converges for real (the deterministic R3/R9 baseline).
+# it keeps full budgets and converges for real.
 _PASS_THROUGH = SETTINGS.fix_caps.pass_through
 _PASS_THROUGH_STALLS = SETTINGS.fix_caps.pass_through_stalls
 _CONVERGE_MODULE = SETTINGS.fix_caps.converge_module
@@ -1060,7 +1060,7 @@ def _ask_retrospective(prompt: str, model: str | None = None) -> str:
 
 # Cargo diagnostic parsing relocated to application/reconstruct/cargo_errors.py
 # (regex-free): the rendered-text error-signature fallback is now
-# the structured `err_sig_from_text` scan (R7 standing rule).
+# the structured `err_sig_from_text` scan.
 import pipeline_core.application.reconstruct.fill_reading as _fill_reading  # noqa: E402
 import pipeline_core.application.reconstruct.regression_guard as _regression_guard  # noqa: E402
 
@@ -1084,7 +1084,7 @@ def _run_cargo(cmd: str, cwd: Path, env: dict, timeout: int = 180) -> tuple[int,
 # fallbacks (recently-filled queue, test-reverse map), and the stall budget.
 
 
-# _ask_per_fn_body + _collect_sibling_filled_bodies relocated to pipeline_core (G/P6).
+# _ask_per_fn_body + _collect_sibling_filled_bodies relocated to pipeline_core.
 # Tests that patch pipeline._ask_per_fn_body / pipeline._collect_sibling_filled_bodies
 # still work: the aliased names remain in this module's namespace.
 from pipeline_core.adapters.per_fn_ask import (  # noqa: E402
@@ -1094,12 +1094,12 @@ from pipeline_core.application.reconstruct.sibling_context import (  # noqa: E40
     collect_sibling_filled_bodies as _collect_sibling_filled_bodies,  # noqa: F401  (test pin: pipeline._collect_sibling_filled_bodies)
 )
 
-# S77: per-fn conversation protocol with the guarded client + task2 model bound.
+# Per-fn conversation protocol with the guarded client + task2 model bound.
 _ask_per_fn_body: "Callable[..., tuple[str | None, str]]" = functools.partial(
     _ask_per_fn_body_impl, _ASK_CLIENT, model=_TASK2_MODEL)
 
 
-# Retrospectives store relocated to pipeline_core/adapters/retros.py (P2);
+# Retrospectives store relocated to pipeline_core/adapters/retros.py;
 # aliases keep engine call sites + smoke pins unchanged.
 from pipeline_core.adapters.retros import (  # noqa: E402
     canon_container as _canon_container,  # noqa: F401  (smoke pin: test_canon_container_unifies_renderings)
@@ -1113,7 +1113,7 @@ def _count_relevant_notes(fr_path: Path | None,
                             fn_key: tuple[str, str]) -> int:
     """Count model-notes currently relevant to a (file, fn) — proxy for
     'has the model's accumulated knowledge about this fn grown since
-    the prior attempt'. Used by the TDD driver's D3 re-entry policy.
+    the prior attempt'. Used by the TDD driver's re-entry policy.
     """
     if fr_path is None or not fr_path.exists():
         return 0
@@ -1129,12 +1129,12 @@ def _count_relevant_notes(fr_path: Path | None,
     return section.count("\n- ") if section else 0
 
 
-# P3-S3: PhaseCTddDeps constructed in build_app (App.phase_c_tdd_deps).
-# Typed boundary (plan #77 T1): partial binds only the deps — the fully typed
+# PhaseCTddDeps constructed in build_app (App.phase_c_tdd_deps).
+# Typed boundary: partial binds only the deps — the fully typed
 # keyword signature lives on the engine fn itself, no **kwargs hop to hide it.
 
 
-# _PER_IMPL_MAX_STUBS moved above _HELPERS (P3-S3 value dependency).
+# _PER_IMPL_MAX_STUBS moved above _HELPERS (a value dependency).
 
 # Per-source-tree splice+cargo locks. Originally one global lock (hoisted
 # from `_task2_fill_fns_one_by_one` because the per-impl path also needs to
@@ -1145,14 +1145,14 @@ def _count_relevant_notes(fr_path: Path | None,
 # concurrent invocations in one dir anyway), while distinct clusters —
 # distinct .skeleton-filled/{c}/ trees with their own target/ — proceed in
 # parallel.
-# S75: the per-tree lock map lives in application/reconstruct/splice.py
+# The per-tree lock map lives in application/reconstruct/splice.py
 # (process-global singleton preserved); alias doubles as the test pin.
 import pipeline_core.application.reconstruct.splice as _reconstruct_splice  # noqa: E402
 
 _splice_lock_for = _reconstruct_splice.splice_lock_for  # test pin: test_parallelism
 
 
-# THE fix-loop driver — relocated to the application layer (P1) so task0c
+# THE fix-loop driver — relocated to the application layer so task0c
 # can drive it too; these aliases keep every call site + test pin unchanged.
 
 
@@ -1162,10 +1162,10 @@ _phase_c_fill_impl_blocks: "Callable[..., ClusterFillResult]" = functools.partia
 
 # Leaf-first GROUP ordering stays aliased (used by the per-impl path); the per-fn
 # pass ctx / scheduling / early-exit helpers are now consumed inside the
-# application-layer use-cases, not here (P2).
+# application-layer use-cases, not here.
 
 # ===========================================================================
-# P2 / R3.3 — phase-C fill engine composition root.
+# Phase-C fill engine composition root.
 #
 # The per-fn fill unit (`FillOneFn`) and the per-cluster coordinator
 # (`PhaseCFillEngine`) live in `application/reconstruct/`. `pipeline.py` is the
@@ -1181,7 +1181,7 @@ from pipeline_core.application.reconstruct.fill_one_fn import (  # noqa: E402
     FillOneFn,
 )
 
-# Back-compat re-export seams: these moved into the fill-engine use-cases (P2),
+# Back-compat re-export seams: these moved into the fill-engine use-cases,
 # but the unit suites pin them via `pipeline._x` — keep the aliases.
 from pipeline_core.application.reconstruct.fill_rules import (
     failure_hit_unfilled_stub as _failure_hit_unfilled_stub,  # noqa: E402,F401
@@ -1195,7 +1195,7 @@ from pipeline_core.application.reconstruct.scheduling import (
 )
 from pipeline_core.prompts.per_fn import build_per_fn_prompt as _build_per_fn_prompt  # noqa: E402,F401
 
-# S64: the fill-engine role adapters construct in build_app (`_APP.fill_roles`);
+# The fill-engine role adapters construct in build_app (`_APP.fill_roles`);
 # the engine factory below sources them from the LIVE `_APP` at call time.
 
 
@@ -1203,10 +1203,10 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
     """Composition root: bind the concrete helpers to the fill-engine ports and
     assemble the use-cases. Built per call so monkeypatched SETTINGS / parallelism
     (tests) are honoured at call time. `structure` lets a test inject a fake
-    StructureReader (P1 constructor-DI seam) instead of monkeypatching the
+    StructureReader (constructor-DI seam) instead of monkeypatching the
     enumerate globals — it is swapped into the WorkspaceModel adapter only."""
     roles = _APP.fill_roles
-    # P3-S2: default to the App's structure provider at CALL time, so a
+    # Default to the App's structure provider at CALL time, so a
     # test-injected _APP (build_app/replace with a fake reader) intercepts.
     ws = dataclasses.replace(
         roles.ws, structure=structure if structure is not None else _APP.structure)
@@ -1240,7 +1240,7 @@ def _task2_fill_fns_one_by_one(
     **kwargs: Any,
 ) -> "ClusterFillResult":
     """Phase C per-cluster fill engine shim → `PhaseCFillEngine.run` (the typed
-    signature + pass/worker orchestration live there); `structure` is the P1
+    signature + pass/worker orchestration live there); `structure` is the
     test-injection seam (fake StructureReader)."""
     return _build_phase_c_engine(structure=structure).run(*args, **kwargs)
 
@@ -1255,7 +1255,7 @@ def _task2_fill_fns_one_by_one(
 # pipeline only ever queries one dir at a time during a cluster pass.
 
 
-# Slice 9: the pipeline_state.md store moved to pipeline_core/adapters/state.py
+# The pipeline_state.md store moved to pipeline_core/adapters/state.py
 # (regex-free line parser; same file format, locking, atomic replace). Aliases
 # keep every call site + the task-deps records unchanged.
 _mark_phase = _state_mod.mark_phase
@@ -1263,7 +1263,7 @@ _phase_valid: Callable[[Path, str], bool] = _state_mod.phase_valid
 
 
 # task0_project_profile/context → application.tasks.task0_docs, bound in
-# build_app (App.run_deps, S72).
+# build_app (App.run_deps).
 
 
 # API-surface section cap: ~25% of the single-call budget. The skeleton must
@@ -1274,25 +1274,25 @@ _phase_valid: Callable[[Path, str], bool] = _state_mod.phase_valid
 # context guard still protects total-prompt overflow.
 
 
-# --- TASK 1 synthesizer engine relocated to application/generators (P4). The
-# synthesizers are use-cases over the narrow `ports.synthesizer` roles (debt #14:
-# replaced the old `configure()` global-injection seam). The focused role adapters
+# --- TASK 1 synthesizer engine relocated to application/generators. The
+# synthesizers are use-cases over the narrow `ports.synthesizer` roles (replaced
+# the old `configure()` global-injection seam). The focused role adapters
 # (`adapters.task2_roles`, wired as `_GEN_*` below) bind BOTH the TASK-2 and TASK-1
 # roles; `_build_task1_config()` resolves the constants into a VO. -----------------
 
 
-# slice 5b: _task1_proc_macro moved to application.tasks.task1.
+# _task1_proc_macro moved to application.tasks.task1.
 
 
 # ---------------------------------------------------------------------------
-# Source code generation (TASK 2) — Clean Architecture (P4)
+# Source code generation (TASK 2) — Clean Architecture
 #
 # The Task2Generator family lives in
 # `pipeline_core/application/generators/task2_generator.py` as use-cases over
 # the narrow `ports.generator` roles. pipeline.py is the COMPOSITION ROOT: the
 # focused role adapters (`adapters.task2_roles`, wired as `_GEN_*` below) bind the
 # concrete helpers to those roles via late-binding lambdas (so test/scripted-harness
-# them via build_app's generator factories (S64). Each role is a narrow ISP port.
+# them via build_app's generator factories. Each role is a narrow ISP port.
 #
 # Selected by TASK2_GENERATOR in .env: static | llm | skeleton | filelist (default).
 # ---------------------------------------------------------------------------
@@ -1300,27 +1300,27 @@ from pipeline_core.domain.generation import (  # noqa: E402
     build_gen_tests_decl as _build_gen_tests_decl,
 )
 
-# P6: the `_Task2Adapter` god-object is dissolved — each TASK-1/TASK-2 generator
+# The `_Task2Adapter` god-object is dissolved — each TASK-1/TASK-2 generator
 # role is a focused adapter (adapters.task2_roles), constructor-injected with
 # late-binding lambdas over the resident composition-root callables (so the
 # scripted-harness / test monkeypatches still intercept at call time). The
 # generator/synthesizer use-cases receive narrow role ports (ISP) instead of one
 # multi-role binding object.
-# P6: cross-cluster skeleton merge — focused adapter, composition-injected.
-# P6: mutation-testing behaviour hardening — focused adapter, composition-injected
+# Cross-cluster skeleton merge — focused adapter, composition-injected.
+# Mutation-testing behaviour hardening — focused adapter, composition-injected
 # (ask late-bound so a test monkeypatching pipeline.ask still intercepts).
-# _MUTATION constructed above _HELPERS (S43 definition-order).
+# _MUTATION constructed above _HELPERS (definition order).
 
 
-# S79: generate_fix_loop constructs in build_app (app_ref-live deps); pin kept
+# generate_fix_loop constructs in build_app (app_ref-live deps); pin kept
 # for the e2e routing/stub/fix-gate tests.
 generate_fix_loop: "Callable[..., tuple[bool, str]]" = _APP.task0c_deps.generate_fix_loop
 # pin kept for tests: composed in build_app (ask_client.ask + ports.guard bound).
 generate_in_parallel = _APP.task0c_deps.generate_in_parallel
 
 
-# slice 5b: deps for the extracted TASK 2 (defined after generate_fix_loop, its latest dep).
-# P7.3: task3 inline retry. Currently task3 is one-shot; failure escalates
+# Deps for the extracted TASK 2 (defined after generate_fix_loop, its latest dep).
+# Task3 inline retry. Currently task3 is one-shot; failure escalates
 # straight to task4 + full regen. The inline retry catches the case where
 # only a handful of fns broke a test — classifier identifies them, a single
 # LLM call per fn fixes the body, cargo test re-runs. Bounded by stall budget
@@ -1335,7 +1335,7 @@ def _task3_inline_retry(
     all_clusters: "list[BuildCluster] | None" = None,
 ) -> tuple[bool, str]:
     """Composition-root shim -> per_fn_retry.run_task3_inline_retry (chunk H,
-    deps migrated into build_app in S27). The deps' fill-role adapters +
+    deps migrated into build_app). The deps' fill-role adapters +
     Helpers lambdas late-bind the module globals, so the scripted-cargo /
     scripted-model monkeypatch seams (test_e2e_build_fix / test_e2e_routing)
     still intercept at call time; env knobs are read per call in pipeline_core.
@@ -1373,9 +1373,9 @@ def _task3_legacy_single(
 # _cargo_env (cluster-aware cargo env) is defined near _SCOPE above.
 
 
-# slice 5b: deps records for the extracted TASK 3 / TASK 4. Defined here, after every
+# Deps records for the extracted TASK 3 / TASK 4. Defined here, after every
 # collaborator they bind (notably _cargo_env). The task3/task4 shims above read these.
-# S3.7: Task4Deps construction migrated into build_app; re-export by name.
+# Task4Deps construction migrated into build_app; re-export by name.
 
 
 def _describe_test_environment() -> str:
@@ -1388,18 +1388,18 @@ def _describe_test_environment() -> str:
         active.excluded_cfg if active is not None else None)
 
 
-# Slice 4b: coverage I/O relocated to pipeline_core.adapters.coverage. _COV_DEPS injects
+# Coverage I/O relocated to pipeline_core.adapters.coverage. _COV_DEPS injects
 # the pipeline's log + cargo-env + live-cluster accessor + tool paths/timeout/pragma so the
 # adapter stays import-independent of pipeline.py. `cluster` is a callable (the active
 # cluster is reassigned across the run; resolve at call time = original global semantics).
-# S26: _COV_DEPS constructed standalone above (before _APP); also injected into build_app.
+# _COV_DEPS constructed standalone above (before _APP); also injected into build_app.
 
 
-# S26: _coverage_provider constructed standalone above (before _APP); also injected
+# _coverage_provider constructed standalone above (before _APP); also injected
 # into build_app. No longer an _APP re-export → unblocks the _APP-to-end move.
 
 
-# Sibling-name parser + predicate live in discovery (P5); shims keep the
+# Sibling-name parser + predicate live in discovery; shims keep the
 # private names the call sites already use.
 _match_gen_tests_sibling = _discovery.match_gen_tests_sibling
 _is_gen_tests_file: Callable[[str], bool] = _discovery.is_gen_tests_file
@@ -1413,7 +1413,7 @@ _is_gen_tests_file: Callable[[str], bool] = _discovery.is_gen_tests_file
 def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
                               sibling_body: str = "",
                               project_dir: "Path | None" = None) -> str:
-    """#26: the cfg gate to stamp on a gen_tests sibling. Gate it to its cluster
+    """The cfg gate to stamp on a gen_tests sibling. Gate it to its cluster
     only when the lines it targets are cluster-SPECIFIC (live inside a `#[cfg]`
     region that some cluster compiles out); a cluster-agnostic test is emitted
     UNGATED so a later cluster sees those lines already covered and skips
@@ -1423,12 +1423,12 @@ def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
     delta). This is the documented-safe criterion: a `not(egma)` stable-only test
     stays gated to stable, never leaking into the nightly harness.
 
-    #26 residual: even when the TARGET lines are agnostic, a body that CALLS a
+    Additionally, even when the TARGET lines are agnostic, a body that CALLS a
     cluster-specific symbol (a fn compiled out under some cluster) would fail to
     compile if shared ungated into that cluster's harness. So keep the gate when
     `sibling_body` references any cluster-specific symbol — only a body that is
     both line-agnostic AND symbol-agnostic is shared."""
-    # C4: relocated to cluster_membership.cluster_gate_for_sibling; shim binds
+    # Relocated to cluster_membership.cluster_gate_for_sibling; shim binds
     # _SCOPE.all + a LAZY cluster-specific-symbols provider (extractor + cache).
     contexts = [_cfg.CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false) for c in _SCOPE.all]
     return _membership.cluster_gate_for_sibling(
@@ -1437,67 +1437,67 @@ def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
 
 
 # TestAugmentor (ABC) → ports/augment.py; StaticRustTestAugmentor →
-# adapters/augment_engine.py (C10). The factory binds the cargo collaborators.
+# adapters/augment_engine.py. The factory binds the cargo collaborators.
 
 
-# _derive_gentest_prelude → adapters/gen_tests_storage.derive_gentest_prelude (S33);
+# _derive_gentest_prelude → adapters/gen_tests_storage.derive_gentest_prelude;
 # alias lives at the import (line ~100s) so every reference sees it defined.
 
 
 # restart_from_augmented → App.restore_from_augmented.run, bound in build_app
-# (App.run_deps, S72).
+# (App.run_deps).
 
 
-# Strip subsystem moved to pipeline_core.adapters.strip (P5-S2). Shims keep the
+# Strip subsystem moved to pipeline_core.adapters.strip. Shims keep the
 # module-level names existing call sites reference.
 strip_module_source = _strip_mod.strip_module_source
 ORIGINAL_STRUCTURE_DIR = _strip_mod.ORIGINAL_STRUCTURE_DIR
 
 
-# slice 5b: deps for the extracted TASK 1 (defined after load_api_surface, its latest dep).
-# P3-S3: Task1Deps constructed in build_app (App.task1_deps).
+# Deps for the extracted TASK 1 (defined after load_api_surface, its latest dep).
+# Task1Deps constructed in build_app (App.task1_deps).
 
 
-# Relocated to adapters/artifacts.py (P3-S5); alias keeps call sites + fakes stable.
+# Relocated to adapters/artifacts.py; alias keeps call sites + fakes stable.
 load_original_structure: "Callable[[Path, str], list[str]]" = _artifacts_load_original_structure
 
 
 cmd_best_models = _model_catalog.print_best_models
 
 
-# P6: per-file generation constraints reader (config TOML I/O) — focused adapter,
+# Per-file generation constraints reader (config TOML I/O) — focused adapter,
 # composition-injected with the configs dir + the active-cluster predicate + log.
-# _FILE_CONSTRAINTS constructed above _HELPERS (S43 definition-order).
+# _FILE_CONSTRAINTS constructed above _HELPERS (definition order).
 
 
-# slice 5b: deps for the extracted TASK 0c engine (defined before main(), after every
+# Deps for the extracted TASK 0c engine (defined before main(), after every
 # collaborator). subprocess/git injected as the module; _current_cluster via a call-time
 # getter (mutable global); coverage provider as a value.
 
-# S28: deps for the relocated fix-loop body (fix_loop.generate_fix_loop).
-# P3-S3 (step 31): GenerateFixLoopDeps constructed in build_app (App.gen_fix_loop_deps).
+# Deps for the relocated fix-loop body (fix_loop.generate_fix_loop).
+# GenerateFixLoopDeps constructed in build_app (App.gen_fix_loop_deps).
 
 
-# P6/S65: API-surface capture constructs in build_app; pin kept for tests
+# API-surface capture constructs in build_app; pin kept for tests
 # (test_pipeline_smoke uses pipeline._API_SURFACE).
 _API_SURFACE = _APP.api_surface
 task0_cfg_scan = _APP.run_deps.task0_cfg_scan
 
-# F11 layout runners + strip/bake deps construct in build_app (S66).
+# Layout runners + strip/bake deps construct in build_app.
 
-# S24: the role adapters (_PHASE_GATE/…/_ANALYST) + spine use-cases
+# The role adapters (_PHASE_GATE/…/_ANALYST) + spine use-cases
 # (_LOCK_DEPS/_REATTACH_DEPS/_RECONSTRUCTION_STEP/_FAILURE_ANALYSIS/_COVERAGE_DOCS/
 # _FLOW_AUDIT/_DOCS_METRICS/_FAILURE_JOURNAL/_WORKSPACE_ARTIFACTS/_TEST_RUNNER) are
 # consumed only INSIDE build_app now → their pipeline re-exports were dead and deleted.
 # main() reads only these two:
 
 
-# S25: the TASK-0c augmentation cluster (_AUGMENT_STORE/_AUGMENT_ENGINE/
+# The TASK-0c augmentation cluster (_AUGMENT_STORE/_AUGMENT_ENGINE/
 # _CLUSTER_AUGMENTOR) is built before _APP and exposed as _APP.augment_roles.
 
-# C8: the standalone --phase-*-only / --skeleton-backend handlers live in the
+# The standalone --phase-*-only / --skeleton-backend handlers live in the
 # orchestrator; this binds them to the resident pipeline shims.
-# P3-S3 (step 47): PhaseSubcommandDeps constructed in build_app.
+# PhaseSubcommandDeps constructed in build_app.
 
 
 def main():
@@ -1509,7 +1509,7 @@ def main():
         sys.exit(0)
 
     root = Path(__file__).parent
-    # Parse-don't-validate (#77 T1): the Namespace is read once, here.
+    # Parse-don't-validate: the Namespace is read once, here.
     plan = _RunPlan.from_args(args)
     _orchestrator.run_pipeline(_APP.run_deps, plan, root)
 

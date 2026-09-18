@@ -1,4 +1,4 @@
-"""ReconstructionStep (P5) — ONE TASK 2-4 iteration's generate→test→verdict.
+"""ReconstructionStep — ONE TASK 2-4 iteration's generate→test→verdict.
 
 Generates source (TASK 2), reattaches preserved gen_tests, checks API-surface
 conformance, runs the strict test verdict (TASK 3), and dispatches the verdict:

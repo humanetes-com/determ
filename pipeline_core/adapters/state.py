@@ -1,4 +1,4 @@
-"""pipeline_state.md store (slice 9) — phase markers, atomic writes, locking.
+"""pipeline_state.md store — phase markers, atomic writes, locking.
 
 The state file is the single source of truth for which phases are complete
 (`phase_valid`) and where the run last stood (`current:`). Bodies moved

@@ -1,4 +1,4 @@
-"""FixTarget verdict logic + FixSession context (P3.C domain VOs)."""
+"""FixTarget verdict logic + FixSession context (domain VOs)."""
 from __future__ import annotations
 
 from pathlib import Path

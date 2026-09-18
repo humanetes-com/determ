@@ -439,7 +439,7 @@ def process_rust(project_dir: Path, dry_run: bool):
             kept += 1
             continue
 
-        # FR-023: gen_tests siblings are pure test code written by task0c.
+        # gen_tests siblings are pure test code written by task0c.
         # Every line (imports, helper structs/impls, #[test] fns) is signal
         # for reconstruction. They MUST survive strip byte-for-byte —
         # running `extract_rust_tests` on them drops imports + helpers and

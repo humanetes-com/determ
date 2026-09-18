@@ -1,4 +1,4 @@
-"""Characterization tests for FixReport (P3.B).
+"""Characterization tests for FixReport.
 
 Pin `as_record()` to the EXACT dicts `generate_fix_loop`'s return sites built,
 so swapping the hand-built dicts for the typed VO is provably behaviour-

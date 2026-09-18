@@ -1,4 +1,4 @@
-"""Workspace lifecycle adapter (P6 relocation).
+"""Workspace lifecycle adapter, relocated out of pipeline.py.
 
 `clean_state` wipes every pipeline-generated artefact from a project workspace so
 the next run starts fresh: manifest-tracked source, per-iteration documents,

@@ -1,6 +1,6 @@
 """TASK 0 — discover the project's test command (LLM use-case).
 
-Extracted from pipeline.py (P6 engine-relocation series). Collects project file
+Extracted from pipeline.py. Collects project file
 signals (README + Cargo.toml/Makefile/package.json/.cargo config), asks the
 configured model for the one command that runs the suite, then parses and
 normalizes the answer through :mod:`pipeline_core.domain.test_command` (pure).

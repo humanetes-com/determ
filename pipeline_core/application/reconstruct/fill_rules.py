@@ -1,4 +1,4 @@
-"""Pure rules of the per-fn fill loop (P2 slice 2, relocated verbatim from
+"""Pure rules of the per-fn fill loop (relocated verbatim from
 pipeline.py; `_`-prefixes dropped on promotion).
 
 `FAILED_ATTEMPT_SENTINEL` is a SEAM constant: skeleton.rs's

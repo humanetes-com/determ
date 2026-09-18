@@ -1,6 +1,6 @@
 """TASK 0a — project profile + behavioral context docs (LLM doc-generation use cases).
 
-Extracted from pipeline.py (slice 5b, Option 1). The incidental fence-stripping regex in the
+Extracted from pipeline.py. The incidental fence-stripping regex in the
 fallback path is replaced by the relocated `strip_markdown_fences` helper (no regex enters the
 clean layer). Infra (log/retry) and the pure text/extraction helpers are imported; the
 pipeline-coupled collaborators (phase tracking, ask, write, prompt budgeting, caps, model ids)

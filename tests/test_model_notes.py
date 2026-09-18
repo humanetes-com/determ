@@ -1,4 +1,4 @@
-"""Unit tests for the FR model-notes domain (P6 prerequisite slice) — pins the
+"""Unit tests for the FR model-notes domain — pins the
 behaviour of the regex→structured-scan migration of `slice_model_notes`."""
 from __future__ import annotations
 

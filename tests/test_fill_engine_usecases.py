@@ -1,4 +1,4 @@
-"""Phase-C fill engine use-cases (P2): FillOneFn + PhaseCFillEngine driven
+"""Phase-C fill engine use-cases: FillOneFn + PhaseCFillEngine driven
 through their `ports.fill_engine` roles with one recording fake adapter.
 
 The REAL engine (real splice/revert/FloorStall over scripted cargo+model) is
@@ -1396,6 +1396,81 @@ def test_control_an_improving_retrospective_on_an_entered_unit_re_enters(
     assert not res.filled
     assert "phase_c.fn.retro_retry" in fake.events
     assert fake.diagnose_calls == 2
+
+
+# ---- a vetoed conviction is not a bought re-entry ----
+# Run `2657150-3139f958` (2026-09-18): one per-fn unit read `improved=False`
+# at the same floor on rounds 2 to 7; each round's conviction was vetoed (the
+# failure was the tree's, not the body's) and each veto re-entered the fix
+# loop, holding one worker for 1h40m after its run's share was spent. The
+# shape here is invented: an unchanging compile error whose conviction a veto
+# arm refuses (a splice diagnostic), against a store that keeps the floor.
+
+
+class _FlatFloorRetro(_ImprovingRetro):
+    """Keeps what the retrospective saved, so round 2 compares against
+    round 1's floor instead of re-baselining on an empty store."""
+
+    def __init__(self, **scripted: Any) -> None:
+        super().__init__(**scripted)
+        self.store: dict[str, Any] = {}
+
+    def load(self, *a: Any) -> dict[str, Any]:
+        return dict(self.store)
+
+    def save(self, *a: Any) -> None:
+        super().save(*a)
+        self.store = dict(a[-1])
+
+
+_SPLICE_ERR = ("error: `self` parameter is only allowed in associated "
+               "functions\n --> src/lib.rs:1:15")
+
+
+def test_an_unimproved_round_whose_conviction_is_vetoed_does_not_re_enter(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "6")
+    ws = _mk_ws(tmp_path)
+    fake = _FlatFloorRetro(run=(1, _SPLICE_ERR), err=_SPLICE_ERR,
+                           body=("Ok(())", "R"))
+    res = _run_bound(fake, ws, _cov_ctx(ws), entered=True)
+    assert not res.filled
+    assert fake.diagnose_calls == 2, (
+        "round 1 baselines and re-enters; round 2 reads the same floor and "
+        "stops, whatever the veto decided about conviction")
+    assert fake.events.count("phase_c.fn.retro_retry") == 1
+    assert any("NOT exhausting" in m for m in fake.logs), (
+        "the veto arm must have fired, or this proves nothing")
+
+
+def test_control_the_pre_fix_gate_re_enters_every_vetoed_round(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Negative control: the retry gate without the improvement clause, the
+    shape that shipped before 2026-09-18, spends every round up to the cap on
+    the same flat floor."""
+    import inspect
+
+    from pipeline_core.application.reconstruct import fill_one_fn as mod
+    src = inspect.getsource(mod)
+    fixed = "_retry_informed = (_improved and not _full_exhaust"
+    assert fixed in src
+    old = compile(src.replace(fixed, "_retry_informed = (not _full_exhaust"),
+                  mod.__file__, "exec")
+    ns: dict[str, Any] = {"__name__": mod.__name__}
+    exec(old, ns)
+    monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "6")
+    ws = _mk_ws(tmp_path)
+    fake = _FlatFloorRetro(run=(1, _SPLICE_ERR), err=_SPLICE_ERR,
+                           body=("Ok(())", "R"))
+    from pipeline_core.domain.coverage_slice import bind
+    bind(_bound(True))
+    try:
+        ns["FillOneFn"](tel=fake, mut=fake, cargo=fake, prompt=fake,
+                        retros=fake, tests=fake, stall=fake, caps=_CAPS).run(
+            1, Stub(file="lib.rs", fn_name="answer"), ctx=_cov_ctx(ws))
+    finally:
+        bind(None)
+    assert fake.diagnose_calls == 6
 
 
 # ---- the exhaustion summary agrees with the salvage decision ----

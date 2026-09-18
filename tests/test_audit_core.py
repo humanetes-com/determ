@@ -314,7 +314,7 @@ def test_parallel_stream_integrity_verdicts(tmp_path: Path) -> None:
     vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
     assert vs["C10 parallel-streams"].status == "SKIP"
 
-    # Pre-instrumentation fallback (debt #6): the anyhow shape — a MainThread
+    # Pre-instrumentation fallback: the anyhow shape — a MainThread
     # call left OPEN while a burst overlaps it under the SAME name — has NO tid
     # to prove it's one OS thread, so C10 conservatively FAILs it (old events).
     anyhow_shape = [

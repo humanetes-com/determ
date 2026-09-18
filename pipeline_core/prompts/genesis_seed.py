@@ -3,8 +3,8 @@
 genesis.md is the project-INDEPENDENT methodology document: how to turn test
 signal into a compiling, test-passing implementation. TASK 4 evolves it after
 failures; before this seed existed the happy path (iteration-1 success) left
-only a placeholder, so the per-fn prompts carried no methodology at all
-(debt #38). The seed is deterministic (Rule 9) — a curated static artifact,
+only a placeholder, so the per-fn prompts carried no methodology at all.
+The seed is deterministic — a curated static artifact,
 never LLM-generated — and written whenever genesis.md is absent.
 
 Style contract (CLAUDE.md): concrete WRONG→RIGHT examples with generic

@@ -1,4 +1,4 @@
-"""Per-fn prompt builders (slice 8) — initial fill + compile-fix re-prompt.
+"""Per-fn prompt builders — initial fill + compile-fix re-prompt.
 
 Moved verbatim from pipeline.py. Pure text→text; impure collaborators
 come from :mod:`pipeline_core.prompts.runtime`.
@@ -37,7 +37,7 @@ def build_per_fn_prompt(
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
 
-    `sections` (P7): every injected section as a frozen no-default record — a
+    `sections`: every injected section as a frozen no-default record — a
     forgotten section is a TypeError at construction, not a silent "".
     """
     macros_section = sections.macros
@@ -65,7 +65,7 @@ def build_per_fn_prompt(
             "origin stack. This is runtime evidence from the actual "
             "crash, stronger than any failing-test guess:\n",
             (fn_name,)))
-    # F10 Use-B (M5): concrete RIGHT usage examples harvested from the real
+    # Concrete RIGHT usage examples harvested from the real
     # lib's doc-tests/examples — teaches the API SHAPE by example. After notes,
     # before the file context (same slot the archetype prescribes).
     usage_block = tag_block(
@@ -74,7 +74,7 @@ def build_per_fn_prompt(
                "the library's own tests/examples). Match how the API is called "
                "here:\n```rust\n", suffix="\n```")
     macros_block = tag_block("MACROS", macros_section)
-    # P5.1: type definitions for types the fn touches. The model often
+    # Type definitions for types the fn touches. The model often
     # confuses Own/Ref/ErrorImpl fields with methods (writes self.ptr.as_ref
     # instead of self.ptr.as_ref()); listing each type's actual fields and
     # methods makes this unambiguous.
@@ -111,8 +111,8 @@ def build_per_fn_prompt(
         prefix="Patterns this file already uses — design your fn to MATCH "
                "these idioms whenever its situation matches one of them. Do "
                "NOT invent a new approach when one clearly applies.\n")
-    # P5.5: promoted recurring errors (E0xxx codes seen 3+ times this run).
-    # P6.4: pass fr_path so past notes tagged with active codes get surfaced.
+    # Promoted recurring errors (E0xxx codes seen 3+ times this run).
+    # Passes fr_path so past notes tagged with active codes get surfaced.
     recurring_block = tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))
     # Repository Specifications: FR + genesis + API, relevance-selected and
     # budget-capped — every code-producing prompt carries the crate's specs.
@@ -186,17 +186,17 @@ def build_per_fn_fix_prompt(
 ) -> str:
     """Re-prompt for a fn whose previous fill broke `cargo check`.
 
-    When `allow_sig_change` is True (P3.1, fired by the per-fn loop after
+    When `allow_sig_change` is True (fired by the per-fn loop after
     attempt 5), the prompt invites the model to optionally return a
     <SIGNATURE>...</SIGNATURE> block proposing a new sig (e.g. adding a
     `T: 'static` bound). The loop applies it only when the fn is non-pub.
 
-    P2: `attempt_history` is a list of dicts (oldest first), each of:
+    `attempt_history` is a list of dicts (oldest first), each of:
         {"attempt": int, "body": str, "error_sig": str, "outcome": str}
     Rendered as a <PRIOR_ATTEMPTS> block so the model sees what it has
     already tried (and what failed) rather than re-deriving from scratch.
 
-    `sections` (P7): every injected section as a frozen no-default record.
+    `sections`: every injected section as a frozen no-default record.
     """
     macros_section = sections.macros
     notes_section = sections.notes
@@ -227,7 +227,7 @@ def build_per_fn_fix_prompt(
                "the library's own tests/examples). Match how the API is called "
                "here:\n```rust\n", suffix="\n```")
     macros_block = tag_block("MACROS", macros_section)
-    # P3.2: full detail block for gotchas matching the current error.
+    # Full detail block for gotchas matching the current error.
     gotchas_block = tag_block(
         "RUST_GOTCHAS_DETAIL", language_driver().gotchas_for_error(error_excerpt))
     container_line = f"In: {container}\n" if container else ""
@@ -276,7 +276,7 @@ def build_per_fn_fix_prompt(
         prefix="The crate's own specification documents (functional "
                "requirements, build rules, API ground truth). When your plan "
                "conflicts with them, follow the spec.\n")
-    # P2: prior-attempts block. Show up to the last 3 distinct attempts
+    # Prior-attempts block. Show up to the last 3 distinct attempts
     # with their compact error signature, so the model can see the search
     # space it has already explored. Budget capped to keep prompt lean.
     prior_block = ""

@@ -1,4 +1,4 @@
-"""build_arg_parser (P5): the CLI surface extracted from main()."""
+"""build_arg_parser: the CLI surface extracted from main()."""
 from __future__ import annotations
 
 import argparse

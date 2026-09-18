@@ -401,7 +401,7 @@ def test_all_target_not_stub_refusals_count_as_complete(monkeypatch, tmp_path):
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB_FILLED
 
 
-# --- P6: maximal last-resort attempt (budgets off) ---------------------------
+# --- Maximal last-resort attempt (budgets off) --------------------------------
 
 
 def test_maximal_last_resort_rescues_exhausted_block(monkeypatch, tmp_path):
@@ -509,7 +509,7 @@ def test_noncompiling_cap_does_not_fire_once_something_compiled(
     assert res.impls_filled == 1 and res.impls_failed == 0
 
 
-# --- P2: pull protocol through the impl fill path -----------------------------
+# --- Pull protocol through the impl fill path ---------------------------------
 
 
 def test_pull_request_answered_then_block_fills(monkeypatch, tmp_path):
@@ -537,7 +537,7 @@ def test_pulls_disabled_by_env(monkeypatch, tmp_path):
     assert res.impls_filled == 0 and res.impls_failed == 1
 
 
-# --- P5: file-first fill for multi-block files --------------------------------
+# --- File-first fill for multi-block files -------------------------------------
 
 IMPL_LIB_TWO = """\
 pub struct Foo { tag: u32 }
@@ -1694,7 +1694,7 @@ def test_impl_retry_flips_a_sibling_that_carries_the_rejected_expression(
     assert "follow the same structural pattern" not in sib2
 
 
-# --- THE PLAN step 1: the producer-bypass closure, route → prompt ------------
+# --- The producer-bypass closure, route → prompt ------------------------------
 
 BYPASS_LIB = """\
 pub struct W { x: u32 }

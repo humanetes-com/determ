@@ -85,7 +85,7 @@ STREAM_LOG   = os.getenv("LLM_STREAM_LOG", os.getenv("OLLAMA_STREAM_LOG", _pick_
 EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
     _DISCOVERED, "events_log", os.path.join(_LOG_DIR, "events.jsonl")))
 
-# P6 data-vs-render split: the events.jsonl readers live in the data module; this
+# Data-vs-render split: the events.jsonl readers live in the data module; this
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.domain import graceful_stop  # noqa: E402
@@ -188,7 +188,7 @@ _baked_cluster_order = _rd.baked_cluster_order
 _find_project_dir = _rd.find_project_dir
 _parse_pipeline_state = _rd.parse_pipeline_state
 _current_stage_label = _rd.current_stage_label
-_task_progression = _ed.task_progression       # debt#7: structured-event sources
+_task_progression = _ed.task_progression       # structured-event sources
 _pipeline_log_facts = _ed.pipeline_log_facts
 _vllm_runtime = _ed.vllm_runtime
 _vllm_budget_by_thread = _ed.vllm_budget_by_thread
@@ -273,7 +273,7 @@ def gpu():
 
 
 def _docs_richness_row() -> str:
-    """One-line latest doc-richness vs convergence (R13.3 docs.richness event).
+    """One-line latest doc-richness vs convergence (docs.richness event).
 
     Returns "" when this run has emitted no docs.richness yet.
     """
@@ -458,7 +458,7 @@ def _flow_audit_rows(data: dict[str, Any]) -> list[str]:
 
 
 def pipeline_status(width: int):
-    prog  = _pipeline_log_facts()       # debt#7: task0c progress from structured events
+    prog  = _pipeline_log_facts()       # task0c progress, read from structured events
     prog.update(_log_tail_meta())       # + raw-log presentation (last_line, age)
     state = _parse_pipeline_state(_find_project_dir())
     running   = _pipeline_running()
@@ -468,7 +468,7 @@ def pipeline_status(width: int):
     if not os.path.exists(PIPELINE_LOG):
         return [f"{status_str}   {red('log not found')}"]
 
-    # Coverage: the structured coverage.measured event is authoritative (R8.4);
+    # Coverage: the structured coverage.measured event is authoritative;
     # the pipeline_state.md / log-text scrapes remain only for legacy logs.
     cov = _coverage_from_events() or state["coverage"] or "?"
     try:    cov_col = green if float(cov.rstrip("%")) >= 80 else yellow
@@ -517,10 +517,10 @@ def pipeline_status(width: int):
     # (The old log-parsed "phases" line was removed — the state-driven
     # the phase strip above is the single, granular phase display. tp is still
     # parsed below for the fix-phase detection further down.)
-    # debt#7: task progression is now derived purely from structured events.
+    # Task progression is now derived purely from structured events.
     tp = _task_progression()
 
-    # ── P3.11: Phase C per-fn panel (visible when the skeleton backend
+    # ── Phase C per-fn panel (visible when the skeleton backend
     # is running). Pulls structured data from logs/events.jsonl.
     # Bound before the try: the loop-hierarchy rows below read it too, and a
     # panel error must not turn into a NameError that blanks the whole screen.

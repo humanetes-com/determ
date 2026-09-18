@@ -1,4 +1,4 @@
-"""Role-based ports for the phase-C fill engine use-cases (P2 / R3.3).
+"""Role-based ports for the phase-C fill engine use-cases.
 
 These are the DIP seams `application.reconstruct.fill_one_fn` and
 `application.reconstruct.phase_c_engine` depend on. Each Protocol is a narrow
@@ -11,7 +11,7 @@ Pure helpers the engine also uses (splice math, fill rules, cargo-error
 parsing, the fix-loop driver, prompt builders) are NOT ports — they live in
 inner layers (`domain`, `application.reconstruct.*`, `prompts`) the use-cases
 import directly. Only I/O, the LLM call, the extractor, the retro store, and
-`pipeline.py`-resident (P4-slated) helpers cross a port.
+`pipeline.py`-resident (still to be relocated) helpers cross a port.
 """
 from __future__ import annotations
 

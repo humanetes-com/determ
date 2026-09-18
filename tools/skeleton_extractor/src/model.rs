@@ -1,7 +1,7 @@
-//! Serde record types — the JSON seam to the Python side (CODE_ARCHITECTURE.md §4).
+//! Serde record types — the JSON seam to the Python side.
 //!
 //! These `serde::Serialize` structs are the wire contract enumerated by the CLI subcommands
-//! and parsed by `pipeline_core.domain.models`. Moved verbatim from `lib.rs` (slice 7); the
+//! and parsed by `pipeline_core.domain.models`. Moved verbatim from `lib.rs`; the
 //! serialized shape is unchanged — field names and order are the contract.
 
 /// Result of skeletonising a single file.

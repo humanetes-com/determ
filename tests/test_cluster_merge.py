@@ -1,4 +1,4 @@
-"""Unit tests for `pipeline_core.adapters.cluster_merge.ClusterMerger` (P6).
+"""Unit tests for `pipeline_core.adapters.cluster_merge.ClusterMerger`.
 
 Covers the offline branches (no extractor I/O): no cluster outputs → zero result,
 and the verbatim-copy fallback when the extractor binary is absent.

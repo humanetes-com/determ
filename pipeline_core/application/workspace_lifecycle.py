@@ -1,7 +1,7 @@
-"""Module-start workspace lifecycle (slice 9): save siblings → (maybe) wipe → stub.
+"""Module-start workspace lifecycle: save siblings → (maybe) wipe → stub.
 
-Codifies THE invariant that broke in session 59 (the wipe-vs-resume bug,
-commit 9e182bb): a startup wipe of regenerated sources is allowed ⟺ the
+Codifies THE invariant that broke as the wipe-vs-resume bug (commit 9e182bb):
+a startup wipe of regenerated sources is allowed ⟺ the
 phase that REGENERATES the wiped artefact will rerun. Wiping while the
 regenerating phase's done-marker stands leaves later phases running against
 a stub tree (the t2c→t3 fall-through). :func:`may_wipe_regenerated` is that
@@ -121,7 +121,7 @@ def wipe_module_sources(
 
 
 # --- Best-tree ratchet (2026-06-11, no-wipe repair iterations) ---------------
-# Iterations repair the kept tree instead of wiping (R13/RepoSpec). The
+# Iterations repair the kept tree instead of wiping. The
 # ratchet bounds cross-iteration damage: snapshot the source tree whenever
 # the t3 pass count sets a new best; if an iteration ends BELOW the best
 # (regressed fix, broken build → pass count 0), restore the best tree before

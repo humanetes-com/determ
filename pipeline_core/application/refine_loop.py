@@ -5,8 +5,8 @@ augmentation, per-fn fill, the TDD driver, post-merge fill, the compile-fix
 loop), so they share one termination policy AND so meta-awareness
 (`LoopState.context()`) is delivered to every loop uniformly.
 
-This is a thin facade over :func:`pipeline_core.application.fix_loop.run_fix_loop`
-(P3 unification): the loop policy lives once in the engine; here we adapt a
+This is a thin facade over :func:`pipeline_core.application.fix_loop.run_fix_loop`:
+the loop policy lives once in the engine; here we adapt a
 :class:`pipeline_core.ports.RefineStrategy` to it. `LoopState` is the gauge AND
 the result — the driver reads its `stalls`/`repeated` for the exit decision and
 the strategy's `attempt` records into it.
@@ -83,7 +83,7 @@ def run_callback_loop(
     on_iter: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[bool, str, list[dict[str, Any]]]:
     """Canonical fix-loop over the callback convention — the relocated
-    `_improvement_loop` (P3.3). Adapts the run_check/do_fix/do_retro callbacks
+    `_improvement_loop`. Adapts the run_check/do_fix/do_retro callbacks
     onto :func:`run_refine_loop` so outer measure loops share one termination
     policy with task0c augmentation.
 

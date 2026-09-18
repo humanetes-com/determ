@@ -1,4 +1,4 @@
-"""P3 blueprint: parse, slice_for ranking, topic validation, ensure phase."""
+"""Blueprint: parse, slice_for ranking, topic validation, ensure phase."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,5 +1,5 @@
 """FnFixUnit / ImplFixUnit drive their inner cargo-check loop over ISP role
-ports (P3.C). Fakes script the probe + model; we assert verdict, prompt wiring,
+ports. Fakes script the probe + model; we assert verdict, prompt wiring,
 splice accumulation, and the loop exit."""
 from __future__ import annotations
 

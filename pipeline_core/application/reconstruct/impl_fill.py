@@ -4129,8 +4129,14 @@ def prepare_impl_fill(
                 # metric describes a discarded splice) and a measured
                 # coverage-unreached block all withhold the retry: none of
                 # them is evidence a re-prompt of THIS block buys anything,
-                # and the last two are attempt-invariant.
-                _retry_informed = (not full_exhaust and not _downstream
+                # and the last two are attempt-invariant. A round that did
+                # not improve does not either, even when the splice, coverage
+                # or hollow-sibling arm above vetoed its conviction: those
+                # arms decide what is stored, not whether the floor moved
+                # (the per-fn arm re-entered six unimproved rounds on run
+                # `2657150-3139f958` that way).
+                _retry_informed = (improved and not full_exhaust
+                                   and not _downstream
                                    and not _regr_reverted
                                    and not _cov_unreached_block)
                 _floor_note = (f"best {prior_best} -> {new_best} on the "

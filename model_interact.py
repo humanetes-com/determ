@@ -9,8 +9,8 @@ Backend is selected via the BACKEND environment variable (or .env file):
 
 This pipeline is self-hosted only (Hard Rule 7): no external/cloud LLM backend.
 
-The transports themselves live in `pipeline_core.adapters.llm_transports` (P6 /
-debt #10); this module is the composition root (build backend + controller, run
+The transports themselves live in `pipeline_core.adapters.llm_transports`,
+relocated out of pipeline.py; this module is the composition root (build backend + controller, run
 `ask`) and the CLI. It re-exports the transport-layer names that external callers
 and tests already import from `model_interact`.
 

@@ -1,4 +1,4 @@
-"""Cluster-pruning adapter (P6 relocation).
+"""Cluster-pruning adapter, relocated out of pipeline.py.
 
 Gathers the workspace facts the pure pruner needs — Cargo.toml ``[features].default``
 and per-predicate ``#[cfg]`` gated-item counts across ``src/`` — then delegates the

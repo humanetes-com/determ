@@ -1,4 +1,4 @@
-"""Container-qualified refill stamp — plan 2026-08-29 T1b/T2 plus the
+"""Container-qualified refill stamp plus the
 homonym filter the independent walk named as the missing closer.
 
 The frontier key is ``(file, fn_name)``. Four ``from`` impls therefore
@@ -188,7 +188,7 @@ def test_container_line_window_covers_header_through_close() -> None:
 
 
 def test_stamp_reads_exact_site_without_scoring() -> None:
-    """Live S1 path: Debug site has the assert, From site does not — no
+    """Live path: Debug site has the assert, From site does not — no
     sources channel required. of_dispatch still stamps nobody."""
     from pipeline_core.domain.models import FnSite
     debug_site = FnSite("src/error.rs", "fmt", DEBUG_C)

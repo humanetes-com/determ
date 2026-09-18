@@ -1,4 +1,4 @@
-"""Monitor data layer — the I/O-and-parse half of the TUI (P6 data-vs-render split).
+"""Monitor data layer — the I/O-and-parse half of the TUI (data-vs-render split).
 
 `monitor.py` stays the thin TUI renderer (ANSI/curses + the live loop); the functions
 that READ the run's `events.jsonl` and roll it up into plain data structures live here,

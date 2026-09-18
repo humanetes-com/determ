@@ -1,4 +1,4 @@
-"""Test-command discovery — pure domain (P6 engine-relocation series).
+"""Test-command discovery — pure domain.
 
 The vocabulary and parsing rules for turning a model's free-text answer into the
 single shell command that runs a project's test suite. No I/O, no LLM, no logging
@@ -6,7 +6,7 @@ single shell command that runs a project's test suite. No I/O, no LLM, no loggin
 normalize it. The orchestration (collecting project files, asking the model,
 retrying, logging) lives in the use-case layer.
 
-R7 win: the old ``re.finditer(r'`([^`]+)`', …)`` backtick scan is replaced by a
+The old ``re.finditer(r'`([^`]+)`', …)`` backtick scan is replaced by a
 structured character scan (:func:`backtick_spans`) with byte-equivalent semantics
 — a backtick-delimited run of one-or-more non-backtick chars, non-overlapping.
 """

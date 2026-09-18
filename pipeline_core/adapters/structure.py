@@ -1,4 +1,4 @@
-"""CliStructureReader (P1) — the real StructureReader over the Extractor seam.
+"""CliStructureReader — the real StructureReader over the Extractor seam.
 
 Holds the `.to_dict()`-wrapping that used to live in pipeline.py's `_enumerate_*_via_extractor`
 shims (anti-pattern A: logic in the god-file behind a monkeypatch seam). The composition root
@@ -178,7 +178,7 @@ class CliStructureReader:
 
     def enumerate_fns(self, src_dir: Path) -> list[dict[str, Any]] | None:
         """Fn records as wire dicts (the per-fn/per-impl engine contract); None if the
-        extractor binary is unavailable. The seam returns typed FnRecords (slice 6); we
+        extractor binary is unavailable. The seam returns typed FnRecords; we
         serialise back via ``to_dict`` so the engine stays byte-identical. Each dict:
         file, fn_name, sig_text, body_text, sig_byte_start, body_byte_start,
         body_byte_end, cfg_predicates (list[str]), is_pub (bool), container
@@ -215,7 +215,7 @@ class CliStructureReader:
         return self.extractor.enumerate_doc_items(src_dir)
 
     def parse_ok(self, path: Path) -> bool:
-        """Syn parse-check one file via the extractor (`--parse-check`). The F1
+        """Syn parse-check one file via the extractor (`--parse-check`). The
         splice gate's validator — fail-open (see Extractor.parse_check)."""
         return self.extractor.parse_check(path)
 

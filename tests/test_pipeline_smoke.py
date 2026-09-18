@@ -134,7 +134,7 @@ def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
 
 
 def test_extract_self_note_shim(monkeypatch) -> None:
-    """Slice-12: the _extract_self_note shim runs the ask ladder + parse_self_note."""
+    """The _extract_self_note shim runs the ask ladder + parse_self_note."""
     import pipeline
 
     note = "this is a sufficiently long self-correction note about lifetimes"
@@ -421,7 +421,7 @@ pub fn bar(x: u32) -> u32 {
 
 
 def test_prune_redundant_clusters() -> None:
-    """Plan 4 + cluster pruning: drop clusters that duplicate defaults or
+    """Cluster pruning: drop clusters that duplicate defaults or
     gate too few items."""
     import tempfile
     from pathlib import Path
@@ -477,7 +477,7 @@ def test_prune_redundant_clusters() -> None:
 
 
 def test_filter_tests_for_cluster() -> None:
-    """Plan 4: top-level #![cfg(...)] filter on test files."""
+    """Top-level #![cfg(...)] filter on test files."""
 
     import pipeline
 
@@ -506,7 +506,7 @@ def test_filter_tests_for_cluster() -> None:
 
 
 def test_eval_cfg_pred() -> None:
-    """Plan 4: cfg predicate evaluator handles all/any/not."""
+    """Cfg predicate evaluator handles all/any/not."""
     from pipeline_core.domain.cfg import CfgSet
     true_set = {'feature="std"', 'nightly'}
     false_set = {'feature="alloc"'}
@@ -521,7 +521,7 @@ def test_eval_cfg_pred() -> None:
     assert e('not(feature = "alloc")', true_set, false_set) is True
     assert e('something_unknown', true_set, false_set) is None
     assert e('all(nightly, something_unknown)', true_set, false_set) is None
-    # R7.4b: syn renders operators with a space — `all (…)`, `not (…)`.
+    # syn renders operators with a space — `all (…)`, `not (…)`.
     # These were silently undecidable (None) → wrong cluster membership.
     assert e('not (nightly)', true_set, false_set) is False
     assert e('all (nightly, feature = "std")', true_set, false_set) is True
@@ -531,7 +531,7 @@ def test_eval_cfg_pred() -> None:
 
 
 def test_strip_doc_attrs() -> None:
-    """FR-024 fix 1: doc attributes pollute prompt context."""
+    """Doc attributes pollute prompt context."""
     from pipeline_core.domain.doc_render import strip_doc_attrs
     text = (
         '# [doc = " /// Single-line doc"]\n'
@@ -550,7 +550,7 @@ def test_strip_doc_attrs() -> None:
 
 
 def test_condense_doc_attrs() -> None:
-    """FR-026: doc attrs condense to a one-line intent, not deleted, not dumped.
+    """Doc attrs condense to a one-line intent, not deleted, not dumped.
     Brackets inside doc content (markdown links/badges) must not desync."""
     from pipeline_core.domain.doc_render import condense_doc_attrs
     text = (
@@ -577,7 +577,7 @@ def test_condense_doc_attrs() -> None:
 
 
 def test_cluster_gate_predicate_is_satisfiable() -> None:
-    """FR-032: a cluster activated by `--cfg N` must get a gate that's true
+    """A cluster activated by `--cfg N` must get a gate that's true
     under that cfg. The old `all(N, feature="N", …)` was unsatisfiable (feature
     off) → divergent items vanished from the merge → E0046."""
     from pipeline_core.domain.cfg import cluster_gate_predicate
@@ -595,7 +595,7 @@ def test_cluster_gate_predicate_is_satisfiable() -> None:
 
 
 def test_run_scoped_tests() -> None:
-    """Plan 10 U1: reusable scoped-test check classifies pass/fail/timeout and
+    """Reusable scoped-test check classifies pass/fail/timeout and
     returns failure detail for prompt feedback."""
     from pipeline_core.application.reconstruct.cargo_runner import run_scoped_tests
     _P = __import__("pathlib").Path(".")
@@ -618,7 +618,7 @@ def test_run_scoped_tests() -> None:
 
 
 def test_generate_in_parallel() -> None:
-    """Plan 8: split-and-merge fans out one concurrent ask() per subset prompt,
+    """Split-and-merge fans out one concurrent ask() per subset prompt,
     returns responses index-aligned, and survives a failing request."""
     import threading
 
@@ -654,7 +654,7 @@ def test_generate_in_parallel() -> None:
 
 
 def test_partition_uncovered_lines() -> None:
-    """Plan 8: uncovered lines partition into <=N buckets, keeping each
+    """Uncovered lines partition into <=N buckets, keeping each
     function's lines together and balancing across buckets."""
     src = (
         "pub fn a() -> i32 {\n"      # line 1
@@ -684,7 +684,7 @@ def test_partition_uncovered_lines() -> None:
 
 
 def test_collect_sibling_filled_bodies() -> None:
-    """FR-024 fix 3: sibling impl with same fn name surfaces as reference."""
+    """Sibling impl with same fn name surfaces as reference."""
     import pipeline
     text = (
         "impl Foo {\n"
@@ -708,7 +708,7 @@ def test_collect_sibling_filled_bodies() -> None:
 
 
 def test_count_test_fns_cfg_aware() -> None:
-    """FR-024: cfg-aware test counter must skip #[test] fns gated by a
+    """The cfg-aware test counter must skip #[test] fns gated by a
     #[cfg(...)] whose predicate is in the cluster's cfg_false set."""
     text = (
         "#[test]\nfn t_always() {}\n"
@@ -743,7 +743,7 @@ def test_count_test_fns_cfg_aware() -> None:
 
 
 def test_validate_task3_strict() -> None:
-    """FR-024 strict per-cluster acceptance criterion."""
+    """Strict per-cluster acceptance criterion."""
     import pipeline
     v = pipeline.validate_task3_output_strict
     # All accounted, no failures → pass.
@@ -765,7 +765,7 @@ def test_validate_task3_strict() -> None:
 
 
 def test_parse_test_counts() -> None:
-    """FR-024 metric parser: sum (passed, failed, ignored) across all
+    """Metric parser: sum (passed, failed, ignored) across all
     `test result:` lines in cargo test output."""
     import pipeline
     sample = (
@@ -792,7 +792,7 @@ def test_parse_test_counts() -> None:
 
 
 def test_build_test_reverse_map() -> None:
-    """FR-024 reverse map: each #[test] fn maps to fns it could reach."""
+    """Reverse map: each #[test] fn maps to fns it could reach."""
     import tempfile
 
     import pipeline
@@ -927,7 +927,7 @@ def test_ast_cluster_merge_preserves_trait_structure() -> None:
 
 
 def test_strip_preserves_gen_tests_verbatim() -> None:
-    """FR-023: strip must preserve `*.gen_tests_N.rs` siblings byte-for-byte.
+    """Strip must preserve `*.gen_tests_N.rs` siblings byte-for-byte.
 
     These files are task0c output — pure test code with imports and helper
     types. Running `extract_rust_tests` on them drops the imports and
@@ -1075,7 +1075,7 @@ def test_file_cfg_predicate_adjacent_mod_decls() -> None:
 
 
 def test_buildcluster_features_toolchain() -> None:
-    """Plan 4: BuildCluster derives features and toolchain from cfg lists."""
+    """BuildCluster derives features and toolchain from cfg lists."""
     import pipeline
 
     c = pipeline.BuildCluster(
@@ -1100,7 +1100,7 @@ def test_buildcluster_features_toolchain() -> None:
 
 
 def test_format_skeleton_index_elides_macros() -> None:
-    """P3.11: macro_rules! bodies must be elided from the skeleton index."""
+    """macro_rules! bodies must be elided from the skeleton index."""
     import pipeline
 
     files = [(
@@ -1132,7 +1132,7 @@ pub fn helper() { ::core::unimplemented!() }
 
 
 def test_split_oversized_groups() -> None:
-    """P3.6: groups with >max_size test files get split into chunks."""
+    """Groups with >max_size test files get split into chunks."""
     import pipeline
 
     groups = [
@@ -1198,7 +1198,7 @@ def test_retrospective_prompt_includes_failed_attempts() -> None:
     """When unproductive_blocks is non-empty, the retrospective prompt must
     surface them as concrete evidence so the LLM can revise a TESTABLE call.
     We don't actually call the LLM — we inject a fake `ask` via deps and inspect
-    the prompt string the retrospective would have sent. (P3.3: the helper now
+    the prompt string the retrospective would have sent. (The helper now
     lives in task0c.py; ask is injected, no longer the patchable pipeline global.)"""
     from types import SimpleNamespace
 
@@ -1521,7 +1521,7 @@ def test_api_surface_capture() -> None:
 def test_module_augment_state() -> None:
     """Cover every transition in the augmentation state machine."""
     # ModuleAugmentState lives in the domain; pipeline.py no longer re-exports it
-    # since the cluster-augment loop moved to application.cluster_augment (R2.2).
+    # since the cluster-augment loop moved to application.cluster_augment.
     from pipeline_core.domain.models import ModuleAugmentState
 
     # 1. Done — coverage hits 100.
@@ -1741,7 +1741,7 @@ def test_event_log() -> None:
 
 
 def test_monitor_coverage_from_events() -> None:
-    """R8.4: the header coverage figure comes from the structured
+    """The header coverage figure comes from the structured
     coverage.measured event (latest wins, legacy one-decimal shape);
     no event / no pct → "" so the legacy text scrapes take over."""
     import json
@@ -1780,7 +1780,7 @@ def test_monitor_coverage_from_events() -> None:
 
 
 def test_genesis_rules_count() -> None:
-    """R13.3: genesis_rules_count totals rules for a scope (module + '*'),
+    """genesis_rules_count totals rules for a scope (module + '*'),
     independent of genesis_rules_read's LIMIT 20 render cap."""
     import tempfile
     from pathlib import Path
@@ -1802,7 +1802,7 @@ def test_genesis_rules_count() -> None:
 
 
 def test_monitor_docs_richness_row() -> None:
-    """R13.3: the docs-richness row renders the latest docs.richness event
+    """The docs-richness row renders the latest docs.richness event
     (fr/notes/rules + pass delta); no event → "" (row hidden)."""
     import json
     import tempfile
@@ -2108,7 +2108,7 @@ def test_strip_ansi_and_diag_frontier() -> None:
     plain = _strip_ansi(ansi)
     assert "\x1b[" not in plain and "error[E0201]" in plain, plain
     # The text-fallback parser (parse_rustc_compile_errors, migrated from the old
-    # `_COMPILE_ERROR_RE` per R7) needs the `error` keyword at line start, so it
+    # `_COMPILE_ERROR_RE`) needs the `error` keyword at line start, so it
     # matches only the de-ANSI'd text — proving why the rendered-text path
     # silently failed; the structured cargo-JSON frontier below is the ANSI-immune
     # primary path.
@@ -2117,7 +2117,7 @@ def test_strip_ansi_and_diag_frontier() -> None:
     # Structured-diag frontier never touches rendered text; empty/garbage in →
     # empty out (no crash), and it ignores ANSI entirely.
     assert pipeline._APP.frontier_from_diags([], pipeline.Path(".")) == {}
-    # slice 6: diagnostics are typed Diagnostic records now (empty file → skipped → {}).
+    # Diagnostics are typed Diagnostic records now (empty file → skipped → {}).
     assert pipeline._APP.frontier_from_diags(
         [pipeline.Diagnostic(file="", line=0)], pipeline.Path(".")) == {}
     print("  OK  _strip_ansi + frontier_from_diags (ANSI-immune inner check)")
@@ -2155,7 +2155,7 @@ def test_sig_tighten_guard_and_where_parse() -> None:
 
 
 def test_domain_enums_and_model_caps() -> None:
-    """pipeline_core domain: StrEnum coerce + pure model-caps math (strangler slice 1)."""
+    """pipeline_core domain: StrEnum coerce + pure model-caps math."""
     from pipeline_core.domain.enums import (
         Backend,
         CoverageBackend,
@@ -2197,11 +2197,11 @@ def test_domain_enums_and_model_caps() -> None:
     assert model_context_chars("qwen3", Backend.OLLAMA, 6000) == 4_000 * 4  # floor
     assert model_context_chars("x", Backend.OLLAMA, None) == (8_192 - 6_000) * 4
 
-    # Slice 2: module-level knobs are wired to the enum types, not bare strings.
+    # Module-level knobs are wired to the enum types, not bare strings.
     import pipeline
     assert isinstance(pipeline.COVERAGE_BACKEND, CoverageBackend)
 
-    # Slice 3: one typed Settings singleton is the source of truth for these knobs.
+    # One typed Settings singleton is the source of truth for these knobs.
     from pipeline_core.settings import Settings
     assert isinstance(pipeline.SETTINGS, Settings)
     assert pipeline.COVERAGE_BACKEND is pipeline.SETTINGS.coverage_backend
@@ -2234,7 +2234,7 @@ def test_domain_enums_and_model_caps() -> None:
 
 
 def test_adapters_satisfy_ports() -> None:
-    """Slice 4a: LLM / Extractor / Cargo adapters structurally satisfy their ports,
+    """LLM / Extractor / Cargo adapters structurally satisfy their ports,
     and the composition root builds them on `pipeline.ADAPTERS`."""
     from pathlib import Path
 
@@ -2266,7 +2266,7 @@ def test_adapters_satisfy_ports() -> None:
 
 
 def test_coverage_workspace_adapters() -> None:
-    """Slice 4b: relocated coverage parse paths + GitWorkspace behave identically,
+    """Relocated coverage parse paths + GitWorkspace behave identically,
     and pipeline's shims delegate to the adapters. No cargo needed — exercises the
     transcription-risk pure logic (lcov parse, grcov-json parse, git read/write/commit)."""
     import json as _json
@@ -2333,7 +2333,7 @@ def test_coverage_workspace_adapters() -> None:
 
 
 def test_slice5a_shims_delegate_to_adapters() -> None:
-    """Slice 5a: pipeline's extractor + cargo shims delegate to ADAPTERS (no duplicated
+    """pipeline's extractor + cargo shims delegate to ADAPTERS (no duplicated
     subprocess logic), and _run_cargo preserves the legacy (rc, text) contract."""
     import types
     from pathlib import Path
@@ -2351,7 +2351,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     )
 
     class _FakeExtractor:
-        # slice 6: the adapter contract returns typed records, not dicts.
+        # The adapter contract returns typed records, not dicts.
         def enumerate_fns(self, d, **k): calls.append(("fns", d)); return [FnRecord(fn_name="x")]
         def enumerate_types(self, d, **k): calls.append(("types", d)); return [TypeRecord(name="T")]
         def enumerate_dispatch_families(self, d, **k): calls.append(("disp", d)); return []
@@ -2374,7 +2374,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     orig = pipeline.ADAPTERS
     orig_app = pipeline._APP
     pipeline.ADAPTERS = types.SimpleNamespace(extractor=_FakeExtractor(), cargo=_FakeCargo())  # type: ignore[assignment]
-    # P3-S2: the fns/types/mods/dispatch shims delegate through the App's
+    # The fns/types/mods/dispatch shims delegate through the App's
     # structure provider (port boundary) — swap it wholesale, as tests do via
     # tests.harness.install_fake_extractor. feature-gate-cfgs + skeletonise +
     # cargo still go straight to ADAPTERS.
@@ -2410,7 +2410,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
 
 
 def test_slice5b_task0_docs() -> None:
-    """Slice 5b: extracted task0 profile/context doc tasks generate + write via fakes,
+    """Extracted task0 profile/context doc tasks generate + write via fakes,
     and the fence-fallback path uses strip_markdown_fences (no regex in the clean layer)."""
     from pathlib import Path
 
@@ -2444,7 +2444,7 @@ def test_slice5b_task0_docs() -> None:
 
 
 def test_slice5b_task0b_discovery() -> None:
-    """Slice 5b: extracted TASK 0b builds the strategy doc, dedups lines, writes via fakes;
+    """Extracted TASK 0b builds the strategy doc, dedups lines, writes via fakes;
     the fence fallback uses strip_markdown_fences (no regex in the clean layer)."""
     import tempfile
     from pathlib import Path
@@ -2472,7 +2472,7 @@ def test_slice5b_task0b_discovery() -> None:
 
 
 def test_slice5b_task1() -> None:
-    """Slice 5b: extracted TASK 1 dispatches to the synthesizer, and the proc-macro path
+    """Extracted TASK 1 dispatches to the synthesizer, and the proc-macro path
     builds requirements via fakes (Rust-source regex stays injected from pipeline)."""
     from pathlib import Path
     from types import SimpleNamespace
@@ -2510,7 +2510,7 @@ def test_slice5b_task1() -> None:
 
 
 def test_slice5b_task0c() -> None:
-    """Slice 5b: extracted task0c engine — verbatim body behind a rebind-prelude. Exercise the
+    """Extracted task0c engine — verbatim body behind a rebind-prelude. Exercise the
     early-skip path (augmentor not applicable) with all-stub deps; confirm pipeline builds the
     real App.task0c_deps (which validates all injected names resolve)."""
     from pathlib import Path
@@ -2548,9 +2548,9 @@ def test_augment_engine_callback_accepts_engine_call_shape() -> None:
 
 
 def test_slice6_models() -> None:
-    """Slice 6: domain dataclasses for the Rust↔Python extractor seam. Verify tolerant
+    """Domain dataclasses for the Rust↔Python extractor seam. Verify tolerant
     from_dict (missing keys default, nested records parse, extra keys ignored) and that
-    to_dict round-trips the exact wire shape (the seam is sacred — CODE_ARCHITECTURE.md §4)."""
+    to_dict round-trips the exact wire shape (the seam is sacred)."""
     from pipeline_core.domain.models import DispatchFamily, FieldRecord, FnRecord, MethodRecord, ModRecord, TypeRecord
 
     # FnRecord wire dict (every field as the Rust extractor emits it).
@@ -2599,7 +2599,7 @@ def test_slice6_models() -> None:
     assert fam.traits == ("AdhocKind", "TraitKind") and fam.method == "kind"
     assert fam.to_dict() == fam_wire
 
-    # Diagnostic — the cargo↔Python seam (slice 6, 2nd unit).
+    # Diagnostic — the cargo↔Python seam.
     from pipeline_core.domain.models import Diagnostic
     diag_wire = {"code": "E0277", "file": "src/error.rs", "line": 42,
                  "message": "the trait bound is not satisfied", "rendered": "error[E0277]..."}
@@ -2613,7 +2613,7 @@ def test_slice6_models() -> None:
 
 
 def test_slice6_models_seam_wiring() -> None:
-    """Slice 6: the Extractor adapter parses JSON into typed records; the pipeline.py fns
+    """The Extractor adapter parses JSON into typed records; the pipeline.py fns
     wrapper re-serialises to dicts via to_dict so the dict-based fill engine is unchanged."""
     from pathlib import Path
 
@@ -2633,7 +2633,7 @@ def test_slice6_models_seam_wiring() -> None:
 
 
 def test_stub_model() -> None:
-    """R3.2: Stub is the per-fn fill unit's input. from_dict is tolerant of BOTH
+    """Stub is the per-fn fill unit's input. from_dict is tolerant of BOTH
     a full FnRecord.to_dict() (extra keys ignored) and the hand-built 4-key
     fallback; from_record projects an FnRecord; key is the (file, fn_name)
     identity used for frontier/ordering."""
@@ -2657,7 +2657,7 @@ def test_stub_model() -> None:
     s2 = Stub.from_dict({"file": "a.rs", "fn_name": "f", "container": None, "sig_text": None})
     assert s2.container == "" and s2.sig_text == "" and s2.key == ("a.rs", "f")
 
-    # from_record projects the location/sig fields + the cfg chain (debt #17).
+    # from_record projects the location/sig fields + the cfg chain.
     assert Stub.from_record(fr) == s
     # tolerant: empty dict → all-default Stub, no crash.
     assert Stub.from_dict({}).key == ("", "")
@@ -2665,7 +2665,7 @@ def test_stub_model() -> None:
 
 
 def test_impl_block_model() -> None:
-    """R3.2: ImplBlock mirrors the _collect_impl_blocks dict. from_dict parses
+    """ImplBlock mirrors the _collect_impl_blocks dict. from_dict parses
     members/stub_members as FnRecords (typed threading); to_dict round-trips the
     exact wire shape; id = file::container (the per-block lock key)."""
     from pipeline_core.domain.models import FnRecord, ImplBlock
@@ -2701,7 +2701,7 @@ def test_impl_block_model() -> None:
 
 
 def test_slice5b_task2() -> None:
-    """Slice 5b: extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
+    """Extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
     (empty manifest) behave with fakes; generation engine stays injected from pipeline."""
     from pathlib import Path
     from types import SimpleNamespace
@@ -2728,7 +2728,7 @@ def test_slice5b_task2() -> None:
 
 
 def test_slice5b_task3_task4() -> None:
-    """Slice 5b: extracted TASK 3 (test runner) + TASK 4 (failure analysis) drive their
+    """Extracted TASK 3 (test runner) + TASK 4 (failure analysis) drive their
     branches correctly with injected fakes — no cargo, no LLM."""
     from contextlib import contextmanager
     from pathlib import Path
@@ -2794,7 +2794,7 @@ def test_slice5b_task3_task4() -> None:
 
 
 def test_slice5b_genesis_audit_task() -> None:
-    """Slice 5b: extracted genesis_audit use case behaves per-branch with injected deps,
+    """Extracted genesis_audit use case behaves per-branch with injected deps,
     and pipeline's shim + deps record are wired."""
     from pathlib import Path
 
@@ -2844,7 +2844,7 @@ def test_slice5b_genesis_audit_task() -> None:
     from pipeline_core.domain import text as txt
     assert pipeline._strip_markdown_fences is txt.strip_markdown_fences
     assert pipeline.extract_code_content is txt.extract_code_content
-    # trim_to_line: no longer used in pipeline.py (moved to group_fill in P4) → not re-exported;
+    # trim_to_line: no longer used in pipeline.py (moved to group_fill) → not re-exported;
     # it lives in domain.text and call sites import it there directly.
     assert _text_dom.smart_truncate is txt.smart_truncate
     assert txt.strip_markdown_fences("```rust\nlet x = 1;\n```") == "let x = 1;"
@@ -2886,7 +2886,7 @@ def test_slice5b_genesis_audit_task() -> None:
 
 
 def test_task0b_iter_source_rs_prunes_scratch_dirs() -> None:
-    """R9.3: the discovery file walk must yield real source only — never the
+    """The discovery file walk must yield real source only — never the
     pipeline scratch trees (.skeleton / .skeleton-filled, each with its own src/
     + nested target/ build output). Those phantom files exhausted the budget."""
     import tempfile
@@ -2914,7 +2914,7 @@ def test_task0b_iter_source_rs_prunes_scratch_dirs() -> None:
 
 
 def test_validate_task4_output_build_skips_identifier_check() -> None:
-    """R9.5: the identifier-overlap anti-corruption check is a TEST-failure
+    """The identifier-overlap anti-corruption check is a TEST-failure
     heuristic and must NOT apply to BUILD failures — the build prompt mandates
     general, identifier-free structural rules, so a correct build update shares
     no identifier with the (identifier-heavy) compiler output."""
@@ -2950,7 +2950,7 @@ def test_validate_task4_output_build_skips_identifier_check() -> None:
 
 
 def test_propagate_or_quarantine_orphan_sibling() -> None:
-    """R9.6: the origin manifest is authoritative. A sibling on disk but absent
+    """The origin manifest is authoritative. A sibling on disk but absent
     from a NON-empty manifest is an undeclared orphan → quarantined (.rs.broken),
     not propagated under a guessed gate. Empty manifest → legacy pass-through."""
     import tempfile
@@ -2989,7 +2989,7 @@ def test_propagate_or_quarantine_orphan_sibling() -> None:
 
 
 def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
-    """R9.6 atomicity: reverting to a snapshot that drops MULTIPLE decls (split/
+    """Atomicity: reverting to a snapshot that drops MULTIPLE decls (split/
     retry added extra siblings) must delete every sibling whose decl the restore
     removed — not just the one named sibling — so no orphan file is left behind."""
     import tempfile
@@ -3060,7 +3060,7 @@ if __name__ == "__main__":
 
 
 def test_tag_block_shapes():
-    # slice 8a: the one wrapper for optional prompt sections — pins the exact
+    # The one wrapper for optional prompt sections — pins the exact
     # legacy rendering (leading/trailing newlines, prefix/suffix placement).
     import pipeline as p
     assert p._tag_block("X", "") == ""
@@ -3099,7 +3099,7 @@ def test_per_impl_prompt_macros_and_siblings_sections():
 
 
 def test_fn_belongs_to_cluster_record_cfg_path(tmp_path):
-    # R7.4a: callers holding extractor records pass the record's
+    # Callers holding extractor records pass the record's
     # cfg_predicates — syn-accurate, per-record. The legacy regex
     # backward-window runs ONLY when no record data is given, and its
     # over-capture (preceding fn's cfg bleeding onto an ungated neighbour

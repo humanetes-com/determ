@@ -1,4 +1,4 @@
-"""Skeleton index for Phase-C prompts (P6 relocation).
+"""Skeleton index for Phase-C prompts, relocated out of pipeline.py.
 
 `format_skeleton_index` renders the on-disk skeleton as a signatures-only index
 (bodies — `unimplemented!()` / macro rules — elided to save input tokens, keeping
@@ -25,7 +25,7 @@ def format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
     + macro definitions for cross-reference. Used in Phase C prompts so we
     don't waste input tokens on body stubs the model already knows about.
 
-    P3.11: macro_rules! bodies are also elided. Phase A preserves macros
+    macro_rules! bodies are also elided. Phase A preserves macros
     verbatim on disk; the prompt's index just needs the macro NAMES so the
     model knows what's exported, not the multi-KB rule definitions.
     """

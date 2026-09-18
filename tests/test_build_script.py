@@ -1,4 +1,4 @@
-"""Pure parser for cargo build-script `output` files (#23)."""
+"""Pure parser for cargo build-script `output` files."""
 from __future__ import annotations
 
 from pipeline_core.domain.build_script import BuildScriptCfg, parse_build_script_output

@@ -1,6 +1,6 @@
-//! Cfg predicate logic — the `CfgSet` evaluator + cfg-attribute parsing (CODE_ARCHITECTURE.md §3).
+//! Cfg predicate logic — the `CfgSet` evaluator + cfg-attribute parsing.
 //!
-//! Moved verbatim from `lib.rs` (slice 7). Owns cluster cfg-set evaluation and the helpers that
+//! Moved verbatim from `lib.rs`. Owns cluster cfg-set evaluation and the helpers that
 //! pull predicate strings out of `#[cfg(...)]` attributes. No regex — syn token walks only.
 
 use quote::{ToTokens, quote};

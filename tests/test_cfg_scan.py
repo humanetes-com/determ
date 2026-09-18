@@ -1,4 +1,4 @@
-"""Cluster identification — `task0_cfg_scan` (debt #15 open half).
+"""Cluster identification — `task0_cfg_scan`.
 
 A custom `--cfg` toggle that gates ANY code must form its own compiler cluster: if it
 doesn't, the gated code is reconstructed/tested in NO cluster (a silent coverage hole +
@@ -25,7 +25,7 @@ def _names(clusters) -> list[str]:
 
 def test_lone_custom_cfg_forms_a_cluster(tmp_path: Path) -> None:
     """A single `#[cfg(extra_cap)]` line (no `not()` counterpart) must still create
-    the extra_cap-active cluster — the #15 hole that dropped the cap trap."""
+    the extra_cap-active cluster — the hole that dropped the cap trap."""
     clusters = _scan(tmp_path,
                      "#[cfg(extra_cap)]\npub fn big() -> usize { 999 }\n"
                      "pub fn small() -> usize { 1 }\n")

@@ -1,10 +1,10 @@
-"""StructureReader port (P1) — the syn-extractor structure reads the fill engine needs.
+"""StructureReader port — the syn-extractor structure reads the fill engine needs.
 
 A thin, dict-shaped view over the `Extractor` seam: `enumerate_fns` returns the wire
 dicts the per-fn / per-impl engine consumes (the `.to_dict()` wrapping that used to live in
 pipeline.py shims); the rest return their typed records. The composition root injects the
 real :class:`pipeline_core.adapters.structure.CliStructureReader`; tests inject a fake —
-NO monkeypatching of module globals (CODE_ARCHITECTURE.md §0, §4 P1).
+NO monkeypatching of module globals.
 """
 from __future__ import annotations
 

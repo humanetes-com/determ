@@ -1,10 +1,10 @@
 """Fix-loop compile diagnostics — small, reusable units extracted from the
-`generate_fix_loop` monolith (P3 slice 1).
+`generate_fix_loop` monolith.
 
-`error_sigs`/`errors_by_file` parse CARGO OUTPUT (legitimate regex, R7). `file_stats`
-reads source files for the per-file overview table; its fn-decl line scan is the
-structured `rust_idents.is_fn_decl_line` (P7 source-regex→tokeniser, byte-equivalent
-to the old `_FN_DECL_RE`).
+`error_sigs`/`errors_by_file` parse CARGO OUTPUT (legitimate regex). `file_stats`
+reads source files for the per-file overview
+table; its fn-decl line scan is the structured `rust_idents.is_fn_decl_line`
+(source-regex-to-tokeniser migration, byte-equivalent to the old `_FN_DECL_RE`).
 """
 from __future__ import annotations
 

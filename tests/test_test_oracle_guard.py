@@ -1,4 +1,4 @@
-"""Test-oracle immutability (FR-018 / Hard Rule 11 / debt #17b).
+"""Test-oracle immutability (Hard Rule 11).
 
 The fill/fix frontier must never target a `#[cfg(test)]`/`#[test]` fn — splicing a
 test body rewrites the oracle (the hardcrate `extra_cap_limit` 255→512 corruption).

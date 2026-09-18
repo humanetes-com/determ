@@ -1,4 +1,4 @@
-"""CallableCommitGate — the atomic commit-then-mark transition (P6).
+"""CallableCommitGate — the atomic commit-then-mark transition.
 
 Satisfies :class:`pipeline_core.ports.augment.CommitGate`. The actual
 commit-and-mark logic stays at the composition root (it binds the `_git_managed`

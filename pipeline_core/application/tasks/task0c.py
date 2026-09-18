@@ -1,4 +1,4 @@
-"""TASK 0c — per-module coverage augmentation engine (extracted, slice 5b).
+"""TASK 0c — per-module coverage augmentation engine (extracted verbatim).
 
 The 1316-line body is moved VERBATIM from pipeline.py; the only addition is a prelude that
 rebinds every collaborator as a local from the injected :class:`Task0cDeps`, so the body is
@@ -82,7 +82,7 @@ class Task0cDeps:
     block_is_prose: Any
     build_gen_tests_decl: Any
     cargo_env: Any
-    cluster_gate_for: Any        # #26: (cluster, source_text, uncov_lines) → sibling cfg gate
+    cluster_gate_for: Any        # (cluster, source_text, uncov_lines) → sibling cfg gate
     condense_rust_to_signatures: Any
     count_test_attrs: Any
     derive_gentest_prelude: Any
@@ -137,7 +137,7 @@ class Task0cDeps:
     subprocess: Any
     get_current_cluster: Any
     coverage_provider: Any
-    check_stop: Any   # graceful-stop hook for the fix loops (#14: was a fix_loop global)
+    check_stop: Any   # graceful-stop hook for the fix loops (was a fix_loop global)
     # Percent of the cluster's pinnable harvested behaviours the generated
     # tests must pin (float; 0 = the pin requirement and the behaviour rounds
     # are off, the public-API refusal still applies). Defaulted, last, so a
@@ -350,7 +350,7 @@ corrected content here
 
 
 def _looks_like_fn_decl(ln: str) -> bool:
-    """R7 (regex-free): does this line start a Rust fn declaration?
+    """Regex-free: does this line start a Rust fn declaration?
     Equivalent to the old re.match(r'\\s*(pub\\s+)?fn\\s+', ln) used to count
     uncovered functions: optional leading ws, optional `pub`, then `fn` followed
     by whitespace and at least a name token."""
@@ -1160,7 +1160,7 @@ def _run_harness_preflight(
     Two-stage check (lib, then full harness), an LLM repair fix-loop, and the
     targeted→full→git-restore strip escalation ladder. Returns an early-exit
     result tuple when augmentation must be skipped, or ``None`` to proceed.
-    Body moved VERBATIM from ``task0c_augment_module`` (W5 thinning, slice 1).
+    Body moved VERBATIM from ``task0c_augment_module``.
     """
     _log = ctx.log
     _emit = ctx.emit
@@ -1236,7 +1236,7 @@ def _run_harness_preflight(
 
     harness_ok, compile_err_out = augmentor.test_harness_compiles(project_dir, module_name)
     if not harness_ok:
-        # P1 FixLoop port: the LLM repair attempts run on the shared driver
+        # FixLoop port: the LLM repair attempts run on the shared driver
         # (the old hand-rolled `while True` never terminated when error
         # signatures kept CHANGING without resolving — floor-stall + the
         # backstop now bound it). The strip ladder runs once on exhaustion,
@@ -1466,7 +1466,7 @@ corrected content here
 @dataclass
 class Task0cFileHistory:
     """Per-file stall/retrospective history accumulated across augmentation
-    attempts (W5 slice 4). Mutated in place by the Phase C generator."""
+    attempts. Mutated in place by the Phase C generator."""
 
     file_stall_counts: dict[str, int] = field(default_factory=dict)
     file_best_uncov: dict[str, int] = field(default_factory=dict)
@@ -1531,7 +1531,7 @@ def _run_phase_c(
     """Generate/augment tests for the attempt's uncovered lines, commit each block
     through its compile-fix loop, and update per-file history. Returns the loop
     signal (continue / break[/at-ceiling] / early-return). Body moved VERBATIM from
-    ``task0c_augment_module`` (W5 thinning, slice 3); the three outer-loop exits
+    ``task0c_augment_module``; the three outer-loop exits
     become :class:`_PhaseCOutcome` returns.
 
     `fn_targets` are the functions the cluster compiles that no test executes
@@ -2172,7 +2172,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             _gate = _cluster_gate_for(
                 _current_cluster, existing_text, uncov_lines,
                 block, project_dir)
-            # P1 FixLoop port: verify→LLM-fix cycle on the shared driver.
+            # FixLoop port: verify→LLM-fix cycle on the shared driver.
             # The old hand-rolled loop terminated only on identical error
             # signatures — floor-stall + the backstop now also bound the
             # "signatures keep changing but never resolve" case.
@@ -2850,7 +2850,7 @@ def _diagnose_and_fix_regression(
     """A large coverage drop usually means a generated test now fails at runtime
     and corrupts grcov profraw data. Run the tests to confirm, and if they fail,
     repair them before generating more (which would only pile failures on top).
-    Extracted from the augmentation loop (W5 thinning, slice 2)."""
+    Extracted from the augmentation loop."""
     log(f"  [{module_name}] Coverage regression {delta_lines:+d} lines — running tests to detect runtime failures.")
     reg_result = subprocess.run(
         ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
@@ -2888,7 +2888,7 @@ def task0c_augment_module(
     Returns final coverage percentage. New writes go under `tests/`; leftover
     `*.gen_tests_*.rs` siblings from earlier runs stay readable.
     """
-    # slice 5b: rebind injected collaborators as locals so the body below is verbatim.
+    # Rebind injected collaborators as locals so the body below is verbatim.
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
     _COVERAGE_TARGET = deps.COVERAGE_TARGET
     _FIX_ERR_CAP = deps.FIX_ERR_CAP
@@ -3036,7 +3036,7 @@ def task0c_augment_module(
             except Exception:
                 pass
 
-    # P7.7: floor-stall semantics with the absolute cap raised so it's no
+    # Floor-stall semantics with the absolute cap raised so it's no
     # longer the binding constraint. `MAX_NO_IMPROVEMENT` below already
     # functions as the stall budget; we just surface both as env-configurable.
     max_attempts = int(os.getenv("TASK0C_HARD_CAP", "30"))
@@ -3085,7 +3085,7 @@ def task0c_augment_module(
     no_improvement_count = 0
     MAX_NO_IMPROVEMENT = int(os.getenv(
         "TASK0C_MAX_STALLS", "5"
-    ))  # P7.7: tightened — per-file retrospective fires first; this is the
+    ))  # Tightened — per-file retrospective fires first; this is the
     # global stall budget. Lower than the legacy 10 because the per-file
     # deep retrospective (RETRO_DEEP_AT_STALL=5) is the heavy lifter.
     # Per-file budget: up to 5 INFORMED attempts before skipping a file. Each
@@ -3105,7 +3105,7 @@ def task0c_augment_module(
     # targeted lines. Fed to the deep retrospective so the classifier can see
     # which strategies the LLM has already tried — and revise its TESTABLE
     # call to UNREACHABLE when evidence demands it.
-    # FIX (session 48): give the generation model META-AWARENESS that it is stalling (today it gets
+    # Give the generation model META-AWARENESS that it is stalling (today it gets
     # none — it re-tries blind), and FEED the consecutive give-up signal to the retrospective so
     # genuinely-unreachable lines are classified (and pragma'd) faster instead of burning the full
     # stall budget. Env-gated so a fresh run can be A/B'd against the current (pre-fix) run.
@@ -3198,7 +3198,7 @@ def task0c_augment_module(
             prev_covered = covered_lines
             continue  # skip Phase C (no new tests until runtime failures are resolved)
 
-        # P7.7: uniform loop.iter event on every attempt for monitor.py.
+        # Uniform loop.iter event on every attempt for monitor.py.
         _emit("loop.iter", data={
             "name": "task0c.augment",
             "module": module_name,
@@ -3489,7 +3489,7 @@ def select_relevant_siblings(
     if not all_siblings:
         return []
 
-    # P7: CamelCase type-name + `kw Name` definition scans → pure tokeniser
+    # CamelCase type-name + `kw Name` definition scans → pure tokeniser
     # (byte-equivalent), no regex on source.
     used_types: set[str] = camelcase_type_names(target_source)
 

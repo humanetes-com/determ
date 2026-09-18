@@ -1,9 +1,9 @@
 """Pure text helpers — LLM-output cleanup + prompt-budget truncation (pure domain).
 
-Relocated from pipeline.py (slice 5b foundation). No I/O, no pipeline deps — so tasks
+Relocated from pipeline.py. No I/O, no pipeline deps — so tasks
 import them instead of carrying them in a deps record. These operate on LLM response
 text / generic strings (fence stripping, think-block removal), not Rust source — source
-parsing stays on the syn extractor. Now fully regex-free (P7): deterministic char scans,
+parsing stays on the syn extractor. Now fully regex-free: deterministic char scans,
 each byte-equivalent to the pattern it replaced (pinned in tests/test_text_domain.py).
 """
 
@@ -209,7 +209,7 @@ def strip_think_blocks(text: str) -> str:
 
 
 def trim_to_line(text: str, cap: int, marker: str = "\n// ... (truncated)") -> str:
-    """Truncate text at the last newline before cap — never mid-line. FR-020."""
+    """Truncate text at the last newline before cap — never mid-line."""
     if len(text) <= cap:
         return text
     cut = text.rfind("\n", 0, cap)
@@ -344,7 +344,7 @@ def strip_surrounding_asterisks(s: str) -> str:
 
 
 def strip_list_marker(line: str) -> str:
-    """Strip a leading list/enumeration marker from `line` (regex-free, R7).
+    """Strip a leading list/enumeration marker from `line` (regex-free).
 
     Removes a leading run of `-`, `*`, or digits, an optional single `.`, `)`,
     or `:`, then any following whitespace — the shapes the LLM uses when it
@@ -367,7 +367,7 @@ def strip_list_marker(line: str) -> str:
 
 def tagged_path_block_spans(text: str, tag: str) -> list[tuple[int, int]]:
     """`(start, end)` spans of each `\\n<tag path="…">…</tag>` block, in order
-    (regex-free, R7; mirrors `\\n<tag path="[^"]*">.*?</tag>` with DOTALL —
+    (regex-free; mirrors `\\n<tag path="[^"]*">.*?</tag>` with DOTALL —
     non-greedy: each block ends at its nearest `</tag>`)."""
     open_lead = f'\n<{tag} path="'
     close = f"</{tag}>"
@@ -391,7 +391,7 @@ def tagged_path_block_spans(text: str, tag: str) -> list[tuple[int, int]]:
 def sibling_comment_block_spans(text: str) -> list[tuple[int, int]]:
     """`(start, end)` spans of each `\\n// --- <name> ---\\n<body>` block, where the
     body runs (non-slash) up to the next `\\n// ---` header or end-of-text
-    (regex-free, R7; mirrors `\\n// --- [^\\n]+ ---\\n[^/]*?(?=\\n// ---|$)`)."""
+    (regex-free; mirrors `\\n// --- [^\\n]+ ---\\n[^/]*?(?=\\n// ---|$)`)."""
     header = "\n// --- "
     spans: list[tuple[int, int]] = []
     i = 0
@@ -426,7 +426,7 @@ def sibling_comment_block_spans(text: str) -> list[tuple[int, int]]:
 
 def strip_trailing_file_tag(text: str) -> str:
     """Strip a trailing `</FILE>` tag (with surrounding whitespace) and `.strip()`
-    the result (regex-free, R7). Equivalent to `re.sub(r'\\s*</FILE>\\s*$', '', text)`
+    the result (regex-free). Equivalent to `re.sub(r'\\s*</FILE>\\s*$', '', text)`
     then `.strip()`: only the single trailing tag at end-of-text is removed."""
     tag = "</FILE>"
     stripped = text.rstrip()              # \s*$
@@ -437,7 +437,7 @@ def strip_trailing_file_tag(text: str) -> str:
 
 def extract_markdown_rules(text: str, min_len: int = 0) -> list[str]:
     """Bullet/numbered list items from a markdown block, longer than `min_len`
-    chars (regex-free, R7). Equivalent to
+    chars (regex-free). Equivalent to
     ``re.compile(r'^\\s*[-*•]\\s+(.+)$|^\\s*\\d+\\.\\s+(.+)$', re.M)`` then
     `.strip()` + length filter: a marker (`-`/`*`/`•`, or digits + `.`) followed
     by at least one space and a non-empty remainder, one rule per matching line."""

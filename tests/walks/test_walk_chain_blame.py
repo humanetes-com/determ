@@ -37,7 +37,7 @@ from tests.walks.harness import load_walk, replay
 pytestmark = pytest.mark.walk
 
 # The run's real inventory and its chronic shrink: 106 expected, 101
-# reporting on every intact sweep (debt 167's "capped at 101 by design").
+# reporting on every intact sweep ("capped at 101 by design").
 _INVENTORY = 106
 _CHRONIC = 5
 

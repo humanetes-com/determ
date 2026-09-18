@@ -1,6 +1,6 @@
 """Anti-corruption validators for TASK 1, 2, and 4 outputs.
 
-Extracted from pipeline.py (H/P6). All checks are deterministic — no LLM calls.
+Extracted from pipeline.py. All checks are deterministic — no LLM calls.
 Task2 validators receive impure deps (extractor calls) via `Task2CheckerDeps`.
 """
 from __future__ import annotations
@@ -179,7 +179,7 @@ def validate_task2_api_surface_conformance(
     extractor on both sides (see `pub_items_from_records`) — NOT a regex over
     the human-readable api_surface listing, which cannot tell a real
     top-level `pub` item from the same syntax inside a `///` doc-comment
-    usage example (debt #64)."""
+    usage example."""
     api_items = (deps.load_pub_items_manifest(project_dir, module_name)
                  if deps is not None else None)
     if api_items is None:

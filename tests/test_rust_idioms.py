@@ -1,4 +1,4 @@
-"""Byte-equivalence pins for `pipeline_core.domain.rust_idioms` (P7).
+"""Byte-equivalence pins for `pipeline_core.domain.rust_idioms`.
 
 Each detector replaced an `_IDIOM_*_RE` regex in pipeline.py; the tests compare
 against the exact original pattern (projected onto the groups the consumer used).

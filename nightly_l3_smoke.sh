@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R10.5 — unattended L3 real-model convergence smoke + verdict ledger.
+# Unattended L3 real-model convergence smoke + verdict ledger.
 #
 # Runs the full microcrate pipeline (real local model) from scratch and appends a
 # one-line verdict to logs/l3_nightly.ledger so convergence health is trend-tracked

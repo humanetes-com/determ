@@ -1,4 +1,4 @@
-"""Unit tests for the P5 cfg domain (`pipeline_core.domain.cfg`) — the typed,
+"""Unit tests for the cfg domain (`pipeline_core.domain.cfg`) — the typed,
 algebraic replacement for the old string-slicing cfg helpers in pipeline.py.
 
 Pure domain: no extractor, no I/O. Exercises the parse → tree → evaluate path
@@ -59,7 +59,7 @@ def test_evaluate_decidable_and_undecidable() -> None:
     assert ctx.evaluate("not(windows)") is True
     assert ctx.evaluate("all(nightly, windows)") is False     # one false → false
     assert ctx.evaluate("any(windows, windows)") is False     # all known false → false
-    # Truth-dominant (#19): a decided operand wins over undecidable arms.
+    # Truth-dominant: a decided operand wins over undecidable arms.
     assert ctx.evaluate("any(nightly, unix)") is True         # one true → true
     assert ctx.evaluate("all(windows, unix)") is False        # one false → false
     # Only undecided-WITHOUT a dominating operand stays None.
@@ -111,7 +111,7 @@ def test_lines_are_cluster_specific() -> None:
 
 
 def test_cluster_specific_symbol_names_flags_gated_fns() -> None:
-    # #26 residual: a fn compiled OUT under some cluster is cluster-specific; an
+    # A fn compiled OUT under some cluster is cluster-specific; an
     # ungated fn (and a #[cfg(test)]-only fn, builtin atom) is NOT.
     from pipeline_core.domain.cfg import cluster_specific_symbol_names
     recs = [
@@ -156,7 +156,7 @@ def test_excludes_for_cargo_never_over_excludes_builtins() -> None:
     assert empty.excludes_for_cargo("not(extra_cap)") is False
 
 
-# E/R3 — filter_cfg_inactive_branches tests
+# filter_cfg_inactive_branches tests
 _STABLE_CTX = CfgSet.of(cfg_true=["not(nightly)"], cfg_false=["nightly"])
 
 

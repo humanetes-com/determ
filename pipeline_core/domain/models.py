@@ -853,7 +853,7 @@ class ModuleAugmentState:
 
 @dataclass(frozen=True, slots=True)
 class FillResult:
-    """Outcome of one per-fn fill unit (R3.1; P2 de-closure of
+    """Outcome of one per-fn fill unit (de-closure of
     `_process_one_stub`). The unit returns this instead of mutating the
     pass's counters through a closure — the dispatcher aggregates under its
     own lock.
@@ -887,7 +887,7 @@ class FillResult:
 @dataclass(frozen=True, slots=True)
 class FnFixContext:
     """The per-fn prompt context the fill engine assembles before each model
-    call (P2): the impl where-clause, the TYPES_IN_SCOPE section, and the
+    call: the impl where-clause, the TYPES_IN_SCOPE section, and the
     relevance-filtered model notes. A pure value object so the fill use-cases
     can type the `PromptContext.gather(...)` port result without importing the
     static-analysis machinery that derives it (that lives behind the port)."""
@@ -990,7 +990,7 @@ class ClusterFillResult:
 
 @dataclass(frozen=True, slots=True)
 class Stub:
-    """The input to one per-fn fill unit (R3.2): an `unimplemented!()` body to
+    """The input to one per-fn fill unit: an `unimplemented!()` body to
     reconstruct, identified by location + signature. A narrower projection than
     `FnRecord` — the fill engine only needs these four fields to locate, prompt,
     and splice. Threading this instead of bare dicts kills the `"fn"` vs
@@ -1049,7 +1049,7 @@ class Stub:
 
 @dataclass(frozen=True, slots=True)
 class ImplBlock:
-    """One impl/trait/free-fn container grouped for the per-impl fill path (R3.2),
+    """One impl/trait/free-fn container grouped for the per-impl fill path,
     mirroring the dict `_collect_impl_blocks` builds. `members`/`stub_members` are
     `FnRecord`s (threading the typed record through the impl engine — kills the
     raw-dict member access); `stub_members` is the subset with an unimplemented

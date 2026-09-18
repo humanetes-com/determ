@@ -1,4 +1,4 @@
-"""Bound-provided method inventory (corrected R2/R3, debt #28).
+"""Bound-provided method inventory.
 
 When a generic parameter is bounded by an in-scope trait in the FROZEN `where`
 clause (e.g. `impl<T, E> Trait for Result<T, E> where E: some::BoundTrait`), the
@@ -39,7 +39,7 @@ def format_bound_methods_section(
     """Render the BOUND_METHODS prompt section, or "" when no provider trait
     contributes a method. Lists each in-scope bound trait's method signatures
     (real, in-scope symbols) under a WRONG->RIGHT directive that uses GENERIC
-    placeholder names (FR-036: never crate source names) so the model prefers a
+    placeholder names (never crate source names) so the model prefers a
     bound-provided trait method over a free constructor that imposes a different
     bound."""
     if not provider_traits:

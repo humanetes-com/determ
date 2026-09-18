@@ -4,8 +4,8 @@ A cargo test sweep only reports tests whose binary built AND ran to the
 summary line; a binary that fails to compile or crashes (segfault, abort)
 takes its whole test set out of the output silently. Comparing pass/fail
 counts across sweeps with a shrinking denominator understates failures and
-can manufacture a fraudulent "all tests pass" (FR-018/FR-022) — the same
-fraud class FR-024 guards at TASK 3, applied here to every TDD iteration.
+can manufacture a fraudulent "all tests pass" — the same fraud class the
+compile/run oracle guards at TASK 3, applied here to every TDD iteration.
 
 `reconcile_sweep` folds the statically-expected oracle (cfg-aware test-fn
 inventory) into one sweep's observed results: expected tests that reported no

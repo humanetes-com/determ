@@ -1,6 +1,6 @@
 """TASK 2 — source generation dispatcher + inner build-fix loop + post-test fix loop.
 
-Extracted from pipeline.py (slice 5b, Option 1). The generation engine (the Task2Generator
+Extracted from pipeline.py. The generation engine (the Task2Generator
 classes + `generate_fix_loop`) stays in pipeline.py and is injected. The two inline regexes
 in the inner loop (Cargo.toml proc-macro flag, rustc error-code count) are kept in pipeline.py
 behind injected predicates so the clean layer stays regex-free. No import of pipeline.py.

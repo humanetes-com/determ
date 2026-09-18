@@ -1,4 +1,4 @@
-"""Phase-C per-fn retrospective prompt (P6 engine-relocation series).
+"""Phase-C per-fn retrospective prompt, relocated out of pipeline.py.
 
 Pure prompt assembly: given the failed fn's context, produce the diagnosis
 prompt that asks the model to classify the root cause and give concrete

@@ -1,4 +1,4 @@
-"""S1 live fixture, computed on the filled anyhow tree this session.
+"""Live fixture, computed on the filled anyhow tree this session.
 
 Plan sentence (2026-08-29): ``src/error.rs::from`` resolves to four sites;
 ``src/wrapper.rs::fmt`` resolves to six. Negative control is today's

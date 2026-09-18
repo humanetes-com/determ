@@ -654,7 +654,7 @@ def note_hash(text: str) -> str:
 def note_signature(text: str) -> tuple[frozenset[str], frozenset[str]]:
     """Semantic signature ``(error codes mentioned, keyword set)`` of a note.
 
-    Two notes are semantically duplicate (P3.3) when these signatures' keyword
+    Two notes are semantically duplicate when these signatures' keyword
     sets overlap ≥80% — catches the 4-way paraphrase of "TypeId::of::<T>() needs
     T: 'static" that exact-hash dedup let through."""
     low = text.lower()
@@ -814,7 +814,7 @@ def build_promoted_rules(
 ) -> str:
     """A compact block listing error codes that recurred ``threshold``+ times
     this run, each with its canonical hint, any shared type-tokens mined from
-    the excerpts (P6.3), and up to 2 past ``[E0xxx]``-tagged notes (P6.4)."""
+    the excerpts, and up to 2 past ``[E0xxx]``-tagged notes."""
     if not counts:
         return ""
     code_to_notes: dict[str, list[str]] = {}

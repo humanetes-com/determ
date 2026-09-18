@@ -1,4 +1,4 @@
-"""CallableTestRunner — the TASK 3 strict-verdict test runner boundary (P6).
+"""CallableTestRunner — the TASK 3 strict-verdict test runner boundary.
 
 Satisfies :class:`pipeline_core.ports.reconstruct.TestRunner`. TASK 3's logic
 already lives in ``application.tasks.task3``; the composition root keeps a thin

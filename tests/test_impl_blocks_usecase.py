@@ -1,5 +1,5 @@
 """Unit tests for the impl-block collection use-case
-(`pipeline_core.application.reconstruct.impl_blocks.collect_impl_blocks`), P6.
+(`pipeline_core.application.reconstruct.impl_blocks.collect_impl_blocks`).
 
 Fake-injected `enumerate_fns`; a real temp src dir provides the byte ranges.
 """

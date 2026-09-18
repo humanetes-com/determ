@@ -1,6 +1,6 @@
 """Retry util — call-until-success with network backoff.
 
-Relocated from pipeline.py (slice 5b infra foundation). Bodies verbatim; the former module
+Relocated from pipeline.py. Bodies verbatim; the former module
 global is now module config set once by the composition root via :func:`configure`
 (``MAX_RETRIES``), and logging goes through the :mod:`pipeline_core.log` facade. Generic
 infra: any layer may import ``with_retry`` instead of injecting a ``retry`` collaborator.

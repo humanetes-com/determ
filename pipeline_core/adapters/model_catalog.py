@@ -1,4 +1,4 @@
-"""Network adapters for the model report (P6).
+"""Network adapters for the model report, relocated out of pipeline.py.
 
 The two live reads behind `--best-models-list`: the local Ollama daemon's
 installed-models list, and the HuggingFace Hub top-models query. Pure ranking /

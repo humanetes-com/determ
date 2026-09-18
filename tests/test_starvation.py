@@ -1,4 +1,4 @@
-"""Starvation classifier (domain) + miner correlation (application) — P1."""
+"""Starvation classifier (domain) + miner correlation (application)."""
 from __future__ import annotations
 
 from pipeline_core.application.starvation_report import (

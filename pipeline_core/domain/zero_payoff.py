@@ -101,8 +101,8 @@ def zero_payoff_streak(
     Identity of the set, not overlap: a shrinking or rotating frontier is the
     loop re-planning, which is payoff on the frontier axis by construction.
     Only the exact same plan, spent K times, with nothing back, qualifies —
-    that is the census's futile-aim shape (P3) and the spend half of its limit
-    cycles (P5)."""
+    that is the census's futile-aim shape and the spend half of its limit
+    cycles."""
     if window < 2 or len(history) < window:
         return None
     tail = history[-window:]

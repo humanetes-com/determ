@@ -1,9 +1,9 @@
 """Workspace-structure + dependency-graph scanners (ADAPTERS: they do I/O —
 fs walks, the `cargo metadata` subprocess, and the LLM scan). Moved verbatim
-from pipeline.py (P4). Domain/log/retry are imported; the pipeline-bound
+from pipeline.py. Domain/log/retry are imported; the pipeline-bound
 collaborators (`ask`, the task0 model, the skip-dir set, the shell-split helper)
 are passed explicitly via the frozen `WorkspaceScanDeps` to each scanner/graph
-constructor and the two factories (#14: constructor injection, no module state).
+constructor and the two factories (constructor injection, no module state).
 
 Backend selection: WORKSPACE_SCANNER / DEPENDENCY_GRAPH in .env (llm | static).
 """
@@ -33,7 +33,7 @@ def _default_ask(*a: object, **k: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceScanDeps:
-    """The pipeline-bound collaborators the scanners need (#14: was injected into
+    """The pipeline-bound collaborators the scanners need (was injected into
     module globals via configure()). Defaults make the adapters self-contained for
     tests; the composition root passes the real `ask`/model/shell-split."""
     ask: Callable[..., str] = _default_ask
@@ -394,7 +394,7 @@ class StaticDependencyGraph(DependencyGraph):
             else:
                 self._crate_types[pkg_name] = "lib"
 
-            # tomllib (R8: never scrape a structured format with regex). The
+            # tomllib (never scrape a structured format with regex). The
             # dep NAMES are the table keys — handles inline-table, workspace-
             # inherited (`name.workspace = true`), and quoted forms uniformly.
             dep_names: set[str] = set()

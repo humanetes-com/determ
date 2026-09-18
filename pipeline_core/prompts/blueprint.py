@@ -1,4 +1,4 @@
-"""Blueprint-generation prompt (july_plan P3). The model authors its OWN
+"""Blueprint-generation prompt. The model authors its OWN
 implementation plan from tests + skeleton signatures + FR — top-down design
 before any bottom-up fill. Charter: never steer toward what the original
 library did; the model owns every representation choice.

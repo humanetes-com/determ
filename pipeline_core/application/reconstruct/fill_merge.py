@@ -1,4 +1,4 @@
-"""Disk-preserving fill merge (P6 relocation).
+"""Disk-preserving fill merge.
 
 `merge_fills_preserving_existing` splices the model's fn BODIES into the on-disk
 file without ever losing the disk's structure (imports/types/macros/attrs/prior

@@ -1,4 +1,4 @@
-"""Unit tests for the WorkspaceArtifacts adapter (P6 prerequisite slice) — the
+"""Unit tests for the WorkspaceArtifacts adapter — the
 read-side workspace artefacts moved out of pipeline.py's free functions +
 _ReconstructAdapter binding."""
 from __future__ import annotations

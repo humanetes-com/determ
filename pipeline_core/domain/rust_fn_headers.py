@@ -1,4 +1,4 @@
-"""Structured fn / `macro_rules!` HEADER location over Rust-ish source (P7).
+"""Structured fn / `macro_rules!` HEADER location over Rust-ish source.
 
 Collapses the three parallel header regexes the pipeline used to drive its body
 elision and body-splice logic into one domain concept — a *header match*:

@@ -1,4 +1,4 @@
-"""A revertible snapshot of the reconstructed source tree (P3.D).
+"""A revertible snapshot of the reconstructed source tree.
 
 The task3 inline retry mutates `src/**/*.rs` in place and must be able to UNDO
 those edits when a retry leaves the tree worse than it found it (more failing

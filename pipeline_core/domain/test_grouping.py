@@ -1,4 +1,4 @@
-"""Phase-B test-grouping domain logic (P6 relocation).
+"""Phase-B test-grouping domain logic.
 
 Pure rules for grouping a cluster's test files into cohesive reconstruction
 units and for parsing/validating the LLM's JSON grouping manifest. Stdlib +

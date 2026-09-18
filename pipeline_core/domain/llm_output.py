@@ -1,6 +1,6 @@
 """LLM-output extraction — parse <FILE> blocks + genesis content from model responses.
 
-Relocated verbatim from pipeline.py (slice 5b foundation). The regex here operates on
+Relocated verbatim from pipeline.py. The regex here operates on
 model *response text* (the <FILE path="…"> protocol, markdown artefacts, genesis
 delimiters), not Rust source — source parsing stays on the syn extractor. Logging goes
 through the :mod:`pipeline_core.log` facade; the genesis-format text helper
@@ -127,10 +127,10 @@ def _normalize_file_markers(text: str) -> str:
     Normalise these so `_find_file_blocks` sees the canonical double-quoted tag.
 
     The two `#`-prefix passes are text-cleanup heuristics over malformed model
-    output (not structured-fact extraction), so per R7.6 they legitimately stay
+    output (not structured-fact extraction), so they legitimately stay
     as `re.sub` — replicating `#{1,6}`'s greedy backtracking char-by-char buys no
     fidelity. The single-quote→double-quote pass IS structured (`_rewrite_sq_file_blocks`,
-    regex-free, R8.5); the canonical-tag *extraction* is the state machine above.
+    regex-free); the canonical-tag *extraction* is the state machine above.
     """
     # Strip leading `###` (or `##`, `#`) before a <FILE ... > tag on the same line.
     text = re.sub(r'#{1,6}\s*(<FILE\s)', r'\1', text)
@@ -291,7 +291,7 @@ def split_api_surface_by_file(api_surface: str) -> list[tuple[str, str]]:
     """Parse a monolithic API-surface doc into `(path, full_section_text)` pairs,
     where the section text INCLUDES its `<FILE path="…">…</FILE>` framing.
 
-    Regex-free (R8.5) replacement for `<FILE path="([^"]+)">(.*?)</FILE>` (DOTALL,
+    Regex-free replacement for `<FILE path="([^"]+)">(.*?)</FILE>` (DOTALL,
     non-greedy): require the literal `<FILE path="` open, read the path up to the
     next `"`, require the `">` that closes the open tag, then the nearest
     `</FILE>`. A block missing any of those is skipped, matching a regex non-match.
@@ -340,7 +340,7 @@ def _retro_label(s: str) -> tuple[str | None, str]:
 
 def parse_retrospective(result: str, *, guidance_cap: int = 1200) -> dict[str, str]:
     """Parse a fix-loop retrospective response into {category, guidance, signal}.
-    Tolerant + regex-free (R7): handles `CATEGORY:`/`category =`/`**GUIDANCE**:`
+    Tolerant + regex-free: handles `CATEGORY:`/`category =`/`**GUIDANCE**:`
     and bullet prefixes; GUIDANCE may span multiple lines. Falls back to the
     whole response as guidance when neither field parses."""
     cat = ""
@@ -374,7 +374,7 @@ def parse_self_note(resp: str, *, min_len: int = 20, max_len: int = 300) -> str 
     """Pure parse of a model self-correction note response. Takes the last
     non-empty line, strips surrounding backticks/quotes, and rejects a
     declined note (`NONE` or shorter than `min_len`). Returns the note capped
-    at `max_len`, or None. Regex-free (R7)."""
+    at `max_len`, or None. Regex-free."""
     if not resp:
         return None
     lines = [ln.strip() for ln in resp.splitlines() if ln.strip()]

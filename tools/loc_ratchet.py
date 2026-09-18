@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LOC ratchet — the god-files may only shrink (FINAL-RESULT PLAN P0).
+"""LOC ratchet — the god-files may only shrink.
 
 Gates the line counts of the refactor targets against `.loc_ratchet.json`
 (repo root, committed). Mirrors coverage_ratchet.py semantics, inverted

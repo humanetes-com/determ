@@ -1,4 +1,4 @@
-"""ClusterAugmentor (R2.2) — the TASK 0c compiler-cluster augmentation phase.
+"""ClusterAugmentor — the TASK 0c compiler-cluster augmentation phase.
 
 The de-monolithed outer `for _cluster in _clusters` loop that used to live inline
 in `main()`: for each compiler cluster, augment every module's tests up to the

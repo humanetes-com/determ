@@ -1,6 +1,6 @@
 """Phase C test-fix log archive — write one ``fix_NN.txt`` per test-fix
 iteration under ``.phase_c_logs/<cluster>/pass_<n>/`` for post-hoc analysis.
-Relocated from pipeline.py (C2). Pure observability: a write failure is logged
+Relocated from pipeline.py. Pure observability: a write failure is logged
 and swallowed, never control flow."""
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def write_phase_c_test_fix_log(
     best_fail_count: int,
     stall: int,
 ) -> None:
-    """Archive one test-fix iteration to disk for post-hoc analysis (P4)."""
+    """Archive one test-fix iteration to disk for post-hoc analysis."""
     try:
         out_dir = project_dir / PHASE_C_LOGS_DIR / cluster_name / f"pass_{pass_n}"
         out_dir.mkdir(parents=True, exist_ok=True)

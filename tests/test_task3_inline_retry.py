@@ -77,7 +77,7 @@ def test_build_mode_no_reproducible_diags_bails(tmp_path: Path) -> None:
 
 def test_env_gate_disables_retry(tmp_path: Path, monkeypatch) -> None:
     """TASK3_INLINE_RETRY=0 short-circuits before touching any collaborator
-    (the gate moved from the pipeline.py shim into the use-case, S27)."""
+    (the gate moved from the pipeline.py shim into the use-case)."""
     monkeypatch.setenv("TASK3_INLINE_RETRY", "0")
     initial = _failed(1)
     passed, out = run_task3_inline_retry(

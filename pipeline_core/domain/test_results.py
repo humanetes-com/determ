@@ -1,6 +1,6 @@
 """Test-result parsing + acceptance rules (pure domain).
 
-Relocated verbatim from pipeline.py (slice 5b foundation). These are pure functions over
+Relocated verbatim from pipeline.py. These are pure functions over
 cargo/pytest *output text* and pass/fail counts — no I/O, no pipeline deps — so tasks
 (task3/task4 and the loops) import them instead of carrying them in a deps record.
 
@@ -321,9 +321,9 @@ def _counts_on_result_line(line: str) -> tuple[int, int]:
 def summarize_test_binaries(test_output: str) -> list[tuple[str, int, int]]:
     """Per-binary breakdown `(label, passed, failed)` in output order — one entry
     per cargo test target (unit-tests, each `tests/*.rs` integration binary, and
-    Doc-tests). Lets triage see WHICH test set changed between TDD iters (debt
-    #44: a drop in the number of binaries/tests that RUN — not just pass→fail —
-    was previously invisible because only the summed pass/fail was logged).
+    Doc-tests). Lets triage see WHICH test set changed between TDD iters — a
+    drop in the number of binaries/tests that RUN, not just pass→fail, was
+    previously invisible because only the summed pass/fail was logged.
 
     Pure string parsing, resilient to the combined stdout+stderr layout: the
     `Running <desc> (<path>)` / `Doc-tests <crate>` labels are STDERR lines,
@@ -886,7 +886,7 @@ class RustcDiagnostic:
 
 def parse_rustc_compile_errors(build_output: str) -> list[RustcDiagnostic]:
     """One `RustcDiagnostic` for each rustc `error[...]: <msg>` line immediately
-    followed by a `--> <file>:<line>[:col]` location line (regex-free, R7; mirrors
+    followed by a `--> <file>:<line>[:col]` location line (regex-free; mirrors
     `^error(?:\\[E\\d+\\])?:\\s+([^\\n]+)\\n\\s*-->\\s*([^:]+):(\\d+)(?::\\d+)?`,
     MULTILINE). The `error` keyword must start the line — same ANSI sensitivity as
     the old regex; the structured cargo-JSON frontier is the primary path and this
@@ -1043,7 +1043,7 @@ def lib_compile_clean(cargo_output: str) -> bool:
 
 def rustc_error_signatures(cargo_output: str) -> frozenset[str]:
     """Stable rustc error signatures (`error[E<code>]: <message>`, no file/line),
-    regex-free (R7). Equivalent to `re.findall(r'error\\[E\\d+\\]: .+', output)`:
+    regex-free. Equivalent to `re.findall(r'error\\[E\\d+\\]: .+', output)`:
     per line, the first `error[E<digits>]: ` with ≥1 trailing char, captured to
     end of line (the greedy `.+` consumes the remainder → one per line)."""
     marker = "error[E"

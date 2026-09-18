@@ -1,4 +1,4 @@
-"""Pure domain for the `--best-models-list` VRAM-fit report (P6).
+"""Pure domain for the `--best-models-list` VRAM-fit report.
 
 A self-contained, engine-unrelated concern lifted out of the pipeline.py god-file:
 the model catalog, the VRAM-fit arithmetic, the ranking/dedup rules, and the table

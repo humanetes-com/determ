@@ -1,4 +1,4 @@
-"""Phase-C per-fn retrospective diagnosis use-case (P6 engine-relocation series).
+"""Phase-C per-fn retrospective diagnosis use-case.
 
 When the per-fn fix loop exhausts on a fn, this diagnoses WHY — returning a
 structured `{category, guidance, signal}` dict that shapes the next attempt's
@@ -78,7 +78,7 @@ def diagnose_phase_c(
     if "Errors elsewhere in the crate" in _exc and "Errors in target file" not in _exc:
         return {"category": "DOWNSTREAM", "guidance": "", "signal": "downstream_only"}
 
-    # F/R4: unsafe vtable-dispatch fns cannot be reconstructed without the
+    # Unsafe vtable-dispatch fns cannot be reconstructed without the
     # ErrorVTable struct layout. Skip the LLM call and mark GENUINELY_HARD
     # immediately at ≥2 attempts — saves ~32 wasted model calls per anyhow run.
     if fix_attempts >= 2 and _is_vtable_dispatch_fn(sig_text, container):

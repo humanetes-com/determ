@@ -1,5 +1,5 @@
 """Unit tests for the pure context guard (`pipeline_core.domain.context_guard`)
-relocated from pipeline.ask in P6 (BL-015).
+relocated from pipeline.ask.
 
 Pins the section-aware trimming: under-budget passthrough, TESTFILE-block drop,
 sibling-comment drop, middle <FILE> drop, and the middle-trim fallback — all as

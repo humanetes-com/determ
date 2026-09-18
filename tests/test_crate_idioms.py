@@ -1,4 +1,4 @@
-"""Characterization for the relocated `<CRATE_IDIOMS>` miner (P6). Pure over
+"""Characterization for the relocated `<CRATE_IDIOMS>` miner. Pure over
 ImplBlock VOs — pins the Self:: constructor-family axis and the empty cases."""
 from __future__ import annotations
 

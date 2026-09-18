@@ -1,4 +1,4 @@
-"""Downstream-API scanner adapter (P6 relocation).
+"""Downstream-API scanner adapter, relocated out of pipeline.py.
 
 Scans the workspace's `.rs` source for `use <module>::…` imports (and PascalCase
 types named in `functional_requirements.md` code fences) to infer the public API a

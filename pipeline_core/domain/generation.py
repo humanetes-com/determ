@@ -1,4 +1,4 @@
-"""Value objects for the TASK-2 source generators (P4).
+"""Value objects for the TASK-2 source generators.
 
 `Task2Config` carries the prompt constants/budgets the generators read (resolved
 from `SETTINGS`/pipeline.py globals at the composition root). `GenerationRequest`
@@ -179,7 +179,7 @@ class Task1Request:
 
 def strip_test_prefix(stem: str) -> str:
     """Drop a leading `test_`/`tests_`/`it_` prefix from a test file stem
-    (regex-free, R7). Equivalent to `re.sub(r'^(test_|tests_|it_)', '', stem)` —
+    (regex-free). Equivalent to `re.sub(r'^(test_|tests_|it_)', '', stem)` —
     `test_` cannot match a `tests_` stem (5th char differs), so first-match
     order is preserved."""
     for p in ("test_", "tests_", "it_"):
@@ -267,7 +267,7 @@ def strip_mod_test_prefix(stem: str) -> str:
 
 def parse_gen_tests_filename(name: str) -> tuple[str, int] | None:
     """Parse a `<stem>.gen_tests_<N>.rs` sibling filename → (stem, N), or None.
-    Accepts an optional trailing `.broken` quarantine suffix (regex-free, R7).
+    Accepts an optional trailing `.broken` quarantine suffix (regex-free).
     Equivalent to `^(.+?)\\.gen_tests_(\\d+)\\.rs(?:\\.broken)?$` — `partition`
     takes the first `.gen_tests_` to mirror the non-greedy stem capture."""
     rest = name[: -len(".broken")] if name.endswith(".broken") else name
@@ -496,7 +496,7 @@ def merge_gen_tests_blocks(blocks: list[str]) -> str | None:
     return f"mod gen_tests_merged {{\n{merged}\n}}\n"
 
 
-# --- gen_tests path-mod declaration toolkit (R7: structured, replaces the four
+# --- gen_tests path-mod declaration toolkit (structured, replaces the four
 # `decl_re` regexes that did string surgery on the pipeline's OWN fixed format) ---
 #
 # The decl builder emits, for each augmentation sibling:
@@ -589,7 +589,7 @@ def _attr_run_before(
 def iter_gen_tests_decls(text: str) -> Iterator[GenTestsDecl]:
     """Yield every gen_tests path-mod decl block in `text`, scanning each
     `mod gen_tests_<N>;` anchor and walking back over its contiguous `#[...]`
-    attribute run. Pure structural scan of the pipeline's own fixed format (R7)."""
+    attribute run. Pure structural scan of the pipeline's own fixed format."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
         pass_n = _mod_gen_tests_pass(line.strip())
@@ -714,7 +714,7 @@ def gen_tests_decl_blocks(text: str) -> list[GenTestsDecl]:
 
 def testfile_paths(text: str) -> list[str]:
     """Every `path` in `<TESTFILE path="...">` markers within `text`, in order
-    (regex-free, R7). Equivalent to `re.findall(r'<TESTFILE path="([^"]+)"', text)`
+    (regex-free). Equivalent to `re.findall(r'<TESTFILE path="([^"]+)"', text)`
     — empty paths are skipped (the `+` quantifier required ≥1 char)."""
     out: list[str] = []
     marker = '<TESTFILE path="'
@@ -754,7 +754,7 @@ def topo_sort_files(file_paths: list[str], known_content: dict[str, str]) -> lis
 
 def prelude_import_names(prelude_block: str) -> str:
     """Comma-separated short names imported by the `use …;` lines of a gen_tests
-    prelude block (regex-free, R7). Expands `use a::b::{X, Y as Z}` groups, takes
+    prelude block (regex-free). Expands `use a::b::{X, Y as Z}` groups, takes
     the last path segment (or the rename target) of each, dedups preserving order.
 
     Lets task0c prompts reflect whatever the project's prelude actually provides
