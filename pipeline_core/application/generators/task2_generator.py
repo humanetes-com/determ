@@ -1370,7 +1370,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
     def _ensure_blueprint(self, project_dir: Path, module: str,
                           default_cluster: Any, all_test_pairs: list[tuple[str, str]],
                           functional_req: str, functional_req_path: Path) -> None:
-        """P3: the model authors its own design doc from skeleton sigs +
+        """The model authors its own design doc from skeleton sigs +
         tests + FR, once per crate, before any fill. Topics = source-file
         stems (one section each) + Overview; fills consume slices of it."""
         from pipeline_core.application.reconstruct.source_view import (
@@ -1412,8 +1412,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
         self.tel.log("\nTASK 2: Implementing source code (skeleton backend, per-cluster)")
         module = current_module or project_dir.name
 
-        # Load clusters from the bake artefact written before strip (Hard Rule 11:
-        # no source access post-strip). If absent, abort — there is no live source
+        # Load clusters from the bake artefact written before strip (no original
+        # source access post-strip). If absent, abort — there is no live source
         # to discover from at this point.
         clusters = self.clusters.load_baked(project_dir)
         if not clusters:
@@ -1421,7 +1421,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{project_dir}/.skeleton/_clusters.json. The skeleton bake "
                          "step (pre-strip) must run before TASK 2.")
             return False
-        # Debt #36: default cluster first — later clusters seed shared-fn
+        # Default cluster first — later clusters seed shared-fn
         # bodies from the ones earlier clusters accepted (fill ONCE, propagate).
         clusters = fill_order(clusters)
         self.tel.log(f"  [skeleton] loaded {len(clusters)} baked cluster(s): "
@@ -1441,7 +1441,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log("  [skeleton] no test files; cannot proceed.")
             return False
 
-        # P3: crate blueprint — the top-down design the per-block fills
+        # Crate blueprint — the top-down design the per-block fills
         # consume slices of. Idempotent; never blocks the run on failure.
         if (self.blueprint_deps is not None
                 and os.getenv("BLUEPRINT_PHASE", "1") != "0"):
@@ -1504,7 +1504,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     self.tel.log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
                 return {"cluster": cluster.name, **res}
 
-            # Debt #36: clusters run SERIALLY in fill_order. Each cluster seeds
+            # Clusters run SERIALLY in fill_order. Each cluster seeds
             # its stubs from the bodies earlier clusters accepted, so an item
             # shared across clusters is filled ONCE; a later cluster rewrites a
             # seeded body only when its own compile/tests fail on it — which is
@@ -1513,8 +1513,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # per-cluster fills of the same shared fns were the double-fill /
             # cfg-chimera machine (2× LLM cost, wholesale cfg-gated forks).
             if self.cfg.parallelism > 1 and len(clusters) > 1:
-                self.tel.log("  [skeleton] task2a runs clusters serially (debt "
-                             "#36 shared-fn seeding); PIPELINE_PARALLELISM "
+                self.tel.log("  [skeleton] task2a runs clusters serially "
+                             "(shared-fn seeding); PIPELINE_PARALLELISM "
                              "applies within a cluster, not across clusters.")
             # The stage marker is all-or-nothing, but the work inside it is
             # per-cluster and serial — so without a per-cluster marker ANY
@@ -1633,7 +1633,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.set_current(
                 project_dir,
                 f"task2b/{module} / merging {len(cluster_summaries)} cluster output(s)")
-            # Debt #36: pre-merge stub backfill. A stub still left in one
+            # Pre-merge stub backfill. A stub still left in one
             # cluster's tree (cfg-inactive there, or its fill exhausted) adopts
             # the body a sibling cluster accepted, so the AST merge never emits
             # a dead `unimplemented!()` cfg-variant alongside a real body —
@@ -1751,7 +1751,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         skeleton_dir = project_dir / ".skeleton" / cluster.name
         filled_dir = project_dir / ".skeleton-filled" / cluster.name
 
-        # Phase A — load the pre-baked skeleton from disk. Hard Rule 11: the
+        # Phase A — load the pre-baked skeleton from disk. The
         # original source is gone after strip, so the skeleton MUST have been
         # produced earlier by `_bake_skeleton_artifacts`. If absent here, that
         # step did not run — fail loud.
@@ -1857,7 +1857,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             tag, project_dir, cluster, filled_dir,
             [d.name for d in (donor_dirs or [])], skeleton_dir=skeleton_dir)
 
-        # Debt #36: adopt the shared-fn bodies earlier clusters already accepted
+        # Adopt the shared-fn bodies earlier clusters already accepted
         # (fill ONCE, propagate). Only `unimplemented!()` stubs are replaced, so
         # resume-time prior fills of THIS cluster are never overwritten; this
         # cluster's phase C then only fills its cluster-specific remainder and

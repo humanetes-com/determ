@@ -518,7 +518,8 @@ def _log_attribution_gap(
       parsed==0                → parse_failed_tests couldn't read the names (parser gap)
       parsed>0 & candidates==0 → names parsed fine but NO attribution path
                                  (behavioral/reverse-map) mapped them to a fn
-      parsed>0 & candidates>0  → candidates existed but all exhaustion-filtered (D3)
+      parsed>0 & candidates>0  → candidates existed but all exhaustion-filtered
+                                 (the exhaustion re-entry filter)
     Prints the failing names so we can see which fns should have been re-filled.
     """
     if fail_count <= 0:
@@ -921,8 +922,9 @@ def run_phase_c_tdd(
     # with a compiling-but-wrong body) are not stubs, so the stub-based
     # exhaustion path never bounds them → an unfixable wrong body would burn one
     # LLM call every iter until the stall budget alone exits. Count per-fn re-fill
-    # attempts and mark a fn exhausted once it caps (D3 still re-admits it on new
-    # notes / cluster-wide progress — same escape hatch as stubs).
+    # attempts and mark a fn exhausted once it caps (the exhaustion re-entry
+    # filter still re-admits it on new notes / cluster-wide progress — same
+    # escape hatch as stubs).
     refill_attempts: dict[FnLocator, int] = {}
     _refill_max = int(os.getenv("TDD_REFILL_MAX_ATTEMPTS", "2"))
     # Destruction epoch: bumped at every deliberate destruction this loop
@@ -3369,8 +3371,8 @@ def run_phase_c_tdd(
             # `domain/escalation_lifetime`), drop the rest. A sustain is not
             # new evidence: no guidance suspension, no exhaustion
             # re-admission, one summary line for all of them; an escalated
-            # unit that exhausts its refill budget leaves through the D3
-            # filter exactly as any frontier unit does.
+            # unit that exhausts its refill budget leaves through the
+            # exhaustion re-entry filter exactly as any frontier unit does.
             _sustain = sustain_escalation_products(
                 escalation_products, units_by_test, _stub_keys,
                 format_tests=frozenset(
@@ -3513,8 +3515,8 @@ def run_phase_c_tdd(
                         # The escalation IS new evidence about its targets: a
                         # producer convicted before anyone knew this test
                         # needed it was judged on a different question. An
-                        # exhausted target silently swallowed by the D3 filter
-                        # is how arm A's hardcrate stable stopped at 46 while
+                        # exhausted target silently swallowed by the exhaustion
+                        # re-entry filter is how arm A's hardcrate stable stopped at 46 while
                         # B/C (whose filter never caught it) reached 47.
                         _re_admitted = set(extra) & permanently_exhausted
                         if _re_admitted:
@@ -3530,7 +3532,7 @@ def run_phase_c_tdd(
                                            for k in _re_admitted)))
                         # The SAME evidence opens the store's gate on the same
                         # targets. The local release above reaches only the
-                        # D3 filter; a target whose disk record is
+                        # exhaustion re-entry filter; a target whose disk record is
                         # `fully_exhausted` enters the frontier every sweep
                         # and is skipped at the route every time (the
                         # `<C,Error>` block, run `1246060-2339497b`). Capped
@@ -3617,7 +3619,7 @@ def run_phase_c_tdd(
         # still fills in phase-c instead of surviving to the post-TASK3 sweep
         # while its tested callers thrash as "blocked by an unfilled sibling
         # stub". order_frontier sorts leaf-first so helpers fill ahead of their
-        # callers; the D3 filter + permanently_exhausted still bound re-entry.
+        # callers; the exhaustion re-entry filter + permanently_exhausted still bound re-entry.
         frontier = union_unattributed_stubs(frontier, _stub_list)
 
         # No frontier key may be a `#[test]` fn — the tests ARE the oracle, and a
@@ -3638,8 +3640,8 @@ def run_phase_c_tdd(
             "cluster": cluster.name, "iter": iter_n,
             "tests": list(_unowned), "count": len(_unowned)})
 
-        # D3 — re-entry filter for fns that already exhausted the per-fn
-        # fix loop in a prior iter (avoid burning compute on the same fn
+        # The exhaustion re-entry filter — for fns that already exhausted the
+        # per-fn fix loop in a prior iter (avoid burning compute on the same fn
         # with no new context).
         # Crash evidence voids exhaustion: the prior attempts never saw a
         # localized faulting stack, so "nothing left to try" no longer holds.
@@ -4288,7 +4290,7 @@ def run_phase_c_tdd(
             # governed it: the plateau exit above charges a COMPLETED
             # traversal, and an empty frontier completes nothing. First the
             # only move left — re-admit what the loop itself holds exhausted
-            # (the D3 filter's set and the store's flags), bounded by the
+            # (the exhaustion re-entry filter's set and the store's flags), bounded by the
             # same reset cap the store applies per record; then, with that
             # budget spent and still nothing to dispatch, stop under a name
             # instead of re-running a cached `cargo test` to the backstop.

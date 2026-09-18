@@ -46,7 +46,13 @@ def measured(include: str) -> float:
          f"--include={include}", "--format=total"],
         capture_output=True, text=True, cwd=ROOT, check=True,
     )
-    return float(out.stdout.strip())
+    # `--format=total` prints the number on the LAST line. Coverage 7.14
+    # combines stray parallel data files on report and says so first
+    # ("Combined 10 files"), which broke a whole-stdout parse on 2026-09-18.
+    lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError(f"coverage report printed no total for {include!r}")
+    return float(lines[-1])
 
 
 def main() -> int:
