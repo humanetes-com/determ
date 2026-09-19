@@ -188,6 +188,17 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      name (`PEELED` on the next such reply).  A refusal that remains after
      the fix is either a scaffold/import error (honest) or a new key seam —
      read the refusal's diagnostic before trusting it.
+  P29 parked stub — the blocker histogram ranked a still-stubbed fn first
+     and the same iteration's fill opened no run holding a stub, so the unit
+     every blocked test waits on was cut by the batch.  Run 3453127-045b05b1
+     (2026-09-19, cluster stable): iters 3 and 4 read `blocker histogram:
+     src/error.rs::vtable (7) rank first` and both fills opened `per-fn 0
+     stub(s)`; 82 of 141 failing tests stopped inside that stub.  Two
+     owners missed it: the stub-abort reading (isolation closes every
+     section, it read only unfinished ones) and the service order (a stale
+     stamp put the stub behind never-served units).  Reaction: the sweep
+     prints `still-stubbed fn(s) hold N failing test(s)` and ranks them as
+     crash-site evidence; a stub is never served.
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -497,6 +508,10 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P28": [
         # The peel isolated the blamed bodies and kept the rest.
         ("PEELED ", "peeled"),
+    ],
+    "P29": [
+        # The sweep held the failing tests by the stub they stop in.
+        ("still-stubbed fn(s) hold", "stub-held"),
     ],
     "P27": [
         # The end gate classified each orphan against augmentation's
@@ -2170,6 +2185,41 @@ def detect_p28(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:3]}]
 
 
+RE_HISTOGRAM = re.compile(
+    r"\[phase-c/dispatch\] blocker histogram: (?P<head>\S+) \((?P<n>\d+)\)")
+RE_TDD_ITER = re.compile(r"\[phase-c/tdd\] iter (?P<iter>\d+): cargo test")
+RE_FILL_PLAN = re.compile(r"\[phase-c/schedule\] fill \d+: \d+ run\(s\)")
+RE_STUB_RUN = re.compile(r"per-fn [1-9]\d* stub\(s\)")
+
+
+def detect_p29(run: Run, iters: list[dict]) -> list[dict]:
+    """An iteration whose blocker histogram ranked a stub first and whose
+    fill plan opened no run holding a stub. One hit per run."""
+    hits: list[str] = []
+    refs: list[str] = []
+    head = ""
+    it = ""
+    for ref, text in run.lines:
+        m = RE_TDD_ITER.search(text)
+        if m:
+            it = m["iter"]
+            continue
+        m = RE_HISTOGRAM.search(text)
+        if m:
+            head = m["head"]
+            continue
+        if head and RE_FILL_PLAN.search(text):
+            if not RE_STUB_RUN.search(text):
+                hits.append(f"iter {it or '?'} parked {head}")
+                refs.append(ref)
+            head = ""
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} fill(s) opened no stub run while the "
+                         f"histogram ranked one first: {'; '.join(hits[:6])}",
+             "refs": refs[:3]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2184,7 +2234,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
              "P25": detect_p25, "P26": detect_p26, "P27": detect_p27,
-             "P28": detect_p28}
+             "P28": detect_p28, "P29": detect_p29}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2208,7 +2258,8 @@ CLASS_NAMES = {
     "P25": "hung sweep (cargo test timed out inside a test; pre-fix the cluster was abandoned and the hung tree left on disk)",
     "P26": "unbounded wait (a fill event then no non-audit event for longer than 5x the sweep timeout; pre-fix the coverage slice waited forever)",
     "P27": "orphaned stub at a green end (all tests pass, exit 1 on reachable stubs no test executes; augmentation stopped on line coverage alone)",
-    "P28": "unpeelable reply (file-first compile failure, peel refused none_implicated, whole reply reverted; pre-fix a bare-block free fn was keyed by the target impl)"}
+    "P28": "unpeelable reply (file-first compile failure, peel refused none_implicated, whole reply reverted; pre-fix a bare-block free fn was keyed by the target impl)",
+    "P29": "parked stub (the blocker histogram ranked a stub first and the fill opened no stub run; pre-fix isolation silenced the stub-abort reading and a stale stamp sank the stub)"}
 
 
 # -------------------------------------------------------------------- report

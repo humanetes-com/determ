@@ -140,7 +140,7 @@ def test_negative_control_the_old_rule_re_sends_the_identical_batch(
     # would be `g` under BOTH the old cursor rule and the new one — so this
     # control could not fail. Identity-ranking restores the isolation the
     # cursor rule needs.
-    def _identity(ordered, served, flat, dead=(), red_dead=()):  # noqa: ARG001
+    def _identity(ordered, served, flat, dead=(), red_dead=(), hollow=()):  # noqa: ARG001
         return list(ordered)
 
     monkeypatch.setattr(

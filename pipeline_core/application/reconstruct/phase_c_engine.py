@@ -314,14 +314,14 @@ class PhaseCFillEngine:
         # plus its attributed units): the red-slice session's editable set.
         session_slices: Mapping[str, frozenset[FnSite]] | None = None,
         session_owners: Mapping[str, frozenset[FnSite]] | None = None,
-        # The sweep's stub-only abort reading (`StubAbortReading`), for the
-        # SCHEDULE only: the still-stubbed fns whose panics abort test
-        # binaries, and each vanished test's blockers among them. A run
-        # holding one can make those binaries complete, so it is neither an
-        # unmeasurable re-buy nor a run the pair must go before; the per-fn
-        # and impl routes never see these as blame.
-        stub_abort_blockers: frozenset[FnLocator] = frozenset(),
-        stub_abort_hollow: Mapping[str, frozenset[FnLocator]] | None = None,
+        # The sweep's stub hold (`test_outcome.StubHold`), for the SCHEDULE
+        # only: the still-stubbed fns failing tests stop in first, and each
+        # held test's blockers among them. A run holding one can move those
+        # tests, so it is neither an unmeasurable re-buy nor a run the pair
+        # must go before; the per-fn and impl routes never see these as
+        # blame.
+        stub_hold_blockers: frozenset[FnLocator] = frozenset(),
+        stub_hold_hollow: Mapping[str, frozenset[FnLocator]] | None = None,
         # The fill schedule's inputs: its wall-clock budget in minutes
         # (`TDD_FILL_BUDGET_MINUTES`; 0 = order only), the iteration the
         # rows are stamped with, and the run id.
@@ -533,7 +533,7 @@ class PhaseCFillEngine:
         routes.append(_per_fn_route)
         _hollow: dict[str, frozenset[FnLocator]] = dict(
             _prepared_fill.hollow if _prepared_fill is not None else {})
-        for _t, _locs in (stub_abort_hollow or {}).items():
+        for _t, _locs in (stub_hold_hollow or {}).items():
             _hollow[_t] = _hollow.get(_t, frozenset()) | _locs
         _execution = execute_fill(
             routes,
@@ -549,7 +549,7 @@ class PhaseCFillEngine:
                 scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
                 parallelism=self.config.parallelism,
                 unmeasurable_tests=unmeasurable_tests,
-                crash_blamed=(crash_blamed or frozenset()) | stub_abort_blockers,
+                crash_blamed=(crash_blamed or frozenset()) | stub_hold_blockers,
                 attributed=frozenset(attributed),
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),

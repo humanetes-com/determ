@@ -35,7 +35,7 @@ from enum import StrEnum
 
 from pipeline_core.domain.generation import is_gen_tests_sibling_name
 from pipeline_core.domain.models import FnSite
-from pipeline_core.domain.test_report import parse_test_output
+from pipeline_core.domain.test_report import parse_test_output, stub_abort_reading
 from pipeline_core.domain.test_results import (
     parse_binary_results,
     stable_name_keys,
@@ -44,6 +44,7 @@ from pipeline_core.domain.test_results import (
 __all__ = [
     "RunKind",
     "SiteKind",
+    "StubHold",
     "TestOutcome",
     "PremiseEntry",
     "outcomes_of",
@@ -52,6 +53,7 @@ __all__ = [
     "premise_of",
     "run_kind",
     "site_kind_of",
+    "stub_hold_of",
     "truncated_failing",
 ]
 
@@ -187,6 +189,78 @@ def premise_moved(
     filtered out) is not a move: absence is not a reading."""
     return tuple(sorted(k for k in plan.keys() & now.keys()
                         if plan[k] != now[k]))
+
+
+@dataclass(frozen=True, slots=True)
+class StubHold:
+    """Which still-stubbed functions hold which failing tests.
+
+    A failing test whose first failure is inside a still-stubbed function
+    cannot move until that function has a body: whatever else is filled, the
+    test stops at the same `unimplemented!()`. That is the strongest "need"
+    a sweep can state about a unit, and it is read off each test's own
+    outcome — whether its process died is beside the point.
+
+    It used to be read off aborted BINARIES only (`test_report.
+    StubAbortReading`: a section that never printed its trailer, whose only
+    crate panics were stub panics, feeding the vanished tests). Isolating
+    aborted binaries one test per process (`cargo_runner.
+    isolate_aborted_binaries`) gives every test a verdict and closes every
+    section, so that reading went silent while the stubs still held the
+    tests. Measured on run `3453127-045b05b1` (2026-09-19, cluster `stable`),
+    the iter-3 checkpoint re-run through the pipeline's runner: isolation on
+    — 0 unfinished sections, the abort reading empty, 82 of 141 failing tests
+    first failing inside the `vtable` stub; isolation off — 24 unfinished
+    sections and the abort reading naming that stub. The loop dispatched
+    it two iterations later, after the service order had sunk it behind
+    never-served units.
+
+    The shared-process reading survives only as what it now is: the fallback
+    for a binary isolation could not rebuild, whose tests have no outcome.
+    """
+
+    by_test: Mapping[str, frozenset[FnSite]]
+
+    @property
+    def blockers(self) -> frozenset[FnSite]:
+        out: set[FnSite] = set()
+        for sites in self.by_test.values():
+            out |= sites
+        return frozenset(out)
+
+    def held_by(self, site: FnSite) -> frozenset[str]:
+        return frozenset(t for t, ss in self.by_test.items() if site in ss)
+
+
+def stub_hold_of(
+    capture: str,
+    locate: Locate,
+    is_stub: Callable[[FnSite], bool],
+    vanished: Iterable[str] = (),
+    test_files: Mapping[str, str] | None = None,
+) -> StubHold:
+    """:class:`StubHold` of one sweep capture.
+
+    Each failing test whose first failure site is crate source that
+    ``locate`` resolves to a function ``is_stub`` accepts is held by that
+    function. Then, for the tests the capture has no outcome for
+    (``vanished``: a binary isolation could not rebuild), the shared-process
+    stub-abort reading adds the stubs its unfinished sections name.
+    """
+    held: dict[str, set[FnSite]] = {}
+    for o in outcomes_of(capture).values():
+        if (o.passed or o.site_kind is not SiteKind.CRATE
+                or o.first_file is None or o.first_line is None):
+            continue
+        site = locate(o.first_file, int(o.first_line))
+        if site is not None and is_stub(site):
+            held.setdefault(o.name, set()).add(site)
+    vanished = list(vanished)
+    if vanished:
+        fallback = stub_abort_reading(capture, locate)
+        for t, sites in fallback.hollow(vanished, test_files or {}).items():
+            held.setdefault(t, set()).update(sites)
+    return StubHold({t: frozenset(ss) for t, ss in held.items()})
 
 
 def names_of(entries: Iterable[str]) -> str:

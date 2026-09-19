@@ -653,7 +653,12 @@ class StubAbortReading:
     vtable drop fn, 18 at a nightly request helper, 15 at a vtable ref fn); all
     five were attributed and on the frontier, logged "parked under the dispatch
     cap, not served", while two fills spent their whole budget on a pair whose
-    tests sat in those binaries."""
+    tests sat in those binaries.
+
+    Since test isolation re-runs an aborted binary one test per process, this
+    reading only sees a binary isolation could not rebuild. The sweep's
+    reader is `test_outcome.stub_hold_of`, which holds each failing test by
+    the stub it first fails in and calls this for the vanished remainder."""
 
     by_binary: Mapping[str, frozenset[FnSite]]
 

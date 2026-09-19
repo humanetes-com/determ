@@ -216,18 +216,18 @@ from pipeline_core.domain.test_cmd import expected_target_labels
 from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_outcome import (
     PremiseEntry,
+    StubHold,
     names_of,
     outcomes_of,
     premise_moved,
     premise_of,
+    stub_hold_of,
     truncated_failing,
 )
 from pipeline_core.domain.test_report import (
-    StubAbortReading,
     failure_evidence_by_test,
     merge_observations,
     parse_test_output,
-    stub_abort_reading,
 )
 from pipeline_core.domain.test_results import (
     BinaryResult,
@@ -3340,53 +3340,60 @@ def run_phase_c_tdd(
                 for _loc in crash_texts:
                     frontier.setdefault(_loc, set()).update(_oracle.vanished)
 
-        # STUB-ONLY ABORTS NAME THEIR OWN BLOCKERS. A binary whose only crate
-        # panics are stub panics died because those stubs panicked while a
-        # test was already unwinding; the fns are named at their own lines,
-        # with no localizer involved. The ratchet and the fill gates already
-        # read this to forgive a drop "until the stubs fill"; this is the
-        # reading that makes the stubs fill. Independent of the localizer on
-        # purpose — it defers on a stub-heavy tree and finds no native fault
-        # in a double panic, which is exactly when this evidence exists.
+        # A STUB THAT HOLDS A FAILING TEST NAMES ITSELF. A failing test whose
+        # first failure is inside a still-stubbed fn cannot move until that
+        # fn has a body, so the fn is the strongest need the sweep can state
+        # (`test_outcome.StubHold`). Read per TEST from the typed outcomes,
+        # not per aborted binary: isolation gives every aborted test its own
+        # verdict and closes every section, and the binary-level reading this
+        # replaces went silent on run `3453127-045b05b1` (2026-09-19) while
+        # 82 of 141 failing tests stopped inside one stub that the batch cut
+        # for two iterations. The shared-process reading remains inside
+        # `stub_hold_of` for a binary isolation could not rebuild.
+        # Independent of the localizer on purpose — it defers on a
+        # stub-heavy tree and finds no native fault in a stub panic.
         # EVIDENCE, never blame: the stubs get a prompt, a frontier entry, an
         # exhaustion void and the crash cohort's site rank; `crash_blamed`
         # stays the localizer's, so nothing here convicts or reverts a body.
-        _stub_aborts = StubAbortReading({})
-        _stub_hollow: dict[str, frozenset[FnSite]] = {}
-        if (_oracle.vanished and not _sweep_compile_broke
-                and deps.enumerate_fns is not None):
-            _stub_aborts = stub_abort_reading(output, make_fn_site_locator(
-                SimpleNamespace(enumerate_fns=deps.enumerate_fns),
-                target_src_dir))
-        if _stub_aborts.by_binary:
-            _stub_hollow = _stub_aborts.hollow(_oracle.vanished, _test_files)
-            for _site in sorted(_stub_aborts.blockers):
-                _binaries = sorted(b for b, s in _stub_aborts.by_binary.items()
-                                   if _site in s)
+        _stub_hold = StubHold({})
+        if not _sweep_compile_broke and deps.enumerate_fns is not None:
+            _hollow_now = frozenset(_stub_keys)
+
+            def _is_stub(s_: FnSite, _k: frozenset[FnLocator] = _hollow_now,
+                         ) -> bool:
+                return locator_of(s_) in _k
+
+            _stub_hold = stub_hold_of(
+                output,
+                make_fn_site_locator(
+                    SimpleNamespace(enumerate_fns=deps.enumerate_fns),
+                    target_src_dir),
+                is_stub=_is_stub,
+                vanished=_oracle.vanished, test_files=_test_files)
+        if _stub_hold.by_test:
+            for _site in sorted(_stub_hold.blockers):
+                _held_tests = _stub_hold.held_by(_site)
                 _loc = locator_of(_site)
                 crash_texts.setdefault(_loc, (
-                    f"This fn is still a stub, and its `unimplemented!()` panic "
-                    f"is the only crate panic in test binaries that abort "
-                    f"({', '.join(_binaries)}): it panics while another panic "
-                    "is unwinding, the process aborts, and every test in those "
-                    "binaries loses its verdict — including tests that already "
-                    "pass. Give it a real body; nothing in those binaries can "
-                    "be measured until it has one."))
-                frontier.setdefault(_loc, set()).update(
-                    t for t, s in _stub_hollow.items() if _site in s)
+                    f"This fn is still a stub, and {len(_held_tests)} failing "
+                    "test(s) stop at its `unimplemented!()` before they check "
+                    "anything else. No other body can move those tests until "
+                    "this one exists. Give it a real body."))
+                frontier.setdefault(_loc, set()).update(_held_tests)
             deps.log(
                 f"  {tag} [phase-c/crash] iter {iter_n}: "
-                f"{len(_stub_aborts.by_binary)} binary(ies) abort on stub "
-                f"panics alone — {len(_stub_aborts.blockers)} still-stubbed "
-                f"fn(s) block {len(_stub_hollow)} vanished test(s), ranked as "
-                "crash-site evidence: "
-                + ", ".join(sorted(f"{s.file}::{s.fn_name}"
-                                   for s in _stub_aborts.blockers)))
-            deps.emit("phase_c.crash.stub_aborts", data={
+                f"{len(_stub_hold.blockers)} still-stubbed fn(s) hold "
+                f"{len(_stub_hold.by_test)} failing test(s) at their first "
+                "failure, ranked as crash-site evidence: "
+                + ", ".join(
+                    f"{s.file}::{s.fn_name} ({len(_stub_hold.held_by(s))})"
+                    for s in sorted(_stub_hold.blockers)))
+            deps.emit("phase_c.crash.stub_holds", data={
                 "cluster": cluster.name, "iter": iter_n,
-                "binaries": {b: sorted(f"{s.file}::{s.fn_name}" for s in ss)
-                             for b, ss in _stub_aborts.by_binary.items()},
-                "hollow_tests": len(_stub_hollow)})
+                "held": {f"{s.file}::{s.fn_name}":
+                         sorted(_stub_hold.held_by(s))[:50]
+                         for s in sorted(_stub_hold.blockers)},
+                "held_tests": len(_stub_hold.by_test)})
 
         # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by
@@ -4496,6 +4503,14 @@ def run_phase_c_tdd(
             _ranks = _prev_payoff.locator_counts()
         if not _ranks:
             _ranks = blocker_histogram(_deferred)
+        # A stub's measured hold is the direct count of what the histogram
+        # infers from attribution: on run `3453127-045b05b1` iter 3 the
+        # histogram gave `vtable` 7 deferred consumers while 82 failing tests
+        # stopped inside it.
+        for _site in _stub_hold.blockers:
+            _loc = locator_of(_site)
+            _ranks[_loc] = max(_ranks.get(_loc, 0),
+                               len(_stub_hold.held_by(_site)))
         if _ranks:
             _before_blk = [k for k, _ in ordered]
             ordered = promote_by_blocker_counts(ordered, _ranks)
@@ -4911,10 +4926,14 @@ def run_phase_c_tdd(
         # inclusive `_served_at`: a floor stamp the route-scoped rule never
         # earned kept `never_served` at [] on 24 of 25 rankings after the
         # decode fix shipped, so never-attempted units could not rank first.
+        # A still-stubbed unit is never-served whatever its stamp says: the
+        # stamp is about a body that is no longer on disk (`service_bucket`).
         ordered = promote_by_service(
-            ordered, set(_served_verified), _flat_keys, _dead_keys, _red_dead)
+            ordered, set(_served_verified), _flat_keys, _dead_keys, _red_dead,
+            hollow=_stub_keys)
         _ranked = [k for k, _ in ordered]
-        _never = [k for k in _ranked if k not in _served_verified
+        _never = [k for k in _ranked
+                  if (k in _stub_keys or k not in _served_verified)
                   and k not in _dead_keys and k not in _red_dead]
         _flat_n = sum(1 for k in _ranked if k in _flat_keys
                       and k not in _dead_keys and k not in _red_dead)
@@ -5833,15 +5852,15 @@ def run_phase_c_tdd(
                         or None),
                     session_slices=_session_slices or None,
                     session_owners=_session_owners or None,
-                    # The stub-only abort reading, for the schedule: its
-                    # blockers are the locators whose bodies can make an
-                    # aborted binary complete, and its hollow relation is the
-                    # one coverage cannot give for a binary that wrote none.
-                    stub_abort_blockers=frozenset(
-                        locator_of(s_) for s_ in _stub_aborts.blockers),
-                    stub_abort_hollow={
+                    # The stub hold, for the schedule: its blockers are the
+                    # locators whose bodies the held tests need first, and its
+                    # hollow relation is the one coverage cannot give for a
+                    # run that stopped at the stub.
+                    stub_hold_blockers=frozenset(
+                        locator_of(s_) for s_ in _stub_hold.blockers),
+                    stub_hold_hollow={
                         t_: frozenset(locator_of(s_) for s_ in ss_)
-                        for t_, ss_ in _stub_hollow.items()},
+                        for t_, ss_ in _stub_hold.by_test.items()},
                     on_wave_kept=lambda kept: _record_landed_rows("wave", kept),
                     fill_premise=_plan_premise,
                     fill_ground_now=_ground_now,

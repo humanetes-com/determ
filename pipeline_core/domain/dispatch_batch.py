@@ -472,9 +472,20 @@ def service_bucket[K: Hashable](
     flat: Collection[K],
     dead: Collection[K] = (),
     red_dead: Collection[K] = (),
+    hollow: Collection[K] = (),
 ) -> int:
     """0 never-served live, 1 served live, 2 served-and-flat live,
     3 red-dead, 4 dead.
+
+    A HOLLOW key (its body on disk is still a stub) is never served, whatever
+    the stamps say. Service is a claim about a body the unit was given; a
+    stub is not that body, so the claim describes bytes that are no longer
+    on disk — the same reason `drop_standing_flat` exempts stubs from a FLAT
+    grade. Run `3453127-045b05b1` (2026-09-19, cluster `stable`): `vtable`
+    carried a verified service stamp from an earlier process, was a stub
+    again, and 82 of 141 failing tests stopped inside it; the blocker
+    histogram ranked it first and this bucket then put it behind 20
+    never-served units, outside the 12-unit batch, for two iterations.
 
     Dead last regardless of service: a body no test executes cannot move a
     verdict, and never-served-first would otherwise put those dead units at
@@ -498,7 +509,7 @@ def service_bucket[K: Hashable](
         return 4
     if key in red_dead:
         return 3
-    if key not in served:
+    if key in hollow or key not in served:
         return 0
     if key in flat:
         return 2
@@ -511,10 +522,12 @@ def promote_by_service[K: Hashable, V](
     flat: Collection[K],
     dead: Collection[K] = (),
     red_dead: Collection[K] = (),
+    hollow: Collection[K] = (),
 ) -> list[tuple[K, V]]:
     """`ordered` with never-served live units first, then served, then
     served-and-last-graded-flat, then red-dead, then dead. Stable within a
-    bucket.
+    bucket. A `hollow` unit (still a stub) is never-served: see
+    `service_bucket`.
 
     WHY THIS IS NOT A KEY IN `order_frontier`. That ranking runs BEFORE
     `promote_producers`, which then puts the table-builders — the units the
@@ -540,7 +553,8 @@ def promote_by_service[K: Hashable, V](
         item for _, item in sorted(
             enumerate(ordered),
             key=lambda idx_item: (
-                service_bucket(idx_item[1][0], served, flat, dead, red_dead),
+                service_bucket(idx_item[1][0], served, flat, dead, red_dead,
+                               hollow),
                 idx_item[0],
             ),
         )
