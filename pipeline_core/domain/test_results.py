@@ -2240,6 +2240,24 @@ def regressed_attempt_of(record: Mapping[str, object], *,
     return RegressedAttempt.REVERTED
 
 
+#: Marks the part of a reddened test's printed output that quotes the crate
+#: line it panicked at, read from the attempt before it was reverted
+#: (`domain/attempt_site.py`). Renderers keep that part whole: the first
+#: lines of the printed output are capped, the quote is the evidence.
+ATTEMPT_QUOTE_MARK = "in the text of the attempt that printed this"
+
+
+def said_lines(said: str, *, max_lines: int = 8) -> list[str]:
+    """The non-blank lines of one test's printed output as a prompt shows
+    them: the printed part capped at `max_lines`, then every attempt quote
+    (`ATTEMPT_QUOTE_MARK`) whole. Without the split the cap cut the quote a
+    few lines after the panic message it explains."""
+    lines = [ln for ln in said.splitlines() if ln.strip()]
+    cut = next((i for i, ln in enumerate(lines) if ATTEMPT_QUOTE_MARK in ln),
+               len(lines))
+    return lines[:cut][:max_lines] + lines[cut:]
+
+
 def render_newly_red_outputs(
     newly_red: Iterable[str], outputs: Mapping[str, str], *,
     indent: str = "  ", max_lines: int = 8,
@@ -2254,7 +2272,7 @@ def render_newly_red_outputs(
         said = outputs.get(name) or outputs.get(name.rsplit("::", 1)[-1])
         if not said:
             continue
-        lines = [ln for ln in said.splitlines() if ln.strip()][:max_lines]
+        lines = said_lines(said, max_lines=max_lines)
         blocks.append(f"{indent}{name} said:\n"
                       + "\n".join(f"{indent}  {ln}" for ln in lines))
     if not blocks:

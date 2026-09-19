@@ -47,7 +47,7 @@ from pipeline_core.domain.refill_evidence import (
     render_refill_evidence,
     wraps_crate_tuple_struct,
 )
-from pipeline_core.domain.test_results import RegressedAttempt
+from pipeline_core.domain.test_results import RegressedAttempt, said_lines
 
 # One test lookup: (bare fn/test name, max_blocks) -> (path, text) pairs.
 TestLookup = Callable[[str, int], Sequence[tuple[str, str]]]
@@ -162,7 +162,7 @@ def render_prior_regression(
             said = outputs.get(name) or outputs.get(name.rsplit("::", 1)[-1])
             if not said:
                 continue
-            body = [ln for ln in said.splitlines() if ln.strip()][:8]
+            body = said_lines(said, max_lines=8)
             shown.append(f"    {name} said:\n"
                          + "\n".join(f"      {ln}" for ln in body))
         if shown:

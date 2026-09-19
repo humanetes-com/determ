@@ -43,6 +43,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
     peel_to_compiling,
 )
 from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
+from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.attribution import (
     container_key,
     record_site,
@@ -419,7 +420,11 @@ def run_slice_session(
         evidence = failure_evidence_by_test(text)
         failed = {_leaf(n) for n in after.failed_names}
         passed = {_leaf(n) for n in after.passed_names}
-        outputs = regressed_test_outputs(text, cmp.newly_red) if cmp.newly_red else {}
+        # Quoted while this turn's change set is still on the tree: the
+        # next turn may be told about it after a restore (`attempt_site`).
+        outputs = (quote_attempt_outputs(
+            regressed_test_outputs(text, cmp.newly_red), ports.read_source)
+            if cmp.newly_red else {})
         red_names = sorted(cmp.newly_red)
         want_obs = [t for t in slice_.tests if _leaf(t) in failed] + red_names
         observed: Mapping[str, str] = {}

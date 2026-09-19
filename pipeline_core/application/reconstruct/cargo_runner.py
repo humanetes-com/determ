@@ -25,6 +25,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
 )
+from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
@@ -289,6 +290,18 @@ def measure_test_state(
     return reading
 
 
+def _read_under(root: Path, rel: str) -> str | None:
+    """`root/rel` as text, for a path a panic printed relative to the
+    package root; None outside `root` or unreadable."""
+    try:
+        path = (root / rel).resolve()
+        if not path.is_relative_to(root.resolve()):
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def test_regression_gate(
     run_cargo_fn: RunCargo,
     test_cmd: str | None,
@@ -368,9 +381,13 @@ def test_regression_gate(
     # Attach what the reddened tests printed, from the same capture the
     # comparison was read from — the detail used to name the tests and drop
     # their `left` / `right` (`regressed_test_outputs` carries the instance).
+    # The crate sites those outputs name are read HERE, while the attempt is
+    # still on the tree: every consumer renders the reading after the revert,
+    # where the same line number is other code (`attempt_site`).
     if cmp.newly_red:
-        cmp = replace(cmp, newly_red_output=regressed_test_outputs(
-            _raw[-1] if _raw else "", cmp.newly_red))
+        cmp = replace(cmp, newly_red_output=quote_attempt_outputs(
+            regressed_test_outputs(_raw[-1] if _raw else "", cmp.newly_red),
+            lambda rel: _read_under(cwd, rel)))
     # PUBLISH THE READING. This full-suite measurement runs on every splice and
     # its numbers were discarded on every path — the gate reduced them to a
     # yes/no, so nothing in the event store carried a score between one
