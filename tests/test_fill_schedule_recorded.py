@@ -408,8 +408,10 @@ def test_the_681204_fill_stops_zeroing_the_runs_behind_a_pair_that_never_pays() 
 
     The claim under test is NOT "builders sort first" or any paraphrase of
     the implementation's rule. It is: on a fill whose hop pair has been
-    graded over and over without ever paying, the pair still goes FIRST
-    and the runs behind it get a share instead of zero.
+    graded over and over without ever paying, the runs behind it get a
+    share instead of zero, and the pair itself is ranked by what its
+    ledger says (since 2026-09-19 it no longer keeps the head of the
+    order past its grace — run `3893442-cb547388`).
 
     The fixture is the record — the schedule event's own seven candidate
     runs (one opened, six `pair_wait`) and the route-run rows those same
@@ -456,17 +458,18 @@ def test_the_681204_fill_stops_zeroing_the_runs_behind_a_pair_that_never_pays() 
     assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
                for s in control.deferred)
 
-    # The change: the pair still goes first, nothing is zeroed behind it.
+    # The change: nothing is zeroed behind the pair, and past its grace the
+    # pair is ranked by its ledger like any run — its last try on these
+    # very bodies came back flat, so it is a flat re-buy the budget defers
+    # (re-admitted after `readmit_after` deferrals), and every other
+    # candidate opens with a share.
     sched = schedule(runs, rows, oracle_fp=oracle, hollow=hollow_of(fix),
                      budget_minutes=200)
-    assert sched.ordered[0].run.label == pair_label
-    assert sched.ordered[0].reason == "grace_spent"
     assert not [s for s in sched.deferred if s.reason == "pair_wait"]
-    assert {s.run.label for s in sched.ordered} == set(recorded)
+    assert {s.run.label for s in sched.ordered} == set(recorded) - {pair_label}
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (pair_label, "rebuy_flat")]
     assert all(s.share_minutes and s.share_minutes > 0 for s in sched.ordered)
-    # Every run the pair blocks still queues behind it.
-    order = [s.run.label for s in sched.ordered]
-    assert all(order.index(lbl) > 0 for lbl in set(recorded) - {pair_label})
 
 
 def test_a_pair_inside_its_grace_still_defers_the_rest_on_the_681204_fill() -> None:
@@ -513,3 +516,49 @@ def test_the_fresh_tree_fill_opens_every_run_instead_of_none() -> None:
     assert sorted(opened) == sorted(r.label for r in runs)
     assert not out.schedule.deferred
     assert {p.label for p in pairs} <= set(opened)
+
+
+def test_the_3893442_fill_opens_the_never_served_runs_before_pairs_past_their_grace() -> None:
+    """Plan sentence, computed on fill 1 of `3893442-cb547388` (2026-09-19).
+
+    The claim: on a fill whose two hop pairs are past their grace (the
+    debug pair graded 10 times under this oracle, none paying; both pairs'
+    last replies were the bodies already on disk), every never-served run
+    opens before either pair, and the session that did pay that fill
+    (`session[1 test(s), 29 unit(s)] #0`, +3 in 12 minutes, opened 4th
+    after 69 minutes of the two pairs) opens first.
+
+    The fixture's ledger is the index prefix the fill's schedule loaded
+    (`ledger_source: index`). The negative control is the record itself:
+    the schedule event opened both pairs at slots 2 and 3, ahead of that
+    session — and the pre-change `schedule` over this same fixture
+    reproduces that line.
+    """
+    fix = load_fill("3893442-cb547388_iter1")
+    assert fix["ledger_source"] == "index"
+    recorded = [str(raw["label"]) for raw in fix["schedule_runs"]
+                if not raw.get("deferred")]
+    pairs = [lbl for lbl in recorded if lbl.startswith("pair ")]
+    paid = "session[1 test(s), 29 unit(s)] #0"
+    assert len(pairs) == 2
+    assert [recorded.index(p) for p in pairs] == [1, 2]
+    assert recorded.index(paid) == 3
+
+    runs = sorted((r for rs in candidate_runs(fix).values() for r in rs),
+                  key=lambda r: r.seq)
+    rows = ledger_of(fix)
+    # The fill's oracle is the newest row's: the index prefix also holds
+    # pair rows graded under the oracle before the 2026-09-18 re-augment.
+    oracle = rows[-1].oracle_fp
+    sched = schedule(runs, rows, oracle_fp=oracle, hollow=hollow_of(fix),
+                     budget_minutes=200,
+                     unmeasurable_tests=unmeasurable_of(fix),
+                     crash_blamed=crash_blamed_of(fix),
+                     max_per_kind={RouteKind.SESSION: 4})
+    order = [s.run.label for s in sched.ordered]
+    assert order[0] == paid
+    never = [s.run.label for s in sched.ordered if s.reason == "never_served"]
+    for p in pairs:
+        if p in order:
+            assert all(order.index(n) < order.index(p) for n in never)
+    assert not [s for s in sched.deferred if s.reason == "pair_wait"]

@@ -775,14 +775,16 @@ def test_the_grace_does_not_read_rows_graded_under_another_oracle() -> None:
     assert consecutive_unpaid(rows, pair, "o") == 3
 
 
-def test_a_pair_past_its_grace_goes_first_and_the_rest_get_a_share() -> None:
-    """The plan's sentence. The pair still leads — a two-file transaction
-    written after one of its halves was peeled apart is the split every
-    pair_wait instance records — and the runs behind it stop being held
-    at zero.
+def test_a_pair_past_its_grace_loses_its_precedence_and_the_rest_get_a_share() -> None:
+    """The sentence. A pair past its grace neither zeroes the runs its
+    leftovers share nor sorts ahead of them: the never-served runs go
+    first and the pair queues with its own ledger rank (`grace_spent`,
+    weight 1). Inside the grace the pair still leads and the rest are
+    `pair_wait` at share 0 (negative control: one fewer graded row).
 
-    Negative control: one fewer graded row and the fill is today's, pair
-    alone with everything else `pair_wait` at share 0."""
+    Measured on run `3893442-cb547388` (2026-09-19): with the order kept
+    past the grace the pairs opened ahead of the session that paid, every
+    fill, once the fill re-planned at its first premise move."""
     pair, per_fn, file_run, _ = _pair_blocked_inputs()
     runs = [pair, per_fn, file_run]
     spent = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.REVERTED)
@@ -798,12 +800,31 @@ def test_a_pair_past_its_grace_goes_first_and_the_rest_get_a_share() -> None:
 
     sched = schedule(runs, spent, oracle_fp="o", hollow={},
                      budget_minutes=120)
-    assert sched.ordered[0].run.label == pair.label
-    assert sched.ordered[0].reason == "grace_spent"
-    assert {s.run.label for s in sched.ordered} == {
-        pair.label, per_fn.label, file_run.label}
+    order = [s.run.label for s in sched.ordered]
+    assert set(order) == {pair.label, per_fn.label, file_run.label}
+    assert order[-1] == pair.label
+    assert sched.ordered[-1].reason == "grace_spent"
     assert not [s for s in sched.deferred if s.reason == "pair_wait"]
     assert all(s.share_minutes and s.share_minutes > 0 for s in sched.ordered)
+
+
+def test_a_pair_past_its_grace_that_returned_the_same_bodies_flat_is_a_rebuy() -> None:
+    """Past the grace the ledger speaks for the pair as for any run: its
+    last graded row on the identical bodies came back FLAT, so it is a
+    `rebuy_flat` and a positive budget defers it. Inside the grace the
+    same history keeps it first (control)."""
+    pair, per_fn, file_run, _ = _pair_blocked_inputs()
+    moved = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.FLAT)
+             for i in range(DEFAULT_UNPAID_GRACE - 1)]
+    rows = [*moved, _row(pair, RunOutcome.FLAT)]
+    sched = schedule([pair, per_fn, file_run], rows, oracle_fp="o",
+                     hollow={}, budget_minutes=120)
+    assert [s.run.label for s in sched.deferred] == [pair.label]
+    assert sched.deferred[0].reason == "rebuy_flat"
+    assert {s.run.label for s in sched.ordered} == {per_fn.label, file_run.label}
+    control = schedule([pair, per_fn, file_run], rows[1:], oracle_fp="o",
+                       hollow={}, budget_minutes=120)
+    assert [s.run.label for s in control.ordered] == [pair.label]
 
 
 def test_the_grace_bound_is_switchable_off() -> None:
@@ -997,10 +1018,10 @@ def test_a_pair_that_paid_a_sibling_does_not_keep_zeroing_the_other_tests_runs()
     assert consecutive_unpaid(rows, pair, "o") == 1 < DEFAULT_UNPAID_GRACE
     sched = schedule([pair, b_only, a_only], rows, oracle_fp="o", hollow={},
                      budget_minutes=120)
-    assert sched.ordered[0].run.label == pair.label
-    assert b_only.label in [s.run.label for s in sched.ordered]
-    (opened,) = [s for s in sched.ordered if s.run.label == b_only.label]
-    assert opened.lapsed == ("pair_wait",)
+    # The spent grace over `t_b` also releases the order: `b_only` is ranked
+    # against the pair by the ledger (never served vs served) and opens
+    # first; the pair still holds `a_only`, whose test it has not spent on.
+    assert [s.run.label for s in sched.ordered] == [b_only.label, pair.label]
     assert [(s.run.label, s.reason) for s in sched.deferred] == [
         (a_only.label, "pair_wait")]
 

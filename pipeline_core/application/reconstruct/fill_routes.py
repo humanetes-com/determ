@@ -83,6 +83,10 @@ class RouteRunReport:
     #: rows alone cannot. Every other route answers the simpler question the
     #: executor folds — were ALL of this run's joined fill replies cut.
     cap_owned: bool = False
+    #: The units the route reported kept left every target body as it was
+    #: before the run (whitespace-folded): the reply re-emitted the tree.
+    #: Set by the executor, which then records the run as keeping nothing.
+    unchanged: bool = False
 
     @classmethod
     def from_delta(cls, delta: AttemptsDelta,

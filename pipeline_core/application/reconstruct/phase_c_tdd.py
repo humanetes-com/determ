@@ -161,6 +161,7 @@ from pipeline_core.domain.measurement import (
     Measurement,
     VerdictReconciliation,
     code_identity,
+    failing_binaries_by_name,
     qualified_verdicts,
     tree_content_sha,
 )
@@ -4633,12 +4634,16 @@ def run_phase_c_tdd(
             # to answer "can a rewrite of this unit move THIS red test",
             # and a passing test asks nothing. Costs one instrumented run
             # per failing test on a staged copy.
+            # A name the sweep failed in several binaries is several failing
+            # tests: pass C measures it on each binary that failed it.
             _cov = deps.measure_coverage_slice(
                 project_dir, cluster.name,
                 failing_tests=frozenset(cur_failed),
                 cluster_env=cluster_env,
                 timeout=test_timeout,
-                hung={b.label: (b.dangling or "?") for b in _hung})
+                hung={b.label: (b.dangling or "?") for b in _hung},
+                failing_binaries=failing_binaries_by_name(
+                    _measure.failed_pairs))
             if _cov is not None and _cov.hung_tests:
                 deps.emit("phase_c.coverage.hung", data={
                     "cluster": cluster.name, "iter": iter_n,

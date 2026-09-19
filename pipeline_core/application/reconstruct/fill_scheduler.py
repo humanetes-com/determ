@@ -196,6 +196,32 @@ def _outcome(report: RouteRunReport, delta: int) -> RunOutcome:
     return RunOutcome.FLAT
 
 
+def _landed_nothing(
+    rep: RouteRunReport, targets: frozenset[FnLocator], before: str,
+    bodies_sha: Callable[[frozenset[FnLocator]], str],
+) -> RouteRunReport:
+    """`rep` with its keeps dropped when they changed no body.
+
+    A route reports what its gate KEPT, and a reply that re-emits the bodies
+    already on disk passes every gate: it compiles and regresses nothing.
+    Run `3893442-cb547388` (2026-09-19) rowed both hop pairs `kept 2` — the
+    log said `FILLED 2 fn(s)` — while the checkpoint after the fill differed
+    from the one before only in a file neither pair writes, and the
+    landed-change audit printed both pairs' units `unchanged`. A keep that
+    changed nothing is not a landing: the unit ledger, the route row and the
+    log must not read it as one. The run stays a graded try (its reply is
+    the evidence that this prompt yields the tree), so the row keeps its
+    FLAT / UNMEASURED grade and the re-buy detector still sees it.
+
+    Judged over the run's targets only: a keep outside them (an installable
+    complement) cannot be compared against `before`, so it is left alone."""
+    if not rep.kept or not before or not rep.kept <= targets:
+        return rep
+    if bodies_sha(targets) != before:
+        return rep
+    return replace(rep, kept=frozenset(), unchanged=True)
+
+
 def _pairs(locs: frozenset[FnLocator]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((loc.file, loc.fn_name) for loc in locs))
 
@@ -235,16 +261,20 @@ def _row_for(
         classes=dict(rep.classes), share_minutes=share, reason=s.reason)
 
 
-def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow) -> None:
+def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
+             unchanged: bool = False) -> None:
     deps.log(
         f"  [phase-c/route] {row.label}: {row.outcome.value.upper()} after "
         f"{row.minutes:.1f} min ({row.model_calls} call(s), net "
         f"{row.net_pass_delta:+d}, kept {len(row.kept)}, reverted "
         f"{len(row.reverted)}"
+        + (", every kept body was the one already on disk"
+           if unchanged else "")
         + (f", newly red {len(row.newly_red)}" if row.newly_red else "")
         + (f", crashed {list(row.newly_crashed)}" if row.newly_crashed else "")
         + f"; {row.reason})")
-    deps.emit("phase_c.route.run", data=row.to_dict())
+    deps.emit("phase_c.route.run",
+              data={**row.to_dict(), **({"unchanged": True} if unchanged else {})})
 
 
 def execute_fill(
@@ -353,13 +383,18 @@ def execute_fill(
         reports: dict[str, RouteRunReport] = {}
         starts: dict[str, float] = {}
         ends: dict[str, float] = {}
+        before: dict[str, str] = {}
 
         def _run_one(w: ScheduledRun, *, _route: FillRoute = route,
                      _starts: dict[str, float] = starts,
                      _ends: dict[str, float] = ends,
                      _reports: dict[str, RouteRunReport] = reports,
-                     _clocks: dict[str, RunClock] = clocks) -> None:
+                     _clocks: dict[str, RunClock] = clocks,
+                     _before: dict[str, str] = before) -> None:
             _starts[w.run.key] = deps.now()
+            # The targets' bodies as THIS run opens on them — not the plan's
+            # sha, which an earlier run of the same fill may have moved.
+            _before[w.run.key] = bodies_sha(w.run.targets)
             with route_scope(w.run.kind.value, w.run.label,
                              cluster=deps.cluster, iteration=deps.iteration):
                 # The stream rows of the calls THIS run makes, so a run
@@ -372,7 +407,8 @@ def execute_fill(
                     _rep = _route.run(w.run, _clocks[w.run.key])
                 if not _rep.cap_owned and run_all_replies_capped(_rows):
                     _rep = replace(_rep, unmeasured=True)
-                _reports[w.run.key] = _rep
+                _reports[w.run.key] = _landed_nothing(
+                    _rep, w.run.targets, _before[w.run.key], bodies_sha)
             _ends[w.run.key] = deps.now()
 
         try:
@@ -411,7 +447,7 @@ def execute_fill(
             row = _row_for(w, rep, kept, deps=deps, started=started,
                            minutes=minutes, share=shares[w.run.key])
             rows.append(row)
-            _log_row(deps, row)
+            _log_row(deps, row, unchanged=rep.unchanged)
         _flush(rows[-len(wave):])
         _notify_wave(deps, [reports.get(w.run.key) for w in wave])
         # A wave can end without its routes asking the clock again after

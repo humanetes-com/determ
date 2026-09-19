@@ -199,6 +199,15 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      stamp put the stub behind never-served units).  Reaction: the sweep
      prints `still-stubbed fn(s) hold N failing test(s)` and ranks them as
      crash-site evidence; a stub is never served.
+  P30 spent pair first — a fill's schedule opened a hop pair ranked
+     `grace_spent` (graded `unpaid_grace` times without paying) ahead of a
+     `never_served` run.  Run 3893442-cb547388 (2026-09-19, cluster stable):
+     fill 1 opened both pairs at slots 2-3, 69 of 96 minutes, both replies
+     the bodies already on disk, while the session that paid +3 waited at
+     slot 4; with the fill re-planning at its first premise move the order
+     repeats every fill.  Reaction: past its grace a pair loses its place in
+     the order over the runs it has spent on and is ranked by its ledger
+     (a flat re-buy of identical bodies is `rebuy_flat`).
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -512,6 +521,10 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P29": [
         # The sweep held the failing tests by the stub they stop in.
         ("still-stubbed fn(s) hold", "stub-held"),
+    ],
+    "P30": [
+        # A pair that re-emitted the tree is rowed as keeping nothing.
+        ("every kept body was the one already on disk", "noop-keep-rowed"),
     ],
     "P27": [
         # The end gate classified each orphan against augmentation's
@@ -2220,6 +2233,34 @@ def detect_p29(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:3]}]
 
 
+RE_PAIR_SPENT = re.compile(r"\d+\. pair [^;]*?\(grace_spent")
+RE_NEVER_SERVED_RUN = re.compile(r"\d+\. [^;]*?\(never_served")
+
+
+def detect_p30(run: Run, iters: list[dict]) -> list[dict]:
+    """A fill schedule line whose ORDERED part holds a `grace_spent` pair
+    before a `never_served` run. One hit per run."""
+    hits: list[str] = []
+    refs: list[str] = []
+    for ref, text in run.lines:
+        m = re.search(r"\[phase-c/schedule\] fill (\d+): \d+ run\(s\) — (.*)",
+                      text)
+        if not m:
+            continue
+        ordered = m.group(2).split(" — deferred:", 1)[0]
+        pair = RE_PAIR_SPENT.search(ordered)
+        if pair is None:
+            continue
+        if RE_NEVER_SERVED_RUN.search(ordered, pair.end()):
+            hits.append(f"fill {m.group(1)}")
+            refs.append(ref)
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} fill(s) opened a pair past its grace "
+                         f"before a never-served run: {', '.join(hits[:8])}",
+             "refs": refs[:3]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2234,7 +2275,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
              "P25": detect_p25, "P26": detect_p26, "P27": detect_p27,
-             "P28": detect_p28, "P29": detect_p29}
+             "P28": detect_p28, "P29": detect_p29, "P30": detect_p30}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2259,7 +2300,8 @@ CLASS_NAMES = {
     "P26": "unbounded wait (a fill event then no non-audit event for longer than 5x the sweep timeout; pre-fix the coverage slice waited forever)",
     "P27": "orphaned stub at a green end (all tests pass, exit 1 on reachable stubs no test executes; augmentation stopped on line coverage alone)",
     "P28": "unpeelable reply (file-first compile failure, peel refused none_implicated, whole reply reverted; pre-fix a bare-block free fn was keyed by the target impl)",
-    "P29": "parked stub (the blocker histogram ranked a stub first and the fill opened no stub run; pre-fix isolation silenced the stub-abort reading and a stale stamp sank the stub)"}
+    "P29": "parked stub (the blocker histogram ranked a stub first and the fill opened no stub run; pre-fix isolation silenced the stub-abort reading and a stale stamp sank the stub)",
+    "P30": "spent pair first (a pair past its grace opened ahead of a never-served run; pre-fix the grace lapsed the deferral but kept the order)"}
 
 
 # -------------------------------------------------------------------- report

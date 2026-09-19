@@ -148,11 +148,25 @@ def plan_layout_reconciliation(
                                  "declaration could not be located in the live "
                                  "tree; leaving it alone")
                     continue
+                # The item as the file holds it: its outer doc comments are
+                # part of it. The authored text carries them, so replacing
+                # only the declaration below them added one more copy of the
+                # doc on every reinstall.
+                live_key = _with_outer_docs(text, live_key)
                 # A reinstall replaces the DECLARATION. Any member body the
                 # live tree has already implemented survives it — otherwise a
                 # trait's default methods go back to `unimplemented!()` on
                 # every startup and the fill loop re-earns them forever.
                 merged = merge_live_bodies(authored, live_key)
+                if _ws(merged) == _ws(live_key):
+                    # Installed: what a reinstall would write is what is
+                    # there. Compared against the AUTHORED text alone, a tree
+                    # whose member bodies the fill loop has written never
+                    # matches, and the item was "superseded" on every launch
+                    # (`kind.rs` `AdhocKind`/`TraitKind` on every stable and
+                    # nightly start in the kept logs; run `3893442-cb547388`,
+                    # 2026-09-19, found its doc comment seven times over).
+                    continue
                 plan.setdefault(it.file, []).append(
                     DefReplacement(live_key, merged))
                 notes.append(f"{it.file}: {it.name} — live tree is on a "
@@ -180,6 +194,30 @@ def live_definition(text: str, item: PrivateSurfaceItem) -> str | None:
         return None
     span = locate_item_declaration(text, keyword, item.name)
     return None if span is None else text[span[0]:span[1]]
+
+
+def _ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _with_outer_docs(text: str, decl: str) -> str:
+    """`decl` (a slice of `text`) extended back over the `///` lines directly
+    above it — the item's outer doc comments, which `live_definition` leaves
+    out because it starts at the item's attributes."""
+    start = text.find(decl)
+    if start < 0:
+        return decl
+    lines_before = text[:start].split("\n")
+    # The line `decl` starts on is lines_before[-1] (its indentation, if any).
+    head = lines_before[:-1]
+    n = 0
+    while n < len(head) and head[len(head) - 1 - n].lstrip().startswith("///"):
+        n += 1
+    if n == 0:
+        return decl
+    doc_start = start - len(lines_before[-1]) - sum(
+        len(ln) + 1 for ln in head[len(head) - n:])
+    return text[doc_start:start + len(decl)]
 
 
 def _components_for(

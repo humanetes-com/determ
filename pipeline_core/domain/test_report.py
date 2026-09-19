@@ -53,6 +53,17 @@ class TestFailure:
     panic_line: int | None
     panic_col: int | None
     body: str                   # the test's `---- name stdout ----` section (uncapped)
+    # The same name's failures in OTHER test binaries, each with its own
+    # panic and section, in capture order. A name is not a test: two
+    # integration binaries may each hold a `test_downcast_ref`, and with the
+    # first section winning the second binary's panic reached no reader —
+    # run `3893442-cb547388` (2026-09-19): `tests/test_context.rs`'s copy
+    # asserted a call the session could not edit, `tests/test_downcast.rs`'s
+    # copy was the one measured. The primary fields stay the first copy's,
+    # so every reader that asks "where did this name fail" answers as before;
+    # the readers that must see every copy (the evidence a prompt quotes,
+    # the premise, the truncation reading) read these too.
+    others: tuple[TestFailure, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,31 +215,47 @@ def failure_evidence_by_test(output: str, *, per_test_cap: int = 480) -> dict[st
     """
     out: dict[str, str] = {}
     for f in parse_test_output(output).failures:
-        if not f.body.strip():
-            continue
-        keep: list[str] = []
-        started = False
-        for ln in f.body.splitlines():
-            s = ln.strip()
-            if not started:
-                if "panicked at " in s:
-                    started = True
-                    keep.append(s)
-                continue
-            if not s:
-                continue
-            if s.startswith("note: run with `RUST_BACKTRACE"):
-                break
-            keep.append(s)
-            if len(keep) >= 8:
-                break
-        if not keep:
-            keep = [s for s in (ln.strip() for ln in f.body.splitlines()) if s][:6]
-        text = "\n".join(keep)
-        if len(text) > per_test_cap:
-            text = text[:per_test_cap].rstrip() + " …"
-        out[f.test_name] = text
+        text = _evidence_of(f.body, per_test_cap)
+        # Every binary's failure of the name: the model must see the panic
+        # of the copy whose asserted call it is asked to fix.
+        extra = [e for e in (_evidence_of(o.body, per_test_cap)
+                             for o in f.others) if e]
+        if extra:
+            text = "\n".join(
+                [text or "(no captured output)"]
+                + [f"{OTHER_COPY_MARK} {f.test_name}, in a different test "
+                   f"binary, also failed:)\n{e}" for e in extra])
+        if text:
+            out[f.test_name] = text
     return out
+
+
+def _evidence_of(body: str, per_test_cap: int) -> str:
+    """The panic line and what follows it, capped; "" for an empty body."""
+    if not body.strip():
+        return ""
+    keep: list[str] = []
+    started = False
+    for ln in body.splitlines():
+        s = ln.strip()
+        if not started:
+            if "panicked at " in s:
+                started = True
+                keep.append(s)
+            continue
+        if not s:
+            continue
+        if s.startswith("note: run with `RUST_BACKTRACE"):
+            break
+        keep.append(s)
+        if len(keep) >= 8:
+            break
+    if not keep:
+        keep = [s for s in (ln.strip() for ln in body.splitlines()) if s][:6]
+    text = "\n".join(keep)
+    if len(text) > per_test_cap:
+        text = text[:per_test_cap].rstrip() + " …"
+    return text
 
 
 def merge_observations(
@@ -279,6 +306,12 @@ def regressed_test_outputs(
     return out
 
 
+#: Opens the part of a name's evidence that is another binary's failure of
+#: that name (`failure_evidence_by_test`); readers that act per panic split
+#: on it (`refill_evidence.quote_panic_site`).
+OTHER_COPY_MARK = "(another test named"
+
+
 def parse_test_output(text: str) -> TestRunReport:
     """Parse raw `cargo test` output into a :class:`TestRunReport`. Failures
     carry the first panic location libtest printed so the caller can attribute
@@ -286,9 +319,12 @@ def parse_test_output(text: str) -> TestRunReport:
     section still appears (kind OTHER, no location)."""
     if not text:
         return TestRunReport(frozenset(), ())
-    bodies: dict[str, str] = {}
+    sections: dict[str, list[str]] = {}
     for name, body in split_test_stdout_sections(text):
-        bodies.setdefault(name, body)   # first section wins
+        sections.setdefault(name, []).append(body)
+    # The first section is the name's primary failure; a further section
+    # under the same name is another binary's test of that name.
+    bodies = {name: bs[0] for name, bs in sections.items()}
     # Some cargo versions emit no `---- name stdout ----` header for a
     # single-test run — the panic sits in the bare output. Fall back to the
     # whole text as the body so the panic still resolves. Gated on the text
@@ -304,9 +340,16 @@ def parse_test_output(text: str) -> TestRunReport:
         seen.add(name)
         body = text if no_sections else bodies.get(name, "")
         pf, pl, pc, msg = parse_panic_location(body)
+        others: list[TestFailure] = []
+        for extra in ([] if no_sections else sections.get(name, [])[1:]):
+            opf, opl, opc, omsg = parse_panic_location(extra)
+            others.append(TestFailure(
+                test_name=name, kind=_classify(omsg, extra),
+                panic_file=opf, panic_line=opl, panic_col=opc, body=extra))
         failures.append(TestFailure(
             test_name=name, kind=_classify(msg, body),
-            panic_file=pf, panic_line=pl, panic_col=pc, body=body))
+            panic_file=pf, panic_line=pl, panic_col=pc, body=body,
+            others=tuple(others)))
     passed = frozenset(_passed_names(text) - seen)
     return TestRunReport(passed, tuple(failures))
 

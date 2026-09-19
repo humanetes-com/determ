@@ -61,11 +61,20 @@ def _is_stub(s: FnSite) -> bool:
 def test_under_isolation_the_stub_holds_the_tests_that_stop_in_it() -> None:
     hold = stub_hold_of(_ISOLATED, _locate, _is_stub)
     assert hold.blockers == {_VTABLE}
-    assert len(hold.held_by(_VTABLE)) == 82
-    # Every held test is failing and first fails at the stub's line.
+    # 82 names whose first-parsed copy stops at the stub, plus 2 whose copy
+    # in ANOTHER binary does (`test_drop`, `test_unsuccessful_downcast`:
+    # one name, two failing tests), which the first-section-wins parse hid
+    # until 2026-09-19.
+    assert len(hold.held_by(_VTABLE)) == 84
+    # Every held test is failing and some copy of it first fails at the
+    # stub's line.
     oc = outcomes_of(_ISOLATED)
-    assert all(not oc[t].passed and (oc[t].first_file, oc[t].first_line)
-               == ("src/error.rs", 733) for t in hold.held_by(_VTABLE))
+    assert all(not oc[t].passed and any(
+        (c.first_file, c.first_line) == ("src/error.rs", 733)
+        for c in (oc[t], *oc[t].others)) for t in hold.held_by(_VTABLE))
+    assert {t for t in hold.held_by(_VTABLE)
+            if (oc[t].first_file, oc[t].first_line) != ("src/error.rs", 733)
+            } == {"test_drop", "test_unsuccessful_downcast"}
 
 
 def test_negative_control_the_binary_reading_is_silent_under_isolation() -> None:

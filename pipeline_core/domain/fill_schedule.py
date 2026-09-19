@@ -32,7 +32,7 @@ test, unit or crate name is an input:
   that shares its leftover tests or members: the pair is the paying
   two-file transaction, and a never-served file / impl / per-fn of units
   those tests merely execute through is not a new try, it is a split of
-  that transaction (run ``675471-0f3105f2``, 2026-09-10: the pair sat at
+  that transaction — while the pair's grace lasts (``unpaid_grace``) (run ``675471-0f3105f2``, 2026-09-10: the pair sat at
   served rank 2 while a never-served 26-body per-fn of coverage locators
   opened first and classified every landing unreachable). Those blocked
   runs are deferred this fill (reason ``pair_wait``), not queued after
@@ -246,13 +246,12 @@ def run_blocks(a: RouteRun, b: RouteRun,
                crash_blamed: Collection[FnLocator] = ()) -> bool:
     """True when `a` must land before `b` can be judged.
 
-    This is ORDER: it says the pair goes first, and that claim has no
-    expiry — a two-file transaction written after one of its halves has
-    been peeled apart is the split every instance below records. What
-    DOES expire is the share-0 deferral built on top of it; see
-    ``unpaid_grace`` in :func:`schedule`. Read the two together: past the
-    grace the pair still sorts first here, and the runs behind it stop
-    being zeroed.
+    This is the RELATION: it says which runs a pair's transaction covers
+    — a two-file transaction written after one of its halves has been
+    peeled apart is the split every instance below records. Whether the
+    relation still orders and defers is the pair's grace; see
+    ``unpaid_grace`` in :func:`schedule`. Past the grace over `b` the pair
+    neither defers `b` nor sorts ahead of it: the ledger ranks the two.
 
     A hop pair is the two-file transaction for its members. Any other run
     that can write either member, or that aims at the same leftover tests,
@@ -720,29 +719,41 @@ def _rank_of(run: RouteRun, oracle_fp: str,
             continue
         last = r
         break
-    if run.kind is RouteKind.PAIR and not grace_left:
-        # Past the grace: SERVED — honest about a history the ledger has
-        # dozens of rows for, and still a non-zero weight. Not
-        # never-served, which is what the exemption below was answering;
-        # not a zero-weight re-buy either, because a DEFERRED pair is how
-        # the two-file transaction gets split, which is the defect that
-        # exemption was written against. What lapses instead is the
-        # share-0 deferral of every competing run — see `unpaid_grace`.
-        # Before `last is None`, because the identity carries the bodies
-        # sha and a pair that keeps any body at all arrives with no row
-        # on its own identity: that is the state this bound exists for.
+    rank, reason = _ledger_rank(run, last, served_targets,
+                                grace_left=grace_left)
+    if (run.kind is RouteKind.PAIR and not grace_left
+            and rank in (_RANK_NEVER_SERVED, _RANK_SERVED)):
+        # Past the grace a pair is never "never served": its work key has
+        # `unpaid_grace` graded rows at least, and the identity misses them
+        # only because it carries the bodies sha, which any kept body moves.
+        # Anything the ledger can say beyond that — the identical bodies
+        # came back flat, or reverted — it says through `_ledger_rank`,
+        # exactly as for every other route: run `3893442-cb547388`
+        # (2026-09-19) held 10 graded rows on the debug pair under one
+        # oracle, none paying, the last two on one bodies sha, and the
+        # pair still opened ahead of four never-served sessions.
         return _RANK_SERVED, "grace_spent", deferrals
+    if rank in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED) \
+            and deferrals >= readmit_after:
+        return rank, "rebuy_readmitted", deferrals
+    return rank, reason, deferrals
+
+
+def _ledger_rank(run: RouteRun, last: RouteLedgerRow | None,
+                 served_targets: Collection[str], *,
+                 grace_left: bool) -> tuple[int, str]:
+    """(rank, reason) from the latest graded row on the run's identity."""
     if last is None:
         # A row on the same route and targets under ANOTHER identity (the
         # bodies or the oracle moved since): served, but this try is new.
         if _served_key(run) in served_targets:
-            return _RANK_SERVED, _REASON[_RANK_SERVED], deferrals
-        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
+            return _RANK_SERVED, _REASON[_RANK_SERVED]
+        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
     if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
-        return _RANK_PAYING, _REASON[_RANK_PAYING], deferrals
+        return _RANK_PAYING, _REASON[_RANK_PAYING]
     if last.outcome in (RunOutcome.STOPPED, RunOutcome.UNMEASURED):
         # Interrupted, or every reply reasoning-capped: not evidence.
-        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
+        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
     if (last.outcome is RunOutcome.REVERTED and run.kind is RouteKind.PAIR
             and grace_left):
         # The pair's revert stores a diagnosis the next prompt is
@@ -761,12 +772,10 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         # NEVER SERVED about a route the ledger has 60 graded rows for
         # (cluster `stable`, 2026-09-14, none of them cashed), which is
         # the one state the re-buy detector exists to catch.
-        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED], deferrals
+        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
     rank = (_RANK_REBUY_REVERTED if last.outcome is RunOutcome.REVERTED
             else _RANK_REBUY_FLAT)
-    if deferrals >= readmit_after:
-        return rank, "rebuy_readmitted", deferrals
-    return rank, _REASON[rank], deferrals
+    return rank, _REASON[rank]
 
 
 def _work_key(kind: RouteKind, targets: Iterable[FnLocator],
@@ -916,11 +925,16 @@ def schedule(
     ``unpaid_grace`` bounds the schedule's exemptions. A run graded that
     many times in a row on the same targets and oracle without paying has
     SPENT its grace: a reverted hop pair stops ranking as never-served,
-    and it stops deferring the runs it blocks — it still sorts first, they
-    queue behind it with a share instead of zero. ``0`` disables the
-    bound and restores the unbounded exemptions. This is the difference
-    between "the pair goes first", which the pair_wait instances below
-    establish, and "nothing else goes at all", which none of them does:
+    it stops deferring the runs it blocks, and it stops sorting ahead of
+    them — from then on the ledger ranks it like any run (a flat re-buy of
+    identical bodies is ``rebuy_flat``). ``0`` disables the bound and
+    restores the unbounded exemptions. Keeping the order past the grace
+    was measured on run ``3893442-cb547388`` (2026-09-19): with the fill
+    re-planning at its first premise move, the two pairs opened ahead of
+    the never-served session that paid, every fill. The grace is the
+    difference between "the pair goes first", which the pair_wait
+    instances below establish, and "nothing else goes at all", which none
+    of them does:
     on 2026-09-14 the stable cluster's ledger held 60 graded pair rows
     under one oracle, all reverted or flat, while the schedule opened
     that pair and nothing else in 20 consecutive fills. A pair's grace
@@ -995,6 +1009,43 @@ def schedule(
                 order_index.get(run.kind, len(order_index)), run.seq)
 
     ranked.sort(key=_sort_key)
+    _per_test: dict[tuple[str, str], int] = {}
+
+    def _test_spent(kind: str, test: str) -> bool:
+        """`unpaid_grace` tries in a row of `kind`'s writes aimed at `test`
+        that did not turn it green. Cached per fill."""
+        if unpaid_grace <= 0:
+            return False
+        key = (kind, test)
+        if key not in _per_test:
+            _per_test[key] = (
+                unpaid_tries_for_test(
+                    rows_list, test, oracle_fp,
+                    match=lambda r: r.kind is RouteKind.PAIR)
+                if kind == "pair" else
+                unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
+        return _per_test[key] >= unpaid_grace
+
+    def _grace_left(p: RouteRun, run: RouteRun) -> bool:
+        return (_served_key(p) not in spent
+                and not ((shared := p.target_tests & run.target_tests)
+                         and all(_test_spent("pair", t) for t in shared)))
+
+    def _orders(a: RouteRun, b: RouteRun) -> bool:
+        """`a` goes before `b` in the order. A hop pair's claim to go
+        first is part of its grace, not a separate rule: once the pair has
+        spent it over `b` (its own graded rows, or `b`'s shared tests'
+        pair tries, `unpaid_grace` in a row without paying), `b` is ranked
+        against the pair by the ledger like any two runs. Run
+        `3893442-cb547388` (2026-09-19) is what the unbounded order cost
+        once the fill re-plans at the first premise move: both pairs, past
+        their grace and returning the bodies already on disk, opened ahead
+        of the never-served session that paid +3, 69 of the fill's 96
+        minutes, and the fill after re-planned into the same order."""
+        if not run_blocks(a, b, hollow, blamed):
+            return False
+        return a.kind is not RouteKind.PAIR or _grace_left(a, b)
+
 
     # Stable topological order over ALL runs: at each step the first run in
     # sort order whose every blocker is already placed. A cycle (two runs
@@ -1003,13 +1054,13 @@ def schedule(
         it[0].key: tuple(
             other[0].label for other in ranked
             if other[0] is not it[0]
-            and run_blocks(other[0], it[0], hollow, blamed))
+            and _orders(other[0], it[0]))
         for it in ranked}
     blocker_keys: dict[str, set[str]] = {
         it[0].key: {
             other[0].key for other in ranked
             if other[0] is not it[0]
-            and run_blocks(other[0], it[0], hollow, blamed)}
+            and _orders(other[0], it[0])}
         for it in ranked}
     ordered_items: list[tuple[RouteRun, int, str, int, int, tuple[str, ...]]] = []
     pending = list(ranked)
@@ -1055,27 +1106,6 @@ def schedule(
     # The kind cap is applied in the same pass for the same reason: a
     # holder the cap then defers held its waiters for nothing.
     waiting: list[ScheduledRun] = []
-    _per_test: dict[tuple[str, str], int] = {}
-
-    def _test_spent(kind: str, test: str) -> bool:
-        """`unpaid_grace` tries in a row of `kind`'s writes aimed at `test`
-        that did not turn it green. Cached per fill."""
-        if unpaid_grace <= 0:
-            return False
-        key = (kind, test)
-        if key not in _per_test:
-            _per_test[key] = (
-                unpaid_tries_for_test(
-                    rows_list, test, oracle_fp,
-                    match=lambda r: r.kind is RouteKind.PAIR)
-                if kind == "pair" else
-                unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
-        return _per_test[key] >= unpaid_grace
-
-    def _grace_left(p: RouteRun, run: RouteRun) -> bool:
-        return (_served_key(p) not in spent
-                and not ((shared := p.target_tests & run.target_tests)
-                         and all(_test_spent("pair", t) for t in shared)))
 
     # A coverage-split waits on a non-split candidate of the same
     # leftovers. The candidates are every non-split run in order; the

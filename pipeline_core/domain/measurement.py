@@ -168,6 +168,35 @@ def qualified_verdicts(
     return frozenset(passed), frozenset(failed), frozenset(incomplete)
 
 
+def cargo_target_of(binary_label: str) -> str | None:
+    """The cargo target name of an integration-test binary as the sweep
+    labels it: `tests/foo.rs` and `tests/foo/main.rs` -> `foo`. None for
+    any other label (the lib's unit tests, doc tests): those are one binary
+    per crate and need no disambiguation by name."""
+    parts = binary_label.replace("\\", "/").split("/")
+    if len(parts) == 2 and parts[0] == "tests" and parts[1].endswith(".rs"):
+        return parts[1][:-3] or None
+    if len(parts) == 3 and parts[0] == "tests" and parts[2] == "main.rs":
+        return parts[1] or None
+    return None
+
+
+def failing_binaries_by_name(
+    failed_pairs: Iterable[tuple[str, str]],
+) -> dict[str, frozenset[str]]:
+    """Failing test name -> the cargo targets of the binaries that failed
+    it. A name with two targets is two failing tests: run
+    `3893442-cb547388` (2026-09-19) failed `test_downcast_ref` in both
+    `tests/test_context.rs` and `tests/test_downcast.rs`, and every reader
+    keyed by the name alone measured one of them."""
+    out: dict[str, set[str]] = {}
+    for label, name in failed_pairs:
+        target = cargo_target_of(str(label))
+        if target is not None:
+            out.setdefault(str(name), set()).add(target)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
 @dataclass(frozen=True, slots=True)
 class PassDelta:
     """Whether two measurements' pass counts may be compared at all, and why."""

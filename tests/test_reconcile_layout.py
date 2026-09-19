@@ -327,3 +327,51 @@ def test_non_authored_records_are_untouched():
     recs, notes = adopt_registry_definitions([gated], _registry(Error=_NEW))
     assert recs[0] is gated
     assert notes == []
+
+
+_TAG_AUTHORED = ("/// Picks the tagged arm.\n#[doc(hidden)]\n"
+                 "pub trait TagKind: Sized {\n"
+                 "    fn kind(&self) -> Tag { unimplemented!() }\n}")
+_TAG_FILLED_DECL = ("#[doc(hidden)]\npub trait TagKind: Sized {\n"
+                    "    fn kind(&self) -> Tag {\n        Tag\n    }\n}")
+
+
+def _tag_plan(live_text: str):
+    surface = classify_private_surface([
+        TypeRecord(file="kind.rs", kind="trait", name="TagKind", is_pub=False,
+                   definition=_TAG_AUTHORED),
+    ], [], cfg_cluster="stable", author_private_fields=True)
+    comp = next(c for c in surface.components
+                if any(i.name == "TagKind" for i in c))
+    rec = LayoutComponentRecord(
+        frozenset(i.name for i in comp), LayoutOutcome.AUTHORED,
+        tuple((uid, _TAG_AUTHORED) for uid in component_uids(comp)))
+    return plan_layout_reconciliation(surface, [rec], lambda rel: live_text)
+
+
+def test_a_filled_member_body_is_not_a_superseded_definition() -> None:
+    """Run `3893442-cb547388` (2026-09-19): `kind.rs`'s two tag traits were
+    "superseded" on every launch because the check compared the tree with
+    the AUTHORED text (stub members) while the tree held filled members, and
+    each reinstall replaced the declaration below the doc comment with a
+    text carrying the doc comment — seven copies by then. The sentence: a
+    tree holding the doc comment once and the filled member plans nothing;
+    a tree holding it three times is healed to once in one reinstall.
+    Control: the filled tree with no doc comment at all still gets it
+    (one reinstall, then nothing)."""
+    doc = "/// Picks the tagged arm.\n"
+    plan, _notes = _tag_plan("pub struct Tag;\n" + doc + _TAG_FILLED_DECL + "\n")
+    assert plan == {}
+
+    plan, _notes = _tag_plan("pub struct Tag;\n" + doc * 3 + _TAG_FILLED_DECL + "\n")
+    (rep,) = plan["kind.rs"]
+    assert rep.old.count("/// Picks") == 3
+    assert rep.new.count("/// Picks") == 1 and "Tag\n" in rep.new
+    healed = ("pub struct Tag;\n" + doc * 3 + _TAG_FILLED_DECL + "\n").replace(
+        rep.old, rep.new)
+    assert _tag_plan(healed)[0] == {}
+
+    plan, _notes = _tag_plan("pub struct Tag;\n" + _TAG_FILLED_DECL + "\n")
+    (rep,) = plan["kind.rs"]
+    once = ("pub struct Tag;\n" + _TAG_FILLED_DECL + "\n").replace(rep.old, rep.new)
+    assert once.count("/// Picks") == 1 and _tag_plan(once)[0] == {}

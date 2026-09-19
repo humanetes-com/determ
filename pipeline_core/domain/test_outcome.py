@@ -106,6 +106,9 @@ class TestOutcome:
     first_line: int | None = None
     aborted: bool = False
     silent: bool = False
+    #: The same name's failures in other test binaries, first failure site
+    #: each (`TestFailure.others`): one name, several failing tests.
+    others: tuple[TestOutcome, ...] = ()
 
     @property
     def site_kind(self) -> SiteKind:
@@ -115,7 +118,8 @@ class TestOutcome:
 def outcomes_of(capture: str) -> dict[str, TestOutcome]:
     """Every passed and failed test of a capture. Ignored tests have no
     outcome. A name reported both passed and failed (two binaries sharing a
-    test name) is failed: a failure anywhere is the evidence."""
+    test name) is failed: a failure anywhere is the evidence. A name that
+    failed in several binaries carries each further copy in `others`."""
     report = parse_test_output(capture)
     aborted: set[str] = set()
     silent: set[str] = set()
@@ -127,7 +131,9 @@ def outcomes_of(capture: str) -> dict[str, TestOutcome]:
     for f in report.failures:
         out[f.test_name] = TestOutcome(
             f.test_name, False, f.panic_file, f.panic_line,
-            aborted=f.test_name in aborted, silent=f.test_name in silent)
+            aborted=f.test_name in aborted, silent=f.test_name in silent,
+            others=tuple(TestOutcome(o.test_name, False, o.panic_file,
+                                     o.panic_line) for o in f.others))
     return out
 
 
@@ -139,8 +145,11 @@ def run_kind(o: TestOutcome) -> RunKind:
     which is what a coverage refusal about that test needs."""
     if o.passed:
         return RunKind.COMPLETE
-    if o.site_kind is SiteKind.TEST and not o.aborted:
+    if (o.site_kind is SiteKind.TEST and not o.aborted
+            and all(c.site_kind is SiteKind.TEST for c in o.others)):
         return RunKind.ASSERTED
+    # Any copy of the name that stopped inside the crate (or died) is a run
+    # that did not reach the end of its path.
     return RunKind.TRUNCATED
 
 
@@ -177,8 +186,18 @@ def premise_of(
     """The ground a plan stands on: per test (stable name), whether it
     passes, where it first fails, and whether its process died."""
     keys = stable_name_keys(outcomes)
-    return {keys[n]: (o.passed, _site_identity(o, locate), o.aborted)
+    return {keys[n]: (o.passed, _sites_identity(o, locate), o.aborted)
             for n, o in outcomes.items()}
+
+
+def _sites_identity(o: TestOutcome, locate: Locate | None) -> tuple[str, ...]:
+    """The name's site identity; with copies in other binaries, every
+    copy's, so a move of any of them is a move of the name."""
+    own = _site_identity(o, locate)
+    if not o.others:
+        return own
+    rest = sorted("|".join(_site_identity(c, locate)) for c in o.others)
+    return (*own, "+", *rest)
 
 
 def premise_moved(
@@ -248,13 +267,14 @@ def stub_hold_of(
     stub-abort reading adds the stubs its unfinished sections name.
     """
     held: dict[str, set[FnSite]] = {}
-    for o in outcomes_of(capture).values():
-        if (o.passed or o.site_kind is not SiteKind.CRATE
-                or o.first_file is None or o.first_line is None):
-            continue
-        site = locate(o.first_file, int(o.first_line))
-        if site is not None and is_stub(site):
-            held.setdefault(o.name, set()).add(site)
+    for top in outcomes_of(capture).values():
+        for o in (top, *top.others):
+            if (o.passed or o.site_kind is not SiteKind.CRATE
+                    or o.first_file is None or o.first_line is None):
+                continue
+            site = locate(o.first_file, int(o.first_line))
+            if site is not None and is_stub(site):
+                held.setdefault(top.name, set()).add(site)
     vanished = list(vanished)
     if vanished:
         fallback = stub_abort_reading(capture, locate)

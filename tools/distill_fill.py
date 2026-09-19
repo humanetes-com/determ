@@ -60,7 +60,11 @@ else one per file that holds a stub, targets = that file's sites in the
 slices), `schedule_runs` (the schedule event's candidate runs, all kinds),
 `failed` / `failed_pairs` / `incomplete` (the iter event), `crash_blamed`
 ([[file, fn], ...] from crash.localized), `ledger_rows` (prior route rows
-for the cluster), `route_attempts` ([{label, dispatched, planned_recorded,
+for the cluster: with `ledger_source: "index"` the first N cluster rows of
+`logs/route_ledger/<project>/index.jsonl`, N being the `ledger N row(s)`
+the schedule loaded, kept for the candidates' work keys and every hop-pair
+row; with `"events"` the stream's rows, for fills whose schedule event
+predates the count), `route_attempts` ([{label, dispatched, planned_recorded,
 attempts: [{outcome, units}], recorded_outcome, source}] for this fill's
 file runs that went through more than one attempt or recorded a revert),
 `classes` ([{unit, route, class, keep, net_pass_delta, newly_red,
@@ -160,6 +164,45 @@ def _prior_candidate_rows(path: Path, cluster: str,
             if _work_key(str(d.get("kind", "")),
                          d.get("targets") or []) in wanted:
                 out.append(d)
+    return out
+
+
+def _index_prior_rows(index: Path, cluster: str, count: int,
+                      schedule_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The first `count` rows of the cluster in the route-ledger index —
+    the rows the schedule itself loaded (`ledger N row(s)` on its line) —
+    kept for the fill's candidate work keys and for every hop-pair row.
+
+    The event stream is not the ledger: it rotates, and a row the stream
+    no longer holds is still read by the schedule. Pair rows are kept
+    whatever their targets because the per-test pay clock
+    (`unpaid_tries_for_test`) reads every pair row aimed at a test, not
+    only the rows of the candidate pair. Run `3893442-cb547388` fill 1
+    (2026-09-19) distilled from the stream alone did not reproduce its own
+    recorded schedule line: the display pair's grace read as unspent and
+    every run behind it came back `pair_wait`."""
+    wanted = {_work_key(str(r.get("kind", "")), r.get("targets") or [])
+              for r in schedule_runs}
+    out: list[dict[str, Any]] = []
+    seen = 0
+    try:
+        fh = index.open(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    with fh:
+        for line in fh:
+            if seen >= count:
+                break
+            try:
+                raw = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(raw, dict) or str(raw.get("cluster", "")) != cluster:
+                continue
+            seen += 1
+            kind = str(raw.get("kind", ""))
+            if kind == "pair" or _work_key(kind, raw.get("targets") or []) in wanted:
+                out.append(raw)
     return out
 
 
@@ -264,7 +307,8 @@ def _classes(fill: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def distil(run_id: str, iter_n: int, stubs: list[str], *,
-           events_path: Path) -> dict[str, Any]:
+           events_path: Path,
+           ledger_index: Path | None = None) -> dict[str, Any]:
     evs = _events(events_path, run_id)
     iters = [e for e in evs if _kind(e) == "phase_c.tdd.iter"]
     # The fill of iteration N starts at the N-th `phase_c.tdd.iter` and ends
@@ -336,8 +380,17 @@ def distil(run_id: str, iter_n: int, stubs: list[str], *,
     # `681204-b695ab3f` fill 2, 2026-09-14). Carry the earlier rows of
     # those same candidates too, from the whole stream and nothing else,
     # so the fixture stays small and the history in it is the record.
-    ledger_rows = _prior_candidate_rows(
-        events_path, cluster, schedule_runs, run_id) + ledger_rows
+    loaded = int(((sched or {}).get("data") or {}).get("ledger_rows", 0) or 0)
+    ledger_source = "events"
+    if ledger_index is not None and loaded and ledger_index.exists():
+        # The index prefix the schedule read supersedes the stream: it holds
+        # this run's earlier rows too, in the order they were appended.
+        ledger_rows = _index_prior_rows(ledger_index, cluster, loaded,
+                                        schedule_runs)
+        ledger_source = "index"
+    else:
+        ledger_rows = _prior_candidate_rows(
+            events_path, cluster, schedule_runs, run_id) + ledger_rows
     crash_blamed: list[list[str]] = []
     seen_blame: set[tuple[str, str]] = set()
     for e in fill:
@@ -360,6 +413,7 @@ def distil(run_id: str, iter_n: int, stubs: list[str], *,
         "fitted_recorded": int(pd.get("fitted", 0) or 0),
         "stubs": sorted(stub_set), "stubs_source": stubs_source,
         "file_runs": file_runs, "ledger_rows": ledger_rows,
+        "ledger_source": ledger_source,
         "schedule_runs": schedule_runs,
         "failed": list(idat.get("failed") or []),
         "failed_pairs": [list(p) for p in (idat.get("failed_pairs") or [])],
@@ -376,10 +430,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stubs", default="",
                     help="comma-separated file::fn locators assumed hollow")
     ap.add_argument("--events", type=Path, default=REPO / "logs" / "events.jsonl")
+    ap.add_argument("--ledger-index", type=Path,
+                    default=REPO / "logs" / "route_ledger" / "anyhow" / "index.jsonl",
+                    help="route-ledger index; its first N cluster rows (N from "
+                         "the schedule event) are the ledger the fill read")
     ap.add_argument("-o", "--out", type=Path, required=True)
     args = ap.parse_args(argv)
     stubs = [s.strip() for s in args.stubs.split(",") if s.strip()]
-    fixture = distil(args.run, args.iter, stubs, events_path=args.events)
+    fixture = distil(args.run, args.iter, stubs, events_path=args.events,
+                     ledger_index=args.ledger_index)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(fixture, indent=1, sort_keys=True) + "\n",
                         encoding="utf-8")

@@ -70,6 +70,15 @@ class _Route:
         return self._report
 
 
+
+def _moving_sha():
+    """A `bodies_sha` whose every read differs: the tree moves under each
+    run, so a reported keep is a landing. A constant stub would say the
+    targets' bodies never changed, which the executor reads as a reply
+    that re-emitted the tree (the kept set is dropped)."""
+    n = iter(range(1_000_000))
+    return lambda _t: f"b{next(n)}"
+
 def _deps(tmp_path: Path, log: list[str], events: list[tuple[str, dict]], *,
           budget: float = 0.0, scheduled: bool = True,
           now=None, parallelism: int = 1) -> FillExecutionDeps:
@@ -319,7 +328,8 @@ def test_a_wave_s_rows_carry_each_run_s_own_units_and_a_run_that_never_opened_is
         fill_reading.reset_last_comparison()
         log: list[str] = []
         events: list[tuple[str, dict]] = []
-        out = execute_fill([_WaveRoute(labelled)], hollow={}, bodies_sha=lambda _t: "b",
+        out = execute_fill([_WaveRoute(labelled)], hollow={},
+                           bodies_sha=_moving_sha(),
                            deps=_deps(root, log, events, parallelism=3))
         return {r.label: r for r in out.rows}
 
@@ -376,7 +386,7 @@ def test_every_wave_hands_its_kept_units_to_the_unit_ledger_writer(
     ]
     deps = _replace(_deps(tmp_path, log, events), on_wave_kept=seen.append)
     with pytest.raises(SystemExit):
-        execute_fill(routes, hollow={}, bodies_sha=lambda _t: "s", deps=deps)
+        execute_fill(routes, hollow={}, bodies_sha=_moving_sha(), deps=deps)
     assert calls == ["file src/x.rs", "per-fn 1 re-fill(s)"]
     assert seen == [frozenset({_FMT}), frozenset()], (
         "one call per completed wave with its keeps, one for the cut wave")
@@ -486,3 +496,44 @@ def test_the_executor_does_not_overrule_a_route_that_read_its_own_calls(
     out = execute_fill([route], hollow={}, bodies_sha=lambda _t: "b",
                        deps=_deps(tmp_path, [], []))
     assert out.rows[0].outcome is RunOutcome.FLAT
+
+
+def test_a_keep_that_left_the_targets_as_they_were_is_recorded_as_keeping_nothing(
+        tmp_path: Path) -> None:
+    """Run `3893442-cb547388` (2026-09-19): both hop pairs were rowed
+    `kept 2` while the tree after the fill differed from the tree before
+    it only in a file neither pair writes — the replies re-emitted the
+    bodies on disk. The sentence: a run whose reported keeps leave its
+    targets' bodies identical keeps nothing on its row, the unit-ledger
+    hook hears no keep, the log says why, and the row is still a graded
+    FLAT (the reply is evidence the re-buy detector needs).
+
+    Control: the same run on a tree whose bodies moved keeps its unit."""
+    from dataclasses import replace as _replace
+
+    def one(sha, root: Path) -> tuple[object, list[str], list[frozenset[FnLocator]]]:
+        log: list[str] = []
+        seen: list[frozenset[FnLocator]] = []
+        run = RouteRun(kind=RouteKind.FILE, label="file src/x.rs",
+                       targets=frozenset({_FMT}))
+        route = _Route(RouteKind.FILE, [run], calls=[],
+                       report=RouteRunReport(model_calls=1, kept=frozenset({_FMT})))
+        deps = _replace(_deps(root, log, []), on_wave_kept=seen.append)
+        out = execute_fill([route], hollow={}, bodies_sha=sha, deps=deps)
+        (row,) = out.rows
+        return row, log, seen
+
+    root = tmp_path / "same"
+    root.mkdir()
+    row, log, seen = one(lambda _t: "unchanged", root)
+    assert row.kept == () and row.outcome is RunOutcome.FLAT
+    assert row.model_calls == 1
+    assert seen == [frozenset()]
+    assert any("every kept body was the one already on disk" in ln for ln in log)
+
+    root = tmp_path / "moved"
+    root.mkdir()
+    row, log, seen = one(_moving_sha(), root)
+    assert row.kept == (("src/x.rs", "fmt"),)
+    assert seen == [frozenset({_FMT})]
+    assert not any("already on disk" in ln for ln in log)

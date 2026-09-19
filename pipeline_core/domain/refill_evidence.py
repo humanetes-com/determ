@@ -42,7 +42,7 @@ from typing import Any
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, body_sha
 from pipeline_core.domain.models import FnLocator, ImplBlock
-from pipeline_core.domain.test_report import parse_panic_location
+from pipeline_core.domain.test_report import OTHER_COPY_MARK, parse_panic_location
 from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
 
@@ -185,7 +185,29 @@ def quote_panic_site(
     line says WHICH payload must survive the round trip. `read_source`
     serves the crate's own trees (the reconstruction's `src/`, the oracle's
     `tests/`) and nothing else; a path it cannot serve, or a line past the
-    file's end, leaves `text` unchanged."""
+    file's end, leaves `text` unchanged.
+
+    Evidence holding another binary's failure of the same name (the part
+    opening with `OTHER_COPY_MARK`) is quoted part by part: each copy's
+    panic line is its own observable."""
+    if OTHER_COPY_MARK in text:
+        parts: list[str] = []
+        cur: list[str] = []
+        for ln in text.splitlines():
+            if ln.startswith(OTHER_COPY_MARK) and cur:
+                parts.append("\n".join(cur))
+                cur = []
+            cur.append(ln)
+        parts.append("\n".join(cur))
+        if len(parts) > 1:
+            return "\n".join(_quote_one(p, read_source, context=context)
+                             for p in parts)
+    return _quote_one(text, read_source, context=context)
+
+
+def _quote_one(
+    text: str, read_source: Callable[[str], str | None], *, context: int,
+) -> str:
     file, line, _col, _msg = parse_panic_location(text)
     if not file or line is None:
         return text

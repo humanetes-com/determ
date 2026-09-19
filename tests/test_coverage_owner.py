@@ -506,7 +506,8 @@ def test_owner_map_filters_on_the_cargo_name_not_the_leaf(
 def test_two_tests_sharing_a_leaf_do_not_share_a_profile(
         monkeypatch, tmp_path: Path) -> None:
     """The leaf as a filename would clobber: `a::t` then `b::t` write the
-    same `one-t.profraw`."""
+    same `one-t.profraw`. The stem also carries the binary's label, since
+    one name may run in several binaries (2026-09-19)."""
     project = _owner_project(tmp_path)
     paths: list[str] = []
     monkeypatch.setattr(cov.shutil, "which", lambda n: "/usr/bin/" + n)
@@ -526,7 +527,7 @@ def test_two_tests_sharing_a_leaf_do_not_share_a_profile(
     slice_ = _measure(project, "stable", failing_tests=["a::t", "b::t"])
     assert slice_ is not None
     stems = {p.rsplit("/", 1)[-1] for p in paths}
-    assert stems == {"one-a_t.profraw", "one-b_t.profraw"}, stems
+    assert stems == {"one-bin-a_t.profraw", "one-bin-b_t.profraw"}, stems
 
 
 def test_a_generator_of_failing_tests_is_not_counted_as_zero(

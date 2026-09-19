@@ -40,7 +40,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -432,13 +432,17 @@ def _recover_binaries(
     env: dict[str, str], prof: Path,
     *, timeout: float, exact_timeout: float | None = None,
     workers: int = 1, longest: _Longest | None = None,
-) -> dict[str, ExactRun]:
+) -> dict[tuple[str, str], ExactRun]:
     """Every binary whose whole-suite process did not complete, re-run one
     test per process. The runs that complete carry the counts the merge
     lost with the crash; the ones that still die are the tests the reading
-    cannot measure. Keyed by the listed name, in listing order (binary
-    order, then the binary's own order — a name two binaries share keeps
-    the later binary's run, as the serial loop did).
+    cannot measure. Keyed by `(binary label, listed name)`, in listing
+    order: a name two binaries share is two tests. Keyed by the name alone
+    the later binary's run replaced the earlier one, and the owner map
+    then answered a test with the other binary's execution (run
+    `3893442-cb547388`, 2026-09-19: `test_downcast_ref` fails in both
+    `test_context` and `test_downcast`; the session got the latter's slice
+    and the former's panic).
 
     Each item is `(binary, skip)`: ``skip`` is the hung test the caller
     already named for that binary — re-running it is a second wait on the
@@ -461,22 +465,23 @@ def _recover_binaries(
                           f"-{_prof_stem(name)}.profraw")
             tasks.append((binary, name, raw))
 
-    def _one(task: tuple[Path, str, Path]) -> tuple[str, ExactRun | None]:
+    def _one(task: tuple[Path, str, Path]) -> tuple[
+            tuple[str, str], ExactRun | None]:
         binary, name, raw = task
-        return name, _exact_run(tree, binary, name, raw, env,
-                                timeout=bound, longest=longest)
+        return (_binary_label(binary), name), _exact_run(
+            tree, binary, name, raw, env, timeout=bound, longest=longest)
 
-    runs: dict[str, ExactRun] = {}
-    for name, run in _map_concurrently(_one, tasks, workers):
+    runs: dict[tuple[str, str], ExactRun] = {}
+    for key, run in _map_concurrently(_one, tasks, workers):
         if run is not None:
-            runs[name] = run
+            runs[key] = run
     return runs
 
 
 def _recover_binary(
     tree: Path, binary: Path, env: dict[str, str], prof: Path,
     *, timeout: float, skip: Iterable[str] = (),
-) -> dict[str, ExactRun]:
+) -> dict[tuple[str, str], ExactRun]:
     """One binary through `_recover_binaries`, serially — the pre-concurrency
     shape, kept for callers that recover a single binary."""
     return _recover_binaries(tree, [(binary, skip)], env, prof,
@@ -496,9 +501,10 @@ def _owner_map(
     tree: Path, bins: list[Path], prof: Path, env: dict[str, str],
     tests: Iterable[str], profdata_bin: str, cov_bin: str,
     index: SiteIndex,
-    prior: Mapping[str, ExactRun] | None = None,
+    prior: Mapping[tuple[str, str], ExactRun] | None = None,
     *, timeout: float, workers: int = 1, longest: _Longest | None = None,
-) -> tuple[dict[str, frozenset[FnSite]], frozenset[str]]:
+    failing_binaries: Mapping[str, Collection[str]] | None = None,
+) -> tuple[dict[str, frozenset[FnSite]], frozenset[str], frozenset[str]]:
     """Which crate bodies does each named test enter, one profile per test
     — and which named tests could not be measured because their process
     did not complete.
@@ -521,6 +527,16 @@ def _owner_map(
     already made, reused here (exact name, then unique leaf) instead of
     re-spending the process.
 
+    A name the sweep saw fail in several binaries (`failing_binaries`:
+    name -> the cargo labels of the binaries that failed it) is several
+    failing tests. Each is run on its own binary and the owner set of the
+    name is the UNION of what they entered: the slice built from it must
+    hold every body the quoted failures executed, and a binary where the
+    name passes contributes nothing. A test that died on any of them makes
+    the name unmeasured. The third return value is those names. Without
+    `failing_binaries` (or when none of its labels is built here), the
+    first binary that claims the name answers, as before.
+
     Cost is one binary invocation per test per candidate binary until the
     owning one answers, plus a merge and an export. Measured on the
     2026-08-30 stable tree: sub-second per test against a 6 s
@@ -531,36 +547,67 @@ def _owner_map(
     """
     owners: dict[str, frozenset[FnSite]] = {}
     unmeasured: set[str] = set()
+    multi: set[str] = set()
     prior = dict(prior or {})
+    by_label = {_binary_label(b): b for b in bins}
+    fb = {k: frozenset(v) for k, v in (failing_binaries or {}).items()}
 
-    def _one(name: str) -> tuple[str, frozenset[FnSite] | None, bool]:
-        key = matching_test_key(name, prior)
-        run: ExactRun | None = prior[key] if key is not None else None
-        if run is None:
-            raw = prof / f"one-{_prof_stem(name)}.profraw"
-            for b in bins:
+    def _prior_run(label: str, name: str) -> ExactRun | None:
+        keys = [n for (lab, n) in prior if lab == label]
+        key = matching_test_key(name, keys)
+        return prior[(label, key)] if key is not None else None
+
+    def _one(name: str) -> tuple[str, frozenset[FnSite] | None, bool, int]:
+        labels = fb.get(name) or fb.get(name.rsplit("::", 1)[-1]) or frozenset()
+        failing = [by_label[lab] for lab in sorted(labels) if lab in by_label]
+        # Every binary that failed the name, each measured; otherwise the
+        # first binary that claims it.
+        candidates, every = (failing, True) if failing else (list(bins), False)
+        runs: list[ExactRun] = []
+        for b in candidates:
+            label = _binary_label(b)
+            run = _prior_run(label, name)
+            if run is None:
+                raw = prof / (f"one-{_prof_stem(label)}"
+                              f"-{_prof_stem(name)}.profraw")
                 run = _exact_run(tree, b, name, raw, env, timeout=timeout,
                                  longest=longest)
-                if run is not None:
-                    break
-        if run is None:
-            return name, None, False
-        if not run.completed:
-            return name, None, True
-        export = _merge_export([run.raw], [run.binary],
-                               prof / f"one-{_prof_stem(name)}.json",
-                               profdata_bin, cov_bin)
-        if export is None:
-            return name, None, False
-        return name, _entered_sites(export, tree, index), False
+            if run is None:
+                continue
+            runs.append(run)
+            if not every:
+                break
+        if not runs:
+            return name, None, False, 0
+        if any(not r.completed for r in runs):
+            return name, None, True, len(runs)
+        sites: set[FnSite] = set()
+        measured = 0
+        for r in runs:
+            export = _merge_export(
+                [r.raw], [r.binary],
+                prof / (f"one-{_prof_stem(_binary_label(r.binary))}"
+                        f"-{_prof_stem(name)}.json"),
+                profdata_bin, cov_bin)
+            if export is None:
+                continue
+            measured += 1
+            sites |= _entered_sites(export, tree, index)
+        if measured < len(runs):
+            # One of the name's failing tests left no export: a union
+            # missing it is the one-binary answer this rule replaces.
+            return name, None, False, len(runs)
+        return name, frozenset(sites), False, len(runs)
 
-    for name, sites, died in _map_concurrently(
+    for name, sites, died, n_runs in _map_concurrently(
             _one, list(dict.fromkeys(tests)), workers):
+        if n_runs > 1:
+            multi.add(name)
         if died:
             unmeasured.add(name)
         elif sites is not None:
             owners[name] = sites
-    return owners, frozenset(unmeasured)
+    return owners, frozenset(unmeasured), frozenset(multi)
 
 
 def measure_coverage_slice(
@@ -575,6 +622,7 @@ def measure_coverage_slice(
     hung: Mapping[str, str] | None = None,
     workers: int | None = None,
     exact_timeout: float | None = None,
+    failing_binaries: Mapping[str, Collection[str]] | None = None,
 ) -> CoverageSlice | None:
     """Pass A of the owner probe, plus pass C over `failing_tests`.
 
@@ -618,6 +666,11 @@ def measure_coverage_slice(
     121 minutes over ten steps). `exact_timeout` bounds the single-test
     processes (None reads `PHASE_C_EXACT_TEST_TIMEOUT`, else the suite
     bound); the longest completing run is printed for sizing it.
+
+    `failing_binaries` maps a failing name to the cargo labels of the
+    binaries the sweep saw fail it (`test_context` for
+    `tests/test_context.rs`); pass C measures the name on each of them and
+    unions (see `_owner_map`). None keeps the first-claimant answer.
     """
     bound = float(timeout if timeout is not None else _suite_timeout())
     exact_bound = (float(exact_timeout) if exact_timeout is not None
@@ -660,7 +713,7 @@ def measure_coverage_slice(
         completed_raws: list[Path] = []
         unmeasured_bins: list[tuple[Path, int]] = []
         hung_tests: set[str] = set()
-        recovered: dict[str, ExactRun] = {}
+        recovered: dict[tuple[str, str], ExactRun] = {}
         hung_skip: dict[Path, set[str]] = {}
         for b in bins:
             (run_a / b.name).mkdir()
@@ -695,7 +748,7 @@ def measure_coverage_slice(
                 hung_name = hung_map[label]
                 hung_tests.add(f"{label}::{hung_name}")
                 hung_skip.setdefault(b, set()).add(hung_name)
-                recovered[hung_name] = ExactRun(
+                recovered[(label, hung_name)] = ExactRun(
                     name=hung_name, binary=b, returncode=-1,
                     raw=d / "hung.profraw", completed=False)
                 continue
@@ -708,7 +761,7 @@ def measure_coverage_slice(
             if dangling:
                 hung_tests.add(f"{label}::{dangling}")
                 hung_skip.setdefault(b, set()).add(dangling)
-                recovered[dangling] = ExactRun(
+                recovered[(label, dangling)] = ExactRun(
                     name=dangling, binary=b, returncode=ran.returncode,
                     raw=d / "hung.profraw", completed=False)
         recovered.update(_recover_binaries(
@@ -718,7 +771,8 @@ def measure_coverage_slice(
         completed_raws.extend(
             r.raw for r in recovered.values() if r.completed)
         if unmeasured_bins and log:
-            still = sorted(n for n, r in recovered.items() if not r.completed)
+            still = sorted(n for (_lab, n), r in recovered.items()
+                           if not r.completed)
             hung_bits = [
                 f"{item} (killed after {int(bound)}s)"
                 for item in sorted(hung_tests)]
@@ -756,14 +810,14 @@ def measure_coverage_slice(
                 file_texts[rel] = ""
         index = SiteIndex(fn_records, file_texts)
         asked = tuple(dict.fromkeys(failing_tests))
-        owners, unmeasured_asked = _owner_map(
+        owners, unmeasured_asked, multi = _owner_map(
             tree, bins, prof, env, asked, profdata_bin, cov_bin, index,
             prior=recovered, timeout=exact_bound, workers=pool,
-            longest=longest)
+            longest=longest, failing_binaries=failing_binaries)
         # The crashed binaries' tests that still died alone, under the name
         # the binary lists, unless an asked name already covers them.
         unmeasured_tests = set(unmeasured_asked)
-        for name, run in recovered.items():
+        for (_lab, name), run in recovered.items():
             if not run.completed and matching_test_key(
                     name, unmeasured_asked) is None:
                 unmeasured_tests.add(name)
@@ -777,7 +831,11 @@ def measure_coverage_slice(
             log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
                 f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "
                 f"owner set for {len(owners)}/{len(asked)} failing test(s), "
-                f"{len(unmeasured_asked)} unmeasured (binary did not complete) "
+                f"{len(unmeasured_asked)} unmeasured (binary did not complete)"
+                + (f", {len(multi)} failing in several binaries measured on "
+                   f"each and unioned ({', '.join(sorted(multi)[:6])})"
+                   if multi else "")
+                + " "
                 f"(staged, own target dir; {pool} worker(s), single-test "
                 f"bound {int(exact_bound)}s, longest completing run "
                 f"{longest.render()})")
