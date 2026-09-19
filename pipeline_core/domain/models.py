@@ -986,6 +986,12 @@ class ClusterFillResult:
     # None: caller/test did not populate it. The TDD driver prints the
     # previous call's histogram on the next iter line.
     fill_classes: FillClassHistogram | None = None
+    # The tests whose first failure moved when the fill ended on its
+    # premise (`fill_scheduler._GroundGate`); empty when it ran its plan
+    # out. The driver reads it so units the cut fill never opened go back
+    # on the pass without spending the once-per-pass re-offer: the plan
+    # changed under them, the schedule did not judge them.
+    premise_moved: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

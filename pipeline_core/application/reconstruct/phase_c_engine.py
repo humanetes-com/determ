@@ -89,6 +89,7 @@ from pipeline_core.domain.refill_stamp import (
     stamp_reads_dispatch,
 )
 from pipeline_core.domain.refine import FixProgress, FloorStall
+from pipeline_core.domain.test_outcome import PremiseEntry
 from pipeline_core.domain.test_results import parse_failed_tests, still_open_names
 from pipeline_core.ports.fill_engine import (
     Cargo,
@@ -339,6 +340,11 @@ class PhaseCFillEngine:
         # every wave (and on the wave a stop cuts) with the units the wave
         # kept, so a fill that never returns still leaves its `landed` rows.
         on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None,
+        # The ground this fill's plan was made from and a reader of the
+        # ground now (`test_outcome.premise_of`); both set, the fill ends at
+        # the first claim after a keep that moved it (`fill_scheduler`).
+        fill_premise: Mapping[str, PremiseEntry] | None = None,
+        fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None,
     ) -> ClusterFillResult:
         """Phase C — every route of one fill, ordered and budgeted by
         `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
@@ -529,7 +535,7 @@ class PhaseCFillEngine:
             _prepared_fill.hollow if _prepared_fill is not None else {})
         for _t, _locs in (stub_abort_hollow or {}).items():
             _hollow[_t] = _hollow.get(_t, frozenset()) | _locs
-        execute_fill(
+        _execution = execute_fill(
             routes,
             hollow=_hollow,
             bodies_sha=(_prepared_fill.bodies_sha if _prepared_fill is not None
@@ -547,7 +553,8 @@ class PhaseCFillEngine:
                 attributed=frozenset(attributed),
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),
-                on_wave_kept=on_wave_kept))
+                on_wave_kept=on_wave_kept,
+                premise=fill_premise, ground_now=fill_ground_now))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
                        else None)
         _per_fn = _per_fn_route.result
@@ -581,7 +588,9 @@ class PhaseCFillEngine:
                 "remaining_stubs": _impl_stats.remaining,
                 "errors": len(_impl_stats.errors),
             })
-            return _impl_stats
+            return (replace(_impl_stats,
+                            premise_moved=_execution.premise_moved)
+                    if _execution.premise_moved else _impl_stats)
         if _per_fn is None:
             _per_fn = ClusterFillResult(
                 remaining=self.ws.scan_stub_tuples(target_src_dir, cluster).unit_count)
@@ -599,6 +608,7 @@ class PhaseCFillEngine:
             answer_lost_fns=tuple(sorted(_answer_lost - _reverted)),
             payoff=combine_payoffs(_impl_payoff, _per_fn.payoff),
             fill_classes=_fill_hist,
+            premise_moved=_execution.premise_moved,
         )
         self.tel.emit("phase_c.cluster.done", data={
             "cluster": cluster_name,

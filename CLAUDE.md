@@ -849,6 +849,17 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   either. It was set to 360 on the same reading — four sessions at the
   measured max (200 min) + the file wave + per-fn ≈ 270 min healthy worst
   case, 90 min over it.
+- `PHASE_C_REPLAN_ON_PREMISE` (default 1) — NOT a stop: a fill ends at the
+  first claim after a keep that changed which tests fail or where they first
+  fail (`fill_scheduler._GroundGate`, `test_outcome.premise_of`), and the
+  next sweep re-plans. It prevents no reading, it brings the next one
+  forward; iterations get shorter and more frequent, which every
+  pass-denominated stop already absorbs. Confirmed on the cluster-entry line
+  (`replan-on-premise=on`) and by `premise moved after <run>` on the
+  `[phase-c/schedule]` line. `0` runs every plan to its end (the frozen-plan
+  negative control). `PHASE_C_TEST_ISOLATION` (default 1) is a measurement
+  setting, not a stop: an aborted test binary is re-run one test per process
+  inside `run_cargo`; `0` restores the shared-process capture.
 - `POST_MERGE_MAX_STALLS` — the same clock for the post-merge wave (task2c),
   whose traversal is `ceil(frontier / POST_MERGE_MAX_DISPATCH)` iterations;
   same arithmetic, same `0`. Its empty-frontier branch

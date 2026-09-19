@@ -1185,13 +1185,24 @@ class FillBudget:
 class RunClock:
     """One run's claim gate. It never interrupts: a unit, a turn or a session
     already claimed runs to completion; the clock only answers whether the
-    NEXT claim may be made."""
+    NEXT claim may be made.
+
+    ``ground_moved`` is the fill's premise gate (`fill_scheduler`): True once
+    a keep in this fill changed what the plan was made from — a test's
+    verdict, where it first fails, or whether its process dies. Every route
+    already asks this clock before each claim, so the refusal lands at the
+    next unit boundary of whichever route is running, and the fill ends
+    there for the sweep to re-plan (run `3383938-c5d24499`, 2026-09-19: the
+    first keep moved all 141 failing tests off `construct`'s stub and the
+    rest of the fill ran a plan in which `vtable` had no run)."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
-                 now: Callable[[], float] = time.monotonic) -> None:
+                 now: Callable[[], float] = time.monotonic,
+                 ground_moved: Callable[[], bool] | None = None) -> None:
         self.share_minutes = share_minutes
         self._fill_remaining = fill_remaining
+        self._ground_moved = ground_moved
         self._now = now
         self._started = now()
         self.last_delta = 0
@@ -1212,7 +1223,11 @@ class RunClock:
 
     def may_claim(self) -> bool:
         """Budget follows payoff: within the share, always; past it only
-        while the last claim cashed and the fill has budget left."""
+        while the last claim cashed and the fill has budget left. Never once
+        the fill's ground has moved."""
+        if self._ground_moved is not None and self._ground_moved():
+            self.refused += 1
+            return False
         if self.share_minutes is None:
             self.claims += 1
             return True

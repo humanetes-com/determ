@@ -19,16 +19,15 @@ interrupt a run (the clock only gates the next claim), or stop the process
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pipeline_core.application.reconstruct.fill_reading import (
-    begin_fill,
     kept_mark,
     kept_since,
-    unmeasurable_tests_now,
 )
 from pipeline_core.application.reconstruct.fill_routes import (
     FillRoute,
@@ -46,11 +45,15 @@ from pipeline_core.domain.fill_schedule import (
     RunClock,
     RunOutcome,
     ScheduledRun,
-    run_is_unmeasurable,
     schedule,
 )
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
+from pipeline_core.domain.test_outcome import (
+    PremiseEntry,
+    names_of,
+    premise_moved,
+)
 
 __all__ = ["FillExecution", "FillExecutionDeps", "execute_fill"]
 
@@ -98,6 +101,14 @@ class FillExecutionDeps:
     #: flushed per wave for the same reason; this is the unit ledger's
     #: turn. None (the default) keeps the post-fill write alone.
     on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None
+    #: The ground the plan was made from (`test_outcome.premise_of` of the
+    #: sweep's capture) and a reader of the ground the tree stands on now
+    #: (one suite run → the same function). With both set, the first claim
+    #: after a keep that moved the ground is refused and the fill ends for
+    #: the sweep to re-plan. None (the default) runs the plan to its end —
+    #: the frozen-plan negative control (`PHASE_C_REPLAN_ON_PREMISE=0`).
+    premise: Mapping[str, PremiseEntry] | None = None
+    ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +116,47 @@ class FillExecution:
     schedule: FillSchedule
     rows: tuple[RouteLedgerRow, ...]
     stopped: bool = False
+    #: The tests whose ground moved when the fill ended on its premise
+    #: (empty when the fill ran its schedule out, or was stopped).
+    premise_moved: tuple[str, ...] = ()
+
+
+class _GroundGate:
+    """The fill's premise gate, shared by every run's clock.
+
+    Measures only when something was kept since the last look
+    (`fill_reading.kept_mark`), so a fill that keeps nothing never pays for
+    it, and once the ground has moved it stays moved for the rest of the
+    fill. Thread-safe: a parallel wave's workers ask at their own unit
+    boundaries."""
+
+    def __init__(self, deps: FillExecutionDeps) -> None:
+        self._premise = deps.premise
+        self._read = deps.ground_now
+        self._lock = threading.Lock()
+        self._seen = kept_mark()
+        self.moved: tuple[str, ...] = ()
+
+    @property
+    def armed(self) -> bool:
+        return self._premise is not None and self._read is not None
+
+    def __call__(self) -> bool:
+        if not self.armed:
+            return False
+        with self._lock:
+            if self.moved:
+                return True
+            mark = kept_mark()
+            if mark == self._seen:
+                return False
+            self._seen = mark
+            assert self._read is not None and self._premise is not None
+            now = self._read()
+            if now is None:
+                return False
+            self.moved = premise_moved(self._premise, now)
+            return bool(self.moved)
 
 
 def _notify_wave(deps: FillExecutionDeps,
@@ -253,7 +305,7 @@ def execute_fill(
     rows: list[RouteLedgerRow] = []
     stopped = False
     ordered = list(sched.ordered)
-    begin_fill()
+    gate = _GroundGate(deps)
     i = 0
 
     def _flush(new_rows: list[RouteLedgerRow]) -> None:
@@ -287,34 +339,6 @@ def execute_fill(
                 remaining_weight -= w.weight
             _flush(rows[-len(wave):])
             continue
-        # Fill-time re-grade: a keep earlier in THIS fill made every aimed
-        # test's binary abort or hang, and no target is crash-blamed. The
-        # budget-0 contract still opens plan-time unmeasurable runs (no
-        # reading yet); a keep is the reading. Skip even under budget 0.
-        now_unmeas = unmeasurable_tests_now()
-        if deps.scheduled and now_unmeas:
-            skipped = [w for w in wave
-                       if run_is_unmeasurable(
-                           w.run, now_unmeas, deps.crash_blamed)]
-            kept_wave = [w for w in wave if w not in skipped]
-            if skipped:
-                for w in skipped:
-                    remaining_weight -= w.weight
-                    deps.log(
-                        f"  [phase-c/schedule] {w.run.label}: re-graded "
-                        "rebuy_flat at open — every aimed test is in a "
-                        "binary that did not complete at a keep in this fill")
-                    row = replace(
-                        _row_for(w, None, None, deps=deps, started=started,
-                                 minutes=0.0, share=0.0,
-                                 outcome=RunOutcome.DEFERRED),
-                        reason="rebuy_flat")
-                    rows.append(row)
-                    _log_row(deps, row)
-                _flush(rows[-len(skipped):])
-            if not kept_wave:
-                continue
-            wave = kept_wave
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         for w in wave:
@@ -323,7 +347,7 @@ def execute_fill(
             shares[w.run.key] = share
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,
-                now=deps.now)
+                now=deps.now, ground_moved=gate)
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}
@@ -390,6 +414,33 @@ def execute_fill(
             _log_row(deps, row)
         _flush(rows[-len(wave):])
         _notify_wave(deps, [reports.get(w.run.key) for w in wave])
+        # A wave can end without its routes asking the clock again after
+        # their last keep; ask once here so the NEXT run is not opened on a
+        # plan whose ground already moved.
+        if i < len(ordered) and gate():
+            rest = ordered[i:]
+            deps.log(
+                f"  [phase-c/schedule] fill {deps.iteration}: premise moved "
+                f"after {s.run.label} — {len(gate.moved)} test(s) no longer "
+                f"fail where the plan read them ({names_of(gate.moved)}); "
+                f"ending the fill, {len(rest)} run(s) deferred for the sweep "
+                "to re-plan")
+            deps.emit("phase_c.fill.premise_moved", data={
+                "cluster": deps.cluster, "iter": deps.iteration,
+                "after": s.run.label, "moved": list(gate.moved[:50]),
+                "moved_count": len(gate.moved),
+                "deferred": [w.run.label for w in rest]})
+            started = datetime.now(UTC).isoformat(timespec="seconds")
+            for w in rest:
+                row = replace(
+                    _row_for(w, None, None, deps=deps, started=started,
+                             minutes=0.0, share=0.0,
+                             outcome=RunOutcome.DEFERRED),
+                    reason="premise_moved")
+                rows.append(row)
+                _log_row(deps, row)
+            _flush(rows[-len(rest):])
+            break
     deferred_rows: list[RouteLedgerRow] = []
     for s in sched.deferred:
         row = _row_for(s, None, None, deps=deps,
@@ -399,5 +450,6 @@ def execute_fill(
         deferred_rows.append(row)
         _log_row(deps, row)
     _flush(deferred_rows)
-    return FillExecution(schedule=sched, rows=tuple(rows), stopped=stopped)
+    return FillExecution(schedule=sched, rows=tuple(rows), stopped=stopped,
+                         premise_moved=gate.moved)
 

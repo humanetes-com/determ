@@ -284,4 +284,6 @@ class ImplFillPath(Protocol):
         session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
         session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
         on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = ...,
+        fill_premise: Mapping[str, Any] | None = ...,
+        fill_ground_now: Callable[[], Mapping[str, Any] | None] | None = ...,
     ) -> ClusterFillResult: ...

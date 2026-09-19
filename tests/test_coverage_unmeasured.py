@@ -37,9 +37,9 @@ from pipeline_core.adapters.coverage_owner import (
 from pipeline_core.domain.coverage_slice import (
     CoverageSlice,
     bind,
-    exempt_recorded_executors,
     matching_test_key,
     slice_from_counts,
+    withhold_unmeasured,
 )
 from pipeline_core.domain.models import ClusterFillResult, FnLocator, FnSite
 from pipeline_core.domain.recorded_entry import (
@@ -107,58 +107,59 @@ def _recorded() -> dict[str, frozenset[FnLocator]]:
 
 
 def test_bodies_of_a_non_completed_binary_are_unmeasured_not_dead() -> None:
-    """The plan's sentence, on the live dead list and the live store: the
-    two reallocate units leave `dead` (and the culprit's region sentence
-    goes with it) because the SIGSEGV test is recorded to enter them."""
-    reading, exempted = exempt_recorded_executors(_control_slice(), _recorded())
-    assert _CULPRIT not in reading.dead and _SIBLING not in reading.dead
-    assert _CULPRIT not in reading.dead_regions
-    assert {_CULPRIT, _SIBLING} <= exempted
-    # Everything the record does not name stays convicted: the exemption is
-    # evidence-shaped, not a blanket clear.
-    assert _loc("src/ptr.rs::clone") in reading.dead
-    assert len(reading.dead) == len(_control_slice().dead) - len(exempted)
+    """On the live dead list: the SIGSEGV binary's tests are unmeasured, so
+    `dead` and its region sentences are withheld whole — the two reallocate
+    units leave `dead`, and so does everything else, because a run that
+    stopped short bounds nothing about the bodies after its stop."""
+    reading, withheld = withhold_unmeasured(_control_slice())
+    assert reading.dead == frozenset() and reading.dead_regions == {}
+    assert {_CULPRIT, _SIBLING} <= withheld
+    assert withheld == _control_slice().dead | frozenset(
+        _control_slice().dead_regions)
 
 
 def test_negative_control_the_pre_change_shape_keeps_the_units_dead() -> None:
     """The shipped slice carried no `unmeasured_tests` (the crashed tests
-    were EMPTY entries in `owners`), so the exemption has nothing to act
-    on and both units stay dead — the live `service_order` event."""
+    were EMPTY entries in `owners`) and the capture named no truncated run,
+    so nothing is withheld and both units stay dead — the live
+    `service_order` event."""
     ctl = _FIX["control"]
     old = CoverageSlice(
         dead=frozenset(_loc(u) for u in ctl["dead"]),
         owners={t: frozenset() for t, ks in ctl["owners"].items() if not ks},
         failing=frozenset(_FIX["failing"]))
-    reading, exempted = exempt_recorded_executors(old, _recorded())
-    assert exempted == frozenset()
+    reading, withheld = withhold_unmeasured(old)
+    assert withheld == frozenset()
     assert _CULPRIT in reading.dead and _SIBLING in reading.dead
 
 
-def test_an_unmeasured_test_with_no_record_makes_dead_unmeasurable() -> None:
-    """No record, no evidence either way about that test's path: `dead` and
-    the region sentences clear whole rather than convict on nothing."""
-    base = _control_slice()
-    reading = CoverageSlice(
-        dead=base.dead, dead_regions=dict(base.dead_regions),
-        failing=base.failing,
-        unmeasured_tests=base.unmeasured_tests | {"never_seen_before"})
-    out, exempted = exempt_recorded_executors(reading, _recorded())
-    assert out.dead == frozenset() and out.dead_regions == {}
-    assert exempted == base.dead | frozenset(base.dead_regions)
+def test_a_failing_run_that_stopped_inside_the_crate_withholds_dead() -> None:
+    """No process died, but a red test failed at a panic inside the crate
+    (`test_outcome.truncated_failing`): its path after the panic is unknown,
+    so the reading may not call anything dead, and the test leaves the
+    owner map (absent = unmeasured, never a refusal)."""
+    base = slice_from_counts([], owners={"m::t": frozenset({FnSite(
+        "src/a.rs", "f", "")})}, failing=["m::t"])
+    base = CoverageSlice(dead=frozenset({_CULPRIT}), owners=base.owners,
+                         failing=base.failing)
+    out, withheld = withhold_unmeasured(base, truncated={"t"})
+    assert out.dead == frozenset() and withheld == frozenset({_CULPRIT})
+    assert out.owners == {} and "t" in out.unmeasured_tests
 
 
-def test_no_unmeasured_test_leaves_the_reading_untouched() -> None:
+def test_no_unmeasured_run_leaves_the_reading_untouched() -> None:
     base = slice_from_counts([], owners={}, failing=["t"])
-    out, exempted = exempt_recorded_executors(base, {"t": {_CULPRIT}})
-    assert out == base and exempted == frozenset()
+    out, withheld = withhold_unmeasured(base, truncated=())
+    assert out == base and withheld == frozenset()
 
 
-def test_the_exemption_never_touches_owners() -> None:
-    """A recorded set is not a measurement: `owners` (what
-    `measured_entry_sets` re-stamps) is byte-identical after the call."""
+def test_measured_tests_keep_their_owner_sets() -> None:
+    """Only the unmeasured tests leave `owners`; a test that ran to its
+    end keeps its measured set for every refusal that reads it."""
     base = _control_slice()
-    out, _ = exempt_recorded_executors(base, _recorded())
-    assert out.owners == base.owners
+    out, _ = withhold_unmeasured(base)
+    assert out.owners == {t: ks for t, ks in base.owners.items()
+                          if t not in base.unmeasured_tests}
     assert _SEGV_TEST not in out.owners
 
 
@@ -428,7 +429,7 @@ def test_the_recorded_set_stands_in_for_the_unmeasured_red_test(
     recorded = {u["file"] + "::" + u["fn"] for u in first["recorded_owners"]["t135"]}
     assert recorded == {"src/b.rs::culprit", "src/a.rs::fmt"}
     assert {u["file"] + "::" + u["fn"] for u in first["owners"]["t135"]} == recorded
-    assert first["dead_exempted"] == ["src/b.rs::culprit"]
+    assert first["dead_withheld"] == ["src/b.rs::culprit"]
     # Not demoted: no ranking lists the culprit dead and the service-order
     # log never prints a dead demotion (the negative control below shows
     # both on every sweep).
@@ -436,8 +437,10 @@ def test_the_recorded_set_stands_in_for_the_unmeasured_red_test(
     assert all("src/b.rs::culprit" not in d["dead"] for d in orders)
     assert not any("dead body(ies) demoted" in ln for ln in logs)
     assert batches and all(_CULP in b for b in batches)
-    assert any("1 unmeasured test(s) (binary did not complete: b_gen_1)" in ln
-               and "1 body(ies) exempted from dead" in ln for ln in logs), logs
+    assert any("1 failing test(s) did not reach the end of their path" in ln
+               and "binaries did not complete: b_gen_1" in ln
+               and "1 dead / unreached-line claim(s) withheld" in ln
+               for ln in logs), logs
 
 
 @pytest.mark.walk

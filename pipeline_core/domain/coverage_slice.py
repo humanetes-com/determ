@@ -115,7 +115,7 @@ class CoverageSlice:
     "executed by no test" is false for them. The adapter re-runs such a
     binary's tests one process each so the tests that do complete are
     measured; the ones that still die are `unmeasured_tests`, and their
-    executed set is known only from the record (`exempt_recorded_executors`).
+    executed set is unknown this sweep (`withhold_unmeasured`).
     Measured 2026-09-07 on run `1577437-c93d5c26`'s iter-4 tree: three of
     45 binaries died (SIGSEGV, SIGABRT, SIGABRT), 6 of 13 red tests had no
     completing process, and the shipped reading listed both
@@ -260,52 +260,46 @@ def matching_test_key(name: str, keys: Iterable[str]) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def exempt_recorded_executors(
-    reading: CoverageSlice,
-    recorded: Mapping[str, Collection[FnLocator]],
+def withhold_unmeasured(
+    reading: CoverageSlice, truncated: Collection[str] = (),
 ) -> tuple[CoverageSlice, frozenset[FnLocator]]:
-    """The reading with every body an UNMEASURED test is recorded to execute
-    taken out of `dead` (and out of `dead_regions`), plus the set taken out.
+    """The reading with every negative claim withheld that an unmeasured run
+    could contradict, plus the dead / region locators withheld.
 
-    `dead` is "executed by no test in the suite". For a test whose process
-    never completed the reading holds no evidence either way, and the only
-    evidence about its executed set is the record written when it last ran
-    to a verdict (`recorded`, keyed by test name, values the units it
-    entered then). A body in that set is unmeasured this sweep, not dead:
-    the ranking would sink it last and the prompt would tell the model
-    "whatever is wrong is in its caller" — on the live instance, about the
-    very unit the crash originates in.
+    A run is unmeasured when it did not reach its end: its process died (the
+    adapter's `unmeasured_tests`) or it failed at a panic inside the crate
+    (``truncated``, from `test_outcome.truncated_failing` on the sweep's
+    capture). Such a run says nothing about the bodies it would have entered
+    next, and nothing bounds which bodies those are — the pipeline has no
+    call graph — so while any run is unmeasured:
 
-    An unmeasured test with NO recorded set leaves the dead classification
-    unsound for every zero-count body — any of them may be on that test's
-    path — so `dead` and `dead_regions` are cleared whole and the caller
-    logs it. The reading then degrades to what it was before the dead set
-    existed (service and flat ranking only), which authors no verdict and
-    costs one sweep of a demotion the evidence could not support; the
-    opposite choice is the demotion that spent an iteration on the live tree.
+    - `dead` ("executed by no test in the suite") and `dead_regions` are
+      withheld whole;
+    - the unmeasured tests leave `owners`, so every refusal that reads the
+      owner map (`convictors_never_enter`, the red-dead demotion, the
+      per-fn pre-loop gate) sees them as absent, which is the owner map's
+      own "unmeasured, never a refusal" contract.
 
-    Name reconciliation is exact-then-leaf (`matching_test_key`). `owners`
-    is untouched: a recorded set is not a measurement and must not be
-    re-stamped as one (`measured_entry_sets`)."""
-    if not reading.unmeasured_tests:
+    One rule for both sources. It replaces the recorded-executor exemption,
+    which rescued only the bodies an earlier run of a crashed test had been
+    recorded entering: that record was itself a truncated run, and on run
+    `3383938-c5d24499` (2026-09-19) every one of 141 failing tests stopped
+    at `construct`'s stub while the reading still called 58 bodies dead —
+    `vtable`, `drop`, `downcast` among them — and told the model "whatever is
+    wrong is in its caller" about the vtable functions the stub had kept
+    every test from reaching. Positive evidence (what a truncated run DID
+    enter) is the caller's to keep for admission and ranking; this function
+    only withholds what the reading cannot know."""
+    unmeasured = frozenset(reading.unmeasured_tests) | frozenset(truncated)
+    if not unmeasured:
         return reading, frozenset()
-    exempt: set[FnLocator] = set()
-    unknown: list[str] = []
-    for test in sorted(reading.unmeasured_tests):
-        key = matching_test_key(test, recorded)
-        units = recorded.get(key) if key is not None else None
-        if not units:
-            unknown.append(test)
-            continue
-        exempt.update(units)
-    if unknown:
-        removed = frozenset(reading.dead) | frozenset(reading.dead_regions)
-        return replace(reading, dead=frozenset(), dead_regions={}), removed
-    keep = frozenset(reading.dead) - exempt
-    regions = {loc: s for loc, s in reading.dead_regions.items()
-               if loc not in exempt}
-    removed = (frozenset(reading.dead) | frozenset(reading.dead_regions)) & exempt
-    return replace(reading, dead=keep, dead_regions=regions), removed
+    leaves = {t.rsplit("::", 1)[-1] for t in unmeasured}
+    owners = {t: sites for t, sites in reading.owners.items()
+              if t not in unmeasured and t.rsplit("::", 1)[-1] not in leaves}
+    removed = frozenset(reading.dead) | frozenset(reading.dead_regions)
+    return (replace(reading, dead=frozenset(), dead_regions={},
+                    owners=owners, unmeasured_tests=unmeasured),
+            removed)
 
 
 _bound: CoverageSlice | None = None

@@ -5689,7 +5689,9 @@ def fill_impl_blocks(
             unmeasurable_tests=frozenset(kw.get("unmeasurable_tests") or ()),
             crash_blamed=frozenset(kw.get("crash_blamed") or ()),
             attributed=frozenset(kw.get("attributed") or ()),
-            on_wave_kept=kw.get("on_wave_kept")))
+            on_wave_kept=kw.get("on_wave_kept"),
+            premise=kw.get("fill_premise"),
+            ground_now=kw.get("fill_ground_now")))
     return prepared.finish()
 
 

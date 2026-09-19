@@ -18,9 +18,9 @@ that file and exports count 0 for every function. So a file on disk is not
 a completed measurement; the process's returncode (negative = killed by a
 signal) and a NON-EMPTY profile are. A binary that did not complete is
 re-run one test per process so the tests that do complete are measured;
-the ones that still die are reported as unmeasured, absent from the owner
-map, and their bodies are the caller's to exempt from `dead` on the
-recorded evidence (`coverage_slice.exempt_recorded_executors`). The crash
+the ones that still die are reported as unmeasured, and the caller withholds
+every negative claim while any run is unmeasured
+(`coverage_slice.withhold_unmeasured`). The crash
 localizer stays the signal for the fault itself.
 
 Bodies are named at the extractor's `FnSite`, resolved by LINE against the
@@ -587,9 +587,9 @@ def measure_coverage_slice(
     per-test owner sets, plus the binaries and tests whose process did not
     complete (`unmeasured_binaries`, `unmeasured_tests`), or None when the
     reading cannot be taken. `dead` is computed over the COMPLETED
-    processes only; the caller subtracts what an unmeasured test is
-    recorded to execute (`coverage_slice.exempt_recorded_executors`),
-    because this adapter measures the tree and holds no record. Never
+    processes only; the caller withholds it while any run is unmeasured
+    (`coverage_slice.withhold_unmeasured`), because a run that stopped
+    short bounds nothing about the bodies after its stop. Never
     writes into the loop's target dir.
 
     `failing_tests` is the sweep's failing set. Empty leaves `owners`

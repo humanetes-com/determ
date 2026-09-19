@@ -71,8 +71,8 @@ from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
 )
 from pipeline_core.domain.coverage_slice import (
-    exempt_recorded_executors,
     red_dead_units,
+    withhold_unmeasured,
 )
 from pipeline_core.domain.crash_site import (
     blamed_locators,
@@ -214,9 +214,16 @@ from pipeline_core.domain.tdd_floor import (
 )
 from pipeline_core.domain.test_cmd import expected_target_labels
 from pipeline_core.domain.test_command import ensure_serial_harness
+from pipeline_core.domain.test_outcome import (
+    PremiseEntry,
+    names_of,
+    outcomes_of,
+    premise_moved,
+    premise_of,
+    truncated_failing,
+)
 from pipeline_core.domain.test_report import (
     StubAbortReading,
-    compare_panic_sites,
     failure_evidence_by_test,
     merge_observations,
     parse_test_output,
@@ -454,11 +461,11 @@ class PhaseCTddDeps:
     # (project_dir, test names) -> the recorded executed set per test, from
     # the retrospectives store's conviction-time entry stamps. Read for the
     # red tests the coverage probe could NOT measure this sweep (their
-    # process did not complete): the recorded set exempts their bodies
-    # from `dead` and stands in as their owner set for ranking, admission
-    # and the red-slice sessions, tagged recorded in the owner-map event.
-    # None means no record is consulted; an unmeasured test then clears
-    # the dead set whole (`exempt_recorded_executors`).
+    # process did not complete): the recorded set stands in as their owner
+    # set for ranking, admission and the red-slice sessions (positive
+    # evidence only), tagged recorded in the owner-map event. `dead` is
+    # withheld while any run is unmeasured (`withhold_unmeasured`) whether
+    # or not a record exists.
     recorded_entry_sets: Callable[..., Mapping[str, frozenset[FnLocator]]] | None = None
     # (project_dir) -> per-unit text of the retrospectives store's rows about
     # it, the `retro` channel of the evidence premise
@@ -748,6 +755,27 @@ def run_phase_c_tdd(
     # order only (no shares, nothing deferred). Read once, like the stops.
     _fill_budget = _read_fill_budget_minutes()
     _max_sessions = _read_max_sessions_per_fill()
+    # Re-plan on a moved premise (`fill_scheduler._GroundGate`): a fill ends
+    # at the first claim after a keep that changed which tests fail or where
+    # they first fail, and the next sweep plans from the tree as it stands.
+    # NOT a stop — it prevents no reading, it brings the next one forward.
+    # `0` runs every fill's plan to its end (the frozen-plan negative
+    # control). Read once, like the stops.
+    _replan_on_premise = os.getenv("PHASE_C_REPLAN_ON_PREMISE", "1") != "0"
+
+    def _premise_of_capture(capture: str) -> dict[str, PremiseEntry]:
+        """The ground a capture shows (`test_outcome.premise_of`), crate
+        sites resolved to their function on the tree as it stands now —
+        a fresh locator per call, because the tree moves between calls.
+        With no extractor wired a crate site is identified by its file."""
+        return premise_of(outcomes_of(capture), make_fn_site_locator(
+            SimpleNamespace(enumerate_fns=deps.enumerate_fns), target_src_dir)
+            if deps.enumerate_fns is not None else None)
+
+    # The previous judged sweep's ground, for the no-verdict clock: a sweep
+    # whose tests fail somewhere else than they did is the loop doing
+    # something to the crate even when no verdict flipped.
+    _prev_premise: dict[str, PremiseEntry] | None = None
 
     # The GPU protector (domain/flat_score.py). The plateau budget above charges
     # only on a COMPLETED frontier traversal, which under the dispatch cap is
@@ -830,7 +858,8 @@ def run_phase_c_tdd(
          + (f", sessions-per-fill={_max_sessions}"
             if _max_sessions > 0 else ", sessions-per-fill=unbounded")
          + f", language-driver={language_driver().name}"
-         + f", followup-think={'on' if followup_think_env_on() else 'off'}")
+         + f", followup-think={'on' if followup_think_env_on() else 'off'}"
+         + f", replan-on-premise={'on' if _replan_on_premise else 'off'}")
 
     if deps.migrate_retro_evidence is not None:
         _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
@@ -2305,35 +2334,35 @@ def run_phase_c_tdd(
         # because a re-stub is expected to move the vector down.
         _landed_since = total_filled - _filled_at_prev_sweep
         # A byte-identical vector can still hide movement: a failing test
-        # that now panics at a later assertion of its own file got further.
-        # Run `11358-e5de094e` iter 5 printed "bought nothing" over a fill
-        # that took its aimed test from its first assertion to its second.
-        _advanced_now = (
-            compare_panic_sites(
-                {t: st for t, st in _sweep_prev.panic_sites.items()
-                 if t in _sweep_view.failed},
-                _sweep_view.panic_sites)[1]
-            if _sweep_prev is not None
+        # that now fails somewhere else — a later assertion of its own file
+        # (run `11358-e5de094e` iter 5 printed "bought nothing" over a fill
+        # that took its aimed test from its first assertion to its second),
+        # or a different crate function (run `3383938-c5d24499`: a kept
+        # `construct` moved all 141 failing tests off its stub) — is the
+        # loop doing something to the crate. One comparison answers both:
+        # the ground the previous sweep stood on against this one's.
+        _premise_now = _premise_of_capture(output)
+        _sites_moved = (
+            premise_moved(_prev_premise, _premise_now)
+            if _prev_premise is not None and _sweep_prev is not None
             and _sweep_prev.epoch == _sweep_view.epoch else ())
+        _prev_premise = _premise_now
         if (_prev_bins and _bins == _prev_bins and _landed_since > 0
-                and not _grace.bodies_in_flight and _advanced_now):
-            # Movement the vector cannot see is still the loop doing
-            # something to the crate — the clock restarts, as for a moved
-            # verdict. Only ever LATER than before, so it can prevent no
-            # reading a stop was sized to.
+                and not _grace.bodies_in_flight and _sites_moved):
+            # Movement the vector cannot see — the clock restarts, as for a
+            # moved verdict. Only ever LATER than before, so it can prevent
+            # no reading a stop was sized to.
             _unmoved = _unmoved.moved()
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: {_landed_since} "
                 "body(ies) landed since the last sweep; no test changed "
-                f"verdict, but {len(_advanced_now)} failing test(s) now panic "
-                "at a LATER assertion (every assertion before it passes): "
-                + ", ".join(f"{t} {f}:{a}->{b}"
-                            for t, f, a, b in _advanced_now[:6]))
-            deps.emit("phase_c.tdd.assertion_advanced", data={
+                f"verdict, but {len(_sites_moved)} failing test(s) now fail "
+                "somewhere else: " + names_of(_sites_moved))
+            deps.emit("phase_c.tdd.failure_site_moved", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "filled_since": _landed_since,
-                "advanced": [{"test": t, "file": f, "before": a, "after": b}
-                             for t, f, a, b in _advanced_now]})
+                "moved": list(_sites_moved[:50]),
+                "moved_count": len(_sites_moved)})
         elif (_prev_bins and _bins == _prev_bins and _landed_since > 0
                 and not _grace.bodies_in_flight):
             _unmoved = _unmoved.unmoved(_landed_since)
@@ -4600,34 +4629,34 @@ def run_phase_c_tdd(
                     "cluster": cluster.name, "iter": iter_n,
                     "hung_tests": sorted(_cov.hung_tests),
                 })
-        # UNMEASURED TESTS. A red test whose process did not complete (a
-        # binary killed by a signal flushes no profile) has no live
-        # reading; the record of what it entered when it last ran to a
-        # verdict is the only evidence about its path. Its bodies leave
-        # `dead` (unmeasured is not "executed by no test"), and the
-        # recorded set stands in as its owner set below. Run
-        # `1577437-c93d5c26` iter 4: the SIGSEGV binary's two units were
-        # listed dead and demoted below the frontier while the store
-        # already recorded the crashing test entering both.
+        # UNMEASURED RUNS. A red test whose process did not complete, or that
+        # failed at a panic inside the crate, never reached the end of its
+        # path; every negative claim the reading makes ("executed by no
+        # test", "no failing test enters this body") is withheld while any
+        # such run exists (`coverage_slice.withhold_unmeasured`). What those
+        # runs DID enter stays positive evidence for admission and ranking:
+        # `_owners_positive` is taken before the withholding, and the record
+        # of what a crashed test entered when it last ran stands in for it.
         _recorded: dict[str, frozenset[FnLocator]] = {}
-        _dead_exempt: frozenset[FnLocator] = frozenset()
-        if _cov is not None and _cov.unmeasured_tests:
-            if deps.recorded_entry_sets is not None:
+        _owners_positive: dict[str, frozenset[FnSite]] = (
+            dict(_cov.owners) if _cov is not None else {})
+        if _cov is not None:
+            _truncated = truncated_failing(outcomes_of(output))
+            if _cov.unmeasured_tests and deps.recorded_entry_sets is not None:
                 _recorded = dict(deps.recorded_entry_sets(
                     project_dir, sorted(_cov.unmeasured_tests)))
-            _cov, _dead_exempt = exempt_recorded_executors(_cov, _recorded)
-            _no_record = sorted(
-                t for t in _cov.unmeasured_tests if t not in _recorded)
-            deps.log(
-                f"  {tag} [phase-c/coverage] {len(_cov.unmeasured_tests)} "
-                "unmeasured test(s) (binary did not complete: "
-                + ", ".join(sorted(_cov.unmeasured_binaries)) + "); "
-                f"recorded executed set for {len(_recorded)}; "
-                f"{len(_dead_exempt)} body(ies) exempted from dead"
-                + (" — no recorded set for "
-                   + ", ".join(_no_record[:6])
-                   + "; dead set cleared (unmeasurable this sweep)"
-                   if _no_record else ""))
+            _cov, _dead_withheld = withhold_unmeasured(_cov, _truncated)
+            if _cov.unmeasured_tests:
+                deps.log(
+                    f"  {tag} [phase-c/coverage] {len(_cov.unmeasured_tests)} "
+                    "failing test(s) did not reach the end of their path ("
+                    f"{len(_truncated)} stopped inside the crate"
+                    + (", binaries did not complete: "
+                       + ", ".join(sorted(_cov.unmeasured_binaries))
+                       if _cov.unmeasured_binaries else "")
+                    + f"); {len(_dead_withheld)} dead / unreached-line "
+                    "claim(s) withheld and those tests' owner sets kept as "
+                    "positive evidence only")
         bind_coverage_slice(_cov)
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
@@ -4636,8 +4665,7 @@ def run_phase_c_tdd(
         # take unique-container sites from the frontier, not this map.
         # The BOUND slice keeps the measured map only — a recorded set is
         # not a measurement and must not be re-stamped as one.
-        _owners_read: dict[str, frozenset[FnSite]] = (
-            dict(_cov.owners) if _cov is not None else {})
+        _owners_read: dict[str, frozenset[FnSite]] = dict(_owners_positive)
         # Ranking converts sites back to locators, so an empty container
         # here is a (file, fn) stamp and does not fan out. Sessions do
         # not read this map: they take unique-container sites below.
@@ -4666,8 +4694,9 @@ def run_phase_c_tdd(
                 "recorded_owners": {
                     t: [site_payload(k) for k in sorted(ks)]
                     for t, ks in sorted(_recorded_rank.items())},
-                "dead_exempted": sorted(
-                    f"{k.file}::{k.fn_name}" for k in _dead_exempt),
+                "dead_withheld": sorted(
+                    f"{k.file}::{k.fn_name}" for k in _dead_withheld)
+                if _cov is not None else [],
             })
         # RED-DEAD DEMOTION. `dead` above is a whole-suite merge and cannot
         # say "no FAILING test enters this body", which is the only question
@@ -4680,8 +4709,11 @@ def run_phase_c_tdd(
         # re-lifts anything a fault names.
         _red_dead: frozenset[FnLocator] = frozenset()
         if _cov is not None and _owners_read:
+            # The withheld map: a failing test whose run stopped short is
+            # absent from it, so the demotion declines (`red_dead_units`'s
+            # own "every red test measured" rule).
             _red_dead = red_dead_units(
-                (k for k, _ in ordered), cur_failed, _owners_read,
+                (k for k, _ in ordered), cur_failed, _cov.owners,
                 exempt=_esc_keys | _product_keys | _crash_grades.keys())
         # OWNER-MAP ADMISSION. Ranking can promote a never-served owner but
         # cannot put `error.rs::fmt` on the frontier: run `451330-7e8a7ca9`
@@ -5717,6 +5749,23 @@ def run_phase_c_tdd(
                     deps.log(f"  {tag} [probe] observed values for "
                              f"{len(_observed)} failing test(s).")
         _fill_meta: list[dict[str, Any]] = []
+        # The ground this fill's plan stands on: the sweep's own capture,
+        # read into per-test outcomes with crate sites resolved to the
+        # function they lie in on the tree the sweep measured. The reader
+        # re-runs the same test command on the tree as it stands; the fill
+        # executor calls it only after a keep (`fill_scheduler._GroundGate`).
+        _plan_premise: dict[str, PremiseEntry] | None = None
+        _ground_now: Callable[[], dict[str, PremiseEntry] | None] | None = None
+        if _replan_on_premise:
+            _plan_premise = _premise_of_capture(output)
+
+            def _ground_now() -> dict[str, PremiseEntry] | None:
+                _rc_g, _out_g = deps.run_cargo(
+                    test_cmd, target_src_dir, cluster_env,
+                    timeout=test_timeout)
+                if _rc_g == -1:
+                    return None
+                return _premise_of_capture(_out_g)
         try:
             with collect_stream_meta() as _fill_meta:
                 sub = deps.task2_fill_fns_one_by_one(
@@ -5794,6 +5843,8 @@ def run_phase_c_tdd(
                         t_: frozenset(locator_of(s_) for s_ in ss_)
                         for t_, ss_ in _stub_hollow.items()},
                     on_wave_kept=lambda kept: _record_landed_rows("wave", kept),
+                    fill_premise=_plan_premise,
+                    fill_ground_now=_ground_now,
                 )
         except BaseException:
             # Before the restore: a restored tree no longer holds these
@@ -5862,7 +5913,11 @@ def run_phase_c_tdd(
             already=_pass_reoffered)
         _pass_closed_now = _batch.completes_pass
         if _reoffer:
-            _pass_reoffered |= _reoffer
+            # A fill that ended on a moved premise did not judge the units
+            # it never opened — the plan changed under them — so their
+            # re-offer does not spend the once-per-pass bound.
+            if not sub.premise_moved:
+                _pass_reoffered |= _reoffer
             if _batch.completes_pass:
                 _pass_closed_now = False
                 _traversals -= 1

@@ -9,8 +9,10 @@ ledger graded the landing `flat`.
 Replayed on the flat readings of `358833-aa15d93c` (135 passing, 2 failing at
 every sweep), with the failing tests' synthetic panic moving from line 10 to
 line 12 of their test file between the first two sweeps. Asserted: the loop
-reports the advance, emits `phase_c.tdd.assertion_advanced`, and does not
-print the "bought nothing" line for that sweep. Negative control: the same
+reports the move, emits `phase_c.tdd.failure_site_moved` (the general form:
+any test's first failure moving, crate or test source — run
+`3383938-c5d24499`'s kept `construct` moved 141 of them off its stub), and
+does not print the "bought nothing" line for that sweep. Negative control: the same
 replay with the panic line unmoved prints "bought nothing" and emits no
 advance.
 """
@@ -37,31 +39,33 @@ def _replay(monkeypatch, tmp_path: Path, lines: list[int]):
 def test_a_panic_that_moved_later_is_reported_not_bought_nothing(
         monkeypatch, tmp_path: Path) -> None:
     logs, events = _replay(monkeypatch, tmp_path, [10, 12, 12])
-    advanced = [d for e, d in events if e == "phase_c.tdd.assertion_advanced"]
+    advanced = [d for e, d in events if e == "phase_c.tdd.failure_site_moved"]
     assert advanced, "the second sweep's later panic must be reported"
     assert advanced[0]["iter"] == 2
-    assert {a["before"] for a in advanced[0]["advanced"]} == {10}
-    assert {a["after"] for a in advanced[0]["advanced"]} == {12}
+    assert advanced[0]["moved_count"] >= 1
     iter2 = [ln for ln in logs if "iter 2:" in ln]
-    assert any("LATER assertion" in ln for ln in iter2)
+    assert any("now fail somewhere else" in ln for ln in iter2)
     assert not any("bought nothing" in ln for ln in iter2)
 
 
 def test_negative_control_an_unmoved_panic_still_bought_nothing(
         monkeypatch, tmp_path: Path) -> None:
     logs, events = _replay(monkeypatch, tmp_path, [10, 10, 10])
-    assert not [e for e, _ in events if e == "phase_c.tdd.assertion_advanced"]
+    # Iteration 2 is the sweep under test; the harness pads later sweeps'
+    # panic line to 1, which is a real move and is reported as one.
+    assert not [e for e, d in events
+                if e == "phase_c.tdd.failure_site_moved" and d["iter"] == 2]
     assert any("iter 2:" in ln and "bought nothing" in ln for ln in logs)
 
 
 def test_negative_control_the_pre_change_sweep_calls_the_moved_panic_nothing(
         monkeypatch, tmp_path: Path) -> None:
     """The pre-change reading injected into the same moving-panic replay:
-    with no panic comparison the loop prints "bought nothing" exactly as
+    with no premise comparison the loop prints "bought nothing" exactly as
     run `11358-e5de094e` did."""
     import pipeline_core.application.reconstruct.phase_c_tdd as _mod
-    monkeypatch.setattr(_mod, "compare_panic_sites",
-                        lambda _b, _a: ((), ()))
+    monkeypatch.setattr(_mod, "premise_moved", lambda _b, _a: ())
     logs, events = _replay(monkeypatch, tmp_path, [10, 12, 12])
-    assert not [e for e, _ in events if e == "phase_c.tdd.assertion_advanced"]
+    assert not [e for e, d in events
+                if e == "phase_c.tdd.failure_site_moved" and d["iter"] == 2]
     assert any("iter 2:" in ln and "bought nothing" in ln for ln in logs)

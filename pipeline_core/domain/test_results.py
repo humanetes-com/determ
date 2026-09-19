@@ -2023,7 +2023,12 @@ def stable_test_keys(b: BinaryResult) -> dict[str, str]:
     `reference_floor.pairs_of` already compares trees by, applied to every
     test the binary reported so the ordinal does not depend on verdicts.
     Every other name is its own identity."""
-    names = b.passed | b.failed | b.ignored
+    return stable_name_keys(b.passed | b.failed | b.ignored)
+
+
+def stable_name_keys(names: Iterable[str]) -> dict[str, str]:
+    """:func:`stable_test_keys` over any set of names of ONE binary (or of
+    a capture whose doc tests all come from one doc-test target)."""
     out: dict[str, str] = {}
     ordinal: dict[str, int] = {}
     for n in sorted(names, key=lambda x: (doc_test_line(x) or 0, x)):
