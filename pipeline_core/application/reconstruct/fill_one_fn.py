@@ -63,8 +63,8 @@ from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.declined import declined_guidance
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.fill_class import FillOutcomeClass, class_for_kept
-from pipeline_core.domain.last_error import LastErrorKind, kind_of_compiled_run
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.last_error import LastErrorKind, kind_of_compiled_run
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
     body_fingerprint,

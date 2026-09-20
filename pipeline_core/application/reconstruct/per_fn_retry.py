@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 from pipeline_core.application.reconstruct.attribution import (
     not_body_repairable_tests,
 )
-from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
 )
@@ -41,6 +40,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.cluster_plan import cfg_world_rules
+from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.retry_outcome import (

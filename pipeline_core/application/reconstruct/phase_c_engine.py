@@ -66,7 +66,6 @@ from pipeline_core.domain.dispatch import (
     stubs_deferred_by_impl_route,
 )
 from pipeline_core.domain.enums import FillUnit, RouteOrder
-from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillClassHistogram,
@@ -74,6 +73,7 @@ from pipeline_core.domain.fill_class import (
 )
 from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, RunClock
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,

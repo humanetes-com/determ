@@ -33,6 +33,11 @@ from typing import Any
 from pipeline_core.domain.attribution import container_key, locator_of, site_label
 from pipeline_core.domain.fill_schedule import RouteRun
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.last_error import (
+    kind_of_compiled_run,
+    last_error_prefix,
+    resolve_kind,
+)
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
 NOTES_OPEN = "<NOTES>"
@@ -1007,6 +1012,12 @@ def render_test_turn(
         if t.observed:
             lines.append(_indent(t.observed))
     if reading.newly_red:
+        _said_blob = "\n".join(
+            reading.newly_red_said.get(n, "") for n in reading.newly_red)
+        _kind = kind_of_compiled_run(
+            aborted=bool(reading.crashed), hung=bool(reading.hung))
+        if resolve_kind(_kind, _said_blob).has_faulting_call:
+            lines.append("  " + last_error_prefix(_said_blob, _kind).rstrip())
         lines.append(
             f"  REGRESSION: {len(reading.newly_red)} previously-passing test(s) "
             "went red under this change set — the next change set must keep "

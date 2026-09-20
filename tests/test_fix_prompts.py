@@ -11,7 +11,7 @@ import dataclasses
 
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.domain.last_error import LastErrorKind, RED_HEAD_MARK, last_error_prefix
+from pipeline_core.domain.last_error import RED_HEAD_MARK, LastErrorKind, last_error_prefix
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
     build_behavior_fix_prompt,
@@ -686,6 +686,26 @@ def test_restrict_fill_plan_drops_the_kept_name_and_keeps_the_peeled() -> None:
     assert plan.refills == ("debug", "write_str")
     empty = restrict_fill_plan([plan], {"never_in_plan"})
     assert empty == []
+
+
+def test_restrict_fill_plan_keeps_an_installable_only_remainder() -> None:
+    """A peeled name that lives only on installable= must still produce a plan.
+
+    Negative control: the old stubs-or-refills keep dropped that plan, which
+    is how a peel-retry rebuilt a bare header="" refill and lost the
+    INSTALLABLE instruction the first prompt had.
+    """
+    plan = BlockFillPlan(
+        header="",
+        refills=(),
+        installable=("object_table",),
+    )
+    # The pre-change predicate (what the retry used to do).
+    assert not (plan.stubs or plan.refills)
+    got = restrict_fill_plan([plan], {"object_table"})
+    assert len(got) == 1
+    assert got[0].installable == ("object_table",)
+    assert restrict_fill_plan([plan], {"other"}) == []
 
 
 def test_file_fill_retry_of_a_compiling_red_uses_the_compiled_prefix() -> None:

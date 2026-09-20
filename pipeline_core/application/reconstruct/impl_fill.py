@@ -169,6 +169,7 @@ from pipeline_core.domain.last_error import (
     LAST_ERROR_KIND,
     LastErrorKind,
     kind_from_record,
+    kind_of_compiled_run,
 )
 from pipeline_core.domain.llm_output import (
     ReplyAudit,
@@ -1970,15 +1971,24 @@ def prepare_impl_fill(
                     file_rel, _audit.empty, _cont_of,
                     response_sha=_audit.response_sha, route="file")
             if not parsed:
+                if (_retry_names is not None
+                        and _attempt < _FILE_FIRST_MAX_ATTEMPTS):
+                    _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
+                         f"({fn_tag_occurrences(_file_reply)} FN tag(s) in "
+                         "reply) on peel-retry — retrying (attempts remain).")
+                    prior_error = (
+                        (prior_error + "\n" if prior_error else "")
+                        + "previous retry returned no FN blocks")
+                    _pre = capture(file_path, None)
+                    snapshot = _pre.text("replace")
+                    continue
                 _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
                      f"({fn_tag_occurrences(_file_reply)} FN tag(s) in reply) — "
                      "falling back to per-block fills.")
-                _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
-                # Attempt-scoped, as at the LLM-error return above.
-                attempts.note_lost(
-                    FnLocator(file_rel, n)
-                    for n in (_retry_names if _retry_names is not None
-                              else wanted))
+                if _retry_names is None:
+                    _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
+                    attempts.note_lost(
+                        FnLocator(file_rel, n) for n in wanted)
                 return
             with _splice_check_lock:
                 # Runtime test state for the monotone ratchet, captured NOW
@@ -2204,14 +2214,27 @@ def prepare_impl_fill(
                             _log(f"  [phase-c/file] {file_rel}: free-fn splice "
                                  f"`{_p['fn_name']}` failed: {_reason}")
                 if spliced_now == 0:
+                    if (_retry_names is not None
+                            and _attempt < _FILE_FIRST_MAX_ATTEMPTS):
+                        _log(f"  [phase-c/file] {glabel}: nothing spliced "
+                             f"on peel-retry of {sorted(_retry_names)} — "
+                             "retrying the same names (attempts remain).")
+                        prior_error = (
+                            (prior_error + "\n" if prior_error else "")
+                            + "previous retry spliced nothing for: "
+                            + ", ".join(sorted(_retry_names)))
+                        _pre = capture(file_path, None)
+                        snapshot = _pre.text("replace")
+                        continue
                     _log(f"  [phase-c/file] {glabel}: nothing spliced — "
                          "falling back to per-block fills.")
-                    _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
-                    # Attempt-scoped, as at the LLM-error return above.
-                    attempts.note_lost(
-                        FnLocator(file_rel, n)
-                        for n in (_retry_names if _retry_names is not None
-                                  else wanted))
+                    if _retry_names is None:
+                        _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
+                        # Attempt-scoped, as at the LLM-error return above.
+                        # A peel-retry that spliced nothing already reverted
+                        # those names on the peel; do not also mark them lost.
+                        attempts.note_lost(
+                            FnLocator(file_rel, n) for n in wanted)
                     return
                 _attempted_names = [b.fn_name for b in _landed]
                 _peel_reverted: tuple[str, ...] = ()
@@ -2567,6 +2590,20 @@ def prepare_impl_fill(
                         _pre = capture(file_path, None)
                         snapshot = _pre.text("replace")
                         continue
+                    if _retry_names is not None:
+                        _landed_names = {b.fn_name for b in _landed}
+                        _unspliced = frozenset(
+                            n for n in _retry_names if n not in _landed_names)
+                        if (_unspliced
+                                and _attempt < _FILE_FIRST_MAX_ATTEMPTS):
+                            _log(f"  [phase-c/file] {glabel}: peel-retry "
+                                 f"left {len(_unspliced)} name(s) unspliced "
+                                 f"({', '.join(sorted(_unspliced))}) — "
+                                 "retrying those names; judged remainder stays.")
+                            _retry_names = _unspliced
+                            _pre = capture(file_path, None)
+                            snapshot = _pre.text("replace")
+                            continue
                     return
                 restore(_pre)
                 _note_reverted(file_rel, _attempted_names)
@@ -5299,6 +5336,7 @@ def prepare_impl_fill(
                 bound_methods="\n\n".join(_bound_parts),
                 invariants=invariants_section, macros=macros_section,
                 notes=_prior_notes, prior_regression=_prior_regr,
+                kind=kind_from_record(_srec),
                 blueprint=_bp, fr_path=fr_path,
                 max_turns=_max_turns, executed=_executed_all,
                 file_chars=_sl.file_chars or SESSION_FILE_CHARS)
@@ -5479,6 +5517,10 @@ def prepare_impl_fill(
                     "session_outcome": _out.outcome,
                     "session_turns": _out.turns,
                 })
+                if _out.newly_red and _out.final is not None:
+                    _new_rec[LAST_ERROR_KIND] = kind_of_compiled_run(
+                        aborted=bool(_out.final.crashed),
+                        hung=bool(_out.final.hung)).value
                 retros_cache[_skey] = _new_rec
                 _save_retrospectives(project_dir, retros_cache)
             if _out.kept and _out.newly_red:

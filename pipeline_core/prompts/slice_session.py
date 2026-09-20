@@ -22,6 +22,7 @@ from pathlib import Path
 
 from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import NOTES_CLOSE, NOTES_OPEN, SessionSlice
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
@@ -143,6 +144,7 @@ def build_slice_session_prompt(
     macros: str = "",
     notes: str = "",
     prior_regression: str = "",
+    kind: LastErrorKind | None = None,
     blueprint: str = "",
     fr_path: Path | None = None,
     max_turns: int = 8,
@@ -157,7 +159,11 @@ def build_slice_session_prompt(
     from. `test_blocks` are the test files (attributed first) under the
     same caps the other routes use. `notes` is the previous session's own
     `<NOTES>` for this slice, after the contradiction screen. `prior_regression`
-    is what the previous session's reddened tests printed (`render_prior_regression`)."""
+    is what the previous session's reddened tests printed (`render_prior_regression`).
+    `kind` is the stored verdict of that attempt when the record carries one;
+    a faulting-call kind prefixes PRIOR_REGRESSION with the same
+    `last_error_prefix` sentence the pair builder already uses, so the
+    quoted expression is an instruction not only evidence."""
     tests_part = "\n\n".join(
         f"* {t} — FAILING. It said:\n"
         + "\n".join(f"    {ln}" for ln in (target_evidence.get(t) or "(no captured output)").splitlines())
@@ -181,6 +187,11 @@ def build_slice_session_prompt(
     tests_section = "\n\n".join(
         f'<TEST path="{p}">\n{txt}\n</TEST>' for p, txt in test_blocks) or "(none)"
     first_file = slice_.files[0] if slice_.files else ""
+    regression_body = prior_regression
+    if (prior_regression.strip()
+            and resolve_kind(kind, prior_regression).has_faulting_call):
+        regression_body = (
+            last_error_prefix(prior_regression, kind) + prior_regression)
     return f"""You are DEBUGGING a Rust crate that already compiles: {len(slice_.tests)} test(s)
 fail, and every crate fn those tests execute is listed below as EDITABLE. Your
 job over this session is to change as few of those bodies as needed so the
@@ -193,7 +204,7 @@ FAILING TESTS (the targets):
 
 {tests_part}
 
-{tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", prior_regression)}
+{tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", regression_body)}
 <RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>

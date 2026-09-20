@@ -8,8 +8,8 @@ used last_error_prefix; this builder did not. Invented names only.
 from __future__ import annotations
 
 from pipeline_core.domain.last_error import (
-    LastErrorKind,
     RED_HEAD_MARK,
+    LastErrorKind,
     last_error_prefix,
 )
 from pipeline_core.prompts.context import PerFnFixSections

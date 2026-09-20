@@ -15,9 +15,11 @@ from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import (
     LastErrorKind,
-    faulted_clause as _faulted_clause,
     last_error_prefix,
     resolve_kind,
+)
+from pipeline_core.domain.last_error import (
+    faulted_clause as _faulted_clause,
 )
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.domain.pair_fill import extra_quoted_members, extra_write_members

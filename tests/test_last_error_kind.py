@@ -27,8 +27,10 @@ from pipeline_core.domain.last_error import (
     kind_from_record,
     kind_from_text,
     kind_of_compiled_run,
-    last_error_prefix as domain_prefix,
     resolve_kind,
+)
+from pipeline_core.domain.last_error import (
+    last_error_prefix as domain_prefix,
 )
 from pipeline_core.domain.pair_fill import pair_last_error
 from pipeline_core.domain.test_results import (

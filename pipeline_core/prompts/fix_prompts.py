@@ -239,7 +239,10 @@ def restrict_fill_plan(
     ``451330-7e8a7ca9``, 2026-08-31: ``src/fmt.rs::debug`` peeled, FILE FILLED
     1, attempt 1 of 3 final). The retry loop rebuilds the prompt from this
     restriction so kept bodies are not re-authorized and the peeled names
-    keep the rewrite instruction.
+    keep the rewrite instruction. A plan that still lists ``installable``
+    names survives even when stubs and refills emptied: those names are
+    the free-fn complement the first prompt offered, and dropping them
+    here used to rebuild a bare header="" refill without that instruction.
     """
     want = frozenset(names)
     out: list[BlockFillPlan] = []
@@ -256,7 +259,12 @@ def restrict_fill_plan(
             bypass=tuple(b for b in p.bypass if b.fn_name in want),
             sigs=tuple((n, s) for n, s in p.sigs if n in want),
         )
-        if q.stubs or q.refills:
+        # A peeled name that lives only on `installable=` (the free-fn
+        # complement an escalated producer offered) must still produce a
+        # plan: dropping the whole plan when stubs/refills emptied, then
+        # appending a bare header="" refill, lost the INSTALLABLE
+        # instruction the first prompt had.
+        if q.stubs or q.refills or q.installable:
             out.append(q)
     return out
 

@@ -236,20 +236,69 @@ def test_rejected_only_and_crash_turns_render() -> None:
         "src/lib.rs": [_DISP], "src/render.rs": [_RENDER, _NEW]}
 
 
-def test_turn0_renders_prior_regression_and_omits_empty_notes() -> None:
+def _turn0(**kwargs) -> str:
     from pipeline_core.prompts.slice_session import build_slice_session_prompt
     sl = SessionSlice(tests=("t_pair",), units=(_DISP, _RENDER))
     recs = _records()
-    text = build_slice_session_prompt(
+    args = dict(
         module_name="m", cluster_name="t", slice_=sl, records=recs,
         all_records=list(recs.values()),
         file_texts={"src/lib.rs": "fn fmt() {}", "src/render.rs": "fn render() {}"},
         target_evidence={"t_pair": 'left: "a"'},
         test_blocks=(), types_section="",
-        prior_regression="the PREVIOUS attempt reddened t_keep")
+    )
+    args.update(kwargs)
+    return build_slice_session_prompt(**args)
+
+
+def test_turn0_renders_prior_regression_and_omits_empty_notes() -> None:
+    text = _turn0(prior_regression="the PREVIOUS attempt reddened t_keep")
     assert "PRIOR_REGRESSION" in text
     assert "reddened t_keep" in text
     assert "PREVIOUS_SESSION_NOTES" not in text
+    # No panic / regression-head mark: kind_from_text is UNKNOWN, so the
+    # pair's faulting-call prefix must not appear.
+    assert "compiled and then" not in text
+    assert "do not emit" not in text
+    empty = _turn0(prior_regression="")
+    assert "PRIOR_REGRESSION" not in empty
+    assert "compiled and then" not in empty
+
+
+def test_turn0_faulting_prior_regression_uses_the_pair_prefix() -> None:
+    from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix
+    from pipeline_core.domain.test_results import ATTEMPT_QUOTE_MARK
+    quote = (
+        "t_sib said: panicked at src/lib.rs:4:1\n"
+        f"  {ATTEMPT_QUOTE_MARK}: `self.0[n + 3]` inside `fn widen`")
+    text = _turn0(prior_regression=quote, kind=LastErrorKind.REDDENED)
+    prefix = last_error_prefix(quote, LastErrorKind.REDDENED)
+    assert prefix.strip() in text
+    assert ATTEMPT_QUOTE_MARK in text
+    assert "self.0[n + 3]" in text
+    compile_kind = _turn0(prior_regression=quote, kind=LastErrorKind.COMPILE)
+    assert prefix.strip() not in compile_kind
+    assert ATTEMPT_QUOTE_MARK in compile_kind
+
+
+def test_render_test_turn_prefixes_a_faulting_regression() -> None:
+    from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix
+    from pipeline_core.domain.test_results import ATTEMPT_QUOTE_MARK
+    said = (
+        "panicked at src/lib.rs:4:1\n"
+        f"{ATTEMPT_QUOTE_MARK}: `self.0[n + 3]` inside `fn widen`")
+    reading = TurnReading(
+        targets=(TargetStatus("t_a", False, said="still red"),),
+        newly_red=("t_sib",),
+        newly_red_said={"t_sib": said})
+    text = render_test_turn(reading)
+    prefix = last_error_prefix(said, LastErrorKind.REDDENED).rstrip()
+    assert prefix in text
+    assert ATTEMPT_QUOTE_MARK in text
+    clean = render_test_turn(TurnReading(
+        targets=(TargetStatus("t_a", True),)))
+    assert "compiled and then" not in clean
+    assert "do not emit" not in clean
 
 
 # --- what the first live session taught (run 164454-8ec9c4d4, 2026-09-02) ---

@@ -699,8 +699,55 @@ def test_peel_retry_that_returns_empty_keeps_the_judged_remainder(
     assert res.answer_lost_fns == (), (
         "the retry pursued only the peeled names: `name` landed and `kind` "
         "has a reverted try — neither is a lost answer")
-    assert len(prompts) >= 2 and "kind" in prompts[1], (
-        "the second prompt is the scoped retry")
+    assert len(prompts) == 3 and "kind" in prompts[1] and "kind" in prompts[2], (
+        "an empty peel-retry is asked again while attempts remain, then "
+        "gives up without FILE FILLED-returning the first empty")
+
+
+def test_peel_retry_parse_broken_is_asked_again(monkeypatch, tmp_path):
+    """A peel-retry that splices nothing is not FILE FILLED-done.
+
+    Attempt 1 peels `kind` and keeps `name`. Attempt 2's body does not parse.
+    Attempt 3 lands `kind`. Before this, spliced_now==0 on the retry returned
+    and `kind` never saw the remaining attempt.
+    """
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    from pipeline_core.application.reconstruct import splice as splice_mod
+    _real_guard = splice_mod.parse_guarded_write
+
+    def _guard(path, new_bytes, pre_bytes, validate_parse):
+        if b"@@@" in new_bytes:
+            return False
+        return _real_guard(path, new_bytes, pre_bytes, validate_parse)
+
+    monkeypatch.setattr(splice_mod, "parse_guarded_write", _guard)
+    prompts: list[str] = []
+    replies = [
+        RESPONSE_TWO,
+        '<FN name="kind" block="impl Foo">this is not rust @@@</FN>',
+        '<FN name="kind" block="impl Foo">self.tag</FN>',
+    ]
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return replies[min(len(prompts) - 1, len(replies) - 1)]
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (0, "", [])],
+        frontier={FnLocator("lib.rs", "kind"): {"<compile>"}})
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert "self.tag + 1" in text, "the kept remainder survives the broken retry"
+    assert "unimplemented!()" not in text
+    assert len(prompts) == 3, f"expected 3 file-first calls, got {len(prompts)}"
+    assert "kind" in prompts[2]
+    assert res.fns_filled >= 2
 
 
 def test_file_first_without_the_peel_loses_the_good_body_too(
