@@ -71,8 +71,11 @@ _FIELD = {
 def class_for_kept(
     *, passed: Collection[str], unreachable: bool,
     net_delta: int = 0, newly_passing: Collection[str] = (),
+    attributed: Collection[str] | None = None,
+    measured: bool | None = None,
 ) -> FillOutcomeClass:
-    """CASHED when the fill's reading moved verdicts; UNREACHABLE otherwise.
+    """CASHED when the fill's reading moved verdicts; else WRONG_BODY or
+    UNREACHABLE depending on whether the attributed tests ran.
 
     The three fill routes used to assign CASHED in the else of a U2
     decision chain, ten lines before they computed ``_passed_f`` /
@@ -92,15 +95,27 @@ def class_for_kept(
     on: ``net_delta`` and ``newly_passing`` are the fill reading the keep
     site measured (`fill_reading.last_comparison` at the keep, the same
     reading `note_kept_comparison` records for the route row). A reading
-    that moved verdicts is CASHED whatever the attribution says;
-    UNREACHABLE is a kept body whose reading moved nothing and whose
-    attributed tests could not run (``unreachable`` still vetoes an
-    attributed pass observed under a crash-keep or a red crate — a
-    partial reading is not a verdict; the fill reading is).
+    that moved verdicts is CASHED whatever the attribution says.
+
+    A keep whose attributed tests RAN and still fail is WRONG_BODY, not
+    UNREACHABLE. Run `3500465-67c40e78` (2026-09-08) labelled twelve
+    such per-fn keeps unreachable because ``not passed`` collapsed "none
+    passed" with "could not run". Callers that pass ``attributed`` and
+    ``measured`` split those. Omitting either keeps the pre-change
+    reading (empty passed → UNREACHABLE) so existing folds stay the
+    negative control.
     """
     if net_delta > 0 or newly_passing:
         return FillOutcomeClass.CASHED
-    if unreachable or not passed:
+    if unreachable:
+        return FillOutcomeClass.UNREACHABLE_VERDICT
+    if attributed is not None and measured is not None:
+        if not attributed or not measured:
+            return FillOutcomeClass.UNREACHABLE_VERDICT
+        if not passed:
+            return FillOutcomeClass.WRONG_BODY
+        return FillOutcomeClass.CASHED
+    if not passed:
         return FillOutcomeClass.UNREACHABLE_VERDICT
     return FillOutcomeClass.CASHED
 

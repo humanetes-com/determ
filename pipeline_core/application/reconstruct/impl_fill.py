@@ -1858,6 +1858,7 @@ def prepare_impl_fill(
                 _file_retro_parts.append(_dtext)
         _file_retro = "\n\n".join(_file_retro_parts)
         prior_error = ""
+        _file_kind: LastErrorKind | None = None
         _prev_prompt: str | None = None
         _retry_names: frozenset[str] | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
@@ -1890,6 +1891,7 @@ def prepare_impl_fill(
                 # compares what the model would actually receive.
                 prior_error=with_blamed_type_api(
                     prior_error, _crate_type_records),
+                kind=_file_kind,
                 crash_evidence=_file_crash,
                 retrospective_guidance=_file_retro,
                 module_name=module_name, cluster_name=cluster_name,
@@ -2504,13 +2506,20 @@ def prepare_impl_fill(
                                  else (_u2_file.self_passed
                                        if _u2_file is not None else frozenset()))
                     _kept_f = _crash_keep_file or _nonregr_keep_file
+                    _attr_f = (
+                        (_u2_file.self_passed | _u2_file.self_failures
+                         | _u2_file.aborted)
+                        if _u2_file is not None else frozenset())
                     _cls(class_for_kept(
                         passed=_passed_f, unreachable=_kept_f
                         or (_u2_file is not None
                             and _u2_file.decision
                             is U2Decision.ACCEPT_EXTERNAL_ONLY),
                         net_delta=(_cmp_f.net_pass_delta
-                                   if _cmp_f is not None else 0)),
+                                   if _cmp_f is not None else 0),
+                        attributed=_attr_f,
+                        measured=(_u2_file is not None
+                                  and not _u2_file.aborted)),
                          glabel, "file")
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
@@ -2564,17 +2573,21 @@ def prepare_impl_fill(
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
+                    _file_kind = regression_detail_kind(_regr_file[0])
                 elif _peel_refuse_keep:
                     _revert_reason = (
                         "peel restored stub(s) and this file's hollow set "
                         "did not shrink")
                     prior_error = ""
+                    _file_kind = None
                 elif rc == 0:
                     _revert_reason = "U2 test failure (no strict improvement)"
                     prior_error = _u2_file.detail if _u2_file is not None else ""
+                    _file_kind = LastErrorKind.REDDENED
                 else:
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
+                    _file_kind = LastErrorKind.COMPILE
                 _verdict_row(
                     glabel, Disposition.REVERT, _revert_reason,
                     outcome=GateOutcome.NEGATIVE,
@@ -3556,9 +3569,16 @@ def prepare_impl_fill(
                                  else (_u2_impl.self_passed
                                        if _u2_impl is not None else frozenset()))
                     _kept_i = _u2_external_only or _crash_keep
+                    _attr_i = (
+                        (_u2_impl.self_passed | _u2_impl.self_failures
+                         | _u2_impl.aborted)
+                        if _u2_impl is not None else _block_answers.tests)
                     _cls(class_for_kept(passed=_passed_i, unreachable=_kept_i,
                                         net_delta=(_cmp_i.net_pass_delta
-                                                   if _cmp_i is not None else 0)),
+                                                   if _cmp_i is not None else 0),
+                                        attributed=_attr_i,
+                                        measured=(_u2_impl is not None
+                                                  and not _u2_impl.aborted)),
                          block_id, "impl")
                     _verdict_row(
                         block_id,
@@ -3962,6 +3982,7 @@ def prepare_impl_fill(
                     # an observable they name.
                     pinned_observables=pins_for_contradiction_guard(
                         _pins, _block_ev.observables),
+                    compiled=bool(last_metric and last_metric.compiles),
                 )
                 _signal = retro.get("signal", "")
                 if _signal in ("llm_error", "empty_response"):
@@ -4901,10 +4922,17 @@ def prepare_impl_fill(
                     _pair_u2 is not None
                     and (_pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
                          or _pair_nonregr))
+                _attr_p = (
+                    (_pair_u2.self_passed | _pair_u2.self_failures
+                     | _pair_u2.aborted)
+                    if _pair_u2 is not None else frozenset())
                 _cls(class_for_kept(passed=_pair_passed,
                                     unreachable=_pair_kept_unreachable,
                                     net_delta=(_cmp_p.net_pass_delta
-                                               if _cmp_p is not None else 0)),
+                                               if _cmp_p is not None else 0),
+                                    attributed=_attr_p,
+                                    measured=(_pair_u2 is not None
+                                              and not _pair_u2.aborted)),
                      pair_id, "pair")
                 _verdict_row(
                     pair_id,
@@ -5366,7 +5394,9 @@ def prepare_impl_fill(
                      "graded UNMEASURED, not a re-buy.")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, _sid, "session")
             if _out.outcome == "accepted":
-                _cls(class_for_kept(passed=frozenset(_sl.tests), unreachable=False),
+                _cls(class_for_kept(passed=frozenset(_sl.tests), unreachable=False,
+                                    attributed=frozenset(_sl.tests),
+                                    measured=True),
                      _sid, "session")
                 _verdict_row(
                     _sid, Disposition.ACCEPT,
@@ -5387,7 +5417,9 @@ def prepare_impl_fill(
                                 if _out.final is not None else frozenset()),
                         unreachable=False,
                         net_delta=(_out.final.pass_delta
-                                   if _out.final is not None else 0)),
+                                   if _out.final is not None else 0),
+                        attributed=frozenset(_sl.tests),
+                        measured=True),
                          _sid, "session")
                 _verdict_row(
                     _sid, Disposition.KEEP_DEFERRED,

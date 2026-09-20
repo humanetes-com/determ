@@ -66,6 +66,7 @@ from pipeline_core.domain.dispatch import (
     stubs_deferred_by_impl_route,
 )
 from pipeline_core.domain.enums import FillUnit, RouteOrder
+from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillClassHistogram,
@@ -1227,6 +1228,7 @@ class PhaseCFillEngine:
                                                 fn, container_for_fn, sig_t),))),
                                     fr_path=fr_path,  # note recall
                                     attempt_history=test_fix_history.get((rel_f, fn), []),
+                                    kind=resolve_kind(None, error_excerpt_test),
                                 )
                                 attempts += 1
                                 attempts_log_t: list[str] = []

@@ -12,6 +12,7 @@ from pipeline_core.application.reconstruct.retrospective import (
     diagnose_phase_c,
     whole_tree_retrospective,
 )
+from pipeline_core.domain.last_error import RED_HEAD_MARK
 from pipeline_core.prompts.retrospective import build_phase_c_retro_prompt
 
 
@@ -136,6 +137,34 @@ def test_diagnose_passes_compiled_through_to_the_prompt():
         "self.inner.by_ref()", "CRASH", 1, deps, compiled=True)
     assert seen and "compiled and then crashed" in seen[0]
     assert "could not be made to compile" not in seen[0]
+
+
+def test_diagnose_compiled_false_on_a_reddened_excerpt_still_says_compile_failed():
+    """The live lie: per-fn/impl omit compiled, so a REGRESSED excerpt is
+    diagnosed as cargo-check. Control for the call-site flag, not the
+    builder. Pair already passes compiled=True.
+    """
+    seen: list[str] = []
+
+    def ask(prompt: str) -> str:
+        seen.append(prompt)
+        return "CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: x"
+
+    deps = PhaseCRetroDeps(ask_retrospective=ask, log=lambda *_: None,
+                           failed_body_cap=2000, fix_err_cap=2000)
+    excerpt = (
+        f"This compiled, but it {RED_HEAD_MARK}: ['t_sib']\n"
+        "panicked at src/x.rs:4:1")
+    diagnose_phase_c(
+        "f", "fn f()", "impl X", "src/x.rs", "c",
+        "let p = unit as *const E;", excerpt, 2, deps)
+    assert seen and "could not be made to compile" in seen[0]
+    assert "Compile errors from that attempt" in seen[0]
+    diagnose_phase_c(
+        "f", "fn f()", "impl X", "src/x.rs", "c",
+        "let p = unit as *const E;", excerpt, 2, deps, compiled=True)
+    assert "compiled and then crashed or reddened tests" in seen[1]
+    assert "could not be made to compile" not in seen[1]
 
 
 def test_prompt_for_a_compiling_crash_does_not_say_compile_failed():

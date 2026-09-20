@@ -26,6 +26,8 @@ from pipeline_core.domain.last_error import (
     instruction_for,
     kind_from_record,
     kind_from_text,
+    kind_of_compiled_run,
+    last_error_prefix as domain_prefix,
     resolve_kind,
 )
 from pipeline_core.domain.pair_fill import pair_last_error
@@ -115,6 +117,15 @@ def test_a_body_rustc_rejected_keeps_the_errors_wording() -> None:
     assert COMPILE_WORDING in last_error_prefix(excerpt, LastErrorKind.COMPILE)
     assert UNENTERED_ARM in pair_joint_write_paragraph(
         excerpt, LastErrorKind.COMPILE)
+    assert domain_prefix(excerpt, LastErrorKind.COMPILE) == last_error_prefix(
+        excerpt, LastErrorKind.COMPILE)
+
+
+def test_kind_of_compiled_run_is_reddened_unless_aborted_or_hung() -> None:
+    assert kind_of_compiled_run() is LastErrorKind.REDDENED
+    assert kind_of_compiled_run(aborted=True) is LastErrorKind.CRASHED
+    assert kind_of_compiled_run(hung=True) is LastErrorKind.HUNG
+    assert kind_of_compiled_run(aborted=True, hung=True) is LastErrorKind.HUNG
     assert UNENTERED_ARM in pair_joint_write_paragraph("", None)
 
 

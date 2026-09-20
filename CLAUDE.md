@@ -1,6 +1,6 @@
 # CLAUDE.md — conventions for code written in this repo
 
-## Current reading — replace this block when the joint pair+slots write is not CRASHED-graded and does not drop the slots on the next fill
+## Current reading — replace this block when a compiling sibling-red retry is not described as rustc and those keeps are not labelled unreachable
 
 A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to this file.
 

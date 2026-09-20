@@ -36,6 +36,30 @@ def test_class_for_kept_is_cashed_only_with_observed_passes() -> None:
         FillOutcomeClass.UNREACHABLE_VERDICT)
 
 
+def test_class_for_kept_measured_attributed_still_failing_is_wrong_body() -> None:
+    """A keep whose attributed tests ran and stayed red is WRONG_BODY.
+
+    Run 3500465-67c40e78 labelled that unreachable because `not passed`
+    collapsed "none passed" with "could not run". Negative control: the
+    same attributed set unmeasured, or no attributed tests, stays
+    UNREACHABLE. Invented names only.
+    """
+    assert class_for_kept(
+        passed=frozenset(), unreachable=False,
+        attributed={"t_aim"}, measured=True) is FillOutcomeClass.WRONG_BODY
+    assert class_for_kept(
+        passed=frozenset(), unreachable=False,
+        attributed={"t_aim"}, measured=False) is (
+        FillOutcomeClass.UNREACHABLE_VERDICT)
+    assert class_for_kept(
+        passed=frozenset(), unreachable=False,
+        attributed=frozenset(), measured=True) is (
+        FillOutcomeClass.UNREACHABLE_VERDICT)
+    # Omitting attributed/measured keeps the pre-change reading.
+    assert class_for_kept(passed=frozenset(), unreachable=False) is (
+        FillOutcomeClass.UNREACHABLE_VERDICT)
+
+
 def test_class_for_kept_a_reading_that_moved_is_cashed() -> None:
     """A keep whose suite reading moved verdicts is CASHED even with an
     empty attributed set — the session keep of run 3014175-d98ed09e

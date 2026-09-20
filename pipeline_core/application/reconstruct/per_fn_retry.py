@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 from pipeline_core.application.reconstruct.attribution import (
     not_body_repairable_tests,
 )
+from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
 )
@@ -770,6 +771,7 @@ def generate_one_body(
             blueprint=fix_ctx.blueprint_section,
         ),
         fr_path=ctx.fr_path,
+        kind=resolve_kind(None, err_excerpt),
     )
     # Context pulls: bounded typed requests through the ladder (same rung re-asks
     # with the answered context; budget per fix attempt).

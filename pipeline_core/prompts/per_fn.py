@@ -13,6 +13,7 @@ from pipeline_core.domain.construction_recipe import construction_recipe_prefix
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -183,8 +184,15 @@ def build_per_fn_fix_prompt(
     allow_sig_change: bool = False,
     fr_path: Path | None = None,
     attempt_history: list[dict[str, Any]] | None = None,
+    kind: LastErrorKind | None = None,
 ) -> str:
-    """Re-prompt for a fn whose previous fill broke `cargo check`.
+    """Re-prompt for a fn whose previous fill failed.
+
+    ``kind`` is the measurement of that failure. A rustc-accepted body
+    that then reddened or aborted is not a cargo-check miss: the opener
+    and the excerpt tag follow :func:`last_error_prefix`. Omit ``kind``
+    (or pass COMPILE) and the text stays the cargo-check / COMPILE_ERRORS
+    form.
 
     When `allow_sig_change` is True (fired by the per-fn loop after
     attempt 5), the prompt invites the model to optionally return a
@@ -246,10 +254,16 @@ def build_per_fn_fix_prompt(
     invariants_block = tag_block("CLUSTER_INVARIANTS", invariants_section)
     # Retrospective guidance: surfaced FIRST in the prompt when available —
     # the prior diagnosis is the highest-signal hint.
+    _ran = resolve_kind(kind, error_excerpt).compiled
     retro_block = tag_block(
         "RETROSPECTIVE_GUIDANCE", retrospective_guidance,
-        prefix="Prior diagnosis of this fn's compile failures (act on this "
-               "— do NOT repeat the previous approach):\n")
+        prefix=(
+            "Prior diagnosis of a body rustc accepted that then failed "
+            "at run time (act on this — do NOT repeat the previous "
+            "approach):\n"
+            if _ran else
+            "Prior diagnosis of this fn's compile failures (act on this "
+            "— do NOT repeat the previous approach):\n"))
     # Sibling reference: when the same fn name has a sibling impl already
     # filled correctly in this file, hoist it to the top of the prompt. Best
     # source-of-truth for "what does a body for this fn look
@@ -318,8 +332,20 @@ def build_per_fn_fix_prompt(
                 + "\n---\n".join(rendered)
                 + "\n</PRIOR_ATTEMPTS>\n"
             )
-    return f"""RE-implement ONE Rust function. Previous attempt broke cargo check.
-Diagnose the errors, return a corrected body. Don't repeat the previous body.
+    if _ran:
+        _opener = (
+            "RE-implement ONE Rust function. "
+            + last_error_prefix(error_excerpt, kind).rstrip()
+            + "\nReturn a corrected body. Don't repeat the previous body."
+        )
+        _err_open, _err_close = "<LAST_ERROR>", "</LAST_ERROR>"
+    else:
+        _opener = (
+            "RE-implement ONE Rust function. Previous attempt broke cargo check.\n"
+            "Diagnose the errors, return a corrected body. Don't repeat the previous body."
+        )
+        _err_open, _err_close = "<COMPILE_ERRORS>", "</COMPILE_ERRORS>"
+    return f"""{_opener}
 
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
 {container_line}Signature (verbatim, do not change):
@@ -338,9 +364,9 @@ FILE (previous attempt reverted; stubs annotated):
 {prev_body}
 </PREVIOUS_BODY>
 
-<COMPILE_ERRORS>
+{_err_open}
 {error_excerpt}
-</COMPILE_ERRORS>
+{_err_close}
 
 Tests:
 {tests_section}

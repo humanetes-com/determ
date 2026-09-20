@@ -13,7 +13,12 @@ from pipeline_core.domain.construction_recipe import construction_recipes_for
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.language_driver import language_driver
-from pipeline_core.domain.last_error import LastErrorKind, resolve_kind
+from pipeline_core.domain.last_error import (
+    LastErrorKind,
+    faulted_clause as _faulted_clause,
+    last_error_prefix,
+    resolve_kind,
+)
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.domain.pair_fill import extra_quoted_members, extra_write_members
 from pipeline_core.prompts.context import PerImplSections
@@ -27,24 +32,6 @@ from pipeline_core.prompts.sections import (
 SIBLING_FOLLOW_PREFIX = (
     "Already-filled fns in OTHER impl blocks of this file with the same name "
     "as a TARGET stub — follow the same structural pattern:\n```rust\n")
-
-
-def _faulted_clause(kind: LastErrorKind) -> tuple[str, str, str]:
-    """(what the run did, the evidence below, the evidence just named).
-
-    One vocabulary, used by both the prefix and the joint-write
-    paragraph, so a hang is never described as a panic and the two
-    sentences can never disagree about which happened. The two evidence
-    phrasings differ only in how they point at LAST_ERROR: the prefix
-    introduces it ("below"), the paragraph refers back to it ("that").
-    """
-    if kind is LastErrorKind.HUNG:
-        return ("never returned",
-                "the call the evidence below shows it re-entered",
-                "the call that evidence shows it re-entered")
-    return ("panicked",
-            "the call the stack below shows reached the panic",
-            "the call that stack shows reached the panic")
 
 
 def last_error_is_compiling_crash(
@@ -70,25 +57,6 @@ def last_error_is_compiling_crash(
     wording and the unentered-arm sentence.
     """
     return resolve_kind(kind, last_error).has_faulting_call
-
-
-def last_error_prefix(last_error: str,
-                      kind: LastErrorKind | None = None) -> str:
-    """LAST_ERROR lead-in. A body that ran and faulted names the faulting
-    call; a compile excerpt keeps the older errors / same-approach
-    wording."""
-    resolved = resolve_kind(kind, last_error)
-    if resolved.has_faulting_call:
-        did, below, _that = _faulted_clause(resolved)
-        return (
-            f"Your previous attempt compiled and then {did} — do not "
-            f"emit {below}:\n"
-        )
-    return (
-        "Your previous attempt at this block produced these errors — "
-        "the bodies below must resolve them; do not resubmit the "
-        "same approach:\n"
-    )
 
 
 def pair_joint_write_paragraph(last_error: str,

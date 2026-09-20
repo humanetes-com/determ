@@ -63,6 +63,7 @@ from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.declined import declined_guidance
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.fill_class import FillOutcomeClass, class_for_kept
+from pipeline_core.domain.last_error import LastErrorKind, kind_of_compiled_run
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
@@ -708,6 +709,10 @@ class FillOneFn:
                     allow_sig_change=(fix_attempt >= 5),
                     fr_path=ctx.fr_path,
                     attempt_history=per_fn_history,
+                    kind=(LastErrorKind.COMPILE
+                          if _last_failure[0] is AttemptFailure.COMPILE
+                          else kind_of_compiled_run(
+                              aborted=_last_failure[0] is AttemptFailure.ABORT)),
                 )
 
             # The stream-meta rows of this call carry the unit they serve,
@@ -1365,6 +1370,7 @@ class FillOneFn:
                     bound_methods_section=retro_bound_methods,
                     pinned_observables=pins_for_contradiction_guard(
                         _fn_pins, _fn_observables),
+                    compiled=_last_failure[0] is not AttemptFailure.COMPILE,
                 )
                 # Transient empties (llm_error / empty_response) don't
                 # update state — we never saw a real fix attempt's
@@ -1808,7 +1814,9 @@ class FillOneFn:
         note_kept_comparison(_cmp_u)
         _ok = class_for_kept(
             passed=_observed_passed[0], unreachable=bool(_blocked_by),
-            net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0)
+            net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0,
+            attributed=_answers.tests,
+            measured=not _blocked_by)
         self.tel.emit("phase_c.fill.class", data={
             "cluster": ctx.cluster_name,
             "unit": f"{rel_file}::{fn_name}",

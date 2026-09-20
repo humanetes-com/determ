@@ -11,6 +11,7 @@ import dataclasses
 
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.domain.last_error import LastErrorKind, RED_HEAD_MARK, last_error_prefix
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
     build_behavior_fix_prompt,
@@ -685,3 +686,30 @@ def test_restrict_fill_plan_drops_the_kept_name_and_keeps_the_peeled() -> None:
     assert plan.refills == ("debug", "write_str")
     empty = restrict_fill_plan([plan], {"never_in_plan"})
     assert empty == []
+
+
+def test_file_fill_retry_of_a_compiling_red_uses_the_compiled_prefix() -> None:
+    """A file-first retry after rustc accepted the body is not 'the last
+    attempt failed'. Control: COMPILE / no kind keeps that sentence.
+    """
+    plan = [BlockFillPlan("impl Holder", (), ("widen",))]
+    excerpt = (
+        f"This compiled, but it {RED_HEAD_MARK}: ['t_sib']\n"
+        "panicked at src/lib.rs:4:1")
+    compiled = build_file_fill_prompt(
+        file_rel="src/lib.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="",
+        prior_error=excerpt, kind=LastErrorKind.REDDENED)
+    assert last_error_prefix(excerpt, LastErrorKind.REDDENED) in compiled
+    assert "Your last attempt at this file failed:" not in compiled
+    compile_fail = build_file_fill_prompt(
+        file_rel="src/lib.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="",
+        prior_error="error[E0308]: mismatched types",
+        kind=LastErrorKind.COMPILE)
+    assert "Your last attempt at this file failed:" in compile_fail
+    omitted = build_file_fill_prompt(
+        file_rel="src/lib.rs", file_text="fn a() {}", fill_plan=plan,
+        tests_block="", blueprint="", notes="",
+        prior_error="error[E0308]: mismatched types")
+    assert "Your last attempt at this file failed:" in omitted

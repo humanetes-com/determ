@@ -212,6 +212,7 @@ class Retros(Protocol):
         fix_attempts: int, prior_retrospective: str = ...,
         bound_methods_section: str = ...,
         pinned_observables: str = ...,
+        compiled: bool = ...,
     ) -> dict[str, Any]: ...
     def append_note(
         self, fr_path: Path, note: str,

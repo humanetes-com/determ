@@ -28,6 +28,7 @@ from pipeline_core.domain.crash_site import (
 )
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
 # The file/impl view handed to the model can itself contain HTML-escaped Rust —
@@ -485,6 +486,7 @@ def build_file_fill_prompt(
     blueprint: str,
     notes: str,
     prior_error: str = "",
+    kind: LastErrorKind | None = None,
     crash_evidence: str = "",
     retrospective_guidance: str = "",
     module_name: str = "",
@@ -555,9 +557,16 @@ def build_file_fill_prompt(
     regression_part = (f"\n<PRIOR_REGRESSION>\n{prior_regression}\n"
                        "</PRIOR_REGRESSION>\n"
                        if prior_regression.strip() else "")
-    error_part = (f"\nYour last attempt at this file failed:\n{prior_error}\n"
-                  "Fix the WHOLE file again, keeping every impl mutually "
-                  "consistent.\n" if prior_error.strip() else "")
+    if prior_error.strip():
+        _lead = (last_error_prefix(prior_error, kind)
+                 if resolve_kind(kind, prior_error).compiled
+                 else "Your last attempt at this file failed:\n")
+        error_part = (
+            f"\n{_lead}{prior_error}\n"
+            "Fix the WHOLE file again, keeping every impl mutually "
+            "consistent.\n")
+    else:
+        error_part = ""
     crash_part = (f"\n<CRASH_EVIDENCE>\nA test binary CRASHED at runtime inside "
                   f"this file:\n{crash_evidence}\nAn already-written body in the "
                   "file above uses a scheme that is UNSOUND — do NOT copy that "

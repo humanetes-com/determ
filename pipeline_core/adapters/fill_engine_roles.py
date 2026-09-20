@@ -396,14 +396,16 @@ class RetrosAdapter:
                  cluster_name: str, last_body: str, error_excerpt: str,
                  fix_attempts: int, prior_retrospective: str = "",
                  bound_methods_section: str = "",
-                 pinned_observables: str = "") -> dict[str, Any]:
+                 pinned_observables: str = "",
+                 compiled: bool = False) -> dict[str, Any]:
         return self.diagnose_fn(
             fn_name=fn_name, sig_text=sig_text, container=container,
             file_rel=file_rel, cluster_name=cluster_name, last_body=last_body,
             error_excerpt=error_excerpt, fix_attempts=fix_attempts,
             prior_retrospective=prior_retrospective,
             bound_methods_section=bound_methods_section,
-            pinned_observables=pinned_observables)
+            pinned_observables=pinned_observables,
+            compiled=compiled)
 
     def append_note(self, fr_path: Path, note: str,
                     error_codes: list[str] | set[str] | None = None,

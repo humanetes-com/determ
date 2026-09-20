@@ -126,6 +126,55 @@ def instruction_for(kind: LastErrorKind) -> str:
     return ""
 
 
+def kind_of_compiled_run(*, aborted: bool = False,
+                         hung: bool = False) -> LastErrorKind:
+    """Kind for an attempt rustc accepted.
+
+    The per-fn loop already stores TEST vs ABORT vs COMPILE on the last
+    attempt; prompt builders consume LastErrorKind, so a TEST retry is
+    never described as cargo-check. Hang outranks abort.
+    """
+    if hung:
+        return LastErrorKind.HUNG
+    if aborted:
+        return LastErrorKind.CRASHED
+    return LastErrorKind.REDDENED
+
+
+def faulted_clause(kind: LastErrorKind) -> tuple[str, str, str]:
+    """(what the run did, the evidence below, the evidence just named).
+
+    One vocabulary for the LAST_ERROR prefix and the pair joint-write
+    paragraph, so a hang is never described as a panic.
+    """
+    if kind is LastErrorKind.HUNG:
+        return ("never returned",
+                "the call the evidence below shows it re-entered",
+                "the call that evidence shows it re-entered")
+    return ("panicked",
+            "the call the stack below shows reached the panic",
+            "the call that stack shows reached the panic")
+
+
+def last_error_prefix(last_error: str,
+                      kind: LastErrorKind | None = None) -> str:
+    """LAST_ERROR lead-in. A body that ran and faulted names the faulting
+    call; a compile excerpt keeps the older errors / same-approach
+    wording."""
+    resolved = resolve_kind(kind, last_error)
+    if resolved.has_faulting_call:
+        did, below, _that = faulted_clause(resolved)
+        return (
+            f"Your previous attempt compiled and then {did} — do not "
+            f"emit {below}:\n"
+        )
+    return (
+        "Your previous attempt at this block produced these errors — "
+        "the bodies below must resolve them; do not resubmit the "
+        "same approach:\n"
+    )
+
+
 def kind_from_text(text: str) -> LastErrorKind:
     """Classify an excerpt that arrived with no provenance.
 
