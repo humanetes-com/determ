@@ -77,3 +77,51 @@ def test_a_test_failure_is_labelled_to_correct_not_to_avoid() -> None:
     assert "do not avoid it" in body
     assert "TEST FAILURE" in body
     assert "did not compile" not in body
+
+
+# --- the fix loop's seed: how the body it starts from failed -------------
+# Run `3400-4d0618ba` (2026-09-21): a behavioural refill's first ask opened
+# `Previous attempt broke cargo check` over a body rustc had accepted,
+# because the seed left the COMPILE default in place until the loop measured.
+
+
+def test_seed_of_a_stub_is_compile() -> None:
+    from pipeline_core.application.reconstruct.fill_rules import (
+        seed_attempt_failure,
+    )
+    assert seed_attempt_failure(refill=False, crash_implicated=False) \
+        is AttemptFailure.COMPILE
+
+
+def test_seed_of_a_refill_is_a_run_failure_never_compile() -> None:
+    from pipeline_core.application.reconstruct.fill_rules import (
+        seed_attempt_failure,
+    )
+    assert seed_attempt_failure(refill=True, crash_implicated=False) \
+        is AttemptFailure.TEST
+    assert seed_attempt_failure(refill=True, crash_implicated=True) \
+        is AttemptFailure.ABORT
+
+
+def test_fix_prompt_kind_names_no_faulting_call_when_no_run_is_quoted() -> None:
+    """The plan's claim: a refill's first ask is compiled-and-ran with
+    nothing to avoid, a measured test retry quotes its panic, a crash seed
+    has its stack in CRASH_EVIDENCE, and rustc rejections stay COMPILE."""
+    from pipeline_core.application.reconstruct.fill_rules import (
+        fix_prompt_kind,
+        seed_attempt_failure,
+    )
+    from pipeline_core.domain.last_error import LastErrorKind, kind_of_compiled_run
+    seed = seed_attempt_failure(refill=True, crash_implicated=False)
+    k = fix_prompt_kind(seed, quoted_run=False)
+    assert k is LastErrorKind.UNPASSED
+    assert k.compiled and not k.has_faulting_call
+    assert fix_prompt_kind(AttemptFailure.TEST, quoted_run=True) \
+        is LastErrorKind.REDDENED
+    assert fix_prompt_kind(AttemptFailure.ABORT, quoted_run=False) \
+        is LastErrorKind.CRASHED
+    assert fix_prompt_kind(AttemptFailure.COMPILE, quoted_run=True) \
+        is LastErrorKind.COMPILE
+    # Negative control: the pre-change mapping of the same seed claims a
+    # faulting call the excerpt does not carry.
+    assert kind_of_compiled_run().has_faulting_call

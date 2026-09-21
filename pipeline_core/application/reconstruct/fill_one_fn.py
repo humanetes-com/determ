@@ -37,10 +37,13 @@ from pipeline_core.application.reconstruct.fill_reading import (
     note_kept_comparison,
 )
 from pipeline_core.application.reconstruct.fill_rules import (
+    REFILL_SEED_EXCERPT,
     AttemptFailure,
+    fix_prompt_kind,
     is_unimplemented_body,
     make_failed_attempt_body,
     module_of,
+    seed_attempt_failure,
 )
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
@@ -62,9 +65,12 @@ from pipeline_core.domain.coverage_slice import (
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.declined import declined_guidance
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
-from pipeline_core.domain.fill_class import FillOutcomeClass, class_for_kept
+from pipeline_core.domain.fill_class import (
+    FillOutcomeClass,
+    class_for_kept,
+    tests_could_not_run,
+)
 from pipeline_core.domain.impl_routing import norm_src_rel
-from pipeline_core.domain.last_error import LastErrorKind, kind_of_compiled_run
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
     body_fingerprint,
@@ -545,12 +551,15 @@ class FillOneFn:
         # seed the current wrong body + a behavioral instruction so attempt 1 is
         # a corrective fix (build_per_fn_fix_prompt) with the failing test shown,
         # not a naive from-scratch stub fill.
+        # The seed is how THAT body failed, written with the excerpt it
+        # explains: a refill compiled, so its first ask is never the
+        # cargo-check prompt, and the excerpt quotes no run of it yet.
+        _last_failure[0] = seed_attempt_failure(
+            refill=rec.refill, crash_implicated=bool(_crash_evidence))
+        _excerpt_quotes_run: list[bool] = [False]
         if rec.refill:
             last_body = _cur_body
-            error_excerpt = (
-                "This body COMPILES but its attributed test(s) below still FAIL. "
-                "Rewrite the BEHAVIOR so those test(s) pass; keep the signature "
-                "and do not reintroduce `unimplemented!()`.")
+            error_excerpt = REFILL_SEED_EXCERPT
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""
@@ -709,10 +718,8 @@ class FillOneFn:
                     allow_sig_change=(fix_attempt >= 5),
                     fr_path=ctx.fr_path,
                     attempt_history=per_fn_history,
-                    kind=(LastErrorKind.COMPILE
-                          if _last_failure[0] is AttemptFailure.COMPILE
-                          else kind_of_compiled_run(
-                              aborted=_last_failure[0] is AttemptFailure.ABORT)),
+                    kind=fix_prompt_kind(
+                        _last_failure[0], quoted_run=_excerpt_quotes_run[0]),
                 )
 
             # The stream-meta rows of this call carry the unit they serve,
@@ -1224,6 +1231,7 @@ class FillOneFn:
             last_metric = cur_metric
             salvage.offer(body, cur_metric)
             error_excerpt = _excerpt()
+            _excerpt_quotes_run[0] = True
             # Revert to snapshot before returning; the model will see
             # the file as unimplemented again but with last_body + errors
             # in the prompt. (Reverting unconditionally — the exhaustion
@@ -1813,7 +1821,8 @@ class FillOneFn:
         _cmp_u = last_comparison() if ctx.tdd_test_cmd else None
         note_kept_comparison(_cmp_u)
         _ok = class_for_kept(
-            passed=_observed_passed[0], unreachable=bool(_blocked_by),
+            passed=_observed_passed[0],
+            unreachable=tests_could_not_run(blocked_sibling=bool(_blocked_by)),
             net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0,
             attributed=_answers.tests,
             measured=not _blocked_by)

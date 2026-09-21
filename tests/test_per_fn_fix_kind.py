@@ -54,3 +54,47 @@ def test_compile_retry_is_today_s_cargo_check_text() -> None:
     omitted = _prompt(excerpt="error[E0308]: mismatched types", kind=None)
     assert "Previous attempt broke cargo check." in omitted
     assert "<COMPILE_ERRORS>" in omitted
+
+
+def test_refill_first_ask_is_compiled_and_names_no_phantom_stack() -> None:
+    """Run `3400-4d0618ba` (2026-09-21): the first ask of a behavioural
+    refill opened `broke cargo check` and wrapped the COMPILES sentence in
+    COMPILE_ERRORS. The seed's kind is UNPASSED: the prompt says the body
+    compiled and ran, and orders the model away from no call."""
+    from pipeline_core.application.reconstruct.fill_rules import (
+        REFILL_SEED_EXCERPT,
+        fix_prompt_kind,
+        seed_attempt_failure,
+    )
+    kind = fix_prompt_kind(
+        seed_attempt_failure(refill=True, crash_implicated=False),
+        quoted_run=False)
+    p = _prompt(excerpt=REFILL_SEED_EXCERPT, kind=kind)
+    assert "broke cargo check" not in p
+    assert "<COMPILE_ERRORS>" not in p
+    assert "<LAST_ERROR>" in p
+    assert p.startswith("RE-implement ONE Rust function. Your previous "
+                        "attempt compiled and ran")
+    assert "do not emit" not in p
+    assert "panicked" not in p
+    # Negative controls: the pre-change seed (COMPILE) and the plan's first
+    # draft (REDDENED) each misdescribe the same excerpt.
+    before = _prompt(excerpt=REFILL_SEED_EXCERPT, kind=LastErrorKind.COMPILE)
+    assert "Previous attempt broke cargo check." in before
+    assert "<COMPILE_ERRORS>" in before
+    phantom = _prompt(excerpt=REFILL_SEED_EXCERPT, kind=LastErrorKind.REDDENED)
+    assert "the stack below shows" in phantom
+
+
+def test_crash_implicated_refill_opens_as_a_run_fault() -> None:
+    from pipeline_core.application.reconstruct.fill_rules import (
+        REFILL_SEED_EXCERPT,
+        fix_prompt_kind,
+        seed_attempt_failure,
+    )
+    kind = fix_prompt_kind(
+        seed_attempt_failure(refill=True, crash_implicated=True),
+        quoted_run=False)
+    p = _prompt(excerpt=REFILL_SEED_EXCERPT, kind=kind)
+    assert "broke cargo check" not in p
+    assert "compiled and then panicked" in p

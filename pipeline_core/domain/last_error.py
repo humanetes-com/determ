@@ -76,6 +76,16 @@ class LastErrorKind(Enum):
     #: Compiled; fewer tests executed, or the pass count fell, with no
     #: crash, hang or named red test to point at.
     LOST_TESTS = "lost_tests"
+    #: Compiled; its attributed tests fail and have never been observed
+    #: passing, and no run output of this body is quoted. A behavioural
+    #: refill's first ask is this: the body on disk is one rustc accepted,
+    #: and the only evidence is the test source. Run `3400-4d0618ba`
+    #: (2026-09-21): 2,947 of the 2,977 refill-seed prompts on disk opened
+    #: `broke cargo check`; REDDENED in its place would have ordered the
+    #: model away from "the call the stack below shows" with no stack
+    #: below. Only a writer that knows no run was quoted may claim it —
+    #: :func:`kind_from_text` never returns it.
+    UNPASSED = "unpassed"
 
     @property
     def compiled(self) -> bool:
@@ -85,7 +95,8 @@ class LastErrorKind(Enum):
         :func:`kind_from_text` rather than assume either way.
         """
         return self in (LastErrorKind.CRASHED, LastErrorKind.HUNG,
-                        LastErrorKind.REDDENED, LastErrorKind.LOST_TESTS)
+                        LastErrorKind.REDDENED, LastErrorKind.LOST_TESTS,
+                        LastErrorKind.UNPASSED)
 
     @property
     def has_faulting_call(self) -> bool:
@@ -158,15 +169,22 @@ def faulted_clause(kind: LastErrorKind) -> tuple[str, str, str]:
 
 def last_error_prefix(last_error: str,
                       kind: LastErrorKind | None = None) -> str:
-    """LAST_ERROR lead-in. A body that ran and faulted names the faulting
-    call; a compile excerpt keeps the older errors / same-approach
-    wording."""
+    """LAST_ERROR lead-in, decided by the kind's two properties and no
+    per-member branch. A body that ran and faulted names the faulting
+    call; a body that ran with no faulting call in evidence says it
+    compiled and ran, and orders the model away from nothing; a compile
+    excerpt keeps the older errors / same-approach wording."""
     resolved = resolve_kind(kind, last_error)
     if resolved.has_faulting_call:
         did, below, _that = faulted_clause(resolved)
         return (
             f"Your previous attempt compiled and then {did} — do not "
             f"emit {below}:\n"
+        )
+    if resolved.compiled:
+        return (
+            "Your previous attempt compiled and ran; the tests below still "
+            "fail — change its behavior, do not resubmit the same body:\n"
         )
     return (
         "Your previous attempt at this block produced these errors — "

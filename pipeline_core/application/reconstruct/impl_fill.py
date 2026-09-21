@@ -138,6 +138,7 @@ from pipeline_core.domain.fill_class import (
     FillOutcomeClass,
     class_for_kept,
     note_fill_class,
+    tests_could_not_run,
 )
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.fill_schedule import (
@@ -2528,16 +2529,20 @@ def prepare_impl_fill(
                     _passed_f = (frozenset(_bank.resolved) if _bank is not None
                                  else (_u2_file.self_passed
                                        if _u2_file is not None else frozenset()))
-                    _kept_f = _crash_keep_file or _nonregr_keep_file
                     _attr_f = (
                         (_u2_file.self_passed | _u2_file.self_failures
                          | _u2_file.aborted)
                         if _u2_file is not None else frozenset())
+                    # A non-regression keep's tests RAN (its GUARD line says
+                    # so): it is judged here like any keep, and deferred
+                    # only in the verdict row below.
                     _cls(class_for_kept(
-                        passed=_passed_f, unreachable=_kept_f
-                        or (_u2_file is not None
-                            and _u2_file.decision
-                            is U2Decision.ACCEPT_EXTERNAL_ONLY),
+                        passed=_passed_f, unreachable=tests_could_not_run(
+                            crash_keep=_crash_keep_file,
+                            external_only=(
+                                _u2_file is not None
+                                and _u2_file.decision
+                                is U2Decision.ACCEPT_EXTERNAL_ONLY)),
                         net_delta=(_cmp_f.net_pass_delta
                                    if _cmp_f is not None else 0),
                         attributed=_attr_f,
@@ -2556,20 +2561,20 @@ def prepare_impl_fill(
                     _passed_f = (frozenset(_bank.resolved) if _bank is not None
                                  else (_u2_file.self_passed
                                        if _u2_file is not None else frozenset()))
-                    _kept_f = _crash_keep_file or _nonregr_keep_file
+                    _deferred_f = _crash_keep_file or _nonregr_keep_file
                     _verdict_row(
                         glabel,
-                        (Disposition.KEEP_DEFERRED if _kept_f
+                        (Disposition.KEEP_DEFERRED if _deferred_f
                          else Disposition.ACCEPT),
                         ("kept on non-regression — no newly-red self-failure"
-                         if _kept_f
+                         if _deferred_f
                          else f"accepted — {len(_passed_f)} attributed test(s) "
                          "observed passing" if _passed_f
                          else "kept — compiles, but no attributed test was "
                          "observed passing (none were failing, or the scoped "
                          "run was inconclusive)"),
                         outcome=(GateOutcome.POSITIVE
-                                 if _passed_f and not _kept_f
+                                 if _passed_f and not _deferred_f
                                  else GateOutcome.UNMEASURABLE),
                         evidence=tuple(sorted(_passed_f)),
                         attempt=_attempt,
@@ -3610,7 +3615,10 @@ def prepare_impl_fill(
                         (_u2_impl.self_passed | _u2_impl.self_failures
                          | _u2_impl.aborted)
                         if _u2_impl is not None else _block_answers.tests)
-                    _cls(class_for_kept(passed=_passed_i, unreachable=_kept_i,
+                    _cls(class_for_kept(passed=_passed_i,
+                                        unreachable=tests_could_not_run(
+                                            crash_keep=_crash_keep,
+                                            external_only=_u2_external_only),
                                         net_delta=(_cmp_i.net_pass_delta
                                                    if _cmp_i is not None else 0),
                                         attributed=_attr_i,
@@ -3678,7 +3686,10 @@ def prepare_impl_fill(
                         _log(f"  [phase-c/impl] {block_id}: KEPT {spliced_now} "
                              f"fn(s) (B3 non-regressing; {len(_cur_sig)} crate "
                              f"err(s) remain elsewhere) (attempt {fix_attempt}).")
-                        _cls(FillOutcomeClass.UNREACHABLE_VERDICT, block_id, "impl")
+                        _cls(class_for_kept(
+                            passed=frozenset(),
+                            unreachable=tests_could_not_run(crate_red=True)),
+                             block_id, "impl")
                         _emit("phase_c.impl.fill.done", duration_ms=int(
                             (time.monotonic() - _t0) * 1000),
                             data={
@@ -4955,16 +4966,21 @@ def prepare_impl_fill(
                 block_outcomes.append(UnitOutcome(landed=True))
                 _pair_passed = (_pair_u2.self_passed
                                 if _pair_u2 is not None else frozenset())
-                _pair_kept_unreachable = (
+                # Two facts: whether the keep is deferred to the sweep (the
+                # verdict row — a non-regression keep is), and whether its
+                # tests could run (the class — a non-regression keep's did).
+                _pair_external_only = (
                     _pair_u2 is not None
-                    and (_pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
-                         or _pair_nonregr))
+                    and _pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
+                _pair_deferred = _pair_external_only or (
+                    _pair_u2 is not None and _pair_nonregr)
                 _attr_p = (
                     (_pair_u2.self_passed | _pair_u2.self_failures
                      | _pair_u2.aborted)
                     if _pair_u2 is not None else frozenset())
                 _cls(class_for_kept(passed=_pair_passed,
-                                    unreachable=_pair_kept_unreachable,
+                                    unreachable=tests_could_not_run(
+                                        external_only=_pair_external_only),
                                     net_delta=(_cmp_p.net_pass_delta
                                                if _cmp_p is not None else 0),
                                     attributed=_attr_p,
@@ -4973,14 +4989,14 @@ def prepare_impl_fill(
                      pair_id, "pair")
                 _verdict_row(
                     pair_id,
-                    (Disposition.KEEP_DEFERRED if _pair_kept_unreachable
+                    (Disposition.KEEP_DEFERRED if _pair_deferred
                      else Disposition.ACCEPT),
                     (f"pair accepted — {len(_pair_passed)} convicting test(s) "
                      "observed passing" if _pair_passed
                      else "pair kept — compiles, no regression; judged at the "
                      "next sweep"),
                     outcome=(GateOutcome.POSITIVE
-                             if _pair_passed and not _pair_kept_unreachable
+                             if _pair_passed and not _pair_deferred
                              else GateOutcome.UNMEASURABLE),
                     evidence=tuple(sorted(_pair_passed)), attempt=1,
                     validity=ValidityVector(binary_completed=True),
@@ -5432,7 +5448,8 @@ def prepare_impl_fill(
                      "graded UNMEASURED, not a re-buy.")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, _sid, "session")
             if _out.outcome == "accepted":
-                _cls(class_for_kept(passed=frozenset(_sl.tests), unreachable=False,
+                _cls(class_for_kept(passed=frozenset(_sl.tests),
+                                    unreachable=tests_could_not_run(),
                                     attributed=frozenset(_sl.tests),
                                     measured=True),
                      _sid, "session")
@@ -5453,7 +5470,7 @@ def prepare_impl_fill(
                     _cls(class_for_kept(
                         passed=(_out.final.green_targets
                                 if _out.final is not None else frozenset()),
-                        unreachable=False,
+                        unreachable=tests_could_not_run(),
                         net_delta=(_out.final.pass_delta
                                    if _out.final is not None else 0),
                         attributed=frozenset(_sl.tests),

@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from ... import log
+from ...domain.last_error import LastErrorKind
 from ...domain.rust_scan import body_is_only_redeclaration
 
 FAILED_ATTEMPT_SENTINEL = "// SKELETON_STUB_FAILED_ATTEMPT"
@@ -101,6 +102,52 @@ class AttemptFailure(Enum):
     COMPILE = "compile"   # rustc rejected it
     TEST = "test"         # compiled; its attributed tests still failed
     ABORT = "abort"       # compiled; the test process died under it
+
+
+# The LAST_ERROR a behavioural refill's first ask carries: the body on disk
+# compiled, and the only evidence is the attributed test source.
+REFILL_SEED_EXCERPT = (
+    "This body COMPILES but its attributed test(s) below still FAIL. "
+    "Rewrite the BEHAVIOR so those test(s) pass; keep the signature "
+    "and do not reintroduce `unimplemented!()`.")
+
+
+def seed_attempt_failure(*, refill: bool,
+                         crash_implicated: bool) -> AttemptFailure:
+    """How the body a fix loop starts from failed, before this loop has
+    measured anything.
+
+    A stub has not failed yet, so COMPILE is the honest default (its first
+    ask is the stub prompt, not a fix prompt). A behavioural refill is a
+    body rustc already ACCEPTED: its attributed tests fail (TEST), or it is
+    on a localized crash stack (ABORT). The same three-way the loop writes
+    after a measured attempt. Seeding COMPILE for a refill is how every
+    refill's first ask opened `Previous attempt broke cargo check` over a
+    compiling body — run `3400-4d0618ba` (2026-09-21), `src/error.rs::
+    context`: the model "fixed rustc" into an E0277 and oscillated 78
+    minutes."""
+    if not refill:
+        return AttemptFailure.COMPILE
+    return AttemptFailure.ABORT if crash_implicated else AttemptFailure.TEST
+
+
+def fix_prompt_kind(failure: AttemptFailure, *,
+                    quoted_run: bool) -> LastErrorKind:
+    """The LastErrorKind a fix prompt is built with — the one mapping.
+
+    ``quoted_run`` is whether the LAST_ERROR excerpt quotes this body's own
+    run output (a measured attempt of this loop). A TEST failure with its
+    panic lines quoted is REDDENED; the same failure with no run quoted (a
+    refill's seed, whose only evidence is the test source) is UNPASSED,
+    which names no faulting call — REDDENED there would order the model
+    away from "the call the stack below shows" with no stack below. An
+    ABORT is CRASHED either way: a crash-implicated seed carries its stack
+    in the prompt's CRASH_EVIDENCE."""
+    if failure is AttemptFailure.COMPILE:
+        return LastErrorKind.COMPILE
+    if failure is AttemptFailure.ABORT:
+        return LastErrorKind.CRASHED
+    return LastErrorKind.REDDENED if quoted_run else LastErrorKind.UNPASSED
 
 
 def make_failed_attempt_body(

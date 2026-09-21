@@ -13,6 +13,11 @@ that attempt; the retry prompt must use the compiled-then prefix.
 Negative control: the same excerpt with kind=COMPILE (the pre-change
 opener) still says broke cargo check.
 
+Second shape, run `3400-4d0618ba` (2026-09-21): a behavioural refill's
+FIRST ask, before the loop has measured anything. The tree compiles and the
+body's test fails; the seed must describe that body as compiled-and-ran,
+with no faulting call to avoid (there is no run quoted), never as rustc.
+
 Gated on `INTEGRATION=1`; `scripts/run_integration.sh` is the launcher.
 """
 from __future__ import annotations
@@ -30,6 +35,11 @@ from pipeline_core.application.reconstruct.cargo_runner import (
 )
 from pipeline_core.application.reconstruct.cargo_runner import (
     test_regression_gate as regression_gate,
+)
+from pipeline_core.application.reconstruct.fill_rules import (
+    REFILL_SEED_EXCERPT,
+    fix_prompt_kind,
+    seed_attempt_failure,
 )
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix
 from pipeline_core.prompts.context import PerFnFixSections
@@ -125,4 +135,53 @@ def test_retry_prompt_after_a_compiling_red_is_not_cargo_check(
         test_blocks=[], module_name="wides", cluster_name="stable",
         file_rel="src/lib.rs", prev_body="x", error_excerpt=detail,
         sections=sections, fr_path=None, kind=LastErrorKind.COMPILE)
+    assert "broke cargo check" in control
+
+
+_WRONG = """pub struct Wide(pub Vec<u8>);
+
+impl Wide {
+    pub fn widen(&self) -> u8 {
+        0
+    }
+}
+"""
+
+
+def test_refill_first_ask_on_a_compiling_red_body_is_not_cargo_check(
+        tmp_path: Path) -> None:
+    root = _crate(tmp_path)
+    (root / "src" / "lib.rs").write_text(_WRONG, encoding="utf-8")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET)
+    env["RUST_BACKTRACE"] = "0"
+    state = measure_test_state(_run, _CMD, root, env, timeout=600)
+    # The premise the seed rests on: rustc accepted the body and the test
+    # ran and failed. A None state is a tree that did not build.
+    assert state is not None
+    assert state.pass_count == 0
+    kind = fix_prompt_kind(
+        seed_attempt_failure(refill=True, crash_implicated=False),
+        quoted_run=False)
+    sections = PerFnFixSections(
+        macros="", notes="", container="impl Wide", types="",
+        invariants="", siblings="", crate_idioms="", bound_methods="")
+    prompt = build_per_fn_fix_prompt(
+        file_text=_WRONG, fn_name="widen",
+        sig_text="pub fn widen(&self) -> u8",
+        test_blocks=[(str(root / "tests" / "wide.rs"), _TESTS)],
+        module_name="wides", cluster_name="stable", file_rel="src/lib.rs",
+        prev_body="0", error_excerpt=REFILL_SEED_EXCERPT, sections=sections,
+        fr_path=None, kind=kind)
+    assert "broke cargo check" not in prompt
+    assert "<COMPILE_ERRORS>" not in prompt
+    assert "compiled and ran" in prompt
+    assert "do not emit" not in prompt
+    control = build_per_fn_fix_prompt(
+        file_text=_WRONG, fn_name="widen",
+        sig_text="pub fn widen(&self) -> u8",
+        test_blocks=[], module_name="wides", cluster_name="stable",
+        file_rel="src/lib.rs", prev_body="0",
+        error_excerpt=REFILL_SEED_EXCERPT, sections=sections, fr_path=None,
+        kind=LastErrorKind.COMPILE)
     assert "broke cargo check" in control

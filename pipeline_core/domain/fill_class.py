@@ -68,6 +68,28 @@ _FIELD = {
 }
 
 
+def tests_could_not_run(
+    *, crash_keep: bool = False, external_only: bool = False,
+    blocked_sibling: bool = False, crate_red: bool = False,
+) -> bool:
+    """The ``unreachable=`` every keep site passes to :func:`class_for_kept`.
+
+    The signature is the docstring: the attributed tests could not run
+    because the keep was on crash evidence, U2 found every failing test
+    blocked outside the unit (ACCEPT_EXTERNAL_ONLY), a still-stubbed
+    sibling blocks them, or the crate was red so no test ran. Nothing else.
+
+    A non-regression keep is deliberately not a parameter. Its GUARD line
+    says the attributed tests RAN and were already failing at baseline, so
+    the body is WRONG, not unmeasured. Run `3400-4d0618ba` (2026-09-21):
+    the file and pair sites folded the non-regression flag into
+    ``unreachable=``, and all four file keeps of that run were graded
+    `unreachable` beside a GUARD line saying the tests ran. Every consumer
+    calls this function, so no site can pass the non-regression flag in.
+    """
+    return crash_keep or external_only or blocked_sibling or crate_red
+
+
 def class_for_kept(
     *, passed: Collection[str], unreachable: bool,
     net_delta: int = 0, newly_passing: Collection[str] = (),
@@ -81,8 +103,9 @@ def class_for_kept(
     decision chain, ten lines before they computed ``_passed_f`` /
     ``_passed_i`` / ``_u2_passed``. That is the fabricated-win class
     priced at run ``1064759-0f23fb68`` (2026-08-15/16): 50 successes
-    against a byte-identical verdict vector. ``unreachable=True`` is
-    ACCEPT_EXTERNAL_ONLY, still-stubbed sibling, crash-keep, B3-while-red.
+    against a byte-identical verdict vector. ``unreachable`` is always
+    :func:`tests_could_not_run` (ACCEPT_EXTERNAL_ONLY, still-stubbed
+    sibling, crash-keep, B3-while-red), never a site's own flag.
 
     The opposite miscount: ``passed`` is the unit's ATTRIBUTED tests
     observed passing, and a fill run with no attribution (every leftover

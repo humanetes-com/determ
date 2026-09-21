@@ -248,8 +248,12 @@ plan and refactor; the final goal outranks the session's convenience.
 defect each one leaves alive. The right fix is the one after which the defect
 CLASS cannot recur — not the one after which the observed instance stops. The
 tell that the rule is being broken is the sentence "the minimal fix is …" (or
-sizing a fix by its diff): minimal scopes the fix to the instance, and the
-instance is never the defect. The instance that named the rule, 2026-08-24:
+sizing a fix by its diff, or "just patch the two callers that fired"):
+minimal scopes the fix to the instance, and the instance is never the
+defect. A cheap form that stops this fill and leaves the next keep site
+able to pass the same lie, or a default that still forgets the fact until
+this loop measures, has not closed the class. The instance that named the
+rule, 2026-08-24:
 a stored `[E0425]` lesson ("use the construction helper that omits the
 vtable") was steering escalated rewrites toward the exact wrong body holding
 the pass-93 lock. The cheap fix was to filter that note from escalated
@@ -293,6 +297,16 @@ pass 134"), it is a steer. A predicate written to convert this run's
 leftovers is the same steer even when the leftover names are not in the
 diff.
 
+That bar is necessary and not sufficient. A function that names no leftover
+can still be an instance patch: it closes the two call sites that fired on
+this tree, leaves the default that forgot the fact, and the next strip of
+the same crate (or a crate that does not exist yet) hits a sibling of the
+same question. Generic-and-resilient means the defect CLASS cannot recur by
+forgetting a caller or by starting from an empty tree of the same repo.
+The next section's "most correct fix" and the "one typed model" rule below
+are how that is checked; "no leftover names in the diff" is only the
+steer half.
+
 **The rule, checkable.** Before shipping a stall fix, name the function that
 would carry it and the inputs it reads. Then one of: it is a generic
 mechanism (those inputs contain no live test name, no live unit name, no
@@ -301,6 +315,9 @@ failing tests to a unit they did not already own); or it is a steer —
 stop, do not ship. A test whose fixture is the live leftover names is the
 same steer with a passing suite. The negative control is the same predicate
 on a different crate shape, producing the bad outcome without those names.
+Then the stronger check in "Every fix is the general solution" below: name
+every consumer of the fact, and whether a new consumer can recreate the
+defect by omitting the call.
 
 **The instance that motivated the rule, 2026-08-31, run `451330-7e8a7ca9`
 at pass 134.** Three tests still failed, all on Debug output. The session
@@ -423,6 +440,17 @@ order: remove the situation at the layer that creates it (measure so the
 confusion cannot occur); then one typed model every consumer reads
 through one rule; never a predicate for the instance.
 
+That "one typed model" is not a docstring plus N call sites each inventing
+the boolean. If two keep sites construct `unreachable=` from their own
+flags, a third site can recreate the defect by omitting the call, and a
+strip-and-restart of the same crate will look like a new issue. The model
+is one function every consumer must call, whose arguments cannot express
+the lie (a non-regression keep is not a parameter of "tests could not
+run"; a compiling refill is not a default of `COMPILE`). The cheap form
+patches the callers that fired. The strong form makes the wrong state
+unrepresentable. Ship the strong form. The next empty tree of the same
+repo is the test the cheap form fails.
+
 **The rule, checkable.** Before adding a condition to a gate, exemption,
 router or classifier, count the special cases the function already
 holds. If the new one is another case of the same question, stop and
@@ -430,6 +458,15 @@ write the model that answers the question, and delete the cases it
 subsumes in the same change. A fix is general only if it would decide
 correctly on a shape no run has produced yet. A fix that REMOVES a special
 case in favour of a lookup the code already has is the good direction.
+Then, before shipping a call-site correction of an existing model: name
+every consumer of that fact. If two or more sites construct the same
+flag independently, extract the function whose signature is the docstring
+(only the cases that are actually that fact) and route every consumer
+through it in the same change. A test of the model given honest inputs
+is not a test of the consumers: it stays green if the callers still lie.
+The test that closes the class fails when a keep site can pass
+non-regression as unreachable, or when a refill seed can still default
+to compile, without editing that test.
 
 **The instances, 2026-09-18/19, runs `3109629-f6bcbf01` and
 `3213361-9d582ae7`.** Good direction: a body answered with `block=""` was
@@ -448,6 +485,22 @@ two layers: run each test in its own process, so one abort cannot erase
 another test's verdict (the collateral class disappears), and give every
 test one typed outcome (passed / failed with its own panic / aborted with
 a named cause) that every judge compares to the baseline by one rule.
+
+**The instance, 2026-09-21, run `3400-4d0618ba`.** `LastErrorKind` already
+converted a measured TEST retry; refill attempt 1 still opened as cargo-check
+because `_last_failure` defaulted `COMPILE` until this loop measured, and
+the seed that already knew the body compiled never wrote it. `class_for_kept`
+already returned WRONG_BODY when attributed tests ran and none passed; the
+file and pair sites passed `unreachable=True` for a non-regression keep,
+which short-circuits that branch. The cheap form: set TEST when `rec.refill`,
+drop the flag at two sites. The strong form, which is the one that ships:
+last-failure is how this body failed, using the same mapping the loop
+already writes after a measurement (crash evidence → abort, else test on a
+refill, compile only on a stub); unreachable is one helper every keep site
+calls, arguments only crash-keep / external-only / blocked-sibling, so a
+non-regression keep cannot be passed in. A test that only feeds honest
+kwargs into `class_for_kept` would have stayed green with the callers left
+alone — that test does not close the class.
 
 ## Nothing leaves this machine
 
