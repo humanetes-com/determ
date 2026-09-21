@@ -240,14 +240,14 @@ def _turn0(**kwargs) -> str:
     from pipeline_core.prompts.slice_session import build_slice_session_prompt
     sl = SessionSlice(tests=("t_pair",), units=(_DISP, _RENDER))
     recs = _records()
-    args = dict(
-        module_name="m", cluster_name="t", slice_=sl, records=recs,
-        all_records=list(recs.values()),
-        file_texts={"src/lib.rs": "fn fmt() {}", "src/render.rs": "fn render() {}"},
-        target_evidence={"t_pair": 'left: "a"'},
-        test_blocks=(), types_section="",
-    )
-    args.update(kwargs)
+    args = {
+        "module_name": "m", "cluster_name": "t", "slice_": sl, "records": recs,
+        "all_records": list(recs.values()),
+        "file_texts": {"src/lib.rs": "fn fmt() {}", "src/render.rs": "fn render() {}"},
+        "target_evidence": {"t_pair": 'left: "a"'},
+        "test_blocks": (), "types_section": "",
+        **kwargs,
+    }
     return build_slice_session_prompt(**args)
 
 
