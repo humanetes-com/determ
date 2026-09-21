@@ -76,6 +76,7 @@ from pipeline_core.application.reconstruct.routes import (
     PairRoute,
     SessionRoute,
 )
+from pipeline_core.application.reconstruct.session_write_set import session_write_set
 from pipeline_core.application.reconstruct.slice_session import (
     SessionPorts,
     run_slice_session,
@@ -1656,7 +1657,7 @@ def prepare_impl_fill(
                 f"file builds a `{i.type_name}` literal whose field "
                 f"`{i.field}` has this fn's signature"
                 + (" (the name occurs nowhere in the file but its own "
-                   "declaration)" if i.references <= 1 else
+                   "declaration)" if i.unwired else
                    f" ({i.references} occurrences in the file)")
                 + ". Rewrite it together with the producer if it is not "
                 "right for the type the producer erases."
@@ -5278,8 +5279,36 @@ def prepare_impl_fill(
                      + ", ".join(site_label(u) for u in _missing[:6]))
             if not _records:
                 return RouteRunReport(empty=True)
-            _units = tuple(sorted(_records, key=lambda u: (u.file, u.fn_name, u.container)))
-            _sl = type(_sl)(tests=_sl.tests, units=_units)
+            # The write set's installable complement: free fns of a slice
+            # file whose signature fits a field of a table an editable unit
+            # builds, and that nothing installs yet. Coverage cannot put them
+            # in the slice (nothing installed runs nothing), and without them
+            # an editable producer can only reuse the tables already wired.
+
+            def _read_slice_file(f: str) -> str | None:
+                try:
+                    return (target_src_dir / f).read_text(
+                        encoding="utf-8", errors="replace")
+                except OSError:
+                    return None
+            _ws = session_write_set(
+                _sl, _records, list(_all_recs.values()),
+                _crate_type_records, _read_slice_file)
+            _installable_sites = _ws.installable
+            if _installable_sites:
+                _log(f"  [phase-c/session] {_sl.label()}: "
+                     f"{len(_installable_sites)} installable fn(s) admitted to "
+                     "the editable set — referenced by nothing but their own "
+                     "declaration, signature fits a table an editable unit "
+                     "builds: " + ", ".join(
+                         f"{site_label(u)}->{t}"
+                         for u, t in _installable_sites.items()))
+                _emit("phase_c.session.installable_admitted", data={
+                    "cluster": cluster_name, "tests": list(_sl.tests),
+                    "admitted": [{**site_payload(u), "slot": t}
+                                 for u, t in _installable_sites.items()]})
+            _sl, _records = _ws.slice_, _ws.records
+            _units = _sl.units
             _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))
             _tblocks = attributed_test_blocks(
                 _leaves,
@@ -5355,7 +5384,8 @@ def prepare_impl_fill(
                 kind=kind_from_record(_srec),
                 blueprint=_bp, fr_path=fr_path,
                 max_turns=_max_turns, executed=_executed_all,
-                file_chars=_sl.file_chars or SESSION_FILE_CHARS)
+                file_chars=_sl.file_chars or SESSION_FILE_CHARS,
+                installable=_installable_sites)
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:

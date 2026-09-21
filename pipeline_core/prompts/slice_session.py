@@ -45,6 +45,7 @@ def render_slice_file(
     file_chars: int = DEFAULT_FILE_CHARS,
     executed: Collection[FnSite] = (),
     coverage_known: bool = False,
+    installable: Mapping[FnSite, str] | None = None,
 ) -> str:
     """One `<FILE>` section: the editable units named with their impl
     headers — and, when the sweep's coverage is known, whether the failing
@@ -55,8 +56,19 @@ def render_slice_file(
     The executed mark is what run `164454-8ec9c4d4` (2026-09-02) lacked:
     its first session rewrote `ErrorImpl::debug` five times while the Debug
     dispatcher never called it on the failing arm, and nothing in the
-    transcript said so."""
+    transcript said so.
+
+    `installable` maps an editable free fn to the `Table.field` whose
+    signature it fits, for a fn no table installs yet. Its mark says that
+    instead of the coverage mark: "NOT executed" is true of it and tells the
+    model to leave it alone, while its whole reason for being editable is
+    that the table an editable unit builds may install it."""
     def _mark(r: FnRecord) -> str:
+        slot = (installable or {}).get(record_site(r))
+        if slot:
+            return (f" [installable: fits {slot}; referenced by nothing but "
+                    "its own declaration — a table an editable unit builds "
+                    "may install it, rewritten in the same change set]")
         if not coverage_known:
             return ""
         return (" [executed by the failing tests]"
@@ -150,6 +162,7 @@ def build_slice_session_prompt(
     max_turns: int = 8,
     file_chars: int = DEFAULT_FILE_CHARS,
     executed: Collection[FnSite] | None = None,
+    installable: Mapping[FnSite, str] | None = None,
 ) -> str:
     """Turn 0 of a session over `slice_`.
 
@@ -173,7 +186,8 @@ def build_slice_session_prompt(
             f, file_texts.get(f, ""),
             [records[u] for u in slice_.units if u.file == f],
             all_records, file_chars=file_chars,
-            executed=executed or (), coverage_known=executed is not None)
+            executed=executed or (), coverage_known=executed is not None,
+            installable=installable)
         for f in slice_.files)
     coverage_legend = ""
     if executed is not None:
@@ -184,6 +198,12 @@ def build_slice_session_prompt(
             "until a unit they do execute routes into it (a dispatcher that "
             "does not yet call its implementer is the usual shape: change the "
             "dispatcher's arm AND the implementer in one change set).\n")
+    if installable:
+        coverage_legend += (
+            "A unit marked installable is executed by nothing because no "
+            "table installs it yet; it is editable so that a table an "
+            "editable unit builds can name it, with both written in one "
+            "change set.\n")
     tests_section = "\n\n".join(
         f'<TEST path="{p}">\n{txt}\n</TEST>' for p, txt in test_blocks) or "(none)"
     first_file = slice_.files[0] if slice_.files else ""

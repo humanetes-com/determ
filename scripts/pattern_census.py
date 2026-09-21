@@ -208,6 +208,16 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      repeats every fill.  Reaction: past its grace a pair loses its place in
      the order over the runs it has spent on and is ranked by its ledger
      (a flat re-buy of identical bodies is `rebuy_flat`).
+  P31 split complement — in one run, file-first offered a file's table
+     fns an escalated producer could install, and a slice session opened
+     with no installable admitted to its write set.  Run 195091-72b92f1e
+     (2026-09-21, cluster stable): the session held the producer that had
+     to install two table fns nothing named yet, coverage could never admit
+     them (nothing installed runs nothing), file-first held the fns but not
+     the producer, and two iterations moved no verdict.  A proxy: the
+     session's files are not on its opening line, so a session that holds
+     no builder of the offered file also counts.  Reaction: the session
+     logs `installable fn(s) admitted to the editable set`.
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -525,6 +535,10 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P30": [
         # A pair that re-emitted the tree is rowed as keeping nothing.
         ("every kept body was the one already on disk", "noop-keep-rowed"),
+    ],
+    "P31": [
+        # The session's write set carried the unwired table fns.
+        ("installable fn(s) admitted to the editable set", "complement-admitted"),
     ],
     "P27": [
         # The end gate classified each orphan against augmentation's
@@ -2261,6 +2275,38 @@ def detect_p30(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:3]}]
 
 
+RE_FILE_INSTALLABLE = re.compile(
+    r"\[phase-c/file\] (?P<file>\S+): \d+ declared fn\(s\) an escalated "
+    r"producer could install are writable")
+RE_SESSION_OPEN = re.compile(r"\[phase-c/session\] (session\[[^\]]*\]): opening")
+RE_SESSION_ADMIT = re.compile(r"installable fn\(s\) admitted to the editable set")
+
+
+def detect_p31(run: Run, iters: list[dict]) -> list[dict]:
+    """Sessions that opened with no installable admitted in a run whose
+    file-first offered installables. One hit per run."""
+    offered: set[str] = set()
+    opened: list[tuple[str, str]] = []
+    admitted = 0
+    for ref, text in run.lines:
+        m = RE_FILE_INSTALLABLE.search(text)
+        if m:
+            offered.add(m["file"])
+            continue
+        m = RE_SESSION_OPEN.search(text)
+        if m:
+            opened.append((ref, m.group(1)))
+            continue
+        if RE_SESSION_ADMIT.search(text):
+            admitted += 1
+    if not offered or not opened or admitted >= len(opened):
+        return []
+    return [{"evidence": f"{len(opened) - admitted} of {len(opened)} session(s) "
+                         "opened with no installable admitted while file-first "
+                         f"offered installables for {', '.join(sorted(offered))}",
+             "refs": [r for r, _ in opened[:3]]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2275,7 +2321,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P19": detect_p19, "P20": detect_p20, "P21": detect_p21,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
              "P25": detect_p25, "P26": detect_p26, "P27": detect_p27,
-             "P28": detect_p28, "P29": detect_p29, "P30": detect_p30}
+             "P28": detect_p28, "P29": detect_p29, "P30": detect_p30,
+             "P31": detect_p31}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2301,7 +2348,8 @@ CLASS_NAMES = {
     "P27": "orphaned stub at a green end (all tests pass, exit 1 on reachable stubs no test executes; augmentation stopped on line coverage alone)",
     "P28": "unpeelable reply (file-first compile failure, peel refused none_implicated, whole reply reverted; pre-fix a bare-block free fn was keyed by the target impl)",
     "P29": "parked stub (the blocker histogram ranked a stub first and the fill opened no stub run; pre-fix isolation silenced the stub-abort reading and a stale stamp sank the stub)",
-    "P30": "spent pair first (a pair past its grace opened ahead of a never-served run; pre-fix the grace lapsed the deferral but kept the order)"}
+    "P30": "spent pair first (a pair past its grace opened ahead of a never-served run; pre-fix the grace lapsed the deferral but kept the order)",
+    "P31": "split complement (a session opened with no unwired table fn in its write set while file-first offered them; pre-fix the session's write set was coverage-only)"}
 
 
 # -------------------------------------------------------------------- report

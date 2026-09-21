@@ -55,6 +55,13 @@ class Installable:
     field: str            # the field's name
     references: int       # occurrences of the fn's name in the file
 
+    @property
+    def unwired(self) -> bool:
+        """The name occurs nowhere in the file but its own declaration: no
+        table installs it, so no test can execute it, and a route whose
+        write set is read off coverage can never contain it."""
+        return self.references <= 1
+
 
 @dataclass(frozen=True, slots=True)
 class ProducerBypass:
@@ -265,8 +272,17 @@ def offer_producers(
     return measured or batch
 
 
+def _field(record: object, name: str) -> str:
+    """One field of an extractor fn record, raw dict or typed record alike:
+    the file route holds the extractor's dicts, the session route holds
+    `FnRecord`s, and both ask the one relation below."""
+    if isinstance(record, Mapping):
+        return str(record.get(name, "") or "")
+    return str(getattr(record, name, "") or "")
+
+
 def installable_fns(
-    fn_records: Sequence[Mapping[str, object]],
+    fn_records: Sequence[object],
     type_records: Iterable[TypeRecord],
     escalated: frozenset[FnLocator],
     file_rel: str,
@@ -291,14 +307,14 @@ def installable_fns(
     esc_names = {k.fn_name for k in escalated if k.file == file_rel}
     if not esc_names:
         return ()
-    here = [r for r in fn_records if str(r.get("file", "")) == file_rel]
+    here = [r for r in fn_records if _field(r, "file") == file_rel]
     # Types an escalated producer builds a literal of.
     built: list[TypeRecord] = []
     for tr in type_records:
         if not tr.name or tr.kind not in ("struct", "enum"):
             continue
-        if any(constructs_type(str(r.get("body_text", "") or ""), tr.name)
-               for r in here if str(r.get("fn_name", "")) in esc_names):
+        if any(constructs_type(_field(r, "body_text"), tr.name)
+               for r in here if _field(r, "fn_name") in esc_names):
             built.append(tr)
     if not built:
         return ()
@@ -311,12 +327,12 @@ def installable_fns(
         if not wanted:
             continue
         for r in here:
-            name = str(r.get("fn_name", ""))
+            name = _field(r, "fn_name")
             # A member of an impl block is reachable by its own container and
             # is not a free fn the table can name.
-            if not name or name in seen or str(r.get("container", "")):
+            if not name or name in seen or _field(r, "container"):
                 continue
-            shape = fn_decl_shape(str(r.get("sig_text", "") or ""))
+            shape = fn_decl_shape(_field(r, "sig_text"))
             if shape is None:
                 continue
             for field, want in wanted:
@@ -327,6 +343,44 @@ def installable_fns(
                     break
     out.sort(key=lambda i: (i.references, i.fn_name))
     return tuple(out[:cap])
+
+
+def unwired_complement(
+    fn_records: Sequence[object],
+    type_records: Iterable[TypeRecord],
+    writable: frozenset[FnLocator],
+    file_rel: str,
+    *,
+    reference_counts: Mapping[str, int],
+) -> tuple[Installable, ...]:
+    """The installables of `file_rel` that a WRITABLE table-builder could
+    install and that nothing installs yet, minus the ones already writable.
+
+    The same relation as `installable_fns`, keyed on what a route may write
+    rather than on what the escalation convicted, and narrowed to the fns no
+    table names. That narrowing is the point: a route whose write set is
+    read off the failing tests' coverage (the slice session) can contain a
+    table-builder but never a fn the builder does not install, because a fn
+    nothing installs is executed by nothing. The two halves of the split
+    defect this module exists for then sit on different routes and no reply
+    can write both. Measured on run `195091-72b92f1e` (2026-09-21, cluster
+    `stable`): the five-test session's editable src/error.rs held the
+    context-wrapping producer and every table-builder, the two table fns a
+    correct producer must install were each referenced only by their own
+    declaration and were not editable, the model's own reasoning named the
+    wrapper the producer had to build and never named either fn, and
+    file-first, which offered both, never had the producer in its write
+    list; run `3400-4d0618ba` spent 78 min of per-fn on the producer alone.
+
+    Wired installables are left out on purpose: a fn some table already
+    names is reachable, so coverage decides whether the failing path runs
+    it, and adding it would only widen the prompt.
+    """
+    return tuple(
+        i for i in installable_fns(
+            fn_records, type_records, writable, file_rel,
+            reference_counts=reference_counts, cap=len(fn_records) or 1)
+        if i.unwired and FnLocator(file_rel, i.fn_name) not in writable)
 
 
 def _turbofish_types(body_text: str) -> frozenset[str]:
