@@ -15,7 +15,7 @@ Pure domain: stdlib only, no I/O. Parsing happens in the adapter, which is the s
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
@@ -234,6 +234,15 @@ class TypeRecord:
     # a partial one read as complete would assert an impl is absent when it
     # is not. An empty tuple is a real reading: this type implements nothing.
     trait_impls: tuple[TraitImplRecord, ...] | None = None
+    # Impls whose self type is one of the impl's own type parameters
+    # (`impl<T: Bound> Trait for T`). The extractor emits the list once per
+    # enumeration and `type_records_from_enumeration` attaches that one tuple
+    # to every record, so any subset a prompt renders still carries it. None
+    # = the extractor did not report it. Empty = this crate writes none. Not
+    # an impl of this named type: the section prints the list once, and the
+    # per-type sentence does not treat its absence here as "this crate does
+    # not implement the trait".
+    blanket_impls: tuple[TraitImplRecord, ...] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TypeRecord:
@@ -253,6 +262,8 @@ class TypeRecord:
             external_trait_impls=_strs(d.get("external_trait_impls")),
             trait_impls=(None if d.get("trait_impls") is None else tuple(
                 TraitImplRecord.from_dict(t) for t in d["trait_impls"])),
+            blanket_impls=(None if d.get("blanket_impls") is None else tuple(
+                TraitImplRecord.from_dict(t) for t in d["blanket_impls"])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -270,6 +281,8 @@ class TypeRecord:
             "mod_path": self.mod_path,
             **({"trait_impls": [t.to_dict() for t in self.trait_impls]}
                if self.trait_impls is not None else {}),
+            **({"blanket_impls": [t.to_dict() for t in self.blanket_impls]}
+               if self.blanket_impls is not None else {}),
             # Only an external record carries these keys: the Rust side never
             # emits them, so a crate record round-trips to the exact wire shape.
             **({"external_path": self.external_path,
@@ -277,6 +290,24 @@ class TypeRecord:
                if self.external_path else {}),
         }
 
+
+
+def type_records_from_enumeration(data: Any) -> list[TypeRecord] | None:
+    """Decode `--enumerate-types` output. The extractor emits one object:
+    `types` (the records) and `blanket_impls` (the crate's type-parameter
+    impls, which belong to no record). The one blanket tuple is attached to
+    every record. A bare list is a build that predates the object: its
+    records keep whatever they carry. Any other shape is None, the adapter's
+    failure contract."""
+    if isinstance(data, list):
+        return [TypeRecord.from_dict(r) for r in data]
+    if not isinstance(data, dict) or not isinstance(data.get("types"), list):
+        return None
+    raw = data.get("blanket_impls")
+    blankets = (None if raw is None
+                else tuple(TraitImplRecord.from_dict(t) for t in raw))
+    return [replace(TypeRecord.from_dict(r), blanket_impls=blankets)
+            for r in data["types"]]
 
 @dataclass(frozen=True, slots=True)
 class FnRecord:

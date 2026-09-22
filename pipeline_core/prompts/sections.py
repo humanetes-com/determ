@@ -9,12 +9,14 @@ extraction — they are this module's public entry points).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from pipeline_core.domain.models import (
     DispatchFamily,
     FieldRecord,
     ImplBlock,
+    TraitImplRecord,
     TypeRecord,
 )
 from pipeline_core.domain.refill_evidence import collapse_ws
@@ -1471,23 +1473,66 @@ def _private_field_lines(
 #: and concluded 9 times that it was "omitted from the snippet". Auto traits
 #: and the standard library's blanket impls are not headers this crate writes,
 #: so the sentence says so rather than claim they are absent.
-TRAIT_IMPLS_HEADER = (
-    "  trait impls (COMPLETE: every impl this crate writes for this type, any "
-    "file; a trait not listed is NOT implemented for it by this crate — auto "
-    "traits and std blanket impls aside):")
+_TRAIT_IMPLS_BODY = (
+    "  trait impls (COMPLETE: every impl this crate writes whose self type is "
+    "this type, any file; a trait not listed is NOT implemented for it by an "
+    "impl that names this type — auto traits and std blanket impls aside"
+)
+TRAIT_IMPLS_HEADER = _TRAIT_IMPLS_BODY + "):"
+TRAIT_IMPLS_HEADER_WITH_BLANKETS = (
+    _TRAIT_IMPLS_BODY
+    + "; an impl this crate writes for a type parameter is not in this list, "
+    "it is in the crate blanket list in this section):")
+# The record's crate writes type-parameter impls and this rendering does not
+# print them: the sentence must not point at a list that is not there, and
+# must not let the per-type list read as covering them either.
+TRAIT_IMPLS_HEADER_BLANKETS_NOT_SHOWN = (
+    _TRAIT_IMPLS_BODY
+    + "; this crate also writes impls for a type parameter, not shown here, "
+    "which may implement a trait not listed):")
+BLANKET_IMPLS_HEADER = (
+    "  crate blanket impls (COMPLETE: every impl this crate writes whose self "
+    "type is a type parameter, any file; a trait not listed is NOT "
+    "implemented for any type by such an impl — auto traits and std blanket "
+    "impls aside):")
+# A cap that lands inside either list used to keep the COMPLETE sentence and
+# drop the lines under it, which is the absence lie the sentence forbids.
+_LIST_OMITTED = (
+    "  trait-impl list omitted: this record did not fit the section, so the "
+    "list is not shown and is not a statement that any impl is absent.")
+_COMPLETE_HEADERS = (
+    TRAIT_IMPLS_HEADER, TRAIT_IMPLS_HEADER_WITH_BLANKETS,
+    TRAIT_IMPLS_HEADER_BLANKETS_NOT_SHOWN, BLANKET_IMPLS_HEADER)
 
 
 def trait_impl_lines(rec: TypeRecord) -> list[str]:
+    """The `trait impls` block of a crate type rendered on its own: nothing
+    beside it prints the crate's type-parameter impls, so when the record
+    carries any the sentence says they exist and are not shown."""
+    return _trait_impl_lines(rec, blankets_shown=False)
+
+
+def _trait_impl_lines(rec: TypeRecord, *, blankets_shown: bool) -> list[str]:
     """The `trait impls` block of a crate type: one line per header the
     extractor found, the declaring file beside it. Headers only (the line the
     skeleton keeps after strip). Nothing for an external record (it carries
     its own `trait impls:` note) or a record whose extractor predates the
     field (`trait_impls is None`) — a list printed as complete must be
     complete. An empty reading prints the header with `(none)`, which is a
-    statement the reader can use."""
+    statement the reader can use. When the record carries blanket impls,
+    absence here does not cover an impl whose self type is a type parameter:
+    the sentence points at the crate blanket list when `blankets_shown` (only
+    `render_types_section`, which prints that list, passes it), and says the
+    list is not shown otherwise."""
     if rec.external_path or rec.trait_impls is None or rec.kind == "trait":
         return []
-    out = [TRAIT_IMPLS_HEADER]
+    if not rec.blanket_impls:
+        header = TRAIT_IMPLS_HEADER
+    elif blankets_shown:
+        header = TRAIT_IMPLS_HEADER_WITH_BLANKETS
+    else:
+        header = TRAIT_IMPLS_HEADER_BLANKETS_NOT_SHOWN
+    out = [header]
     if not rec.trait_impls:
         out.append("    (none)")
     for t in rec.trait_impls:
@@ -1496,26 +1541,124 @@ def trait_impl_lines(rec: TypeRecord) -> list[str]:
     return out
 
 
+def blanket_impl_block(records: Sequence[TypeRecord]) -> str:
+    """The crate's type-parameter impls, once. Empty when no record carries
+    any: the per-type sentence then does not point at a list that is not
+    here. The same headers are stored on every record of one enumeration;
+    the first occurrence wins so the block is stable."""
+    chosen: list[TraitImplRecord] = []
+    seen: set[tuple[str, str]] = set()
+    for rec in records:
+        for t in rec.blanket_impls or ():
+            key = (t.header, t.file)
+            if key in seen:
+                continue
+            seen.add(key)
+            chosen.append(t)
+    if not chosen:
+        return ""
+    out = [BLANKET_IMPLS_HEADER]
+    for t in chosen:
+        where = f"  // {t.file}" if t.file else ""
+        out.append(f"    {t.header}{where}")
+    return "\n".join(out)
+
+
+def _first_complete_header(block: str) -> int | None:
+    found = [i for h in _COMPLETE_HEADERS if (i := block.find(h)) >= 0]
+    return min(found) if found else None
+
+
+def _fit_block(block: str, cap: int) -> str:
+    """`block` when it fits. Otherwise a prefix that does not end inside a
+    list whose header says the list is complete, plus a note that the list
+    was omitted. A block with no such header is sliced: it makes no absence
+    claim."""
+    if len(block) <= cap:
+        return block
+    at = _first_complete_header(block)
+    if at is None:
+        return block[:cap]
+    prefix = block[:at].rstrip()
+    if not prefix:
+        return _LIST_OMITTED[:cap]
+    candidate = prefix + "\n" + _LIST_OMITTED
+    if len(candidate) <= cap:
+        return candidate
+    room = cap - len(_LIST_OMITTED) - 1
+    if room > 0:
+        return prefix[:room].rstrip() + "\n" + _LIST_OMITTED
+    return prefix[:cap]
+
+
 def join_type_blocks(blocks: list[str], cap: int) -> str:
-    """Join rendered type blocks under a char cap, dropping whole blocks
-    rather than cutting one: a block carries a list that says it is
-    COMPLETE (`TRAIT_IMPLS_HEADER`), and a cut through it would state that an
-    impl the cut removed does not exist. A first block larger than the cap
-    alone is still cut (there is nothing else to show)."""
+    """Join rendered type blocks under a char cap. A later block that does
+    not fit is dropped whole. A first block that does not fit is cut before
+    a COMPLETE list (`TRAIT_IMPLS_HEADER`, `BLANKET_IMPLS_HEADER`): slicing
+    after that header would state that an impl the cut removed does not
+    exist."""
     out: list[str] = []
     used = 0
     for b in blocks:
-        extra = len(b) + (2 if out else 0)
-        if out and used + extra > cap:
-            break
-        out.append(b)
-        used += extra
-    return "\n\n".join(out)[:cap]
+        sep = 2 if out else 0
+        if used + sep + len(b) <= cap:
+            out.append(b)
+            used += sep + len(b)
+            continue
+        if not out:
+            fitted = _fit_block(b, cap)
+            if fitted:
+                out.append(fitted)
+        break
+    return "\n\n".join(out)
+
+
+def render_types_section(
+    records: Sequence[TypeRecord],
+    observables: frozenset[str] = frozenset(),
+    *,
+    viewer_file: str = "",
+    cap: int | None = None,
+) -> str:
+    """Type blocks for a prompt, with the crate's blanket impls printed once
+    ahead of them. The one renderer whose per-type sentence may point at the
+    blanket list, because it is the one that prints it.
+
+    `cap` drops later blocks whole and will not slice a complete list. The
+    first record outranks the blanket list: when the two do not fit
+    together, the list is left out (the per-type sentence then says it is
+    not shown) and the first record is shown, cut before its own impl list
+    if it alone exceeds the cap. Printing the list first and dropping the
+    record whole would leave a section with no type in it."""
+    blanket = blanket_impl_block(records)
+    if blanket:
+        shown = [_type_block(r, observables, viewer_file=viewer_file,
+                             blankets_shown=True) for r in records]
+        if cap is None:
+            return "\n\n".join([blanket, *shown])
+        if len(blanket) + 2 + len(shown[0]) <= cap:
+            return join_type_blocks([blanket, *shown], cap)
+    plain = [_type_block(r, observables, viewer_file=viewer_file,
+                         blankets_shown=False) for r in records]
+    if cap is None:
+        return "\n\n".join(plain)
+    return join_type_blocks(plain, cap)
 
 
 def format_type_for_prompt(
     rec: TypeRecord, observables: frozenset[str] = frozenset(),
     *, viewer_file: str = "",
+) -> str:
+    """One type record on its own. It cannot point at the crate blanket list,
+    because it does not print one; a prompt section is
+    `render_types_section`."""
+    return _type_block(rec, observables, viewer_file=viewer_file,
+                       blankets_shown=False)
+
+
+def _type_block(
+    rec: TypeRecord, observables: frozenset[str] = frozenset(),
+    *, viewer_file: str, blankets_shown: bool,
 ) -> str:
     """Render a type record as a compact Rust-like definition for prompts.
 
@@ -1581,7 +1724,6 @@ def format_type_for_prompt(
     _ctor = None if private else _construct_hint(rec)
     if _ctor:
         lines.append(_ctor)
-    lines.extend(trait_impl_lines(rec))
     if methods:
         # Dedup by method name (same fn can appear in multiple impl blocks);
         # keep the first sig we saw. Then render WITH SIGNATURE.
@@ -1613,6 +1755,9 @@ def format_type_for_prompt(
                 if len(rest) > 200:
                     rest = rest[:197] + "..."
                 lines.append(f"    // also: {rest}")
+    # After the methods, so a section cap that cannot fit this record cuts
+    # the complete impl list off the end and keeps the fields and methods.
+    lines.extend(_trait_impl_lines(rec, blankets_shown=blankets_shown))
     return "\n".join(lines)
 
 

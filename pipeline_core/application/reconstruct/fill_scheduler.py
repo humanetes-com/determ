@@ -335,7 +335,6 @@ def execute_fill(
         "deferred": [s.to_dict() for s in sched.deferred]})
 
     budget = FillBudget(sched.budget_minutes, now=deps.now)
-    remaining_weight = sum(s.weight for s in sched.ordered)
     rows: list[RouteLedgerRow] = []
     stopped = False
     ordered = list(sched.ordered)
@@ -370,15 +369,17 @@ def execute_fill(
                     reason="budget_spent")
                 rows.append(row)
                 _log_row(deps, row)
-                remaining_weight -= w.weight
             _flush(rows[-len(wave):])
             continue
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
-        for w in wave:
-            share = budget.share_for(w.weight, remaining_weight,
-                                     floor_minutes=w.floor_minutes)
-            remaining_weight -= w.weight
+        # The plan reserved later floors against the whole budget. Opening
+        # on a weight split of only the time left spends a floor that has
+        # not opened yet. Same allotment, on what remains, this wave plus
+        # every run still ahead.
+        ahead = [*wave, *ordered[i:]]
+        granted = budget.opening_shares(ahead)
+        for w, share in zip(wave, granted[:len(wave)], strict=True):
             shares[w.run.key] = share
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,

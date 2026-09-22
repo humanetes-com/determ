@@ -139,7 +139,7 @@ from pipeline_core.prompts.per_fn import (
     build_per_fn_prompt,
 )
 from pipeline_core.prompts.pull_menu import pull_menu_section
-from pipeline_core.prompts.sections import format_type_for_prompt
+from pipeline_core.prompts.sections import render_types_section
 
 
 def _cfg_dead_fns_of(ctx: PerFnPassCtx, rel_file: str) -> frozenset[str]:
@@ -579,10 +579,10 @@ class FillOneFn:
                 find_tests=lambda name: "\n\n".join(
                     f"// {p}\n{t}" for p, t in self.tests.find_tests_for_fn(
                         ctx.tests_dir_files, name)),
-                type_def=lambda name: ("\n\n".join(
-                    format_type_for_prompt(r, viewer_file=rel_file) for r in
+                type_def=lambda name: (render_types_section(
                     types_referenced_in_text(
-                        name, ctx.crate_type_records, visible_from=rel_file)[:3])
+                        name, ctx.crate_type_records, visible_from=rel_file)[:3],
+                    viewer_file=rel_file)
                     # Crate-local records win; well-known unstable std APIs
                     # (std::error::Request et al.) answer as a last fallback so
                     # the pull never starves on a std type the manifest can't have.

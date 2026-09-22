@@ -919,7 +919,10 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   floored at this many turns priced at its measured turn cost (median
   minutes per call over its ledger rows), taken from the fill budget before
   the weighted split and clipped to budget / sessions when the floors
-  exceed it (`floor NxMm` on the `[phase-c/schedule]` line). A session row
+  exceed it (`floor NxMm` on the `[phase-c/schedule]` line). The clock that
+  opens the run recomputes that allotment from the time still left, so a
+  floor still ahead is not spent by an earlier run and unused time flows
+  forward. A session row
   that ran out of its share before this many turns is not a graded try.
   Prevents no reading; `0` restores the plain weighted split. Read once at
   cluster entry (`session-min-turns=N` on the cluster-entry line). Keep

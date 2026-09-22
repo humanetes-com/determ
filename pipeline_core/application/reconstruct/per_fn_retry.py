@@ -66,7 +66,7 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.prompts.context import PerFnFixSections
 from pipeline_core.prompts.pull_menu import pull_menu_section
-from pipeline_core.prompts.sections import format_type_for_prompt
+from pipeline_core.prompts.sections import render_types_section
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,10 +784,10 @@ def generate_one_body(
             find_tests=lambda name: "\n\n".join(
                 f"// {p}\n{t}" for p, t in deps.find_tests_for_fn(
                     ctx.tests_dir_files, name)),
-            type_def=lambda name: ("\n\n".join(
-                format_type_for_prompt(r, viewer_file=rel_f) for r in
+            type_def=lambda name: (render_types_section(
                 types_referenced_in_text(
-                    name, ctx.type_recs, visible_from=rel_f)[:3])
+                    name, ctx.type_recs, visible_from=rel_f)[:3],
+                viewer_file=rel_f)
                 # Crate-local records win; well-known unstable std APIs
                 # (std::error::Request et al.) answer as a last fallback so
                 # the pull never starves on a std type the manifest can't have.

@@ -48,6 +48,29 @@ def test_types_section_cap_fires_guard() -> None:
     assert guard_log and guard_log[0][0] == "phase-c/types_truncated"
 
 
+def test_a_cap_inside_a_complete_impl_list_omits_the_list() -> None:
+    """A first record longer than the cap used to be sliced with the
+    COMPLETE sentence left above a partial list. The cut stops before that
+    sentence and says the list was omitted."""
+    from pipeline_core.prompts.sections import TRAIT_IMPLS_HEADER, join_type_blocks
+    block = (
+        "struct Box\n  fields (access with .name):\n    x: u8\n"
+        + TRAIT_IMPLS_HEADER
+        + "\n    impl Show for Box\n    impl Send for Box")
+    # Inside the header, with room for the omission note and the type line.
+    cap = block.index(TRAIT_IMPLS_HEADER) + 160
+    out = join_type_blocks([block], cap)
+    assert TRAIT_IMPLS_HEADER not in out
+    assert "impl Show" not in out
+    assert "not a statement that any impl is absent" in out
+    assert len(out) <= cap
+    assert "struct Box" in out
+    # A cap that fits the first block and not the second still drops the
+    # second whole, list included.
+    whole = join_type_blocks([block, "struct Other"], len(block) + 5)
+    assert whole == block
+
+
 def test_bound_methods_empty_cases() -> None:
     a = _assembler()
     assert a.bound_methods_section_for("", _RECS) == ""

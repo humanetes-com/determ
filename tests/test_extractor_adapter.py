@@ -112,6 +112,30 @@ def test_enumerate_non_list_json_returns_none(tmp_path: Path, monkeypatch: pytes
     assert CliExtractor(_bin(tmp_path)).enumerate_fns(tmp_path) is None
 
 
+def test_enumerate_types_attaches_the_one_blanket_list_to_every_record(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The extractor emits the crate's type-parameter impls once beside the
+    records; each decoded record carries that one tuple, so a subset a
+    prompt renders still has it."""
+    import json
+    blanket = {"header": "impl<T> Show for T", "trait_path": "Show",
+               "self_ty": "T", "generics": "<T>", "where_clause": "",
+               "file": "src/a.rs", "mod_path": "", "cfg_predicates": []}
+    payload = {"types": [{"name": "A", "kind": "struct"},
+                         {"name": "B", "kind": "enum"}],
+               "blanket_impls": [blanket]}
+    monkeypatch.setattr(ext.subprocess, "run", _FakeRun(stdout=json.dumps(payload)))
+    out = CliExtractor(_bin(tmp_path)).enumerate_types(tmp_path)
+    assert out is not None and [r.name for r in out] == ["A", "B"]
+    assert out[0].blanket_impls is not None
+    assert [t.header for t in out[0].blanket_impls] == ["impl<T> Show for T"]
+    assert out[1].blanket_impls is out[0].blanket_impls
+    # An object without a record list is the failure contract, not an
+    # empty crate.
+    monkeypatch.setattr(ext.subprocess, "run", _FakeRun(stdout='{"blanket_impls": []}'))
+    assert CliExtractor(_bin(tmp_path)).enumerate_types(tmp_path) is None
+
+
 def test_enumerate_subprocess_raises_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ext.subprocess, "run", _FakeRun(raises=OSError("boom")))
     assert CliExtractor(_bin(tmp_path)).enumerate_fns(tmp_path) is None

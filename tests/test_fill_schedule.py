@@ -22,6 +22,7 @@ from pipeline_core.domain.fill_schedule import (
     RouteRun,
     RunClock,
     RunOutcome,
+    ScheduledRun,
     bodies_sha_of,
     consecutive_unpaid,
     hollow_by_test,
@@ -607,12 +608,19 @@ def test_an_unbounded_clock_always_claims_and_shares_flow_forward() -> None:
     assert clock.may_claim()
     now.t = 0
     budget = FillBudget(60, now=now)
-    assert budget.share_for(2, 4) == 30.0
+
+    def _ahead(weight: int, label: str) -> ScheduledRun:
+        return ScheduledRun(
+            run=RouteRun(kind=RouteKind.PER_FN, label=label,
+                         targets=frozenset({_FMT})),
+            rank=0, weight=weight, reason="never_served", level=1)
+
+    assert budget.opening_shares([_ahead(2, "a"), _ahead(2, "b")]) == [30.0, 30.0]
     now.t = 30 * 60  # the first run finished early: 30 min unspent of 60
-    assert budget.share_for(2, 2) == 30.0  # flows to the last run
-    assert budget.share_for(0, 2) == 0.0
+    assert budget.opening_shares([_ahead(2, "b")]) == [30.0]  # flows forward
+    assert budget.opening_shares([_ahead(0, "z")]) == [0.0]
     unbounded = FillBudget(0, now=now)
-    assert unbounded.share_for(2, 2) is None
+    assert unbounded.opening_shares([_ahead(2, "b")]) == [None]
 
 
 def test_two_sessions_that_share_a_count_label_both_appear_in_the_schedule() -> None:

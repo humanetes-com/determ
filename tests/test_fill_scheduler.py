@@ -27,6 +27,7 @@ from pipeline_core.application.reconstruct.fill_scheduler import (
 from pipeline_core.domain.fill_context import current_route
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
+    RouteLedgerRow,
     RouteRun,
     RunClock,
     RunOutcome,
@@ -537,3 +538,58 @@ def test_a_keep_that_left_the_targets_as_they_were_is_recorded_as_keeping_nothin
     assert row.kept == (("src/x.rs", "fmt"),)
     assert seen == [frozenset({_FMT})]
     assert not any("already on disk" in ln for ln in log)
+
+
+def test_a_session_floor_still_binds_when_earlier_runs_burn_their_share(
+        tmp_path: Path) -> None:
+    """The plan reserves three turns before the split. The clock must open
+    on that reservation: ten never-served runs ahead of a served session,
+    each burning the share it was granted, still leave the session its
+    floor. A weight split of only the time left gives the first run
+    200 * 2/21 and the session whatever remains, under three turns."""
+    t = [0.0]
+
+    def now() -> float:
+        return t[0]
+
+    granted: list[tuple[str, float | None]] = []
+
+    class _Burn(_Route):
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            granted.append((run.label, clock.share_minutes))
+            if clock.share_minutes:
+                t[0] += clock.share_minutes * 60.0
+            return RouteRunReport(model_calls=1)
+
+    hub = FnLocator("src/s.rs", "hub")
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    deps = replace(_deps(tmp_path, log, events, budget=200, now=now),
+                   session_min_turns=3)
+    assert deps.ledger is not None
+    deps.ledger.append("p", [RouteLedgerRow(
+        kind=RouteKind.SESSION, label="earlier", bodies_sha="b",
+        targets=(("src/s.rs", "hub"),), oracle_fp="o",
+        outcome=RunOutcome.FLAT, cluster="c", minutes=36.0, model_calls=3,
+        target_tests=("t_old",))])
+    session = RouteRun(
+        kind=RouteKind.SESSION, label="session", targets=frozenset({hub}),
+        target_tests=frozenset({"t_new"}))
+    per_fn = [
+        RouteRun(kind=RouteKind.PER_FN, label=f"per-fn {i}",
+                 targets=frozenset({FnLocator("src/p.rs", f"n{i}")}))
+        for i in range(10)]
+    out = execute_fill(
+        [_Burn(RouteKind.PER_FN, per_fn, calls=[]),
+         _Burn(RouteKind.SESSION, [session], calls=[])],
+        hollow={}, bodies_sha=lambda _t: "b", deps=deps)
+    plan = {s.run.label: s.share_minutes for s in out.schedule.ordered}
+    assert granted[-1][0] == "session"
+    assert plan["session"] is not None and plan["session"] >= 36.0 - 1e-6
+    assert granted[-1][1] is not None and granted[-1][1] >= 36.0 - 1e-6
+    # The unreserved split of the whole budget. The first clock is the
+    # floor-reserved share, not this.
+    assert granted[0][1] is not None and granted[0][1] < 200.0 * 2 / 21 - 1
+    for label, clock_share in granted:
+        assert clock_share is not None and plan[label] is not None
+        assert abs(clock_share - plan[label]) < 1e-4

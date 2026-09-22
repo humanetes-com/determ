@@ -605,18 +605,20 @@ pub(crate) fn collect_types_and_methods(
     }
 }
 
-/// Every trait impl header in `items` (nested inline `mod`s included), keyed
-/// by the bare name of its self type. A self type written as a qualified path
-/// that does not start in this crate (`std::io::Error`, `fmt::Error`) is a
-/// foreign type and is skipped: records are keyed by bare name, and attaching
-/// `impl From<X> for io::Error` to the crate's own `Error` would state an impl
-/// the crate type does not have — the one lie a list read as complete cannot
-/// carry.
+/// Every trait impl header in `items` (nested inline `mod`s included). The
+/// key is the bare name of a named self type, or `None` when that self type
+/// is one of the impl's own type parameters (`impl<T: Bound> Trait for T`):
+/// a blanket is not an impl of any one record. A self type written as a
+/// qualified path that does not start in this crate (`std::io::Error`,
+/// `fmt::Error`) is a foreign type and is skipped: records are keyed by bare
+/// name, and attaching `impl From<X> for io::Error` to the crate's own
+/// `Error` would state an impl the crate type does not have — the one lie a
+/// list read as complete cannot carry.
 pub(crate) fn collect_trait_impls(
     items: &[Item],
     file_rel: &str,
     mod_path: &str,
-    out: &mut Vec<(String, TraitImplRecord)>,
+    out: &mut Vec<(Option<String>, TraitImplRecord)>,
 ) {
     // Traits declared in THIS scope. Inside a nested `mod`, an impl whose
     // trait is a bare name declared beside it implements that local trait,
@@ -675,8 +677,13 @@ pub(crate) fn collect_trait_impls(
                 if ty_name.is_empty() {
                     continue;
                 }
+                // `impl<T: Bound> Trait for T` applies to whatever satisfies
+                // the bound. Keying it by `T` attaches it to no record, and
+                // dropping it makes a per-type list that says "not listed
+                // means not implemented" a lie. It is a blanket, printed once.
+                let blanket = ii.generics.type_params().any(|p| p.ident == ty_name);
                 out.push((
-                    ty_name,
+                    if blanket { None } else { Some(ty_name) },
                     TraitImplRecord {
                         header: render_trait_impl_header(ii),
                         trait_path: format!(
@@ -779,10 +786,10 @@ pub(crate) fn self_ty_name(ty: &syn::Type) -> String {
 }
 
 /// Walk a directory tree and emit one TypeRecord per (file × struct/enum/type/trait).
-pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
+pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<TypeEnumeration> {
     let mut types: std::collections::BTreeMap<String, TypeRecord> =
         std::collections::BTreeMap::new();
-    let mut trait_impls: Vec<(String, TraitImplRecord)> = Vec::new();
+    let mut trait_impls: Vec<(Option<String>, TraitImplRecord)> = Vec::new();
     for entry in walkdir::WalkDir::new(input_dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -813,31 +820,45 @@ pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
         collect_types_and_methods(&ast.items, &rel_str, "", &mut types);
         collect_trait_impls(&ast.items, &rel_str, "", &mut trait_impls);
     }
-    attach_trait_impls(&mut types, trait_impls);
-    Ok(types.into_values().collect())
+    let blanket_impls = attach_trait_impls(&mut types, trait_impls);
+    Ok(TypeEnumeration {
+        types: types.into_values().collect(),
+        blanket_impls,
+    })
 }
 
-/// Attach each collected trait impl to the crate type of that name, after the
-/// whole tree is walked so file order cannot decide it. Only struct / enum /
-/// alias records take impls; a name with no record is a foreign type or a
-/// type parameter (`impl<T: Display> Ext for T`) and is dropped. Sorted by
-/// (file, header) so the list, and the prompt it renders into, is stable.
+/// Attach each collected trait impl after the whole tree is walked, so file
+/// order cannot decide it. A named self type goes on that struct / enum /
+/// alias record. A blanket (self type is one of the impl's type parameters)
+/// is an impl of no one record: it is returned, once, for the enumeration to
+/// carry beside the records. A name with no record is a foreign type and is
+/// dropped. Both lists are sorted by (file, header) so the prompt is stable.
 pub(crate) fn attach_trait_impls(
     types: &mut std::collections::BTreeMap<String, TypeRecord>,
-    impls: Vec<(String, TraitImplRecord)>,
-) {
+    impls: Vec<(Option<String>, TraitImplRecord)>,
+) -> Vec<TraitImplRecord> {
+    let mut blankets = Vec::new();
     for (name, rec) in impls {
-        if let Some(t) = types.get_mut(&name)
-            && t.kind != "trait"
-        {
-            t.trait_impls.push(rec);
+        match name {
+            None => blankets.push(rec),
+            Some(name) => {
+                if let Some(t) = types.get_mut(&name)
+                    && t.kind != "trait"
+                {
+                    t.trait_impls.push(rec);
+                }
+            }
         }
     }
+    blankets.sort_by(|a, b| {
+        (a.file.as_str(), a.header.as_str()).cmp(&(b.file.as_str(), b.header.as_str()))
+    });
     for t in types.values_mut() {
         t.trait_impls.sort_by(|a, b| {
             (a.file.as_str(), a.header.as_str()).cmp(&(b.file.as_str(), b.header.as_str()))
         });
     }
+    blankets
 }
 
 /// Parse a single file and emit one FnRecord per fn item.

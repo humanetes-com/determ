@@ -302,7 +302,7 @@ mod tests {
         collect_types_and_methods(&b.items, "b.rs", "", &mut types);
         collect_trait_impls(&a.items, "a.rs", "", &mut impls);
         collect_trait_impls(&b.items, "b.rs", "", &mut impls);
-        attach_trait_impls(&mut types, impls);
+        let blanket_impls = attach_trait_impls(&mut types, impls);
 
         let wrap: Vec<(&str, &str)> = types["Wrap"]
             .trait_impls
@@ -341,14 +341,17 @@ mod tests {
             extra.cfg_predicates,
             vec!["feature = \"extra\"".to_string()]
         );
-        // No record for a type parameter or a foreign type.
+        // No record for a type parameter or a foreign type. The blanket is
+        // not an impl of Wrap; it is the crate's type-parameter list.
         assert!(!types.contains_key("T"));
         assert!(
             types["Wrap"]
                 .trait_impls
                 .iter()
-                .all(|t| !t.header.contains("From"))
+                .all(|t| !t.header.contains("From") && !t.header.contains("Blanket"))
         );
+        let blankets: Vec<&str> = blanket_impls.iter().map(|t| t.header.as_str()).collect();
+        assert_eq!(blankets, vec!["impl<T: Marker> Blanket for T"]);
     }
 
     #[test]

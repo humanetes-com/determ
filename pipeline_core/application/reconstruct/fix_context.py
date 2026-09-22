@@ -30,7 +30,7 @@ from pipeline_core.domain.type_refs import (
     hidden_symbols_from_types,
     types_referenced_in_text,
 )
-from pipeline_core.prompts.sections import format_type_for_prompt, join_type_blocks
+from pipeline_core.prompts.sections import render_types_section
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,16 +132,18 @@ class FixContextAssembler:
              if r.name not in head_names),
             key=_not_shown_elsewhere)
         recs = (head + rest)[:self.budgets.types_count]
-        blocks = [format_type_for_prompt(r, observables, viewer_file=file_rel)
-                  for r in recs]
-        full = "\n\n".join(blocks)
+        # The blanket list is printed once, ahead of the records. A record
+        # that does not fit is cut before a list that says it is complete:
+        # slicing after that header would make the sentence a lie.
+        full = render_types_section(
+            recs, observables, viewer_file=file_rel)
         if len(full) > self.budgets.types_section:  # surface starvation
             self.guard("phase-c/types_truncated",
                        f"{(container or sig_text)[:50]}: type context {len(full):,} > "
                        f"cap {self.budgets.types_section:,} ({len(recs)} types)")
-        # Whole records only: a record's trait-impl list is printed as
-        # complete, and a mid-record cut would make it lie.
-        return join_type_blocks(blocks, self.budgets.types_section)
+        return render_types_section(
+            recs, observables, viewer_file=file_rel,
+            cap=self.budgets.types_section)
 
     def bound_methods_section_for(
         self, impl_where: str, type_records: list[TypeRecord],

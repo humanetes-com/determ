@@ -158,6 +158,7 @@ def test_recorded_450977_fill_1_ranks_the_reshuffled_runs_as_rebuys() -> None:
     assert deferred["file src/error.rs"] == "rebuy_flat"
     per_fn = next(lab for lab in deferred if lab.startswith("per-fn"))
     assert deferred[per_fn] == "rebuy_flat"
+    assert deferred["session[5 test(s), 31 unit(s)] #0"] == "rebuy_flat"
     assert not [s for s in sched.ordered if s.reason == "never_served"]
     # Negative control: under the whole-batch key both were never served,
     # which is what the live schedule line printed.

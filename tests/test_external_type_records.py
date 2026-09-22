@@ -479,7 +479,7 @@ USE_REC = {"file": "src/backtrace.rs", "alias": "Backtrace", "path": ["std", "ba
 
 
 class _StubExtractor(CliExtractor):
-    """The real adapter with its one subprocess seam (`_enumerate`) canned:
+    """The real adapter with its one subprocess seam (`_run_json`) canned:
     the JSON→record parsing and the reader wiring above it run for real."""
 
     def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
@@ -487,8 +487,8 @@ class _StubExtractor(CliExtractor):
         self.rows = rows
         self.calls: list[str] = []
 
-    def _enumerate(self, subcmd: str, src_dir: Path, cfg_true: tuple[str, ...],
-                   cfg_false: tuple[str, ...], *, timeout: int = 60) -> list[Any] | None:
+    def _run_json(self, subcmd: str, src_dir: Path, cfg_true: tuple[str, ...],
+                  cfg_false: tuple[str, ...], *, timeout: int = 60) -> Any:
         self.calls.append(subcmd)
         return self.rows.get(subcmd)
 

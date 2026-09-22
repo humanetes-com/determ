@@ -86,6 +86,19 @@ pub struct TypeRecord {
     pub trait_impls: Vec<TraitImplRecord>,
 }
 
+/// What `--enumerate-types` emits: the type records, and the crate's impls
+/// whose self type is one of the impl's own type parameters (`impl<T: Bound>
+/// Trait for T`). Those are not an impl of any one record, so they are one
+/// list beside the records rather than a copy on each: on the anyhow stable
+/// tree (2026-09-22) three such impls copied onto 30 records were 22 KB of a
+/// 72 KB payload.
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct TypeEnumeration {
+    pub types: Vec<TypeRecord>,
+    // Sorted by (file, header). Empty when this crate writes none.
+    pub blanket_impls: Vec<TraitImplRecord>,
+}
+
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct TraitImplRecord {
     // The header on one line, as the skeleton prints it, without the body:

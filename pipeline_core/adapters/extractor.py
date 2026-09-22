@@ -27,6 +27,7 @@ from ..domain.models import (
     SkeletoniseResult,
     TypeRecord,
     UseRecord,
+    type_records_from_enumeration,
 )
 
 
@@ -55,6 +56,19 @@ class CliExtractor:
         *,
         timeout: int = 60,
     ) -> list[Any] | None:
+        data = self._run_json(subcmd, src_dir, cfg_true, cfg_false, timeout=timeout)
+        return data if isinstance(data, list) else None
+
+    def _run_json(
+        self,
+        subcmd: str,
+        src_dir: Path,
+        cfg_true: tuple[str, ...],
+        cfg_false: tuple[str, ...],
+        *,
+        timeout: int = 60,
+    ) -> Any:
+        """The subprocess seam: parsed stdout, or None on any failure."""
         if not self._bin.exists():
             return None
         cmd = [str(self._bin), subcmd, "--input", str(src_dir), *_cfg_args(cfg_true, cfg_false)]
@@ -65,18 +79,19 @@ class CliExtractor:
         if r.returncode != 0:
             return None
         try:
-            data = json.loads(r.stdout)
+            return json.loads(r.stdout)
         except Exception:
             return None
-        return data if isinstance(data, list) else None
 
     def enumerate_fns(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[FnRecord] | None:
         rows = self._enumerate("--enumerate-fns", src_dir, cfg_true, cfg_false)
         return None if rows is None else [FnRecord.from_dict(r) for r in rows]
 
     def enumerate_types(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[TypeRecord] | None:
-        rows = self._enumerate("--enumerate-types", src_dir, cfg_true, cfg_false)
-        return None if rows is None else [TypeRecord.from_dict(r) for r in rows]
+        # One object, not a list: the crate's type-parameter impls ride
+        # beside the records rather than as a copy on each.
+        return type_records_from_enumeration(
+            self._run_json("--enumerate-types", src_dir, cfg_true, cfg_false))
 
     def enumerate_dispatch_families(self, src_dir: Path, *, cfg_true: tuple[str, ...] = (), cfg_false: tuple[str, ...] = ()) -> list[DispatchFamily] | None:
         rows = self._enumerate("--enumerate-dispatch-families", src_dir, cfg_true, cfg_false)

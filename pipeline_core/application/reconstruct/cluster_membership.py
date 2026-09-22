@@ -144,6 +144,14 @@ def cluster_filter_type_members(
     if cluster is None:
         return records
     cfg_set = _cfg.cluster_cfg_set(cluster)
+
+    def _cfg_kept(impls: tuple[Any, ...] | None) -> tuple[Any, ...] | None:
+        if impls is None:
+            return None
+        return tuple(
+            t for t in impls
+            if not any(cfg_set.evaluate(p) is False for p in t.cfg_predicates))
+
     out: list[TypeRecord] = []
     for r in records:
         # Each record answers for its OWN leading cfg, never for its name:
@@ -165,14 +173,16 @@ def cluster_filter_type_members(
         )
         # A trait impl the cluster does not compile is not an impl here: the
         # list renders as complete, so an impl the cfg world drops must leave
-        # it, exactly as a dropped field leaves the `construct:` hint.
-        kept_impls = (None if r.trait_impls is None else tuple(
-            t for t in r.trait_impls
-            if not any(cfg_set.evaluate(p) is False for p in t.cfg_predicates)))
+        # it, exactly as a dropped field leaves the `construct:` hint. The
+        # crate's type-parameter impls are the same kind of list.
+        kept_impls = _cfg_kept(r.trait_impls)
+        kept_blankets = _cfg_kept(r.blanket_impls)
         if (len(kept) != len(r.methods) or len(kept_fields) != len(r.fields)
-                or kept_impls != r.trait_impls):
-            out.append(dataclasses.replace(r, methods=kept, fields=kept_fields,
-                                           trait_impls=kept_impls))
+                or kept_impls != r.trait_impls
+                or kept_blankets != r.blanket_impls):
+            out.append(dataclasses.replace(
+                r, methods=kept, fields=kept_fields,
+                trait_impls=kept_impls, blanket_impls=kept_blankets))
         else:
             out.append(r)
     return out

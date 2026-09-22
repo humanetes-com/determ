@@ -162,16 +162,18 @@ fn main() -> Result<()> {
         bail!("input path is not a directory: {}", input.display());
     }
 
-    // Enumeration modes — each emits a JSON array to stdout and returns. The
-    // pipeline passes exactly one; checked in priority order.
+    // Enumeration modes — each emits a JSON array to stdout and returns,
+    // except `--enumerate-types`, which emits one object: the records plus
+    // the crate's type-parameter impls, a list that belongs to no record.
+    // The pipeline passes exactly one; checked in priority order.
     if cli.enumerate_fns {
         let records = skeleton_extractor::enumerate_fns_in_tree(&input)?;
         println!("{}", serde_json::to_string(&records)?);
         return Ok(());
     }
     if cli.enumerate_types {
-        let records = skeleton_extractor::enumerate_types_in_tree(&input)?;
-        println!("{}", serde_json::to_string(&records)?);
+        let enumeration = skeleton_extractor::enumerate_types_in_tree(&input)?;
+        println!("{}", serde_json::to_string(&enumeration)?);
         return Ok(());
     }
     if cli.enumerate_mods {

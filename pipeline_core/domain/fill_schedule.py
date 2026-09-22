@@ -1159,8 +1159,12 @@ def schedule(
     opened session's share is at least that many turns at its measured
     turn cost (:func:`session_turn_minutes`), taken from the budget before
     the weighted split; floors that together exceed the budget are clipped
-    to budget / sessions and the schedule line says so. A session row that
-    ran out of its share before that many turns is not a graded try
+    to budget / sessions (:func:`_floor_clip`) and the schedule line says
+    so. The clock that opens the run recomputes that same allotment against
+    the time still left (:meth:`FillBudget.opening_shares`), so a floor
+    that has not opened yet is not spent by an earlier run, and time an
+    earlier run did not use flows forward. A session row that ran out of
+    its share before that many turns is not a graded try
     (:meth:`UnitService.starved`). ``0`` restores the plain weighted split
     and the pre-floor grading.
     """
@@ -1366,8 +1370,8 @@ def schedule(
                 if turn is not None:
                     priced[sr.run.key] = turn
         total_floor = sum(session_min_turns * t for t in priced.values())
-        clip = (budget_minutes / len(priced)
-                if priced and total_floor > budget_minutes else None)
+        clip = _floor_clip(
+            [session_min_turns * t for t in priced.values()], budget_minutes)
         scheduled = [
             replace(sr, floor_minutes=(
                 min(session_min_turns * priced[sr.run.key], clip)
@@ -1399,6 +1403,34 @@ def schedule(
     return FillSchedule(tuple(ordered), tuple(deferred), float(budget_minutes))
 
 
+def _floor_clip(floors: Sequence[float], budget: float) -> float | None:
+    """The per-floor cap when the floors do not fit in `budget`. None when
+    they do. Every floored run takes the same cap, which is what the
+    schedule line reports (`clipped to Nm`)."""
+    if not floors or sum(floors) <= budget:
+        return None
+    return budget / len(floors)
+
+
+def allot_opening(runs: Sequence[ScheduledRun], budget_minutes: float
+                  ) -> list[float]:
+    """Each run's share of `budget_minutes`, floors reserved before the
+    weighted split. The plan (:func:`schedule`) and the clock
+    (:meth:`FillBudget.opening_shares`) both allot through here, so a
+    later floor cannot be forgotten by a caller that only has the current
+    run's weight."""
+    clip = _floor_clip(
+        [s.floor_minutes for s in runs if s.floor_minutes], budget_minutes)
+    adjusted = [
+        replace(s, floor_minutes=min(s.floor_minutes, clip))
+        if clip is not None and s.floor_minutes and s.floor_minutes > clip
+        else s
+        for s in runs
+    ]
+    return [s.share_minutes or 0.0
+            for s in _allot(list(adjusted), float(budget_minutes))]
+
+
 class FillBudget:
     """The fill's wall clock. `remaining()` is None when unbounded."""
 
@@ -1420,22 +1452,16 @@ class FillBudget:
             return None
         return max(0.0, self._budget - self.elapsed())
 
-    def share_for(self, weight: int, remaining_weight: int, *,
-                  floor_minutes: float | None = None) -> float | None:
-        """The share a run may claim when it opens: the UNSPENT budget over
-        the weights of the runs not yet opened, so an early finish flows to
-        the next run and an overrun is paid by the ones after it. A run
-        with a floor (a session's minimum turns) gets at least the floor,
-        bounded by what the fill has left."""
+    def opening_shares(self, ahead: Sequence[ScheduledRun]
+                       ) -> list[float] | list[None]:
+        """Shares for `ahead` (the wave opening now, then every run not yet
+        opened), from the time still left. Floors of runs not yet opened are
+        reserved; time an earlier run did not use is in `remaining` and
+        flows forward. None when the fill is unbounded."""
         rem = self.remaining()
         if rem is None:
-            return None
-        if remaining_weight <= 0 or weight <= 0:
-            return 0.0
-        share = rem * weight / remaining_weight
-        if floor_minutes:
-            share = max(share, min(floor_minutes, rem))
-        return share
+            return [None] * len(ahead)
+        return allot_opening(ahead, rem)
 
 
 class RunClock:

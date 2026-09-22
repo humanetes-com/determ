@@ -13,7 +13,7 @@ Each record type exists on both sides, field-for-field:
 | Rust (`src/model.rs`) | Python (`pipeline_core/domain/models.py`) | emitted by |
 |---|---|---|
 | `FnRecord` | `FnRecord` | `--enumerate-fns` |
-| `TypeRecord` / `FieldRecord` / `MethodRecord` | same | `--enumerate-types` |
+| `TypeEnumeration` (`types`: `TypeRecord` / `FieldRecord` / `MethodRecord` / `TraitImplRecord`, plus `blanket_impls`) | `type_records_from_enumeration` → `list[TypeRecord]`, the one `blanket_impls` tuple attached to every record | `--enumerate-types` (one object, not a list) |
 | `ModRecord` | `ModRecord` | `--enumerate-mods` |
 | `ConstRecord` | `ConstRecord` | `--enumerate-consts` |
 | `DispatchFamily` | `DispatchFamily` | `--enumerate-dispatch-families` |
