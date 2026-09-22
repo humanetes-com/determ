@@ -219,6 +219,25 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      no builder of the offered file also counts.  Reaction: the session
      logs `installable fn(s) admitted to the editable set`.
 
+  P32 render-only owner — the owner map cuts each failing test's profile
+     at its premise boundary (the panic handler's entry, or the harness's
+     result check for a test returning `Err`); what ran only after it is
+     `rendered` on `phase_c.coverage.owner_map`.  A fill whose schedule
+     aims a run at a unit that is rendered for some failing test and owned
+     by none is buying the failure REPORT.  Run 450977-5f48b68a
+     (2026-09-21): 16 of the 25 escalated additions for the downcast tests
+     ran only after the panic began, re-bought 10–31 times each.  Needs
+     post-fix events (the `rendered` field).  Reaction: `premise cut for`.
+
+  P33 cut-rate run — the run-level LLM cut stop's fold
+     (`reasoning_cap.CutRate`, 4% of the last 100 calls from call 25,
+     notes-extractor calls excluded) replayed over the run's recorded
+     `llm.stream_meta` rows would have fired.  A cut call returned no
+     decided answer: reasoning ran out or the reply was empty.  Recorded
+     2026-08-10 → 2026-09-21: 1,810 of 12,002 calls, and each time the
+     class was found by hand days late because every capped call was graded
+     UNMEASURED and quietly re-bought.  Reaction: `HEALTH ‼ LLM_CUT_STOP`.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -539,6 +558,14 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P31": [
         # The session's write set carried the unwired table fns.
         ("installable fn(s) admitted to the editable set", "complement-admitted"),
+    ],
+    "P32": [
+        # The owner map cut each failing test at its premise boundary.
+        ("premise cut for ", "premise-cut"),
+    ],
+    "P33": [
+        # The run-level cut stop fired and ended the run.
+        ("HEALTH ‼ LLM_CUT_STOP", "cut-stop"),
     ],
     "P27": [
         # The end gate classified each orphan against augmentation's
@@ -2307,6 +2334,135 @@ def detect_p31(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [r for r, _ in opened[:3]]}]
 
 
+_P32_EVENTS: dict[str, dict[str, list[dict]]] | None = None
+
+
+def _p32_events_by_run() -> dict[str, dict[str, list[dict]]]:
+    """`phase_c.coverage.owner_map` and `phase_c.fill.schedule` by run."""
+    global _P32_EVENTS
+    if _P32_EVENTS is not None:
+        return _P32_EVENTS
+    out: dict[str, dict[str, list[dict]]] = defaultdict(
+        lambda: {"owner_map": [], "schedule": []})
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "phase_c.coverage.owner_map" in line:
+                    kind = "owner_map"
+                elif '"phase_c.fill.schedule"' in line:
+                    kind = "schedule"
+                else:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                out[str(ev.get("run_id", ""))][kind].append(
+                    dict(ev.get("data") or {}))
+    except OSError:
+        pass
+    _P32_EVENTS = dict(out)
+    return _P32_EVENTS
+
+
+def detect_p32(run: Run, iters: list[dict]) -> list[dict]:
+    """A fill whose ordered runs target a unit some failing test ran ONLY
+    while its failure was reported (in `rendered`, owned by no failing
+    test). Reads the owner-map event's `rendered` field, so runs before the
+    premise cut shipped cannot hit. One hit per run."""
+    ev = _p32_events_by_run().get(run.run_id)
+    if not ev:
+        return []
+    hits: list[str] = []
+    for om in ev["owner_map"]:
+        rendered = {(s.get("file"), s.get("fn"))
+                    for sites in (om.get("rendered") or {}).values()
+                    for s in sites}
+        owned = {(s.get("file"), s.get("fn"))
+                 for sites in (om.get("owners") or {}).values()
+                 for s in sites}
+        render_only = rendered - owned
+        if not render_only:
+            continue
+        for sc in ev["schedule"]:
+            if sc.get("iter") != om.get("iter"):
+                continue
+            for r in sc.get("runs") or ():
+                aimed = {tuple(t) for t in r.get("targets") or ()}
+                both = aimed & render_only
+                if both:
+                    hits.append(f"iter {om.get('iter')} {r.get('label')}: "
+                                + ", ".join(f"{f}::{fn}" for f, fn in sorted(both)[:4]))
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} run(s) aimed at render-only units: "
+                         + "; ".join(hits[:4]),
+             "refs": [run.start_ref]}]
+
+
+_STREAM_ROWS: dict[str, list[dict]] | None = None
+
+
+def _stream_rows_by_run() -> dict[str, list[dict]]:
+    """`llm.stream_meta` rows by run, notes-extractor calls excluded (joined
+    to `llm.request.caller` on the prompt sha) — the population the run-level
+    cut stop folds."""
+    global _STREAM_ROWS
+    if _STREAM_ROWS is not None:
+        return _STREAM_ROWS
+    notes: set[str] = set()
+    out: dict[str, list[dict]] = defaultdict(list)
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"llm.request"' in line and "extract_self_note" in line:
+                    try:
+                        d = json.loads(line).get("data") or {}
+                    except ValueError:
+                        continue
+                    sha = d.get("prompt_sha") or (d.get("prompt") or {}).get("sha256")
+                    if sha:
+                        notes.add(str(sha))
+                    continue
+                if '"llm.stream_meta"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                d = dict(ev.get("data") or {})
+                if str(d.get("prompt_sha", "")) in notes:
+                    continue
+                out[str(ev.get("run_id", ""))].append(d)
+    except OSError:
+        pass
+    _STREAM_ROWS = dict(out)
+    return _STREAM_ROWS
+
+
+def detect_p33(run: Run, iters: list[dict]) -> list[dict]:
+    """A run whose model calls the cut stop (4% of the last 100, from call 25)
+    would have stopped: the fold `reasoning_cap.CutRate` replayed over the
+    run's recorded rows. One hit per run, at the first firing call."""
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from pipeline_core.domain.reasoning_cap import (  # noqa: PLC0415
+        CutRate,
+        CutStopKnobs,
+        mark_of,
+    )
+    k = CutStopKnobs()
+    fold = CutRate(k.window, k.share_pct, k.min_calls)
+    for i, row in enumerate(_stream_rows_by_run().get(run.run_id, ()), 1):
+        fold = fold.add(mark_of(row, ""))
+        if fold.fired:
+            return [{"evidence": f"cut stop would fire at call {i}: "
+                                 f"{fold.describe()}",
+                     "refs": [run.start_ref]}]
+    return []
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2322,7 +2478,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
              "P25": detect_p25, "P26": detect_p26, "P27": detect_p27,
              "P28": detect_p28, "P29": detect_p29, "P30": detect_p30,
-             "P31": detect_p31}
+             "P31": detect_p31, "P32": detect_p32, "P33": detect_p33}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2349,7 +2505,9 @@ CLASS_NAMES = {
     "P28": "unpeelable reply (file-first compile failure, peel refused none_implicated, whole reply reverted; pre-fix a bare-block free fn was keyed by the target impl)",
     "P29": "parked stub (the blocker histogram ranked a stub first and the fill opened no stub run; pre-fix isolation silenced the stub-abort reading and a stale stamp sank the stub)",
     "P30": "spent pair first (a pair past its grace opened ahead of a never-served run; pre-fix the grace lapsed the deferral but kept the order)",
-    "P31": "split complement (a session opened with no unwired table fn in its write set while file-first offered them; pre-fix the session's write set was coverage-only)"}
+    "P31": "split complement (a session opened with no unwired table fn in its write set while file-first offered them; pre-fix the session's write set was coverage-only)",
+    "P32": "render-only owner (a fill aimed a run at a unit a failing test ran only while its failure was reported; pre-fix the owner map was the full profile, so the panic message's renderer owned the test)",
+    "P33": "cut-rate run (4% or more of the last 100 model calls returned no decided answer from call 25; pre-fix nothing stopped it and each capped call was quietly re-bought)"}
 
 
 # -------------------------------------------------------------------- report

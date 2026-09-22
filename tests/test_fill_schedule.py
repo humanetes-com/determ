@@ -411,23 +411,37 @@ def test_a_flat_rebuy_sinks_below_a_never_served_run_and_is_deferred_under_a_bud
     assert control.ordered[0].share_minutes == 30.0
 
 
-def test_a_paying_run_keeps_the_never_served_rank() -> None:
+def test_a_unit_paid_on_another_route_is_served_not_never_served() -> None:
+    """Service is per unit: the per-fn's only target was opened (and paid)
+    by the file route under this oracle, so the per-fn is `served` (weight
+    1), and the paying file run goes first."""
     file_run = _file("file src/x.rs", {_STUB}, {_STUB})
     per_fn = _per_fn({_STUB})
     rows = [_row(file_run, RunOutcome.CASHED, 3)]
     sched = schedule([per_fn, file_run], rows, oracle_fp="o", hollow=_hollow())
-    assert sched.ordered[0].run.label == "per-fn"  # never-served first
-    assert sched.ordered[1].reason == "paying" and sched.ordered[1].weight == 2
+    assert sched.ordered[0].reason == "paying" and sched.ordered[0].weight == 2
+    assert sched.ordered[1].run.label == "per-fn"
+    assert sched.ordered[1].reason == "served" and sched.ordered[1].weight == 1
 
 
-def test_a_moved_body_is_a_new_try_not_a_rebuy() -> None:
-    """The identity carries the bodies: the same targets on different bodies
-    is `served`, ranked between never-served and a re-buy."""
+def test_a_body_this_route_moved_is_still_a_rebuy_another_routes_move_is_not() -> None:
+    """The identity carries the bodies, and the route's own flat keep moves
+    them — so under a whole-batch key every re-buy came back as a new try
+    (run `450977-5f48b68a`). Per unit: the latest row on this route was
+    flat and nothing paid since, so it is a re-buy — a flat keep elsewhere
+    moves the body, not the evidence. Once a try on ANOTHER route PAID
+    after it, the verdicts it saw moved: `served`."""
     before = _file("file src/x.rs", {_STUB}, {_STUB}, sha="old")
     after = _file("file src/x.rs", {_STUB}, {_STUB}, sha="new")
     rows = [_row(before, RunOutcome.FLAT, 0)]
     assert rebuy_identity(after.kind, after.targets, after.bodies_sha, "o") != rows[0].identity
     sched = schedule([after], rows, oracle_fp="o", hollow=_hollow())
+    assert sched.ordered[0].reason == "rebuy_flat" and sched.ordered[0].weight == 0
+    flat_elsewhere = [*rows, _row(_per_fn({_STUB}), RunOutcome.FLAT, 0)]
+    sched = schedule([after], flat_elsewhere, oracle_fp="o", hollow=_hollow())
+    assert sched.ordered[0].reason == "rebuy_flat"
+    paid_elsewhere = [*rows, _row(_per_fn({_STUB}), RunOutcome.CASHED, 1)]
+    sched = schedule([after], paid_elsewhere, oracle_fp="o", hollow=_hollow())
     assert sched.ordered[0].reason == "served" and sched.ordered[0].weight == 1
 
 
@@ -463,7 +477,9 @@ def test_an_oracle_move_makes_every_row_a_different_identity() -> None:
     file_run = _file("file src/x.rs", {_STUB}, {_STUB})
     rows = [_row(file_run, RunOutcome.FLAT, 0, oracle="old")]
     sched = schedule([file_run], rows, oracle_fp="new", hollow=_hollow())
-    assert sched.ordered[0].reason == "served"  # same targets, different try
+    # Service is counted under THIS oracle: a row graded against another
+    # set of tests served nothing here.
+    assert sched.ordered[0].reason == "never_served"
 
 
 def test_order_only_under_a_zero_budget_defers_nothing() -> None:
@@ -644,7 +660,9 @@ def test_session_rebuy_is_the_slice_file_rebuy_is_the_bodies() -> None:
         target_tests=f2.target_tests)
     sched = schedule([s2], [_row(s1, RunOutcome.FLAT, 0)],
                      oracle_fp="o", hollow={})
-    assert sched.ordered[0].reason == "never_served"
+    # Its units were opened by a session aimed at other tests: served (a
+    # new question on known units), not a re-buy of s1 and not never-served.
+    assert sched.ordered[0].reason == "served"
 
 
 def test_an_empty_row_neither_hides_the_last_verdict_nor_serves_the_targets() -> None:
@@ -654,7 +672,7 @@ def test_an_empty_row_neither_hides_the_last_verdict_nor_serves_the_targets() ->
     not hide the verdict before it; on a moved identity (the bodies
     changed, targets the same) an EMPTY or DEFERRED row alone leaves the
     run never-served — a try that never opened served nothing. Control:
-    a FLAT row on the moved identity is `served`."""
+    a FLAT row on the moved identity is the unit's re-buy on this route."""
     f1 = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"}, sha="f1")
     flat_then_empty = [_row(f1, RunOutcome.FLAT, 0), _row(f1, RunOutcome.EMPTY, 0)]
     sched = schedule([f1], flat_then_empty, oracle_fp="o", hollow={})
@@ -664,7 +682,7 @@ def test_an_empty_row_neither_hides_the_last_verdict_nor_serves_the_targets() ->
         sched = schedule([f2], [_row(f1, outcome, 0)], oracle_fp="o", hollow={})
         assert sched.ordered[0].reason == "never_served", outcome
     sched = schedule([f2], [_row(f1, RunOutcome.FLAT, 0)], oracle_fp="o", hollow={})
-    assert sched.ordered[0].reason == "served"
+    assert sched.ordered[0].reason == "rebuy_flat"
 
 
 def test_a_per_kind_cap_defers_the_sessions_beyond_it_in_schedule_order() -> None:
@@ -801,9 +819,13 @@ def test_a_pair_past_its_grace_loses_its_precedence_and_the_rest_get_a_share() -
     sched = schedule(runs, spent, oracle_fp="o", hollow={},
                      budget_minutes=120)
     order = [s.run.label for s in sched.ordered]
-    assert set(order) == {pair.label, per_fn.label, file_run.label}
-    assert order[-1] == pair.label
-    assert sched.ordered[-1].reason == "grace_spent"
+    # Past the grace the pair's units carry `unpaid_grace` reverted pair
+    # rows and nothing since: the pair is the re-buy its units' record says
+    # (weight 0, deferred, re-admitted after `readmit_after` deferrals) and
+    # the runs it held open with a share.
+    assert set(order) == {per_fn.label, file_run.label}
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (pair.label, "rebuy_reverted")]
     assert not [s for s in sched.deferred if s.reason == "pair_wait"]
     assert all(s.share_minutes and s.share_minutes > 0 for s in sched.ordered)
 
@@ -942,6 +964,13 @@ def test_a_coverage_split_stops_waiting_once_the_attributed_write_spent_its_grac
     runs = [file_run, split]
     spent = [_row(replace(file_run, bodies_sha=f"b{i}"), RunOutcome.FLAT)
              for i in range(DEFAULT_UNPAID_GRACE)]
+    # A try on another route that aimed at no test paid after the file
+    # writes: the attributed write is `served` (the verdicts it saw moved)
+    # rather than the unit's zero-weight re-buy, and the grace counts are
+    # untouched — the clock under test here.
+    spent.append(RouteLedgerRow(
+        kind=RouteKind.IMPL, label="impl src/x.rs", targets=((_FMT.file, _FMT.fn_name),),
+        bodies_sha="i", oracle_fp="o", outcome=RunOutcome.CASHED, net_pass_delta=1))
     assert unpaid_attributed_writes(spent, "t_a", {_FMT}, "o") == DEFAULT_UNPAID_GRACE
 
     inside = schedule(runs, spent[1:], oracle_fp="o", hollow={},
@@ -1012,9 +1041,11 @@ def test_a_pair_that_paid_a_sibling_does_not_keep_zeroing_the_other_tests_runs()
     # identity and the pair ranks served, as the live pair does.
     cash = replace(_row(replace(pair, bodies_sha="cash"), RunOutcome.CASHED, 1),
                    newly_green=("t_a",))
+    # The last try reverted (not flat): inside the grace a reverted pair is
+    # a retry with a diagnosis, `served`; a flat one is its units' re-buy.
     rows = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.REVERTED)
             for i in range(DEFAULT_UNPAID_GRACE)] + [
-        cash, _row(replace(pair, bodies_sha="flat"), RunOutcome.FLAT)]
+        cash, _row(replace(pair, bodies_sha="flat"), RunOutcome.REVERTED)]
     assert consecutive_unpaid(rows, pair, "o") == 1 < DEFAULT_UNPAID_GRACE
     sched = schedule([pair, b_only, a_only], rows, oracle_fp="o", hollow={},
                      budget_minutes=120)

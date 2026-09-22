@@ -438,10 +438,18 @@ class ScheduledRun:
     #: hollow on). Printed apart from ``lapsed``: nothing was spent, the
     #: wait would have made the pair's own verdict unreachable.
     mutual: tuple[str, ...] = ()
+    #: Minutes this run's share may not fall below (a session's minimum
+    #: turns priced at its measured turn cost, :func:`session_floor`); None =
+    #: no floor. `floor_note` says how it was priced, or that it was clipped.
+    floor_minutes: float | None = None
+    floor_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **self.run.to_dict(), "rank": self.rank, "weight": self.weight,
+            "floor_minutes": (round(self.floor_minutes, 2)
+                              if self.floor_minutes is not None else None),
+            "floor_note": self.floor_note,
             "reason": self.reason, "level": self.level,
             "share_minutes": (round(self.share_minutes, 2)
                               if self.share_minutes is not None else None),
@@ -474,6 +482,8 @@ class FillSchedule:
                             + ", ".join(s.mutual))
             if s.blocked_by:
                 bits.append("after " + ", ".join(s.blocked_by))
+            if s.floor_note:
+                bits.append(s.floor_note)
             share = (f" share {s.share_minutes:.0f}m"
                      if s.share_minutes is not None else "")
             parts.append(f"{i}. {s.run.label} ({'; '.join(bits)}){share}")
@@ -689,16 +699,130 @@ def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
     return _unpaid_streak(rows, lambda r: _served_key_of(r) == key, oracle_fp)
 
 
+class UnitService:
+    """Which units the ledger has served under one oracle, and how.
+
+    Service is a property of the UNIT, not of the batch that carried it. The
+    dispatch batch is re-drawn every iteration, so a run keyed by its whole
+    target list presented a new key almost every fill and ranked
+    ``never_served`` at double weight while every unit in it had been bought
+    27+ times (run `450977-5f48b68a`, 2026-09-21: fill 1's `file
+    src/error.rs` never_served over 5 targets with prior buys min/median
+    27/34; the per-fn batch never_served over 12 with median 27). Built once
+    per schedule from the rows that OPENED a try — not deferred, empty,
+    stopped or unmeasured (a reasoning-capped run served nothing, the 241
+    grade) — under the schedule's oracle."""
+
+    def __init__(self, rows: Iterable[RouteLedgerRow], oracle_fp: str, *,
+                 session_min_turns: int = 0) -> None:
+        self._opened: dict[FnLocator, list[RouteLedgerRow]] = {}
+        self._deferred: dict[FnLocator, list[RouteLedgerRow]] = {}
+        self._min_turns = session_min_turns
+        for r in rows:
+            if r.oracle_fp != oracle_fp:
+                continue
+            bucket = (self._deferred if r.outcome is RunOutcome.DEFERRED
+                      else self._opened if r.outcome not in (
+                          RunOutcome.EMPTY, RunOutcome.STOPPED,
+                          RunOutcome.UNMEASURED)
+                      else None)
+            if bucket is None:
+                continue
+            for f, fn in r.targets:
+                bucket.setdefault(FnLocator(f, fn), []).append(r)
+
+    def served(self, unit: FnLocator) -> bool:
+        return unit in self._opened
+
+    @staticmethod
+    def _same_route(row: RouteLedgerRow, run: RouteRun) -> bool:
+        """The route that would be re-bought: the same kind, and for a
+        session the same aimed tests — two slices sharing hub units are
+        different questions (`_work_key` keys sessions the same way)."""
+        if row.kind is not run.kind:
+            return False
+        if run.kind is RouteKind.SESSION:
+            return frozenset(row.target_tests) == frozenset(run.target_tests)
+        return True
+
+    def starved(self, row: RouteLedgerRow) -> bool:
+        """A session row that ran out of its share before completing
+        ``session_min_turns`` turns. It is not a graded try: the share, not
+        the route, ended it. On `450977-5f48b68a` fill 1 the session ran 2
+        of 8 turns in 25.8 min against a 20-min share and was rowed
+        REVERTED; ranked on that row it would be a zero-weight re-buy, so
+        the starved share would convict the route it starved. Zero turns
+        configured means no row is starved (the pre-floor reading)."""
+        return (row.kind is RouteKind.SESSION and self._min_turns > 0
+                and row.model_calls < self._min_turns
+                and row.share_minutes is not None
+                and row.minutes >= row.share_minutes)
+
+    def rank(self, run: RouteRun, *, grace_left: bool,
+             readmit_after: int) -> tuple[int, str]:
+        """(rank, reason) for a run the identity ledger has no row for.
+
+        ``never_served`` only when a target has no opened row under this
+        oracle on ANY route: an untried unit is a new try whatever rides
+        with it. Otherwise each target is classed by its latest row on this
+        route — paid: ``paying``; none, starved by its share, or a later try
+        on another route paid: ``served``; flat or reverted: that re-buy —
+        and the run takes its WORST target's class, so a batch re-drawn
+        around units bought and never paid ranks as the re-buy it is. On
+        `450977-5f48b68a` fill 1 "best target decides" left the 12-unit
+        per-fn re-fill at ``served`` because one unit was new to per-fn
+        while the other eleven had been bought flat on it. A re-buy whose
+        every re-buy target has been deferred `readmit_after` times since
+        its latest try here is re-admitted, as the identity path does."""
+        targets = run.targets
+        if not targets or any(not self.served(t) for t in targets):
+            return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
+        worst = _RANK_PAYING
+        rebuy_deferrals: list[int] = []
+        for t in targets:
+            opened = self._opened[t]
+            here_at = [i for i, r in enumerate(opened)
+                       if self._same_route(r, run)]
+            if (not here_at or self.starved(opened[here_at[-1]])
+                    or any(_row_paid(r) for r in opened[here_at[-1] + 1:])):
+                # Never tried on this route, starved by its share, or a later
+                # try on another route PAID (the verdicts this route last saw
+                # moved): served, and this try is new. A later flat keep
+                # elsewhere moves the body, not the evidence — counting it
+                # made every re-buy "served" on `450977-5f48b68a`'s ledger,
+                # where session, file and per-fn touch the same units in turn.
+                cls = _RANK_SERVED
+            else:
+                last = opened[here_at[-1]]
+                if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
+                    cls = _RANK_PAYING
+                elif last.outcome is RunOutcome.REVERTED:
+                    cls = (_RANK_SERVED if run.kind is RouteKind.PAIR
+                           and grace_left else _RANK_REBUY_REVERTED)
+                else:
+                    cls = _RANK_REBUY_FLAT
+                if cls in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED):
+                    rebuy_deferrals.append(sum(
+                        1 for d in self._deferred.get(t, ())
+                        if self._same_route(d, run)
+                        and d.started >= last.started))
+            worst = max(worst, cls)
+        if (worst in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED)
+                and rebuy_deferrals and min(rebuy_deferrals) >= readmit_after):
+            return worst, "rebuy_readmitted"
+        return worst, _REASON[worst]
+
+
 def _rank_of(run: RouteRun, oracle_fp: str,
              history: Mapping[str, list[RouteLedgerRow]],
-             served_targets: Collection[str],
+             units: UnitService,
              *, readmit_after: int, grace_left: bool = True,
              ) -> tuple[int, str, int]:
     """(rank, reason, deferrals) for one run against the ledger.
 
-    `served_targets` holds the (kind, targets) keys the ledger has a row
-    that OPENED for (any outcome but deferred or empty) — the "served,
-    but under another identity" class."""
+    `units` answers for a run whose identity has no graded row — the
+    "served, but under another identity" class — by the service its
+    UNITS have had (:class:`UnitService`)."""
     ident = rebuy_identity(
         run.kind, run.targets, run.bodies_sha, oracle_fp,
         target_tests=run.target_tests)
@@ -719,8 +843,12 @@ def _rank_of(run: RouteRun, oracle_fp: str,
             continue
         last = r
         break
-    rank, reason = _ledger_rank(run, last, served_targets,
-                                grace_left=grace_left)
+    if last is None:
+        rank, reason = units.rank(run, grace_left=grace_left,
+                                  readmit_after=readmit_after)
+    else:
+        rank, reason = _ledger_rank(run, last, grace_left=grace_left,
+                                    starved=units.starved(last))
     if (run.kind is RouteKind.PAIR and not grace_left
             and rank in (_RANK_NEVER_SERVED, _RANK_SERVED)):
         # Past the grace a pair is never "never served": its work key has
@@ -739,21 +867,18 @@ def _rank_of(run: RouteRun, oracle_fp: str,
     return rank, reason, deferrals
 
 
-def _ledger_rank(run: RouteRun, last: RouteLedgerRow | None,
-                 served_targets: Collection[str], *,
-                 grace_left: bool) -> tuple[int, str]:
+def _ledger_rank(run: RouteRun, last: RouteLedgerRow, *,
+                 grace_left: bool, starved: bool = False) -> tuple[int, str]:
     """(rank, reason) from the latest graded row on the run's identity."""
-    if last is None:
-        # A row on the same route and targets under ANOTHER identity (the
-        # bodies or the oracle moved since): served, but this try is new.
-        if _served_key(run) in served_targets:
-            return _RANK_SERVED, _REASON[_RANK_SERVED]
-        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
     if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
         return _RANK_PAYING, _REASON[_RANK_PAYING]
     if last.outcome in (RunOutcome.STOPPED, RunOutcome.UNMEASURED):
         # Interrupted, or every reply reasoning-capped: not evidence.
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
+    if starved:
+        # Ended by its share before its minimum turns (UnitService.starved):
+        # opened, so served, but not a graded try.
+        return _RANK_SERVED, _REASON[_RANK_SERVED]
     if (last.outcome is RunOutcome.REVERTED and run.kind is RouteKind.PAIR
             and grace_left):
         # The pair's revert stores a diagnosis the next prompt is
@@ -879,6 +1004,66 @@ def unpaid_attributed_writes(rows: Iterable[RouteLedgerRow], test: str,
             [FnLocator(f, fn) for f, fn in r.targets], r.target_tests, attr))
 
 
+#: Session rows the turn price is measured over, newest first.
+_TURN_COST_WINDOW = 20
+
+
+def session_turn_minutes(rows: Iterable[RouteLedgerRow],
+                         run: RouteRun) -> float | None:
+    """The median minutes per model call over this session's rows (its work
+    key), falling back to every session row in the ledger; None when there
+    is none. A session's unit of progress is a turn (compile → diagnostics
+    → next turn), and one turn is one call, so minutes / calls is its turn
+    price. Measured across `logs/pipeline_anyhow.log*` to 2026-09-21: 41
+    sessions stopped by the share, 31 after at most 2 of 8 turns; session
+    turn calls since 2026-09-14 ran p50 5.0 / p90 14.3 min, and run
+    `450977-5f48b68a`'s two turns were 11.3 and 14.3 min against shares of 9
+    and 11 min. Any oracle: a turn's price does not depend on which tests
+    fail."""
+    sessions = [r for r in rows if r.kind is RouteKind.SESSION
+                and r.model_calls > 0 and r.minutes > 0]
+    key = _served_key(run)
+    own = [r for r in sessions if _served_key_of(r) == key]
+    pool = (own or sessions)[-_TURN_COST_WINDOW:]
+    if not pool:
+        return None
+    per = sorted(r.minutes / r.model_calls for r in pool)
+    mid = len(per) // 2
+    return per[mid] if len(per) % 2 else (per[mid - 1] + per[mid]) / 2
+
+
+def _allot(scheduled: list[ScheduledRun], budget_minutes: float
+           ) -> list[ScheduledRun]:
+    """Shares by weight with floors honoured: a run whose floor exceeds its
+    weighted share takes the floor, and the rest split what remains by
+    weight (repeated until no further run is lifted, so the result does not
+    depend on order). Floors whose sum exceeds the budget were clipped by
+    the caller to budget / floored runs."""
+    floored: set[str] = set()
+    while True:
+        rest = budget_minutes - sum(
+            s.floor_minutes or 0.0 for s in scheduled if s.run.key in floored)
+        free_w = sum(s.weight for s in scheduled if s.run.key not in floored)
+        lifted = False
+        for s in scheduled:
+            if s.run.key in floored or not s.floor_minutes:
+                continue
+            share = rest * s.weight / free_w if free_w > 0 else 0.0
+            if s.floor_minutes > share:
+                floored.add(s.run.key)
+                lifted = True
+        if not lifted:
+            break
+    out: list[ScheduledRun] = []
+    for s in scheduled:
+        if s.run.key in floored:
+            out.append(replace(s, share_minutes=s.floor_minutes))
+        else:
+            out.append(replace(s, share_minutes=(
+                rest * s.weight / free_w if free_w > 0 else 0.0)))
+    return out
+
+
 def schedule(
     runs: Sequence[RouteRun],
     rows: Iterable[RouteLedgerRow],
@@ -893,6 +1078,7 @@ def schedule(
     max_per_kind: Mapping[RouteKind, int] | None = None,
     attributed: Collection[FnLocator] = (),
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
+    session_min_turns: int = 0,
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
 
@@ -963,6 +1149,20 @@ def schedule(
     leftover whose failing assertion is printed by a unit in a third file
     kept buying the two-file pair. ``unpaid_grace=0`` restores the
     unbounded deferral.
+
+    Service is per UNIT (:class:`UnitService`): a run the identity ledger
+    has no row for is ``never_served`` only if a target was never opened
+    under this oracle on any route, so re-drawing a batch cannot
+    manufacture novelty.
+
+    ``session_min_turns`` prices a session's share in its own unit: an
+    opened session's share is at least that many turns at its measured
+    turn cost (:func:`session_turn_minutes`), taken from the budget before
+    the weighted split; floors that together exceed the budget are clipped
+    to budget / sessions and the schedule line says so. A session row that
+    ran out of its share before that many turns is not a graded try
+    (:meth:`UnitService.starved`). ``0`` restores the plain weighted split
+    and the pre-floor grading.
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
@@ -971,10 +1171,8 @@ def schedule(
     # (EMPTY), or a run whose every reply was reasoning-capped
     # (UNMEASURED) served nothing, so its targets under a moved body or
     # oracle are still a new try, not a served one.
-    served_targets = frozenset(
-        _served_key_of(r) for r in rows_list
-        if r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
-                             RunOutcome.UNMEASURED))
+    units = UnitService(rows_list, oracle_fp,
+                        session_min_turns=session_min_turns)
     order_index = {k: i for i, k in enumerate(today_order)}
     attr = frozenset(attributed)
     split_of: dict[str, bool] = {}
@@ -992,7 +1190,7 @@ def schedule(
     ranked: list[tuple[RouteRun, int, str, int, int]] = []
     for run in runs:
         rank, reason, deferrals = _rank_of(
-            run, oracle_fp, history, served_targets,
+            run, oracle_fp, history, units,
             readmit_after=readmit_after,
             grace_left=_served_key(run) not in spent)
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
@@ -1160,6 +1358,29 @@ def schedule(
     if budget_minutes <= 0:
         return FillSchedule(tuple(scheduled), tuple(capped), 0.0)
 
+    if session_min_turns > 0:
+        priced: dict[str, float] = {}
+        for sr in scheduled:
+            if sr.run.kind is RouteKind.SESSION and sr.weight > 0:
+                turn = session_turn_minutes(rows_list, sr.run)
+                if turn is not None:
+                    priced[sr.run.key] = turn
+        total_floor = sum(session_min_turns * t for t in priced.values())
+        clip = (budget_minutes / len(priced)
+                if priced and total_floor > budget_minutes else None)
+        scheduled = [
+            replace(sr, floor_minutes=(
+                min(session_min_turns * priced[sr.run.key], clip)
+                if clip is not None else session_min_turns * priced[sr.run.key]),
+                floor_note=(
+                    f"floor {session_min_turns}x{priced[sr.run.key]:.1f}m"
+                    + (f" clipped to {clip:.0f}m (floors {total_floor:.0f}m > "
+                       f"budget {budget_minutes:.0f}m)" if clip is not None
+                       and session_min_turns * priced[sr.run.key] > clip
+                       else "")))
+            if sr.run.key in priced else sr
+            for sr in scheduled]
+
     runnable = [s for s in scheduled if s.weight > 0]
     if not runnable:
         # Every candidate is a re-buy: share the budget equally rather than
@@ -1167,15 +1388,14 @@ def schedule(
         scheduled = [replace(s, weight=1, reason="rebuy_readmitted")
                      for s in scheduled]
         runnable = list(scheduled)
-    total_w = sum(s.weight for s in runnable)
     ordered: list[ScheduledRun] = []
     deferred: list[ScheduledRun] = list(capped)
     for s in scheduled:
         if s.weight <= 0:
             deferred.append(replace(s, deferred=True, share_minutes=0.0))
             continue
-        ordered.append(replace(
-            s, share_minutes=budget_minutes * s.weight / total_w))
+        ordered.append(s)
+    ordered = _allot(ordered, float(budget_minutes))
     return FillSchedule(tuple(ordered), tuple(deferred), float(budget_minutes))
 
 
@@ -1200,16 +1420,22 @@ class FillBudget:
             return None
         return max(0.0, self._budget - self.elapsed())
 
-    def share_for(self, weight: int, remaining_weight: int) -> float | None:
+    def share_for(self, weight: int, remaining_weight: int, *,
+                  floor_minutes: float | None = None) -> float | None:
         """The share a run may claim when it opens: the UNSPENT budget over
         the weights of the runs not yet opened, so an early finish flows to
-        the next run and an overrun is paid by the ones after it."""
+        the next run and an overrun is paid by the ones after it. A run
+        with a floor (a session's minimum turns) gets at least the floor,
+        bounded by what the fill has left."""
         rem = self.remaining()
         if rem is None:
             return None
         if remaining_weight <= 0 or weight <= 0:
             return 0.0
-        return rem * weight / remaining_weight
+        share = rem * weight / remaining_weight
+        if floor_minutes:
+            share = max(share, min(floor_minutes, rem))
+        return share
 
 
 class RunClock:

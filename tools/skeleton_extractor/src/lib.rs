@@ -274,6 +274,84 @@ mod tests {
     }
 
     #[test]
+    fn trait_impls_attach_across_files_with_generic_args_and_cfg() {
+        // A fill that needs "does this crate type satisfy this bound" read a
+        // types section with no trait impls on crate types and bet that the
+        // impl was "omitted from the snippet" (run 450977-5f48b68a,
+        // 2026-09-21). The record must carry every header, from any file,
+        // partially specialised ones included, and must NOT carry an impl of
+        // a same-named local trait as if it were the root one, nor a foreign
+        // type's impl keyed by the same bare name.
+        let a: syn::File = parse_file(
+            "pub struct Wrap<A, B> { a: A, b: B }\n\
+             pub struct Inner;\n\
+             impl<A, B: Marker> Other for Wrap<A, B> {}",
+        )
+        .unwrap();
+        let b: syn::File = parse_file(
+            "impl<A> Marker for Wrap<A, Inner> where A: Clone {}\n\
+             #[cfg(feature = \"extra\")] impl Extra for Inner {}\n\
+             impl From<u8> for other::Wrap {}\n\
+             impl<T: Marker> Blanket for T {}\n\
+             mod local { pub trait Marker {} impl Marker for super::Inner {} impl Clone for Inner {} }",
+        )
+        .unwrap();
+        let mut types = std::collections::BTreeMap::new();
+        let mut impls = Vec::new();
+        collect_types_and_methods(&a.items, "a.rs", "", &mut types);
+        collect_types_and_methods(&b.items, "b.rs", "", &mut types);
+        collect_trait_impls(&a.items, "a.rs", "", &mut impls);
+        collect_trait_impls(&b.items, "b.rs", "", &mut impls);
+        attach_trait_impls(&mut types, impls);
+
+        let wrap: Vec<(&str, &str)> = types["Wrap"]
+            .trait_impls
+            .iter()
+            .map(|t| (t.file.as_str(), t.header.as_str()))
+            .collect();
+        assert_eq!(
+            wrap,
+            vec![
+                ("a.rs", "impl<A, B: Marker> Other for Wrap<A, B>"),
+                ("b.rs", "impl<A> Marker for Wrap<A, Inner> where A: Clone"),
+            ]
+        );
+        let marker = &types["Wrap"].trait_impls[1];
+        assert_eq!(marker.self_ty, "Wrap<A, Inner>");
+        assert_eq!(marker.trait_path, "Marker");
+        assert_eq!(marker.generics, "<A>");
+        assert_eq!(marker.where_clause, "where A: Clone");
+
+        let inner: Vec<&str> = types["Inner"]
+            .trait_impls
+            .iter()
+            .map(|t| t.header.as_str())
+            .collect();
+        // The local trait is qualified by its module; `Clone` is not local.
+        assert_eq!(
+            inner,
+            vec![
+                "impl Clone for Inner",
+                "impl Extra for Inner",
+                "impl local::Marker for super::Inner",
+            ]
+        );
+        let extra = &types["Inner"].trait_impls[1];
+        assert_eq!(
+            extra.cfg_predicates,
+            vec!["feature = \"extra\"".to_string()]
+        );
+        // No record for a type parameter or a foreign type.
+        assert!(!types.contains_key("T"));
+        assert!(
+            types["Wrap"]
+                .trait_impls
+                .iter()
+                .all(|t| !t.header.contains("From"))
+        );
+    }
+
+    #[test]
     fn is_exactly_pub_excludes_restricted_visibility() {
         let src = "pub struct Fully; pub(crate) struct CrateOnly; struct Private;";
         let ast: syn::File = parse_file(src).unwrap();

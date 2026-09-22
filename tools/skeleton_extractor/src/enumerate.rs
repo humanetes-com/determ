@@ -439,6 +439,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub: false,
                     is_exactly_pub: false,
                     mod_path: mod_path.to_string(),
+                    trait_impls: Vec::new(),
                 });
                 entry.kind = "struct".to_string();
                 entry.file = file_rel.to_string();
@@ -475,6 +476,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub,
                     is_exactly_pub,
                     mod_path: mod_path.to_string(),
+                    trait_impls: Vec::new(),
                 });
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
@@ -499,6 +501,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub,
                     is_exactly_pub,
                     mod_path: mod_path.to_string(),
+                    trait_impls: Vec::new(),
                 });
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
@@ -540,6 +543,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub,
                     is_exactly_pub,
                     mod_path: mod_path.to_string(),
+                    trait_impls: Vec::new(),
                 });
                 raise_visibility(entry, is_pub, is_exactly_pub);
             }
@@ -564,6 +568,7 @@ pub(crate) fn collect_types_and_methods(
                     is_pub: false,
                     is_exactly_pub: false,
                     mod_path: mod_path.to_string(),
+                    trait_impls: Vec::new(),
                 });
                 let impl_cfgs = extract_cfg_predicates(&ii.attrs);
                 for impl_item in &ii.items {
@@ -600,6 +605,169 @@ pub(crate) fn collect_types_and_methods(
     }
 }
 
+/// Every trait impl header in `items` (nested inline `mod`s included), keyed
+/// by the bare name of its self type. A self type written as a qualified path
+/// that does not start in this crate (`std::io::Error`, `fmt::Error`) is a
+/// foreign type and is skipped: records are keyed by bare name, and attaching
+/// `impl From<X> for io::Error` to the crate's own `Error` would state an impl
+/// the crate type does not have — the one lie a list read as complete cannot
+/// carry.
+pub(crate) fn collect_trait_impls(
+    items: &[Item],
+    file_rel: &str,
+    mod_path: &str,
+    out: &mut Vec<(String, TraitImplRecord)>,
+) {
+    // Traits declared in THIS scope. Inside a nested `mod`, an impl whose
+    // trait is a bare name declared beside it implements that local trait,
+    // not whatever the crate root means by the name: anyhow's `context.rs`
+    // holds `mod ext { pub trait StdError { .. } impl StdError for Error }`,
+    // and printing that as `impl StdError for Error` would tell the reader the
+    // crate's error type implements the standard trait it does not implement.
+    // Such a path is printed qualified by the module (`impl ext::StdError for
+    // Error`).
+    let local_traits: std::collections::BTreeSet<String> = items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Trait(t) => Some(t.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    for item in items {
+        match item {
+            Item::Impl(ii) => {
+                let Some((_, raw_path, _)) = &ii.trait_ else {
+                    continue;
+                };
+                let mut ii = ii.clone();
+                if !mod_path.is_empty()
+                    && raw_path.leading_colon.is_none()
+                    && raw_path.segments.len() == 1
+                    && local_traits.contains(&raw_path.segments[0].ident.to_string())
+                {
+                    let qualified = format!("{}::{}", mod_path, quote::quote!(#raw_path));
+                    if let Ok(p) = syn::parse_str::<syn::Path>(&qualified)
+                        && let Some((_, path, _)) = ii.trait_.as_mut()
+                    {
+                        *path = p;
+                    }
+                }
+                let ii = &ii;
+                let Some((bang, path, _)) = &ii.trait_ else {
+                    continue;
+                };
+                let syn::Type::Path(tp) = ii.self_ty.as_ref() else {
+                    continue;
+                };
+                if tp.qself.is_some() {
+                    continue;
+                }
+                let segs: Vec<String> = tp
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect();
+                if segs.len() > 1 && !matches!(segs[0].as_str(), "crate" | "self" | "super") {
+                    continue;
+                }
+                let ty_name = self_ty_name(&ii.self_ty);
+                if ty_name.is_empty() {
+                    continue;
+                }
+                out.push((
+                    ty_name,
+                    TraitImplRecord {
+                        header: render_trait_impl_header(ii),
+                        trait_path: format!(
+                            "{}{}",
+                            if bang.is_some() { "!" } else { "" },
+                            unparse_type_like(path)
+                        ),
+                        self_ty: unparse_type_like(ii.self_ty.as_ref()),
+                        generics: render_generics_parts(&ii.generics).0,
+                        where_clause: render_generics_parts(&ii.generics).1,
+                        file: file_rel.to_string(),
+                        mod_path: mod_path.to_string(),
+                        cfg_predicates: extract_cfg_predicates(&ii.attrs),
+                    },
+                ));
+            }
+            Item::Mod(item_mod) => {
+                if let Some((_, inner)) = &item_mod.content {
+                    let child = if mod_path.is_empty() {
+                        item_mod.ident.to_string()
+                    } else {
+                        format!("{}::{}", mod_path, item_mod.ident)
+                    };
+                    collect_trait_impls(inner, file_rel, &child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `(<A, B: Marker>, where A: Clone)` printed by the skeleton's printer, each
+/// on one line; empty strings when absent. Printed through a stand-in fn
+/// because a bare generics list is not an item prettyplease can print.
+fn render_generics_parts(g: &syn::Generics) -> (String, String) {
+    let item: syn::ItemFn = syn::parse_quote!(
+        fn __x() {}
+    );
+    let mut item = item;
+    item.sig.generics = g.clone();
+    let printed = collapse_ws(&render_item_definition(&Item::Fn(item)));
+    // `fn __x<A>() where A: Clone {}`
+    let rest = printed.trim_start_matches("fn __x");
+    let (params, tail) = match rest.find("()") {
+        Some(i) => (&rest[..i], &rest[i + 2..]),
+        None => ("", rest),
+    };
+    let tail = tail
+        .trim()
+        .trim_end_matches("{}")
+        .trim()
+        .trim_end_matches(',');
+    (params.trim().to_string(), tail.to_string())
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A type-like fragment printed by the same printer as the skeleton, so it
+/// reads `ContextError<C, Error>` and not `ContextError < C , Error >`.
+fn unparse_type_like<T: quote::ToTokens>(t: &T) -> String {
+    let src = format!("type __X = {};", quote::quote!(#t));
+    match syn::parse_file(&src) {
+        Ok(f) => {
+            let printed = prettyplease::unparse(&f);
+            let body = printed
+                .trim()
+                .trim_start_matches("type __X = ")
+                .trim_end_matches(';');
+            collapse_ws(body)
+        }
+        Err(_) => collapse_ws(&render_type(t)),
+    }
+}
+
+/// `impl<C> StdError for ContextError<C, Error> where C: Display` — the impl
+/// block printed with no attributes and no items, its braces removed, on one
+/// line.
+fn render_trait_impl_header(ii: &syn::ItemImpl) -> String {
+    let mut bare = ii.clone();
+    bare.attrs.clear();
+    bare.items.clear();
+    let printed = render_item_definition(&Item::Impl(bare));
+    let head = printed.trim_end();
+    let head = head.strip_suffix('}').unwrap_or(head).trim_end();
+    let head = head.strip_suffix('{').unwrap_or(head);
+    let one = collapse_ws(head);
+    one.trim_end_matches(',').to_string()
+}
+
 pub(crate) fn self_ty_name(ty: &syn::Type) -> String {
     // Get the bare ident from a possibly-generic type: `Foo<X, Y>` → "Foo".
     if let syn::Type::Path(tp) = ty
@@ -614,6 +782,7 @@ pub(crate) fn self_ty_name(ty: &syn::Type) -> String {
 pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
     let mut types: std::collections::BTreeMap<String, TypeRecord> =
         std::collections::BTreeMap::new();
+    let mut trait_impls: Vec<(String, TraitImplRecord)> = Vec::new();
     for entry in walkdir::WalkDir::new(input_dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -642,8 +811,33 @@ pub fn enumerate_types_in_tree(input_dir: &Path) -> Result<Vec<TypeRecord>> {
         };
         let rel_str = rel.to_string_lossy().to_string();
         collect_types_and_methods(&ast.items, &rel_str, "", &mut types);
+        collect_trait_impls(&ast.items, &rel_str, "", &mut trait_impls);
     }
+    attach_trait_impls(&mut types, trait_impls);
     Ok(types.into_values().collect())
+}
+
+/// Attach each collected trait impl to the crate type of that name, after the
+/// whole tree is walked so file order cannot decide it. Only struct / enum /
+/// alias records take impls; a name with no record is a foreign type or a
+/// type parameter (`impl<T: Display> Ext for T`) and is dropped. Sorted by
+/// (file, header) so the list, and the prompt it renders into, is stable.
+pub(crate) fn attach_trait_impls(
+    types: &mut std::collections::BTreeMap<String, TypeRecord>,
+    impls: Vec<(String, TraitImplRecord)>,
+) {
+    for (name, rec) in impls {
+        if let Some(t) = types.get_mut(&name)
+            && t.kind != "trait"
+        {
+            t.trait_impls.push(rec);
+        }
+    }
+    for t in types.values_mut() {
+        t.trait_impls.sort_by(|a, b| {
+            (a.file.as_str(), a.header.as_str()).cmp(&(b.file.as_str(), b.header.as_str()))
+        });
+    }
 }
 
 /// Parse a single file and emit one FnRecord per fn item.

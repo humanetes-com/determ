@@ -129,7 +129,17 @@ def test_fill_3_of_the_97_run_ranks_unmeasurable_runs_as_rebuy_flat() -> None:
     assert len(runs) == 13
     control = schedule(runs, rows, oracle_fp=oracle, hollow={})
     assert len(control.ordered) == 13 and not control.deferred
-    assert {s.reason for s in control.ordered} == {"never_served"}
+    # Per-unit service: every run carrying a unit never opened under this
+    # oracle is a new try; the context/kind runs' units were all opened —
+    # the context file run's unit last reverted on the file route (a
+    # re-buy), the rest were opened on other routes (served).
+    by_reason: dict[str, set[str]] = {}
+    for s in control.ordered:
+        by_reason.setdefault(s.reason, set()).add(s.run.label)
+    assert by_reason.pop("served") == {
+        "file src/kind.rs", "impl src/context.rs", "impl src/kind.rs"}
+    assert by_reason.pop("rebuy_reverted") == {"file src/context.rs"}
+    assert set(by_reason) == {"never_served"}
 
     unmeas = unmeasurable_of(fix)
     blamed = crash_blamed_of(fix)
@@ -353,8 +363,8 @@ def test_the_675471_fill_opens_the_served_pair_before_coverage_spine_refills() -
     runs = _planned(fix)
     pair = next(r for r in runs if r.kind is RouteKind.PAIR)
     assert pair.label == recorded[7]
-    # The pair ranked served: a prior row on the same work under a
-    # different body identity (the class `_rank_of` maps to rank 2).
+    # The pair ranked served: a prior REVERTED pair try under a different
+    # body identity, inside its grace (a retry that carries a diagnosis).
     prior = RouteRun(
         kind=pair.kind, label=pair.label, targets=pair.targets,
         target_tests=pair.target_tests, files=pair.files, bodies_sha="old")
@@ -362,7 +372,7 @@ def test_the_675471_fill_opens_the_served_pair_before_coverage_spine_refills() -
         kind=prior.kind, label=prior.label,
         targets=tuple(sorted((f, fn) for f, fn in prior.targets)),
         bodies_sha=prior.bodies_sha, oracle_fp="o",
-        outcome=RunOutcome.FLAT,
+        outcome=RunOutcome.REVERTED,
         target_tests=tuple(sorted(prior.target_tests)))]
     sched = schedule(runs, rows, oracle_fp="o", hollow={})
     assert [s.run.label for s in sched.ordered] == [pair.label]

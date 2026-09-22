@@ -23,7 +23,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from pipeline_core.domain import fill_phase_clock
+from pipeline_core.domain import fill_phase_clock, reasoning_cap
 
 SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
 
@@ -44,8 +44,14 @@ def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
     # event a sentinel stop takes — no leftover file for the next launch.
     if fill_phase_clock.poll():
         _STOP_EVENT.set()
+    # The run-level LLM cut rate (`reasoning_cap.CutRate`): the fold already
+    # logged `HEALTH ‼ LLM_CUT_STOP` and emitted its event when it fired.
+    if reasoning_cap.cut_stop_poll():
+        _STOP_EVENT.set()
     if _STOP_EVENT.is_set():
-        if fill_phase_clock.was_tripped():
+        if reasoning_cap.cut_stop_tripped():
+            log(f"  [graceful] LLM cut-rate stop at {context} — exiting cleanly.")
+        elif fill_phase_clock.was_tripped():
             log(f"  [graceful] fill-phase bound at {context} — exiting cleanly.")
         else:
             log(f"  [graceful] stop sentinel detected at {context} — exiting cleanly.")
@@ -72,3 +78,4 @@ def reset_for_tests() -> None:
     """Test-only: the event is process-wide state: clear it between cases."""
     _STOP_EVENT.clear()
     fill_phase_clock.disarm()
+    reasoning_cap.reset_cut_stop_for_tests()

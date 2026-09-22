@@ -25,6 +25,7 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 )
 from pipeline_core.domain import model_notes as mn
 from pipeline_core.domain.llm_output import parse_self_note
+from pipeline_core.domain.reasoning_cap import bookkeeping_call
 from pipeline_core.domain.rust_scan import item_names, names_method_call
 
 _NOTE_EXTRACTION_PROMPT = """A model attempted to implement a Rust function and
@@ -388,17 +389,20 @@ class FileModelNotesStore:
         )
         # Two-attempt ladder (default thinking, then think=False) — Qwen3.6
         # occasionally returns empty in one mode and not the other.
+        # Bookkeeping, not a fill: the empty-then-retry ladder is by design,
+        # so these calls stay out of the run-level cut rate.
         resp = ""
-        try:
-            resp = self._ask.ask(prompt, model=self._model)
-        except Exception as e:
-            self._log(f"  [model-notes] extraction failed (default): {e}")
-        if not resp or not resp.strip():
+        with bookkeeping_call():
             try:
-                resp = self._ask.ask(prompt, model=self._model, think=False)
+                resp = self._ask.ask(prompt, model=self._model)
             except Exception as e:
-                self._log(f"  [model-notes] extraction failed (think=False): {e}")
-                return None
+                self._log(f"  [model-notes] extraction failed (default): {e}")
+            if not resp or not resp.strip():
+                try:
+                    resp = self._ask.ask(prompt, model=self._model, think=False)
+                except Exception as e:
+                    self._log(f"  [model-notes] extraction failed (think=False): {e}")
+                    return None
         return parse_self_note(resp)
 
 

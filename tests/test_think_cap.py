@@ -27,7 +27,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from pipeline_core.adapters.llm_transports import (
-    VLLM_THINK_EMPTY_BAND,
+    VLLM_CEILING_TRUNCATIONS_CHARS,
+    VLLM_CEILING_TRUNCATIONS_MAX_TOKENS,
+    VLLM_UNCAPPED_NATURAL_FINISHES_CHARS,
     VLLMTransport,
 )
 from pipeline_core.llm import BudgetState, Delta, Hooks, LLMController, StreamMeta
@@ -189,18 +191,22 @@ def test_vllm_ships_a_cap_at_all() -> None:
         "vLLM is uncapped again — this is the 08-08 configuration"
 
 
-def test_the_default_cap_lies_in_the_measured_empty_band() -> None:
-    """The reasoning-length distribution is bimodal: healthy calls end below
-    the band's low edge (Muse@high natural finishes max 77,595 chars, measured
-    2026-08-13 uncapped on retained anyhow prompts), runaways start above its
-    high edge (smallest recorded truncation 121,109 chars). A cap inside the
-    band separates the two populations, so the exact value does not matter —
-    which is the claim this test keeps true as the value moves."""
-    low, high = VLLM_THINK_EMPTY_BAND
-    cap = VLLMTransport().spec().thinking_char_cap
-    assert cap is not None and low <= cap <= high, \
-        f"cap {cap} is outside the measured empty band {low}-{high}: it now " \
-        "either truncates healthy reasoning or misses the runaway population"
+def test_the_recorded_runaways_are_the_token_ceiling_not_a_population() -> None:
+    """The fixed cap was sized inside an "empty band" whose high edge was these
+    four traces, read as runaways. Each is 32,768 tokens of reasoning at
+    3.70–3.79 chars/token: they stopped because the REQUEST ran out, so they say
+    nothing about where reasoning ends on its own."""
+    for chars in VLLM_CEILING_TRUNCATIONS_CHARS:
+        assert 3.6 <= chars / VLLM_CEILING_TRUNCATIONS_MAX_TOKENS <= 3.9
+
+
+def test_there_is_no_empty_band_for_a_fixed_cap() -> None:
+    """Given room, prompts the 120,000 cap had cut finished naturally ABOVE the
+    old band's high edge (2026-09-21). A fixed character value between healthy
+    and runaway does not exist; the per-call shape is the answer."""
+    high_edge = min(VLLM_CEILING_TRUNCATIONS_CHARS)
+    assert max(VLLM_UNCAPPED_NATURAL_FINISHES_CHARS) > high_edge
+    assert sum(c > 120_000 for c in VLLM_UNCAPPED_NATURAL_FINISHES_CHARS) == 4
 
 
 def test_consume_breaks_exactly_at_the_cap_not_after_the_stream() -> None:

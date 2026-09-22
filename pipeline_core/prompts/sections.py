@@ -1464,6 +1464,55 @@ def _private_field_lines(
     return lines
 
 
+#: The sentence that makes the list usable. A list the reader can see is
+#: partial is a list it cannot reason from by absence: run `450977-5f48b68a`
+#: (2026-09-21) had crate types rendered with no impls beside external types
+#: rendered with theirs, and the fill's trace asked about one impl 14 times
+#: and concluded 9 times that it was "omitted from the snippet". Auto traits
+#: and the standard library's blanket impls are not headers this crate writes,
+#: so the sentence says so rather than claim they are absent.
+TRAIT_IMPLS_HEADER = (
+    "  trait impls (COMPLETE: every impl this crate writes for this type, any "
+    "file; a trait not listed is NOT implemented for it by this crate — auto "
+    "traits and std blanket impls aside):")
+
+
+def trait_impl_lines(rec: TypeRecord) -> list[str]:
+    """The `trait impls` block of a crate type: one line per header the
+    extractor found, the declaring file beside it. Headers only (the line the
+    skeleton keeps after strip). Nothing for an external record (it carries
+    its own `trait impls:` note) or a record whose extractor predates the
+    field (`trait_impls is None`) — a list printed as complete must be
+    complete. An empty reading prints the header with `(none)`, which is a
+    statement the reader can use."""
+    if rec.external_path or rec.trait_impls is None or rec.kind == "trait":
+        return []
+    out = [TRAIT_IMPLS_HEADER]
+    if not rec.trait_impls:
+        out.append("    (none)")
+    for t in rec.trait_impls:
+        where = f"  // {t.file}" if t.file else ""
+        out.append(f"    {t.header}{where}")
+    return out
+
+
+def join_type_blocks(blocks: list[str], cap: int) -> str:
+    """Join rendered type blocks under a char cap, dropping whole blocks
+    rather than cutting one: a block carries a list that says it is
+    COMPLETE (`TRAIT_IMPLS_HEADER`), and a cut through it would state that an
+    impl the cut removed does not exist. A first block larger than the cap
+    alone is still cut (there is nothing else to show)."""
+    out: list[str] = []
+    used = 0
+    for b in blocks:
+        extra = len(b) + (2 if out else 0)
+        if out and used + extra > cap:
+            break
+        out.append(b)
+        used += extra
+    return "\n\n".join(out)[:cap]
+
+
 def format_type_for_prompt(
     rec: TypeRecord, observables: frozenset[str] = frozenset(),
     *, viewer_file: str = "",
@@ -1532,6 +1581,7 @@ def format_type_for_prompt(
     _ctor = None if private else _construct_hint(rec)
     if _ctor:
         lines.append(_ctor)
+    lines.extend(trait_impl_lines(rec))
     if methods:
         # Dedup by method name (same fn can appear in multiple impl blocks);
         # keep the first sig we saw. Then render WITH SIGNATURE.

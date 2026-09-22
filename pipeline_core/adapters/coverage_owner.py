@@ -97,6 +97,13 @@ def _in_flight_test(stdout: str) -> str | None:
     return None
 
 
+def _premise_cut_enabled() -> bool:
+    """`PHASE_C_COVERAGE_PREMISE` (default 1): cut each failing test's owner
+    set at its premise boundary. `0` restores the full profile as ownership
+    (the pre-cut reading) for an A/B."""
+    return os.getenv("PHASE_C_COVERAGE_PREMISE", "1") != "0"
+
+
 def _suite_timeout() -> int:
     try:
         return int(os.environ.get("PHASE_C_TEST_TIMEOUT", "120"))
@@ -410,6 +417,129 @@ def _exact_run(tree: Path, binary: Path, name: str, raw: Path,
     return run
 
 
+# -- the premise cut ---------------------------------------------------------
+#
+# A failing test's full profile includes everything its FAILURE REPORT runs:
+# `Result::unwrap` on an `Err` formats the error's Debug inside the panic
+# machinery, and a test returning `Err` has its error formatted by the test
+# harness after the body returned. Those bodies run after the premise failed
+# and cannot change whether it holds. Measured 2026-09-21 on run
+# `450977-5f48b68a`'s tree (scratch copy, `test_downcast_low`): full profile
+# 39 crate fns, cut at the panic handler's entry 15; `Chain::len`,
+# `Chain::next`, `ErrorImpl::debug`, `Indented::write_str` all 0% at the cut.
+# A panic hook cannot make this cut: std formats the payload before any hook.
+#
+# The boundaries, resolved from the test binary's own symbol table:
+#  - the panic handler (`rust_begin_unwind`, v0-mangled `…17rust_begin_unwind`);
+#  - the harness's result check (`test::assert_test_result::<T>`), entered
+#    after the test body returned and before its `Err` is reported.
+# The profile is flushed at EVERY boundary hit (to `LLVM_PROFILE_FILE`, then
+# copied aside by the debugger — the runtime links no set-filename call in a
+# test binary) and the LAST copy is the premise: a panic the test catches (`catch_unwind`) is followed
+# by the one that fails it. A hit with a boundary frame already on the stack
+# is a panic raised while reporting the first (a stubbed Debug impl panicking
+# inside the message) and is not a boundary. A process that dies before any
+# boundary (SIGSEGV, abort) or a debugger that cannot run leaves no cut; the
+# caller then keeps the full profile and says so.
+_BOUNDARY_SUFFIXES = ("rust_begin_unwind",)
+_BOUNDARY_SUBSTRINGS = ("assert_test_result",)
+
+_GDB_SCRIPT = r"""
+import shutil
+import gdb
+BASE = {base!r}
+SYMS = {syms!r}
+state = {{"k": 0, "names": set(), "hit": False}}
+
+
+class _Cut(gdb.Breakpoint):
+    # Decide only; the flush happens in the loop below. Calling into the
+    # inferior from `stop` resumes it inside the callback and hangs gdb.
+    def stop(self):
+        here = gdb.newest_frame()
+        state["names"].add(here.name() or "")
+        f = here.older()
+        while f is not None:
+            if (f.name() or "") in state["names"]:
+                return False
+            f = f.older()
+        state["hit"] = True
+        return True
+
+
+gdb.execute("set pagination off")
+gdb.execute("set confirm off")
+gdb.execute("set language c")
+for s in SYMS:
+    _Cut("'" + s + "'", internal=True)
+gdb.execute("run")
+while state["hit"] and gdb.selected_inferior().pid:
+    state["hit"] = False
+    state["k"] += 1
+    gdb.execute("call (int)__llvm_profile_write_file()", to_string=True)
+    shutil.copyfile(BASE, "%s.cut%d" % (BASE, state["k"]))
+    gdb.execute("continue")
+"""
+
+
+def _boundary_symbols(binary: Path) -> tuple[str, ...]:
+    """The linkage names of the premise boundaries in `binary`; empty when
+    `nm` is missing or finds none (the caller falls back and says so)."""
+    nm = shutil.which("nm")
+    if nm is None:
+        return ()
+    r = _run([nm, "--defined-only", str(binary)], cwd=binary.parent)
+    if r.returncode != 0:
+        return ()
+    out: list[str] = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[1] not in ("T", "t"):
+            continue
+        name = parts[2]
+        if (name.endswith(_BOUNDARY_SUFFIXES)
+                or any(sub in name for sub in _BOUNDARY_SUBSTRINGS)):
+            out.append(name)
+    return tuple(dict.fromkeys(out))
+
+
+@dataclass(frozen=True, slots=True)
+class PremiseRun:
+    """The profile flushed at a failing test's last premise boundary, or
+    why there is none (`reason`, printed on the `[coverage]` line)."""
+
+    raw: Path | None
+    reason: str = ""
+
+
+def _premise_run(tree: Path, binary: Path, name: str, base: Path,
+                 env: dict[str, str], *, timeout: float,
+                 symbols: tuple[str, ...]) -> PremiseRun:
+    """Re-run `name` alone under gdb, flushing the profile at each premise
+    boundary (see the block comment above), and return the last flush."""
+    gdb = shutil.which("gdb")
+    if gdb is None:
+        return PremiseRun(None, "gdb not on PATH")
+    if not symbols:
+        return PremiseRun(None, "no premise boundary symbol in the binary")
+    for old in base.parent.glob(base.name + "*"):
+        old.unlink(missing_ok=True)
+    script = base.with_suffix(".gdb.py")
+    script.write_text(_GDB_SCRIPT.format(base=str(base), syms=list(symbols)),
+                      encoding="utf-8")
+    e = dict(env)
+    e["LLVM_PROFILE_FILE"] = str(base)
+    _run([gdb, "-nx", "-batch", "-x", str(script), "--args", str(binary),
+          "--exact", name, "--test-threads=1"], cwd=tree, env=e,
+         timeout=int(max(1, timeout)))
+    cuts = sorted(base.parent.glob(base.name + ".cut*"),
+                  key=lambda p: int(p.name.rsplit(".cut", 1)[-1] or 0))
+    cuts = [c for c in cuts if c.stat().st_size > 0]
+    if not cuts:
+        return PremiseRun(None, "no boundary was reached")
+    return PremiseRun(cuts[-1])
+
+
 def _listed_tests(tree: Path, binary: Path, env: dict[str, str],
                   prof: Path, *, timeout: float) -> list[str]:
     """The tests a binary carries, as it names them (`--list` prints
@@ -497,6 +627,21 @@ def _entered_sites(export: dict[str, Any], tree: Path,
         if site is not None)
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerReading:
+    """What `_owner_map` measured: `owners` (premise sets), the names whose
+    process did not complete, the names measured on several binaries, the
+    after-the-failure sets (`rendered`) and the names whose premise could
+    not be cut (`premise_fallbacks`: name -> reason; their owner set is the
+    full profile)."""
+
+    owners: dict[str, frozenset[FnSite]]
+    unmeasured: frozenset[str]
+    multi: frozenset[str]
+    rendered: dict[str, frozenset[FnSite]]
+    premise_fallbacks: dict[str, str]
+
+
 def _owner_map(
     tree: Path, bins: list[Path], prof: Path, env: dict[str, str],
     tests: Iterable[str], profdata_bin: str, cov_bin: str,
@@ -504,10 +649,23 @@ def _owner_map(
     prior: Mapping[tuple[str, str], ExactRun] | None = None,
     *, timeout: float, workers: int = 1, longest: _Longest | None = None,
     failing_binaries: Mapping[str, Collection[str]] | None = None,
-) -> tuple[dict[str, frozenset[FnSite]], frozenset[str], frozenset[str]]:
-    """Which crate bodies does each named test enter, one profile per test
-    — and which named tests could not be measured because their process
-    did not complete.
+    premise: bool = True,
+) -> OwnerReading:
+    """Which crate bodies does each named test enter BEFORE its failure is
+    reported, one profile per test — and which named tests could not be
+    measured because their process did not complete.
+
+    A run that failed (non-zero exit, completed) is re-run under the
+    debugger and cut at its last premise boundary (`_premise_run`): the
+    owner set is what ran before the panic handler or the harness's result
+    check, and what ran only after it — message rendering, unwind drops —
+    is `rendered`, evidence and never ownership. A run with no cut (no
+    debugger, no boundary symbol, no boundary reached) keeps its full
+    profile as its owner set and is named in `premise_fallbacks` with the
+    reason, so the `[coverage]` line says the reading is the union, never
+    silently. A passing run has no failure to report: its full profile is
+    its owner set. `premise=False` is the pre-cut reading (full profile as
+    ownership), the negative control.
 
     Pass C of `scripts/coverage_owner_probe.py`, promoted into the loop.
     The whole-suite merge cannot answer this: it says a body ran, not
@@ -546,18 +704,34 @@ def _owner_map(
     time; `timeout` here is the single-test bound.
     """
     owners: dict[str, frozenset[FnSite]] = {}
+    rendered: dict[str, frozenset[FnSite]] = {}
+    fallbacks: dict[str, str] = {}
     unmeasured: set[str] = set()
     multi: set[str] = set()
     prior = dict(prior or {})
     by_label = {_binary_label(b): b for b in bins}
     fb = {k: frozenset(v) for k, v in (failing_binaries or {}).items()}
+    syms: dict[Path, tuple[str, ...]] = {}
+    syms_lock = threading.Lock()
+
+    def _symbols(b: Path) -> tuple[str, ...]:
+        with syms_lock:
+            if b not in syms:
+                syms[b] = _boundary_symbols(b)
+            return syms[b]
+
+    def _sites_of(raw: Path, binary: Path, stem: str) -> frozenset[FnSite] | None:
+        export = _merge_export([raw], [binary], prof / f"{stem}.json",
+                               profdata_bin, cov_bin)
+        return None if export is None else _entered_sites(export, tree, index)
 
     def _prior_run(label: str, name: str) -> ExactRun | None:
         keys = [n for (lab, n) in prior if lab == label]
         key = matching_test_key(name, keys)
         return prior[(label, key)] if key is not None else None
 
-    def _one(name: str) -> tuple[str, frozenset[FnSite] | None, bool, int]:
+    def _one(name: str) -> tuple[str, frozenset[FnSite] | None, bool, int,
+                                 frozenset[FnSite], str]:
         labels = fb.get(name) or fb.get(name.rsplit("::", 1)[-1]) or frozenset()
         failing = [by_label[lab] for lab in sorted(labels) if lab in by_label]
         # Every binary that failed the name, each measured; otherwise the
@@ -578,28 +752,51 @@ def _owner_map(
             if not every:
                 break
         if not runs:
-            return name, None, False, 0
+            return name, None, False, 0, frozenset(), ""
         if any(not r.completed for r in runs):
-            return name, None, True, len(runs)
+            return name, None, True, len(runs), frozenset(), ""
         sites: set[FnSite] = set()
+        after: set[FnSite] = set()
+        why: list[str] = []
         measured = 0
         for r in runs:
-            export = _merge_export(
-                [r.raw], [r.binary],
-                prof / (f"one-{_prof_stem(_binary_label(r.binary))}"
-                        f"-{_prof_stem(name)}.json"),
-                profdata_bin, cov_bin)
-            if export is None:
+            stem = (f"one-{_prof_stem(_binary_label(r.binary))}"
+                    f"-{_prof_stem(name)}")
+            full = _sites_of(r.raw, r.binary, stem)
+            if full is None:
                 continue
             measured += 1
-            sites |= _entered_sites(export, tree, index)
+            if not premise or r.returncode <= 0:
+                # Passed (0): no failure to report. Killed by a signal (<0):
+                # no report ran either, and no boundary can be reached.
+                sites |= full
+                continue
+            try:
+                cut = _premise_run(
+                    tree, r.binary, name, prof / f"{stem}-premise.profraw",
+                    env, timeout=timeout * 2 + 30, symbols=_symbols(r.binary))
+            except (OSError, subprocess.SubprocessError) as exc:
+                # A premise that cannot be taken falls back to the full
+                # profile; it must never cost the whole coverage reading.
+                cut = PremiseRun(None, f"premise run failed "
+                                       f"({type(exc).__name__})")
+            before = (_sites_of(cut.raw, r.binary, f"{stem}-premise")
+                      if cut.raw is not None else None)
+            if before is None:
+                sites |= full
+                why.append(f"{_binary_label(r.binary)}: "
+                           f"{cut.reason or 'premise profile did not export'}")
+                continue
+            sites |= before
+            after |= full - before
         if measured < len(runs):
             # One of the name's failing tests left no export: a union
             # missing it is the one-binary answer this rule replaces.
-            return name, None, False, len(runs)
-        return name, frozenset(sites), False, len(runs)
+            return name, None, False, len(runs), frozenset(), ""
+        return (name, frozenset(sites), False, len(runs),
+                frozenset(after - sites), "; ".join(why))
 
-    for name, sites, died, n_runs in _map_concurrently(
+    for name, sites, died, n_runs, after, why in _map_concurrently(
             _one, list(dict.fromkeys(tests)), workers):
         if n_runs > 1:
             multi.add(name)
@@ -607,7 +804,13 @@ def _owner_map(
             unmeasured.add(name)
         elif sites is not None:
             owners[name] = sites
-    return owners, frozenset(unmeasured), frozenset(multi)
+            if after:
+                rendered[name] = after
+            if why:
+                fallbacks[name] = why
+    return OwnerReading(owners=owners, unmeasured=frozenset(unmeasured),
+                        multi=frozenset(multi), rendered=rendered,
+                        premise_fallbacks=fallbacks)
 
 
 def measure_coverage_slice(
@@ -810,10 +1013,13 @@ def measure_coverage_slice(
                 file_texts[rel] = ""
         index = SiteIndex(fn_records, file_texts)
         asked = tuple(dict.fromkeys(failing_tests))
-        owners, unmeasured_asked, multi = _owner_map(
+        reading = _owner_map(
             tree, bins, prof, env, asked, profdata_bin, cov_bin, index,
             prior=recovered, timeout=exact_bound, workers=pool,
-            longest=longest, failing_binaries=failing_binaries)
+            longest=longest, failing_binaries=failing_binaries,
+            premise=_premise_cut_enabled())
+        owners, unmeasured_asked, multi = (
+            reading.owners, reading.unmeasured, reading.multi)
         # The crashed binaries' tests that still died alone, under the name
         # the binary lists, unless an asked name already covers them.
         unmeasured_tests = set(unmeasured_asked)
@@ -823,7 +1029,7 @@ def measure_coverage_slice(
                 unmeasured_tests.add(name)
         slice_ = slice_from_counts(
             _counted_bodies(index, bodies, lines),
-            owners=owners, failing=asked,
+            owners=owners, rendered=reading.rendered, failing=asked,
             unmeasured_binaries=[_binary_label(b) for b, _ in unmeasured_bins],
             unmeasured_tests=unmeasured_tests,
             hung_tests=hung_tests)
@@ -835,6 +1041,15 @@ def measure_coverage_slice(
                 + (f", {len(multi)} failing in several binaries measured on "
                    f"each and unioned ({', '.join(sorted(multi)[:6])})"
                    if multi else "")
+                + (f", premise cut for "
+                   f"{len(owners) - len(reading.premise_fallbacks)}/"
+                   f"{len(owners)} ({len(reading.rendered)} with bodies run "
+                   f"only while the failure was reported)"
+                   if _premise_cut_enabled() else ", premise cut OFF")
+                + (", PREMISE FALLBACK to the full profile for "
+                   + "; ".join(f"{n} ({why})" for n, why in
+                               sorted(reading.premise_fallbacks.items())[:6])
+                   if reading.premise_fallbacks else "")
                 + " "
                 f"(staged, own target dir; {pool} worker(s), single-test "
                 f"bound {int(exact_bound)}s, longest completing run "

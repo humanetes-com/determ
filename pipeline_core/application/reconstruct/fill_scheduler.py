@@ -85,6 +85,9 @@ class FillExecutionDeps:
     #: ``max_per_kind``); the rest are deferred to the next fill. Empty =
     #: unbounded. The session cap is `SLICE_SESSION_MAX_PER_FILL`.
     max_per_kind: Mapping[RouteKind, int] = field(default_factory=dict)
+    #: A session's share floor in turns (`schedule`'s ``session_min_turns``,
+    #: `SLICE_SESSION_MIN_TURNS`); 0 = the plain weighted split.
+    session_min_turns: int = 0
     #: Locators leftover tests convict before measured-owners admission
     #: (eligible plus hop-pair members). Empty (the default) skips
     #: coverage-split marking, so every recorded fill fixture's order is
@@ -315,7 +318,8 @@ def execute_fill(
         unmeasurable_tests=deps.unmeasurable_tests if deps.scheduled else (),
         crash_blamed=deps.crash_blamed if deps.scheduled else (),
         max_per_kind=deps.max_per_kind if deps.scheduled else None,
-        attributed=deps.attributed if deps.scheduled else ())
+        attributed=deps.attributed if deps.scheduled else (),
+        session_min_turns=deps.session_min_turns if deps.scheduled else 0)
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"
@@ -372,7 +376,8 @@ def execute_fill(
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         for w in wave:
-            share = budget.share_for(w.weight, remaining_weight)
+            share = budget.share_for(w.weight, remaining_weight,
+                                     floor_minutes=w.floor_minutes)
             remaining_weight -= w.weight
             shares[w.run.key] = share
             clocks[w.run.key] = RunClock(

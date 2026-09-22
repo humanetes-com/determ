@@ -30,7 +30,7 @@ from pipeline_core.domain.type_refs import (
     hidden_symbols_from_types,
     types_referenced_in_text,
 )
-from pipeline_core.prompts.sections import format_type_for_prompt
+from pipeline_core.prompts.sections import format_type_for_prompt, join_type_blocks
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,10 +108,19 @@ class FixContextAssembler:
         # already reads in the file text. Under the char cap that is the
         # difference between `Backtrace`/`BacktraceStatus` reaching a
         # `src/error.rs` prompt and being cut behind `ErrorVTable`.
+        # A type declared in this file whose trait impls live in ANOTHER file
+        # is not fully shown by the file text either: the impl headers are
+        # the part the model cannot see, and they decide which bounds the
+        # type satisfies (run `450977-5f48b68a`, 2026-09-21: the fill could
+        # not see `impl<C> StdError for ContextError<C, Error>` in another
+        # file and bet it was "omitted").
         def _not_shown_elsewhere(rec: TypeRecord) -> int:
             if getattr(rec, "external_path", ""):
                 return 0
-            return 1 if (file_rel and rec.file and rec.file == file_rel) else 0
+            if not (file_rel and rec.file and rec.file == file_rel):
+                return 0
+            impls = getattr(rec, "trait_impls", None) or ()
+            return 0 if any(t.file and t.file != file_rel for t in impls) else 1
 
         head = sorted(types_referenced_in_text(
             "\n".join([sig_text or "", container or "", impl_where or ""]),
@@ -123,14 +132,16 @@ class FixContextAssembler:
              if r.name not in head_names),
             key=_not_shown_elsewhere)
         recs = (head + rest)[:self.budgets.types_count]
-        full = "\n\n".join(
-            format_type_for_prompt(r, observables, viewer_file=file_rel)
-            for r in recs)
-        if len(full) > self.budgets.types_section:  # Plan 9 F5: surface starvation
+        blocks = [format_type_for_prompt(r, observables, viewer_file=file_rel)
+                  for r in recs]
+        full = "\n\n".join(blocks)
+        if len(full) > self.budgets.types_section:  # surface starvation
             self.guard("phase-c/types_truncated",
                        f"{(container or sig_text)[:50]}: type context {len(full):,} > "
                        f"cap {self.budgets.types_section:,} ({len(recs)} types)")
-        return full[:self.budgets.types_section]
+        # Whole records only: a record's trait-impl list is printed as
+        # complete, and a mid-record cut would make it lie.
+        return join_type_blocks(blocks, self.budgets.types_section)
 
     def bound_methods_section_for(
         self, impl_where: str, type_records: list[TypeRecord],

@@ -69,6 +69,8 @@ def _env_block() -> dict[str, Any]:
         "VLLM_REASONING_STRENGTH": os.getenv("VLLM_REASONING_STRENGTH", "high"),
         "VLLM_MAX_MODEL_LEN": int(os.getenv("VLLM_MAX_MODEL_LEN", "0")) or None,
         "VLLM_MAX_THINK_CHARS": int(os.getenv("VLLM_MAX_THINK_CHARS", "60000")),
+        "VLLM_REASONING_BUDGET": os.getenv("VLLM_REASONING_BUDGET", "fixed"),
+        "VLLM_THINKING_BUDGET": int(os.getenv("VLLM_THINKING_BUDGET", "0")) or None,
         "PIPELINE_PARALLELISM": int(os.getenv("PIPELINE_PARALLELISM", "0")) or None,
     }
 

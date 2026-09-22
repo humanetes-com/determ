@@ -42,7 +42,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.application.reconstruct.tree_txn import guard_tree_boundary
-from pipeline_core.domain import fill_phase_clock
+from pipeline_core.domain import fill_phase_clock, reasoning_cap
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureFrontier,
@@ -646,6 +646,23 @@ def _read_max_sessions_per_fill() -> int:
         return 0
 
 
+def _read_session_min_turns() -> int:
+    """`SLICE_SESSION_MIN_TURNS`, default 3; 0 disables the floor.
+
+    Read once at cluster entry like the other fill knobs. NOT a stop: a
+    session's share is floored at this many turns priced at its measured
+    turn cost, taken from the fill budget before the weighted split. Sized
+    on run `450977-5f48b68a` (2026-09-21): 31 of 41 share-stopped sessions
+    on record ended after at most 2 of 8 turns, so the diagnostic loop the
+    route exists for (compile → diagnostics → next turn) never ran. A
+    garbage value keeps the default."""
+    raw = os.getenv("SLICE_SESSION_MIN_TURNS", "3").strip() or "3"
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 3
+
+
 def _read_fill_budget_minutes() -> float:
     """`TDD_FILL_BUDGET_MINUTES`, 0 on unset or garbage."""
     raw = os.getenv("TDD_FILL_BUDGET_MINUTES", "0")
@@ -756,6 +773,7 @@ def run_phase_c_tdd(
     # order only (no shares, nothing deferred). Read once, like the stops.
     _fill_budget = _read_fill_budget_minutes()
     _max_sessions = _read_max_sessions_per_fill()
+    _session_min_turns = _read_session_min_turns()
     # Re-plan on a moved premise (`fill_scheduler._GroundGate`): a fill ends
     # at the first claim after a keep that changed which tests fail or where
     # they first fail, and the next sweep plans from the tree as it stands.
@@ -763,6 +781,16 @@ def run_phase_c_tdd(
     # `0` runs every fill's plan to its end (the frozen-plan negative
     # control). Read once, like the stops.
     _replan_on_premise = os.getenv("PHASE_C_REPLAN_ON_PREMISE", "1") != "0"
+    # The run-level LLM cut stop (`reasoning_cap.CutRate`): the share of the
+    # process's last calls that returned no decided answer. Counts CALLS, not
+    # iterations, so it can fire mid-fill of iteration 1; the reading it
+    # prevents is a run whose calls are cut, which measures the budget, not
+    # reconstruction. Read once, like the stops; `LLM_CUT_STOP_SHARE=0`
+    # disables the stop and keeps the `[llm/health]` line.
+    _cut_knobs = reasoning_cap.cut_stop_knobs_from_env()
+    reasoning_cap.arm_cut_stop(
+        _cut_knobs, log=deps.log, emit=deps.emit,
+        context={"cluster": cluster.name})
 
     def _premise_of_capture(capture: str) -> dict[str, PremiseEntry]:
         """The ground a capture shows (`test_outcome.premise_of`), crate
@@ -858,9 +886,11 @@ def run_phase_c_tdd(
             if _fill_phase_max > 0 else ", fill-phase-stop=off")
          + (f", sessions-per-fill={_max_sessions}"
             if _max_sessions > 0 else ", sessions-per-fill=unbounded")
+         + f", session-min-turns={_session_min_turns}"
          + f", language-driver={language_driver().name}"
          + f", followup-think={'on' if followup_think_env_on() else 'off'}"
-         + f", replan-on-premise={'on' if _replan_on_premise else 'off'}")
+         + f", replan-on-premise={'on' if _replan_on_premise else 'off'}"
+         + f", {_cut_knobs.describe()}")
 
     if deps.migrate_retro_evidence is not None:
         _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
@@ -4709,6 +4739,11 @@ def run_phase_c_tdd(
                 "measured": sorted(_cov.owners),
                 "owners": {t: [site_payload(k) for k in sorted(ks)]
                            for t, ks in sorted(_owners_read.items())},
+                # What each failing test ran only while its failure was
+                # being reported (after the premise cut) — evidence the
+                # census reads, never ownership.
+                "rendered": {t: [site_payload(k) for k in sorted(ks)]
+                             for t, ks in sorted(_cov.rendered.items())},
                 "unmeasured": sorted(_cov.unmeasured_tests),
                 "unmeasured_binaries": sorted(_cov.unmeasured_binaries),
                 "recorded_owners": {
@@ -5512,6 +5547,20 @@ def run_phase_c_tdd(
              f"{skipped_perm} skipped as exhausted; "
              f"unowned={len(_unowned)}; "
              f"dispatching {_batch.rendered}.{_cls_bit}")
+        # The run-level cut rate on screen from iteration 1, so the class is
+        # read here instead of found by hand days later.
+        _health = reasoning_cap.health_reading()
+        if _health is not None:
+            deps.log(f"  {tag} [llm/health] iter {iter_n}: "
+                     f"{_health.describe()}; {_cut_knobs.describe()}; "
+                     f"VLLM_REASONING_BUDGET="
+                     f"{os.getenv('VLLM_REASONING_BUDGET', 'fixed')} "
+                     f"VLLM_THINKING_BUDGET="
+                     f"{os.getenv('VLLM_THINKING_BUDGET', '')} "
+                     f"VLLM_MAX_THINK_CHARS="
+                     f"{os.getenv('VLLM_MAX_THINK_CHARS', '')} "
+                     f"VLLM_CONTENT_BUDGET="
+                     f"{os.getenv('VLLM_CONTENT_BUDGET', '')}")
         # The ordered frontier this iteration walked, as one digest. It is a
         # DIAGNOSTIC and never a gate: a hash of the population cannot decide
         # whether a carried cursor is valid, because the population moves for
@@ -5806,6 +5855,7 @@ def run_phase_c_tdd(
                     fill_iteration=iter_n,
                     run_id=deps.run_id,
                     max_sessions_per_fill=_max_sessions,
+                    session_min_turns=_session_min_turns,
                     leaf_name_counts=leaf_counts,
                     fr_path=fr_path,
                     tdd_frontier_keys=frontier_keys,

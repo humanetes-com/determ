@@ -23,11 +23,15 @@ not the reading this exists to take.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+import os
+import threading
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
+
+from pipeline_core.domain.fill_context import current_route
 
 _active: list[dict[str, Any]] | None = None
 
@@ -54,6 +58,16 @@ _units_var: ContextVar[tuple[str, ...]] = ContextVar(
 _KIND = "kind"
 _FOLLOWUP = "followup"
 
+# Calls that serve the pipeline's own records rather than a fill or a
+# diagnosis — the self-note extractor is the one on record. Its ladder asks
+# twice on an empty first reply by design (`extract_self_note`), so its
+# empties are the ladder working, not the budget failing, and admitting them
+# would let the run-level cut rate (`CutRate`) read the notes store's
+# declines as a starved model. Bound by the caller around its ask; the
+# health fold skips rows recorded inside.
+_bookkeeping_var: ContextVar[bool] = ContextVar(
+    "reasoning_cap_bookkeeping", default=False)
+
 
 def is_reasoning_capped(meta: Mapping[str, Any]) -> bool:
     """A reply that ended because thinking ran out, not because the model
@@ -66,6 +80,106 @@ def is_reasoning_capped(meta: Mapping[str, Any]) -> bool:
 
 def _is_followup_row(row: Mapping[str, Any]) -> bool:
     return str(row.get(_KIND) or "") == _FOLLOWUP
+
+
+def is_cut(meta: Mapping[str, Any]) -> bool:
+    """A main-stream call that returned no decided answer: reasoning ran out
+    (:func:`is_reasoning_capped`, which includes the forced followup that
+    fires on an empty main reply) or the reply on record is empty.
+
+    `stop == "closed"` with no `finish_reason` is the StopDetector ending a
+    FINISHED structure early and is not a cut — 83 such rows on record, all
+    with content (events.jsonl through 2026-09-21)."""
+    return is_reasoning_capped(meta) or int(meta.get("content_chars") or 0) == 0
+
+
+@contextmanager
+def bookkeeping_call() -> Iterator[None]:
+    """Mark the enclosed model call(s) as the pipeline's own bookkeeping, so
+    the run-level cut rate does not count them (see `_bookkeeping_var`)."""
+    token = _bookkeeping_var.set(True)
+    try:
+        yield
+    finally:
+        _bookkeeping_var.reset(token)
+
+
+@dataclass(frozen=True, slots=True)
+class CallMark:
+    """One main-stream call as the cut rate sees it."""
+
+    route: str            # fill route kind bound around the call, "" outside a route
+    cut: bool             # :func:`is_cut`
+    empty: bool           # the reply on record is empty
+    prompt_tokens: int    # the server's prompt count (0 when not reported)
+
+
+@dataclass(frozen=True, slots=True)
+class CutRate:
+    """The share of the last `window` main-stream calls that returned no
+    decided answer, and whether it has reached `share_pct`.
+
+    Why a run-level fold exists at all: the per-call grade (a capped reply
+    is UNMEASURED, not FLAT) is correct and is exactly what hides the rate —
+    every capped call is quietly re-bought. Computed on events.jsonl
+    2026-08-10 → 2026-09-21: 12,002 calls, 1,810 cut (15.1%); 132/506 on
+    08-13 under a half-sized thinking budget, 3/117 on 08-27 after it was
+    doubled, back to 18/115 on 09-21 as prompts grew. Each time the finding
+    took sessions. A reading of a run whose calls are that cut measures the
+    budget, not reconstruction.
+
+    `share_pct <= 0` never fires. No verdict before `min_calls` calls; after
+    that the share is over the last `min(calls, window)`. Pure: `add`
+    returns a new value, so the fold replays over recorded rows unchanged."""
+
+    window: int
+    share_pct: float
+    min_calls: int
+    marks: tuple[CallMark, ...] = ()
+    seen: int = 0
+
+    def add(self, mark: CallMark) -> CutRate:
+        keep = max(1, self.window)
+        return CutRate(self.window, self.share_pct, self.min_calls,
+                       (*self.marks, mark)[-keep:], self.seen + 1)
+
+    @property
+    def cut(self) -> int:
+        return sum(1 for m in self.marks if m.cut)
+
+    @property
+    def share(self) -> float:
+        return 100.0 * self.cut / len(self.marks) if self.marks else 0.0
+
+    @property
+    def fired(self) -> bool:
+        return (self.share_pct > 0 and self.seen >= self.min_calls
+                and bool(self.marks) and self.share >= self.share_pct)
+
+    def by_route(self) -> dict[str, tuple[int, int]]:
+        """route -> (cut, calls) over the window; "" is reported as "other"."""
+        out: dict[str, tuple[int, int]] = {}
+        for m in self.marks:
+            key = m.route or "other"
+            c, n = out.get(key, (0, 0))
+            out[key] = (c + int(m.cut), n + 1)
+        return out
+
+    def describe(self) -> str:
+        """The breakdown every health line and the stop print."""
+        routes = ", ".join(f"{r} {c}/{n}" for r, (c, n)
+                           in sorted(self.by_route().items()))
+        empty = sum(1 for m in self.marks if m.empty)
+        largest = max((m.prompt_tokens for m in self.marks), default=0)
+        return (f"calls={len(self.marks)} (of {self.seen} seen) "
+                f"cut={self.cut} empty={empty} share={self.share:.1f}% "
+                f"[{routes or 'none'}] largest-prompt={largest} tok")
+
+
+def mark_of(meta: Mapping[str, Any], route: str) -> CallMark:
+    return CallMark(route=route, cut=is_cut(meta),
+                    empty=int(meta.get("content_chars") or 0) == 0,
+                    prompt_tokens=int(meta.get("prompt_tokens") or 0))
 
 
 def summarize_capped(rows: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
@@ -228,10 +342,15 @@ def read_call(rows: Sequence[Mapping[str, Any]]) -> CallCapReading | None:
 
 
 def record_stream_meta(data: Mapping[str, Any]) -> None:
-    """No-op outside :func:`collect_stream_meta`. Append-only; CPython
-    `list.append` is atomic, so a worker-thread fill records into the same
-    window the iteration opened."""
+    """Append to the fill window and observers (no-op outside them) and
+    fold into the process's run-level cut rate (`llm_health`), which is
+    idle until the TDD driver arms it. Every main-stream row the controller
+    writes passes here, so no route can reach the model without being
+    counted. Append-only; CPython `list.append` is atomic, so a
+    worker-thread fill records into the same window the iteration opened."""
     _record(data)
+    if not _bookkeeping_var.get():
+        _observe_health(mark_of(data, current_route()[0]))
 
 
 def record_followup_meta(data: Mapping[str, Any]) -> None:
@@ -304,3 +423,147 @@ def collect_stream_meta() -> Iterator[list[dict[str, Any]]]:
         yield rows
     finally:
         _active = prev
+
+
+# -- the run-level cut stop ------------------------------------------------
+#
+# One fold per process. Idle (`_health is None`) until the TDD driver arms it
+# at cluster entry with knobs read once, like every other stop; every
+# main-stream row folds into it from `record_stream_meta`, so no route can
+# reach the model uncounted and no route reads it — the only consumers are
+# the stop and the `[llm/health]` line. On the first fired fold it logs
+# `HEALTH ‼ LLM_CUT_STOP`, emits `llm.cut_rate_stop`, and leaves a pending
+# trip that `graceful_stop.check_graceful_stop` polls (the FILL_PHASE_STOP
+# path: the next unit boundary exits cleanly, no sentinel file left behind).
+# This module does not import `graceful_stop` (it imports this one).
+
+_health_lock = threading.Lock()
+_health: CutRate | None = None
+_health_log: Callable[[str], None] | None = None
+_health_emit: Callable[..., None] | None = None
+_health_meta: dict[str, Any] = {}
+_health_tripped = False
+_health_pending = False
+
+
+@dataclass(frozen=True, slots=True)
+class CutStopKnobs:
+    """`LLM_CUT_STOP_SHARE` (percent, 0 disables), `LLM_CUT_STOP_WINDOW`,
+    `LLM_CUT_STOP_MIN_CALLS`. Decided 2026-09-21: 4% is the level of the
+    fixed-budget regime right after 2026-08-27 (08-27..08-29: 14 of 772,
+    1.8%); anything above it is a defect to fix. The minimum exists because a
+    run makes ~10 calls an hour (run `450977-5f48b68a`: 27 in 2.5 h), so a
+    100-call window alone would rarely fill; at 25 calls one cut stops the
+    run, which is the intent."""
+
+    share_pct: float = 4.0
+    window: int = 100
+    min_calls: int = 25
+
+    @property
+    def enabled(self) -> bool:
+        return self.share_pct > 0
+
+    def describe(self) -> str:
+        if not self.enabled:
+            return "cut-stop=off"
+        return (f"cut-stop={self.share_pct:g}%/{self.window} "
+                f"(min {self.min_calls})")
+
+
+def cut_stop_knobs_from_env() -> CutStopKnobs:
+    """The three knobs; a garbage value falls back to its default rather
+    than disabling the stop, so a typo cannot silently remove it."""
+    d = CutStopKnobs()
+
+    def _num(key: str, default: float) -> float:
+        raw = os.getenv(key, "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+
+    return CutStopKnobs(
+        share_pct=max(0.0, _num("LLM_CUT_STOP_SHARE", d.share_pct)),
+        window=max(1, int(_num("LLM_CUT_STOP_WINDOW", d.window))),
+        min_calls=max(1, int(_num("LLM_CUT_STOP_MIN_CALLS", d.min_calls))))
+
+
+def arm_cut_stop(knobs: CutStopKnobs, *,
+                 log: Callable[[str], None] | None = None,
+                 emit: Callable[..., None] | None = None,
+                 context: Mapping[str, Any] | None = None) -> None:
+    """Arm (or re-arm, at the next cluster's entry) the process's cut stop.
+    Calls already folded are kept: the window is the process's last calls,
+    not the cluster's. A disabled knob still folds, so the health line
+    reports the rate with the stop off."""
+    global _health, _health_log, _health_emit, _health_meta
+    with _health_lock:
+        marks = _health.marks if _health is not None else ()
+        seen = _health.seen if _health is not None else 0
+        _health = CutRate(knobs.window, knobs.share_pct, knobs.min_calls,
+                          marks[-max(1, knobs.window):], seen)
+        _health_log = log
+        _health_emit = emit
+        _health_meta = {**(context or {}), "share_pct": knobs.share_pct,
+                        "window": knobs.window, "min_calls": knobs.min_calls}
+
+
+def _observe_health(mark: CallMark) -> None:
+    global _health, _health_tripped, _health_pending
+    with _health_lock:
+        if _health is None:
+            return
+        _health = _health.add(mark)
+        if _health_tripped or not _health.fired:
+            return
+        _health_tripped = True
+        _health_pending = True
+        reading = _health
+        log, emit, meta = _health_log, _health_emit, dict(_health_meta)
+    line = (f"  HEALTH ‼ LLM_CUT_STOP {reading.describe()} reached "
+            f"LLM_CUT_STOP_SHARE={reading.share_pct:g}% — the run's model "
+            "calls are being cut; stopping at the next unit boundary. Fix the "
+            "budget (or the prompt size) and `bash continue.sh` resumes.")
+    if log is not None:
+        log(line)
+    if emit is not None:
+        emit("llm.cut_rate_stop", data={
+            **meta, "calls": len(reading.marks), "seen": reading.seen,
+            "cut": reading.cut, "share": round(reading.share, 2),
+            "by_route": {r: {"cut": c, "calls": n}
+                         for r, (c, n) in reading.by_route().items()}})
+
+
+def cut_stop_poll() -> bool:
+    """True once, on the first poll after the stop fired; the caller
+    (`check_graceful_stop`) then takes the process-wide stop event."""
+    global _health_pending
+    with _health_lock:
+        if not _health_pending:
+            return False
+        _health_pending = False
+        return True
+
+
+def cut_stop_tripped() -> bool:
+    with _health_lock:
+        return _health_tripped
+
+
+def health_reading() -> CutRate | None:
+    """The fold as it stands; None while unarmed."""
+    with _health_lock:
+        return _health
+
+
+def reset_cut_stop_for_tests() -> None:
+    global _health, _health_log, _health_emit, _health_meta
+    global _health_tripped, _health_pending
+    with _health_lock:
+        _health = None
+        _health_log = _health_emit = None
+        _health_meta = {}
+        _health_tripped = _health_pending = False

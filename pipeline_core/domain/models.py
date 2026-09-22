@@ -154,6 +154,36 @@ class MethodRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class TraitImplRecord:
+    """One `impl Trait for <type>` header the crate declares (model.rs
+    TraitImplRecord). Header text only — the line the skeleton keeps after
+    strip — never a body."""
+    header: str = ""         # `impl<C> StdError for ContextError<C, Error> where C: Display`
+    trait_path: str = ""     # `StdError`, `ext::StdError`, `!Send`, `From<E>`
+    self_ty: str = ""        # as written, generic arguments included
+    generics: str = ""
+    where_clause: str = ""
+    file: str = ""
+    mod_path: str = ""
+    cfg_predicates: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TraitImplRecord:
+        return cls(header=d.get("header", ""), trait_path=d.get("trait_path", ""),
+                   self_ty=d.get("self_ty", ""), generics=d.get("generics", ""),
+                   where_clause=d.get("where_clause", ""), file=d.get("file", ""),
+                   mod_path=d.get("mod_path", ""),
+                   cfg_predicates=_strs(d.get("cfg_predicates")))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"header": self.header, "trait_path": self.trait_path,
+                "self_ty": self.self_ty, "generics": self.generics,
+                "where_clause": self.where_clause, "file": self.file,
+                "mod_path": self.mod_path,
+                "cfg_predicates": list(self.cfg_predicates)}
+
+
+@dataclass(frozen=True, slots=True)
 class TypeRecord:
     """A struct / enum / type-alias / trait definition (model.rs TypeRecord)."""
     file: str = ""
@@ -197,6 +227,13 @@ class TypeRecord:
     # `methods` holds inherent methods only, and whether a std type prints
     # through Display or Debug is exactly what a formatter fill has to know.
     external_trait_impls: tuple[str, ...] = ()
+    # Every `impl Trait for <this crate type>` header in the crate, any file
+    # (extractor `TypeRecord.trait_impls`). None = the record came from an
+    # extractor build without the field (or was hand-made): the renderer then
+    # prints no list, because the list's whole point is that it is COMPLETE —
+    # a partial one read as complete would assert an impl is absent when it
+    # is not. An empty tuple is a real reading: this type implements nothing.
+    trait_impls: tuple[TraitImplRecord, ...] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TypeRecord:
@@ -214,6 +251,8 @@ class TypeRecord:
             mod_path=d.get("mod_path", ""),
             external_path=d.get("external_path", ""),
             external_trait_impls=_strs(d.get("external_trait_impls")),
+            trait_impls=(None if d.get("trait_impls") is None else tuple(
+                TraitImplRecord.from_dict(t) for t in d["trait_impls"])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -229,6 +268,8 @@ class TypeRecord:
             "is_pub": self.is_pub,
             "is_exactly_pub": self.is_exactly_pub,
             "mod_path": self.mod_path,
+            **({"trait_impls": [t.to_dict() for t in self.trait_impls]}
+               if self.trait_impls is not None else {}),
             # Only an external record carries these keys: the Rust side never
             # emits them, so a crate record round-trips to the exact wire shape.
             **({"external_path": self.external_path,

@@ -73,6 +73,34 @@ pub struct TypeRecord {
     // StdError }`). Empty is file scope. A nonempty path is a private-mod
     // wall: the name is not resolvable from another file.
     pub mod_path: String,
+    // Every `impl Trait for <this type>` header in the crate, from any file,
+    // including partially specialised ones (`impl<C> StdError for
+    // ContextError<C, Error>`). Headers only — the line the skeleton keeps
+    // after strip, never a body. Without it the type section listed a crate
+    // type's fields and methods and no trait impls while the same section's
+    // external types did carry theirs, so a fill that needed "does this crate
+    // type satisfy this bound" could not reason from absence: run
+    // `450977-5f48b68a` (2026-09-21) asked about one impl 14 times in one
+    // trace, concluded 9 times it was "omitted from the snippet", and
+    // emitted the E0277 body for the fourth run running.
+    pub trait_impls: Vec<TraitImplRecord>,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct TraitImplRecord {
+    // The header on one line, as the skeleton prints it, without the body:
+    // `impl<C> StdError for ContextError<C, Error> where C: Display`.
+    pub header: String,
+    pub trait_path: String, // `StdError`, `!Send`, `From<E>`
+    pub self_ty: String,    // as written, with generic arguments
+    pub generics: String,   // `<C>` or ""
+    pub where_clause: String,
+    pub file: String,
+    pub mod_path: String,
+    // The impl block's own cfg predicates, so a cluster-aware renderer can
+    // drop an impl its cfg world does not compile — the same shape
+    // `MethodRecord::cfg_predicates` carries.
+    pub cfg_predicates: Vec<String>,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]

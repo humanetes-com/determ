@@ -101,8 +101,8 @@ def cluster_filter_type_members(
 ) -> list[TypeRecord]:
     """Drop what `cluster` does not compile so TYPES_IN_SCOPE advertises only
     what exists here: a METHOD whose cfg evaluates definitively
-    False, a FIELD whose effective cfg does, and a whole TYPE RECORD whose own
-    leading cfg does. Undecidable predicates are kept (conservative).
+    False, a FIELD whose effective cfg does, a TRAIT IMPL whose impl-block cfg
+    does, and a whole TYPE RECORD whose own leading cfg does. Undecidable predicates are kept (conservative).
     `cluster is None` → unchanged.
 
     Fields are the member kind this filter did not reach until 2026-09-07.
@@ -163,8 +163,16 @@ def cluster_filter_type_members(
             f for f in r.fields
             if not any(cfg_set.evaluate(p) is False for p in f.cfg_predicates)
         )
-        if len(kept) != len(r.methods) or len(kept_fields) != len(r.fields):
-            out.append(dataclasses.replace(r, methods=kept, fields=kept_fields))
+        # A trait impl the cluster does not compile is not an impl here: the
+        # list renders as complete, so an impl the cfg world drops must leave
+        # it, exactly as a dropped field leaves the `construct:` hint.
+        kept_impls = (None if r.trait_impls is None else tuple(
+            t for t in r.trait_impls
+            if not any(cfg_set.evaluate(p) is False for p in t.cfg_predicates)))
+        if (len(kept) != len(r.methods) or len(kept_fields) != len(r.fields)
+                or kept_impls != r.trait_impls):
+            out.append(dataclasses.replace(r, methods=kept, fields=kept_fields,
+                                           trait_impls=kept_impls))
         else:
             out.append(r)
     return out

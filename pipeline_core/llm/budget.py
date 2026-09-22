@@ -11,6 +11,25 @@ learned chars-per-token) into the request's ``max_tokens`` consistently:
 ``content_budget`` only overrides the caller's value when the caller used the global
 default sentinel (a mis-derived cap); a deliberate per-call bound is honored as-is,
 because thinking is a *separate* reserve and never eats the caller's content room.
+
+Two reasoning-budget shapes (``BudgetSpec.per_call_reasoning``):
+
+- fixed: every thinking call gets the same ``thinking_budget`` reserve and the
+  transport's ``thinking_char_cap`` breaks the stream at a fixed reasoning length.
+- per call: the request gets the whole room its own prompt leaves,
+
+    request_max = ctx - input - margin      (content keeps ``content_cap`` of it)
+
+  and no character cap: a call is cut only when prompt + reasoning fill the
+  context, which is a runaway, not a long healthy call. Why: on 2026-09-21 the
+  file/impl/pair route's healthy reasoning ran p50 73,962 / p90 109,726 / max
+  119,973 chars against a fixed 120,000 cap (14% of 383 calls cut), and the
+  cut prompts re-asked with no cap finished naturally at 93,740–159,457 chars
+  (scripts/measure_capped_uncapped.py). A fixed cap small enough to leave the
+  largest prompt its room cuts the small prompts' healthy calls; a fixed cap
+  large enough for them shrinks every prompt, because the planner reserves
+  ``thinking_budget`` out of prompt space. In per-call mode ``thinking_budget``
+  is only that planner reserve — the floor the LARGEST prompt still gets.
 """
 
 from __future__ import annotations
@@ -30,6 +49,7 @@ class BudgetSpec:
     cap_by_ctx: bool                  # apply the ctx-budget safe() cap (False ⇒ pass content as-is)
     send_max_tokens: bool             # send max_tokens at all (False ⇒ let the server decide, Ollama-native)
     thinking_char_cap: int | None     # mid-stream reasoning char cap before forced followup (None ⇒ none)
+    per_call_reasoning: bool = False  # reasoning gets the room the prompt leaves, no char cap (see module doc)
 
 
 @dataclass(slots=True)
@@ -54,6 +74,10 @@ class Plan:
     est_input_tokens: int
     content_cap: int
     thinking_reserve: int
+    # The mid-stream reasoning cap THIS call is consumed under. The controller
+    # reads it from the plan, never from the spec, so a per-call plan cannot be
+    # streamed under the fixed cap.
+    thinking_char_cap: int | None = None
 
 
 def request_max_tokens(
@@ -68,19 +92,31 @@ def request_max_tokens(
     """Compute the request's max_tokens (and the pieces the controller reuses)."""
     cpt_eff = max(spec.cpt_floor, state.cpt)
     est_input = max(1, int(input_chars / cpt_eff))
-    thinking_reserve = spec.thinking_budget if (spec.add_thinking_to_request and enable_thinking) else 0
-
     # content_budget overrides ONLY the mis-derived global default; explicit bounds stay.
     if spec.content_budget and caller_max_tokens == default_sentinel:
         content_cap = spec.content_budget
     else:
         content_cap = caller_max_tokens
+    return plan_for_input(spec, input_tokens=est_input, content_cap=content_cap,
+                          enable_thinking=enable_thinking)
 
+
+def plan_for_input(spec: BudgetSpec, *, input_tokens: int, content_cap: int,
+                   enable_thinking: bool) -> Plan:
+    """The plan for a request whose input is `input_tokens` (an estimate, or the
+    server's padded count on a retry). The one place both reasoning shapes are
+    decided, so the first request and the retry after a 400 cannot disagree."""
+    thinking = spec.add_thinking_to_request and enable_thinking
+    if spec.per_call_reasoning and thinking and spec.send_max_tokens:
+        room = max(512, spec.ctx_len - input_tokens - spec.margin)
+        content = min(content_cap, room)
+        return Plan(room, input_tokens, content, room - content, None)
+    thinking_reserve = spec.thinking_budget if thinking else 0
     if not spec.send_max_tokens:
-        return Plan(None, est_input, content_cap, thinking_reserve)
-
+        return Plan(None, input_tokens, content_cap, thinking_reserve,
+                    spec.thinking_char_cap)
     if spec.cap_by_ctx:
-        safe = max(512, spec.ctx_len - est_input - thinking_reserve - spec.margin)
+        safe = max(512, spec.ctx_len - input_tokens - thinking_reserve - spec.margin)
         content_cap = min(content_cap, safe)
-
-    return Plan(content_cap + thinking_reserve, est_input, content_cap, thinking_reserve)
+    return Plan(content_cap + thinking_reserve, input_tokens, content_cap,
+                thinking_reserve, spec.thinking_char_cap)

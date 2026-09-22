@@ -271,13 +271,46 @@ _MAX_THINK_CHARS  = int(os.getenv("OLLAMA_MAX_THINK_CHARS", "40000"))
 # 120,000 sits above every healthy call observed in both measured cells (max
 # 77,595) and below the smallest recorded runaway (121,109), consistent with the
 # 32,768-token request ceiling. `.env` still overrides.
+#
+# The band above is REFUTED (2026-09-21) and so is the premise that a fixed
+# character value can separate healthy calls from runaways. Its high edge was
+# never a runaway population: the four traces are 121,109–124,043 chars at
+# `max_tokens=32768`, i.e. 3.70–3.79 chars per token — every one of them is the
+# REQUEST CEILING, a call that ran out of tokens, not one that would not stop.
+# Re-asked with the room the context allows (scripts/measure_capped_uncapped.py
+# over the cut file-route prompts of runs 450977-5f48b68a, 195091-72b92f1e and
+# 3400-4d0618ba), calls that had been cut at 120,000 finished on their own at
+# 93,740–159,457 chars with a body; on the live route the healthy distribution
+# reached p50 73,962 / max 119,973 over 383 calls, 14% cut. There is no empty
+# band to sit in. `VLLM_REASONING_BUDGET=per_call` (`llm/budget.py`) removes the
+# character cap and gives each call the context its prompt leaves; this value
+# is only the `fixed` shape's cap.
 _VLLM_MAX_THINK_CHARS = int(os.getenv("VLLM_MAX_THINK_CHARS", "120000"))
 
-# The measured empty band, kept next to the value so a future change to
-# `_VLLM_MAX_THINK_CHARS` can be checked against the evidence that sized it
-# rather than against a remembered number. `tests/test_think_cap.py` asserts the
-# default lies inside it.
-VLLM_THINK_EMPTY_BAND: tuple[int, int] = (77_595, 121_109)
+# The recorded evidence both claims rest on, kept next to the value so the next
+# change is checked against it rather than against a remembered number.
+# Truncations at the 32,768-token ceiling (run 491052-1af6b4f4, 2026-08-08):
+VLLM_CEILING_TRUNCATIONS_CHARS: tuple[int, ...] = (121_481, 121_109, 121_432, 124_043)
+VLLM_CEILING_TRUNCATIONS_MAX_TOKENS = 32_768
+# Natural finishes of prompts that the 120,000 cap had cut (2026-09-21):
+VLLM_UNCAPPED_NATURAL_FINISHES_CHARS: tuple[int, ...] = (
+    155_176, 96_368, 93_740, 127_950, 101_209, 140_765, 159_457)
+
+
+def reasoning_budget_is_per_call(value: str) -> bool:
+    """`VLLM_REASONING_BUDGET` → True for `per_call`, False for `fixed`.
+
+    Anything else raises: a typo silently falling back to `fixed` would put the
+    run back under the character cap the operator meant to remove, and the
+    only symptom is the cut rate the knob was set to end."""
+    v = value.strip().lower()
+    if v in ("per_call", "per-call"):
+        return True
+    if v in ("fixed", ""):
+        return False
+    raise ValueError(
+        f"VLLM_REASONING_BUDGET={value!r}: expected 'fixed' or 'per_call'")
+
 
 
 _GUARD_LOG = os.getenv("PIPELINE_GUARD_LOG", os.path.join(_LOG_DIR, "pipeline_guards.log"))
@@ -731,7 +764,15 @@ class VLLMTransport(_BaseTransport):
 
     Environment variables:
       VLLM_BASE_URL, VLLM_MODEL_NAME, VLLM_MAX_MODEL_LEN, VLLM_THINKING_BUDGET,
-      VLLM_CONTENT_BUDGET, VLLM_REPETITION_PENALTY
+      VLLM_CONTENT_BUDGET, VLLM_REPETITION_PENALTY, VLLM_REASONING_BUDGET,
+      VLLM_MAX_THINK_CHARS
+
+    VLLM_REASONING_BUDGET selects the reasoning shape (`llm/budget.py`):
+    `fixed` (the default) reserves VLLM_THINKING_BUDGET tokens per call and
+    breaks the stream at VLLM_MAX_THINK_CHARS; `per_call` gives each thinking
+    call the whole context its prompt leaves and no character cap, and
+    VLLM_THINKING_BUDGET is then only the planner's reserve — the floor the
+    largest prompt still gets (`settings.safe_input_char_limit`).
     """
 
     supports_followup = True
@@ -745,6 +786,8 @@ class VLLMTransport(_BaseTransport):
         self._thinking_budget = int(os.getenv("VLLM_THINKING_BUDGET", "16384"))
         self._content_budget = int(os.getenv("VLLM_CONTENT_BUDGET", "16384"))
         self._rep_penalty = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
+        self._per_call_reasoning = reasoning_budget_is_per_call(
+            os.getenv("VLLM_REASONING_BUDGET", "fixed"))
 
     def spec(self) -> BudgetSpec:
         return BudgetSpec(
@@ -752,6 +795,7 @@ class VLLMTransport(_BaseTransport):
             thinking_budget=self._thinking_budget, margin=512, cpt_floor=3.0,
             adaptive_cpt=True, add_thinking_to_request=True, cap_by_ctx=True,
             send_max_tokens=True, thinking_char_cap=_VLLM_MAX_THINK_CHARS,
+            per_call_reasoning=self._per_call_reasoning,
         )
 
     def resolve_thinking(self, model: str, want_think: bool | None) -> bool:

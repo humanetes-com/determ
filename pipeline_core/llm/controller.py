@@ -19,14 +19,14 @@ again reintroduce a private cap or a missing followup.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pipeline_core.domain.llm_output import salvage_complete_blocks
 from pipeline_core.domain.reasoning_cap import record_followup_meta, record_stream_meta
 from pipeline_core.domain.text import PromptDigest, turns_digest_text
 
-from .budget import BudgetSpec, BudgetState, Plan, request_max_tokens
+from .budget import BudgetSpec, BudgetState, Plan, plan_for_input, request_max_tokens
 from .detect import StopDetector
 from .events import (
     Delta,
@@ -262,7 +262,7 @@ class LLMController:
                     transport.stream(messages, model=model, max_tokens=plan.request_max,
                                      enable_thinking=enable_thinking, meta=meta,
                                      temperature=temperature),
-                    spec.thinking_char_cap, model,
+                    plan.thinking_char_cap, model,
                 )
                 break
             except TransportTimeout as exc:
@@ -379,6 +379,7 @@ class LLMController:
             "stop": cap.stop,
             "followup": bool(followup),
             "request_max": plan.request_max,
+            "think_char_cap": plan.thinking_char_cap,
             "enable_thinking": enable_thinking,
         })
         record_stream_meta({
@@ -391,6 +392,7 @@ class LLMController:
             "stop": cap.stop,
             "followup": bool(followup),
             "request_max": plan.request_max,
+            "think_char_cap": plan.thinking_char_cap,
             "enable_thinking": enable_thinking,
         })
 
@@ -478,7 +480,7 @@ class LLMController:
                 cap = self._consume(
                     transport.stream(fu_messages, model=model, max_tokens=fu_plan.request_max,
                                      enable_thinking=followup_think, meta=meta),
-                    spec.thinking_char_cap if followup_think else None, model,
+                    fu_plan.thinking_char_cap if followup_think else None, model,
                 )
                 break
             except (TransportTimeout, TransportUnavailable) as exc:
@@ -573,12 +575,11 @@ class LLMController:
         count. The server reports "at least N" — a LOWER bound, not exact;
         treating it as exact left the retry ~1 token over ctx on every
         attempt (anyhow 2026-07-02: 25365+40172 = 65537 > 65536).
-        Pad it before capping so the retry actually fits."""
-        thinking_reserve = prev_plan.thinking_reserve
-        content_cap = prev_plan.content_cap
+        Pad it before capping so the retry actually fits. The plan itself
+        comes from `plan_for_input`, the same function the first request
+        used, so a per-call plan stays per-call on the retry."""
         padded_input = int(real_tokens * 1.02) + 256
-        if spec.cap_by_ctx:
-            safe = max(512, spec.ctx_len - padded_input - thinking_reserve - spec.margin)
-            content_cap = min(content_cap, safe)
-        req = (content_cap + thinking_reserve) if spec.send_max_tokens else None
-        return Plan(req, real_tokens, content_cap, thinking_reserve)
+        plan = plan_for_input(spec, input_tokens=padded_input,
+                              content_cap=prev_plan.content_cap,
+                              enable_thinking=enable_thinking)
+        return replace(plan, est_input_tokens=real_tokens)

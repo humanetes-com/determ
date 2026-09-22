@@ -127,6 +127,18 @@ class CoverageSlice:
     dead: frozenset[FnLocator] = field(default_factory=frozenset)
     dead_regions: Mapping[FnLocator, str] = field(default_factory=dict)
     owners: Mapping[str, frozenset[FnSite]] = field(default_factory=dict)
+    # Per failing test, the sites that ran ONLY after its premise failed —
+    # while the failure was being reported (the panic message's Debug, the
+    # harness formatting a returned `Err`) or unwound. Evidence, never
+    # ownership: a prompt may quote it as "runs while the failure is
+    # reported", and no consumer that turns execution into ownership reads
+    # it. There is deliberately no field holding the union of the two, so a
+    # new consumer cannot read it. Measured 2026-09-21 on run
+    # `450977-5f48b68a`: of the 25 escalated additions for the two downcast
+    # tests, 16 ran only after the panic began (the chain iterator, the
+    # indenting writer, the pointer accessors) and fills had re-bought them
+    # 10–31 times each.
+    rendered: Mapping[str, frozenset[FnSite]] = field(default_factory=dict)
     # The red set the owner map was ASKED for, which is not the same as the
     # set it answered: a test with no matching binary is missing from
     # `owners`, and the difference is exactly the ignorance every consumer
@@ -192,6 +204,7 @@ def slice_from_counts(
     *,
     dead_fraction: float = DEAD_FRACTION,
     owners: Mapping[str, frozenset[FnSite]] | None = None,
+    rendered: Mapping[str, frozenset[FnSite]] | None = None,
     failing: Iterable[str] = (),
     unmeasured_binaries: Iterable[str] = (),
     unmeasured_tests: Iterable[str] = (),
@@ -240,6 +253,7 @@ def slice_from_counts(
             regions[loc] = sentence
     return CoverageSlice(dead=frozenset(dead), dead_regions=regions,
                          owners=dict(owners or {}),
+                         rendered=dict(rendered or {}),
                          failing=frozenset(failing),
                          unmeasured_binaries=frozenset(unmeasured_binaries),
                          unmeasured_tests=frozenset(unmeasured_tests),

@@ -191,8 +191,10 @@ def test_an_unmeasured_row_ranks_the_slice_never_served_not_rebuy() -> None:
                      target_tests=run.target_tests, bodies_sha="b2")
     assert schedule([moved], [row(RunOutcome.UNMEASURED)], oracle_fp="o",
                     hollow={}).ordered[0].reason == "never_served"
+    # A moved body after a FLAT row on the same route and tests is the
+    # unit's re-buy (service is per unit; the route's own keep moved it).
     assert schedule([moved], [row(RunOutcome.FLAT)], oracle_fp="o",
-                    hollow={}).ordered[0].reason == "served"
+                    hollow={}).ordered[0].reason == "rebuy_flat"
     assert RouteLedgerRow.from_dict(row(RunOutcome.UNMEASURED).to_dict()) is not None
 
 

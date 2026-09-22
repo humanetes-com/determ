@@ -856,6 +856,19 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   between units and reaches no subprocess; the bound on a subprocess is
   the runner's (`adapters.process.run_bounded`), `PHASE_C_TEST_TIMEOUT`
   for everything that executes the reconstructed tree.
+- `LLM_CUT_STOP_SHARE` / `_WINDOW` / `_MIN_CALLS` (4 / 100 / 25) — the
+  run-level LLM cut stop (`domain/reasoning_cap.py::CutRate`), not a
+  flat-score stop. A call is cut when it returned no decided answer
+  (reasoning ran out, or the reply is empty); notes-extractor calls are not
+  counted. Fires when the cut share of the process's last `WINDOW` calls
+  reaches `SHARE`% from call `MIN_CALLS` on, logs `HEALTH ‼ LLM_CUT_STOP`,
+  emits `llm.cut_rate_stop` and takes the process-wide graceful stop at the
+  next unit boundary; the cluster is not marked done. It counts calls, not
+  iterations, so it can fire mid-fill of iteration 1 — the reading it
+  prevents is one whose calls are cut, which measures the budget, not
+  reconstruction. `SHARE=0` disables the stop and keeps the per-iteration
+  `[llm/health]` line. Read once at cluster entry; confirmed on the
+  cluster-entry line (`cut-stop=4%/100 (min 25)`).
 - `TDD_FILL_BUDGET_MINUTES` (default 0) — NOT a stop: the fill schedule's
   wall-clock budget (`domain/fill_schedule.py`), the minutes one fill's
   route runs share by weight (never-served and paying runs 2, served 1,
@@ -902,6 +915,15 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   either. It was set to 360 on the same reading — four sessions at the
   measured max (200 min) + the file wave + per-fn ≈ 270 min healthy worst
   case, 90 min over it.
+- `SLICE_SESSION_MIN_TURNS` (default 3) — NOT a stop: a session's share is
+  floored at this many turns priced at its measured turn cost (median
+  minutes per call over its ledger rows), taken from the fill budget before
+  the weighted split and clipped to budget / sessions when the floors
+  exceed it (`floor NxMm` on the `[phase-c/schedule]` line). A session row
+  that ran out of its share before this many turns is not a graded try.
+  Prevents no reading; `0` restores the plain weighted split. Read once at
+  cluster entry (`session-min-turns=N` on the cluster-entry line). Keep
+  `SLICE_SESSION_MAX_PER_FILL × N × turn price` under the budget.
 - `PHASE_C_REPLAN_ON_PREMISE` (default 1) — NOT a stop: a fill ends at the
   first claim after a keep that changed which tests fail or where they first
   fail (`fill_scheduler._GroundGate`, `test_outcome.premise_of`), and the

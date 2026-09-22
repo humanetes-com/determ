@@ -333,6 +333,10 @@ class PhaseCFillEngine:
         # 0 = unbounded); the rest are deferred to the next fill by the
         # schedule, never truncated.
         max_sessions_per_fill: int = 0,
+        # A session's share floor in turns (`SLICE_SESSION_MIN_TURNS`; 0 = the
+        # plain weighted split), priced at its measured turn cost by the
+        # schedule.
+        session_min_turns: int = 0,
         # `(rel) -> healed?`: the heal hierarchy on one file of the tree,
         # for the boundary read before the per-pass test. None reports the
         # break and lets the pass test read it (the fixture path).
@@ -554,6 +558,7 @@ class PhaseCFillEngine:
                 attributed=frozenset(attributed),
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),
+                session_min_turns=session_min_turns,
                 on_wave_kept=on_wave_kept,
                 premise=fill_premise, ground_now=fill_ground_now))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
