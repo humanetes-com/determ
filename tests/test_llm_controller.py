@@ -44,7 +44,9 @@ class FakeTransport:
     supports_followup = True
 
     def __init__(self, responses, *, spec=None, finish_reasons=None, prompt_tokens=None,
-                 thinking=True):
+                 thinking=True, counted=None):
+        self._counted = counted
+        self.count_calls = 0
         self._responses = list(responses)
         self._finish = list(finish_reasons or [None] * len(responses))
         self._ptoks = list(prompt_tokens or [None] * len(responses))
@@ -61,6 +63,10 @@ class FakeTransport:
 
     def resolve_thinking(self, model, want_think):
         return self._thinking if want_think is None else want_think
+
+    def count_input_tokens(self, messages, *, enable_thinking):
+        self.count_calls += 1
+        return self._counted
 
     def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta,
                temperature: float | None = None) -> Iterator[Delta]:
@@ -244,6 +250,47 @@ def test_controller_input_retry_pads_lower_bound():
     retry_max = t.calls[1]["max_tokens"]
     assert retry_max is not None
     assert 40172 + retry_max <= 65536 - 512 - int(40172 * 0.02) - 256
+
+
+class _ThresholdServer(FakeTransport):
+    """A server that validates `input + max_tokens <= ctx` and, like vLLM,
+    answers an over-long request with the THRESHOLD it crossed ("at least
+    ctx - max_tokens + 1"), never the prompt's size. Run `497151-a6fa205b`
+    (2026-09-22): 31140, then 32531 (= 131072 - 98542 + 1), then 33950
+    (= 131072 - 97123 + 1), and the unit ended `input too long`."""
+
+    def __init__(self, true_input: int, *, counted: int | None) -> None:
+        super().__init__([[Delta(content="ok")]] * 4, counted=counted)
+        self._true = true_input
+
+    def stream(self, messages, *, model, max_tokens, enable_thinking,
+               meta: StreamMeta, temperature: float | None = None):
+        ctx = self._spec.ctx_len
+        if max_tokens is not None and self._true + max_tokens > ctx:
+            self.calls.append({"max_tokens": max_tokens})
+            raise InputTooLong(ctx - max_tokens + 1)
+        return super().stream(messages, model=model, max_tokens=max_tokens,
+                              enable_thinking=enable_thinking, meta=meta,
+                              temperature=temperature)
+
+
+def test_the_first_request_is_planned_on_the_servers_exact_count():
+    t = _ThresholdServer(40000, counted=40000)
+    out = _controller().run(t, system=None, prompt="p", model="m",
+                            max_tokens=SENTINEL)
+    assert out == "ok"
+    assert len(t.calls) == 1
+    assert 40000 + t.calls[0]["max_tokens"] <= 65536 - 512
+
+
+def test_negative_control_the_threshold_bound_alone_never_converges():
+    """Without a count the retry replans from the bound the 400 carried;
+    each attempt shrinks by the pad and the third 400 ends the call."""
+    t = _ThresholdServer(40000, counted=None)
+    with pytest.raises(InputTooLong):
+        _controller().run(t, system=None, prompt="p", model="m",
+                          max_tokens=SENTINEL)
+    assert len(t.calls) == 3
 
 
 def test_controller_no_followup_when_unsupported():

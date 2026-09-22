@@ -107,3 +107,20 @@ def test_the_unpaid_streak_resets_on_any_payoff():
     assert unpaid_streak((_o(A, False), _o(A, False)), window=2) == 2
     assert unpaid_streak((_o(A, False), _o(A, False))) is None, \
         "two unpaid sweeps do not reach the default window of three"
+
+
+def test_a_closing_stub_chain_pays_on_its_moved_failure_sites():
+    """Run `497151-a6fa205b` (2026-09-22): three sweeps with an identical
+    per-binary vector and a flat pass count, each with 92–100 failing tests
+    now failing one stub further down their path. That is a chain closing,
+    the healthy build the shadow period exists to tell apart; the detector
+    fired on it at iter 4. Negative control: the same sweeps without the
+    site axis are an unpaid streak."""
+    from pipeline_core.domain.zero_payoff import unpaid_streak
+    closing = tuple(
+        _o(t, paid_off(0, False, False, True, sites_moved=True))
+        for t in (A, B, frozenset({"x"})))
+    assert unpaid_streak(closing) is None
+    blind = tuple(_o(t, paid_off(0, False, False, True))
+                  for t in (A, B, frozenset({"x"})))
+    assert unpaid_streak(blind) == 3

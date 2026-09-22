@@ -24,8 +24,9 @@ block on its own.
 The payoff vector asks what the CRATE did, not what the loop planned.  A sweep
 has paid when ANY of: the pass count rose, the crash class moved (the
 vanished-test set changed — a crash signature moving IS progress, it re-opens
-refuted aims), or the per-binary verdict vector changed (some test, anywhere,
-took a different verdict).
+refuted aims), the per-binary verdict vector changed (some test, anywhere,
+took a different verdict), or some failing test now first fails somewhere
+else (its first failure site moved along its path).
 
 The last axis replaces an earlier one — "the frontier changed" — and run
 `1064759-0f23fb68` (2026-08-15/16) is why.  That run took seven scored sweeps
@@ -77,6 +78,7 @@ def paid_off(
     frontier_changed: bool = False,
     *,
     restub_between: bool = False,
+    sites_moved: bool = False,
 ) -> bool:
     """Whether a sweep bought anything the CRATE can show.
 
@@ -84,12 +86,22 @@ def paid_off(
     the sweep against the previous one: unchanged exactly when no test took a
     different verdict, and immune to the loop's own bookkeeping.
 
+    `sites_moved` is whether some failing test now first fails somewhere
+    else (`test_outcome.premise_moved` between the two sweeps' readings):
+    a fact about the crate, not the plan, and the same fact the no-verdict
+    clock already counts as movement. A stub chain closes one link per
+    fill, each link moving its tests to the next stub while no verdict
+    changes: run `497151-a6fa205b` (2026-09-22) printed "92, then 100
+    failing test(s) now fail somewhere else" on the sweeps whose vectors
+    were identical, and this detector fired at iter 4 on that closing
+    chain — the healthy build the shadow period exists to tell apart.
+
     `frontier_changed` counts only with `restub_between` — a re-stub between
     the two readings means the loop deleted work on purpose and the plan had to
     change; anywhere else, a moving frontier is the loop re-planning and says
     nothing about the tree."""
     return (pass_delta > 0 or vanished_changed or binaries_changed
-            or (frontier_changed and restub_between))
+            or sites_moved or (frontier_changed and restub_between))
 
 
 def zero_payoff_streak(

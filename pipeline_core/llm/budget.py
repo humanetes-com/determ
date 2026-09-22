@@ -88,10 +88,16 @@ def request_max_tokens(
     caller_max_tokens: int,
     default_sentinel: int,
     enable_thinking: bool,
+    input_tokens: int | None = None,
 ) -> Plan:
-    """Compute the request's max_tokens (and the pieces the controller reuses)."""
-    cpt_eff = max(spec.cpt_floor, state.cpt)
-    est_input = max(1, int(input_chars / cpt_eff))
+    """Compute the request's max_tokens (and the pieces the controller reuses).
+    ``input_tokens`` is the server's exact count when the transport has one;
+    without it the input is estimated from the learned chars-per-token."""
+    if input_tokens is not None:
+        est_input = max(1, input_tokens)
+    else:
+        cpt_eff = max(spec.cpt_floor, state.cpt)
+        est_input = max(1, int(input_chars / cpt_eff))
     # content_budget overrides ONLY the mis-derived global default; explicit bounds stay.
     if spec.content_budget and caller_max_tokens == default_sentinel:
         content_cap = spec.content_budget

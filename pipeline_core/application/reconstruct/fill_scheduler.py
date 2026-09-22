@@ -51,6 +51,7 @@ from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
 from pipeline_core.domain.test_outcome import (
     PremiseEntry,
+    moved_in_scope,
     names_of,
     premise_moved,
 )
@@ -106,9 +107,10 @@ class FillExecutionDeps:
     on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None
     #: The ground the plan was made from (`test_outcome.premise_of` of the
     #: sweep's capture) and a reader of the ground the tree stands on now
-    #: (one suite run → the same function). With both set, the first claim
-    #: after a keep that moved the ground is refused and the fill ends for
-    #: the sweep to re-plan. None (the default) runs the plan to its end —
+    #: (one suite run → the same function). With both set, a claim planned
+    #: on a test a keep moved is refused (`_GroundGate`); runs whose planned
+    #: tests did not move keep going. None (the default) runs the plan to
+    #: its end —
     #: the frozen-plan negative control (`PHASE_C_REPLAN_ON_PREMISE=0`).
     premise: Mapping[str, PremiseEntry] | None = None
     ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None
@@ -119,26 +121,36 @@ class FillExecution:
     schedule: FillSchedule
     rows: tuple[RouteLedgerRow, ...]
     stopped: bool = False
-    #: The tests whose ground moved when the fill ended on its premise
-    #: (empty when the fill ran its schedule out, or was stopped).
+    #: The tests whose ground moved in this fill (empty when no keep moved
+    #: one). Runs and units planned on them were refused.
     premise_moved: tuple[str, ...] = ()
 
 
 class _GroundGate:
     """The fill's premise gate, shared by every run's clock.
 
+    Answers per claim: has the ground THIS claim was planned on moved
+    (`test_outcome.moved_in_scope`)? A claim's scope is the tests that put
+    it on the plan — a pooled unit's own attributed tests, else its run's
+    target tests; a claim with no named test stands on the whole ground.
+    The first form refused every claim of the fill on any move, so on a
+    hollow tree each fill ended at its first keep: run `497151-a6fa205b`
+    (2026-09-22) kept `src/error.rs::new`, its 13 held tests moved, and the
+    8 unclaimed units of a 12-unit batch were refused with none of their 55
+    held tests moved — three iterations in a row landed only the in-flight
+    wave. A run whose keep moved every failing test (run
+    `3383938-c5d24499`, 141 of 141) still ends the fill at once, because
+    every claim's scope is hit.
+
     Measures only when something was kept since the last look
     (`fill_reading.kept_mark`), so a fill that keeps nothing never pays for
-    it, and once the ground has moved it stays moved for the rest of the
-    fill. Thread-safe: a parallel wave's workers ask at their own unit
+    it. The moved set only grows within a fill, against the plan's premise.
+    Thread-safe: a parallel wave's workers ask at their own unit
     boundaries.
 
-    The move is logged once, here, when it is first seen. The between-waves
-    line in `execute_fill` prints only when runs are left to defer, so a fill
-    whose only run is a pooled route ended with its unclaimed units unnamed:
-    run `311306-c8624d12` (2026-09-22) stopped a 12-unit per-fn batch after
-    four starts, twice, and the only trace was `10 dispatched unit(s) no
-    route opened` one sweep later."""
+    Each growth of the moved set is logged here, where it is first seen
+    (run `311306-c8624d12`, 2026-09-22: a pooled per-fn run stopped with
+    its unclaimed units unnamed)."""
 
     def __init__(self, deps: FillExecutionDeps) -> None:
         self._premise = deps.premise
@@ -148,34 +160,46 @@ class _GroundGate:
         self._lock = threading.Lock()
         self._seen = kept_mark()
         self.moved: tuple[str, ...] = ()
+        self.refused = 0
 
     @property
     def armed(self) -> bool:
         return self._premise is not None and self._read is not None
 
-    def __call__(self) -> bool:
+    def _look(self) -> None:
+        """Re-read the ground if something was kept since the last look.
+        Caller holds the lock."""
+        mark = kept_mark()
+        if mark == self._seen:
+            return
+        self._seen = mark
+        assert self._read is not None and self._premise is not None
+        now = self._read()
+        if now is None:
+            return
+        grown = set(self.moved) | set(premise_moved(self._premise, now))
+        if len(grown) == len(self.moved):
+            return
+        new = sorted(grown - set(self.moved))
+        self.moved = tuple(sorted(grown))
+        self._log(
+            f"  [phase-c/schedule] fill {self._iteration}: premise moved "
+            f"after a keep — {len(new)} test(s) no longer fail where the "
+            f"plan read them ({names_of(new)}); {len(self.moved)} moved in "
+            "this fill. Claims planned on a moved test are refused, the "
+            "rest of the plan continues, units in flight complete")
+
+    def __call__(self, scope: frozenset[str] | None = None) -> bool:
         if not self.armed:
             return False
         with self._lock:
-            if self.moved:
-                return True
-            mark = kept_mark()
-            if mark == self._seen:
+            self._look()
+            if not self.moved:
                 return False
-            self._seen = mark
-            assert self._read is not None and self._premise is not None
-            now = self._read()
-            if now is None:
-                return False
-            self.moved = premise_moved(self._premise, now)
-            if self.moved:
-                self._log(
-                    f"  [phase-c/schedule] fill {self._iteration}: premise "
-                    f"moved after a keep — {len(self.moved)} test(s) no longer "
-                    f"fail where the plan read them ({names_of(self.moved)}); "
-                    "no further unit is claimed this fill, units in flight "
-                    "complete")
-            return bool(self.moved)
+            hit = moved_in_scope(self.moved, scope)
+            if hit:
+                self.refused += 1
+            return bool(hit)
 
 
 def _notify_wave(deps: FillExecutionDeps,
@@ -399,7 +423,8 @@ def execute_fill(
             shares[w.run.key] = share
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,
-                now=deps.now, ground_moved=gate)
+                now=deps.now, ground_moved=gate,
+                scope=w.run.target_tests or None)
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}
@@ -473,32 +498,39 @@ def execute_fill(
         _flush(rows[-len(wave):])
         _notify_wave(deps, [reports.get(w.run.key) for w in wave])
         # A wave can end without its routes asking the clock again after
-        # their last keep; ask once here so the NEXT run is not opened on a
-        # plan whose ground already moved.
-        if i < len(ordered) and gate():
-            rest = ordered[i:]
-            deps.log(
-                f"  [phase-c/schedule] fill {deps.iteration}: premise moved "
-                f"after {s.run.label} — {len(gate.moved)} test(s) no longer "
-                f"fail where the plan read them ({names_of(gate.moved)}); "
-                f"ending the fill, {len(rest)} run(s) deferred for the sweep "
-                "to re-plan")
-            deps.emit("phase_c.fill.premise_moved", data={
-                "cluster": deps.cluster, "iter": deps.iteration,
-                "after": s.run.label, "moved": list(gate.moved[:50]),
-                "moved_count": len(gate.moved),
-                "deferred": [w.run.label for w in rest]})
-            started = datetime.now(UTC).isoformat(timespec="seconds")
-            for w in rest:
-                row = replace(
-                    _row_for(w, None, None, deps=deps, started=started,
-                             minutes=0.0, share=0.0,
-                             outcome=RunOutcome.DEFERRED),
-                    reason="premise_moved")
-                rows.append(row)
-                _log_row(deps, row)
-            _flush(rows[-len(rest):])
-            break
+        # their last keep; ask here, per run still ahead, so no run is opened
+        # on a plan whose ground moved under it. Runs planned on tests that
+        # did not move stay on the plan.
+        if i < len(ordered) and gate.armed:
+            rest = [w for w in ordered[i:]
+                    if gate(w.run.target_tests or None)]
+            if rest:
+                deps.log(
+                    f"  [phase-c/schedule] fill {deps.iteration}: premise "
+                    f"moved after {s.run.label} — {len(gate.moved)} test(s) "
+                    f"no longer fail where the plan read them "
+                    f"({names_of(gate.moved)}); {len(rest)} run(s) planned "
+                    f"on them deferred for the sweep to re-plan, "
+                    f"{len(ordered) - i - len(rest)} run(s) continue")
+                deps.emit("phase_c.fill.premise_moved", data={
+                    "cluster": deps.cluster, "iter": deps.iteration,
+                    "after": s.run.label, "moved": list(gate.moved[:50]),
+                    "moved_count": len(gate.moved),
+                    "deferred": [w.run.label for w in rest],
+                    "continuing": len(ordered) - i - len(rest)})
+                started = datetime.now(UTC).isoformat(timespec="seconds")
+                for w in rest:
+                    row = replace(
+                        _row_for(w, None, None, deps=deps, started=started,
+                                 minutes=0.0, share=0.0,
+                                 outcome=RunOutcome.DEFERRED),
+                        reason="premise_moved")
+                    rows.append(row)
+                    _log_row(deps, row)
+                _flush(rows[-len(rest):])
+                gone = {id(w) for w in rest}
+                ordered = ordered[:i] + [w for w in ordered[i:]
+                                         if id(w) not in gone]
     deferred_rows: list[RouteLedgerRow] = []
     for s in sched.deferred:
         row = _row_for(s, None, None, deps=deps,

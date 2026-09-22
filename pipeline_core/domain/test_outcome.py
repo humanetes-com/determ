@@ -35,6 +35,7 @@ from enum import StrEnum
 
 from pipeline_core.domain.generation import is_gen_tests_sibling_name
 from pipeline_core.domain.models import FnSite
+from pipeline_core.domain.reference_floor import doc_test_line
 from pipeline_core.domain.test_report import parse_test_output, stub_abort_reading
 from pipeline_core.domain.test_results import (
     parse_binary_results,
@@ -49,6 +50,7 @@ __all__ = [
     "PremiseEntry",
     "outcomes_of",
     "premise_moved",
+    "moved_in_scope",
     "names_of",
     "premise_of",
     "run_kind",
@@ -281,6 +283,47 @@ def stub_hold_of(
         for t, sites in fallback.hollow(vanished, test_files or {}).items():
             held.setdefault(t, set()).update(sites)
     return StubHold({t: frozenset(ss) for t, ss in held.items()})
+
+
+def _scope_leaf(name: str) -> str:
+    """One spelling for a test name across the readers that carry it: the
+    premise's stable key (a doc test's `#k`), libtest's raw name (a doc
+    test's `(line N)`), and the leaf a route keeps (`rsplit("::")`). Two
+    tests sharing a leaf in different binaries read as one here, which can
+    only refuse a claim more often, never admit one whose tests moved."""
+    n = name.strip()
+    if doc_test_line(n) is not None:
+        n = n.rpartition(" (line ")[0].rstrip()
+    head, sep, tail = n.rpartition("#")
+    if sep and tail.isdigit():
+        n = head
+    return n.rsplit("::", 1)[-1]
+
+
+def moved_in_scope(
+    moved: Iterable[str], scope: Iterable[str] | None,
+) -> tuple[str, ...]:
+    """The moved tests a claim's plan read, sorted.
+
+    A plan is a set of claims and each one was made from part of the
+    sweep's ground: the tests whose failures put that unit or run on the
+    plan. A keep that moves some tests invalidates the claims made from
+    those tests and no other. The first gate refused every claim of the
+    fill on any move, and on a hollow tree every keep of a stub moves the
+    tests that stub held, so each fill ended at its first keep with only
+    the in-flight units landed: run `497151-a6fa205b` (2026-09-22, cluster
+    `stable`, iter 1) kept `src/error.rs::new`, its 13 held tests moved to
+    `construct_from_std`, and the 8 unclaimed units of the 12-unit batch
+    were refused while none of their 55 held tests had moved; three
+    iterations in a row landed only the four bodies in flight.
+
+    A claim with no scope (None, or an empty set: a run or unit planned on
+    no named test) stands on the whole ground, so any move refuses it."""
+    moved_t = tuple(sorted(set(moved)))
+    if not scope:
+        return moved_t
+    leaves = {_scope_leaf(s) for s in scope}
+    return tuple(m for m in moved_t if _scope_leaf(m) in leaves)
 
 
 def names_of(entries: Iterable[str]) -> str:

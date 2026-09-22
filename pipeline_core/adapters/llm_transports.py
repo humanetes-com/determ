@@ -181,6 +181,10 @@ class _BaseTransport:
     def resolve_thinking(self, model: str, want_think: bool | None) -> bool:
         return False
 
+    def count_input_tokens(self, messages: list[dict[str, Any]], *,
+                           enable_thinking: bool) -> int | None:
+        return None
+
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
                           *, model: str) -> list[dict[str, Any]]:
         return base_messages
@@ -788,6 +792,39 @@ class VLLMTransport(_BaseTransport):
         self._rep_penalty = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
         self._per_call_reasoning = reasoning_budget_is_per_call(
             os.getenv("VLLM_REASONING_BUDGET", "fixed"))
+
+    def count_input_tokens(self, messages: list[dict[str, Any]], *,
+                           enable_thinking: bool) -> int | None:
+        """vLLM's own `/tokenize` over the chat messages with the same
+        template kwargs the request sends, so the count is the one the
+        server validates against the context.
+
+        Why: a 400 is the only other source and it carries no count. vLLM
+        answers an over-long request with "prompt contains at least N input
+        tokens" where N is ctx - max_tokens + 1, the threshold, never the
+        prompt's size. Run `497151-a6fa205b` (2026-09-22 20:36 UTC): four
+        calls opened together right after sub-2k-token prompts had moved
+        the chars-per-token average from 3.51 to 3.61; `src/ensure.rs::new`
+        was told "at least 31140", then 32531 (= 131072 - 98542 + 1), then
+        33950 (= 131072 - 97123 + 1), and the third 400 ended the unit as
+        `input too long` with no model answer. None on any failure: the
+        estimate is still the fallback."""
+        root = self._base_url.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        payload = {
+            "model": self._model_name, "messages": messages,
+            "add_generation_prompt": True,
+            "chat_template_kwargs": reasoning_template_kwargs(
+                self._model_name, enable_thinking),
+        }
+        try:
+            r = httpx.post(f"{root}/tokenize", json=payload, timeout=30.0)
+            r.raise_for_status()
+            count = r.json().get("count")
+        except (httpx.HTTPError, ValueError):
+            return None
+        return int(count) if isinstance(count, int) and count > 0 else None
 
     def spec(self) -> BudgetSpec:
         return BudgetSpec(

@@ -738,6 +738,16 @@ def test_an_escalated_unit_whose_every_reply_was_capped_is_not_graded_flat(
     assert capped_named[0]["esc_unchanged"] == [], (
         "withheld from the graded set, not merely relabelled")
     assert any("every reply capped" in ln for ln in logs)
+    # …and it is NOT nothing: with no row at all the unit stayed re-seedable
+    # at the rank it had and the next pass bought the same prompt under the
+    # same budget, which is the re-buy this class was filed on. The row says
+    # unmeasured — re-seedable, no evidence about the unit, and visible to
+    # the re-buy detector that joins on prior rows.
+    unmeasured = [r for r in ledger["rows"]
+                  if r.state is BodyState.UNMEASURED
+                  and r.key.fn_name == "width"]
+    assert unmeasured, [(r.key.fn_name, r.state) for r in ledger["rows"]]
+    assert any("cut mid-deliberation" in ln for ln in logs)
 
 
 def _flat_row(tmp_path: Path, *, evidence_fp: str = "",

@@ -510,6 +510,10 @@ class PremiseRun:
 
     raw: Path | None
     reason: str = ""
+    #: The flush at the FIRST boundary: the premise of a run whose process
+    #: then died (`_owner_map`), where every later boundary is raised while
+    #: the first panic's unwind is being cleaned up.
+    first: Path | None = None
 
 
 def _premise_run(tree: Path, binary: Path, name: str, base: Path,
@@ -537,7 +541,7 @@ def _premise_run(tree: Path, binary: Path, name: str, base: Path,
     cuts = [c for c in cuts if c.stat().st_size > 0]
     if not cuts:
         return PremiseRun(None, "no boundary was reached")
-    return PremiseRun(cuts[-1])
+    return PremiseRun(cuts[-1], first=cuts[0])
 
 
 def _listed_tests(tree: Path, binary: Path, env: dict[str, str],
@@ -640,6 +644,9 @@ class OwnerReading:
     multi: frozenset[str]
     rendered: dict[str, frozenset[FnSite]]
     premise_fallbacks: dict[str, str]
+    #: Unmeasured names whose owner set was still read, up to their first
+    #: panic, from the debugger's flush before the process died.
+    cut_before_death: frozenset[str] = frozenset()
 
 
 def _owner_map(
@@ -730,6 +737,54 @@ def _owner_map(
         key = matching_test_key(name, keys)
         return prior[(label, key)] if key is not None else None
 
+    def _cut_before_death(runs: Sequence[ExactRun],
+                          name: str) -> frozenset[FnSite] | None:
+        """What a name's runs entered up to their first panic, when a
+        process died and left no profile of its own.
+
+        A process that aborts writes no profile, so its test had no owner
+        set at all — not even the positive evidence a run truncated inside
+        the crate keeps. Run `497151-a6fa205b` (2026-09-22, iter 4): once
+        `construct` had a body, 92 failing tests aborted even alone (the
+        first panic unwinds into a still-stubbed drop path, which panics
+        during cleanup), and 91 of 150 failing tests had no owner set. The
+        debugger flushes the profile at the panic handler, before the
+        abort; the first flush is the premise, since every later one is
+        raised while that panic's unwind is being cleaned up. The name
+        stays unmeasured: its run did not reach its end, so every negative
+        claim stays withheld (`coverage_slice.withhold_unmeasured`), exactly
+        as for a run truncated inside the crate. None when any run of the
+        name reached no boundary, or cut is off. A run the bound cut (-1)
+        is never re-run: that is a second wait on the same hang."""
+        if not premise or any(not r.completed and r.returncode >= -1
+                              for r in runs):
+            return None
+        sites: set[FnSite] = set()
+        for r in runs:
+            if r.completed:
+                stem = (f"one-{_prof_stem(_binary_label(r.binary))}"
+                        f"-{_prof_stem(name)}")
+                full = _sites_of(r.raw, r.binary, stem)
+                if full is None:
+                    return None
+                sites |= full
+                continue
+            stem = (f"one-{_prof_stem(_binary_label(r.binary))}"
+                    f"-{_prof_stem(name)}-died")
+            try:
+                cut = _premise_run(
+                    tree, r.binary, name, prof / f"{stem}.profraw", env,
+                    timeout=timeout * 2 + 30, symbols=_symbols(r.binary))
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if cut.first is None:
+                return None
+            before = _sites_of(cut.first, r.binary, f"{stem}-first")
+            if before is None:
+                return None
+            sites |= before
+        return frozenset(sites)
+
     def _one(name: str) -> tuple[str, frozenset[FnSite] | None, bool, int,
                                  frozenset[FnSite], str]:
         labels = fb.get(name) or fb.get(name.rsplit("::", 1)[-1]) or frozenset()
@@ -754,7 +809,8 @@ def _owner_map(
         if not runs:
             return name, None, False, 0, frozenset(), ""
         if any(not r.completed for r in runs):
-            return name, None, True, len(runs), frozenset(), ""
+            return (name, _cut_before_death(runs, name), True, len(runs),
+                    frozenset(), "")
         sites: set[FnSite] = set()
         after: set[FnSite] = set()
         why: list[str] = []
@@ -796,12 +852,16 @@ def _owner_map(
         return (name, frozenset(sites), False, len(runs),
                 frozenset(after - sites), "; ".join(why))
 
+    cut_before_death: set[str] = set()
     for name, sites, died, n_runs, after, why in _map_concurrently(
             _one, list(dict.fromkeys(tests)), workers):
         if n_runs > 1:
             multi.add(name)
         if died:
             unmeasured.add(name)
+            if sites is not None:
+                owners[name] = sites
+                cut_before_death.add(name)
         elif sites is not None:
             owners[name] = sites
             if after:
@@ -810,7 +870,8 @@ def _owner_map(
                 fallbacks[name] = why
     return OwnerReading(owners=owners, unmeasured=frozenset(unmeasured),
                         multi=frozenset(multi), rendered=rendered,
-                        premise_fallbacks=fallbacks)
+                        premise_fallbacks=fallbacks,
+                        cut_before_death=frozenset(cut_before_death))
 
 
 def measure_coverage_slice(
@@ -961,7 +1022,13 @@ def measure_coverage_slice(
                 continue
             unmeasured_bins.append((b, ran.returncode))
             dangling = _in_flight_test(ran.stdout or "")
-            if dangling:
+            # Only the bound's kill is a hang (`run_bounded` reports it as
+            # -1). A binary killed by a signal of its own (SIGABRT from a
+            # panic during cleanup, SIGSEGV) died in that test, which is
+            # re-run alone like the rest: run `497151-a6fa205b`
+            # (2026-09-22, iter 4) printed 28 aborts as "hung inside …
+            # (killed after 120s)" and emitted them as hung tests.
+            if dangling and ran.returncode == -1:
                 hung_tests.add(f"{label}::{dangling}")
                 hung_skip.setdefault(b, set()).add(dangling)
                 recovered[(label, dangling)] = ExactRun(
@@ -1037,7 +1104,11 @@ def measure_coverage_slice(
             log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
                 f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "
                 f"owner set for {len(owners)}/{len(asked)} failing test(s), "
-                f"{len(unmeasured_asked)} unmeasured (binary did not complete)"
+                f"{len(unmeasured_asked)} unmeasured (binary did not complete"
+                + (f"; {len(reading.cut_before_death)} of them owned up to "
+                   "their first panic from the debugger's flush before the "
+                   "process died" if reading.cut_before_death else "")
+                + ")"
                 + (f", {len(multi)} failing in several binaries measured on "
                    f"each and unioned ({', '.join(sorted(multi)[:6])})"
                    if multi else "")

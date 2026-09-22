@@ -102,11 +102,14 @@ class CoverageSlice:
     `owners` maps a test name to the sites that test alone executed,
     measured by running it under `--exact` on its own binary. A test the
     adapter was not asked to profile, could not find a binary for, or whose
-    process DID NOT COMPLETE is ABSENT from the mapping — which is not the
-    same as an empty owner set, and the two must not be collapsed: absent
-    means unmeasured, empty means measured and it entered no crate body (a
-    test that panics in its own setup). Only a non-empty entry supports a
-    refusal.
+    process DID NOT COMPLETE with no boundary flush to read, is ABSENT from
+    the mapping — which is not the same as an empty owner set, and the two
+    must not be collapsed: absent means unmeasured, empty means measured
+    and it entered no crate body (a test that panics in its own setup). A
+    test whose process died after its first panic has the set flushed at
+    that panic and is ALSO in `unmeasured_tests`; `withhold_unmeasured`
+    removes it before any refusal reads the map. Only a non-empty entry of
+    a measured test supports a refusal.
 
     `unmeasured_binaries` and `unmeasured_tests` name the part of the suite
     the reading could NOT take: a test binary killed by a signal (SIGSEGV,
@@ -151,7 +154,10 @@ class CoverageSlice:
     unmeasured_binaries: frozenset[str] = frozenset()
     # Tests whose own process did not complete: asked red tests (keyed as
     # asked) and the tests of an unmeasured binary that still died when run
-    # alone (keyed as the binary lists them). Never in `owners`.
+    # alone (keyed as the binary lists them). In `owners` only when the
+    # debugger's flush at the test's first panic was read before the
+    # process died: positive evidence, which `withhold_unmeasured` removes
+    # before any negative claim, the same as a run truncated in the crate.
     unmeasured_tests: frozenset[str] = frozenset()
     # ``label::test`` of a binary the bound cut while a test was in flight,
     # or that the caller's own reading already named as hung. Distinct from
@@ -314,6 +320,38 @@ def withhold_unmeasured(
     return (replace(reading, dead=frozenset(), dead_regions={},
                     owners=owners, unmeasured_tests=unmeasured),
             removed)
+
+
+def _has_owner(test: str, owners: Mapping[str, object]) -> bool:
+    return test in owners or matching_test_key(test, list(owners)) is not None
+
+
+def unowned_among(
+    unmeasured: Iterable[str], owners: Mapping[str, object],
+) -> list[str]:
+    """The unmeasured tests this sweep measured NO owner set for, sorted:
+    the only ones a recorded set may stand in for (`records_standing_in`)."""
+    return sorted(t for t in set(unmeasured) if not _has_owner(t, owners))
+
+
+def records_standing_in[T](
+    recorded: Mapping[str, T], owners: Mapping[str, object],
+    failing: Collection[str],
+) -> dict[str, T]:
+    """The recorded owner sets that stand in for this sweep's reading: a
+    failing test's record counts only when this sweep measured no owner set
+    for it. A record is what the test entered at some earlier moment; a set
+    measured now, even one cut at the first panic of a run that then died
+    (`coverage_owner._owner_map`), describes the tree as it is.
+
+    The ranking map used to be the measured map with every record written
+    over it, which was harmless while an unmeasured test never had a
+    measured set. Once an aborted run's owner set is read from the
+    debugger's flush (run `497151-a6fa205b`, 2026-09-22: 91 of 150 failing
+    tests had none after `construct` kept), a test with an older
+    retrospective stamp kept the old set and lost the new one."""
+    return {t: v for t, v in recorded.items()
+            if t in failing and not _has_owner(t, owners)}
 
 
 _bound: CoverageSlice | None = None

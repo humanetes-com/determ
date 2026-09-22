@@ -239,12 +239,19 @@ class LLMController:
         msg_chars = sum(len(m.get("content") or "") for m in messages)
 
         enable_thinking = transport.resolve_thinking(model, want_think)
+        # The server's own count of this request when it has one: the
+        # chars-per-token average is shared by prompts of every size, so a
+        # few short ones move it and the next long prompt is under-counted
+        # into a 400 whose "at least N" is only the threshold it crossed.
+        counted = transport.count_input_tokens(
+            messages, enable_thinking=enable_thinking)
         plan = request_max_tokens(
             spec, state,
             input_chars=msg_chars,
             caller_max_tokens=max_tokens,
             default_sentinel=self._sentinel,
             enable_thinking=enable_thinking,
+            input_tokens=counted,
         )
         # Announce the adaptive token budget so the monitor's budget bar is
         # live during this call (not just after a cpt update lands).
@@ -276,14 +283,21 @@ class LLMController:
                 return ""
             except InputTooLong as exc:
                 self._h.sock_close()
-                if attempt >= _MAX_ATTEMPTS - 1 or exc.real_tokens is None:
+                # The 400's "at least N" is ctx - max_tokens + 1, a bound; the
+                # exact count (asked again, the first ask may have failed)
+                # is the measurement when the server gives one.
+                if counted is None:
+                    counted = transport.count_input_tokens(
+                        messages, enable_thinking=enable_thinking)
+                real = max(exc.real_tokens or 0, counted or 0) or None
+                if attempt >= _MAX_ATTEMPTS - 1 or real is None:
                     raise
-                prev, new = state.update(msg_chars, exc.real_tokens)
-                # Re-estimate the budget directly from the server's reported input count.
-                plan = self._replan_with_input(spec, state, exc.real_tokens, max_tokens,
+                prev, new = state.update(msg_chars, real)
+                plan = self._replan_with_input(spec, state, real, max_tokens,
                                                enable_thinking, plan)
                 self._h.guard("vllm/400_retry",
-                              f"attempt={attempt} real_input={exc.real_tokens}tok "
+                              f"attempt={attempt} reported_bound={exc.real_tokens}tok "
+                              f"counted={counted}tok "
                               f"new_req_max={plan.request_max} cpt_ewm={prev:.2f}→{new:.2f}")
                 self._h.emit("vllm.input_retry",
                              {"request_max": plan.request_max, "cpt": new})
@@ -472,9 +486,12 @@ class LLMController:
         state = transport.budget_state()
         fu_messages = transport.followup_messages(messages, reasoning_text, model=model)
         fu_chars = sum(len(m.get("content") or "") for m in fu_messages)
+        fu_counted = transport.count_input_tokens(
+            fu_messages, enable_thinking=followup_think)
         fu_plan = request_max_tokens(
             spec, state, input_chars=fu_chars, caller_max_tokens=max_tokens,
             default_sentinel=self._sentinel, enable_thinking=followup_think,
+            input_tokens=fu_counted,
         )
         self._h.dbg(f"FOLLOWUP model={model} thinking_len={len(reasoning_text)} "
                     f"fu_max={fu_plan.request_max} think={followup_think}")
@@ -506,9 +523,13 @@ class LLMController:
                 # The main stream retries this (run() :181); the followup
                 # used to let it escape unemitted, so a followup 400 left
                 # no `llm.followup_meta` row at all.
-                if attempt >= _MAX_ATTEMPTS - 1 or exc.real_tokens is None:
+                if fu_counted is None:
+                    fu_counted = transport.count_input_tokens(
+                        fu_messages, enable_thinking=followup_think)
+                fu_real = max(exc.real_tokens or 0, fu_counted or 0) or None
+                if attempt >= _MAX_ATTEMPTS - 1 or fu_real is None:
                     self._h.guard("llm/followup_input",
-                                  f"err=InputTooLong real_tokens={exc.real_tokens}")
+                                  f"err=InputTooLong real_tokens={fu_real}")
                     self._emit_followup_meta(
                         prompt_sha=prompt_sha, model=model, finish_reason="error",
                         result="", fu_reasoning="", reasoning_text=reasoning_text,
@@ -516,11 +537,11 @@ class LLMController:
                         request_max=fu_plan.request_max, followup_think=followup_think,
                         stop=None)
                     return _FollowupOutcome(finish_reason="error")
-                state.update(fu_chars, exc.real_tokens)
+                state.update(fu_chars, fu_real)
                 fu_plan = self._replan_with_input(
-                    spec, state, exc.real_tokens, max_tokens, followup_think, fu_plan)
+                    spec, state, fu_real, max_tokens, followup_think, fu_plan)
                 self._h.guard("llm/followup_input_retry",
-                              f"attempt={attempt} real_input={exc.real_tokens}tok "
+                              f"attempt={attempt} real_input={fu_real}tok "
                               f"new_req_max={fu_plan.request_max}")
                 continue
         raw = transport.clean("".join(cap.content), model=model)

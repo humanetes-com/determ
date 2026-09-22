@@ -1,12 +1,17 @@
 """Pins for the per-fill class histogram — the seven integers on the iter line."""
 from __future__ import annotations
 
+import pytest
+
 from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillClassHistogram,
     FillOutcomeClass,
     class_for_kept,
     note_fill_class,
+)
+from pipeline_core.domain.fill_class import (
+    tests_could_not_run as could_not_run,
 )
 
 
@@ -28,11 +33,12 @@ def test_empty_histogram_is_falsey() -> None:
 def test_class_for_kept_is_cashed_only_with_observed_passes() -> None:
     """Negative control: empty passing set was the else-of-U2 CASHED
     assignment (run 1064759-0f23fb68)."""
-    assert class_for_kept(passed=frozenset(), unreachable=False) is (
+    assert class_for_kept(passed=frozenset(), unreachable=could_not_run()) is (
         FillOutcomeClass.UNREACHABLE_VERDICT)
-    assert class_for_kept(passed={"t"}, unreachable=False) is (
+    assert class_for_kept(passed={"t"}, unreachable=could_not_run()) is (
         FillOutcomeClass.CASHED)
-    assert class_for_kept(passed={"t"}, unreachable=True) is (
+    assert class_for_kept(
+        passed={"t"}, unreachable=could_not_run(crash_keep=True)) is (
         FillOutcomeClass.UNREACHABLE_VERDICT)
 
 
@@ -45,18 +51,18 @@ def test_class_for_kept_measured_attributed_still_failing_is_wrong_body() -> Non
     UNREACHABLE. Invented names only.
     """
     assert class_for_kept(
-        passed=frozenset(), unreachable=False,
+        passed=frozenset(), unreachable=could_not_run(),
         attributed={"t_aim"}, measured=True) is FillOutcomeClass.WRONG_BODY
     assert class_for_kept(
-        passed=frozenset(), unreachable=False,
+        passed=frozenset(), unreachable=could_not_run(),
         attributed={"t_aim"}, measured=False) is (
         FillOutcomeClass.UNREACHABLE_VERDICT)
     assert class_for_kept(
-        passed=frozenset(), unreachable=False,
+        passed=frozenset(), unreachable=could_not_run(),
         attributed=frozenset(), measured=True) is (
         FillOutcomeClass.UNREACHABLE_VERDICT)
     # Omitting attributed/measured keeps the pre-change reading.
-    assert class_for_kept(passed=frozenset(), unreachable=False) is (
+    assert class_for_kept(passed=frozenset(), unreachable=could_not_run()) is (
         FillOutcomeClass.UNREACHABLE_VERDICT)
 
 
@@ -67,10 +73,10 @@ def test_class_for_kept_a_reading_that_moved_is_cashed() -> None:
     object_ref keep of iter 2 (net +55, hollow leftover set). Negative
     control: the same call with the reading withheld is UNREACHABLE."""
     assert class_for_kept(
-        passed=frozenset(), unreachable=False, net_delta=5) is (
+        passed=frozenset(), unreachable=could_not_run(), net_delta=5) is (
         FillOutcomeClass.CASHED)
     assert class_for_kept(
-        passed=frozenset(), unreachable=False, net_delta=0) is (
+        passed=frozenset(), unreachable=could_not_run(), net_delta=0) is (
         FillOutcomeClass.UNREACHABLE_VERDICT)
 
 
@@ -97,30 +103,34 @@ def test_counter_and_note_emit() -> None:
 def test_tests_could_not_run_holds_only_the_could_not_run_reasons() -> None:
     import inspect
 
-    from pipeline_core.domain.fill_class import tests_could_not_run
-    assert tests_could_not_run() is False
+    assert not could_not_run()
     for reason in ("crash_keep", "external_only", "blocked_sibling",
                    "crate_red"):
-        assert tests_could_not_run(**{reason: True}) is True
-    assert set(inspect.signature(tests_could_not_run).parameters) == {
+        got = could_not_run(**{reason: True})
+        assert got and got.reason == reason
+    assert set(inspect.signature(could_not_run).parameters) == {
         "crash_keep", "external_only", "blocked_sibling", "crate_red"}
 
 
 def test_a_keep_whose_tests_ran_red_is_wrong_not_unreachable() -> None:
-    from pipeline_core.domain.fill_class import tests_could_not_run
     attributed = {"t_alpha", "t_beta"}
-    assert class_for_kept(passed=frozenset(), unreachable=tests_could_not_run(),
+    assert class_for_kept(passed=frozenset(), unreachable=could_not_run(),
                           attributed=attributed, measured=True) \
         is FillOutcomeClass.WRONG_BODY
     assert class_for_kept(
-        passed=frozenset(), unreachable=tests_could_not_run(crash_keep=True),
+        passed=frozenset(), unreachable=could_not_run(crash_keep=True),
         attributed=attributed, measured=True) \
         is FillOutcomeClass.UNREACHABLE_VERDICT
-    # Negative control: the pre-change file kwargs (non-regression folded
-    # into unreachable) grade the same measured keep unreachable.
-    assert class_for_kept(passed=frozenset(), unreachable=True,
-                          attributed=attributed, measured=True) \
-        is FillOutcomeClass.UNREACHABLE_VERDICT
+    # The pre-change file kwargs — a non-regression flag folded into
+    # `unreachable=` — cannot be expressed at all any more: the reason is a
+    # type, and a site's own boolean is refused rather than believed. This
+    # is what makes the class unreachable for a keep site that never calls
+    # the helper, which the AST walk below cannot promise for a site that
+    # does not exist yet.
+    for fabricated in (True, 1, "blocked", object()):
+        with pytest.raises(TypeError, match="tests_could_not_run"):
+            class_for_kept(passed=frozenset(), unreachable=fabricated,
+                           attributed=attributed, measured=True)
 
 
 def _keep_site_violations(tree: object, path: str) -> list[str]:
@@ -141,7 +151,7 @@ def _keep_site_violations(tree: object, path: str) -> list[str]:
                   and v.func.id == "tests_could_not_run")
             if not ok:
                 bad.append(f"{path}:{node.lineno} class_for_kept "
-                           "unreachable= is not tests_could_not_run(...)")
+                           "unreachable= is not could_not_run(...)")
         elif (isinstance(node, ast.Attribute)
               and node.attr == "UNREACHABLE_VERDICT"
               and not path.endswith("domain/fill_class.py")):

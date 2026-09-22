@@ -13,6 +13,8 @@ turns that into a real check, and the blob shape is the negative control.
 
 from __future__ import annotations
 
+import pytest
+
 from pipeline_core.application.emit_behaviour_tests import (
     render_behaviour_test_file,
     replay_fn_name,
@@ -397,3 +399,78 @@ def test_a_display_observe_is_rejected_for_an_exact_format_ask() -> None:
         assert exact_format_ask_rejects(display) is not None
         assert exact_format_ask_rejects(debug) is None
         assert fills_non_format_class(ident) and exact_format_ask_rejects(ident) is None
+
+
+def test_a_twin_is_narrowed_to_what_the_capture_and_the_replay_share() -> None:
+    """The twin's Then is cut back to the text the probe binary's render and
+    the test binary's render share; the rest belongs to the rendering
+    process. `None` when they share nothing, and when the capture already
+    agrees (nothing to narrow).
+
+    Run `330242-0be2c3e1` (2026-09-03): the twin carried the probe's WHOLE
+    render and both clusters' only such capture came back `replay disagreed
+    with the capture`. Two runs of the same probe cannot find this — they
+    agree on exactly the part that differs between binaries — which is why
+    the pair is capture-vs-replay.
+    """
+    from pipeline_core.domain.behaviour_probe import (
+        agreed_prefix,
+        narrow_then_to_agreement,
+        observed_values,
+        split_env_worlds,
+    )
+
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="head")
+    env = {"SOME_KNOB": "1"}
+    worlds = split_env_worlds(spec, "head + tail\nframe 0x41\n", env)
+    assert worlds is not None
+    _orig, twin = worlds
+    assert twin.then is not None and twin.then.value == "head + tail\nframe 0x41"
+    assert not twin.then.prefix          # exact until a replay disagrees
+
+    cut = narrow_then_to_agreement(twin, "head + tail\nframe 0x77\n")
+    assert cut is not None and cut.then is not None
+    assert cut.then.value == "head + tail\nframe 0x" and cut.then.prefix
+
+    # Nothing shared, and nothing to cut, are both None — the caller withdraws
+    # rather than pinning the empty string or re-rendering forever.
+    assert narrow_then_to_agreement(twin, "unrelated") is None
+    assert narrow_then_to_agreement(twin, "head + tail\nframe 0x41") is None
+    assert agreed_prefix(["abc", "abd"]) == "ab"
+    assert agreed_prefix(["abc"]) == "" and agreed_prefix([]) == ""
+
+    # The observed value comes out of the failing run's own marker.
+    assert observed_values(
+        "thread 'behaviour_x' panicked:\n"
+        "determ-observed[behaviour_x]<<<head + tail\nframe 0x77\n>>>\n"
+    ) == {"behaviour_x": "head + tail\nframe 0x77\n"}
+    assert observed_values("test behaviour_x ... FAILED") == {}
+
+
+def test_a_prefix_then_replays_as_starts_with_and_a_longer_render() -> None:
+    from dataclasses import replace as dc_replace
+
+    from pipeline_core.domain.behaviour import ObservableOutcome, OutcomeKind
+
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="v")
+    assert spec.then is not None
+    pinned = dc_replace(spec, then=dc_replace(spec.then, value="head", prefix=True))
+    body = render_replay_test(pinned, fn_name="t")
+    assert "starts_with" in body and "assert_eq!" not in body
+    assert "actual.len() > " in body
+    # NEGATIVE CONTROL: the same spec without the flag is an equality assert.
+    assert "assert_eq!" in render_replay_test(spec, fn_name="t")
+
+    # A prefix is a claim about rendered text, and pins nothing when empty.
+    for bad in (OutcomeKind.TYPE_IDENTITY, OutcomeKind.DOWNCAST_OK):
+        with pytest.raises(ValueError):
+            ObservableOutcome(bad, value="T", prefix=True)
+    with pytest.raises(ValueError):
+        ObservableOutcome(OutcomeKind.DEBUG_STRING, value="", prefix=True)
+
+    # Round trip, and a legacy record without the key loads as exact.
+    d = pinned.then.to_dict()
+    assert d["prefix"] is True
+    assert ObservableOutcome.from_dict(d).prefix
+    assert "prefix" not in spec.then.to_dict()
+    assert not ObservableOutcome.from_dict(spec.then.to_dict()).prefix

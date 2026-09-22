@@ -67,6 +67,14 @@ class Transport(Protocol):
         """Effective thinking mode (caller intent + this transport's config)."""
         ...
 
+    def count_input_tokens(self, messages: list[dict[str, Any]], *,
+                           enable_thinking: bool) -> int | None:
+        """The server's exact token count of these messages as the request
+        will render them (chat template included), or None when the server
+        cannot say. The budget plans from it instead of a chars-per-token
+        estimate; None falls back to the estimate."""
+        ...
+
     def stream(
         self,
         messages: list[dict[str, Any]],

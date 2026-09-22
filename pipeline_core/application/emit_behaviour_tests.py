@@ -64,6 +64,8 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_probe import (
     capture_moved,
     is_probe_spec,
+    narrow_then_to_agreement,
+    observed_values,
     render_replay_test,
     split_env_worlds,
 )
@@ -181,6 +183,42 @@ def _free_dest(project_dir: Path, stem: str) -> Path:
     while (dest := Path(project_dir) / gen_tests_integration_rel(stem, n)).exists():
         n += 1
     return dest
+
+
+def _narrow_world_pinned(
+    keep: list[BehaviourSpec], failed: frozenset[str], output: str,
+) -> tuple[list[BehaviourSpec], list[BehaviourSpec]]:
+    """(`keep` with the narrowable specs re-pinned, the ones narrowed).
+
+    A capture that pins its own world REPORTS what it rendered when it fails,
+    so a disagreement between the probe binary's render and the test binary's
+    can be cut back to the text they share instead of withdrawing the
+    capture. The part they disagree on is the part the RENDERING PROCESS owns
+    — the frames of a captured backtrace, an address, an elapsed time — and
+    two runs of the same probe agree on it exactly, which is why the probe
+    cannot find it alone. Run `330242-0be2c3e1` (2026-09-03) withdrew the
+    only such capture of each cluster here, at the FIRST verify stage: the
+    twin was emitted with the probe's whole render and the test binary that
+    ran it was never the binary that captured it.
+
+    Narrowing is strictly shortening, so the caller's round bound ends the
+    loop; a capture that shares no leading text with its replay is not
+    narrowed and goes on to be withdrawn."""
+    seen = observed_values(output)
+    if not seen:
+        return keep, []
+    out: list[BehaviourSpec] = []
+    narrowed: list[BehaviourSpec] = []
+    for spec in keep:
+        fn = replay_fn_name(spec)
+        cut = (narrow_then_to_agreement(spec, seen[fn])
+               if fn in failed and spec.required_env and fn in seen else None)
+        if cut is None:
+            out.append(spec)
+            continue
+        out.append(cut)
+        narrowed.append(cut)
+    return out, narrowed
 
 
 def _withdraw(
@@ -364,6 +402,15 @@ def emit_behaviour_tests(
                     _drop(s, "replay did not build or reported no verdict")
                 return None, tuple(dropped), misses, ()
             if failed:
+                keep, _narrowed = _narrow_world_pinned(keep, failed, out)
+                if _narrowed:
+                    log(
+                        f"  [task0d] cluster {cfg_cluster}: narrowed "
+                        f"{len(_narrowed)} world-pinned capture(s) to the text "
+                        "the capture and the replay share — the rendering "
+                        "process owns the rest."
+                    )
+                    continue
                 keep, went = _withdraw(keep, failed, _drop, "replay disagreed with the capture")
                 log(
                     f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) did not "
@@ -429,12 +476,31 @@ def emit_behaviour_tests(
                             else:
                                 still.append(spec)
                             continue
-                        stdout = recapture(spec, perturb_env) if recapture is not None else None
-                        if stdout is None or not capture_moved(spec, stdout):
+                        # TWICE, deliberately: the twin's Then may only pin
+                        # what two independent processes printed. A render
+                        # whose tail names the rendering process (a captured
+                        # backtrace's frames) agrees on its head and nothing
+                        # else, and `split_env_worlds` writes that head as a
+                        # prefix Then instead of an `assert_eq!` that is red
+                        # by construction in the test binary (run
+                        # `330242-0be2c3e1`, 2026-09-03: the only Debug probe
+                        # of each cluster withdrawn as "replay disagreed with
+                        # the capture").
+                        outs = [recapture(spec, perturb_env)
+                                for _ in range(2)] if recapture is not None else []
+                        stdouts = [o for o in outs if o is not None]
+                        if not stdouts or not capture_moved(spec, stdouts[0]):
                             env_went.append(spec)
                             _drop(spec, env_reason)
                             continue
-                        orig, twin = split_env_worlds(spec, stdout, perturb_env)
+                        worlds = split_env_worlds(spec, stdouts, perturb_env)
+                        if worlds is None:
+                            env_went.append(spec)
+                            _drop(spec, "the perturbed world's recaptures "
+                                        "agreed on no leading text — nothing "
+                                        "in this render is the crate's")
+                            continue
+                        orig, twin = worlds
                         still.append(orig)
                         still.append(twin)
                         split = True

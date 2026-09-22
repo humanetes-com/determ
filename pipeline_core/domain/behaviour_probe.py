@@ -16,6 +16,7 @@ example file and runs it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -443,18 +444,117 @@ def capture_moved(spec: BehaviourSpec, stdout: str) -> bool:
     return new.value != old.value
 
 
+#: The replay prints what it actually rendered when a world-pinned assertion
+#: fails, so the emitter can read it out of the cargo output. Ours, not
+#: rustc's `assertion left == right` layout, which is a format we do not own.
+OBSERVED_OPEN = "determ-observed["
+OBSERVED_MID = "]<<<"
+OBSERVED_CLOSE = ">>>"
+_OBSERVED_RE = re.compile(
+    re.escape(OBSERVED_OPEN) + r"(?P<fn>[A-Za-z0-9_]+)"
+    + re.escape(OBSERVED_MID) + r"(?P<value>.*?)" + re.escape(OBSERVED_CLOSE),
+    re.DOTALL)
+
+
+def observed_values(output: str) -> dict[str, str]:
+    """`replay fn name -> the text it rendered`, from a failed run's output.
+
+    Empty when nothing failed with a marker — an older emitted file, or a
+    failure that is not an assertion of ours."""
+    return {m["fn"]: m["value"] for m in _OBSERVED_RE.finditer(output)}
+
+
+def narrow_then_to_agreement(
+    spec: BehaviourSpec, observed: str,
+) -> BehaviourSpec | None:
+    """`spec` with its Then cut back to the text it and `observed` share, or
+    `None` when they share nothing (the caller withdraws).
+
+    THE PAIR THAT MATTERS IS CAPTURE-vs-REPLAY. The capture runs in the probe
+    binary and the replay in the test binary, so any part of a render that
+    names the rendering PROCESS differs between them — and two runs of the
+    same probe example agree on exactly that part, which is why comparing
+    probe runs to each other cannot find it. Run `330242-0be2c3e1`
+    (2026-09-03) emitted the twin as the probe's whole render and the next
+    line of both clusters was `1 capture(s) did not reproduce as a test
+    against the original and were withdrawn`. Narrowing keeps the crate's own
+    output (the message, the chain, the header that says a tail follows) and
+    drops the bytes the process contributed. Strictly shortening, so the
+    emitter's re-render loop terminates."""
+    then = spec.then
+    if then is None or not then.value:
+        return None
+    shared = agreed_prefix([then.value, observed])
+    if not shared or shared == then.value:
+        return None
+    return replace(spec, then=replace(then, value=shared, prefix=True))
+
+
+def agreed_prefix(values: Sequence[str]) -> str:
+    """The longest leading text every value shares. `""` for fewer than two
+    values, or none. Pure."""
+    if len(values) < 2:
+        return ""
+    head = values[0]
+    for other in values[1:]:
+        i = 0
+        limit = min(len(head), len(other))
+        while i < limit and head[i] == other[i]:
+            i += 1
+        head = head[:i]
+        if not head:
+            break
+    return head
+
+
 def split_env_worlds(
     spec: BehaviourSpec,
-    perturb_stdout: str,
+    perturb_stdout: str | Sequence[str],
     perturb_env: Mapping[str, str],
-) -> tuple[BehaviourSpec, BehaviourSpec]:
-    """`(capture-world spec, perturb-world twin)` from a recapture whose Then
-    moved. The original keeps its id and Then; the twin is `::env`."""
+) -> tuple[BehaviourSpec, BehaviourSpec] | None:
+    """`(capture-world spec, perturb-world twin)` from recaptures whose Then
+    moved. The original keeps its id and Then; the twin is `::env`.
+
+    THE TWIN PINS WHAT TWO PROCESSES AGREED ON. Given several recaptures of
+    the same world, an exact Then is written only when they printed the same
+    text; when they diverge, the twin's Then is their agreed PREFIX, flagged
+    `prefix` so the replay asserts `starts_with` plus a longer observation.
+    `None` when the recaptures agree on nothing — there is no observable to
+    pin and the caller withdraws, which is the honest outcome rather than a
+    test that asserts the empty string.
+
+    WHY the whole render cannot be the Then. The capture runs in the probe
+    binary and the replay in the test binary, so any part of a render that
+    names the rendering PROCESS differs deterministically between them. Run
+    `330242-0be2c3e1` (2026-09-03) emitted the twin as the whole perturbed
+    render, and both clusters' only Debug probe came back
+    `replay disagreed with the capture` and was withdrawn — the emitter
+    working as designed on a Then that was never replayable. Taking the
+    agreement of two independent captures keeps the crate's own output (the
+    message, the chain, the header that says a tail follows) and drops
+    exactly the bytes the process contributed. It names no environment
+    variable, no trait and no crate symbol: any render with a
+    process-dependent tail splits the same way.
+
+    A single recapture (a `str`, or one element) has nothing to agree with,
+    so it keeps today's exact Then — the caller that wants the prefix
+    behaviour passes the captures it took."""
+    stdouts = ([perturb_stdout] if isinstance(perturb_stdout, str)
+               else list(perturb_stdout))
+    if not stdouts:
+        return None
+    then = outcome_from_stdout(spec, stdouts[0])
+    if len(stdouts) > 1 and any(s != stdouts[0] for s in stdouts[1:]):
+        values = [outcome_from_stdout(spec, out).value for out in stdouts]
+        shared = agreed_prefix(values)
+        if not shared:
+            return None
+        then = replace(then, value=shared, prefix=True)
     orig = replace(spec, required_env=env_pairs(unperturbed_env(perturb_env)))
     twin = replace(
         spec,
         behaviour_id=env_twin_id(spec.behaviour_id),
-        then=outcome_from_stdout(spec, perturb_stdout),
+        then=then,
         required_env=env_pairs(perturb_env),
         source_ref=(f"{spec.source_ref}::env" if spec.source_ref else "env"),
     )
@@ -832,6 +932,22 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
     setup = (body + "\n") if body else ""
     if then.kind is OutcomeKind.TYPE_IDENTITY:
         check = f"    assert!({spec.when});" if then.ok else f"    assert!(!({spec.when}));"
+    elif then.prefix or spec.required_env:
+        # A world-pinned capture REPORTS what it rendered when it fails, so
+        # the emitter can narrow the Then to the text the capture and the
+        # replay share instead of withdrawing the capture. The tail of a
+        # prefix Then belongs to the rendering process and is asserted to
+        # EXIST, never to match.
+        fmt = _KIND_TO_FMT.get(then.kind, "{}")
+        lit = rust_string_literal(then.value)
+        mark = f"{OBSERVED_OPEN}{fn_name}{OBSERVED_MID}{{actual}}{OBSERVED_CLOSE}"
+        head = f'    let actual = format!("{fmt}", {spec.when});\n'
+        if then.prefix:
+            check = (head
+                     + f'    assert!(actual.starts_with({lit}), "{mark}");\n'
+                     + f'    assert!(actual.len() > {lit}.len(), "{mark}");')
+        else:
+            check = head + f'    assert!(actual == {lit}, "{mark}");'
     else:
         fmt = _KIND_TO_FMT.get(then.kind, "{}")
         lit = rust_string_literal(then.value)

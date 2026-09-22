@@ -1,12 +1,14 @@
-"""A fill ends at the first claim after a keep that moved its ground.
+"""A claim is refused once a keep moved the tests it was planned on.
 
-The plan's sentence (plans/2026-09-19.md, Part 1): a fill runs its schedule
-while its premise holds; the first claim after a keep that changed which
-tests fail, or where they first fail, is refused, the remaining runs are
-rowed DEFERRED/premise_moved, and the loop returns to the sweep. Run
-`3383938-c5d24499` (2026-09-19): the first keep of fill 1 moved all 141
-failing tests off `construct`'s stub, and the rest of that fill ran a plan in
-which the new first failure had no run.
+A fill runs its schedule while each claim's premise holds; a claim (a run,
+or a pooled unit) planned on a test a keep of this fill moved — its verdict,
+or where it first fails — is refused, a run refused before it opens is
+rowed DEFERRED/premise_moved, and the sweep re-plans it. Claims planned on
+tests that did not move keep going. Run `3383938-c5d24499` (2026-09-19):
+the first keep of fill 1 moved all 141 failing tests off `construct`'s
+stub, and the rest of that fill ran a plan in which the new first failure
+had no run. Run `497151-a6fa205b` (2026-09-22): the first keep moved 13
+tests and the fill-wide gate refused 8 units none of whose tests moved.
 
 Fake routes, the real executor and clocks. Negative control: the same fill
 with no premise (`PHASE_C_REPLAN_ON_PREMISE=0`) runs both routes to the end.
@@ -70,12 +72,13 @@ class _Route:
                               kept=run.targets if self._keeps else frozenset())
 
 
-def _runs() -> tuple[RouteRun, RouteRun]:
+def _runs(b_tests: frozenset[str] = frozenset({"t3"})
+          ) -> tuple[RouteRun, RouteRun]:
     a = RouteRun(kind=RouteKind.FILE, label="file src/h.rs",
                  targets=frozenset({_MAKE}), target_tests=frozenset({"t1", "t2"}),
                  stubs_in_targets=frozenset({_MAKE}), files=("src/h.rs",))
     b = RouteRun(kind=RouteKind.PER_FN, label="per-fn 1 stub(s)",
-                 targets=frozenset({_OTHER}), target_tests=frozenset({"t3"}),
+                 targets=frozenset({_OTHER}), target_tests=b_tests,
                  stubs_in_targets=frozenset({_OTHER}), files=("src/g.rs",))
     return a, b
 
@@ -94,13 +97,14 @@ def _deps(tmp_path: Path, log: list[str], events: list, *, premise, ground,
         premise=premise, ground_now=_ground if premise is not None else None)
 
 
-def _fill(tmp_path: Path, *, premise, ground):
+def _fill(tmp_path: Path, *, premise, ground,
+          b_tests: frozenset[str] = frozenset({"t3"})):
     fill_reading.reset_last_comparison()
     calls: list[str] = []
     log: list[str] = []
     events: list = []
     reads: list[int] = []
-    a, b = _runs()
+    a, b = _runs(b_tests)
     routes = [_Route(RouteKind.FILE, a, 3, calls, keeps=True),
               _Route(RouteKind.PER_FN, b, 2, calls, keeps=False)]
     out = execute_fill(routes, hollow={"t1": frozenset({_MAKE})},
@@ -110,20 +114,35 @@ def _fill(tmp_path: Path, *, premise, ground):
     return out, calls, log, events, reads
 
 
-def test_the_claim_after_a_ground_moving_keep_is_refused_and_the_fill_ends(
-        tmp_path: Path) -> None:
-    out, calls, log, events, reads = _fill(tmp_path, premise=_PLAN,
-                                           ground=_MOVED)
-    # The unit in flight completed; its route's next claim was refused.
+def test_a_run_planned_on_a_moved_test_is_deferred(tmp_path: Path) -> None:
+    out, calls, log, events, reads = _fill(
+        tmp_path, premise=_PLAN, ground=_MOVED,
+        b_tests=frozenset({"t2", "t3"}))
+    # The unit in flight completed; its route's next claim was refused, and
+    # the next run, planned on a moved test, never opened.
     assert calls == ["file src/h.rs#0"]
     assert out.premise_moved == ("t1", "t2")
     per_fn = [r for r in out.rows if r.label == "per-fn 1 stub(s)"]
     assert per_fn and per_fn[0].outcome is RunOutcome.DEFERRED
     assert per_fn[0].reason == "premise_moved"
     assert any("premise moved after file src/h.rs" in ln for ln in log)
-    assert [d for e, d in events if e == "phase_c.fill.premise_moved"][0][
-        "moved_count"] == 2
+    ev = [d for e, d in events if e == "phase_c.fill.premise_moved"][0]
+    assert ev["moved_count"] == 2 and ev["continuing"] == 0
     # Measured once, after the keep — never before anything was kept.
+    assert len(reads) == 1
+
+
+def test_a_run_whose_planned_tests_did_not_move_runs_on(tmp_path: Path) -> None:
+    """The keep moved t1 and t2; the per-fn run was planned on t3. Its
+    premise holds, so it runs — the fill-wide gate deferred it."""
+    out, calls, log, _events, reads = _fill(tmp_path, premise=_PLAN,
+                                            ground=_MOVED)
+    assert calls == ["file src/h.rs#0", "per-fn 1 stub(s)#0",
+                     "per-fn 1 stub(s)#1"]
+    assert out.premise_moved == ("t1", "t2")
+    assert not any(r.reason == "premise_moved" for r in out.rows)
+    assert not any("premise moved after file src/h.rs" in ln for ln in log)
+    # One keep, one look: the ground is not re-read without a new keep.
     assert len(reads) == 1
 
 
@@ -160,6 +179,7 @@ def test_a_single_run_fill_names_the_move_that_ended_it(tmp_path: Path) -> None:
     assert calls == ["file src/h.rs#0"]
     assert out.premise_moved == ("t1", "t2")
     moved = [ln for ln in log if "premise moved after a keep" in ln]
-    assert len(moved) == 1 and "no further unit is claimed" in moved[0]
+    assert len(moved) == 1
+    assert "Claims planned on a moved test are refused" in moved[0]
     # Negative control: the between-waves line cannot carry it here.
     assert not any("premise moved after file src/h.rs" in ln for ln in log)

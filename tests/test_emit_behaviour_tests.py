@@ -203,7 +203,10 @@ def test_an_environment_dependent_capture_is_emitted_as_two_worlds(tmp_path: Pat
     assert 'set_var("RUST_BACKTRACE", "0")' in orig_chunk
     assert 'set_var("RUST_BACKTRACE", "1")' in twin_chunk
     assert orig_chunk.index("set_var") < orig_chunk.index("let e = anyhow")
-    assert 'assert_eq!(format!("{}", e.backtrace()), "captured frames")' in twin_chunk
+    # A world-pinned capture asserts equality AND reports what it rendered,
+    # so a disagreement can be narrowed instead of withdrawn.
+    assert 'assert!(actual == "captured frames"' in twin_chunk
+    assert "determ-observed[" in twin_chunk
 
 
 def test_a_file_that_does_not_build_withdraws_everything_and_leaves_no_file(tmp_path: Path) -> None:
@@ -450,3 +453,117 @@ def test_a_verify_that_raises_leaves_no_file_behind(tmp_path: Path) -> None:
     green = tmp_path / "green"
     dest, dropped, _m = _emit(green, specs, _verifier(green))
     assert dest is not None and dest.exists() and dropped == ()
+
+
+def _render_verifier(tmp: Path, renders: Mapping[str, str],
+                     env_renders: Mapping[str, str] | None = None,
+                     env_key: str = "SOME_KNOB") -> Verify:
+    """A `verify` that EVALUATES each emitted assertion against what the test
+    binary would render in that test's world, and reports a failure the way
+    the emitted file does — with the observed value in the marker.
+
+    A test's world is its own `set_var` when it pins one (that is what
+    `required_env` is for), else the env cargo was given. `renders` is the
+    unperturbed world, `env_renders` the perturbed one; a fn with no entry
+    passes."""
+
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (tmp / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = re.findall(r"fn (behaviour_\w+)\(\)", body)
+        passed, failed, marks = [], [], []
+        for fn in present:
+            chunk = body[body.index(f"fn {fn}()"):]
+            chunk = chunk[:chunk.index("\n}\n") + 1]
+            if f'set_var("{env_key}", "1")' in chunk:
+                world = env_renders or {}
+            elif f'set_var("{env_key}", "0")' in chunk:
+                world = renders
+            else:
+                world = (env_renders or {}) if extra else renders
+            actual = world.get(fn)
+            q = r'"((?:[^"\\]|\\.)*)"'
+            lit = (re.search(r"starts_with\(" + q, chunk)
+                   or re.search(r"actual == " + q, chunk)
+                   or re.search(r"assert_eq!\(.*, " + q + r"\);", chunk))
+            if actual is None or lit is None:
+                passed.append(fn)
+                continue
+            want = lit.group(1).encode().decode("unicode_escape")
+            ok = (actual.startswith(want) and len(actual) > len(want)
+                  if "starts_with" in chunk else actual == want)
+            (passed if ok else failed).append(fn)
+            if not ok:
+                marks.append(f"thread '{fn}' panicked:\n"
+                             f"determ-observed[{fn}]<<<{actual}>>>")
+        return not failed, _libtest(passed, failed) + "\n".join(marks)
+
+    return verify
+
+
+def test_a_world_pinned_capture_is_narrowed_to_what_the_replay_shares(
+        tmp_path: Path) -> None:
+    """The capture runs in the probe binary and the replay in the test
+    binary, so the part of a render that names the rendering PROCESS differs
+    between them — and two runs of the same probe agree on exactly that part,
+    which is why the probe cannot find it alone. Before this, the twin
+    carried the probe's whole render and was withdrawn: run
+    `330242-0be2c3e1` (2026-09-03), `1 capture(s) did not reproduce as a test
+    against the original and were withdrawn`, both clusters, the only Debug
+    probe of each."""
+    from dataclasses import replace as dc_replace
+
+    from pipeline_core.domain.behaviour_probe import env_twin_id
+
+    fixed, moving = _spec("stable_value"), _spec("moving", when="e.backtrace()")
+    perturb = {"SOME_KNOB": "1"}
+    twin_fn = replay_fn_name(
+        dc_replace(moving, behaviour_id=env_twin_id(moving.behaviour_id)))
+    # The probe binary rendered one tail; the test binary renders another.
+    probe_render = "shared head\nat 0x41 probe\n"
+    replay_render = "shared head\nat 0x77 test\n"
+    verify = _render_verifier(
+        tmp_path,
+        {replay_fn_name(moving): "boom"},    # the capture world is stable
+        {replay_fn_name(moving): replay_render, twin_fn: replay_render})
+
+    dest, dropped, misses = _emit(
+        tmp_path, [fixed, moving], verify, perturb_env=perturb,
+        recapture=lambda s, _e: (probe_render
+                                 if s.behaviour_id == moving.behaviour_id
+                                 else None))
+    assert dropped == () and misses == []
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    twin_chunk = body[body.index(f"fn {twin_fn}()"):]
+    assert '.starts_with("shared head\\nat 0x")' in twin_chunk
+    assert "actual.len() > " in twin_chunk
+    assert "assert!(actual ==" not in twin_chunk
+
+
+def test_a_world_pinned_capture_sharing_nothing_with_the_replay_is_withdrawn(
+        tmp_path: Path) -> None:
+    """Narrowing is not a licence to keep everything: a replay that shares no
+    leading text with the capture pins nothing, and the capture goes."""
+    from dataclasses import replace as dc_replace
+
+    from pipeline_core.domain.behaviour_probe import env_twin_id
+
+    fixed, moving = _spec("stable_value"), _spec("moving", when="e.backtrace()")
+    twin_fn = replay_fn_name(
+        dc_replace(moving, behaviour_id=env_twin_id(moving.behaviour_id)))
+    verify = _render_verifier(
+        tmp_path, {replay_fn_name(moving): "boom"},
+        {replay_fn_name(moving): "nothing alike", twin_fn: "nothing alike"})
+
+    dest, dropped, misses = _emit(
+        tmp_path, [fixed, moving], verify, perturb_env={"SOME_KNOB": "1"},
+        recapture=lambda s, _e: ("probe side only"
+                                 if s.behaviour_id == moving.behaviour_id
+                                 else None))
+    # The TWIN goes; the capture-world original, which reproduces, stays.
+    from pipeline_core.domain.behaviour_probe import env_twin_id as _tid
+    assert dropped == (_tid(moving.behaviour_id),)
+    assert "replay disagreed with the capture" in misses[0]["reason"]
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert twin_fn not in body and replay_fn_name(moving) in body

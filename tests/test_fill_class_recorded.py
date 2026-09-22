@@ -21,6 +21,9 @@ from pipeline_core.domain.fill_class import (
     FillOutcomeClass,
     class_for_kept,
 )
+from pipeline_core.domain.fill_class import (
+    tests_could_not_run as could_not_run,
+)
 from tests.fills.harness import load_fill
 
 FIX = "3014175-d98ed09e_iter2"
@@ -34,8 +37,12 @@ def _fold(with_reading: bool) -> dict[str, int]:
             counter.add(FillOutcomeClass(c["class"]))
             continue
         net = int(c["net_pass_delta"] or 0) if with_reading else 0
+        # The recorded row's own class is replayed as the could-not-run
+        # reason it stood for; a raw bool is refused by the grading.
         counter.add(class_for_kept(
-            passed=frozenset(), unreachable=c["class"] == "unreachable",
+            passed=frozenset(),
+            unreachable=could_not_run(
+                blocked_sibling=c["class"] == "unreachable"),
             net_delta=net))
     return {k: v for k, v in counter.histogram().as_dict().items() if v}
 

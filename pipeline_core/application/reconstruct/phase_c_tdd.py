@@ -71,7 +71,9 @@ from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
 )
 from pipeline_core.domain.coverage_slice import (
+    records_standing_in,
     red_dead_units,
+    unowned_among,
     withhold_unmeasured,
 )
 from pipeline_core.domain.crash_site import (
@@ -4739,9 +4741,12 @@ def run_phase_c_tdd(
             dict(_cov.owners) if _cov is not None else {})
         if _cov is not None:
             _truncated = truncated_failing(outcomes_of(output))
-            if _cov.unmeasured_tests and deps.recorded_entry_sets is not None:
+            # A record stands in only where this sweep measured no owner
+            # set: an aborted run cut at its first panic is a measurement.
+            _no_owner = unowned_among(_cov.unmeasured_tests, _cov.owners)
+            if _no_owner and deps.recorded_entry_sets is not None:
                 _recorded = dict(deps.recorded_entry_sets(
-                    project_dir, sorted(_cov.unmeasured_tests)))
+                    project_dir, _no_owner))
             _cov, _dead_withheld = withhold_unmeasured(_cov, _truncated)
             if _cov.unmeasured_tests:
                 deps.log(
@@ -4766,8 +4771,8 @@ def run_phase_c_tdd(
         # Ranking converts sites back to locators, so an empty container
         # here is a (file, fn) stamp and does not fan out. Sessions do
         # not read this map: they take unique-container sites below.
-        _recorded_failing = {
-            t: us for t, us in _recorded.items() if t in cur_failed}
+        _recorded_failing = records_standing_in(
+            _recorded, _owners_positive, cur_failed)
         _recorded_rank = {
             t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
             for t, us in _recorded_failing.items()}
@@ -5684,7 +5689,8 @@ def run_phase_c_tdd(
                                   _zp_vanished != _p_vanished,
                                   _zp_bins != _p_bins,
                                   _zp_targets != _p_targets,
-                                  restub_between=_zp_restub_since)))
+                                  restub_between=_zp_restub_since,
+                                  sites_moved=bool(_sites_moved))))
                 _zp_hit = zero_payoff_streak(_zp_history, window=_zp_window)
                 # Two rules, one report. The strict one asks whether the loop
                 # re-aimed at the IDENTICAL set and got nothing; the loose one
@@ -5705,7 +5711,8 @@ def run_phase_c_tdd(
                         f"  {tag} [phase-c/zero-payoff] SHADOW: "
                         f"{_zp_unpaid or _zp_window} judged sweep(s) "
                         f"dispatched {_zp_rule} and none moved the pass "
-                        "count, the crash class or any test's verdict — the "
+                        "count, the crash class, any test's verdict or any "
+                        "failing test's first failure site — the "
                         "class-general stall condition (scripts/"
                         "pattern_census.py). Shadow mode: logged, no action.")
                     deps.emit("phase_c.tdd.zero_payoff_shadow", data={
@@ -6177,7 +6184,8 @@ def run_phase_c_tdd(
                 crash_evidence=frozenset(_crash_grades))
             _batch_unchanged = set(_batch_flat - _batch_declined)
             if deps.ledger_append is not None and (_batch_landed
-                                                   or _batch_esc_flat):
+                                                   or _batch_esc_flat
+                                                   or _batch_esc_capped):
                 _items, _file_of, _fps = _layout_ctx(_destruction_epoch)
                 # The premise the rows' grades are scoped to: the tests
                 # convicting each unit at DISPATCH (attributed-or-escalated
@@ -6192,7 +6200,8 @@ def run_phase_c_tdd(
                         frozenset(bare_test_name(t)
                                   for t in eligible.get(k, ()))
                         & _bare_failed_dispatch)
-                    for k in (_batch_landed | _batch_esc_flat)}
+                    for k in (_batch_landed | _batch_esc_flat
+                              | _batch_esc_capped)}
                 _new_rows = rows_for_units(
                     [(k.file, k.fn_name) for k in _batch_landed], _recs_after,
                     project=project_dir.name, cluster=cluster.name,
@@ -6246,6 +6255,36 @@ def run_phase_c_tdd(
                         "unchanged — recorded as `flat` (a graded try with "
                         "an empty verdict delta; not re-seedable; the next "
                         "process's re-buy detector fires on it).")
+                # THE CAPPED ARM. A unit whose every joined reply was cut
+                # mid-deliberation is not FLAT (nothing was measured) and it
+                # is not nothing: with no row at all it stayed re-seedable at
+                # the rank it had, and the next pass bought the same prompt
+                # under the same budget — the re-buy this class was filed on
+                # (five of run `2965-453dd7a4`'s iter-3 constructors). The
+                # row says what happened: UNMEASURED, re-seedable, and
+                # visible to the re-buy detector that joins on prior rows.
+                # It is the same grade the session route already gives this
+                # shape (`empty_after_cap` -> `RunOutcome.UNMEASURED`).
+                _capped_rows = rows_for_units(
+                    [(k.file, k.fn_name) for k in _batch_esc_capped],
+                    _recs_after, project=project_dir.name,
+                    cluster=cluster.name, state=BodyState.UNMEASURED,
+                    items=_items, file_of=_file_of, file_fp=_fps,
+                    run_id=deps.run_id, iteration=iter_n,
+                    epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n),
+                    convicting_of=_convicting_of, evidence_of=_evidence_of)
+                if _capped_rows:
+                    deps.ledger_append(project_dir, _capped_rows)
+                    if _ledger_cache is not None:
+                        _ledger_cache.extend(_capped_rows)
+                    deps.log(
+                        f"  {tag} [phase-c/ledger] iter {iter_n}: "
+                        f"{len(_capped_rows)} escalated unit(s) answered with "
+                        "every reply cut mid-deliberation — recorded as "
+                        "`unmeasured` (re-seedable, and NOT evidence about "
+                        "the unit; the next process's re-buy detector sees "
+                        "the try instead of re-buying the same prompt "
+                        "blind).")
             _pass_landed |= _batch_landed
             _pass_declined |= _batch_declined
             _pass_escalated |= _batch_escalated

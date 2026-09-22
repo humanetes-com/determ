@@ -68,10 +68,43 @@ _FIELD = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class CouldNotRun:
+    """Why the attributed tests could not run, or nothing when they ran.
+
+    A TYPE, not a bool, because `class_for_kept` reads this before it reads
+    the measurement, so anything truthy passed in outranks what the sweep
+    observed. While it was a bool, a site could hand it any expression: the
+    file and pair sites folded a non-regression keep into it (run
+    `3400-4d0618ba`, 2026-09-21, four keeps graded unreachable beside a GUARD
+    line saying the tests ran), and the check that shipped against that was
+    an AST walk asserting today's sites spell `tests_could_not_run(...)` —
+    which a new site, or an old one edited back, simply does not appear in.
+    The type is the check: `class_for_kept` refuses anything else, so a
+    fabricated reason cannot be constructed, only a real one."""
+
+    crash_keep: bool = False
+    external_only: bool = False
+    blocked_sibling: bool = False
+    crate_red: bool = False
+
+    def __bool__(self) -> bool:
+        return (self.crash_keep or self.external_only
+                or self.blocked_sibling or self.crate_red)
+
+    @property
+    def reason(self) -> str:
+        """The reasons that hold, for a log line; `""` when the tests ran."""
+        return ", ".join(
+            name for name in ("crash_keep", "external_only",
+                              "blocked_sibling", "crate_red")
+            if getattr(self, name))
+
+
 def tests_could_not_run(
     *, crash_keep: bool = False, external_only: bool = False,
     blocked_sibling: bool = False, crate_red: bool = False,
-) -> bool:
+) -> CouldNotRun:
     """The ``unreachable=`` every keep site passes to :func:`class_for_kept`.
 
     The signature is the docstring: the attributed tests could not run
@@ -87,11 +120,12 @@ def tests_could_not_run(
     `unreachable` beside a GUARD line saying the tests ran. Every consumer
     calls this function, so no site can pass the non-regression flag in.
     """
-    return crash_keep or external_only or blocked_sibling or crate_red
+    return CouldNotRun(crash_keep=crash_keep, external_only=external_only,
+                       blocked_sibling=blocked_sibling, crate_red=crate_red)
 
 
 def class_for_kept(
-    *, passed: Collection[str], unreachable: bool,
+    *, passed: Collection[str], unreachable: CouldNotRun,
     net_delta: int = 0, newly_passing: Collection[str] = (),
     attributed: Collection[str] | None = None,
     measured: bool | None = None,
@@ -128,6 +162,13 @@ def class_for_kept(
     reading (empty passed → UNREACHABLE) so existing folds stay the
     negative control.
     """
+    if not isinstance(unreachable, CouldNotRun):
+        # The one state this grading must not be able to reach: a site
+        # asserting "the tests could not run" from a flag of its own.
+        raise TypeError(
+            "class_for_kept(unreachable=) takes tests_could_not_run(...), "
+            f"not {type(unreachable).__name__} — a keep whose attributed "
+            "tests RAN is WRONG_BODY, whatever the site believes")
     if net_delta > 0 or newly_passing:
         return FillOutcomeClass.CASHED
     if unreachable:

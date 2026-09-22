@@ -107,6 +107,17 @@ class ObservableOutcome:
     ok: bool = False  # DOWNCAST_OK / TYPE_IDENTITY
     static_kind: StaticAssertKind | None = None  # STATIC_ASSERTION only
     static_expr: str = ""  # the asserted expression, verbatim
+    #: `value` is a PREFIX of the observation, not the whole of it, and the
+    #: observation is strictly longer. A render whose tail is not
+    #: reproducible across processes (a captured backtrace's frames, an
+    #: address, an elapsed time) has no exact Then that can replay: the
+    #: capture runs in the probe binary and the replay in the test binary,
+    #: so an `assert_eq!` on the whole string is red by construction (run
+    #: `330242-0be2c3e1`, 2026-09-03, withdrew the only Debug probe of both
+    #: clusters as "replay disagreed with the capture"). The prefix is what
+    #: two independent captures of the same world agreed on, so it is the
+    #: part of the render this crate decides and the process does not.
+    prefix: bool = False
 
     def __post_init__(self) -> None:
         k = self.kind
@@ -117,6 +128,17 @@ class ObservableOutcome:
             raise ValueError(f"static_kind set on non-static outcome {k.name}")
         if k is OutcomeKind.CHAIN_SEQUENCE and not self.chain:
             raise ValueError("CHAIN_SEQUENCE requires a non-empty chain")
+        if self.prefix and k in (OutcomeKind.TYPE_IDENTITY,
+                                 OutcomeKind.DOWNCAST_OK,
+                                 OutcomeKind.STATIC_ASSERTION,
+                                 OutcomeKind.CHAIN_SEQUENCE):
+            # A prefix is a statement about rendered text. A bool, a
+            # compile-time assertion and an element sequence have no
+            # prefix to take, and pretending otherwise would assert
+            # nothing while reading as a pin.
+            raise ValueError(f"prefix outcome is not a text render: {k.name}")
+        if self.prefix and not self.value:
+            raise ValueError("a prefix outcome with an empty value pins nothing")
         if k is OutcomeKind.TYPE_IDENTITY and not self.value.strip():
             # A TypeId pin with no type names nothing — `is::<?>()` is not an
             # observable, and an empty value would silently pass any type.
@@ -186,6 +208,7 @@ class ObservableOutcome:
             "ok": self.ok,
             "static_kind": self.static_kind.name if self.static_kind else None,
             "static_expr": self.static_expr,
+            **({"prefix": True} if self.prefix else {}),
         }
 
     @classmethod
@@ -198,6 +221,7 @@ class ObservableOutcome:
             ok=bool(d.get("ok", False)),
             static_kind=StaticAssertKind[str(sk)] if sk else None,
             static_expr=str(d.get("static_expr", "")),
+            prefix=bool(d.get("prefix", False)),
         )
 
 

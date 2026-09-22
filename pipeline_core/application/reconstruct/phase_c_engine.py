@@ -655,7 +655,7 @@ class PhaseCFillEngine:
         _reverted: set[FnLocator],
         _answer_lost: set[FnLocator],
         landed_before: Callable[[], int],
-        claim: Callable[[], bool],
+        claim: Callable[..., bool],
         heal_file: Callable[[str], bool] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
@@ -929,10 +929,15 @@ class PhaseCFillEngine:
                 stub_free=not any(not _is_cfg_dead(k) for k in _pass_stub_keys),
             )
 
+            # Units the fill schedule's gate refused this pass (share spent,
+            # or their own tests moved under a keep): named once, below.
+            _unclaimed: list[str] = []
+
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
                         filled_this_pass: list[FnLocator] = filled_this_pass,
                         results_this_pass: list[FillResult] = results_this_pass,
+                        _unclaimed: list[str] = _unclaimed,
                         pass_n: int = pass_n) -> None:
                 # B023: the per-LEVEL queue AND the per-pass ctx/list/number are
                 # passed explicitly — free-var reads would rely on late binding.
@@ -945,15 +950,23 @@ class PhaseCFillEngine:
                     # `fill_one.run` below; the main thread's own check (after
                     # the join below) is what actually ends the process.
                     self.tel.check_stop(f"per-fn pass {pass_n} worker dispatch")
-                    # The fill schedule's share: no NEW unit is claimed once
-                    # it is spent and the last landing moved no verdict; a
-                    # unit in flight always completes.
-                    if not claim():
-                        return
                     try:
                         idx, rec = work_queue.get_nowait()
                     except _queue_mod.Empty:
                         return
+                    # The fill schedule's gate on THIS unit: no new unit once
+                    # the share is spent and the last landing moved no
+                    # verdict, and none whose own attributed tests a keep of
+                    # this fill moved. A unit whose tests did not move is
+                    # still standing on its plan; a unit in flight always
+                    # completes.
+                    _own = (tdd_frontier_tests.tests_for(
+                                FnLocator(rec.file, rec.fn_name))
+                            if tdd_frontier_tests is not None else set())
+                    if not claim(frozenset(_own)):
+                        with _counters_lock:
+                            _unclaimed.append(f"{rec.file}::{rec.fn_name}")
+                        continue
                     try:
                         res = self.fill_one.run(idx, rec, ctx=_pass_ctx)
                     except Exception as _e:
@@ -1011,6 +1024,14 @@ class PhaseCFillEngine:
                 else:
                     _worker(_work_queue)
 
+            if _unclaimed:
+                self.tel.log(
+                    f"  [phase-c/per-fn] pass {pass_n}: {len(_unclaimed)} "
+                    "unit(s) not claimed (fill share spent, or a keep of "
+                    "this fill moved the tests they were planned on): "
+                    + ", ".join(sorted(_unclaimed)[:8])
+                    + (f" (+{len(_unclaimed) - 8} more)"
+                       if len(_unclaimed) > 8 else ""))
             if _pass_ctx.retro_gate.total:
                 self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: "
                              f"{_pass_ctx.retro_gate.render()}")

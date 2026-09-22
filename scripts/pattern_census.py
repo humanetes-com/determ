@@ -238,6 +238,27 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      class was found by hand days late because every capped call was graded
      UNMEASURED and quietly re-bought.  Reaction: `HEALTH ‼ LLM_CUT_STOP`.
 
+  P35 fill-wide premise refusal — a keep moved some tests and the premise
+     gate refused every unclaimed unit of the fill, whether or not its own
+     tests moved.  Run 497151-a6fa205b (2026-09-22): the first keep moved
+     13 tests, the 8 unclaimed units of a 12-unit batch held 55 others,
+     and three fills in a row landed only the four bodies in flight.
+     Keyed on the pre-fix line `no further unit is claimed this fill`.
+     Reaction: `Claims planned on a moved test are refused`.
+
+  P36 bound-only input drop — a model call ended `input too long` after
+     the retry replanned from vLLM's "at least N input tokens", which is
+     ctx - max_tokens + 1 and never the prompt's size.  Same run, fill 3:
+     `src/ensure.rs::new` told 31140, 32531, 33950 and dropped with no
+     answer.  No reaction key: the fix plans from the server's exact count
+     and prints nothing in the pipeline log; a post-fix hit is a defect.
+
+  P37 owner-less abort — the coverage reading lists binaries killed by a
+     signal of their own (rc below -1) as `hung inside … (killed after
+     Ns)`, and their tests carry no owner set.  Same run, iter 4: 28
+     binaries at rc=-6, 91 of 150 failing tests without owners.
+     Reaction: `owned up to their first panic`.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -566,6 +587,19 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P33": [
         # The run-level cut stop fired and ended the run.
         ("HEALTH ‼ LLM_CUT_STOP", "cut-stop"),
+    ],
+    "P35": [
+        # The gate refuses only claims planned on a moved test.
+        ("Claims planned on a moved test are refused", "scoped-premise"),
+    ],
+    "P36": [],
+    "P37": [
+        ("owned up to their first panic", "cut-before-death"),
+    ],
+    "P34": [
+        # No answer exists. The stall line IS the loop giving up; nothing
+        # downstream asks why the floor held, which is why the class has
+        # been re-derived once per session since 2026-08-29.
     ],
     "P27": [
         # The end gate classified each orphan against augmentation's
@@ -2374,13 +2408,25 @@ def detect_p32(run: Run, iters: list[dict]) -> list[dict]:
     if not ev:
         return []
     hits: list[str] = []
+
+    def _sites(payload: object) -> set[tuple[str | None, str | None]]:
+        # An owner map recorded before the site payload shipped lists bare
+        # `file::fn` STRINGS, not site dicts (every log rotated before
+        # 2026-09-11). A census that raises on an old log cannot answer the
+        # question it exists for — the old shape is read, not crashed on.
+        out: set[tuple[str | None, str | None]] = set()
+        for sites in (payload or {}).values():  # type: ignore[union-attr]
+            for site in sites:
+                if isinstance(site, dict):
+                    out.add((site.get("file"), site.get("fn")))
+                elif isinstance(site, str) and "::" in site:
+                    file, _sep, fn = site.partition("::")
+                    out.add((file, fn))
+        return out
+
     for om in ev["owner_map"]:
-        rendered = {(s.get("file"), s.get("fn"))
-                    for sites in (om.get("rendered") or {}).values()
-                    for s in sites}
-        owned = {(s.get("file"), s.get("fn"))
-                 for sites in (om.get("owners") or {}).values()
-                 for s in sites}
+        rendered = _sites(om.get("rendered"))
+        owned = _sites(om.get("owners"))
         render_only = rendered - owned
         if not render_only:
             continue
@@ -2463,6 +2509,145 @@ def detect_p33(run: Run, iters: list[dict]) -> list[dict]:
     return []
 
 
+# P34 — abandoned block: a fix loop whose COMPILE-error floor never reached
+# zero, stalled, and dropped the unit. Keyed on the unit alone, deliberately.
+# The class was recorded for a year against one diagnostic (`E0277
+# dyn core::error::Error + Send + Sync`, six runs, 1h17m of a 3h iteration on
+# `955468-7b947bd0`, 2026-08-29) and read as closed when that code stopped
+# appearing, while the same blocks went on stalling their floor under E0308,
+# E0425 and E0425/E0560. A key that carries the code cannot see that, so every
+# session re-derived it.
+#
+# WHICH NUMBER IS A COMPILE FLOOR. `[phase-c/impl]` and `[phase-c/per-fn]`
+# print `FixProgress.__str__`, which says `N compile err(s)` or `compiles, N
+# failing test(s)` — the second is a body that BUILDS and is a different class
+# (the fix loop's own grading owns it). The `[improvement_loop/…]` line prints
+# the raw `floor_metric` instead: `len(error_sigs) * 10_000 + failing_tests`
+# (`application/reconstruct/fix_diagnostics.py`). So on that line a floor of
+# 1, 4, 7 or 27 is a COMPILING body with that many failing tests — 13 of the
+# recorded `floor stalled at 1` lines are exactly that — and only a floor at
+# or above 10_000 is the compile tier (`10001` = one signature, one failing
+# test). Reading those small numbers as compile errors was this detector's
+# first shape and it counted compiled bodies as abandoned blocks.
+_COMPILE_WEIGHT = 10_000
+
+# `[phase-c/impl] <unit>: floor stalled at …` / `[phase-c/per-fn] <unit>: …`,
+# whose floor is rendered, so the wording decides the tier.
+RE_FLOOR_STALL_RENDERED = re.compile(
+    r"\[phase-c/(?:impl|per-fn)\]\s*(?P<unit>.+?): floor stalled at "
+    r"(?P<floor>\d+) (?:compile err\(s\)|errors) for "
+    r"(?P<iters>\d+) (?:iter|attempt)\(s\)(?P<rest>[^\n]*)")
+# `[improvement_loop/<route>:<unit>]`, whose floor is the raw metric. The tag
+# carries the unit; a tag with no `:` is a LOOP name (`generate_fix_loop`),
+# which names no block and would otherwise open a chronic row of its own.
+RE_FLOOR_STALL_METRIC = re.compile(
+    r"\[improvement_loop/(?P<tag>[^\]]+)\] floor stalled at (?P<floor>\d+) "
+    r"for (?P<iters>\d+) iter\(s\)(?P<rest>[^\n]*)")
+# The t2 inner loop's own wording for the same event. It abandons a whole
+# regeneration, not a block, so it names no unit.
+RE_FLOOR_STALL_INNER = re.compile(
+    r"Inner loop floor stalled at (?P<floor>\d+) errors for "
+    r"(?P<iters>\d+) regen\(s\)(?P<rest>[^\n]*)")
+
+
+def _floor_stalls(run: Run) -> list[tuple[str, str, str]]:
+    """`(ref, unit, evidence tail)` per abandoned COMPILE floor of this run.
+
+    `unit` is `""` when the stall names no block (a whole-loop abandonment):
+    still an instance of the class, but nothing a cross-run chronic can key
+    on. A floor of 0 is not a stall to report on any shape — the thing
+    compiled."""
+    out: list[tuple[str, str, str]] = []
+    for ref, m in run.find(RE_FLOOR_STALL_RENDERED):
+        if int(m["floor"]) <= 0:
+            continue
+        out.append((ref, (m["unit"] or "").strip(),
+                    f"floor {m['floor']} compile err(s) for "
+                    f"{m['iters']} iter(s){m['rest'][:60]}"))
+    for ref, m in run.find(RE_FLOOR_STALL_METRIC):
+        floor = int(m["floor"])
+        if floor < _COMPILE_WEIGHT:
+            continue  # a compiling body with `floor` failing tests
+        tag = m["tag"]
+        unit = tag.split(":", 1)[1].strip() if ":" in tag else ""
+        sigs, tests = divmod(floor, _COMPILE_WEIGHT)
+        out.append((ref, unit,
+                    f"floor {sigs} compile signature(s) + {tests} failing "
+                    f"test(s) for {m['iters']} iter(s)"
+                    + ("" if unit else f" [whole loop {tag}, no block]")))
+    for ref, m in run.find(RE_FLOOR_STALL_INNER):
+        if int(m["floor"]) <= 0:
+            continue
+        out.append((ref, "", f"floor {m['floor']} compile err(s) for "
+                             f"{m['iters']} regen(s) [t2 inner loop, no block]"))
+    return out
+
+
+def detect_p34(run: Run, iters: list[dict]) -> list[dict]:
+    """Abandoned block: the unit's compile-error floor never reached zero and
+    the loop stopped spending on it. One hit per occurrence. The key is the
+    unit WITHOUT the diagnostic code, so the cross-run table shows a block
+    that stalls under a different error every run as the one chronic it is; a
+    stall that names no block keys on nothing and stays out of that table."""
+    return [{"evidence": f"{unit or '(no block)'}: {tail} — dropped without "
+                         "ever compiling",
+             "key": [unit],
+             "refs": [ref]}
+            for ref, unit, tail in _floor_stalls(run)]
+
+
+RE_FILLWIDE_PREMISE = re.compile(
+    r"\[phase-c/schedule\] fill (?P<fill>\d+): premise moved after a keep "
+    r"— (?P<n>\d+) test\(s\).*no further unit is claimed this fill")
+
+
+def detect_p35(run: Run, iters: list[dict]) -> list[dict]:
+    """A fill the pre-fix gate ended at its first keep. One hit per run,
+    counting the fills."""
+    hits: list[str] = []
+    refs: list[str] = []
+    for ref, text in run.lines:
+        m = RE_FILLWIDE_PREMISE.search(text)
+        if m:
+            hits.append(f"fill {m['fill']} ({m['n']} moved)")
+            refs.append(ref)
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} fill(s) ended for every unclaimed unit "
+                         f"on a move of some tests: {'; '.join(hits[:6])}",
+             "refs": refs[:3]}]
+
+
+RE_INPUT_DROP = re.compile(
+    r"worker error on (?P<unit>\S+): input too long \(real_tokens=(?P<n>\d+)\)")
+
+
+def detect_p36(run: Run, iters: list[dict]) -> list[dict]:
+    """A unit lost to `input too long`. One hit per occurrence, keyed on
+    the unit."""
+    return [{"evidence": f"{m['unit']} dropped at a reported {m['n']} tokens",
+             "key": [m["unit"]], "refs": [ref]}
+            for ref, text in run.lines
+            for m in [RE_INPUT_DROP.search(text)] if m]
+
+
+RE_COV_SIGNAL = re.compile(r"\(rc=-(?:[2-9]|\d{2,})\)")
+
+
+def detect_p37(run: Run, iters: list[dict]) -> list[dict]:
+    """A coverage line listing a signal-killed binary as hung. One hit per
+    run, counting the lines."""
+    refs = [ref for ref, text in run.lines
+            if "[coverage]" in text and "hung inside" in text
+            and RE_COV_SIGNAL.search(text)]
+    if not refs:
+        return []
+    return [{"evidence": f"{len(refs)} coverage reading(s) listed binaries "
+                         "killed by their own signal as hung, their tests "
+                         "without owners",
+             "refs": refs[:3]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2478,7 +2663,9 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P22": detect_p22, "P23": detect_p23, "P24": detect_p24,
              "P25": detect_p25, "P26": detect_p26, "P27": detect_p27,
              "P28": detect_p28, "P29": detect_p29, "P30": detect_p30,
-             "P31": detect_p31, "P32": detect_p32, "P33": detect_p33}
+             "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
+             "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
+             "P37": detect_p37}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2507,7 +2694,11 @@ CLASS_NAMES = {
     "P30": "spent pair first (a pair past its grace opened ahead of a never-served run; pre-fix the grace lapsed the deferral but kept the order)",
     "P31": "split complement (a session opened with no unwired table fn in its write set while file-first offered them; pre-fix the session's write set was coverage-only)",
     "P32": "render-only owner (a fill aimed a run at a unit a failing test ran only while its failure was reported; pre-fix the owner map was the full profile, so the panic message's renderer owned the test)",
-    "P33": "cut-rate run (4% or more of the last 100 model calls returned no decided answer from call 25; pre-fix nothing stopped it and each capped call was quietly re-bought)"}
+    "P33": "cut-rate run (4% or more of the last 100 model calls returned no decided answer from call 25; pre-fix nothing stopped it and each capped call was quietly re-bought)",
+    "P34": "abandoned block (a fix loop's compile-error floor never reached zero and the unit was dropped; keyed on the unit, not the diagnostic code)",
+    "P35": "fill-wide premise refusal (a keep moved some tests and every unclaimed unit of the fill was refused; pre-fix the gate was not scoped to each claim's tests)",
+    "P36": "bound-only input drop (a call ended input too long after replanning from vLLM's threshold, never the prompt's size; pre-fix no exact count)",
+    "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)"}
 
 
 # -------------------------------------------------------------------- report
@@ -2565,6 +2756,7 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
     fired: dict[str, list[str]] = defaultdict(list)
     nobody: dict[str, int] = defaultdict(int)
     compl: dict[tuple, list[str]] = defaultdict(list)
+    floors: dict[str, list[str]] = defaultdict(list)
     heads: dict[str, list[str]] = defaultdict(list)
     for run in runs:
         seen_e, seen_c, seen_f = set(), set(), set()
@@ -2572,6 +2764,10 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
             key = json.dumps(h["key"])
             if run.run_id not in compl[key]:
                 compl[key].append(run.run_id)
+        for h in detect_p34(run, []):
+            unit = h["key"][0]
+            if unit and run.run_id not in floors[unit]:
+                floors[unit].append(run.run_id)
         # The same cohort head bought under the cap by more than one process:
         # a relaunch on the same tree re-derives the same inference and the
         # same exemption, so the head recurs across run ids without any run
@@ -2621,6 +2817,10 @@ def chronics(runs: list[Run]) -> dict[str, list[dict]]:
         "compliance": [
             {"what": " ".join(str(x) for x in json.loads(k)), "runs": r}
             for k, r in sorted(compl.items(), key=lambda kv: -len(kv[1]))
+            if len(r) >= 2][:12],
+        "abandoned_block": [
+            {"what": unit, "runs": r}
+            for unit, r in sorted(floors.items(), key=lambda kv: -len(kv[1]))
             if len(r) >= 2][:12],
         "cohort_head": [
             {"what": k[:110] + (" …" if len(k) > 110 else ""), "runs": r}
@@ -2852,6 +3052,8 @@ def print_chronics(ch: dict) -> None:
         "compliance": "same identical-diagnostic repeat (unit code symbols)"
                       " in >=2 runs",
         "cohort_head": "same crash-cohort head bought under the cap in >=2 runs",
+        "abandoned_block": "same block abandoned on a stalled compile floor"
+                           " in >=2 runs (any diagnostic)",
     }
     for key, title in titles.items():
         entries = ch.get(key) or []

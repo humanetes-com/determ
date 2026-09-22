@@ -1469,22 +1469,26 @@ class RunClock:
     already claimed runs to completion; the clock only answers whether the
     NEXT claim may be made.
 
-    ``ground_moved`` is the fill's premise gate (`fill_scheduler`): True once
-    a keep in this fill changed what the plan was made from — a test's
-    verdict, where it first fails, or whether its process dies. Every route
-    already asks this clock before each claim, so the refusal lands at the
-    next unit boundary of whichever route is running, and the fill ends
-    there for the sweep to re-plan (run `3383938-c5d24499`, 2026-09-19: the
-    first keep moved all 141 failing tests off `construct`'s stub and the
-    rest of the fill ran a plan in which `vtable` had no run)."""
+    ``ground_moved`` is the fill's premise gate (`fill_scheduler`), asked
+    with the claim's scope: True once a keep in this fill changed what THAT
+    claim was planned on — a test's verdict, where it first fails, or
+    whether its process dies. Every route asks this clock before each
+    claim, so the refusal lands at the next unit boundary of whichever
+    route is running (run `3383938-c5d24499`, 2026-09-19: the first keep
+    moved all 141 failing tests off `construct`'s stub and the rest of the
+    fill ran a plan in which `vtable` had no run). ``scope`` is the run's
+    target tests; a claim with no scope stands on the whole ground."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
                  now: Callable[[], float] = time.monotonic,
-                 ground_moved: Callable[[], bool] | None = None) -> None:
+                 ground_moved: Callable[[frozenset[str] | None], bool] | None = None,
+                 scope: frozenset[str] | None = None) -> None:
         self.share_minutes = share_minutes
         self._fill_remaining = fill_remaining
         self._ground_moved = ground_moved
+        #: The tests the run was planned on (`RouteRun.target_tests`).
+        self.scope = scope
         self._now = now
         self._started = now()
         self.last_delta = 0
@@ -1503,11 +1507,14 @@ class RunClock:
         """What the run's last landed change set bought (net verdicts)."""
         self.last_delta = int(delta)
 
-    def may_claim(self) -> bool:
+    def may_claim(self, tests: Iterable[str] | None = None) -> bool:
         """Budget follows payoff: within the share, always; past it only
         while the last claim cashed and the fill has budget left. Never once
-        the fill's ground has moved."""
-        if self._ground_moved is not None and self._ground_moved():
+        the ground this claim was planned on has moved: ``tests`` when the
+        route names the unit's own tests (a pooled per-fn unit), else the
+        run's scope; with neither, any move refuses."""
+        scope = frozenset(tests) if tests is not None else self.scope
+        if self._ground_moved is not None and self._ground_moved(scope):
             self.refused += 1
             return False
         if self.share_minutes is None:
