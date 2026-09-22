@@ -22,6 +22,8 @@ import subprocess
 import time
 from typing import Any
 
+from pipeline_core.domain import reasoning_cap
+
 from . import events_data, render
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -325,6 +327,31 @@ def read_backend() -> str:
     except Exception:
         pass
     return "ollama"
+
+
+_CUT_STOP_KEYS = ("LLM_CUT_STOP_SHARE", "LLM_CUT_STOP_WINDOW", "LLM_CUT_STOP_MIN_CALLS")
+
+
+def read_cut_stop_knobs() -> reasoning_cap.CutStopKnobs:
+    """`LLM_CUT_STOP_SHARE`/`_WINDOW`/`_MIN_CALLS` as the pipeline reads
+    them at cluster entry (`reasoning_cap.cut_stop_knobs_from_env`), sourced
+    from `.env` on disk: the monitor is a separate process, never forked
+    from the pipeline's, so it inherits none of its environment and no
+    dotenv loader runs here (unlike `pipeline.py`/`model_interact.py`)."""
+    env: dict[str, str] = {}
+    try:
+        with open(os.path.join(SCRIPT_DIR, ".env")) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                key, _, val = s.partition("=")
+                key = key.strip()
+                if key in _CUT_STOP_KEYS:
+                    env[key] = val.strip()
+    except OSError:
+        pass
+    return reasoning_cap.cut_stop_knobs_from_env(env)
 
 
 def pipeline_running() -> bool:

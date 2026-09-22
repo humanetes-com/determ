@@ -12,6 +12,7 @@ import os
 import time
 from typing import Any
 
+from pipeline_core.domain.reasoning_cap import CallMark, CutRate, CutStopKnobs
 from pipeline_core.monitor import engine_metrics as _em
 from pipeline_core.monitor import generation_panel as _gp
 from pipeline_core.monitor import render as _render
@@ -320,3 +321,55 @@ def test_generation_missing_and_empty_logs(tmp_path: Any) -> None:
     rows = _gp.generation_rows(stream_log=empty, width=120, now=time.time(),
                                runtime={}, refresh=2.0, think_cap_chars=40_000)
     assert _render.plain(rows[0]) == "stream log empty"
+
+
+def test_generation_shows_the_cut_rate_gauge_beside_the_live_call(tmp_path: Any) -> None:
+    """The gauge moved out of the Pipeline console's coverage/score family
+    and into the Generation box, beside the call it narrates (phase=, cpt=,
+    elapsed) — the box a viewer actually watches to see "a call is in
+    flight". Row 0 stays the header (existing tests pin it); the gauge is
+    row 1 when the caller supplies a reading, and absent entirely when it
+    does not (the default — every other caller of this box is unaffected)."""
+    _ws._prev.clear()
+    stream = str(tmp_path / "stream.log")
+    _write(stream, "[CALL_START: 1.0]\n[CALL: m]\n[CONTENT]some body text", time.time())
+    knobs = CutStopKnobs(share_pct=4.0, window=100, min_calls=1)
+    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    rate = rate.add(CallMark(route="", cut=True, empty=True, prompt_tokens=0))
+
+    with_gauge = _gp.generation_rows(
+        stream_log=stream, width=120, now=time.time(),
+        runtime={"cpt": 4.0, "max_tokens": None, "retries": 0}, refresh=2.0,
+        think_cap_chars=40_000, cut_rate=rate, cut_knobs=knobs)
+    assert "llm cut" in _render.plain(with_gauge[1])
+
+    without_gauge = _gp.generation_rows(
+        stream_log=stream, width=120, now=time.time(),
+        runtime={"cpt": 4.0, "max_tokens": None, "retries": 0}, refresh=2.0,
+        think_cap_chars=40_000)
+    assert not any("llm cut" in _render.plain(r) for r in without_gauge)
+
+
+def test_generation_shows_elapsed_even_with_no_known_budget(tmp_path: Any) -> None:
+    """A CODE-phase call before vLLM has reported an adaptive budget used to
+    render NO progress line at all — "a call is in flight" was visible only
+    as the header's `last-tok Xs ago`, which measures token silence, not how
+    long the call has been running. It must always show a ticking elapsed
+    counter now, with no invented percentage (there is no real cap to bar
+    it against)."""
+    _ws._prev.clear()
+    now = time.time()
+    stream = str(tmp_path / "stream.log")
+    _write(stream, f"[CALL_START: {now - 12:.3f}]\n[CALL: m]\n[CONTENT]partial",
+           now - 1)
+    rows = _gp.generation_rows(
+        stream_log=stream, width=120, now=now,
+        runtime={"cpt": 4.0, "max_tokens": None, "retries": 0}, refresh=2.0,
+        think_cap_chars=40_000)
+    plain_rows = [_render.plain(r) for r in rows]
+    # `elapsed` floors `now - started`; started was set 12s before `now`, so
+    # scheduling jitter between building the fixture and the call may floor
+    # to 11 or 12 — either is the ticking counter this test exists to prove
+    # exists at all, not a specific value.
+    assert any("elapsed 11s" in r or "elapsed 12s" in r for r in plain_rows)
+    assert not any("[" in r and "]" in r and "%" in r for r in plain_rows[1:])

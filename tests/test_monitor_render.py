@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 import monitor as m
+from pipeline_core.domain.reasoning_cap import CallMark, CutRate, CutStopKnobs
 from pipeline_core.monitor import render as _render
 from pipeline_core.monitor.frame import SplitLayout
 
@@ -244,6 +245,51 @@ def _render_frame(monkeypatch, cols: int, split: bool, view: str) -> list[str]:
     frame = list(m._buf)
     m._buf.clear()
     return frame
+
+
+def test_cut_rate_row_absent_before_any_recorded_call() -> None:
+    assert _render.cut_rate_row(CutRate(100, 4.0, 25), CutStopKnobs()) is None
+
+
+def test_cut_rate_row_fills_toward_the_stop_threshold_not_100pct() -> None:
+    knobs = CutStopKnobs(share_pct=4.0, window=100, min_calls=1)
+    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    # 2 of 100 cut = 2% share = half of the 4% threshold.
+    for _ in range(98):
+        rate = rate.add(CallMark(route="", cut=False, empty=False, prompt_tokens=0))
+    for _ in range(2):
+        rate = rate.add(CallMark(route="", cut=True, empty=True, prompt_tokens=0))
+    row = _render.cut_rate_row(rate, knobs)
+    assert row is not None
+    plain = m._plain(row)
+    assert "2.0% / 4%" in plain and "cut=2" in plain and "empty=2" in plain
+    assert "of 100 call(s)" in plain
+    # Half of an 18-wide bar filled, at the pre-threshold color (not red/fired).
+    assert "\033[33m" in row or "\033[32m" in row  # yellow or green, never red
+    assert "\033[31m" not in row
+
+
+def test_cut_rate_row_fired_reads_full_and_red() -> None:
+    knobs = CutStopKnobs(share_pct=4.0, window=40, min_calls=1)
+    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    for _ in range(2):
+        rate = rate.add(CallMark(route="", cut=True, empty=True, prompt_tokens=0))
+    assert rate.fired  # 100% >= 4%
+    row = _render.cut_rate_row(rate, knobs)
+    assert row is not None
+    assert "\033[31m" in row  # red
+    plain = m._plain(row)
+    assert "█" * 18 in plain  # the bar is entirely full, capped at 100%
+
+
+def test_cut_rate_row_disabled_stop_shows_the_raw_share() -> None:
+    knobs = CutStopKnobs(share_pct=0, window=10, min_calls=1)
+    assert not knobs.enabled
+    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    rate = rate.add(CallMark(route="", cut=True, empty=True, prompt_tokens=0))
+    row = _render.cut_rate_row(rate, knobs)
+    plain = m._plain(row)
+    assert "100.0% / off" in plain
 
 
 def test_split_keeps_monitor_left_and_detail_right(monkeypatch) -> None:

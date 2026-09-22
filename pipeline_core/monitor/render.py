@@ -14,6 +14,7 @@ from datetime import datetime
 from statistics import median
 from typing import Any
 
+from pipeline_core.domain.reasoning_cap import CutRate, CutStopKnobs
 from pipeline_core.monitor.fill_progress import ROUTES, FillProgress
 from pipeline_core.monitor.iteration_steps import STEPS, step_index
 from pipeline_core.monitor.oracle_gap import oracle_gap
@@ -515,6 +516,37 @@ def oracle_row(state: dict[str, Any]) -> str | None:
     static = state.get("tdd_oracle_static")
     return (f"           oracle   {dim(f'{static} declared')}  "
             f"{yellow(gap.rendered)}")
+
+
+def cut_rate_row(rate: CutRate, knobs: CutStopKnobs) -> str | None:
+    """The live `LLM_CUT_STOP` gauge: a bar that fills toward the stop
+    threshold as calls in the window return empty or reasoning-capped
+    (`reasoning_cap.is_cut`) — the same quantity the `[llm/health]` log line
+    prints once per sweep and `HEALTH ‼ LLM_CUT_STOP` reads from when it
+    fires, on screen every refresh instead of only once an iteration or only
+    in hindsight after the stop has already taken the run.
+
+    The bar fills against the STOP threshold, not against 100%: at
+    `share == share_pct` the bar is full and red, matching the instant
+    `CutRate.fired` goes true. With the stop disabled (`LLM_CUT_STOP_SHARE=0`)
+    there is no threshold to fill toward, so the bar fills against the raw
+    share out of 100 instead — the same `[llm/health]` line's number with a
+    knob-off caveat, never a bar that reads "empty" while calls are cutting.
+
+    None before this run has recorded a single main-stream call, so the row
+    does not appear (rather than render a meaningless 0%) ahead of task0c's
+    first request.
+    """
+    if not rate.marks:
+        return None
+    pct_of_stop = (100.0 * rate.share / knobs.share_pct) if knobs.enabled else rate.share
+    bar_col = (red if rate.fired or pct_of_stop >= 100
+               else yellow if pct_of_stop >= 60 else green)
+    thresh = f"{knobs.share_pct:g}%" if knobs.enabled else dim("off")
+    empty = sum(1 for m in rate.marks if m.empty)
+    return (f"  llm cut  [{bar_col(progress_bar(min(100.0, pct_of_stop), 18))}] "
+            f"{rate.share:.1f}% / {thresh}  cut={rate.cut} empty={empty} "
+            f"of {len(rate.marks)} call(s) (seen {rate.seen}+)")
 
 
 def iteration_progress_rows(state: dict[str, Any], now: float) -> list[str]:

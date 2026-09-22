@@ -39,6 +39,24 @@ def test_log_tail_meta_missing(tmp_path, monkeypatch):
     assert rd.log_tail_meta() == {"last_line": "", "age": 0.0}
 
 
+def test_read_cut_stop_knobs_defaults_and_dotenv(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "SCRIPT_DIR", str(tmp_path))
+    d = rd.read_cut_stop_knobs()  # no .env → the same defaults CutStopKnobs() carries
+    assert (d.share_pct, d.window, d.min_calls) == (4.0, 100, 25)
+    (tmp_path / ".env").write_text(
+        "LLM_CUT_STOP_SHARE=6\nLLM_CUT_STOP_WINDOW=50\n"
+        "LLM_CUT_STOP_MIN_CALLS=10\nUNRELATED=ignored\n")
+    d2 = rd.read_cut_stop_knobs()
+    assert (d2.share_pct, d2.window, d2.min_calls) == (6.0, 50, 10)
+
+
+def test_read_cut_stop_knobs_garbage_falls_back_not_disables(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "SCRIPT_DIR", str(tmp_path))
+    (tmp_path / ".env").write_text("LLM_CUT_STOP_SHARE=not-a-number\n")
+    d = rd.read_cut_stop_knobs()
+    assert d.share_pct == 4.0 and d.enabled
+
+
 def test_find_project_dir_and_stage(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "SCRIPT_DIR", str(tmp_path))
     assert rd.find_project_dir() is None  # no tmp/ yet

@@ -180,6 +180,7 @@ _phase_c_state = _ed.phase_c_state
 _latest_compile_file_stats = _ed.latest_compile_file_stats
 _latest_test_file_stats = _ed.latest_test_file_stats
 _latest_flow_audit = _ed.latest_flow_audit
+_cut_rate_reading = _ed.cut_rate_reading
 
 _rd.configure(script_dir=os.path.dirname(os.path.abspath(__file__)),
               pipeline_log=PIPELINE_LOG)
@@ -196,6 +197,7 @@ _log_tail_meta = _rd.log_tail_meta
 _read_backend = _rd.read_backend
 _pipeline_running = _rd.pipeline_running
 _detect_cached_repo_url = _rd.detect_cached_repo_url
+_read_cut_stop_knobs = _rd.read_cut_stop_knobs
 
 _GPU_BW = {"3090": 936.2, "3080": 760.0, "4090": 1008.0, "4080": 716.8,
            "A100": 2000.0, "H100": 3350.0}
@@ -723,11 +725,18 @@ def generation(width: int):
     It follows the freshest stream file rather than the base one: under the
     parallel fill engine every token goes to a per-thread sibling and the base
     file is the idle main thread's.
+
+    The LLM_CUT_STOP gauge is fetched here (alongside the vLLM runtime facts)
+    and handed to the panel rather than rendered in `pipeline_status` — it
+    belongs beside the live call it narrates (phase=, cpt=, elapsed), not
+    beside the coverage/score gauges, which is where it sat before it moved.
     """
+    _cut_knobs = _read_cut_stop_knobs()
     return _generation_rows(
         stream_log=STREAM_LOG, width=width, now=time.time(),
         runtime=_vllm_runtime(), refresh=REFRESH,
-        think_cap_chars=_THINK_CAP_CHARS)
+        think_cap_chars=_THINK_CAP_CHARS,
+        cut_rate=_cut_rate_reading(_cut_knobs), cut_knobs=_cut_knobs)
 
 # ── State ─────────────────────────────────────────────────────────────────────
 

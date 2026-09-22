@@ -43,6 +43,7 @@ FIELDS: list[tuple[str, str]] = [
     ("docs", "docs.richness event: fr=<chars> functional_requirements size, notes=<n> model-notes count, rules=<n> genesis.md rule count, pass=<prev>→<cur> test-pass trend, ▲ = improved vs = unchanged."),
     ("compile overview", "Per-file compile-error snapshot during the fix phase: clean/total files compiling, a red block bar sized by error count per file, optional trailing tests N/M."),
     ("files overview", "Per-file coverage snapshot during task0c augmentation: bar = coverage % per file, trailing history, ✓ = file at/above the coverage target."),
+    ("llm cut", "LLM_CUT_STOP gauge: share of the last window's model calls that returned empty or reasoning-capped, replayed live from events.jsonl. Bar fills toward the stop threshold (X%/Y%) — full+red means the next cut call takes the run's graceful stop at the next unit boundary. cut = calls that returned no decided answer, empty = calls with zero content chars, 'of N call(s)' = the window folded, 'seen M+' = calls this reading has replayed (a floor on the run's true cumulative count — only the log's recent tail is read)."),
     ("vLLM", "Local model backend health: ✓ healthy, or ◑ loading (tail of the vLLM docker logs shown while it loads)."),
     ("≈ tokens/s", "Estimated throughput, computed from GPU memory bandwidth ÷ loaded model size — not a measured rate."),
 ]
@@ -52,7 +53,7 @@ FIELDS: list[tuple[str, str]] = [
 # read fine cold). Everything is still covered in FIELDS for the [f] view.
 CORE_TAGS: set[str] = {
     "in-flight", "notes=", "hot fn", "stall=", "fills", "err", "≈ tokens/s",
-    "fill", "unit",
+    "fill", "unit", "llm cut",
 }
 
 

@@ -24,8 +24,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from pipeline_core.domain.reasoning_cap import CutRate, CutStopKnobs
 from pipeline_core.monitor.render import (
     call_start_value,
+    cut_rate_row,
     cyan,
     dim,
     green,
@@ -52,8 +54,16 @@ def _fmt_eta(secs: float) -> str:
 
 def generation_rows(*, stream_log: str, width: int, now: float,
                     runtime: dict[str, Any], refresh: float,
-                    think_cap_chars: int, tail_lines: int = 5) -> list[str]:
-    """Rows for the Generation box: header, budget/think bar, last text lines."""
+                    think_cap_chars: int, tail_lines: int = 5,
+                    cut_rate: CutRate | None = None,
+                    cut_knobs: CutStopKnobs | None = None) -> list[str]:
+    """Rows for the Generation box: header, the LLM_CUT_STOP gauge, the
+    current call's progress, last text lines.
+
+    `cut_rate`/`cut_knobs` are optional (default None → the gauge line is
+    skipped) so callers that only want the stream view — tests included —
+    are not forced to thread the run-level fold through a box that used to
+    know nothing about it."""
     global _prev_len
     path, thread = freshest_stream_log(stream_log, now)
     try:
@@ -106,6 +116,17 @@ def generation_rows(*, stream_log: str, width: int, now: float,
             progress_rows.append(
                 f"  budget [{progress_bar(pct, 20)}] {pct:4.0f}%  {tg:,.0f}/{max_tok:,} tok"
                 f"  avg {smooth_rate:.1f} tok/s  ETA ≤ {eta}  elapsed {ela_s}")
+        else:
+            # No adaptive budget reported yet (the first request of a fresh
+            # vLLM process, or a followup outside the budget planner) — no
+            # real ceiling to bar a percentage against, so this stays a plain
+            # ticking counter rather than a bar with an invented denominator.
+            # Without it a call in this shape rendered NO progress line at
+            # all: "a call is in flight" was only visible via the header's
+            # `last-tok Xs ago`, which measures token silence, not call age.
+            progress_rows.append(
+                f"  call    elapsed {ela_s}   {tg:,.0f} tok generated so far  "
+                f"{dim('(budget not yet known)')}")
 
     display = content
     for marker in ("[FOLLOWUP", "[CONTENT]", "</think>"):
@@ -120,6 +141,10 @@ def generation_rows(*, stream_log: str, width: int, now: float,
     who = dim(f"[{thread}]") if thread else dim("[main]")
     rows = [f"phase={phase_s}  {who}  {cur_chars:,} chars   last-tok {age_s} ago   "
             f"{rate_str}   {cpt_s}{retry_s}"]
+    if cut_rate is not None and cut_knobs is not None:
+        cr_row = cut_rate_row(cut_rate, cut_knobs)
+        if cr_row:
+            rows.append(cr_row)
     rows += progress_rows
     rows += [dim((ln[:inner - 2] + "…") if len(ln) > inner else ln)
              for ln in dlines] or [dim("(empty)")]

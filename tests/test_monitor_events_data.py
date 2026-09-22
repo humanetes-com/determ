@@ -6,7 +6,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pipeline_core.domain.reasoning_cap import CutRate, CutStopKnobs, mark_of
 from pipeline_core.monitor import events_data as ed
+
+_CUT_RATE_FIXTURES = Path(__file__).parent / "fixtures" / "cut_rate"
 
 
 def _write(p: Path, *recs: dict) -> None:
@@ -588,3 +591,62 @@ def test_read_recent_events_window_survives_a_long_iteration(tmp_path, monkeypat
     _patch(monkeypatch, ev)
     got = ed.read_recent_events(lambda n: n == "phase_c.tdd.iter")
     assert len(got) == 1
+
+
+def _cut_rate_fixture_events(run_id: str) -> list[dict]:
+    """This run's recorded `llm.stream_meta` rows (`test_cut_rate_stop.py`'s
+    own fixtures — one process's real cut-rate history), reshaped into the
+    on-disk envelope `JsonlEventEmitter` writes."""
+    rows = json.loads((_CUT_RATE_FIXTURES / f"{run_id}.json").read_text())["rows"]
+    return [{"ts": "2026-09-21T00:00:00+00:00", "event": "llm.stream_meta",
+              "run_id": run_id, "data": row} for row in rows]
+
+
+def test_cut_rate_reading_matches_the_in_process_fold_on_the_recorded_positive(
+        tmp_path, monkeypatch):
+    """Run `450977-5f48b68a`: 3 of its first 25 calls cut, the recorded
+    positive fixture for the run-level stop (`test_cut_rate_stop.py`). The
+    monitor's replay-from-disk reading must equal the same fold computed
+    in-process over the identical rows — the negative control is that this
+    is a real recorded fixture, not a hand-built list the fold is guaranteed
+    to fire on."""
+    ev = tmp_path / "events.jsonl"
+    recs = _cut_rate_fixture_events("450977-5f48b68a")
+    _write(ev, *recs)
+    _patch(monkeypatch, ev)
+    knobs = CutStopKnobs()  # 4%/100/25, the shipped defaults
+    got = ed.cut_rate_reading(knobs)
+    want = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    for r in recs:
+        want = want.add(mark_of(r["data"], ""))
+    assert got.share == want.share and got.cut == want.cut
+    assert got.fired and want.fired
+
+
+def test_cut_rate_reading_never_fires_on_the_recorded_negative(tmp_path, monkeypatch):
+    """Run `330242-0be2c3e1`: 216 calls whose rate never reaches 4%."""
+    ev = tmp_path / "events.jsonl"
+    recs = _cut_rate_fixture_events("330242-0be2c3e1")
+    _write(ev, *recs)
+    _patch(monkeypatch, ev)
+    got = ed.cut_rate_reading(CutStopKnobs())
+    assert not got.fired
+
+
+def test_cut_rate_reading_excludes_bookkeeping_rows(tmp_path, monkeypatch):
+    """A row the controller stamped `bookkeeping: true` (the self-note
+    extractor's empty-then-retry ladder) must not count toward the gauge —
+    `record_stream_meta` excludes the identical rows from the in-process
+    fold via the same flag."""
+    ev = tmp_path / "events.jsonl"
+    empty = {"finish_reason": None, "stop": None, "followup": False,
+             "content_chars": 0, "prompt_tokens": 100}
+    _write(
+        ev,
+        {"event": "llm.stream_meta", "data": {**empty, "bookkeeping": True}},
+        {"event": "llm.stream_meta", "data": {**empty, "bookkeeping": True}},
+        {"event": "llm.stream_meta", "data": {**empty, "bookkeeping": True}},
+    )
+    _patch(monkeypatch, ev)
+    got = ed.cut_rate_reading(CutStopKnobs())
+    assert got.marks == () and got.seen == 0

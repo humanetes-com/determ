@@ -104,6 +104,17 @@ def bookkeeping_call() -> Iterator[None]:
         _bookkeeping_var.reset(token)
 
 
+def is_bookkeeping_call() -> bool:
+    """Whether the call in flight right now is bound inside
+    :func:`bookkeeping_call`. `record_stream_meta` reads this to decide
+    whether to fold the row into the in-process run-level fold; the
+    controller also stamps it onto the `llm.stream_meta` event it writes to
+    disk, so a reader replaying events.jsonl (the monitor, a report) can
+    exclude the same rows by the same fact instead of reconstructing it from
+    a caller string."""
+    return _bookkeeping_var.get()
+
+
 @dataclass(frozen=True, slots=True)
 class CallMark:
     """One main-stream call as the cut rate sees it."""
@@ -471,13 +482,20 @@ class CutStopKnobs:
                 f"(min {self.min_calls})")
 
 
-def cut_stop_knobs_from_env() -> CutStopKnobs:
+def cut_stop_knobs_from_env(source: Mapping[str, str] | None = None) -> CutStopKnobs:
     """The three knobs; a garbage value falls back to its default rather
-    than disabling the stop, so a typo cannot silently remove it."""
+    than disabling the stop, so a typo cannot silently remove it.
+
+    `source` defaults to the process environment (the pipeline's own read,
+    at cluster entry). The monitor is a separate process that never
+    inherits the pipeline's environment and reads no dotenv, so it passes
+    its own parse of `.env` here instead — same parsing, same defaults,
+    same clamps, so the two readers cannot drift apart on the same file."""
     d = CutStopKnobs()
+    env = source if source is not None else os.environ
 
     def _num(key: str, default: float) -> float:
-        raw = os.getenv(key, "").strip()
+        raw = (env.get(key) or "").strip()
         if not raw:
             return default
         try:

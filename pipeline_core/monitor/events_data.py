@@ -19,6 +19,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from pipeline_core.domain.reasoning_cap import CutRate, CutStopKnobs, mark_of
 from pipeline_core.monitor import iteration_steps as _steps
 from pipeline_core.monitor.fill_progress import FillProgress, fold_fill
 
@@ -742,6 +743,37 @@ def latest_test_file_stats() -> dict[str, Any] | None:
         return None
     data = evs[-1].get("data")
     return data if isinstance(data, dict) else None
+
+
+def cut_rate_reading(knobs: CutStopKnobs) -> CutRate:
+    """Replay this run's `llm.stream_meta` rows through the same fold the
+    live process's LLM_CUT_STOP arms (`reasoning_cap.CutRate`,
+    `_observe_health` in `reasoning_cap.py`) — the monitor's gauge and the
+    pipeline's own stop are then the same computation over the same rows,
+    not a re-derived rate that can read differently from what actually
+    fires the stop.
+
+    Rows tagged `bookkeeping` (the self-note extractor's empty-then-retry
+    ladder, `adapters/model_notes_store.py`) are skipped, exactly as
+    `record_stream_meta` skips them live — via the flag the controller now
+    stamps on the event, not a caller-site guess reconstructed after the
+    fact. `followup` rows (`llm.followup_meta`) are a different event name
+    and are never read here: `_observe_health` (the live fold this mirrors)
+    is only ever called from `record_stream_meta`, never
+    `record_followup_meta`.
+
+    `rate.seen` undercounts a long run's true call count: `read_recent_events`
+    only tails the last 8 MB of events.jsonl, while the live process's `seen`
+    is cumulative since cluster entry. Harmless for `min_calls` gating
+    (default 25, reached within a handful of KB) and irrelevant to `share`,
+    which is computed over `marks` (the last `window` calls) either way."""
+    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    for ev in read_recent_events(lambda n: n == "llm.stream_meta"):
+        data = ev.get("data") or {}
+        if data.get("bookkeeping"):
+            continue
+        rate = rate.add(mark_of(data, ""))
+    return rate
 
 
 def latest_flow_audit() -> dict[str, Any] | None:

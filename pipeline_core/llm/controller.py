@@ -23,7 +23,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pipeline_core.domain.llm_output import salvage_complete_blocks
-from pipeline_core.domain.reasoning_cap import record_followup_meta, record_stream_meta
+from pipeline_core.domain.reasoning_cap import (
+    is_bookkeeping_call,
+    record_followup_meta,
+    record_stream_meta,
+)
 from pipeline_core.domain.text import PromptDigest, turns_digest_text
 
 from .budget import BudgetSpec, BudgetState, Plan, plan_for_input, request_max_tokens
@@ -381,6 +385,12 @@ class LLMController:
             "request_max": plan.request_max,
             "think_char_cap": plan.thinking_char_cap,
             "enable_thinking": enable_thinking,
+            # So a reader replaying events.jsonl (the monitor's live cut-rate
+            # gauge) can exclude bookkeeping calls the same way
+            # `record_stream_meta` excludes them from the in-process
+            # run-level fold below — by the fact itself, not a caller-site
+            # guess reconstructed after the fact.
+            "bookkeeping": is_bookkeeping_call(),
         })
         record_stream_meta({
             "prompt_sha": prompt_sha,
