@@ -100,8 +100,8 @@ from pipeline_core.domain.dispatch import (
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
     CrashCohort,
+    dispatch_ranks_of,
     drop_standing_flat,
-    overlay_crash_on_ranks,
     promote_by_blocker_counts,
     promote_by_service,
     promote_crash_evidence,
@@ -1032,7 +1032,38 @@ def run_phase_c_tdd(
                                      cluster.name) or "")
             _oracle_fp_cache.clear()
             _oracle_fp_cache[iter_no] = hit
+            _oracle_moved_mid_run(iter_no, hit)
         return hit
+
+    _oracle_fp_first: list[str] = []
+
+    def _oracle_moved_mid_run(iter_no: int, fp: str) -> None:
+        """Stop the run when the oracle changes under a live cluster.
+
+        Nothing in this process writes the oracle after cluster entry, so a
+        fingerprint that differs from the one the cluster entered on was
+        written from outside: run `450977-5f48b68a` was live on 2026-09-21
+        at 18:50Z when an edit landed in `tests/test_context.rs`, and every
+        row it wrote after that was stamped with an oracle nobody chose. The
+        startup seal check names the files; this only refuses to keep
+        grading against them."""
+        if not fp:
+            return
+        if not _oracle_fp_first:
+            _oracle_fp_first.append(fp)
+            return
+        if fp == _oracle_fp_first[0] or len(_oracle_fp_first) > 1:
+            return
+        _oracle_fp_first.append(fp)
+        deps.log(f"  {tag} [phase-c/tdd] iter {iter_no}: HEALTH ‼ ORACLE_DRIFT "
+                 f"— the oracle fingerprint moved {_oracle_fp_first[0]} -> {fp} "
+                 "inside this run, and nothing in the pipeline writes the "
+                 "oracle after cluster entry. Stopping the run; the next "
+                 "launch's seal check names the files.")
+        deps.emit("phase_c.tdd.oracle_drift", data={
+            "cluster": cluster.name, "iter": iter_no,
+            "entered_on": _oracle_fp_first[0], "now": fp})
+        request_graceful_stop()
 
     def _skeleton_root() -> Path:
         """The cluster's AUTHORED layout crate — what the bodies answer to.
@@ -1851,6 +1882,22 @@ def run_phase_c_tdd(
                     "re-buy detector"
                     if deps.oracle_fp is not None else
                     "; NO oracle fingerprint wired — every row is refused"))
+        # A moved oracle restarts every clock the ledger keys on it (unpaid
+        # buys, service, re-buy detection), and on 2026-09-22 the only sign
+        # of that was the new hash on the line above: run `92187-f71f12bf`
+        # read 1,309 route rows as foreign and re-bought a pair the old
+        # record had graded flat five times. Say it.
+        _stamped = [e.oracle_fp for e in _ledger_entries() if e.oracle_fp]
+        _now_fp = _oracle_fp(0) if deps.oracle_fp is not None else ""
+        if _stamped and _now_fp and _stamped[-1] != _now_fp:
+            _old_fp = _stamped[-1]
+            deps.log(f"  {tag} [phase-c/ledger] oracle MOVED since the newest "
+                     f"row: {_old_fp} -> {_now_fp}; "
+                     f"{sum(1 for f in _stamped if f == _old_fp)} row(s) "
+                     "under the old oracle are foreign to this tree and every "
+                     "clock keyed on the oracle starts over.")
+            deps.emit("phase_c.ledger.oracle_moved", data={
+                "cluster": cluster.name, "old": _old_fp, "new": _now_fp})
     _reseed_site("cluster entry", 0)
     if _ledger_adopt():
         deps.log(f"  {tag} [phase-c/ledger] {len(_ledger_rows)} backfilled "
@@ -5902,9 +5949,10 @@ def run_phase_c_tdd(
                         if bare_test_name(t) not in {
                             bare_test_name(n) for _b, n in _f_pairs}),
                     attributed=_attributed_locs,
+                    # The pool starts units in the order this driver chose;
+                    # see `dispatch_ranks_of` for why it is not re-ranked.
                     dispatch_ranks=(
-                        overlay_crash_on_ranks(_ranks, _crash_grades)
-                        or None),
+                        dispatch_ranks_of([k for k, _ in ordered]) or None),
                     session_slices=_session_slices or None,
                     session_owners=_session_owners or None,
                     # The stub hold, for the schedule: its blockers are the

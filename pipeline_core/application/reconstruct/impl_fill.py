@@ -5279,11 +5279,12 @@ def prepare_impl_fill(
                      + ", ".join(site_label(u) for u in _missing[:6]))
             if not _records:
                 return RouteRunReport(empty=True)
-            # The write set's installable complement: free fns of a slice
-            # file whose signature fits a field of a table an editable unit
-            # builds, and that nothing installs yet. Coverage cannot put them
-            # in the slice (nothing installed runs nothing), and without them
-            # an editable producer can only reuse the tables already wired.
+            # The write set's table complement: free fns of a slice file whose
+            # signature fits a field of a table an editable unit builds, and
+            # that nothing installs yet or that the editable builder's own
+            # literal installs. Coverage cannot put either in the slice, and
+            # without them an editable builder cannot be written together
+            # with the slots it fills.
 
             def _read_slice_file(f: str) -> str | None:
                 try:
@@ -5298,9 +5299,9 @@ def prepare_impl_fill(
             if _installable_sites:
                 _log(f"  [phase-c/session] {_sl.label()}: "
                      f"{len(_installable_sites)} installable fn(s) admitted to "
-                     "the editable set — referenced by nothing but their own "
-                     "declaration, signature fits a table an editable unit "
-                     "builds: " + ", ".join(
+                     "the editable set — signature fits a table an editable unit "
+                     "builds, and nothing installs it yet or that unit's own "
+                     "literal does: " + ", ".join(
                          f"{site_label(u)}->{t}"
                          for u, t in _installable_sites.items()))
                 _emit("phase_c.session.installable_admitted", data={

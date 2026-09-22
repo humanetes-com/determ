@@ -533,13 +533,20 @@ def _attribute_format_only_test(
     coverage reading (`unreached_by_test` — the previous sweep's, since
     attribution runs before this sweep's bind): positively proven unentered
     drops it, and when every implementer drops, the matched dispatcher —
-    the body coverage shows the test DOES pin — is attributed instead. An
-    unmeasured test, an unbound reading or a crashed binary changes nothing
-    (the conservative rule refuses only on positive evidence).
+    the body coverage shows the test DOES pin — is attributed instead. The
+    dispatcher is screened by the same rule: when the reading proves the
+    test enters it neither, the hop attributes nothing for that test — the
+    renderer runs only while the failure is reported. An unmeasured test,
+    an unbound reading or a crashed binary changes nothing (the
+    conservative rule refuses only on positive evidence).
 
     `pairs_out` collects the dispatcher/implementer pairs the hop resolved
     (`FormatterPair`, container-qualified), in BOTH directions — the pair is
-    what the cross-file pair-fill route dispatches as one transaction."""
+    what the cross-file pair-fill route dispatches as one transaction. A
+    pair is recorded for a test unless the reading proves the test enters
+    neither half: a pair no failing test runs is a transaction with no
+    verdict to move, and the measured-owners withholding and the
+    schedule's pair wait would otherwise hold the fill behind it."""
     traits = format_traits_used(tsrc)
     fmt_recs = by_name.get("fmt")
     if not traits or not fmt_recs:
@@ -556,6 +563,9 @@ def _attribute_format_only_test(
     # Implementers the bound coverage reading positively proves this test
     # never enters — the redirect the final log line names.
     redirected: list[FnLocator] = []
+    # Dispatchers the same reading proves this test never enters before its
+    # failure: attributed to nobody, reported on their own line.
+    screened: list[FnLocator] = []
 
     def _add(key: FnLocator, rec: dict[str, Any] | None = None) -> None:
         if tname not in frontier.get(key, set()):
@@ -572,6 +582,16 @@ def _attribute_format_only_test(
         trait, self_ty = parsed
         if not (trait in traits and self_ty in file_idents):
             continue
+        # The dispatcher faces the same measured screen as every implementer
+        # it delegates to: `unreached_by_test` reads the bound, panic-cut
+        # owner map, so a test whose only contact with this renderer is its
+        # failure being printed (`unwrap` on an `Err` formats Debug before
+        # the panic) does not enter it. Run `92187-f71f12bf` (2026-09-22)
+        # attributed five failing tests to a dispatcher the same sweep
+        # listed as executed by no failing test, and the pair it formed
+        # held 13 other runs of the fill behind it.
+        disp = FnLocator(rec["file"], "fmt")
+        disp_unentered = unreached_by_test(disp, tname)
         # Follow the dispatcher's call to its real formatting implementer.
         # A dispatcher that currently calls a different method of the same
         # qualifier is the implementer-not-yet-called case: fold in
@@ -618,9 +638,14 @@ def _attribute_format_only_test(
                 if k in seen:
                     continue
                 seen.add(k)
-                if pairs_out is not None:
+                impl_unentered = unreached_by_test(k, tname)
+                # A pair is a joint write for a test that runs it: when the
+                # bound reading proves the test enters NEITHER half before
+                # its failure, the pair has no customer here.
+                if pairs_out is not None and not (
+                        impl_unentered and disp_unentered):
                     pairs_out.add(FormatterPair(_disp_site, record_site(irec)))
-                if unreached_by_test(k, tname):
+                if impl_unentered:
                     unentered.append(k)
                 else:
                     kept_impls.append((k, irec))
@@ -629,12 +654,25 @@ def _attribute_format_only_test(
             if unentered and not kept_impls:
                 # Every followed implementer is measured-unentered by this
                 # test: the delegation the theory assumed does not run on
-                # the failing arm. The dispatcher is the measured owner.
-                _add(FnLocator(rec["file"], "fmt"), rec)
+                # the failing arm. The dispatcher is the measured owner —
+                # when the same reading shows the test enters it.
+                if disp_unentered:
+                    screened.append(disp)
+                else:
+                    _add(disp, rec)
                 redirected.extend(unentered)
+        elif disp_unentered:
+            screened.append(disp)
         else:
             # The matched fmt is self-contained — it IS the implementer.
-            _add(FnLocator(rec["file"], "fmt"), rec)
+            _add(disp, rec)
+    if screened and not added:
+        log(f"  [attribution/behavior] {tname}: renders through "
+            f"{'/'.join(sorted(traits))} in its source, but the sweep's "
+            "coverage reading proves it enters neither the dispatcher(s) "
+            + ", ".join(sorted({f"{k.file}::{k.fn_name}" for k in screened}))
+            + " nor their implementer(s) before its failure — no format "
+            "owner and no pair: what renders it is the failure report.")
     if added:
         _why = ("no crate fn named in its source (formatting-macro test)"
                 if not owned else

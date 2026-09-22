@@ -303,8 +303,8 @@ class PhaseCFillEngine:
         # (eligible plus hop-pair members). Empty skips coverage-split
         # marking so a call that does not snapshot keeps today's order.
         attributed: Collection[FnLocator] = (),
-        # Per-unit blocker counts from the TDD driver (post-fill histogram
-        # or the pre-dispatch deferral map). When set, stubs are ordered and
+        # The TDD driver's final dispatch order as ranks (head highest,
+        # `dispatch_batch.dispatch_ranks_of`). When set, stubs are ordered and
         # grouped by these ranks instead of leaf-name frequency, so a
         # constructor that `take_batch` placed in the slice actually OPENS
         # the pass — leaf-first otherwise puts `fmt`/`new` in an earlier

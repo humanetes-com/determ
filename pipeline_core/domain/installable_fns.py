@@ -345,7 +345,7 @@ def installable_fns(
     return tuple(out[:cap])
 
 
-def unwired_complement(
+def table_complement(
     fn_records: Sequence[object],
     type_records: Iterable[TypeRecord],
     writable: frozenset[FnLocator],
@@ -353,34 +353,54 @@ def unwired_complement(
     *,
     reference_counts: Mapping[str, int],
 ) -> tuple[Installable, ...]:
-    """The installables of `file_rel` that a WRITABLE table-builder could
-    install and that nothing installs yet, minus the ones already writable.
+    """The table slots of `file_rel` a WRITABLE table-builder owns, minus the
+    ones already writable: every installable nothing installs yet, and every
+    installable a writable builder's own table literal names.
 
     The same relation as `installable_fns`, keyed on what a route may write
-    rather than on what the escalation convicted, and narrowed to the fns no
-    table names. That narrowing is the point: a route whose write set is
+    rather than on what the escalation convicted. A route whose write set is
     read off the failing tests' coverage (the slice session) can contain a
-    table-builder but never a fn the builder does not install, because a fn
-    nothing installs is executed by nothing. The two halves of the split
-    defect this module exists for then sit on different routes and no reply
-    can write both. Measured on run `195091-72b92f1e` (2026-09-21, cluster
-    `stable`): the five-test session's editable src/error.rs held the
-    context-wrapping producer and every table-builder, the two table fns a
-    correct producer must install were each referenced only by their own
-    declaration and were not editable, the model's own reasoning named the
-    wrapper the producer had to build and never named either fn, and
-    file-first, which offered both, never had the producer in its write
-    list; run `3400-4d0618ba` spent 78 min of per-fn on the producer alone.
+    table-builder but not the slots it fills unless the failing path runs
+    them, and two kinds never run there:
 
-    Wired installables are left out on purpose: a fn some table already
-    names is reachable, so coverage decides whether the failing path runs
-    it, and adding it would only widen the prompt.
+    - a fn nothing installs is executed by nothing. Run `195091-72b92f1e`
+      (2026-09-21, cluster `stable`): the five-test session's editable
+      src/error.rs held the context-wrapping producer and every
+      table-builder, the two table fns a correct producer must install were
+      each referenced only by their own declaration and were not editable,
+      and file-first, which offered both, never had the producer in its
+      write list; run `3400-4d0618ba` spent 78 min of per-fn on the producer
+      alone.
+    - a fn the builder DOES install but that the failing path does not reach
+      — a slot called after the step the wrong body breaks, or on the arm the
+      test's failure skips. Coverage cannot vouch for it because the defect
+      is upstream of it. Run `92187-f71f12bf` (2026-09-22): the four-test
+      session held the builder whose literal installs a drop slot, the
+      model's first reply rewrote that slot, and the splicer refused it as
+      outside the editable set; the next seven turns rewrote accessors and
+      the session ended flat. The same table family was refused six times
+      across five runs from 2026-09-08.
+
+    A wired slot that only a builder OUTSIDE the write set names is left
+    out: this route cannot change what installs it, so coverage still
+    decides it. Ordered unwired first, as `installable_fns` ranks.
     """
-    return tuple(
-        i for i in installable_fns(
+    here = [r for r in fn_records if _field(r, "file") == file_rel]
+    names_writable = {k.fn_name for k in writable if k.file == file_rel}
+    builder_bodies = [_field(r, "body_text") for r in here
+                      if _field(r, "fn_name") in names_writable]
+    out: list[Installable] = []
+    for i in installable_fns(
             fn_records, type_records, writable, file_rel,
-            reference_counts=reference_counts, cap=len(fn_records) or 1)
-        if i.unwired and FnLocator(file_rel, i.fn_name) not in writable)
+            reference_counts=reference_counts, cap=len(fn_records) or 1):
+        if FnLocator(file_rel, i.fn_name) in writable:
+            continue
+        if i.unwired or any(
+                constructs_type(body, i.type_name)
+                and i.fn_name in identifier_tokens(body)
+                for body in builder_bodies):
+            out.append(i)
+    return tuple(out)
 
 
 def _turbofish_types(body_text: str) -> frozenset[str]:

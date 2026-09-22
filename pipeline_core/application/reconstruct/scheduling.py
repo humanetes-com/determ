@@ -25,17 +25,17 @@ def group_priority_levels(
     against PIPELINE_PARALLELISM=4 because the refill tail arrived in
     source-scan order. `match_records_to_order` exists so that does not recur.
 
-    Blocker histogram (`unit_ranks` set): the TDD driver's per-unit score,
-    already applied by `rank_stubs_by_blocker_counts` before this call.
-    Those integers are "how many deferred consumers this unit holds", not a
-    compile-order proxy, and they almost never tie. Splitting on every
+    Driver order (`unit_ranks` set): the TDD driver's final dispatch order
+    as positions (`dispatch_ranks_of`), already applied by
+    `rank_stubs_by_blocker_counts` before this call. They are not a
+    compile-order proxy and never tie between locators. Splitting on every
     distinct count was the leaf-first rule applied to the wrong key: run
     `346231-54bc1489` iter 1's 12-unit batch became 8 levels, the first
     five singletons, and after file-first the per-fn phase ran at mean LLM
     concurrency 0.99 for 3 h (`construct` 44 min, then `construct_from_boxed`
     61 min, then `ensure.rs::write_str` 13 min in another file, then
     `context` 49 min). One level: the engine's pool drains a ranked queue,
-    so the first `parallelism` starts are the highest-count units and a
+    so the first `parallelism` starts are the driver's head and a
     free worker takes the next without waiting for the slowest peer.
     Ranking still decides start ORDER; it does not decide who waits.
 

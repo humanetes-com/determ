@@ -157,3 +157,72 @@ def test_unreached_by_test_reconciles_names_and_declines_on_ambiguity() -> None:
     owners[f"other_mod::{_REDS[0]}"] = owners[_REDS[0]]
     cov.bind(CoverageSlice(owners=owners, failing=two.failing))
     assert unreached_by_test(unit, f"third::{_REDS[0]}") is False
+
+
+# --- the dispatcher faces the same screen (run `92187-f71f12bf`) ------------
+#
+# Recorded inputs: `tests/fixtures/formatter_pair_92187.json` holds the
+# extractor's fmt/debug/display records over the live `.skeleton-filled/stable`
+# tree on 2026-09-22 and the failing test sources as tagged at task0c;
+# `tests/fixtures/owner_map_92187-f71f12bf.json` is that run's iter-1
+# `phase_c.coverage.owner_map` (panic-cut owners). The run attributed these
+# tests to a dispatcher the same sweep called executed by no failing test,
+# and the pair it formed held 13 runs of the fill behind it.
+
+_PAIR_92187 = json.loads(
+    (_FIXTURES / "formatter_pair_92187.json").read_text(encoding="utf-8"))
+_MAP_92187 = json.loads(
+    (_FIXTURES / "owner_map_92187-f71f12bf.json").read_text(encoding="utf-8"))
+
+
+class _Structure92187:
+    def enumerate_fns(self, _src: Path) -> list[dict[str, Any]]:
+        return list(_PAIR_92187["fn_records"])
+
+
+def _hop_92187(owner_map: dict[str, Any] | None) -> tuple[
+        dict, set[FormatterPair], list[str]]:
+    cov.bind(None if owner_map is None else _slice_of(owner_map))
+    lines: list[str] = []
+    deps = AttributionDeps(
+        structure=_Structure92187(), classify=lambda **_k: {},
+        locate_fn=locate_fn, run_check_diag=lambda *_a, **_k: (0, "", []),
+        derive_check_only_cmd=lambda c: c, is_gen_tests_file=lambda _f: False,
+        log=lines.append)
+    out = "".join(f"test {t} ... FAILED\n" for t in _MAP_92187["failing"])
+    pairs: set[FormatterPair] = set()
+    frontier, _s, _t = behavior_frontier_from_texts(
+        deps, out, _PAIR_92187["test_files"], Path("/x"), pairs_out=pairs)
+    return frontier, pairs, lines
+
+
+def _format_owners(frontier: dict) -> set[str]:
+    return {f"{k.file}::{k.fn_name}" for k in frontier
+            if k.file == "src/fmt.rs"}
+
+
+def test_a_render_only_formatter_forms_no_pair_and_no_owner() -> None:
+    """The plan's sentence: on the recorded reading, where no failing test
+    enters the dispatcher or its implementer before its failure, the hop
+    forms no pair and attributes no implementer."""
+    frontier, pairs, lines = _hop_92187(_MAP_92187)
+    assert pairs == set()
+    assert _format_owners(frontier) == set()
+    assert any("no format owner and no pair" in ln for ln in lines)
+
+
+def test_negative_control_the_same_tests_entering_the_dispatcher_pair() -> None:
+    """Same sources and records; the reading now shows the tests entering the
+    dispatcher. The pair is back — the screen, not the inputs, removed it."""
+    entered = {**_MAP_92187, "owners": {
+        t: [*us, "src/error.rs::fmt"]
+        for t, us in _MAP_92187["owners"].items()}}
+    _frontier, pairs, _lines = _hop_92187(entered)
+    assert any(p.dispatcher.file == "src/error.rs"
+               and p.implementer.file == "src/fmt.rs" for p in pairs), pairs
+
+
+def test_negative_control_unbound_reading_keeps_the_pair() -> None:
+    """No sweep measured: positive-evidence rule, the hop is unchanged."""
+    _frontier, pairs, _lines = _hop_92187(None)
+    assert any(p.implementer.file == "src/fmt.rs" for p in pairs), pairs

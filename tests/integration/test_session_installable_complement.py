@@ -1,5 +1,6 @@
 """Integration: a slice session's write set carries the table fns nothing
-installs yet, read off the real extractor's records.
+installs yet, and the slots its writable builder's literal installs, read off
+the real extractor's records.
 
 The class, run `195091-72b92f1e` (2026-09-21, cluster `stable`): the session
 reads its editable set off the failing tests' coverage. A free fn that fits a
@@ -15,6 +16,12 @@ real syn extractor enumerates it (no cargo). The negative control is the
 coverage slice alone — the builder and the wired fns — with no complement:
 the unwired fns are absent from the write set, the live shape of the run.
 
+The second half, run `92187-f71f12bf` (2026-09-22, cluster `stable`): the
+builder was in the session and a slot its literal installs was not, because
+the failing path never reached the slot; the model's reply rewrote the slot
+and the splicer refused it as outside the editable set. The negative control
+is the pre-change relation (unwired only) on the same tree and write set.
+
 Needs only files and the extractor release binary, so it runs in the
 default suite; `scripts/run_integration.sh` runs it with the rest.
 """
@@ -25,7 +32,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.adapters.extractor import CliExtractor
-from pipeline_core.domain.installable_fns import unwired_complement
+from pipeline_core.domain.installable_fns import table_complement
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_idents import fn_reference_counts
 
@@ -89,15 +96,17 @@ def tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
-def _complement(tree: Path, writable: set[str]) -> list[str]:
+def _complement(tree: Path, writable: set[str], *,
+                unwired_only: bool = False) -> list[str]:
     ex = CliExtractor(_EXTRACTOR)
     fns = ex.enumerate_fns(tree) or []
     types = ex.enumerate_types(tree) or []
     rel = "src/hooks.rs"
     assert any(f.file == rel for f in fns), "extractor rooting changed: no src/ file key"
-    return [i.fn_name for i in unwired_complement(
+    return [i.fn_name for i in table_complement(
         fns, types, frozenset(FnLocator(rel, n) for n in writable), rel,
-        reference_counts=fn_reference_counts((tree / rel).read_text()))]
+        reference_counts=fn_reference_counts((tree / rel).read_text()))
+        if i.unwired or not unwired_only]
 
 
 def test_premise_the_extractor_reports_the_table_fields_as_fn_pointers(tree: Path) -> None:
@@ -117,3 +126,16 @@ def test_the_builder_in_the_write_set_admits_the_unwired_fns(tree: Path) -> None
 def test_negative_control_no_builder_in_the_write_set(tree: Path) -> None:
     """The coverage slice before the producer entered it: nothing admitted."""
     assert _complement(tree, {"open_plain", "close_plain", "lookup"}) == []
+
+
+def test_the_builder_alone_admits_the_slots_its_literal_installs(tree: Path) -> None:
+    """The failing path reached the builder and not its wired slots."""
+    assert _complement(tree, {"register"}) == [
+        "close_nested", "open_nested", "close_plain", "open_plain"]
+
+
+def test_negative_control_unwired_only_leaves_the_wired_slots_out(tree: Path) -> None:
+    """The pre-change relation on the same write set: the slot the builder
+    installs is refused, the live shape of the run."""
+    got = _complement(tree, {"register"}, unwired_only=True)
+    assert "close_plain" not in got and "open_plain" not in got

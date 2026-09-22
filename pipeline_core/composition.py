@@ -185,6 +185,12 @@ from pipeline_core.adapters.mutation import MutationTester
 from pipeline_core.adapters.oracle_fingerprint import (
     cluster_oracle_fp as _cluster_oracle_fp,
 )
+from pipeline_core.adapters.oracle_fingerprint import (
+    oracle_tag as _oracle_tag,
+)
+from pipeline_core.adapters.oracle_fingerprint import (
+    workspace_oracle_drift as _workspace_oracle_drift,
+)
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
@@ -1664,6 +1670,11 @@ def build_app(
         derive_gentest_prelude=helpers.derive_gentest_prelude,
         is_gen_tests_file=helpers.is_gen_tests_file,
     )
+    def _seal_oracle(project_dir: Path, module: str) -> None:
+        """Tag the strip commit as the oracle's seal."""
+        git_tag(project_dir, _oracle_tag(module))
+        ports.log(f"  [oracle] sealed '{module}' at {_oracle_tag(module)}")
+
     # Strip/bake/commit pre-step deps + the pre-strip bake (Hard Rule 11).
     strip_bake_deps = StripBakeDeps(
         log=ports.log, phase_valid=phase_valid,
@@ -1679,6 +1690,7 @@ def build_app(
         invalidate_structure=structure_cache.invalidate,
         preserve_inline_tests=lambda p: preserve_inline_tests(
             p / "src", p, _preserve_inline_tests_deps),
+        seal_oracle=_seal_oracle,
     )
     bake_artifacts_deps = BakeArtifactsDeps(
         log=ports.log,
@@ -2466,6 +2478,7 @@ def build_app(
         restart_from_pre_augment=restore_from_pre_augment.run,
         git_tag=git_tag,
         list_git_tags=_ws_list_git_tags,
+        oracle_drift=_workspace_oracle_drift,
         source_hash=source_hash,
         log_state_summary=_state_log_state_summary,
         read=_io_read,

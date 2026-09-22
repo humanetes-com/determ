@@ -372,6 +372,11 @@ class StripBakeDeps:
     # The result is the caller's own report (counts + refusals, already logged);
     # this step only needs the relocation to have happened.
     preserve_inline_tests: Callable[[Path], object] = lambda _p: None
+    # Seal the oracle at the strip commit: strip is its last writer, so every
+    # later launch compares the workspace's tests, gen_tests and behaviour
+    # suites against this commit (`domain/oracle_guard.py`). `(project_dir,
+    # module)`; a no-op leaves the workspace unsealed and unguarded.
+    seal_oracle: Callable[[Path, str], None] = lambda _p, _m: None
 
 
 def strip_and_bake_module(
@@ -472,4 +477,5 @@ def strip_and_bake_module(
         commit_message=f"pipeline: stripped — {module_name}",
         source_hash=src_hash,
     )
+    d.seal_oracle(project_dir, module_name)
     d.set_current(project_dir, f"strip/{module_name} / done")

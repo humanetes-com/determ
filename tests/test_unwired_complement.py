@@ -1,4 +1,4 @@
-"""The session's write set carries the unwired installable complement.
+"""The session's write set carries the table complement of its builders.
 
 Run `195091-72b92f1e` (2026-09-21, cluster `stable`): the slice session's
 editable set is read off the failing tests' coverage, so it held the producer
@@ -7,6 +7,12 @@ not the two table fns a correct producer must install. Each was referenced by
 nothing but its own declaration, so no test executed it, so coverage could
 never admit it. File-first offered both and never had the producer in its
 write list. No reply on any route could write the pair.
+
+Run `92187-f71f12bf` (2026-09-22) found the second half of the same class:
+the session held the builder whose literal installs a drop slot, not the slot,
+because the failing path never reached it; the model's first reply rewrote the
+slot and the splicer refused it. A slot the writable builder's own literal
+names is as much the builder's other half as a slot nothing installs.
 
 The shape here is invented: a table `Slots` with two fn-pointer fields, a
 registry method that builds it, one free fn already wired into the literal,
@@ -18,7 +24,7 @@ import ast
 from pathlib import Path
 
 from pipeline_core.application.reconstruct.session_write_set import session_write_set
-from pipeline_core.domain.installable_fns import unwired_complement
+from pipeline_core.domain.installable_fns import table_complement
 from pipeline_core.domain.models import FieldRecord, FnLocator, FnRecord, FnSite, TypeRecord
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.prompts.slice_session import build_slice_session_prompt, render_slice_file
@@ -52,21 +58,45 @@ COUNTS = {"register": 1, "open_plain": 2, "open_nested": 1,
 
 
 def _complement(writable: set[str]) -> list[str]:
-    return [i.fn_name for i in unwired_complement(
+    return [i.fn_name for i in table_complement(
         RECORDS, [SLOTS], frozenset(FnLocator(REL, n) for n in writable), REL,
         reference_counts=COUNTS)]
 
 
 def test_a_writable_table_builder_brings_the_fns_nothing_installs() -> None:
     """The plan's sentence: a write set holding the table-builder carries the
-    fns of a field's signature that no table names — and only those."""
-    assert _complement({"register"}) == ["close_nested", "open_nested"]
+    fns of a field's signature that no table names, unwired first."""
+    assert _complement({"register"})[:2] == ["close_nested", "open_nested"]
 
 
-def test_wired_and_off_shape_fns_stay_out() -> None:
-    got = _complement({"register"})
-    assert "open_plain" not in got      # already installed: coverage decides
-    assert "lookup" not in got          # fits no field of the table
+def test_a_writable_builder_brings_the_slot_its_own_literal_installs() -> None:
+    """The second half: `open_plain` is wired — by the writable builder's
+    literal — so coverage of a failing path that never reaches it cannot
+    admit it, and the builder is writable without it."""
+    assert _complement({"register"}) == [
+        "close_nested", "open_nested", "open_plain"]
+
+
+def test_a_wired_slot_named_only_by_a_builder_outside_the_write_set() -> None:
+    """A second builder of the same table is writable and does not name
+    `open_plain`; the builder that does is not writable. The route cannot
+    change what installs it, so coverage still decides it."""
+    other = FnRecord(
+        file=REL, fn_name="register_nested", container="impl Registry",
+        sig_text="fn register_nested<T>(item: T) -> Self",
+        body_text="let slots = Slots { on_open: open_nested::<T>, "
+                  "on_close: close_nested::<T> };")
+    got = [i.fn_name for i in table_complement(
+        [*RECORDS, other], [SLOTS],
+        frozenset({FnLocator(REL, "register_nested")}), REL,
+        reference_counts={**COUNTS, "open_nested": 2, "close_nested": 2,
+                          "register_nested": 1})]
+    assert got == ["close_nested", "open_nested"]
+    assert "open_plain" not in got
+
+
+def test_off_shape_fns_stay_out() -> None:
+    assert "lookup" not in _complement({"register"})  # fits no field
 
 
 def test_no_writable_builder_no_complement() -> None:
@@ -77,7 +107,8 @@ def test_no_writable_builder_no_complement() -> None:
 
 
 def test_an_already_writable_fn_is_not_admitted_twice() -> None:
-    assert _complement({"register", "open_nested"}) == ["close_nested"]
+    assert _complement({"register", "open_nested"}) == [
+        "close_nested", "open_plain"]
 
 
 def test_raw_extractor_dicts_and_typed_records_agree() -> None:
@@ -85,9 +116,9 @@ def test_raw_extractor_dicts_and_typed_records_agree() -> None:
     both ask the one relation and must get one answer."""
     dicts = [{"file": r.file, "fn_name": r.fn_name, "container": r.container,
               "sig_text": r.sig_text, "body_text": r.body_text} for r in RECORDS]
-    typed = unwired_complement(RECORDS, [SLOTS], frozenset({FnLocator(REL, "register")}),
+    typed = table_complement(RECORDS, [SLOTS], frozenset({FnLocator(REL, "register")}),
                                REL, reference_counts=COUNTS)
-    raw = unwired_complement(dicts, [SLOTS], frozenset({FnLocator(REL, "register")}),
+    raw = table_complement(dicts, [SLOTS], frozenset({FnLocator(REL, "register")}),
                              REL, reference_counts=COUNTS)
     assert typed == raw
 
@@ -147,10 +178,12 @@ def test_the_session_open_admits_the_complement_into_units_and_header() -> None:
     planned = SessionSlice(tests=("t_open",), units=(_site(BUILDER),), file_chars=9000)
     ws = session_write_set(planned, {_site(BUILDER): BUILDER}, RECORDS, [SLOTS],
                            lambda f: _slice_file_text() if f == REL else None)
-    assert set(ws.slice_.units) == {_site(BUILDER), _site(UNWIRED), _site(UNWIRED_CLOSE)}
+    assert set(ws.slice_.units) == {_site(BUILDER), _site(UNWIRED),
+                                    _site(UNWIRED_CLOSE), _site(WIRED)}
     assert set(ws.records) == set(ws.slice_.units)
     assert ws.installable == {_site(UNWIRED): "Slots.on_open",
-                              _site(UNWIRED_CLOSE): "Slots.on_close"}
+                              _site(UNWIRED_CLOSE): "Slots.on_close",
+                              _site(WIRED): "Slots.on_open"}
     prompt = build_slice_session_prompt(
         module_name="m", cluster_name="c", slice_=ws.slice_, records=ws.records,
         all_records=RECORDS, file_texts={REL: _slice_file_text()},
@@ -159,6 +192,9 @@ def test_the_session_open_admits_the_complement_into_units_and_header() -> None:
     header = next(ln for ln in prompt.splitlines() if ln.startswith("<FILE "))
     assert "open_nested (free fn) [installable: fits Slots.on_open" in header
     assert "close_nested (free fn) [installable: fits Slots.on_close" in header
+    # The slot the builder's own literal installs, which the failing path
+    # did not reach (run `92187-f71f12bf`): editable beside its builder.
+    assert "open_plain (free fn) [installable: fits Slots.on_open" in header
 
 
 def test_the_session_open_keeps_the_planner_rendering_threshold() -> None:

@@ -32,6 +32,7 @@ from pipeline_core.domain.fn_execution import (
 from pipeline_core.domain.generation import GenerationRequest
 from pipeline_core.domain.measurement import code_identity
 from pipeline_core.domain.models import BuildCluster, FnLocator, FnSite
+from pipeline_core.domain.oracle_guard import OracleDrift
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -767,6 +768,44 @@ class RunDeps:
     # `classify_remaining_stubs`); empty degrades to the two-filter form.
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
         lambda _p: ())
+    # The oracle against its strip-time seal, `(project_dir, module) ->
+    # OracleDrift | None` (None: unsealed). Defaults to "unguarded" so a
+    # caller that wires none behaves as before the seal existed.
+    oracle_drift: Callable[[Path, str], OracleDrift | None] = (
+        lambda _p, _m: None)
+
+
+def check_oracle_seal(deps: RunDeps, project_dir: Path,
+                      modules: Sequence[str]) -> None:
+    """Refuse to run on an oracle that is not the one strip sealed.
+
+    Raises RuntimeError on drift, after logging `HEALTH ‼ ORACLE_DRIFT` with
+    the paths and emitting `pipeline.oracle_drift`, so nothing downstream —
+    task0c's commit, a fill, a ledger row — is produced against it. An
+    unsealed stripped module is
+    reported, not refused: workspaces stripped before the seal existed have
+    no tag, and the next strip writes one."""
+    for m in modules:
+        if not deps.phase_valid(project_dir, f"strip/{m}"):
+            continue
+        drift = deps.oracle_drift(project_dir, m)
+        if drift is None:
+            deps.log(f"  [oracle] '{m}': no seal tag — the oracle is unguarded "
+                     "until strip re-runs (redo.sh re-strips and seals).")
+            continue
+        if not drift.clean:
+            deps.log(f"  [ABORT] HEALTH ‼ ORACLE_DRIFT '{m}': the oracle differs "
+                     f"from its seal {drift.seal} — {drift.summary()}. Nothing "
+                     "in the pipeline writes the oracle after strip. Restore "
+                     f"the paths from the seal (git checkout {drift.seal} -- "
+                     "<path>) or re-strip (redo.sh) — refusing to run.")
+            deps.emit("pipeline.oracle_drift", data={
+                "module": m, "seal": drift.seal,
+                "changed": list(drift.changed), "added": list(drift.added),
+                "removed": list(drift.removed)})
+            raise RuntimeError(
+                f"oracle drift for {m}: {', '.join(drift.paths())}")
+        deps.log(f"  [oracle] '{m}': matches its seal {drift.seal}")
 
 
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
@@ -1124,6 +1163,15 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                 continue
             run_task0d(deps.task0d_deps, project_dir, _t0d_module, list(_clusters),
                        _module_dirs[_t0d_module] / "src")
+    # THE ORACLE SEAL, checked before task0c's per-launch pass: that pass ends
+    # in a whole-workspace checkpoint commit, and on 2026-09-22 (run
+    # `92187-f71f12bf`) it committed an edit made outside the pipeline into
+    # `tests/test_context.rs` as `pipeline: task0c/stable`. After that commit
+    # the edit is history and the fingerprint quietly names a new oracle.
+    # Only a stripped module is sealed; one still before strip (a fresh run,
+    # or a restore to the augmented tag) is authoring its oracle.
+    if not _from_spec and deps.run_state.git_managed:
+        check_oracle_seal(deps, project_dir, modules)
     deps.cluster_augmentor.run(AugmentContext(
         project_dir=project_dir, clusters=_clusters, modules=modules,
         module_coverage=module_coverage, module_dirs=_module_dirs,

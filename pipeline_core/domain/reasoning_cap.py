@@ -23,6 +23,7 @@ not the reading this exists to take.
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -139,20 +140,43 @@ class CutRate:
     took sessions. A reading of a run whose calls are that cut measures the
     budget, not reconstruction.
 
-    `share_pct <= 0` never fires. No verdict before `min_calls` calls; after
-    that the share is over the last `min(calls, window)`. Pure: `add`
-    returns a new value, so the fold replays over recorded rows unchanged."""
+    THE VERDICT IS A COUNT, and the share is how that count is configured:
+    the stop fires when `cut` reaches `threshold` = the number of cut calls
+    `share_pct` names over a FULL window (4% of 100 = 4). A share compared
+    against a partial window cannot mean what it says — its smallest non-zero
+    value IS the configured share, so with a floor at 25 calls the FIRST cut
+    call of a run fired the stop: run `190214-8de7c7a5` (2026-09-22) ended at
+    `calls=25 (of 25 seen) cut=1 share=4.0%`, killing a per-fn fill at `0
+    call(s)` and costing a relaunch. Folded over the recorded
+    `llm.stream_meta` rows of 217 runs (`scripts/cut_stop_census.py`), the
+    share-plus-floor rule stopped 97 runs, 14 of them with fewer than 4% cut
+    calls over their first 100; the count rule stops 87 with 1 such, and its
+    median firing call is 15 rather than 25 — it ends the genuinely cut runs
+    EARLIER and the healthy ones not at all. A count also keeps the property
+    the floor was introduced for (2026-09-21: a run makes ~10 calls an hour,
+    so a 100-call window rarely fills), without the floor: 4 cut calls are 4
+    cut calls whatever the denominator has reached.
+
+    `share_pct <= 0` never fires. Pure: `add` returns a new value, so the
+    fold replays over recorded rows unchanged."""
 
     window: int
     share_pct: float
-    min_calls: int
     marks: tuple[CallMark, ...] = ()
     seen: int = 0
 
     def add(self, mark: CallMark) -> CutRate:
         keep = max(1, self.window)
-        return CutRate(self.window, self.share_pct, self.min_calls,
+        return CutRate(self.window, self.share_pct,
                        (*self.marks, mark)[-keep:], self.seen + 1)
+
+    @property
+    def threshold(self) -> int:
+        """Cut calls that fire the stop: `share_pct` of a full window, at
+        least one. 0 when the stop is disabled."""
+        if self.share_pct <= 0:
+            return 0
+        return max(1, math.ceil(self.share_pct * max(1, self.window) / 100.0))
 
     @property
     def cut(self) -> int:
@@ -164,8 +188,7 @@ class CutRate:
 
     @property
     def fired(self) -> bool:
-        return (self.share_pct > 0 and self.seen >= self.min_calls
-                and bool(self.marks) and self.share >= self.share_pct)
+        return self.share_pct > 0 and self.cut >= self.threshold
 
     def by_route(self) -> dict[str, tuple[int, int]]:
         """route -> (cut, calls) over the window; "" is reported as "other"."""
@@ -183,8 +206,9 @@ class CutRate:
         empty = sum(1 for m in self.marks if m.empty)
         largest = max((m.prompt_tokens for m in self.marks), default=0)
         return (f"calls={len(self.marks)} (of {self.seen} seen) "
-                f"cut={self.cut} empty={empty} share={self.share:.1f}% "
-                f"[{routes or 'none'}] largest-prompt={largest} tok")
+                f"cut={self.cut}/{self.threshold or '-'} empty={empty} "
+                f"share={self.share:.1f}% [{routes or 'none'}] "
+                f"largest-prompt={largest} tok")
 
 
 def mark_of(meta: Mapping[str, Any], route: str) -> CallMark:
@@ -459,31 +483,40 @@ _health_pending = False
 
 @dataclass(frozen=True, slots=True)
 class CutStopKnobs:
-    """`LLM_CUT_STOP_SHARE` (percent, 0 disables), `LLM_CUT_STOP_WINDOW`,
-    `LLM_CUT_STOP_MIN_CALLS`. Decided 2026-09-21: 4% is the level of the
-    fixed-budget regime right after 2026-08-27 (08-27..08-29: 14 of 772,
-    1.8%); anything above it is a defect to fix. The minimum exists because a
-    run makes ~10 calls an hour (run `450977-5f48b68a`: 27 in 2.5 h), so a
-    100-call window alone would rarely fill; at 25 calls one cut stops the
-    run, which is the intent."""
+    """`LLM_CUT_STOP_SHARE` (percent, 0 disables) and `LLM_CUT_STOP_WINDOW`,
+    which together name a COUNT of cut calls — see `CutRate.threshold` and
+    `CutRate`'s docstring for why the verdict is the count and not the share.
+    4% is the level of the fixed-budget regime right after 2026-08-27
+    (08-27..08-29: 14 of 772, 1.8%); anything above it is a defect to fix.
+
+    There is no minimum-calls knob. `LLM_CUT_STOP_MIN_CALLS` existed because
+    a run makes ~10 calls an hour (run `450977-5f48b68a`: 27 in 2.5 h) so the
+    window rarely fills, and a share read off a partial window fires on its
+    first cut call. The count needs no floor and is not read off a
+    denominator, so the knob is gone rather than re-tuned; a value left in
+    `.env` is ignored."""
 
     share_pct: float = 4.0
     window: int = 100
-    min_calls: int = 25
 
     @property
     def enabled(self) -> bool:
         return self.share_pct > 0
 
+    @property
+    def threshold(self) -> int:
+        """The cut-call count that fires the stop (0 when disabled)."""
+        return CutRate(self.window, self.share_pct).threshold
+
     def describe(self) -> str:
         if not self.enabled:
             return "cut-stop=off"
         return (f"cut-stop={self.share_pct:g}%/{self.window} "
-                f"(min {self.min_calls})")
+                f"({self.threshold} cut call(s))")
 
 
 def cut_stop_knobs_from_env(source: Mapping[str, str] | None = None) -> CutStopKnobs:
-    """The three knobs; a garbage value falls back to its default rather
+    """The two knobs; a garbage value falls back to its default rather
     than disabling the stop, so a typo cannot silently remove it.
 
     `source` defaults to the process environment (the pipeline's own read,
@@ -505,8 +538,7 @@ def cut_stop_knobs_from_env(source: Mapping[str, str] | None = None) -> CutStopK
 
     return CutStopKnobs(
         share_pct=max(0.0, _num("LLM_CUT_STOP_SHARE", d.share_pct)),
-        window=max(1, int(_num("LLM_CUT_STOP_WINDOW", d.window))),
-        min_calls=max(1, int(_num("LLM_CUT_STOP_MIN_CALLS", d.min_calls))))
+        window=max(1, int(_num("LLM_CUT_STOP_WINDOW", d.window))))
 
 
 def arm_cut_stop(knobs: CutStopKnobs, *,
@@ -521,12 +553,12 @@ def arm_cut_stop(knobs: CutStopKnobs, *,
     with _health_lock:
         marks = _health.marks if _health is not None else ()
         seen = _health.seen if _health is not None else 0
-        _health = CutRate(knobs.window, knobs.share_pct, knobs.min_calls,
+        _health = CutRate(knobs.window, knobs.share_pct,
                           marks[-max(1, knobs.window):], seen)
         _health_log = log
         _health_emit = emit
         _health_meta = {**(context or {}), "share_pct": knobs.share_pct,
-                        "window": knobs.window, "min_calls": knobs.min_calls}
+                        "window": knobs.window, "threshold": knobs.threshold}
 
 
 def _observe_health(mark: CallMark) -> None:
@@ -542,7 +574,8 @@ def _observe_health(mark: CallMark) -> None:
         reading = _health
         log, emit, meta = _health_log, _health_emit, dict(_health_meta)
     line = (f"  HEALTH ‼ LLM_CUT_STOP {reading.describe()} reached "
-            f"LLM_CUT_STOP_SHARE={reading.share_pct:g}% — the run's model "
+            f"{reading.threshold} cut call(s) of the last {reading.window} "
+            f"(LLM_CUT_STOP_SHARE={reading.share_pct:g}%) — the run's model "
             "calls are being cut; stopping at the next unit boundary. Fix the "
             "budget (or the prompt size) and `bash continue.sh` resumes.")
     if log is not None:
@@ -551,6 +584,7 @@ def _observe_health(mark: CallMark) -> None:
         emit("llm.cut_rate_stop", data={
             **meta, "calls": len(reading.marks), "seen": reading.seen,
             "cut": reading.cut, "share": round(reading.share, 2),
+            "cut_threshold": reading.threshold,
             "by_route": {r: {"cut": c, "calls": n}
                          for r, (c, n) in reading.by_route().items()}})
 

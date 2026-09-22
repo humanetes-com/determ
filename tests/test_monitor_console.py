@@ -333,8 +333,8 @@ def test_generation_shows_the_cut_rate_gauge_beside_the_live_call(tmp_path: Any)
     _ws._prev.clear()
     stream = str(tmp_path / "stream.log")
     _write(stream, "[CALL_START: 1.0]\n[CALL: m]\n[CONTENT]some body text", time.time())
-    knobs = CutStopKnobs(share_pct=4.0, window=100, min_calls=1)
-    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    knobs = CutStopKnobs(share_pct=4.0, window=100)
+    rate = CutRate(knobs.window, knobs.share_pct)
     rate = rate.add(CallMark(route="", cut=True, empty=True, prompt_tokens=0))
 
     with_gauge = _gp.generation_rows(

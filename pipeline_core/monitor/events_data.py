@@ -764,10 +764,10 @@ def cut_rate_reading(knobs: CutStopKnobs) -> CutRate:
 
     `rate.seen` undercounts a long run's true call count: `read_recent_events`
     only tails the last 8 MB of events.jsonl, while the live process's `seen`
-    is cumulative since cluster entry. Harmless for `min_calls` gating
-    (default 25, reached within a handful of KB) and irrelevant to `share`,
-    which is computed over `marks` (the last `window` calls) either way."""
-    rate = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    is cumulative since cluster entry. It reads on neither the verdict nor
+    the gauge: both are the cut COUNT over `marks` (the last `window` calls),
+    which the tail carries."""
+    rate = CutRate(knobs.window, knobs.share_pct)
     for ev in read_recent_events(lambda n: n == "llm.stream_meta"):
         data = ev.get("data") or {}
         if data.get("bookkeeping"):

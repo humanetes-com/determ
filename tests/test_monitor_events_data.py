@@ -614,9 +614,9 @@ def test_cut_rate_reading_matches_the_in_process_fold_on_the_recorded_positive(
     recs = _cut_rate_fixture_events("450977-5f48b68a")
     _write(ev, *recs)
     _patch(monkeypatch, ev)
-    knobs = CutStopKnobs()  # 4%/100/25, the shipped defaults
+    knobs = CutStopKnobs()  # 4%/100 = 4 cut calls, the shipped defaults
     got = ed.cut_rate_reading(knobs)
-    want = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    want = CutRate(knobs.window, knobs.share_pct)
     for r in recs:
         want = want.add(mark_of(r["data"], ""))
     assert got.share == want.share and got.cut == want.cut

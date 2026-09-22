@@ -42,6 +42,7 @@ def _deps(calls: list[str], *, phase_valid: bool = False, bake_ok: bool = True,
         coverage_target=98.0,
         invalidate_structure=rec("invalidate_structure"),
         preserve_inline_tests=rec("preserve_inline_tests"),
+        seal_oracle=rec("seal_oracle"),
     )
 
 
@@ -75,12 +76,14 @@ def test_happy_path_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert args["preserve_inline_tests"] == (tmp_path / "m",)
     # Hard-Rule-11 ordering: relocate inline tests → capture → bake → commit →
     # tag → strip → cache invalidation (strip rewrote mod decls) →
-    # commit_and_mark. Preservation leads: both the API snapshot and the
+    # commit_and_mark → seal_oracle (the seal is the strip commit: strip is
+    # the oracle's last writer). Preservation leads: both the API snapshot and the
     # skeleton must be derived from the file WITHOUT its tests, or the skeleton
     # ships a test body inside the fill routes' writable surface.
     assert calls == ["preserve_inline_tests", "capture", "bake", "git_commit",
                      "git_tag", "strip", "invalidate_structure",
-                     "commit_and_mark", "set_current"]
+                     "commit_and_mark", "seal_oracle", "set_current"]
+    assert args["seal_oracle"] == (tmp_path, "m")
 
 
 def test_low_coverage_warns_then_proceeds(

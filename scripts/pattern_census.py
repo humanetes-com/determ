@@ -2453,7 +2453,7 @@ def detect_p33(run: Run, iters: list[dict]) -> list[dict]:
         mark_of,
     )
     k = CutStopKnobs()
-    fold = CutRate(k.window, k.share_pct, k.min_calls)
+    fold = CutRate(k.window, k.share_pct)
     for i, row in enumerate(_stream_rows_by_run().get(run.run_id, ()), 1):
         fold = fold.add(mark_of(row, ""))
         if fold.fired:

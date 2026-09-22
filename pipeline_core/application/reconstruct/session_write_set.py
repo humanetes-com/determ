@@ -1,13 +1,15 @@
-"""A slice session's write set at open: the planned slice plus the unwired
-installable complement of its files.
+"""A slice session's write set at open: the planned slice plus the table
+complement of its files (`installable_fns.table_complement`).
 
 The planner reads the write set off the failing tests' coverage. A free fn
-that fits a field of a fn-pointer table an editable unit builds, but that no
-table names yet, is executed by nothing and so can never be in that set,
-while the producer that should install it can. Run `195091-72b92f1e`
-(2026-09-21, cluster `stable`): the session held the producer, not the two
-table fns it had to install, and file-first held the fns but not the
-producer, so no route could write the pair.
+that fits a field of a fn-pointer table an editable unit builds can be out of
+that set for two reasons, and neither says the fn is not the defect: no table
+names it yet, so nothing executes it (run `195091-72b92f1e`, 2026-09-21: the
+session held the producer, not the two table fns it had to install), or the
+editable builder installs it on a path the failing test does not reach (run
+`92187-f71f12bf`, 2026-09-22: the model rewrote the drop slot the editable
+builder's literal names and the splicer refused it). Either way the builder
+is writable and its slot is not, so no reply can write the pair.
 
 The slice is rebuilt with `dataclasses.replace`, never field by field: the
 open used to rebuild it as `(tests, units)` and dropped the planner's
@@ -20,7 +22,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from pipeline_core.domain.attribution import locator_of, record_site
-from pipeline_core.domain.installable_fns import unwired_complement
+from pipeline_core.domain.installable_fns import table_complement
 from pipeline_core.domain.models import FnRecord, FnSite, TypeRecord
 from pipeline_core.domain.rust_idents import fn_reference_counts
 from pipeline_core.domain.slice_session import SessionSlice
@@ -40,7 +42,7 @@ def session_write_set(
     type_records: Iterable[TypeRecord],
     read_text: Callable[[str], str | None],
 ) -> SessionWriteSet:
-    """The slice's resolved records plus every slice file's unwired
+    """The slice's resolved records plus every slice file's table
     complement, as records, as units of the returned slice, and as the
     installable marks the turn-0 header renders. `read_text(file)` is the
     live file text (None when unreadable: that file admits nothing)."""
@@ -52,7 +54,7 @@ def session_write_set(
         text = read_text(f)
         if text is None:
             continue
-        for inst in unwired_complement(
+        for inst in table_complement(
                 tree_records, types, writable, f,
                 reference_counts=fn_reference_counts(text)):
             for r in tree_records:

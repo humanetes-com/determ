@@ -329,11 +329,11 @@ def read_backend() -> str:
     return "ollama"
 
 
-_CUT_STOP_KEYS = ("LLM_CUT_STOP_SHARE", "LLM_CUT_STOP_WINDOW", "LLM_CUT_STOP_MIN_CALLS")
+_CUT_STOP_KEYS = ("LLM_CUT_STOP_SHARE", "LLM_CUT_STOP_WINDOW")
 
 
 def read_cut_stop_knobs() -> reasoning_cap.CutStopKnobs:
-    """`LLM_CUT_STOP_SHARE`/`_WINDOW`/`_MIN_CALLS` as the pipeline reads
+    """`LLM_CUT_STOP_SHARE`/`_WINDOW` as the pipeline reads
     them at cluster entry (`reasoning_cap.cut_stop_knobs_from_env`), sourced
     from `.env` on disk: the monitor is a separate process, never forked
     from the pipeline's, so it inherits none of its environment and no

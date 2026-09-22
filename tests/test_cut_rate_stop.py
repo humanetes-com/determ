@@ -51,7 +51,7 @@ def _rows(run_id: str) -> list[dict]:
 
 
 def _first_fire(rows: list[dict], knobs: CutStopKnobs) -> int | None:
-    fold = CutRate(knobs.window, knobs.share_pct, knobs.min_calls)
+    fold = CutRate(knobs.window, knobs.share_pct)
     for i, row in enumerate(rows, 1):
         fold = fold.add(mark_of(row, ""))
         if fold.fired:
@@ -70,35 +70,65 @@ def test_cut_is_capped_or_empty_and_a_closed_structure_is_not() -> None:
     assert not is_cut({**OK, "finish_reason": None, "stop": "closed"})
 
 
-def test_fold_fires_at_the_share_over_the_window_not_before_min_calls() -> None:
-    fold = CutRate(window=40, share_pct=25, min_calls=25)
+def test_fold_fires_on_the_count_the_share_names_over_a_full_window() -> None:
+    """25% of a 40-call window is 10 cut calls: not at 9, at the 10th,
+    wherever the window has got to."""
+    fold = CutRate(window=40, share_pct=25)
+    assert fold.threshold == 10
     for _ in range(31):
         fold = fold.add(mark_of(OK, "file"))
     for _ in range(9):
         fold = fold.add(mark_of(CAPPED, "file"))
-    assert fold.cut == 9 and not fold.fired          # 22.5%
+    assert fold.cut == 9 and not fold.fired
     fold = fold.add(mark_of(CAPPED, "session"))     # an OK slides out: 10 of 40
     assert fold.cut == 10 and fold.fired
     assert fold.by_route() == {"file": (9, 39), "session": (1, 1)}
 
-    early = CutRate(window=100, share_pct=4, min_calls=25)
-    for _ in range(24):
-        early = early.add(mark_of(CAPPED, ""))
-    assert not early.fired                            # 100% cut, 24 calls
-    assert early.add(mark_of(OK, "")).fired
+
+def test_a_single_cut_call_never_fires_the_stop() -> None:
+    """The defect this rule replaces: a share compared against a partial
+    window has its configured value as its smallest non-zero reading, so at
+    4%/100 with a 25-call floor the FIRST cut call stopped the run (run
+    `190214-8de7c7a5`, 2026-09-22, `calls=25 (of 25 seen) cut=1
+    share=4.0%`)."""
+    fold = CutRate(window=100, share_pct=4)
+    assert fold.threshold == 4
+    for i in range(80):
+        fold = fold.add(mark_of(CAPPED if i == 0 else OK, ""))
+        assert not fold.fired
+    assert fold.cut == 1 and fold.share == 1.25
+
+    # Negative control: the pre-fix verdict — the share over however much of
+    # the window has filled, floored at 25 calls — fires at call 25 on these
+    # very marks, because 1 of 25 IS 4%.
+    def _old_fired(seen: int, cut: int, share_pct: float = 4.0,
+                   window: int = 100, min_calls: int = 25) -> bool:
+        marks = min(seen, window)
+        return seen >= min_calls and 100.0 * cut / marks >= share_pct
+
+    assert _old_fired(seen=25, cut=1)
+    assert not _old_fired(seen=24, cut=1)
+
+
+def test_a_cut_run_is_stopped_earlier_than_the_share_rule_stopped_it() -> None:
+    """The count is not a softer stop: on the recorded cut run it fires at
+    the 4th cut call, nine calls before the old rule's floor let it look."""
+    rows = _rows("450977-5f48b68a")
+    assert _first_fire(rows, CutStopKnobs()) == 16
 
 
 def test_share_zero_never_fires() -> None:
-    fold = CutRate(window=10, share_pct=0, min_calls=1)
+    fold = CutRate(window=10, share_pct=0)
     for _ in range(10):
         fold = fold.add(mark_of(CAPPED, ""))
     assert not fold.fired
+    assert fold.threshold == 0
 
 
-def test_recorded_run_450977_fires_at_call_25_and_the_disabled_stop_never_does() -> None:
+def test_recorded_run_450977_is_stopped_and_the_disabled_stop_never_is() -> None:
     rows = _rows("450977-5f48b68a")
-    assert _first_fire(rows, CutStopKnobs()) == 25
-    # Negative control — the pre-fix behaviour: no stop at all.
+    assert _first_fire(rows, CutStopKnobs()) is not None
+    # Negative control — the knob off: no stop at all.
     assert _first_fire(rows, CutStopKnobs(share_pct=0)) is None
 
 
@@ -111,16 +141,19 @@ def test_recorded_healthy_run_is_not_stopped() -> None:
 def test_knobs_parse_and_a_typo_keeps_the_default(monkeypatch) -> None:
     monkeypatch.setenv("LLM_CUT_STOP_SHARE", "4")
     monkeypatch.setenv("LLM_CUT_STOP_WINDOW", "100")
-    monkeypatch.setenv("LLM_CUT_STOP_MIN_CALLS", "oops")
+    monkeypatch.setenv("LLM_CUT_STOP_WINDOW", "oops")
     k = cut_stop_knobs_from_env()
-    assert (k.share_pct, k.window, k.min_calls) == (4.0, 100, 25)
-    assert k.describe() == "cut-stop=4%/100 (min 25)"
+    assert (k.share_pct, k.window, k.threshold) == (4.0, 100, 4)
+    assert k.describe() == "cut-stop=4%/100 (4 cut call(s))"
+    # A MIN_CALLS left in .env is ignored, not read back into the verdict.
+    monkeypatch.setenv("LLM_CUT_STOP_MIN_CALLS", "25")
+    assert cut_stop_knobs_from_env() == k
     monkeypatch.setenv("LLM_CUT_STOP_SHARE", "0")
     assert cut_stop_knobs_from_env().describe() == "cut-stop=off"
 
 
 def test_every_recorded_row_folds_bookkeeping_excluded_route_tagged() -> None:
-    reasoning_cap.arm_cut_stop(CutStopKnobs(share_pct=50, window=10, min_calls=3))
+    reasoning_cap.arm_cut_stop(CutStopKnobs(share_pct=50, window=10))
     with route_scope("session", "session[1,2] #0"):
         record_stream_meta(CAPPED)
     with bookkeeping_call():
@@ -139,8 +172,9 @@ def test_unarmed_process_records_nothing() -> None:
 def test_fire_logs_emits_and_takes_the_graceful_stop() -> None:
     logged: list[str] = []
     events: list[tuple[str, dict]] = []
+    # 50% of a 4-call window: the 2nd cut call fires it.
     reasoning_cap.arm_cut_stop(
-        CutStopKnobs(share_pct=4, window=100, min_calls=3),
+        CutStopKnobs(share_pct=50, window=4),
         log=logged.append,
         emit=lambda name, data: events.append((name, data)),
         context={"cluster": "c"})
@@ -151,7 +185,8 @@ def test_fire_logs_emits_and_takes_the_graceful_stop() -> None:
     record_stream_meta(CAPPED)              # fires once, not twice
     assert sum("HEALTH ‼ LLM_CUT_STOP" in line for line in logged) == 1
     assert [n for n, _ in events] == ["llm.cut_rate_stop"]
-    assert events[0][1]["cut"] == 1 and events[0][1]["cluster"] == "c"
+    assert events[0][1]["cut"] == 2 and events[0][1]["cluster"] == "c"
+    assert events[0][1]["cut_threshold"] == 2
     with pytest.raises(SystemExit):
         graceful_stop.check_graceful_stop(logged.append, "unit b")
     assert "[graceful] LLM cut-rate stop at unit b" in logged[-1]
@@ -161,12 +196,12 @@ def test_fire_logs_emits_and_takes_the_graceful_stop() -> None:
 def test_rearm_keeps_the_process_window() -> None:
     reasoning_cap.arm_cut_stop(CutStopKnobs(share_pct=0))
     record_stream_meta(CAPPED)
-    reasoning_cap.arm_cut_stop(CutStopKnobs(share_pct=4, window=100, min_calls=1))
+    reasoning_cap.arm_cut_stop(CutStopKnobs(share_pct=4, window=100))
     reading = reasoning_cap.health_reading()
     assert reading is not None and reading.seen == 1 and reading.cut == 1
 
 
 def test_call_mark_is_what_the_breakdown_prints() -> None:
-    fold = CutRate(100, 4, 25).add(CallMark("per-fn", True, True, 41_000))
-    assert "cut=1 empty=1 share=100.0% [per-fn 1/1] largest-prompt=41000 tok" \
+    fold = CutRate(100, 4).add(CallMark("per-fn", True, True, 41_000))
+    assert "cut=1/4 empty=1 share=100.0% [per-fn 1/1] largest-prompt=41000 tok" \
         in fold.describe()

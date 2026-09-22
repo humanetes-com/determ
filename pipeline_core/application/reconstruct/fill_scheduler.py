@@ -131,11 +131,20 @@ class _GroundGate:
     (`fill_reading.kept_mark`), so a fill that keeps nothing never pays for
     it, and once the ground has moved it stays moved for the rest of the
     fill. Thread-safe: a parallel wave's workers ask at their own unit
-    boundaries."""
+    boundaries.
+
+    The move is logged once, here, when it is first seen. The between-waves
+    line in `execute_fill` prints only when runs are left to defer, so a fill
+    whose only run is a pooled route ended with its unclaimed units unnamed:
+    run `311306-c8624d12` (2026-09-22) stopped a 12-unit per-fn batch after
+    four starts, twice, and the only trace was `10 dispatched unit(s) no
+    route opened` one sweep later."""
 
     def __init__(self, deps: FillExecutionDeps) -> None:
         self._premise = deps.premise
         self._read = deps.ground_now
+        self._log = deps.log
+        self._iteration = deps.iteration
         self._lock = threading.Lock()
         self._seen = kept_mark()
         self.moved: tuple[str, ...] = ()
@@ -159,6 +168,13 @@ class _GroundGate:
             if now is None:
                 return False
             self.moved = premise_moved(self._premise, now)
+            if self.moved:
+                self._log(
+                    f"  [phase-c/schedule] fill {self._iteration}: premise "
+                    f"moved after a keep — {len(self.moved)} test(s) no longer "
+                    f"fail where the plan read them ({names_of(self.moved)}); "
+                    "no further unit is claimed this fill, units in flight "
+                    "complete")
             return bool(self.moved)
 
 

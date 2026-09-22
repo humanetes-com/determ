@@ -280,19 +280,15 @@ def test_promote_by_blocker_counts_puts_the_hottest_blocker_first():
     assert promote_by_blocker_counts(ordered, {}) == ordered
 
 
-def test_overlay_crash_on_ranks_puts_blamed_frames_above_the_histogram():
-    """The engine re-sorts on dispatch_ranks. Histogram-only ranks would
-    undo crash-first the same way leaf-first undid constructor-first."""
-    from pipeline_core.domain.dispatch_batch import overlay_crash_on_ranks
-    construct = _k("src/error.rs", "construct")
-    fmt = _k("src/wrapper.rs", "fmt")
-    blamed = _k("src/error.rs", "object_drop")
-    ranks = {construct: 27, fmt: 14}
-    out = overlay_crash_on_ranks(ranks, {blamed: 0, fmt: 2})
-    assert out[blamed] > out[construct]
-    assert out[fmt] > out[construct]
-    assert out[construct] == 27
-    assert overlay_crash_on_ranks(ranks, {}) == ranks
+def test_dispatch_ranks_of_is_the_order_it_is_given():
+    """The engine's pool ranks are the driver's order, head highest; a key
+    outside the order has no rank, and a repeat keeps its first slot."""
+    from pipeline_core.domain.dispatch_batch import dispatch_ranks_of
+    a, b, c = _k("src/z.rs", "a"), _k("src/a.rs", "b"), _k("src/m.rs", "c")
+    out = dispatch_ranks_of([a, b, c, a])
+    assert out[a] > out[b] > out[c] > 0
+    assert _k("src/a.rs", "absent") not in out
+    assert dispatch_ranks_of([]) == {}
 
 
 def test_promote_product_ahead_lifts_producers_over_new_accessors():

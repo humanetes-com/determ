@@ -388,24 +388,37 @@ def promote_by_blocker_counts[K: Hashable, V](
     ]
 
 
-def overlay_crash_on_ranks[K: Hashable](
-    ranks: Mapping[K, int], grades: Mapping[K, int],
-) -> dict[K, int]:
-    """Crash-evidence units outrank every histogram count; grade 0 is highest.
+def dispatch_ranks_of[K: Hashable](ordered: Sequence[K]) -> dict[K, int]:
+    """The engine's pool ranks, read off the driver's final dispatch order.
 
-    `dispatch_ranks` is what the engine re-sorts on after `take_batch`. Passing
-    the histogram alone undoes `promote_crash_evidence` the same way leaf-first
-    undid constructor ranking (run `155810-cbb3b9fc` iter 1). Offset is
-    `max(histogram)+1+(max(grade)-grade)` so the best observed grade sits
-    above weaker inferences above any blocker count. Empty `grades` returns a
-    copy of `ranks`. Units absent from `grades` keep their histogram value."""
-    out = dict(ranks)
-    if not grades:
-        return out
-    ceiling = max(out.values(), default=0)
-    span = max(grades.values())
-    for k, g in grades.items():
-        out[k] = ceiling + 1 + (span - g)
+    `dispatch_ranks` is what the fill engine re-sorts its pool on after
+    `take_batch` (`rank_stubs_by_blocker_counts`, and the fn order inside an
+    impl block). The driver has already decided the order: blocker counts,
+    product and producer promotion, service order, crash evidence last and
+    stable within a grade. A second ranking built beside it is a second
+    answer to the same question, and the two disagree exactly where the
+    second one loses information.
+
+    The measurement, run `311306-c8624d12` (2026-09-22). The rank map was the
+    blocker histogram with every crash-evidence unit REPLACED by one value per
+    grade. All twelve units in the batch were frame-sited at the same grade,
+    so all twelve got rank 46, and the pool fell through to its `(file, fn)`
+    tiebreak. The fn holding 45 failing tests at its stub started after
+    `context.rs` and `ensure.rs` units holding 11 and 14, and the fill's
+    premise gate ends a fill at the first keep that moves the ground, so only
+    the first four claims ever ran: iter 1 filled the two alphabetically first
+    files and kept four bodies whose tests the 45-test stub still held. The
+    driver's order had that unit first the whole time (`never_served` on the
+    `phase_c.dispatch.service_order` event).
+
+    Rank is position: the head of `ordered` gets `len(ordered)`, the tail 1.
+    A unit the engine is handed that is not in `ordered` (a pair member the
+    batch cut dropped) gets no entry and sorts after every ranked unit. First
+    occurrence wins if a key repeats."""
+    out: dict[K, int] = {}
+    n = len(ordered)
+    for i, k in enumerate(ordered):
+        out.setdefault(k, n - i)
     return out
 
 

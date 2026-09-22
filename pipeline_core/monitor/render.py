@@ -526,11 +526,14 @@ def cut_rate_row(rate: CutRate, knobs: CutStopKnobs) -> str | None:
     fires, on screen every refresh instead of only once an iteration or only
     in hindsight after the stop has already taken the run.
 
-    The bar fills against the STOP threshold, not against 100%: at
-    `share == share_pct` the bar is full and red, matching the instant
-    `CutRate.fired` goes true. With the stop disabled (`LLM_CUT_STOP_SHARE=0`)
-    there is no threshold to fill toward, so the bar fills against the raw
-    share out of 100 instead — the same `[llm/health]` line's number with a
+    The bar fills against the STOP threshold, not against 100%: the stop's
+    verdict is a COUNT (`CutRate.threshold`, the cut calls `share_pct` names
+    over a full window), so the bar is `cut` out of that count and is full
+    and red at the instant `CutRate.fired` goes true. Filling it with the
+    SHARE instead showed a bar already full on a run that had made three
+    calls and cut one. With the stop disabled (`LLM_CUT_STOP_SHARE=0`) there
+    is no threshold to fill toward, so the bar fills against the raw share
+    out of 100 instead — the same `[llm/health]` line's number with a
     knob-off caveat, never a bar that reads "empty" while calls are cutting.
 
     None before this run has recorded a single main-stream call, so the row
@@ -539,13 +542,15 @@ def cut_rate_row(rate: CutRate, knobs: CutStopKnobs) -> str | None:
     """
     if not rate.marks:
         return None
-    pct_of_stop = (100.0 * rate.share / knobs.share_pct) if knobs.enabled else rate.share
+    pct_of_stop = ((100.0 * rate.cut / rate.threshold) if knobs.enabled
+                   else rate.share)
     bar_col = (red if rate.fired or pct_of_stop >= 100
                else yellow if pct_of_stop >= 60 else green)
-    thresh = f"{knobs.share_pct:g}%" if knobs.enabled else dim("off")
+    thresh = (f"{rate.threshold} cut ({knobs.share_pct:g}%)" if knobs.enabled
+              else dim("off"))
     empty = sum(1 for m in rate.marks if m.empty)
     return (f"  llm cut  [{bar_col(progress_bar(min(100.0, pct_of_stop), 18))}] "
-            f"{rate.share:.1f}% / {thresh}  cut={rate.cut} empty={empty} "
+            f"{rate.cut} / {thresh}  share={rate.share:.1f}% empty={empty} "
             f"of {len(rate.marks)} call(s) (seen {rate.seen}+)")
 
 

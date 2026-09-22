@@ -141,3 +141,25 @@ def test_negative_control_the_frozen_plan_runs_both_routes_out(
     assert calls == ["file src/h.rs#0", "file src/h.rs#1", "file src/h.rs#2",
                      "per-fn 1 stub(s)#0", "per-fn 1 stub(s)#1"]
     assert out.premise_moved == ()
+
+
+def test_a_single_run_fill_names_the_move_that_ended_it(tmp_path: Path) -> None:
+    """A fill whose only run is the route that kept: no run is left to defer,
+    so the between-waves line never prints. The gate itself names the move
+    (run `311306-c8624d12`, 2026-09-22: a 12-unit per-fn batch stopped after
+    four starts with nothing in the log saying why)."""
+    fill_reading.reset_last_comparison()
+    calls: list[str] = []
+    log: list[str] = []
+    a, _b = _runs()
+    out = execute_fill([_Route(RouteKind.FILE, a, 3, calls, keeps=True)],
+                       hollow={"t1": frozenset({_MAKE})},
+                       bodies_sha=lambda _t: "b",
+                       deps=_deps(tmp_path, log, [], premise=_PLAN,
+                                  ground=_MOVED, reads=[]))
+    assert calls == ["file src/h.rs#0"]
+    assert out.premise_moved == ("t1", "t2")
+    moved = [ln for ln in log if "premise moved after a keep" in ln]
+    assert len(moved) == 1 and "no further unit is claimed" in moved[0]
+    # Negative control: the between-waves line cannot carry it here.
+    assert not any("premise moved after file src/h.rs" in ln for ln in log)

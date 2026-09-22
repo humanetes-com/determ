@@ -605,6 +605,14 @@ one obvious line", "the loop is stuck on it", or "I will put it back". The edita
 surface is `pipeline.py`, `pipeline_core`, `tools`, the extractor's Rust sources,
 the scripts and the trackers. Nothing else.
 
+**A scratch copy of a cluster tree is `cp -rL`, never `cp -r`.** The tree's
+`tests` is a symlink into the workspace oracle; `cp -r` copies it as a
+symlink, so an edit to the "copy" edits the oracle. That is how an assistant
+session's diagnostic prints landed in `tests/test_context.rs` on 2026-09-21
+and moved the oracle fingerprint under run `92187-f71f12bf`. The pipeline now
+seals the oracle at strip and refuses a launch on drift (`HEALTH ‼
+ORACLE_DRIFT`); do not rely on the refusal.
+
 **Why, in three parts.** The crate IS the measurement: pass counts, verdicts, the
 ratchet and every conviction describe a tree the pipeline produced, and one
 hand-authored line makes every later number a statement about a tree a human
@@ -856,19 +864,28 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   between units and reaches no subprocess; the bound on a subprocess is
   the runner's (`adapters.process.run_bounded`), `PHASE_C_TEST_TIMEOUT`
   for everything that executes the reconstructed tree.
-- `LLM_CUT_STOP_SHARE` / `_WINDOW` / `_MIN_CALLS` (4 / 100 / 25) — the
+- `LLM_CUT_STOP_SHARE` / `_WINDOW` (4 / 100) — the
   run-level LLM cut stop (`domain/reasoning_cap.py::CutRate`), not a
   flat-score stop. A call is cut when it returned no decided answer
   (reasoning ran out, or the reply is empty); notes-extractor calls are not
-  counted. Fires when the cut share of the process's last `WINDOW` calls
-  reaches `SHARE`% from call `MIN_CALLS` on, logs `HEALTH ‼ LLM_CUT_STOP`,
+  counted. The two knobs name a COUNT — `SHARE`% of a FULL `WINDOW`, so
+  4 %/100 is 4 cut calls — and the stop fires when the cut calls among the
+  process's last `WINDOW` reach it, whatever the window has filled to.
+  There is no `_MIN_CALLS`: a share read off a partial window has the
+  configured share as its smallest reading, so the floor made the run's
+  FIRST cut call a stop (run `190214-8de7c7a5`, 2026-09-22, `calls=25 (of
+  25 seen) cut=1 share=4.0%`, a killed fill and a relaunch); a count needs
+  no floor, and a leftover `.env` line is ignored. Replayed over 217
+  recorded runs (`scripts/cut_stop_census.py`) the count stops 87 of them,
+  one with a healthy window, median firing call 15, against 97 / 14 / 25
+  for the share-plus-floor rule. It logs `HEALTH ‼ LLM_CUT_STOP`,
   emits `llm.cut_rate_stop` and takes the process-wide graceful stop at the
   next unit boundary; the cluster is not marked done. It counts calls, not
   iterations, so it can fire mid-fill of iteration 1 — the reading it
   prevents is one whose calls are cut, which measures the budget, not
   reconstruction. `SHARE=0` disables the stop and keeps the per-iteration
   `[llm/health]` line. Read once at cluster entry; confirmed on the
-  cluster-entry line (`cut-stop=4%/100 (min 25)`).
+  cluster-entry line (`cut-stop=4%/100 (4 cut call(s))`).
 - `TDD_FILL_BUDGET_MINUTES` (default 0) — NOT a stop: the fill schedule's
   wall-clock budget (`domain/fill_schedule.py`), the minutes one fill's
   route runs share by weight (never-served and paying runs 2, served 1,
