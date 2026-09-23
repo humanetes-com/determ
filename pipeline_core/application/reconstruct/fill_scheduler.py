@@ -56,6 +56,7 @@ from pipeline_core.domain.test_outcome import (
     moved_in_scope,
     names_of,
     premise_moved,
+    standing_in,
 )
 
 __all__ = ["FillExecution", "FillExecutionDeps", "execute_fill"]
@@ -151,9 +152,10 @@ class _GroundGate:
     (2026-09-22) kept `src/error.rs::new`, its 13 held tests moved, and the
     8 unclaimed units of a 12-unit batch were refused with none of their 55
     held tests moved — three iterations in a row landed only the in-flight
-    wave. A run whose keep moved every failing test (run
-    `3383938-c5d24499`, 141 of 141) still ends the fill at once, because
-    every claim's scope is hit.
+    wave. A keep that moves every failing test (run `3383938-c5d24499`,
+    141 of 141) hits every claim's scope; what continues is only the claims
+    the new ground still stands (below) — the units the moved tests now stop
+    in — and the rest waits for the sweep's re-plan.
 
     Measures only when something was kept since the last look
     (`fill_reading.kept_mark`), so a fill that keeps nothing never pays for
@@ -163,7 +165,16 @@ class _GroundGate:
 
     Each growth of the moved set is logged here, where it is first seen
     (run `311306-c8624d12`, 2026-09-22: a pooled per-fn run stopped with
-    its unclaimed units unnamed)."""
+    its unclaimed units unnamed).
+
+    A claim whose planned ground moved still stands when the ground as it is
+    now puts one of its planned tests' first failure inside a unit the claim
+    writes (`test_outcome.standing_in`): the move is evidence for it, and a
+    re-plan would dispatch it on exactly that reading. The units are a
+    required argument, so no claim can be asked without them. Scoped refusal
+    alone refused such holders fill after fill on a stub chain: run
+    `790176-f0df7402` (2026-09-23) refused `downcast_ref` and `is` in fills
+    1 and 2 while every sweep read them holding tests."""
 
     def __init__(self, deps: FillExecutionDeps) -> None:
         self._premise = deps.premise
@@ -172,8 +183,11 @@ class _GroundGate:
         self._iteration = deps.iteration
         self._lock = threading.Lock()
         self._seen = kept_mark()
+        self._now: Mapping[str, PremiseEntry] = {}
+        self._admitted: set[frozenset[tuple[str, str]]] = set()
         self.moved: tuple[str, ...] = ()
         self.refused = 0
+        self.admitted = 0
 
     @property
     def armed(self) -> bool:
@@ -190,6 +204,7 @@ class _GroundGate:
         now = self._read()
         if now is None:
             return
+        self._now = now
         grown = set(self.moved) | set(premise_moved(self._premise, now))
         if len(grown) == len(self.moved):
             return
@@ -202,17 +217,33 @@ class _GroundGate:
             "this fill. Claims planned on a moved test are refused, the "
             "rest of the plan continues, units in flight complete")
 
-    def __call__(self, scope: frozenset[str] | None = None) -> bool:
+    def __call__(self, scope: frozenset[str] | None,
+                 units: frozenset[FnLocator]) -> bool:
+        """True when the claim is refused: its planned ground moved and the
+        ground now holds none of its planned tests inside ``units``."""
         if not self.armed:
             return False
         with self._lock:
             self._look()
             if not self.moved:
                 return False
-            hit = moved_in_scope(self.moved, scope)
-            if hit:
-                self.refused += 1
-            return bool(hit)
+            if not moved_in_scope(self.moved, scope):
+                return False
+            pairs = frozenset((u.file, u.fn_name) for u in units)
+            standing = standing_in(self._now, scope, pairs)
+            if standing:
+                self.admitted += 1
+                if pairs not in self._admitted:
+                    self._admitted.add(pairs)
+                    self._log(
+                        f"  [phase-c/schedule] fill {self._iteration}: "
+                        f"claim on moved ground admitted — "
+                        f"{len(standing)} planned test(s) now first-fail "
+                        f"inside {names_of(sorted(f'{f}::{n}' for f, n in pairs))} "
+                        f"({names_of(standing)})")
+                return False
+            self.refused += 1
+            return True
 
 
 def _notify_wave(deps: FillExecutionDeps,
@@ -499,7 +530,7 @@ def execute_fill(
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,
                 now=deps.now, ground_moved=gate,
-                scope=w.run.target_tests or None,
+                scope=w.run.target_tests or None, units=w.run.targets,
                 unit_multiple=deps.unit_share_multiple)
         mark = kept_mark()
         t0 = deps.now()
@@ -585,7 +616,7 @@ def execute_fill(
         # did not move stay on the plan.
         if i < len(ordered) and gate.armed:
             rest = [w for w in ordered[i:]
-                    if gate(w.run.target_tests or None)]
+                    if gate(w.run.target_tests or None, w.run.targets)]
             if rest:
                 deps.log(
                     f"  [phase-c/schedule] fill {deps.iteration}: premise "

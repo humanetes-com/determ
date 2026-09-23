@@ -980,12 +980,14 @@ class PhaseCFillEngine:
                     # this fill moved. A unit whose tests did not move is
                     # still standing on its plan; a unit in flight always
                     # completes.
+                    _unit = frozenset({FnLocator(rec.file, rec.fn_name)})
                     _own = (tdd_frontier_tests.tests_for(
                                 FnLocator(rec.file, rec.fn_name))
                             if tdd_frontier_tests is not None else set())
-                    _why = (claim_refusal(frozenset(_own))
+                    _why = (claim_refusal(frozenset(_own), _unit)
                             if claim_refusal is not None
-                            else ("" if claim(frozenset(_own)) else "refused"))
+                            else ("" if claim(frozenset(_own), _unit)
+                                  else "refused"))
                     if _why:
                         with _counters_lock:
                             _unclaimed.setdefault(_why, []).append(

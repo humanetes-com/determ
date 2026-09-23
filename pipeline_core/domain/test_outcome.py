@@ -55,6 +55,7 @@ __all__ = [
     "premise_of",
     "run_kind",
     "site_kind_of",
+    "standing_in",
     "stub_hold_of",
     "truncated_failing",
 ]
@@ -324,6 +325,56 @@ def moved_in_scope(
         return moved_t
     leaves = {_scope_leaf(s) for s in scope}
     return tuple(m for m in moved_t if _scope_leaf(m) in leaves)
+
+
+def _first_fail_fns(identity: tuple[str, ...]) -> frozenset[tuple[str, str]]:
+    """The (file, fn) of every crate function a premise site identity names:
+    the name's own first failure and each other binary's copy
+    (:func:`_sites_identity` is the writer of this shape)."""
+    own: list[str] = []
+    rest: list[str] = []
+    if "+" in identity:
+        cut = identity.index("+")
+        own, rest = list(identity[:cut]), list(identity[cut + 1:])
+    else:
+        own = list(identity)
+    out: set[tuple[str, str]] = set()
+    for parts in (own, *(r.split("|") for r in rest)):
+        if len(parts) >= 3 and parts[0] == "fn":
+            out.add((parts[1], parts[2]))
+    return frozenset(out)
+
+
+def standing_in(
+    now: Mapping[str, PremiseEntry], scope: Iterable[str] | None,
+    units: Iterable[tuple[str, str]],
+) -> tuple[str, ...]:
+    """The failing tests of ``scope`` whose first failure, on the ground as
+    it stands NOW, lies inside one of ``units`` ((file, fn) pairs), sorted.
+
+    This is the claim's standing on the current ground, independent of the
+    ground it was planned on: a unit a planned test now stops inside is on
+    that test's path whatever else moved, which is the reading a fresh plan
+    dispatches it on (the sweep's stub holds rank such a unit as a blocker).
+    A move is evidence FOR such a claim. Run `790176-f0df7402` (2026-09-23,
+    cluster `stable`): the keep of `src/ptr.rs::new` moved all 141 failing
+    tests, and the gate refused `src/error.rs::downcast_ref` and `is`, which
+    the next sweep read holding 6 and 4 tests at their first failure; in the
+    next fill it refused them again — their held tests had not moved, other
+    tests of their scope had — and the third sweep read the same holds.
+
+    A claim with no named test (None or empty) stands on the whole ground.
+    Units are matched by file and function name: two homonyms in one file
+    read as one, which can only admit a claim the fresh measurement then
+    judges, never refuse one."""
+    want = frozenset(units)
+    if not want:
+        return ()
+    leaves = {_scope_leaf(s) for s in scope} if scope else None
+    return tuple(sorted(
+        k for k, (passed, identity, _aborted) in now.items()
+        if not passed and (leaves is None or _scope_leaf(k) in leaves)
+        and _first_fail_fns(identity) & want))
 
 
 def names_of(entries: Iterable[str]) -> str:

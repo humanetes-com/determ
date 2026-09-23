@@ -215,7 +215,7 @@ def test_a_refusal_names_its_reason() -> None:
     moved = {"t_moved"}
     clock = RunClock(share_minutes=10.0, fill_remaining=lambda: 100.0,
                      now=lambda: t[0],
-                     ground_moved=lambda scope: bool(scope and scope & moved))
+                     ground_moved=lambda scope, _units: bool(scope and scope & moved))
     assert clock.refusal(["t_moved"]) == "premise"
     assert clock.refusal(["t_other"]) == ""
     t[0] = 11 * 60.0

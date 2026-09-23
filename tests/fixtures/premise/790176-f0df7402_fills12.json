@@ -1,0 +1,563 @@
+{
+ "fills": {
+  "1": {
+   "now_holds": {
+    "src/context.rs::ext_context": [
+     "test_context_trait_on_result_ok_and_err",
+     "test_display",
+     "test_downcast_high",
+     "test_downcast_low",
+     "test_downcast_mid",
+     "test_downcast_mut",
+     "test_downcast_ref",
+     "test_root_cause",
+     "test_unsuccessful_downcast",
+     "with_context_err_with_anyhow_inner"
+    ],
+    "src/error.rs::as_ref": [
+     "test_as_ref"
+    ],
+    "src/error.rs::chain": [
+     "behaviour_probe_stable_chain_length_counts_contexts_0",
+     "test_clone",
+     "test_error_chain_double_ended_iteration",
+     "test_error_chain_iteration_order",
+     "test_error_chain_len_and_size_hint",
+     "test_iter",
+     "test_len",
+     "test_ptr_chain_iteration_order_and_len",
+     "test_rev",
+     "with_context_err_chain_length"
+    ],
+    "src/error.rs::deref": [
+     "option_with_context_error_has_no_source",
+     "test_anyhow_from_anyhow",
+     "test_boxed_anyhow",
+     "test_boxed_error_debug_via_deref",
+     "test_boxed_error_source_none_for_error_without_source",
+     "test_boxed_thiserror",
+     "test_deref_mut_via_source",
+     "test_fmt_source",
+     "test_io_source",
+     "test_literal_source",
+     "test_variable_source"
+    ],
+    "src/error.rs::downcast": [
+     "test_downcast",
+     "test_drop"
+    ],
+    "src/error.rs::downcast_mut": [
+     "test_downcast_mut",
+     "test_error_downcast_mut_changes_message",
+     "test_ptr_clone_mut_is_exercised_via_downcast_mut_chain",
+     "test_ptr_mut_via_downcast_mut_changes_value"
+    ],
+    "src/error.rs::downcast_ref": [
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "test_downcast_ref",
+     "test_error_downcast_ref_failure",
+     "test_large_alignment",
+     "test_ptr_clone_ref_is_exercised_via_downcast_ref_chain",
+     "test_unsuccessful_downcast"
+    ],
+    "src/error.rs::from": [
+     "test_convert_send_sync"
+    ],
+    "src/error.rs::into_boxed_dyn_error": [
+     "behaviour_probe_stable_boxed_error_shows_inner_display_0",
+     "test_error_impl_source_none_via_boxed",
+     "test_error_impl_source_some_via_boxed"
+    ],
+    "src/error.rs::is": [
+     "test_error_downcast_ref_custom_type",
+     "test_error_downcast_ref_idempotent_across_chain",
+     "test_error_is_checks_type_identity_positive_and_negative",
+     "test_ptr_ref_via_downcast_ref_success"
+    ],
+    "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace": [
+     "test_reallocate_into_boxed_dyn_error_without_backtrace_basic",
+     "test_reallocate_into_boxed_dyn_error_without_backtrace_io",
+     "test_reallocate_with_std_error"
+    ],
+    "src/error.rs::root_cause": [
+     "test_root_cause_reaches_leaf"
+    ],
+    "src/error.rs::vtable": [
+     "option_with_context_none_lazy_closure",
+     "test_drop",
+     "test_ensure",
+     "test_recursion"
+    ],
+    "src/ptr.rs::by_mut": [
+     "test_error_mut_via_deref_mut_msg",
+     "test_error_mut_via_deref_mut_std"
+    ],
+    "src/ptr.rs::by_ref": [
+     "behaviour_probe_stable_msg_displays_exact_string_0",
+     "option_context_none_path",
+     "option_context_none_with_owned_string_context",
+     "option_context_none_yields_error_with_message",
+     "option_with_context_formatted_message",
+     "option_with_context_none_path",
+     "option_with_context_none_returns_error_with_message",
+     "result_with_context_err_path",
+     "test_alt_debug_formatting_exercises_error_impl_paths",
+     "test_altdebug",
+     "test_altdisplay",
+     "test_anyhow_macro_literal_and_format",
+     "test_as",
+     "test_atom",
+     "test_backtrace_after_context_wrap",
+     "test_backtrace_exercises_no_backtrace_vtable",
+     "test_backtrace_from_new_error",
+     "test_backtrace_method_is_callable",
+     "test_backtrace_on_boxed_error",
+     "test_boxed_error_debug_executed",
+     "test_boxed_error_display_via_from_boxed",
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_boxed_str",
+     "test_brace_escape",
+     "test_closure",
+     "test_construct_from_display_literal",
+     "test_context_error_backtrace_propagates_to_inner",
+     "test_context_std_error_path",
+     "test_debug",
+     "test_debug_backtrace_is_rendered",
+     "test_debug_formatting_simple_message_error",
+     "test_debug_formatting_with_context_chain",
+     "test_display_error_debug_delegates_to_display",
+     "test_display_error_debug_exercises_display_error_debug_impl_multi_step",
+     "test_display_error_debug_exercises_display_error_debug_impl_numeric",
+     "test_display_error_debug_exercises_display_error_debug_impl_runtime_format",
+     "test_display_error_debug_with_custom_display",
+     "test_display_error_inside_anyhow_error",
+     "test_error_backtrace_callable_and_display_consistent",
+     "test_error_context_lazy_closure_is_evaluated_once_on_err",
+     "test_error_context_uses_internal_pointers",
+     "test_error_context_with_owned_string_and_display_alt",
+     "test_error_debug_alt_debug_for_simple_msg",
+     "test_error_display_chain_via_context",
+     "test_error_display_for_display_only_like_wrapper",
+     "test_error_from_boxed_and_context_preserves_chain",
+     "test_error_from_boxed_roundtrip",
+     "test_error_msg_context_chain_display",
+     "test_error_msg_display_and_chain_stability",
+     "test_error_msg_display_and_debug"
+    ]
+   },
+   "plan_holds": {
+    "src/ptr.rs::new": [
+     "behaviour_probe_stable_boxed_error_shows_inner_display_0",
+     "behaviour_probe_stable_chain_length_counts_contexts_0",
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "behaviour_probe_stable_msg_displays_exact_string_0",
+     "option_context_none_path",
+     "option_context_none_with_owned_string_context",
+     "option_context_none_yields_error_with_message",
+     "option_with_context_error_has_no_source",
+     "option_with_context_formatted_message",
+     "option_with_context_none_lazy_closure",
+     "option_with_context_none_path",
+     "option_with_context_none_returns_error_with_message",
+     "result_with_context_err_path",
+     "test_alt_debug_formatting_exercises_error_impl_paths",
+     "test_altdebug",
+     "test_altdisplay",
+     "test_anyhow_from_anyhow",
+     "test_anyhow_macro_literal_and_format",
+     "test_as",
+     "test_as_ref",
+     "test_atom",
+     "test_backtrace_after_context_wrap",
+     "test_backtrace_exercises_no_backtrace_vtable",
+     "test_backtrace_from_new_error",
+     "test_backtrace_method_is_callable",
+     "test_backtrace_on_boxed_error",
+     "test_boxed_anyhow",
+     "test_boxed_error_debug_executed",
+     "test_boxed_error_debug_via_as_ref",
+     "test_boxed_error_debug_via_deref",
+     "test_boxed_error_display_via_from_boxed",
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_boxed_error_source_none_for_error_without_source",
+     "test_boxed_str",
+     "test_boxed_thiserror",
+     "test_brace_escape",
+     "test_clone",
+     "test_closure",
+     "test_construct_from_display_literal",
+     "test_context_error_backtrace_propagates_to_inner",
+     "test_context_std_error_path",
+     "test_context_trait_on_result_ok_and_err",
+     "test_convert",
+     "test_convert_send",
+     "test_convert_send_sync",
+     "test_debug",
+     "test_debug_backtrace_is_rendered",
+     "test_debug_formatting_simple_message_error",
+     "test_debug_formatting_with_context_chain",
+     "test_deref_mut_via_source"
+    ]
+   },
+   "refused": [
+    "src/context.rs::source",
+    "src/ensure.rs::new",
+    "src/error.rs::as_ref",
+    "src/error.rs::backtrace",
+    "src/error.rs::downcast_ref",
+    "src/error.rs::into_boxed_dyn_error",
+    "src/error.rs::is",
+    "src/error.rs::root_cause",
+    "src/wrapper.rs::source"
+   ],
+   "scope": {
+    "src/context.rs::source": [
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_boxed_error_source_none_for_error_without_source",
+     "test_boxed_thiserror",
+     "test_deref_mut_via_source",
+     "test_error_from_boxed_roundtrip",
+     "test_error_impl_source_none_via_boxed",
+     "test_error_impl_source_some_via_boxed",
+     "test_io_source",
+     "with_context_err_applies_context",
+     "with_context_err_with_anyhow_inner"
+    ],
+    "src/ensure.rs::new": [
+     "behaviour_probe_stable_boxed_error_shows_inner_display_0",
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "test_boxed_error_debug_via_as_ref",
+     "test_boxed_error_debug_via_deref",
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_error_display_for_display_only_like_wrapper",
+     "test_large_alignment"
+    ],
+    "src/error.rs::as_ref": [
+     "test_as_ref",
+     "test_boxed_error_debug_via_as_ref"
+    ],
+    "src/error.rs::backtrace": [],
+    "src/error.rs::downcast_ref": [
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "test_boxed_str",
+     "test_error_downcast_mut_changes_message",
+     "test_error_downcast_ref_custom_type",
+     "test_error_downcast_ref_failure",
+     "test_error_downcast_ref_idempotent_across_chain",
+     "test_large_alignment",
+     "test_private_format_err_dynamic_interpolation_branch_creates_string_error",
+     "test_private_format_err_interpolated_branch",
+     "test_private_format_err_literal_branch",
+     "test_ptr_clone_ref_is_exercised_via_downcast_ref_chain",
+     "test_ptr_ref_via_downcast_ref_success"
+    ],
+    "src/error.rs::into_boxed_dyn_error": [],
+    "src/error.rs::is": [
+     "test_context_std_error_path",
+     "test_error_downcast_mut_changes_message",
+     "test_error_downcast_ref_custom_type",
+     "test_error_downcast_ref_idempotent_across_chain",
+     "test_error_is_checks_type_identity_positive_and_negative",
+     "test_private_format_err_dynamic_interpolation_branch_creates_string_error",
+     "test_private_format_err_interpolated_branch",
+     "test_ptr_clone_ref_is_exercised_via_downcast_ref_chain",
+     "test_ptr_mut_via_downcast_mut_changes_value",
+     "test_ptr_own_via_error_msg_and_context_chain",
+     "test_ptr_ref_via_downcast_ref_success",
+     "test_trailer"
+    ],
+    "src/error.rs::root_cause": [],
+    "src/wrapper.rs::source": [
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_error_from_boxed_roundtrip"
+    ]
+   }
+  },
+  "2": {
+   "now_holds": {
+    "src/error.rs::backtrace": [
+     "test_backtrace_after_context_wrap",
+     "test_backtrace_exercises_no_backtrace_vtable",
+     "test_backtrace_from_new_error",
+     "test_backtrace_method_is_callable",
+     "test_backtrace_on_boxed_error",
+     "test_context_error_backtrace_propagates_to_inner",
+     "test_context_std_error_path",
+     "test_debug_backtrace_is_rendered",
+     "test_error_backtrace_callable_and_display_consistent",
+     "test_from_boxed_backtrace_and_display_variants",
+     "test_msg_error_backtrace_is_callable_and_display_stable",
+     "test_new_std_error_backtrace_and_chain"
+    ],
+    "src/error.rs::downcast": [
+     "test_downcast",
+     "test_downcast_high",
+     "test_downcast_low",
+     "test_downcast_mid",
+     "test_drop",
+     "test_unsuccessful_downcast"
+    ],
+    "src/error.rs::downcast_mut": [
+     "test_downcast_mut",
+     "test_error_downcast_mut_changes_message",
+     "test_ptr_clone_mut_is_exercised_via_downcast_mut_chain",
+     "test_ptr_mut_via_downcast_mut_changes_value"
+    ],
+    "src/error.rs::downcast_ref": [
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "test_downcast_ref",
+     "test_error_downcast_ref_failure",
+     "test_large_alignment",
+     "test_ptr_clone_ref_is_exercised_via_downcast_ref_chain",
+     "test_unsuccessful_downcast"
+    ],
+    "src/error.rs::from": [
+     "test_convert_send_sync"
+    ],
+    "src/error.rs::is": [
+     "test_downcast_ref",
+     "test_error_downcast_ref_custom_type",
+     "test_error_downcast_ref_idempotent_across_chain",
+     "test_error_is_checks_type_identity_positive_and_negative",
+     "test_ptr_ref_via_downcast_ref_success"
+    ],
+    "src/error.rs::object_boxed": [
+     "behaviour_probe_stable_boxed_error_shows_inner_display_0",
+     "test_error_impl_source_none_via_boxed",
+     "test_error_impl_source_some_via_boxed"
+    ],
+    "src/error.rs::object_drop": [
+     "option_with_context_none_lazy_closure",
+     "test_drop",
+     "test_ensure",
+     "test_recursion"
+    ],
+    "src/error.rs::object_reallocate_boxed": [
+     "test_reallocate_into_boxed_dyn_error_without_backtrace_basic",
+     "test_reallocate_into_boxed_dyn_error_without_backtrace_io",
+     "test_reallocate_with_std_error"
+    ],
+    "src/error.rs::root_cause": [
+     "test_root_cause",
+     "test_root_cause_reaches_leaf"
+    ],
+    "src/ptr.rs::by_mut": [
+     "test_error_mut_via_deref_mut_msg",
+     "test_error_mut_via_deref_mut_std"
+    ],
+    "src/ptr.rs::deref": [
+     "behaviour_probe_stable_chain_length_counts_contexts_0",
+     "behaviour_probe_stable_msg_displays_exact_string_0",
+     "option_context_none_path",
+     "option_context_none_with_owned_string_context",
+     "option_context_none_yields_error_with_message",
+     "option_with_context_error_has_no_source",
+     "option_with_context_formatted_message",
+     "option_with_context_none_path",
+     "option_with_context_none_returns_error_with_message",
+     "result_with_context_err_path",
+     "test_alt_debug_formatting_exercises_error_impl_paths",
+     "test_altdebug",
+     "test_altdisplay",
+     "test_anyhow_from_anyhow",
+     "test_anyhow_macro_literal_and_format",
+     "test_as",
+     "test_as_ref",
+     "test_atom",
+     "test_boxed_anyhow",
+     "test_boxed_error_debug_executed",
+     "test_boxed_error_debug_via_as_ref",
+     "test_boxed_error_debug_via_deref",
+     "test_boxed_error_display_via_from_boxed",
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_boxed_error_source_none_for_error_without_source",
+     "test_boxed_str",
+     "test_boxed_thiserror",
+     "test_brace_escape",
+     "test_clone",
+     "test_closure",
+     "test_construct_from_display_literal",
+     "test_context_trait_on_result_ok_and_err",
+     "test_debug",
+     "test_debug_formatting_simple_message_error",
+     "test_debug_formatting_with_context_chain",
+     "test_deref_mut_via_source",
+     "test_display",
+     "test_display_error_debug_delegates_to_display",
+     "test_display_error_debug_exercises_display_error_debug_impl_multi_step",
+     "test_display_error_debug_exercises_display_error_debug_impl_numeric",
+     "test_display_error_debug_exercises_display_error_debug_impl_runtime_format",
+     "test_display_error_debug_with_custom_display",
+     "test_display_error_inside_anyhow_error",
+     "test_error_chain_double_ended_iteration",
+     "test_error_chain_iteration_order",
+     "test_error_chain_len_and_size_hint",
+     "test_error_context_lazy_closure_is_evaluated_once_on_err",
+     "test_error_context_uses_internal_pointers",
+     "test_error_context_with_owned_string_and_display_alt",
+     "test_error_debug_alt_debug_for_simple_msg"
+    ]
+   },
+   "plan_holds": {
+    "src/context.rs::ext_context": [
+     "test_context_trait_on_result_ok_and_err",
+     "test_display",
+     "test_downcast_high",
+     "test_downcast_low",
+     "test_downcast_mid",
+     "test_downcast_mut",
+     "test_downcast_ref",
+     "test_root_cause",
+     "test_unsuccessful_downcast",
+     "with_context_err_with_anyhow_inner"
+    ],
+    "src/error.rs::as_ref": [
+     "test_as_ref"
+    ],
+    "src/error.rs::chain": [
+     "behaviour_probe_stable_chain_length_counts_contexts_0",
+     "test_clone",
+     "test_error_chain_double_ended_iteration",
+     "test_error_chain_iteration_order",
+     "test_error_chain_len_and_size_hint",
+     "test_iter",
+     "test_len",
+     "test_ptr_chain_iteration_order_and_len",
+     "test_rev",
+     "with_context_err_chain_length"
+    ],
+    "src/error.rs::deref": [
+     "option_with_context_error_has_no_source",
+     "test_anyhow_from_anyhow",
+     "test_boxed_anyhow",
+     "test_boxed_error_debug_via_deref",
+     "test_boxed_error_source_none_for_error_without_source",
+     "test_boxed_thiserror",
+     "test_deref_mut_via_source",
+     "test_fmt_source",
+     "test_io_source",
+     "test_literal_source",
+     "test_variable_source"
+    ],
+    "src/error.rs::downcast": [
+     "test_downcast",
+     "test_drop"
+    ],
+    "src/error.rs::downcast_mut": [
+     "test_downcast_mut",
+     "test_error_downcast_mut_changes_message",
+     "test_ptr_clone_mut_is_exercised_via_downcast_mut_chain",
+     "test_ptr_mut_via_downcast_mut_changes_value"
+    ],
+    "src/error.rs::downcast_ref": [
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "test_downcast_ref",
+     "test_error_downcast_ref_failure",
+     "test_large_alignment",
+     "test_ptr_clone_ref_is_exercised_via_downcast_ref_chain",
+     "test_unsuccessful_downcast"
+    ],
+    "src/error.rs::from": [
+     "test_convert_send_sync"
+    ],
+    "src/error.rs::into_boxed_dyn_error": [
+     "behaviour_probe_stable_boxed_error_shows_inner_display_0",
+     "test_error_impl_source_none_via_boxed",
+     "test_error_impl_source_some_via_boxed"
+    ],
+    "src/error.rs::is": [
+     "test_error_downcast_ref_custom_type",
+     "test_error_downcast_ref_idempotent_across_chain",
+     "test_error_is_checks_type_identity_positive_and_negative",
+     "test_ptr_ref_via_downcast_ref_success"
+    ],
+    "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace": [
+     "test_reallocate_into_boxed_dyn_error_without_backtrace_basic",
+     "test_reallocate_into_boxed_dyn_error_without_backtrace_io",
+     "test_reallocate_with_std_error"
+    ],
+    "src/error.rs::root_cause": [
+     "test_root_cause_reaches_leaf"
+    ],
+    "src/error.rs::vtable": [
+     "option_with_context_none_lazy_closure",
+     "test_drop",
+     "test_ensure",
+     "test_recursion"
+    ],
+    "src/ptr.rs::by_mut": [
+     "test_error_mut_via_deref_mut_msg",
+     "test_error_mut_via_deref_mut_std"
+    ],
+    "src/ptr.rs::by_ref": [
+     "behaviour_probe_stable_msg_displays_exact_string_0",
+     "option_context_none_path",
+     "option_context_none_with_owned_string_context",
+     "option_context_none_yields_error_with_message",
+     "option_with_context_formatted_message",
+     "option_with_context_none_path",
+     "option_with_context_none_returns_error_with_message",
+     "result_with_context_err_path",
+     "test_alt_debug_formatting_exercises_error_impl_paths",
+     "test_altdebug",
+     "test_altdisplay",
+     "test_anyhow_macro_literal_and_format",
+     "test_as",
+     "test_atom",
+     "test_backtrace_after_context_wrap",
+     "test_backtrace_exercises_no_backtrace_vtable",
+     "test_backtrace_from_new_error",
+     "test_backtrace_method_is_callable",
+     "test_backtrace_on_boxed_error",
+     "test_boxed_error_debug_executed",
+     "test_boxed_error_display_via_from_boxed",
+     "test_boxed_error_source_delegates_through_boxed_error",
+     "test_boxed_str",
+     "test_brace_escape",
+     "test_closure",
+     "test_construct_from_display_literal",
+     "test_context_error_backtrace_propagates_to_inner",
+     "test_context_std_error_path",
+     "test_debug",
+     "test_debug_backtrace_is_rendered",
+     "test_debug_formatting_simple_message_error",
+     "test_debug_formatting_with_context_chain",
+     "test_display_error_debug_delegates_to_display",
+     "test_display_error_debug_exercises_display_error_debug_impl_multi_step",
+     "test_display_error_debug_exercises_display_error_debug_impl_numeric",
+     "test_display_error_debug_exercises_display_error_debug_impl_runtime_format",
+     "test_display_error_debug_with_custom_display",
+     "test_display_error_inside_anyhow_error",
+     "test_error_backtrace_callable_and_display_consistent",
+     "test_error_context_lazy_closure_is_evaluated_once_on_err",
+     "test_error_context_uses_internal_pointers",
+     "test_error_context_with_owned_string_and_display_alt",
+     "test_error_debug_alt_debug_for_simple_msg",
+     "test_error_display_chain_via_context",
+     "test_error_display_for_display_only_like_wrapper",
+     "test_error_from_boxed_and_context_preserves_chain",
+     "test_error_from_boxed_roundtrip",
+     "test_error_msg_context_chain_display",
+     "test_error_msg_display_and_chain_stability",
+     "test_error_msg_display_and_debug"
+    ]
+   },
+   "refused": [
+    "src/error.rs::downcast_mut",
+    "src/error.rs::downcast_ref",
+    "src/error.rs::from",
+    "src/error.rs::is"
+   ],
+   "scope": {
+    "src/error.rs::downcast_mut": [],
+    "src/error.rs::downcast_ref": [
+     "behaviour_probe_stable_downcast_finds_original_type_0",
+     "test_large_alignment"
+    ],
+    "src/error.rs::from": [],
+    "src/error.rs::is": []
+   }
+  }
+ },
+ "run": "790176-f0df7402"
+}

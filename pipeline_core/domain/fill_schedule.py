@@ -1884,13 +1884,18 @@ class RunClock:
     route is running (run `3383938-c5d24499`, 2026-09-19: the first keep
     moved all 141 failing tests off `construct`'s stub and the rest of the
     fill ran a plan in which `vtable` had no run). ``scope`` is the run's
-    target tests; a claim with no scope stands on the whole ground."""
+    target tests; a claim with no scope stands on the whole ground.
+    ``units`` is what the run writes: a moved claim still stands when the
+    ground now stops one of its planned tests inside them."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
                  now: Callable[[], float] = time.monotonic,
-                 ground_moved: Callable[[frozenset[str] | None], bool] | None = None,
+                 ground_moved: Callable[
+                     [frozenset[str] | None, frozenset[FnLocator]], bool,
+                 ] | None = None,
                  scope: frozenset[str] | None = None,
+                 units: frozenset[FnLocator] = frozenset(),
                  unit_multiple: float = 0.0) -> None:
         self.share_minutes = share_minutes
         #: Each claimed unit's own bound, as a multiple of the share
@@ -1900,6 +1905,8 @@ class RunClock:
         self._ground_moved = ground_moved
         #: The tests the run was planned on (`RouteRun.target_tests`).
         self.scope = scope
+        #: The units the run writes (`RouteRun.targets`).
+        self.units = units
         self._now = now
         self._started = now()
         self.last_delta = 0
@@ -1918,11 +1925,13 @@ class RunClock:
         """What the run's last landed change set bought (net verdicts)."""
         self.last_delta = int(delta)
 
-    def may_claim(self, tests: Iterable[str] | None = None) -> bool:
+    def may_claim(self, tests: Iterable[str] | None = None,
+                  units: Iterable[FnLocator] | None = None) -> bool:
         """True when the next claim may be made (:meth:`refusal` is "")."""
-        return not self.refusal(tests)
+        return not self.refusal(tests, units)
 
-    def refusal(self, tests: Iterable[str] | None = None) -> str:
+    def refusal(self, tests: Iterable[str] | None = None,
+                units: Iterable[FnLocator] | None = None) -> str:
         """Make the next claim, or say why not: ``""`` when claimed,
         ``"premise"`` when the ground this claim was planned on has moved,
         ``"share"`` when the share is spent and the last claim bought
@@ -1938,7 +1947,9 @@ class RunClock:
         run `484518-91681c1a` fill 4 refused `src/ptr.rs::new` because a
         keep had just moved its tests onto it, or because the share ran out."""
         scope = frozenset(tests) if tests is not None else self.scope
-        if self._ground_moved is not None and self._ground_moved(scope):
+        claimed = frozenset(units) if units is not None else self.units
+        if (self._ground_moved is not None
+                and self._ground_moved(scope, claimed)):
             self.refused += 1
             return "premise"
         if self.share_minutes is None or self.elapsed() < self.share_minutes:
