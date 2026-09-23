@@ -71,6 +71,18 @@ label, so a row's `model_calls` is the run's own calls and the file
 route's increment is no longer an unguarded read-modify-write on a
 closure integer.
 
+A revert is also typed by WHAT it convicts. A route that restores a set of
+bodies as one transaction (a file-first reply the peel could not narrow, an
+impl block's joint splice) reverts every member, and the evidence names the
+set, not any one member: the unit was COLLATERAL. A revert the evidence
+narrowed to the unit (the peel implicated it, or the unit was the only body
+restored) is IMPLICATED. `note_reverted(collateral=True)` records the
+first, and `AttemptsDelta.collateral` carries it to the route row, so the
+schedule can tell a unit's own conviction from a transaction's. Measured on
+the route ledger under oracle `1c3b06644b2e` (2026-09-23): 6 of the 16
+file and impl rows with a revert restored every target, the rest a peeled
+subset.
+
 `sticky_reverts=True` is the pre-fix rule (a revert mark is never
 cleared) and exists only as the negative control of the recorded
 fixture; the loop never constructs it.
@@ -121,6 +133,9 @@ class AttemptsSnapshot:
     kept: frozenset[FnLocator] = frozenset()
     reverted: frozenset[FnLocator] = frozenset()
     lost: frozenset[FnLocator] = frozenset()
+    #: Reverted units whose last revert restored them as part of a set the
+    #: evidence did not narrow to them (see the module docstring).
+    collateral: frozenset[FnLocator] = frozenset()
     tick: int = 0
     dispatched_at: Mapping[FnLocator, int] = field(default_factory=dict)
     marked_at: Mapping[FnLocator, int] = field(default_factory=dict)
@@ -140,6 +155,9 @@ class AttemptsDelta:
     reverted: frozenset[FnLocator]
     lost: frozenset[FnLocator]
     calls: int = 0
+    #: The reverted units whose revert was collateral (a subset of
+    #: `reverted`).
+    collateral: frozenset[FnLocator] = frozenset()
 
     @property
     def empty(self) -> bool:
@@ -172,6 +190,7 @@ class FillAttempts:
         self._last: dict[FnLocator, AttemptOutcome] = {}
         self._marked_at: dict[FnLocator, int] = {}
         self._marked_by: dict[FnLocator, str] = {}
+        self._collateral: set[FnLocator] = set()
         self._calls = 0
         self._calls_by_label: dict[str, int] = {}
         self._sticky = sticky_reverts
@@ -189,11 +208,26 @@ class FillAttempts:
                 self._dispatched_at[u] = self._tick
                 self._dispatched_by[u] = stamp
                 if self._last.get(u) is AttemptOutcome.LOST:
+                    self._collateral.discard(u)
                     del self._last[u]
                     del self._marked_at[u]
                     del self._marked_by[u]
 
-    def _mark(self, u: FnLocator, outcome: AttemptOutcome, stamp: str) -> None:
+    def _mark(self, u: FnLocator, outcome: AttemptOutcome, stamp: str,
+              *, collateral: bool = False) -> None:
+        # A revert this fill already narrowed to the unit stays implicated.
+        # The file route peels the bodies the compiler named and, when the
+        # kept remainder then fails its gates, restores the pre-attempt
+        # file and notes that restore collateral. The second note lists
+        # every body the reply landed, including the peeled ones; letting
+        # it overwrite the peel would record the compiler's own blame as
+        # a verdict on the set, and the next fill whose bodies had moved
+        # would re-ask those bodies.
+        if not collateral:
+            self._collateral.discard(u)
+        elif not (self._last.get(u) is AttemptOutcome.REVERTED
+                  and u not in self._collateral):
+            self._collateral.add(u)
         self._last[u] = outcome
         self._marked_at[u] = self._tick
         self._marked_by[u] = stamp
@@ -209,12 +243,19 @@ class FillAttempts:
                 self._mark(u, AttemptOutcome.KEPT, stamp)
 
     def note_reverted(self, units: Iterable[FnLocator], *,
-                      label: str | None = None) -> None:
+                      label: str | None = None,
+                      collateral: bool = False) -> None:
+        """`collateral`: the units were restored as one transaction the
+        evidence did not narrow. A set of one is never collateral — the
+        evidence of a one-body transaction names that body. A unit this
+        fill already reverted as implicated stays implicated; see `_mark`."""
         stamp = self._label(label)
+        batch = list(units)
         with self._lock:
             self._tick += 1
-            for u in units:
-                self._mark(u, AttemptOutcome.REVERTED, stamp)
+            for u in batch:
+                self._mark(u, AttemptOutcome.REVERTED, stamp,
+                           collateral=collateral and len(batch) > 1)
 
     def note_lost(self, units: Iterable[FnLocator], *,
                   label: str | None = None) -> None:
@@ -242,6 +283,9 @@ class FillAttempts:
                 kept=self._view(AttemptOutcome.KEPT),
                 reverted=self._view(AttemptOutcome.REVERTED),
                 lost=self._view(AttemptOutcome.LOST),
+                collateral=frozenset(
+                    u for u in self._collateral
+                    if self._last.get(u) is AttemptOutcome.REVERTED),
                 tick=self._tick,
                 dispatched_at=dict(self._dispatched_at),
                 marked_at=dict(self._marked_at),
@@ -294,4 +338,5 @@ class FillAttempts:
             kept=touched - now.reverted - now.lost,
             reverted=touched & now.reverted,
             lost=touched & now.lost,
-            calls=calls)
+            calls=calls,
+            collateral=touched & now.collateral)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,7 @@ from pipeline_core.domain.retro_gate import (
     BlockedOnStubs,
     ConvictionEvidence,
     ConvictionStanding,
+    GuidanceScreening,
     RetroGateVerdict,
     RetroProvenance,
     admissible_guidance,
@@ -104,6 +106,7 @@ from pipeline_core.domain.retro_gate import (
     evidence_for_record,
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
+    informed_reentry,
     judge_guidance,
     pins_for_contradiction_guard,
     regressed_tests_from_excerpt,
@@ -490,6 +493,27 @@ class FillOneFn:
         # The one-argument `assert!(s.contains(..))` literals, which the pins
         # extraction does not read; the contradiction guard needs both.
         _fn_observables = asserted_output_literals_from_tests(_fn_leaves, _fn_sources)
+        # The fix loop's own token (`FIX_LOOP_SCOPE`): minted once per unit
+        # fill, stamped on every retro record this fill writes, and passed to
+        # every screen this fill runs, so a lesson the loop just wrote is
+        # judged with the premise it has here and no other loop inherits it.
+        _loop_scope = f"{rel_file}::{fn_name}::{container}:{uuid.uuid4().hex[:12]}"
+
+        def _screen_stored_retro(text: str) -> tuple[str, dict[str, Any],
+                                                     GuidanceScreening]:
+            """The stored record for this unit and what the screen lets a
+            prompt built on ``text`` carry. The one reading both the fix
+            prompt and the retro re-entry decision use, so the loop never
+            re-enters on guidance its prompt would then withhold."""
+            key = self.retros.retro_key(rel_file, fn_name, container)
+            rec = ctx.retros_cache.get(key, {})
+            return key, rec, screen_guidance(
+                rec, text, evidence=_answers,
+                anchor_types=_anchor_types, cluster=ctx.cluster_name,
+                cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
+                unit=screening_unit(rel_file, fn_name),
+                pins=_fn_pins, observables=_fn_observables,
+                loop_scope=_loop_scope)
         # Crate idioms ranked by THIS fn's signature tokens.
         crate_idioms_section = self.prompt.extract_crate_idioms(
             ctx.idiom_blocks, rel_file, target_sig_text=sig_text,
@@ -668,14 +692,8 @@ class FillOneFn:
                 # and a poisoned record's only other trace is its downstream
                 # test failures (the ContextError-source `None` guidance,
                 # 2026-08-13/14, was visible in no log for two days).
-                _retro_key = self.retros.retro_key(rel_file, fn_name, container)
-                _retro_rec = ctx.retros_cache.get(_retro_key, {})
-                _retro_verdict = screen_guidance(
-                    _retro_rec, cur_text, evidence=_answers,
-                    anchor_types=_anchor_types, cluster=ctx.cluster_name,
-                    cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
-                    unit=screening_unit(rel_file, fn_name),
-                    pins=_fn_pins, observables=_fn_observables)
+                _retro_key, _retro_rec, _retro_verdict = _screen_stored_retro(
+                    cur_text)
                 _retro_guidance = _retro_verdict.text
                 if (_dg := declined_guidance(fn_name, _retro_rec)):
                     _retro_guidance = "\n".join(
@@ -1366,7 +1384,8 @@ class FillOneFn:
                     anchor_types=_anchor_types, cluster=ctx.cluster_name,
                     cfg_dead=_cfg_dead_fns_of(ctx, rel_file),
                     unit=screening_unit(rel_file, fn_name),
-                    pins=_fn_pins, observables=_fn_observables)
+                    pins=_fn_pins, observables=_fn_observables,
+                    loop_scope=_loop_scope)
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,
@@ -1532,7 +1551,8 @@ class FillOneFn:
                         regressed=regressed_tests_from_excerpt(
                             error_excerpt or first_error_excerpt or ""),
                         pins=pins_for_contradiction_guard(_fn_pins, _fn_observables),
-                        crash_stub_sites=_last_crash_sites[0])
+                        crash_stub_sites=_last_crash_sites[0],
+                        loop_scope=_loop_scope)
                     self.retros.save(ctx.project_dir, _retros)
                     # Make the fresh guidance visible to this fn's OWN next
                     # round (the fix prompt reads ctx.retros_cache) and to
@@ -1601,6 +1621,29 @@ class FillOneFn:
                     })
             except Exception as _re:
                 self.tel.log(f"  [phase-c/retro] failed for {fn_name}: {_re}")
+            if _retry_informed:
+                # The re-entry is bought by the guidance the next prompt will
+                # carry, so it reads the screen that prompt runs, on the
+                # tree it will be built on.
+                _now_text = file_path.read_text(encoding="utf-8")
+                if ctx.cluster_cfg_set is not None:
+                    _now_text = filter_cfg_inactive_branches(
+                        _now_text, ctx.cluster_cfg_set)
+                _nk, _nrec, _nverdict = _screen_stored_retro(_now_text)
+                if not informed_reentry(_nverdict):
+                    _retry_informed = False
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {fn_name}: retro round "
+                        f"{_retro_round} improved the error floor but its "
+                        "guidance would not reach the next prompt ("
+                        f"{_nverdict.retired_by or 'no guidance'}) — not "
+                        "re-entering an uninformed fix loop.")
+                    self.tel.emit("phase_c.fn.retro_retry_withheld", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "retro_round": _retro_round,
+                        "retired_by": _nverdict.retired_by,
+                    })
             if not (_retry_informed and _retro_round < _retro_rounds_max):
                 break
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: retro round "

@@ -6,16 +6,21 @@ from collections.abc import Callable, Iterable, Sequence
 from pipeline_core.application.reconstruct.fill_routes import RouteRunReport, RouteSnap
 from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, RunClock
 from pipeline_core.domain.models import FnLocator, ImplBlock
+from pipeline_core.domain.refill_stamp import narrow_blocks_to
 
 
 class ImplRoute:
-    """Per-impl: one run per file of viable blocks, blocks serial within."""
+    """Per-impl: one run per file of viable blocks, blocks serial within.
+
+    Ranked by unit like the file route (`RouteRun.unit_tests`): a carved run
+    fills each block's held members and withholds the carved ones.
+    """
 
     kind = RouteKind.IMPL
     parallel = True
 
     def __init__(self, *, blocks_now: Callable[[], list[ImplBlock]],
-                 fill_block: Callable[[ImplBlock], None],
+                 fill_block: Callable[..., None],
                  snapshot: Callable[[], RouteSnap],
                  report_since: Callable[[RouteSnap], RouteRunReport],
                  tests_for: Callable[[Iterable[FnLocator]], frozenset[str]],
@@ -48,12 +53,20 @@ class ImplRoute:
             out.append(RouteRun(
                 kind=self.kind, label=f"impl {file_rel}", targets=locs,
                 target_tests=self._tests_for(locs),
-                stubs_in_targets=stub_locs, files=(file_rel,), seq=i))
+                stubs_in_targets=stub_locs, files=(file_rel,), seq=i,
+                unit_tests=tuple(
+                    (loc, self._tests_for((loc,)))
+                    for loc in sorted(locs, key=lambda k: k.fn_name))))
         return out
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
         file_rel = run.files[0] if run.files else ""
         fblocks = self._by_file(self._blocks_now()).get(file_rel) or []
+        withheld = frozenset[str]()
+        if run.parent:
+            # A carved run: the schedule deferred the rest of the file's
+            # units as re-buys this fill.
+            fblocks, withheld = narrow_blocks_to(fblocks, run.targets)
         if not fblocks:
             return RouteRunReport(empty=True)
         snap = self._snapshot()
@@ -66,7 +79,7 @@ class ImplRoute:
                 break
             opened += 1
             try:
-                self._fill_block(blk)
+                self._fill_block(blk, withheld=withheld)
             except Exception as _we:  # noqa: BLE001 — a route reports, never dies
                 self._log(f"  [phase-c/impl] worker error on "
                           f"{blk.file}::{blk.container}: {_we}")

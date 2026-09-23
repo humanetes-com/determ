@@ -312,6 +312,10 @@ class PhaseCFillEngine:
         # dispatch (`fill_schedule.unit_evidence_from`). None keeps the
         # schedule's route-row reading.
         unit_evidence: UnitEvidence | None = None,
+        # How many rows `unit_evidence` was built from, in cluster file
+        # order. Recorded on the schedule event; None leaves the replay
+        # to its iteration cut.
+        body_rows: int | None = None,
         # The TDD driver's final dispatch order as ranks (head highest,
         # `dispatch_batch.dispatch_ranks_of`). When set, stubs are ordered and
         # grouped by these ranks instead of leaf-name frequency, so a
@@ -566,6 +570,7 @@ class PhaseCFillEngine:
                 crash_blamed=(crash_blamed or frozenset()) | stub_hold_blockers,
                 attributed=frozenset(attributed),
                 unit_evidence=unit_evidence,
+                body_rows=body_rows,
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),
                 session_min_turns=session_min_turns,

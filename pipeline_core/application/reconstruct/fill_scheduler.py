@@ -100,6 +100,10 @@ class FillExecutionDeps:
     #: every unit-writing run is ranked on its units' own graded landings.
     #: None keeps the route-row reading (no body ledger on this driver).
     unit_evidence: UnitEvidence | None = None
+    #: How many body-ledger rows `unit_evidence` was built from, in cluster
+    #: file order. Recorded on the schedule event so a replay cuts the
+    #: ledger where this fill ranked. None on a caller that did not count.
+    body_rows: int | None = None
     #: Called once per wave, after the wave's route rows are flushed, with
     #: the units the wave's reports say they kept — and once more on the
     #: wave a graceful stop cut, before the stop propagates. The driver's
@@ -305,6 +309,7 @@ def _row_for(
         net_pass_delta=delta,
         newly_red=red, newly_crashed=crashed, newly_green=green,
         kept=_pairs(rep.kept), reverted=_pairs(rep.reverted),
+        collateral=_pairs(rep.collateral & rep.reverted),
         target_tests=tuple(sorted(s.run.target_tests)),
         classes=dict(rep.classes), share_minutes=share, reason=s.reason)
 
@@ -323,6 +328,46 @@ def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
         + f"; {row.reason})")
     deps.emit("phase_c.route.run",
               data={**row.to_dict(), **({"unchanged": True} if unchanged else {})})
+
+
+def _schedule_inputs(deps: FillExecutionDeps,
+                     hollow: Mapping[str, frozenset[FnLocator]],
+                     ) -> dict[str, object]:
+    """The arguments `schedule` was called with, in the event's shape.
+
+    An unscheduled fill passes the empty collections the call passes, so a
+    replay of that fill does not apply inputs the ranking never read.
+    `standing_flat` is omitted when this fill did not rank on the body
+    ledger: a present map, even an empty one, is the set the ranking used.
+    """
+    scheduled = deps.scheduled
+    inputs: dict[str, object] = {
+        "hollow": (
+            {t: sorted(f"{u.file}::{u.fn_name}" for u in locs)
+             for t, locs in sorted(hollow.items())}
+            if scheduled else {}),
+        "crash_blamed": (
+            sorted(f"{u.file}::{u.fn_name}" for u in deps.crash_blamed)
+            if scheduled else []),
+        "attributed": (
+            sorted(f"{u.file}::{u.fn_name}" for u in deps.attributed)
+            if scheduled else []),
+        "unmeasurable_tests": (
+            sorted(deps.unmeasurable_tests) if scheduled else []),
+        "readmit_after": deps.readmit_after,
+        "session_min_turns": deps.session_min_turns if scheduled else 0,
+        "max_per_kind": (
+            {k.value: v for k, v in (deps.max_per_kind or {}).items()}
+            if scheduled else {}),
+    }
+    if scheduled and deps.unit_evidence is not None:
+        inputs["standing_flat"] = {
+            f"{u.file}::{u.fn_name}": sha
+            for u, sha in sorted(deps.unit_evidence.standing_flat.items(),
+                                 key=lambda p: (p[0].file, p[0].fn_name))}
+        if deps.body_rows is not None:
+            inputs["body_rows"] = deps.body_rows
+    return inputs
 
 
 def execute_fill(
@@ -379,7 +424,19 @@ def execute_fill(
         "scheduled": deps.scheduled, "budget_minutes": sched.budget_minutes,
         "hollow": len(hollow), "ledger_rows": len(prior),
         "runs": [s.to_dict() for s in sched.ordered],
-        "deferred": [s.to_dict() for s in sched.deferred]})
+        "deferred": [s.to_dict() for s in sched.deferred],
+        # The schedule's other inputs, so a recorded fill can be replayed
+        # as it was decided (`scripts/exemption_replay.py`). Without them
+        # the 2026-09-23 exemption review could not replay a coverage-split
+        # deferral at all (it needs `attributed`) and replayed every run's
+        # blocker tier flat. The values are the ones `schedule` was called
+        # with: an unscheduled fill passes empty hollow, blame, attribution
+        # and caps, and `readmit_after` is the one argument it still passes.
+        # `standing_flat` is present only when this fill ranked on the body
+        # ledger. Its values are body shas — a name with no sha cannot found
+        # a flat landing, because the grade matches the sha. `body_rows` is
+        # the ledger length that verdict was built from.
+        "inputs": _schedule_inputs(deps, hollow)})
 
     budget = FillBudget(sched.budget_minutes, now=deps.now)
     rows: list[RouteLedgerRow] = []
@@ -399,10 +456,17 @@ def execute_fill(
         # run keeps its own clock and share.
         wave = [s]
         if route.parallel:
+            # Never two runs over one file in a wave: a file route's runs are
+            # one per file as planned, but two carved pieces of one planned
+            # run (`carve_rebuys`) share its file and would write it
+            # concurrently. The second opens in the next wave.
+            wave_files = set(s.run.files)
             j = i + 1
             while (j < len(ordered) and ordered[j].run.kind is s.run.kind
-                   and by_key[ordered[j].run.plan_key] is route):
+                   and by_key[ordered[j].run.plan_key] is route
+                   and not wave_files & set(ordered[j].run.files)):
                 wave.append(ordered[j])
+                wave_files |= set(ordered[j].run.files)
                 j += 1
         i += len(wave)
         deps.check_stop("fill schedule dispatch")

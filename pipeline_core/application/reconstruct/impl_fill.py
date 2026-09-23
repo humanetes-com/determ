@@ -11,6 +11,7 @@ import hashlib
 import os
 import threading
 import time
+import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -263,6 +264,7 @@ from pipeline_core.domain.retro_gate import (
     exhaustion_from_splice_diagnostic,
     honoured_guidance_line,
     impossibility_claim_is_unfounded,
+    informed_reentry,
     judge_guidance,
     pins_for_contradiction_guard,
     prescription_removes_pinned_observable,
@@ -1045,8 +1047,13 @@ def prepare_impl_fill(
     # whose call produced nothing.
     ff_produced_files: set[str] = set()
 
-    def _note_reverted(file_rel: str, names: Sequence[str]) -> None:
-        attempts.note_reverted(FnLocator(file_rel, n) for n in names if n)
+    def _note_reverted(file_rel: str, names: Sequence[str], *,
+                       collateral: bool = False) -> None:
+        """`collateral`: the names were restored as one transaction whose
+        evidence did not narrow to any of them (a whole-file or whole-block
+        restore). A peel's reverts are the ones the compiler implicated."""
+        attempts.note_reverted((FnLocator(file_rel, n) for n in names if n),
+                               collateral=collateral)
 
     def _note_kept(file_rel: str, names: Sequence[str]) -> None:
         attempts.note_kept(FnLocator(file_rel, n) for n in names if n)
@@ -1379,7 +1386,8 @@ def prepare_impl_fill(
     _FILE_FIRST_MAX_ATTEMPTS = int(os.getenv("PHASE_C_FILE_MAX_ATTEMPTS", "3"))
 
     def _fill_file_first(file_rel: str, fblocks: list[ImplBlock],
-                         may_claim: Callable[[], bool] | None = None) -> None:
+                         may_claim: Callable[[], bool] | None = None,
+                         withheld: frozenset[str] = frozenset()) -> None:
         """File-first pass: ONE prompt fills every stub of a multi-block
         file so the impls are designed together (run-187469 evidence: the
         Own/Ref/Mut family in src/ptr.rs diverged when filled per block).
@@ -1390,7 +1398,11 @@ def prepare_impl_fill(
         fragmented the coupled vtable family back to per-fn fills exactly when
         it was most-stubbed. It is partitioned into TEST-WELDED block groups
         (blocks whose attributed frontier tests overlap must be designed
-        together), each within the prompt bound, each filled jointly."""
+        together), each within the prompt bound, each filled jointly.
+
+        ``withheld`` names the file's members the schedule deferred as
+        re-buys this fill (`narrow_blocks_to`): `fblocks` no longer asks for
+        them, and a body the reply writes for one anyway is not spliced."""
         file_path = target_src_dir / file_rel
         if not file_path.exists():
             return
@@ -1400,7 +1412,7 @@ def prepare_impl_fill(
             per_impl_max_stubs=_PER_IMPL_MAX_STUBS)
         if plan.groups is None:
             if plan.wanted:
-                _fill_block_group(file_rel, fblocks, file_rel)
+                _fill_block_group(file_rel, fblocks, file_rel, withheld)
             return
         if not plan.groups:
             # Decided — and logged — at plan time by `_file_route_admits`,
@@ -1421,10 +1433,12 @@ def prepare_impl_fill(
                      "next fill.")
                 break
             _fill_block_group(file_rel, [fblocks[i] for i in _g],
-                              f"{file_rel}[group {_gi}/{len(plan.groups)}]")
+                              f"{file_rel}[group {_gi}/{len(plan.groups)}]",
+                              withheld)
 
     def _fill_block_group(file_rel: str, fblocks: list[ImplBlock],
-                          glabel: str) -> None:
+                          glabel: str,
+                          withheld: frozenset[str] = frozenset()) -> None:
         """One joint fill cycle over ``fblocks`` — the whole file, or one
         test-welded group of its blocks: prompt → splice → compile → U2 over
         the group's attributed tests (with comparative banking of strict
@@ -2082,6 +2096,11 @@ def prepare_impl_fill(
                     _fn = rb.fn_data["fn_name"]
                     if _retry_names is not None and _fn not in _retry_names:
                         continue
+                    if _fn in withheld:
+                        _log(f"  [phase-c/file] {glabel}: `{_fn}` withheld — "
+                             "the schedule deferred it as a re-buy this fill; "
+                             "its body is not spliced.")
+                        continue
                     ok, reason, _delta = _splice_fn_with_where(
                         file_path, rb.container, _fn,
                         rb.fn_data["body"], wc,
@@ -2612,7 +2631,9 @@ def prepare_impl_fill(
                             continue
                     return
                 restore(_pre)
-                _note_reverted(file_rel, _attempted_names)
+                # The whole reply is restored: the peel did not narrow the
+                # failure to its bodies, so no one of them is convicted by it.
+                _note_reverted(file_rel, _attempted_names, collateral=True)
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
@@ -2681,7 +2702,8 @@ def prepare_impl_fill(
                     _cls(FillOutcomeClass.COMPILE_FAIL if rc != 0
                          else FillOutcomeClass.WRONG_BODY, glabel, "file")
 
-    def _fill_one_block(block: ImplBlock) -> None:
+    def _fill_one_block(block: ImplBlock,
+                        withheld: frozenset[str] = frozenset()) -> None:
         """One impl block's fill: context assembly, the `_attempt_impl_fill`
         unit on `drive_fix_loop` (replaces the hand-rolled
         while loop), and exhausted-block bookkeeping (retro + fail emit)."""
@@ -3048,6 +3070,12 @@ def prepare_impl_fill(
         # attempt into the same E0609/E0560 on the field that does not exist).
         # Honoured records are LOGGED: the store steers prompts silently, and a
         # poisoned record's only other trace is its downstream test failures.
+        # This block's fix-loop token (`FIX_LOOP_SCOPE`): stamped on every
+        # retro record the block's loop writes and passed to every screen it
+        # runs, so the loop's own fresh lesson is judged with the premise it
+        # has here and no later loop inherits it.
+        _block_loop_scope = (f"{block.file}::*impl*::{block.container}:"
+                             f"{uuid.uuid4().hex[:12]}")
         _prior_key = _retro_key(block.file, "*impl*", block.container)
         _prior_rec = retros_cache.get(_prior_key, {})
         _prior_verdict = screen_guidance(
@@ -3055,7 +3083,8 @@ def prepare_impl_fill(
             anchor_types=anchor_types_for_container(block.container),
             cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
             unit=screening_unit(block.file, "*impl*"),
-            pins=_pins, observables=_block_ev.observables)
+            pins=_pins, observables=_block_ev.observables,
+            loop_scope=_block_loop_scope)
         prior_retro = _prior_verdict.text
         _declined_parts = [
             _dg for _m in (*block.stub_members, *block.refill_members)
@@ -3348,6 +3377,14 @@ def prepare_impl_fill(
                 # re-locate after each splice via the syn enumerator.
                 for _rb in routed:
                     fn_data, container = _rb.fn_data, _rb.container
+                    if fn_data["fn_name"] in withheld:
+                        # A carved run (`narrow_blocks_to`): the schedule
+                        # deferred this member as a re-buy this fill.
+                        _log(f"  [phase-c/impl] {block_id}: "
+                             f"`{fn_data['fn_name']}` withheld — the schedule "
+                             "deferred it as a re-buy this fill; its body is "
+                             "not spliced.")
+                        continue
                     _via_default = _rb.via_trait_default
                     target_file = target_src_dir / block.file
                     # Trait-owned signature (impl member OR the trait's own
@@ -3495,7 +3532,7 @@ def prepare_impl_fill(
                     _cmp, _regr_detail = _regr
                     restore(_block_pre)
                     _last_regr_reverted[0] = True
-                    _note_reverted(block.file, _impl_spliced)
+                    _note_reverted(block.file, _impl_spliced, collateral=True)
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
                          f"fn(s) — regressed sibling test(s): "
                          f"{_cmp.summary} (attempt {fix_attempt}).")
@@ -3758,7 +3795,7 @@ def prepare_impl_fill(
                         file_path.read_text(encoding="utf-8", errors="replace"),
                         cur_metric)
                 restore(_block_pre)
-                _note_reverted(block.file, _impl_spliced)
+                _note_reverted(block.file, _impl_spliced, collateral=True)
                 return FixOutcome("failed", err_sig=cur_err_sig,
                                    metric=cur_metric)
 
@@ -4024,7 +4061,8 @@ def prepare_impl_fill(
                         cluster=cluster_name,
                         cfg_dead=_cfg_dead_fns(block.file),
                         unit=screening_unit(block.file, "*impl*"),
-                        pins=_pins, observables=_block_ev.observables),
+                        pins=_pins, observables=_block_ev.observables,
+                        loop_scope=_block_loop_scope),
                     # The pins of the tests this block answers for, plus the
                     # asserted literals a one-argument `contains` puts only
                     # in observables: the diagnosis may not prescribe away
@@ -4180,7 +4218,8 @@ def prepare_impl_fill(
                             last_error_excerpt),
                         pins=pins_for_contradiction_guard(
                             _pins, _block_ev.observables),
-                        crash_stub_sites=_last_crash_sites[0])
+                        crash_stub_sites=_last_crash_sites[0],
+                        loop_scope=_block_loop_scope)
                     _save_retrospectives(project_dir, retros_cache)
                 _verdict_row(
                     block_id,
@@ -4213,6 +4252,32 @@ def prepare_impl_fill(
                                "kept tree")
             except Exception as _re:
                 _log(f"  [phase-c/impl/retro] {block_id}: {_re}")
+            # Fresh guidance for the next round's prompt (the closure reads
+            # this enclosing binding), screened BEFORE the re-entry is
+            # decided: the re-entry is bought by that guidance, so a round
+            # whose record the screen retires does not re-enter.
+            _prior_key = _retro_key(block.file, "*impl*", block.container)
+            _prior_rec = retros_cache.get(_prior_key, {})
+            _prior_verdict = screen_guidance(
+                _prior_rec, snapshot, evidence=_block_answers,
+                anchor_types=anchor_types_for_container(block.container),
+                cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
+                unit=screening_unit(block.file, "*impl*"),
+                pins=_pins, observables=_block_ev.observables,
+                loop_scope=_block_loop_scope)
+            if _retry_informed and not informed_reentry(_prior_verdict):
+                _retry_informed = False
+                _log(f"  [phase-c/impl] {block_id}: retro round {_retro_round} "
+                     "improved the error floor but its guidance would not "
+                     "reach the next prompt ("
+                     f"{_prior_verdict.retired_by or 'no guidance'}) — not "
+                     "re-entering an uninformed fix loop.")
+                _emit("phase_c.impl.retro_retry_withheld", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "retro_round": _retro_round,
+                    "retired_by": _prior_verdict.retired_by,
+                })
             if not (_retry_informed and _retro_round < _retro_rounds_max):
                 break
             if (salvage.best is None
@@ -4229,17 +4294,8 @@ def prepare_impl_fill(
                     "attempts": fix_attempt,
                 })
                 break
-            # Fresh guidance for the next round's prompt (the closure reads
-            # this enclosing binding).  Logged like the pass-start read: this
-            # is the record that steers the retry the line below announces.
-            _prior_key = _retro_key(block.file, "*impl*", block.container)
-            _prior_rec = retros_cache.get(_prior_key, {})
-            _prior_verdict = screen_guidance(
-                _prior_rec, snapshot, evidence=_block_answers,
-                anchor_types=anchor_types_for_container(block.container),
-                cluster=cluster_name, cfg_dead=_cfg_dead_fns(block.file),
-                unit=screening_unit(block.file, "*impl*"),
-                pins=_pins, observables=_block_ev.observables)
+            # Logged like the pass-start read: this is the record that steers
+            # the retry the line below announces.
             prior_retro = _prior_verdict.text
             if (_hline := honoured_guidance_line(
                     _prior_key, _prior_rec, prior_retro)):

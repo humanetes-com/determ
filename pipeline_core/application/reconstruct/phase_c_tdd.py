@@ -4708,7 +4708,12 @@ def run_phase_c_tdd(
         _flat_keys = {FnLocator(_k.file, _k.fn_name) for _k in _flat_standing}
         # The same standing claims, and every landing's sweep grade, for the
         # fill schedule: it ranks a unit on its own graded body, never on the
-        # run-level outcome of a route row the unit rode in.
+        # run-level outcome of a route row the unit rode in. The length is
+        # the ledger the verdict was built from; the fill appends landings
+        # after this, and the schedule event records the length so a replay
+        # cuts there instead of at the iteration number the sweep and the
+        # fill share.
+        _body_rows = len(_ledger_entries())
         _unit_evidence = unit_evidence_from(
             _ledger_entries(),
             {FnLocator(_k.file, _k.fn_name): _stand[_k].body_sha
@@ -5980,6 +5985,7 @@ def run_phase_c_tdd(
                             bare_test_name(n) for _b, n in _f_pairs}),
                     attributed=_attributed_locs,
                     unit_evidence=_unit_evidence,
+                    body_rows=_body_rows,
                     # The pool starts units in the order this driver chose;
                     # see `dispatch_ranks_of` for why it is not re-ranked.
                     dispatch_ranks=(

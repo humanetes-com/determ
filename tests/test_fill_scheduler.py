@@ -31,6 +31,7 @@ from pipeline_core.domain.fill_schedule import (
     RouteRun,
     RunClock,
     RunOutcome,
+    UnitEvidence,
 )
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import record_stream_meta, serving_units
@@ -128,6 +129,40 @@ def test_the_stub_run_goes_first_and_the_session_still_opens(tmp_path: Path) -> 
     execute_fill(routes, hollow=hollow, bodies_sha=lambda _t: "b",
                  deps=_deps(tmp_path, log, events, scheduled=False))
     assert calls == ["session[1 test(s)]", "file src/x.rs"]
+
+
+def test_the_schedule_event_records_the_verdict_it_ranked_on(
+        tmp_path: Path) -> None:
+    """A replay joins a flat landing on the body sha, and cuts the ledger
+    at the row count the verdict was built from. An unscheduled fill
+    records the empty inputs that walk actually passed."""
+    fill_reading.reset_last_comparison()
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    deps = replace(
+        _deps(tmp_path, log, events),
+        unit_evidence=UnitEvidence(standing_flat={_STUB: "sha-1"}),
+        body_rows=11,
+        crash_blamed=frozenset({_FMT}),
+        attributed=frozenset({_STUB}))
+    execute_fill([_Route(RouteKind.FILE, [_file()], calls=[])],
+                 hollow={"t_hollow": frozenset({_STUB})},
+                 bodies_sha=lambda _t: "b", deps=deps)
+    inputs = events[0][1]["inputs"]
+    assert inputs["standing_flat"] == {"src/x.rs::drop_rest": "sha-1"}
+    assert inputs["body_rows"] == 11
+    assert inputs["crash_blamed"] == ["src/x.rs::fmt"]
+    assert inputs["attributed"] == ["src/x.rs::drop_rest"]
+    assert inputs["hollow"]["t_hollow"] == ["src/x.rs::drop_rest"]
+
+    events.clear()
+    execute_fill([_Route(RouteKind.FILE, [_file()], calls=[])],
+                 hollow={"t_hollow": frozenset({_STUB})},
+                 bodies_sha=lambda _t: "b",
+                 deps=_deps(tmp_path, log, events, scheduled=False))
+    fixed = events[0][1]["inputs"]
+    assert fixed["hollow"] == {} and fixed["crash_blamed"] == []
+    assert "standing_flat" not in fixed and "body_rows" not in fixed
 
 
 def test_rows_are_written_and_a_flat_rebuy_is_deferred_next_fill(tmp_path: Path) -> None:
@@ -628,3 +663,64 @@ def test_a_carved_per_fn_run_is_executed_by_its_route_on_its_own_targets(
     assert seen == [frozenset({b})]
     deferred = [r for r in out.rows if r.outcome is RunOutcome.DEFERRED]
     assert [r.targets for r in deferred] == [(("src/p.rs", "a"),)]
+
+
+def test_two_carved_pieces_of_one_file_never_share_a_wave(
+        tmp_path: Path) -> None:
+    """A file route runs its consecutive runs as one concurrent wave. Its
+    planned runs are one per file, but the two pieces `carve_rebuys` cuts
+    from one planned run share that file, and at budget 0 (order only) both
+    open: in one wave they would write the file concurrently. Negative
+    control: a second file's run still joins the wave."""
+    import threading
+    fill_reading.reset_last_comparison()
+    a, b = FnLocator("src/p.rs", "a"), FnLocator("src/p.rs", "b")
+    q = FnLocator("src/q.rs", "q")
+    run = RouteRun(kind=RouteKind.FILE, label="file src/p.rs",
+                   targets=frozenset({a, b}), target_tests=frozenset({"t"}),
+                   stubs_in_targets=frozenset({a, b}), files=("src/p.rs",),
+                   unit_tests=((a, frozenset({"t"})), (b, frozenset({"t"}))))
+    other = RouteRun(kind=RouteKind.FILE, label="file src/q.rs",
+                     targets=frozenset({q}), target_tests=frozenset({"t"}),
+                     stubs_in_targets=frozenset({q}), files=("src/q.rs",),
+                     seq=1)
+    active: dict[str, int] = {}
+    peak: dict[str, int] = {}
+    overlap: list[tuple[str, str]] = []
+    running: list[str] = []
+    lock = threading.Lock()
+
+    class _Slow(_Route):
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            f = run.files[0]
+            with lock:
+                active[f] = active.get(f, 0) + 1
+                peak[f] = max(peak.get(f, 0), active[f])
+                overlap.extend((o, run.label) for o in running)
+                running.append(run.label)
+            threading.Event().wait(0.3)
+            with lock:
+                active[f] -= 1
+                running.remove(run.label)
+            return super().run(run, clock)
+
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    from dataclasses import replace as _replace
+
+    from pipeline_core.domain.fill_schedule import UnitEvidence
+    deps = _replace(_deps(tmp_path, log, events, budget=0.0, parallelism=4),
+                    unit_evidence=UnitEvidence())
+    deps.ledger.append("p", [RouteLedgerRow(
+        kind=RouteKind.FILE, label="file src/p.rs", bodies_sha="old",
+        targets=(("src/p.rs", "a"), ("src/p.rs", "b")), oracle_fp="o",
+        outcome=RunOutcome.REVERTED, reverted=(("src/p.rs", "a"),),
+        model_calls=1, minutes=5.0, cluster="c",
+        started="2026-01-01T00:00:00+00:00")])
+    calls: list[str] = []
+    execute_fill([_Slow(RouteKind.FILE, [run, other], parallel=True,
+                        calls=calls)],
+                 hollow={}, bodies_sha=_moving_sha(), deps=deps)
+    assert len([c for c in calls if c.startswith("file src/p.rs [")]) == 2
+    assert peak["src/p.rs"] == 1
+    assert overlap, "the other file's run still shares a wave"

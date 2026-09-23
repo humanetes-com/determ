@@ -61,6 +61,9 @@ class RouteRunReport:
     reverted: frozenset[FnLocator] = frozenset()
     dispatched: frozenset[FnLocator] = frozenset()
     classes: Mapping[str, int] = field(default_factory=dict)
+    #: The reverted units restored only as part of a transaction the
+    #: evidence did not narrow to them (`AttemptsDelta.collateral`).
+    collateral: frozenset[FnLocator] = frozenset()
     #: The route found nothing to do when it opened (the targets were
     #: served by an earlier run, or the plan was stale).
     empty: bool = False
@@ -106,6 +109,7 @@ class RouteRunReport:
             model_calls=delta.calls,
             kept=delta.kept, reverted=delta.reverted,
             dispatched=delta.dispatched, classes=dict(classes),
+            collateral=delta.collateral,
             empty=delta.empty,
             declined=declined_only and not delta.kept)
 

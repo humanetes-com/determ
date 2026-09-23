@@ -265,6 +265,23 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      binaries at rc=-6, 91 of 150 failing tests without owners.
      Reaction: `owned up to their first panic`.
 
+  P38 unfounded flat re-buy — a fill schedule deferred a run `rebuy_flat`
+     although the iteration's standing-FLAT set holds none of the units
+     that would make it one: for a divisible (per-fn) run or a carved
+     piece, a target outside the set; for an uncarved transaction, no
+     target in it.  The set is the schedule event's `inputs.standing_flat`
+     (unit to body sha; the keys are the set) when the fill recorded it,
+     and otherwise the `phase_c.dispatch.service_order` event's `flat`
+     list joined on iteration and cluster.  The service-order event is
+     emitted only when dispatch order moved or a re-buy hit, so a fill
+     whose order sat still had no flat list to join; the schedule event
+     carries the set the ranking used.  Run 3131-f6b37c1a (2026-09-23):
+     fills 1-3 deferred the per-fn batch holding `src/error.rs::msg`
+     `rebuy_flat` off route rows while the flat list was empty on every
+     iteration.  A run with neither source cannot hit.  No reaction key:
+     the schedule ranks each unit on its own graded landing and prints
+     nothing new, so a post-fix hit is a defect.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -601,6 +618,7 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
         ("Claims planned on a moved test are refused", "scoped-premise"),
     ],
     "P36": [],
+    "P38": [],
     "P37": [
         ("owned up to their first panic", "cut-before-death"),
     ],
@@ -2385,12 +2403,13 @@ _P32_EVENTS: dict[str, dict[str, list[dict]]] | None = None
 
 
 def _p32_events_by_run() -> dict[str, dict[str, list[dict]]]:
-    """`phase_c.coverage.owner_map` and `phase_c.fill.schedule` by run."""
+    """`phase_c.coverage.owner_map`, `phase_c.fill.schedule` and
+    `phase_c.dispatch.service_order` by run."""
     global _P32_EVENTS
     if _P32_EVENTS is not None:
         return _P32_EVENTS
     out: dict[str, dict[str, list[dict]]] = defaultdict(
-        lambda: {"owner_map": [], "schedule": []})
+        lambda: {"owner_map": [], "schedule": [], "service_order": []})
     try:
         with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -2398,6 +2417,8 @@ def _p32_events_by_run() -> dict[str, dict[str, list[dict]]]:
                     kind = "owner_map"
                 elif '"phase_c.fill.schedule"' in line:
                     kind = "schedule"
+                elif '"phase_c.dispatch.service_order"' in line:
+                    kind = "service_order"
                 else:
                     continue
                 try:
@@ -2661,6 +2682,78 @@ def detect_p37(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:3]}]
 
 
+def p38_unfounded_flat(schedule: dict, flat: set[str]) -> list[tuple[str, list[str]]]:
+    """The `rebuy_flat` deferrals of one schedule event that the standing
+    FLAT set does not found, as (label, unfounded units). A divisible run
+    (per-fn, or any piece `carve_rebuys` cut, which carries `parent`) is a
+    re-buy only when every target it defers is standing flat; a transaction
+    (an uncarved file, impl or pair run) when at least one is. Sessions are
+    ranked on their slice's rows, not on units, and are never judged here."""
+    out: list[tuple[str, list[str]]] = []
+    for r in schedule.get("deferred") or ():
+        if r.get("reason") != "rebuy_flat" or r.get("kind") == "session":
+            continue
+        targets = [str(t) if isinstance(t, str) else "::".join(t)
+                   for t in r.get("targets") or ()]
+        if r.get("kind") == "per-fn" or r.get("parent"):
+            bad = [t for t in targets if t not in flat]
+        else:
+            bad = targets if not any(t in flat for t in targets) else []
+        if bad:
+            out.append((str(r.get("label") or "?"), bad))
+    return out
+
+
+def p38_flat_set(schedule: dict,
+                 service_order: list[dict]) -> set[str] | None:
+    """The standing-FLAT set one schedule event can be judged against, or
+    None when the fill recorded neither source.
+
+    A recorded `inputs.standing_flat` is the map the ranking used, and an
+    empty map is a real empty set. Older fills join the service-order
+    event on iteration and cluster. That event is absent when dispatch
+    order did not move. Several events for one iteration keep the last,
+    which is the order dispatch had settled on; a different cluster's
+    event is not this fill's set.
+    """
+    recorded = (schedule.get("inputs") or {}).get("standing_flat")
+    if isinstance(recorded, dict):
+        return set(recorded)
+    it, cluster = schedule.get("iter"), schedule.get("cluster")
+    same = [so for so in service_order if so.get("iter") == it]
+    if cluster is not None:
+        matched = [so for so in same if so.get("cluster") == cluster]
+        if matched:
+            same = matched
+        elif any(so.get("cluster") not in (None, cluster) for so in same):
+            return None
+    if not same:
+        return None
+    return {str(u) for u in same[-1].get("flat") or ()}
+
+
+def detect_p38(run: Run, iters: list[dict]) -> list[dict]:
+    """A `rebuy_flat` deferral the iteration's standing-FLAT set does not
+    found. One hit per run, counting the deferrals."""
+    ev = _p32_events_by_run().get(run.run_id)
+    if not ev or not (ev["service_order"] or ev["schedule"]):
+        return []
+    hits: list[str] = []
+    for sc in ev["schedule"]:
+        flat = p38_flat_set(sc, ev["service_order"])
+        if flat is None:
+            continue
+        for label, bad in p38_unfounded_flat(sc, flat):
+            it = sc.get("iter")
+            hits.append(f"iter {it} {label}: {', '.join(bad[:3])}"
+                        + (f" (+{len(bad) - 3})" if len(bad) > 3 else ""))
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} rebuy_flat deferral(s) with no standing "
+                         f"flat body: {'; '.join(hits[:4])}",
+             "refs": [run.start_ref]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2678,7 +2771,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P28": detect_p28, "P29": detect_p29, "P30": detect_p30,
              "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
-             "P37": detect_p37}
+             "P37": detect_p37, "P38": detect_p38}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2711,7 +2804,8 @@ CLASS_NAMES = {
     "P34": "abandoned block (a fix loop's compile-error floor never reached zero and the unit was dropped; keyed on the unit, not the diagnostic code)",
     "P35": "fill-wide premise refusal (a keep moved some tests and every unclaimed unit of the fill was refused; pre-fix the gate was not scoped to each claim's tests)",
     "P36": "bound-only input drop (a call ended input too long after replanning from vLLM's threshold, never the prompt's size; pre-fix no exact count)",
-    "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)"}
+    "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)",
+    "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)"}
 
 
 # -------------------------------------------------------------------- report

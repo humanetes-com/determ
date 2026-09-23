@@ -19,6 +19,7 @@ they can be judged.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 
 from pipeline_core.domain.attribution import FailureFrontier, container_key
 from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
@@ -181,6 +182,40 @@ def blocks_after_file_first(
         else:
             kept.append(b)
     return kept, dropped
+
+
+def narrow_blocks_to(
+    blocks: Sequence[ImplBlock],
+    targets: Iterable[FnLocator],
+) -> tuple[list[ImplBlock], frozenset[str]]:
+    """The blocks a carved run may write, and the member names it may not.
+
+    A file or impl run the schedule carved (`fill_schedule.carve_rebuys`)
+    holds a subset of the units its route planned; the rest were deferred
+    as re-buys this fill. Each block keeps only the stub and refill members
+    the run holds, a block left with neither is dropped, and every planned
+    member the run does not hold is returned as withheld, so the splice
+    refuses a body the reply wrote for it anyway (the file text still shows
+    it as a stub, and routing widens to every declaration of the file). A
+    locator names a fn by file and name, as the route's targets do, so
+    same-named members of one file stay together.
+
+    Returns ``(blocks, withheld names)``.
+    """
+    held = frozenset(targets)
+    out: list[ImplBlock] = []
+    withheld: set[str] = set()
+    for b in blocks:
+        def _mine(m: FnRecord, _b: ImplBlock = b) -> bool:
+            return FnLocator(_b.file, m.fn_name) in held
+        stubs = tuple(m for m in b.stub_members if _mine(m))
+        refills = tuple(m for m in b.refill_members if _mine(m))
+        withheld |= {m.fn_name for m in (*b.stub_members, *b.refill_members)
+                     if not _mine(m)}
+        if stubs or refills:
+            out.append(replace(b, stub_members=stubs, refill_members=refills))
+    held_names = {t.fn_name for t in held}
+    return out, frozenset(withheld - held_names)
 
 
 def byte_to_line(text: str, byte: int) -> int:

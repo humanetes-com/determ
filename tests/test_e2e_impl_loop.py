@@ -2023,3 +2023,34 @@ def test_without_the_offer_the_same_installable_body_is_refused(monkeypatch, tmp
     assert "W { x: x + 1 }" in text
     assert "v + 7" not in text
     assert "v as u64 + 1" not in text
+
+
+def _retro_says(monkeypatch, guidance: str) -> None:
+    install_app_seams(monkeypatch, phase_c_retrospective=lambda **k: {
+        "signal": "", "category": "WRONG_TYPE_CHOICE", "guidance": guidance})
+
+
+def test_impl_round_whose_lesson_would_not_reach_the_prompt_does_not_re_enter(
+        monkeypatch, tmp_path):
+    # Run `271137-e728ae95` (2026-09-23) re-entered fix loops "with the new
+    # guidance" while the screen retired that guidance at the next prompt.
+    # The re-entry reads the same screen now: an improved floor whose
+    # retrospective carries nothing the prompt will show buys no round.
+    ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
+    _retro_says(monkeypatch, "")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
+    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    res = _run(ws)
+    assert res.impls_filled == 0
+    assert res.attempts == 2          # round 1 only: nothing to re-enter on
+
+    # Control: the same run with a lesson the screen admits re-enters and
+    # fills on the green third check.
+    ws2 = _setup(monkeypatch, tmp_path / "b")
+    _retro_says(monkeypatch, "Return the tag field; do not construct a Foo.")
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    res2 = _run(ws2)
+    assert res2.impls_filled == 1 and res2.attempts == 3

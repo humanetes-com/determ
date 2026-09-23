@@ -1025,6 +1025,41 @@ CONVICTOR_ENTRY_MOVED = "convictor_entry_moved"
 JOINT_MEMBERS = "joint_members"
 JOINT_BODY_SHA = "joint_body_sha"
 JOINT_PREMISE_MOVED = "joint_premise_moved"
+#: Field: the fix loop a record was written in (an opaque token the loop
+#: mints once per unit fill). A lesson a fix loop just wrote diagnoses the
+#: body that loop is still revising, on the tree it is still reading, so
+#: inside that loop its premise holds by construction. Outside it the token
+#: matches nothing and the record is judged exactly as before. Before the
+#: stamp, a compile-taught lesson whose failed body named no stub carried
+#: no premise and was retired `no_tree_premise` on the loop's own re-entry:
+#: run `271137-e728ae95` (2026-09-23) logged `retro round 1 kept the error
+#: floor improving — re-entering the fix loop with the new guidance` for
+#: `src/error.rs::construct_from_boxed`, then `recorded no tree premise —
+#: NOT injected` on both re-entry prompts, and stopped on the same E0277.
+FIX_LOOP_SCOPE = "fix_loop_scope"
+
+
+def informed_reentry(verdict: GuidanceScreening) -> bool:
+    """True when a retro round's fresh record would reach the next prompt.
+
+    A fix loop re-enters after a retrospective on the promise of new
+    guidance. That promise is only kept when the screen the next prompt
+    runs admits the record, so the re-entry decision reads the same
+    verdict. Measured over the logs on 2026-09-23: of the per-fn and impl
+    re-entries logged as `re-entering the fix loop with the new guidance`,
+    about four in five were followed by no honoured guidance at all, most
+    of them retired silently. Each one bought three more model calls with
+    nothing but the compiler errors the loop had already stopped on."""
+    return bool(verdict.text)
+
+
+def earned_in_loop(record: Mapping[str, Any] | None, loop_scope: str) -> bool:
+    """True when ``record`` was written by the fix loop ``loop_scope`` names.
+
+    An empty scope (every caller outside a fix loop) is never a match, so a
+    stored record keeps every premise rule it had before the stamp."""
+    return bool(loop_scope) and str(
+        (record or {}).get(FIX_LOOP_SCOPE) or "") == loop_scope
 
 
 def tree_premise_absent(record: Mapping[str, Any] | None) -> bool:
@@ -1121,6 +1156,7 @@ def admissible_guidance(
     joint_body_sha: str = "",
     pins: str = "",
     observables: Iterable[str] = (),
+    loop_scope: str = "",
 ) -> str:
     """The stored lesson a prompt may carry, or ``""`` — `screen_guidance`'s
     text half, for the callers that do not log the verdict."""
@@ -1129,7 +1165,8 @@ def admissible_guidance(
                           cfg_dead=cfg_dead, unit=unit,
                           joint_members=joint_members,
                           joint_body_sha=joint_body_sha, pins=pins,
-                          observables=observables).text
+                          observables=observables,
+                          loop_scope=loop_scope).text
 
 
 def screen_guidance(
@@ -1143,8 +1180,15 @@ def screen_guidance(
     joint_body_sha: str = "",
     pins: str = "",
     observables: Iterable[str] = (),
+    loop_scope: str = "",
 ) -> GuidanceScreening:
     """The stored lesson a prompt may carry, or ``""``, with the retiring rule.
+
+    ``loop_scope`` is the token of the fix loop building this prompt, or
+    ``""``. A record that loop wrote (`earned_in_loop`) has a premise the
+    ninth rule cannot see: it diagnoses the body the loop is still revising
+    on the tree it is still reading. Only that rule yields to it; every
+    other rule judges the record exactly as it would any stored lesson.
 
     ``pins`` is the pinned-observables string of the tests the unit answers
     for at THIS prompt-build (`refill_evidence.pinned_observables_from_tests`).
@@ -1331,8 +1375,10 @@ def screen_guidance(
     # records on the `9933-efe68f37` store drop on the next read,
     # including compile-taught lessons that never named a stub —
     # that trade is the contract, not a mute of the three checkable
-    # rows.
-    if tree_premise_absent(rec):
+    # rows. The one premise it cannot see is the fix loop that wrote the
+    # record and is still running (`earned_in_loop`); out of that loop the
+    # rule applies unchanged.
+    if tree_premise_absent(rec) and not earned_in_loop(rec, loop_scope):
         return GuidanceScreening("", NO_TREE_PREMISE)
     # The tenth way, the ninth rule's complement for records that DO carry
     # the premise: the stamped convicting tests now measurably enter
@@ -1560,6 +1606,7 @@ def stamp_conviction(
     regressed: tuple[str, ...] = (),
     pins: str = "",
     crash_stub_sites: Iterable[tuple[str, int]] | None = None,
+    loop_scope: str = "",
 ) -> dict[str, Any]:
     """Every half a later reader needs: the CONTEXT the verdict was earned in
     (equality-checked), the EVIDENCE it rests on (subset-checked), the hollow
@@ -1599,8 +1646,16 @@ def stamp_conviction(
     `fully_exhausted` (the attempts counted could not have passed while
     the drop path was hollow). ``None`` — the failure was not a crash —
     writes no key, so the record reads as "not this class" rather than as
-    a legacy record."""
+    a legacy record.
+
+    `loop_scope` is the token of the fix loop writing the record
+    (`FIX_LOOP_SCOPE`). Written when non-empty and removed otherwise, so a
+    record re-stamped outside a loop never carries an old loop's token."""
     stamped = evidence.stamp(provenance.stamp(record))
+    if loop_scope:
+        stamped[FIX_LOOP_SCOPE] = loop_scope
+    else:
+        stamped.pop(FIX_LOOP_SCOPE, None)
     stamped["regressed"] = sorted(regressed)
     # A conviction is written by a failed attempt: whatever it reddened was
     # reverted with it. An empty set carries no claim to label.

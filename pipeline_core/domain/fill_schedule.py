@@ -341,6 +341,12 @@ class RouteLedgerRow:
     #: 2026-09-15, and rows that opened no judged try — which is NOT the
     #: same claim as ``()`` ("kept, and paid none of its tests").
     newly_green: tuple[str, ...] | None = None
+    #: The reverted units the revert did not narrow to: restored only
+    #: because the transaction they rode in was restored as a whole
+    #: (`FillAttempts.note_reverted(collateral=True)`). Empty on every row
+    #: written before 2026-09-23, which reads as "every revert implicated
+    #: its unit", the reading those rows were ranked on.
+    collateral: tuple[tuple[str, str], ...] = ()
 
     @property
     def identity(self) -> str:
@@ -368,6 +374,7 @@ class RouteLedgerRow:
             "share_minutes": self.share_minutes, "reason": self.reason,
             "newly_green": (list(self.newly_green)
                             if self.newly_green is not None else None),
+            "collateral": [list(t) for t in self.collateral],
         }
 
     @classmethod
@@ -403,6 +410,7 @@ class RouteLedgerRow:
             reason=str(raw.get("reason", "")),
             newly_green=(tuple(str(x) for x in green)
                          if isinstance(green, list) else None),
+            collateral=_pairs("collateral"),
         )
 
     def to_json(self) -> str:
@@ -944,8 +952,12 @@ class UnitService:
           never claimed is not a try): served;
         - that landing starved, or a later try on another route paid:
           served (the `rank` rules, unchanged);
-        - the unit was reverted there: the reverted re-buy (a pair keeps
-          its grace, as in `rank`);
+        - the unit was reverted there, and the revert implicated it: the
+          reverted re-buy (a pair keeps its grace, as in `rank`). A revert
+          that restored the unit only because its transaction was restored
+          whole (``RouteLedgerRow.collateral``) is a verdict on the set; the
+          identical set comes back through its identity row (`_rank_of`),
+          and a different set is a new try for the unit;
         - the sweep graded the landed body advanced or proven: paying;
         - that body is still on the tree and its FLAT claim still stands
           (:attr:`UnitEvidence.standing_flat`): the flat re-buy;
@@ -964,7 +976,8 @@ class UnitService:
         if self.starved(last) or any(
                 _row_paid(r) for r in opened[here_at[-1] + 1:]):
             return _RANK_SERVED, None
-        if t in _locs(last.reverted) and t not in _locs(last.kept):
+        if (t in _locs(last.reverted) and t not in _locs(last.kept)
+                and t not in _locs(last.collateral)):
             if run.kind is RouteKind.PAIR and grace_left:
                 return _RANK_SERVED, None
             return _RANK_REBUY_REVERTED, self._deferrals_since(t, run, last)
@@ -1073,14 +1086,20 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         last = r
         break
     if last is None or (units.judges_units(run) and (
-            run.unit_tests or last.outcome is RunOutcome.FLAT)):
+            last.outcome is RunOutcome.FLAT
+            or (run.unit_tests and last.outcome is not RunOutcome.REVERTED))):
         # With unit evidence, a divisible run has ONE rank path, and an
         # identical run's FLAT row is not a verdict either — its units'
         # graded landings are. Without this the next fill of the same
         # targets and bodies was deferred whole by the row's FLAT and the
         # per-unit verdict was never asked (validation of 2026-09-23 on the
         # `3131-f6b37c1a` batches). A REVERTED identity row stays the gate's
-        # verdict on the run, and an interrupted one stays no evidence.
+        # verdict on the run, divisible or not: the same targets over the
+        # same bodies are the transaction the gate restored, whether its
+        # revert implicated each unit or restored the set whole (a
+        # collateral revert convicts no unit, so without this the identical
+        # file would re-open every fill). An interrupted one stays no
+        # evidence.
         rank, reason = units.rank(run, grace_left=grace_left,
                                   readmit_after=readmit_after)
     else:
