@@ -71,7 +71,12 @@ from pipeline_core.domain.fill_class import (
     FillClassHistogram,
     FillOutcomeClass,
 )
-from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, RunClock
+from pipeline_core.domain.fill_schedule import (
+    RouteKind,
+    RouteRun,
+    RunClock,
+    UnitEvidence,
+)
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import (
@@ -303,6 +308,10 @@ class PhaseCFillEngine:
         # (eligible plus hop-pair members). Empty skips coverage-split
         # marking so a call that does not snapshot keeps today's order.
         attributed: Collection[FnLocator] = (),
+        # The body ledger's per-unit verdicts, built by the TDD driver at
+        # dispatch (`fill_schedule.unit_evidence_from`). None keeps the
+        # schedule's route-row reading.
+        unit_evidence: UnitEvidence | None = None,
         # The TDD driver's final dispatch order as ranks (head highest,
         # `dispatch_batch.dispatch_ranks_of`). When set, stubs are ordered and
         # grouped by these ranks instead of leaf-name frequency, so a
@@ -556,6 +565,7 @@ class PhaseCFillEngine:
                 unmeasurable_tests=unmeasurable_tests,
                 crash_blamed=(crash_blamed or frozenset()) | stub_hold_blockers,
                 attributed=frozenset(attributed),
+                unit_evidence=unit_evidence,
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),
                 session_min_turns=session_min_turns,
@@ -1475,24 +1485,32 @@ class _PerFnRoute:
         targets = stub_locs | frozenset(r.key for r in refills)
         if not targets and not stubs:
             return []
-        tests: set[str] = set()
         frontier: FailureFrontier | None = kw["tdd_frontier_tests"]
-        if frontier is not None:
-            for loc in targets:
-                for t in frontier.tests_for(loc):
-                    tests.add(str(t).rsplit("::", 1)[-1])
+        unit_tests = tuple(
+            (loc, frozenset(str(t).rsplit("::", 1)[-1]
+                            for t in (frontier.tests_for(loc)
+                                      if frontier is not None else ())))
+            for loc in sorted(targets, key=lambda k: (k.file, k.fn_name)))
         return [RouteRun(
             kind=self.kind,
             label=f"per-fn {len(stub_locs)} stub(s), {len(refills)} re-fill(s)",
-            targets=targets, target_tests=frozenset(tests),
+            targets=targets,
+            target_tests=frozenset().union(*(ts for _, ts in unit_tests)),
             stubs_in_targets=stub_locs,
-            files=tuple(sorted({k.file for k in targets})))]
+            files=tuple(sorted({k.file for k in targets})),
+            # The passes claim unit by unit, so the schedule may hand this
+            # route any subset of the targets (`carve_rebuys`).
+            unit_tests=unit_tests)]
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
         if not clock.may_claim():
             return RouteRunReport(empty=True)
         eng = self._engine
         kw = dict(self._kw)
+        if run.parent:
+            # A carved run: the schedule deferred the rest of the planned
+            # targets as re-buys. The passes write only what this run holds.
+            kw["tdd_frontier_keys"] = set(run.targets)
         before_disp = frozenset(kw["dispatched"])
         before_rev = frozenset(kw["reverted"])
         self.result = eng._per_fn_passes(

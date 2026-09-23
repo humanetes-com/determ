@@ -198,7 +198,13 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      section, it read only unfinished ones) and the service order (a stale
      stamp put the stub behind never-served units).  Reaction: the sweep
      prints `still-stubbed fn(s) hold N failing test(s)` and ranks them as
-     crash-site evidence; a stub is never served.
+     crash-site evidence; a stub is never served.  Third owner, run
+     3131-f6b37c1a (2026-09-23): the batch held `src/error.rs::msg` (45
+     tests) and the schedule deferred the whole per-fn run `rebuy_flat`
+     because ONE of its 12 units had a flat last try; the other eleven had
+     paid.  Reaction: the per-fn run is carved by unit, `[K unit(s) to
+     try]` opens and only the re-buy units are deferred.  (Until then the
+     detector matched the batch in the deferred list and missed it.)
   P30 spent pair first — a fill's schedule opened a hop pair ranked
      `grace_spent` (graded `unpaid_grace` times without paying) ahead of a
      `never_served` run.  Run 3893442-cb547388 (2026-09-19, cluster stable):
@@ -571,6 +577,8 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P29": [
         # The sweep held the failing tests by the stub they stop in.
         ("still-stubbed fn(s) hold", "stub-held"),
+        # The schedule carved a per-fn batch's re-buy units off it.
+        ("unit(s) to try]", "carved-per-fn"),
     ],
     "P30": [
         # A pair that re-emitted the tree is rowed as keeping nothing.
@@ -2277,7 +2285,11 @@ RE_HISTOGRAM = re.compile(
     r"\[phase-c/dispatch\] blocker histogram: (?P<head>\S+) \((?P<n>\d+)\)")
 RE_TDD_ITER = re.compile(r"\[phase-c/tdd\] iter (?P<iter>\d+): cargo test")
 RE_FILL_PLAN = re.compile(r"\[phase-c/schedule\] fill \d+: \d+ run\(s\)")
-RE_STUB_RUN = re.compile(r"per-fn [1-9]\d* stub\(s\)")
+# Anchored on an ORDERED run's head (`N. per-fn …`). Unanchored, the
+# pattern matched the per-fn batch in the line's `— deferred:` list and in
+# other runs' `after …` lists, so run `3131-f6b37c1a` (2026-09-23) printed
+# no hit on three fills that deferred the batch holding the head stub.
+RE_STUB_RUN = re.compile(r"(?:^|; |— )\d+\. per-fn [1-9]\d* stub\(s\)")
 
 
 def detect_p29(run: Run, iters: list[dict]) -> list[dict]:
@@ -2297,7 +2309,8 @@ def detect_p29(run: Run, iters: list[dict]) -> list[dict]:
             head = m["head"]
             continue
         if head and RE_FILL_PLAN.search(text):
-            if not RE_STUB_RUN.search(text):
+            ordered = text.split(" — deferred:", 1)[0]
+            if not RE_STUB_RUN.search(ordered):
                 hits.append(f"iter {it or '?'} parked {head}")
                 refs.append(ref)
             head = ""

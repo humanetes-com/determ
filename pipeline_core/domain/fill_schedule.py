@@ -80,6 +80,7 @@ from pipeline_core.domain.models import FnLocator, FnSite
 __all__ = [
     "DEFAULT_UNPAID_GRACE",
     "TODAY_ORDER",
+    "UnitEvidence",
     "FillBudget",
     "FillSchedule",
     "RouteKind",
@@ -89,6 +90,8 @@ __all__ = [
     "RunOutcome",
     "ScheduledRun",
     "bodies_sha_of",
+    "carve_rebuys",
+    "unit_evidence_from",
     "consecutive_unpaid",
     "hollow_by_test",
     "rebuy_identity",
@@ -156,6 +159,20 @@ class RouteRun:
     files: tuple[str, ...] = ()
     seq: int = 0
     bodies_sha: str = ""
+    #: Non-empty when the route writes each target on its own and will run
+    #: ANY subset of ``targets`` it is handed: every target with the bare
+    #: names of the tests it aims at. The schedule then ranks the run's
+    #: units, not the batch (:func:`carve_rebuys`). Empty means the targets
+    #: are one transaction (a file, an impl block, a pair, a session).
+    unit_tests: tuple[tuple[FnLocator, frozenset[str]], ...] = ()
+    #: The ``key`` of the planned run this one was carved from; the route
+    #: that planned that run executes this one. Empty for a planned run.
+    parent: str = ""
+
+    @property
+    def plan_key(self) -> str:
+        """The key of the run as its route planned it."""
+        return self.parent or self.key
 
     @property
     def key(self) -> str:
@@ -173,6 +190,7 @@ class RouteRun:
             "stubs": sorted(f"{f}::{fn}" for f, fn in self.stubs_in_targets),
             "files": list(self.files), "seq": self.seq,
             "bodies_sha": self.bodies_sha,
+            **({"parent": self.parent} if self.parent else {}),
         }
 
 
@@ -699,6 +717,85 @@ def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
     return _unpaid_streak(rows, lambda r: _served_key_of(r) == key, oracle_fp)
 
 
+#: Body-ledger grades that say the landing moved the tests it was bought on.
+_PAYING_GRADES = frozenset({"advanced", "proven"})
+
+
+@dataclass(frozen=True, slots=True)
+class UnitEvidence:
+    """What the body ledger says about each unit's landings — the per-unit
+    verdict the schedule ranks units on, so it is never re-derived from a
+    route row's run-level outcome.
+
+    WHY. A route row's outcome is about the RUN: FLAT means "no verdict
+    moved while this run's keeps were on the tree". Applied to every target
+    of the row it convicted units the run never wrote and units whose tests
+    could not run. Run `3131-f6b37c1a` (2026-09-23): of the five per-fn
+    convictions that deferred the batch holding `src/error.rs::msg` (45 of
+    150 failing tests first panic in it), one was a graded body that ran its
+    tests and stayed red; `src/fmt.rs::display` was convicted by a row
+    (`497151-a6fa205b`) that never kept it and whose only class was
+    `unreachable`. Under oracle `1c3b06644b2e` 43 of 86 FLAT route rows
+    carried only `unreachable`. The body ledger already grades each landed
+    body at the next sweep and already says which grades are evidence
+    (`BodyState.UNMEASURED` is "NOT evidence about anything").
+
+    ``grades`` maps (run id, iteration the route row was written at, unit)
+    to (body sha landed, grade): the grade is the sweep's non-``landed``
+    row with the landing's run id AND body sha, whatever iteration it
+    carries — the sweep stamps its own iteration, one later for 107 of 114
+    graded rows under that oracle and EARLIER for 5 (a later process judged
+    them). None when no sweep graded the landing.
+
+    ``standing_flat`` maps each unit whose ON-TREE body carries a FLAT
+    claim whose premise still holds (``body_ledger.flat_standing_unchanged``:
+    same body, oracle, convicting set and evidence) to that body's sha. A
+    flat grade convicts a unit only through this map: the claim is about a
+    moment, and a body a redo or a revert removed from the tree, or a unit
+    that would now be told something new, is not the question it answered.
+    """
+
+    grades: Mapping[tuple[str, int, FnLocator], tuple[str, str | None]] = field(
+        default_factory=dict)
+    standing_flat: Mapping[FnLocator, str] = field(default_factory=dict)
+
+    def grade(self, run_id: str, iteration: int,
+              unit: FnLocator) -> tuple[str, str | None] | None:
+        return self.grades.get((run_id, iteration, unit))
+
+    def stands_flat(self, unit: FnLocator, body_sha: str) -> bool:
+        return self.standing_flat.get(unit) == body_sha
+
+
+def unit_evidence_from(
+    entries: Iterable[Any],
+    standing_flat: Mapping[FnLocator, str],
+    *, oracle_fp: str,
+) -> UnitEvidence:
+    """Build :class:`UnitEvidence` from body-ledger rows (``LedgerEntry``:
+    ``key.file``, ``key.fn_name``, ``run_id``, ``iteration``, ``body_sha``,
+    ``state``, ``oracle_fp``), in ledger order. A landing is a ``landed``
+    row; its grade is the LAST non-``landed`` row after it with the same
+    run id, unit and body sha. Several bodies landed for one unit at one
+    iteration: the last one in ledger order stands for the landing (it is
+    the body the route row's keep left on the tree)."""
+    landed: dict[tuple[str, int, FnLocator], str] = {}
+    graded: dict[tuple[str, FnLocator, str], str] = {}
+    for e in entries:
+        if str(getattr(e, "oracle_fp", "")) != oracle_fp:
+            continue
+        unit = FnLocator(e.key.file, e.key.fn_name)
+        state = str(getattr(e.state, "value", e.state))
+        if state == "landed":
+            landed[(e.run_id, int(e.iteration), unit)] = e.body_sha
+        else:
+            graded[(e.run_id, unit, e.body_sha)] = state
+    return UnitEvidence(
+        grades={k: (sha, graded.get((k[0], k[2], sha)))
+                for k, sha in landed.items()},
+        standing_flat=dict(standing_flat))
+
+
 class UnitService:
     """Which units the ledger has served under one oracle, and how.
 
@@ -714,10 +811,12 @@ class UnitService:
     grade) — under the schedule's oracle."""
 
     def __init__(self, rows: Iterable[RouteLedgerRow], oracle_fp: str, *,
-                 session_min_turns: int = 0) -> None:
+                 session_min_turns: int = 0,
+                 evidence: UnitEvidence | None = None) -> None:
         self._opened: dict[FnLocator, list[RouteLedgerRow]] = {}
         self._deferred: dict[FnLocator, list[RouteLedgerRow]] = {}
         self._min_turns = session_min_turns
+        self._evidence = evidence
         for r in rows:
             if r.oracle_fp != oracle_fp:
                 continue
@@ -780,37 +879,167 @@ class UnitService:
         worst = _RANK_PAYING
         rebuy_deferrals: list[int] = []
         for t in targets:
-            opened = self._opened[t]
-            here_at = [i for i, r in enumerate(opened)
-                       if self._same_route(r, run)]
-            if (not here_at or self.starved(opened[here_at[-1]])
-                    or any(_row_paid(r) for r in opened[here_at[-1] + 1:])):
-                # Never tried on this route, starved by its share, or a later
-                # try on another route PAID (the verdicts this route last saw
-                # moved): served, and this try is new. A later flat keep
-                # elsewhere moves the body, not the evidence — counting it
-                # made every re-buy "served" on `450977-5f48b68a`'s ledger,
-                # where session, file and per-fn touch the same units in turn.
-                cls = _RANK_SERVED
-            else:
-                last = opened[here_at[-1]]
-                if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
-                    cls = _RANK_PAYING
-                elif last.outcome is RunOutcome.REVERTED:
-                    cls = (_RANK_SERVED if run.kind is RouteKind.PAIR
-                           and grace_left else _RANK_REBUY_REVERTED)
-                else:
-                    cls = _RANK_REBUY_FLAT
-                if cls in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED):
-                    rebuy_deferrals.append(sum(
-                        1 for d in self._deferred.get(t, ())
-                        if self._same_route(d, run)
-                        and d.started >= last.started))
+            cls, deferrals = self.target_class(t, run, grace_left=grace_left)
+            if deferrals is not None:
+                rebuy_deferrals.append(deferrals)
             worst = max(worst, cls)
         if (worst in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED)
                 and rebuy_deferrals and min(rebuy_deferrals) >= readmit_after):
             return worst, "rebuy_readmitted"
         return worst, _REASON[worst]
+
+    def target_class(self, t: FnLocator, run: RouteRun, *,
+                     grace_left: bool) -> tuple[int, int | None]:
+        """(class, deferrals) of one target on `run`'s route: the rank its
+        latest opened row on this route gives it, and — for a re-buy only —
+        how many times this route deferred it since that row (the bounded
+        re-admission count). A target never opened on any route is
+        never-served."""
+        if not self.served(t):
+            return _RANK_NEVER_SERVED, None
+        if self.judges_units(run):
+            return self._landing_class(t, run, grace_left=grace_left)
+        opened = self._opened[t]
+        here_at = [i for i, r in enumerate(opened)
+                   if self._same_route(r, run)]
+        if (not here_at or self.starved(opened[here_at[-1]])
+                or any(_row_paid(r) for r in opened[here_at[-1] + 1:])):
+            # Never tried on this route, starved by its share, or a later
+            # try on another route PAID (the verdicts this route last saw
+            # moved): served, and this try is new. A later flat keep
+            # elsewhere moves the body, not the evidence — counting it
+            # made every re-buy "served" on `450977-5f48b68a`'s ledger,
+            # where session, file and per-fn touch the same units in turn.
+            return _RANK_SERVED, None
+        last = opened[here_at[-1]]
+        if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
+            return _RANK_PAYING, None
+        if last.outcome is RunOutcome.REVERTED:
+            cls = (_RANK_SERVED if run.kind is RouteKind.PAIR
+                   and grace_left else _RANK_REBUY_REVERTED)
+        else:
+            cls = _RANK_REBUY_FLAT
+        if cls == _RANK_SERVED:
+            return cls, None
+        return cls, self._deferrals_since(t, run, last)
+
+    def _deferrals_since(self, t: FnLocator, run: RouteRun,
+                         last: RouteLedgerRow) -> int:
+        return sum(1 for d in self._deferred.get(t, ())
+                   if self._same_route(d, run) and d.started >= last.started)
+
+    def judges_units(self, run: RouteRun) -> bool:
+        """True when `run`'s units are ranked by their own graded landings
+        (:class:`UnitEvidence`) rather than by the route rows' outcomes.
+        Every unit-writing route; not a session, whose try is keyed by the
+        tests it aims at (the slice), not by the units its transcript
+        happened to touch."""
+        return self._evidence is not None and run.kind is not RouteKind.SESSION
+
+    def _landing_class(self, t: FnLocator, run: RouteRun, *,
+                       grace_left: bool) -> tuple[int, int | None]:
+        """The unit's class from its own latest landing on this route.
+
+        - no row on this route KEPT or REVERTED the unit (a target the run
+          never claimed is not a try): served;
+        - that landing starved, or a later try on another route paid:
+          served (the `rank` rules, unchanged);
+        - the unit was reverted there: the reverted re-buy (a pair keeps
+          its grace, as in `rank`);
+        - the sweep graded the landed body advanced or proven: paying;
+        - that body is still on the tree and its FLAT claim still stands
+          (:attr:`UnitEvidence.standing_flat`): the flat re-buy;
+        - no grade, and the row paid: paying;
+        - anything else — unmeasured, never graded, flat but off the tree
+          or under moved evidence, a cash that was a sibling's: served.
+        """
+        ev = self._evidence
+        assert ev is not None
+        opened = self._opened[t]
+        here_at = [i for i, r in enumerate(opened)
+                   if self._same_route(r, run) and _landed(r, t)]
+        if not here_at:
+            return _RANK_SERVED, None
+        last = opened[here_at[-1]]
+        if self.starved(last) or any(
+                _row_paid(r) for r in opened[here_at[-1] + 1:]):
+            return _RANK_SERVED, None
+        if t in _locs(last.reverted) and t not in _locs(last.kept):
+            if run.kind is RouteKind.PAIR and grace_left:
+                return _RANK_SERVED, None
+            return _RANK_REBUY_REVERTED, self._deferrals_since(t, run, last)
+        g = ev.grade(last.run_id, last.iteration, t)
+        if g is not None and g[1] in _PAYING_GRADES:
+            return _RANK_PAYING, None
+        if g is not None and ev.stands_flat(t, g[0]):
+            return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
+        if (g is None or g[1] is None) and _row_paid(last):
+            return _RANK_PAYING, None
+        return _RANK_SERVED, None
+
+
+def _locs(pairs: Iterable[tuple[str, str]]) -> frozenset[FnLocator]:
+    return frozenset(FnLocator(f, fn) for f, fn in pairs)
+
+
+def _landed(row: RouteLedgerRow, t: FnLocator) -> bool:
+    return t in _locs(row.kept) or t in _locs(row.reverted)
+
+
+def carve_rebuys(run: RouteRun, units: UnitService, *,
+                 readmit_after: int) -> tuple[RouteRun, ...]:
+    """A run whose route writes each target on its own, split into the
+    units that are a new or paying try and the units that are a re-buy.
+
+    "The run takes its worst target's class" is right for a transaction —
+    a file or an impl block is re-bought whole — and wrong for a route
+    that claims unit by unit: there it lets ONE flat unit convict every
+    other unit riding in the batch. Run `3131-f6b37c1a` (2026-09-23,
+    cluster `stable`, after a restart from the augmented tree): the per-fn
+    batch of 12 stubs was deferred `rebuy_flat` in fills 1 and 2 because
+    one target's last per-fn try (run `497151-a6fa205b`) was flat, while
+    the other eleven's last per-fn try (run `713017-baa50600`) had PAID —
+    among them the stub 45 of the 150 failing tests first panicked in.
+    No route opened those eleven; the fills went to 1-stub impl blocks
+    whose tests were hollow on them, and the score sat at 29/184.
+
+    A unit is a re-buy when :meth:`UnitService.target_class` says so and
+    its own deferrals since that try are fewer than `readmit_after` (the
+    same bounded re-admission the whole run gets). Returns `(run,)` when
+    the run is not divisible or nothing splits; otherwise the open piece
+    first and the re-buy piece second, each carrying `parent=run.key`, its
+    own targets, stubs, files and the union of its units' aimed tests. The
+    re-buy piece is ranked, deferred and rowed like any run, so each of
+    its units accrues its own deferrals and is re-admitted on its own
+    count."""
+    if not run.unit_tests:
+        return (run,)
+    rebuy: set[FnLocator] = set()
+    for t in run.targets:
+        cls, deferrals = units.target_class(t, run, grace_left=True)
+        if (cls in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED)
+                and (deferrals or 0) < readmit_after):
+            rebuy.add(t)
+    if not rebuy or rebuy == set(run.targets):
+        return (run,)
+    tests_of = dict(run.unit_tests)
+
+    def _piece(targets: frozenset[FnLocator], what: str) -> RouteRun:
+        return replace(
+            run, label=f"{run.label} [{len(targets)} {what}]",
+            targets=targets,
+            stubs_in_targets=run.stubs_in_targets & targets,
+            target_tests=frozenset().union(
+                *(tests_of.get(t, frozenset()) for t in targets)),
+            files=tuple(sorted({t.file for t in targets})),
+            unit_tests=tuple((t, tests_of.get(t, frozenset()))
+                             for t in sorted(targets,
+                                             key=lambda u: (u.file, u.fn_name))),
+            bodies_sha="", parent=run.key)
+
+    open_part = frozenset(run.targets) - rebuy
+    return (_piece(open_part, "unit(s) to try"),
+            _piece(frozenset(rebuy), "re-buy unit(s)"))
 
 
 def _rank_of(run: RouteRun, oracle_fp: str,
@@ -843,7 +1072,15 @@ def _rank_of(run: RouteRun, oracle_fp: str,
             continue
         last = r
         break
-    if last is None:
+    if last is None or (units.judges_units(run) and (
+            run.unit_tests or last.outcome is RunOutcome.FLAT)):
+        # With unit evidence, a divisible run has ONE rank path, and an
+        # identical run's FLAT row is not a verdict either — its units'
+        # graded landings are. Without this the next fill of the same
+        # targets and bodies was deferred whole by the row's FLAT and the
+        # per-unit verdict was never asked (validation of 2026-09-23 on the
+        # `3131-f6b37c1a` batches). A REVERTED identity row stays the gate's
+        # verdict on the run, and an interrupted one stays no evidence.
         rank, reason = units.rank(run, grace_left=grace_left,
                                   readmit_after=readmit_after)
     else:
@@ -1079,8 +1316,21 @@ def schedule(
     attributed: Collection[FnLocator] = (),
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
     session_min_turns: int = 0,
+    bodies_sha: Callable[[frozenset[FnLocator]], str] | None = None,
+    unit_evidence: UnitEvidence | None = None,
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
+
+    A run whose route writes each target on its own (``unit_tests``) is
+    ranked by unit: its re-buy units are carved into a run of their own
+    (:func:`carve_rebuys`) and the rest open at their own class. The
+    carved pieces are stamped with ``bodies_sha`` when given (the
+    executor's reader of the targets' bodies), so their ledger rows carry
+    the same identity any planned run's would.
+
+    ``unit_evidence`` (:class:`UnitEvidence`, from the body ledger) makes
+    every unit-writing run's units ranked by their own graded landings; None
+    keeps the route-row reading (a caller with no body ledger).
 
     Level 0 holds every run that fills a stub which makes a leftover test
     hollow; level 1 the rest. Within a level a coverage-split (see
@@ -1176,7 +1426,8 @@ def schedule(
     # (UNMEASURED) served nothing, so its targets under a moved body or
     # oracle are still a new try, not a served one.
     units = UnitService(rows_list, oracle_fp,
-                        session_min_turns=session_min_turns)
+                        session_min_turns=session_min_turns,
+                        evidence=unit_evidence)
     order_index = {k: i for i, k in enumerate(today_order)}
     attr = frozenset(attributed)
     split_of: dict[str, bool] = {}
@@ -1191,8 +1442,15 @@ def schedule(
         if unpaid_grace > 0
         and consecutive_unpaid(rows_list, r, oracle_fp) >= unpaid_grace)
 
+    carved: list[RouteRun] = []
+    for planned in runs:
+        for piece in carve_rebuys(planned, units, readmit_after=readmit_after):
+            if piece.parent and bodies_sha is not None:
+                piece = replace(piece, bodies_sha=bodies_sha(piece.targets))
+            carved.append(piece)
+
     ranked: list[tuple[RouteRun, int, str, int, int]] = []
-    for run in runs:
+    for run in carved:
         rank, reason, deferrals = _rank_of(
             run, oracle_fp, history, units,
             readmit_after=readmit_after,

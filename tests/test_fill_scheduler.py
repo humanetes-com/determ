@@ -593,3 +593,38 @@ def test_a_session_floor_still_binds_when_earlier_runs_burn_their_share(
     for label, clock_share in granted:
         assert clock_share is not None and plan[label] is not None
         assert abs(clock_share - plan[label]) < 1e-4
+
+
+def test_a_carved_per_fn_run_is_executed_by_its_route_on_its_own_targets(
+        tmp_path: Path) -> None:
+    """The schedule carves a divisible run; the executor hands the open
+    piece to the route that planned the whole run, with only the units that
+    piece holds, and rows the re-buy piece DEFERRED under its own targets."""
+    fill_reading.reset_last_comparison()
+    a, b = FnLocator("src/p.rs", "a"), FnLocator("src/p.rs", "b")
+    run = RouteRun(kind=RouteKind.PER_FN, label="per-fn 2 stub(s)",
+                   targets=frozenset({a, b}),
+                   target_tests=frozenset({"t_a", "t_b"}),
+                   stubs_in_targets=frozenset({a, b}),
+                   unit_tests=((a, frozenset({"t_a"})), (b, frozenset({"t_b"}))))
+    seen: list[frozenset[FnLocator]] = []
+
+    class _PerFn(_Route):
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            seen.append(frozenset(run.targets))
+            return super().run(run, clock)
+
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    deps = _deps(tmp_path, log, events, budget=100.0)
+    deps.ledger.append("p", [RouteLedgerRow(
+        kind=RouteKind.PER_FN, label="per-fn", bodies_sha="old",
+        targets=(("src/p.rs", "a"),), oracle_fp="o", outcome=RunOutcome.FLAT,
+        model_calls=1, minutes=5.0, cluster="c",
+        started="2026-01-01T00:00:00+00:00")])
+    calls: list[str] = []
+    out = execute_fill([_PerFn(RouteKind.PER_FN, [run], calls=calls)],
+                       hollow={}, bodies_sha=_moving_sha(), deps=deps)
+    assert seen == [frozenset({b})]
+    deferred = [r for r in out.rows if r.outcome is RunOutcome.DEFERRED]
+    assert [r.targets for r in deferred] == [(("src/p.rs", "a"),)]

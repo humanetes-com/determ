@@ -45,6 +45,7 @@ from pipeline_core.domain.fill_schedule import (
     RunClock,
     RunOutcome,
     ScheduledRun,
+    UnitEvidence,
     schedule,
 )
 from pipeline_core.domain.models import FnLocator
@@ -95,6 +96,10 @@ class FillExecutionDeps:
     #: unchanged by this argument. Snapshot before owner-map admission
     #: or the spine locators become "attributed".
     attributed: frozenset[FnLocator] = frozenset()
+    #: The body ledger's per-unit verdicts (`fill_schedule.UnitEvidence`):
+    #: every unit-writing run is ranked on its units' own graded landings.
+    #: None keeps the route-row reading (no body ledger on this driver).
+    unit_evidence: UnitEvidence | None = None
     #: Called once per wave, after the wave's route rows are flushed, with
     #: the units the wave's reports say they kept — and once more on the
     #: wave a graceful stop cut, before the stop propagates. The driver's
@@ -359,7 +364,9 @@ def execute_fill(
         crash_blamed=deps.crash_blamed if deps.scheduled else (),
         max_per_kind=deps.max_per_kind if deps.scheduled else None,
         attributed=deps.attributed if deps.scheduled else (),
-        session_min_turns=deps.session_min_turns if deps.scheduled else 0)
+        session_min_turns=deps.session_min_turns if deps.scheduled else 0,
+        bodies_sha=bodies_sha,
+        unit_evidence=deps.unit_evidence if deps.scheduled else None)
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"
@@ -386,7 +393,7 @@ def execute_fill(
             deps.ledger.append(deps.project, new_rows)
     while i < len(ordered):
         s = ordered[i]
-        route = by_key[s.run.key]
+        route = by_key[s.run.plan_key]
         # A wave: this run plus the consecutive runs of the same route when
         # the route allows concurrency. One reading brackets the wave; each
         # run keeps its own clock and share.
@@ -394,7 +401,7 @@ def execute_fill(
         if route.parallel:
             j = i + 1
             while (j < len(ordered) and ordered[j].run.kind is s.run.kind
-                   and by_key[ordered[j].run.key] is route):
+                   and by_key[ordered[j].run.plan_key] is route):
                 wave.append(ordered[j])
                 j += 1
         i += len(wave)

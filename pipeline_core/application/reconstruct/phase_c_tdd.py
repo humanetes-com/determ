@@ -124,6 +124,7 @@ from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     RouteLedgerRow,
+    unit_evidence_from,
     unopened_pair_fills,
     unpaid_pair_buys,
 )
@@ -4701,12 +4702,18 @@ def run_phase_c_tdd(
         _evidence_of = {
             (_k.file, _k.fn_name): _fp
             for _k, _fp in _evidence_now.items()}
-        _flat_keys = {
-            FnLocator(_k.file, _k.fn_name)
-            for _k in flat_standing_unchanged(
-                _stand, oracle_fp_now=_oracle_fp(iter_n),
-                convicting_now=_convict_now,
-                evidence_now=_evidence_now)}
+        _flat_standing = flat_standing_unchanged(
+            _stand, oracle_fp_now=_oracle_fp(iter_n),
+            convicting_now=_convict_now, evidence_now=_evidence_now)
+        _flat_keys = {FnLocator(_k.file, _k.fn_name) for _k in _flat_standing}
+        # The same standing claims, and every landing's sweep grade, for the
+        # fill schedule: it ranks a unit on its own graded body, never on the
+        # run-level outcome of a route row the unit rode in.
+        _unit_evidence = unit_evidence_from(
+            _ledger_entries(),
+            {FnLocator(_k.file, _k.fn_name): _stand[_k].body_sha
+             for _k in _flat_standing},
+            oracle_fp=_oracle_fp(iter_n))
         _cov = None
         if deps.measure_coverage_slice is not None:
             # The failing set is what pass C profiles: the owner map exists
@@ -5737,9 +5744,21 @@ def run_phase_c_tdd(
         # needs the landed fact (`domain/landed_change.py`). None ⇒ the
         # extractor port is absent (legacy/stub engines): the audit is
         # skipped, never guessed.
-        _bodies_before = (
-            unit_bodies(deps.enumerate_fns(target_src_dir) or [], frontier_keys)
-            if deps.enumerate_fns is not None else None)
+        _recs_before = (deps.enumerate_fns(target_src_dir) or []
+                        if deps.enumerate_fns is not None else None)
+        _bodies_before = (unit_bodies(_recs_before, frontier_keys)
+                          if _recs_before is not None else None)
+        # Every unit's body, for the landed-row writer: a wave's route may
+        # keep units outside the dispatch batch (a slice session writes its
+        # editable set), and a keep the ledger never records is a body no
+        # sweep can grade — 24 session-kept units under oracle
+        # `1c3b06644b2e` had no body row for their run (2026-09-23), so the
+        # schedule's per-unit verdict could not see them.
+        _bodies_before_all = (
+            unit_bodies(_recs_before, {
+                FnLocator(str(r.get("file") or ""), str(r.get("fn_name") or ""))
+                for r in _recs_before})
+            if _recs_before is not None else None)
         # THE UNIT LEDGER'S WRITE PATH, AT THE WAVE. The `landed` rows used
         # to be written only in the post-fill block below, which a fill that
         # ends on a stop never reaches: every stop kind (sentinel, the
@@ -5761,7 +5780,7 @@ def run_phase_c_tdd(
             site: str, kept_hint: frozenset[FnLocator], *,
             # Bound at definition, per iteration: the snapshot, the batch,
             # the premise and the row list this iteration's sweep judges.
-            _before: dict[FnLocator, Any] | None = _bodies_before,
+            _before: dict[FnLocator, Any] | None = _bodies_before_all,
             _keys: frozenset[FnLocator] = frozenset(frontier_keys),
             _failed: frozenset[str] = frozenset(cur_failed),
             _elig: Mapping[FnLocator, Any] = eligible,
@@ -5776,7 +5795,11 @@ def run_phase_c_tdd(
                 return 0
             try:
                 recs_now = deps.enumerate_fns(target_src_dir) or []
-                landed_now = changed_units(_before, unit_bodies(recs_now, _keys))
+                # The batch, plus whatever the wave's routes say they kept.
+                scope = _keys | kept_hint
+                landed_now = changed_units(
+                    {k: v for k, v in _before.items() if k in scope},
+                    unit_bodies(recs_now, scope))
                 if not landed_now:
                     return 0
                 items_w, file_of_w, fps_w = _layout_ctx(_epoch)
@@ -5956,6 +5979,7 @@ def run_phase_c_tdd(
                         if bare_test_name(t) not in {
                             bare_test_name(n) for _b, n in _f_pairs}),
                     attributed=_attributed_locs,
+                    unit_evidence=_unit_evidence,
                     # The pool starts units in the order this driver chose;
                     # see `dispatch_ranks_of` for why it is not re-ranked.
                     dispatch_ranks=(
