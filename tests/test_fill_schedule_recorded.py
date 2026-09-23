@@ -79,7 +79,7 @@ def test_the_0523_fill_opens_the_stub_runs_before_the_format_session() -> None:
     assert all(lab in stub_labels for lab in opened[:first_session])
     assert set(opened[:first_session]) == stub_labels
     assert set(sessions) <= set(opened)          # the sessions still open
-    assert out.schedule.ordered[0].level == 0    # blockers first
+    assert out.schedule.ordered[0].level <= 1    # blockers first
     # Negative control: the fixed pre-schedule walk opens the session first.
     _out2, opened_fixed = replay(fix, scheduled=False)
     assert opened_fixed[0] == sessions[0]
@@ -93,7 +93,7 @@ def test_the_91_plateau_fill_keeps_the_sessions_first() -> None:
     out, opened = replay(fix)
     _out2, opened_fixed = replay(fix, scheduled=False)
     assert opened == opened_fixed == [r.label for r in runs["session"]]
-    assert all(s.level == 1 and s.reason == "never_served" for s in out.schedule.ordered)
+    assert all(s.level == 2 and s.reason == "never_served" for s in out.schedule.ordered)
 
 
 def test_a_budget_on_the_0523_fill_defers_nothing_never_served_and_shares_by_weight() -> None:

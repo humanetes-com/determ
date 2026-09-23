@@ -82,7 +82,7 @@ def test_a_stub_run_that_hollows_a_leftover_test_goes_before_a_stub_free_session
     sched = schedule(runs, [], oracle_fp="o", hollow=_hollow())
     assert [s.run.label for s in sched.ordered] == [
         "file src/x.rs", "per-fn", "session[1 test(s)]"]
-    assert sched.ordered[0].level == 0 and sched.ordered[2].level == 1
+    assert sched.ordered[0].level == 1 and sched.ordered[2].level == 2
     # Negative control: the pre-schedule walk.
     fixed = sorted(runs, key=lambda r: TODAY_ORDER.index(r.kind))
     assert fixed[0].kind is RouteKind.SESSION
@@ -1228,3 +1228,57 @@ def test_a_fill_with_candidates_always_opens_one() -> None:
         if len(_pre_fix_pair_wait(runs, hollow)) == len(runs):
             pre_fix_empty += 1
     assert pre_fix_empty > 0
+
+
+def test_recorded_220812_fill_1_opens_the_run_holding_the_crash_evidenced_stub_first() -> None:
+    """Plan sentence: among runs that all fill a blocking stub, the one
+    writing the locator the sweep's crash evidence names opens first. Run
+    `220812-8d346f9c` fill 1 (2026-09-23): `src/error.rs::construct` was the
+    first panic of 128 of 141 failing tests and the per-fn run holding it
+    opened at slot 8 of 9. Control: the same fill with the two tiers merged
+    (no crash evidence to split on) reproduces the live order."""
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.fill_schedule import (
+        RouteLedgerRow,
+        unit_evidence_from,
+    )
+
+    fix = json.loads((Path(__file__).resolve().parent / "fixtures" / "fills"
+                      / "220812-8d346f9c_fill1.json").read_text())
+
+    def loc(s: str) -> FnLocator:
+        f, fn = s.split("::", 1)
+        return FnLocator(f, fn)
+
+    runs = [RouteRun(
+        kind=RouteKind(r["kind"]), label=r["label"],
+        targets=frozenset(loc(x) for x in r["targets"]),
+        target_tests=frozenset(r["target_tests"]),
+        stubs_in_targets=frozenset(loc(x) for x in r["stubs"]),
+        files=tuple(r["files"]), seq=r["seq"], bodies_sha=r["bodies_sha"])
+        for r in fix["runs"]]
+    rows = [r for r in (RouteLedgerRow.from_dict(x) for x in fix["ledger"])
+            if r is not None]
+    # Live, every run sat at level 0: each held a stub a hollow test runs
+    # through. One hollow test per stub restores that.
+    hollow = {f"t_{s}": frozenset({s}) for r in runs
+              for s in r.stubs_in_targets}
+    body = [SimpleNamespace(key=SimpleNamespace(file=b["file"], fn_name=b["fn"]),
+                            run_id=b["run_id"], iteration=b["iteration"],
+                            body_sha=b["body_sha"], state=b["state"],
+                            oracle_fp=b["oracle_fp"])
+            for b in fix["body_ledger"]]
+    kw = {"oracle_fp": fix["oracle_fp"], "hollow": hollow,
+          "budget_minutes": fix["budget_minutes"],
+          "unit_evidence": unit_evidence_from(body, {},
+                                              oracle_fp=fix["oracle_fp"])}
+    sched = schedule(runs, rows, crash_blamed=frozenset(
+        loc(x) for x in fix["crash_blamed"]), **kw)
+    first = sched.ordered[0]
+    assert first.run.kind is RouteKind.PER_FN and first.level == 0
+    assert FnLocator("src/error.rs", "construct") in first.run.targets
+    control = schedule(runs, rows, **kw)
+    assert [s.run.label for s in control.ordered] == fix["live_order"]

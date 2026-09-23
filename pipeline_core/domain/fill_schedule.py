@@ -1161,6 +1161,28 @@ def _served_key_of(row: RouteLedgerRow) -> str:
         row.target_tests)
 
 
+def _level(run: RouteRun, hollow: Mapping[str, frozenset[FnLocator]],
+           blamed: frozenset[FnLocator]) -> int:
+    """The blockers-first tier. 0: the run writes a locator the sweep's
+    crash evidence names (a frame-sited crash, or the stub failing tests
+    first panic in); 1: it fills a stub some leftover test is hollow on;
+    2: the rest.
+
+    One tier for 0 and 1 said nothing about WHICH blocker: on a stub-heavy
+    tree every run holds some stub a hollow test runs through, so the tier
+    was everyone and the fixed route order broke the tie. Run
+    `220812-8d346f9c` fill 1 (2026-09-23): the sweep named
+    `src/error.rs::construct` as the first panic of 128 of 141 failing
+    tests, and the per-fn run holding it opened at slot 8 of 9, behind
+    seven file and impl runs of 22 minutes each, none holding it — with the
+    fill ending at its first premise move."""
+    if run.targets & blamed:
+        return 0
+    if _blocking_stubs(run, hollow):
+        return 1
+    return 2
+
+
 def _run_is_unmeasurable(
     run: RouteRun,
     unmeasurable_tests: Collection[str],
@@ -1332,8 +1354,9 @@ def schedule(
     every unit-writing run's units ranked by their own graded landings; None
     keeps the route-row reading (a caller with no body ledger).
 
-    Level 0 holds every run that fills a stub which makes a leftover test
-    hollow; level 1 the rest. Within a level a coverage-split (see
+    Level 0 holds every run that writes a crash-evidenced locator
+    (``crash_blamed``), level 1 every other run that fills a stub which
+    makes a leftover test hollow, level 2 the rest (:func:`_level`). Within a level a coverage-split (see
     ``attributed``) sorts after an attributed write — that bit precedes
     ledger rank, then the caller's `today_order`, then the run's own
     sequence number. A run goes after every run that :func:`run_blocks`
@@ -1457,8 +1480,7 @@ def schedule(
             grace_left=_served_key(run) not in spent)
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
             rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
-        level = 0 if (_blocking_stubs(run, hollow)
-                      or (run.targets & blamed)) else 1
+        level = _level(run, hollow, blamed)
         split_of[run.key] = _is_coverage_split(run, attr)
         ranked.append((run, rank, reason, deferrals, level))
 
