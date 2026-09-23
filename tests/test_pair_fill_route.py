@@ -373,8 +373,11 @@ def test_no_attributed_tests_means_name_match_only_and_no_direct_claim(
         module_name="m", cluster_name="t", cluster=None,
         check_cmd="cargo check", cluster_env={}, fr_path=None,
         tdd_frontier_keys={_DISP},
+        # A failing test is dispatched against the pair (a pair no failing
+        # test is dispatched against does not travel with the frontier) but
+        # convicts nobody and has no source in the workspace.
         tdd_frontier_tests=FailureFrontier.build(
-            {_DISP: set(), _IMPL: set()}, {}, pairs=(_PAIR,)),
+            {_DISP: {"t_elsewhere"}, _IMPL: set()}, {}, pairs=(_PAIR,)),
     )
     (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]
     assert "display_gen_1.rs" not in pair_prompt
@@ -517,8 +520,11 @@ def test_negative_control_no_attributed_pin_leaves_the_doc_capped(
         module_name="m", cluster_name="t", cluster=None,
         check_cmd="cargo check", cluster_env={}, fr_path=None,
         tdd_frontier_keys={_DISP},
+        # A failing test is dispatched against the pair (a pair no failing
+        # test is dispatched against does not travel with the frontier) but
+        # convicts nobody and has no source in the workspace.
         tdd_frontier_tests=FailureFrontier.build(
-            {_DISP: set(), _IMPL: set()}, {}, pairs=(_PAIR,)),
+            {_DISP: {"t_elsewhere"}, _IMPL: set()}, {}, pairs=(_PAIR,)),
         tdd_test_cmd="cargo test",
     )
     (pair_prompt,) = [p for p in prompts if "PAIRED WRITE" in p]

@@ -1,0 +1,80 @@
+"""Wall-clock bound on ONE claimed unit of a fill route, per thread.
+
+WHY. The fill schedule's share is checked between units, never inside one: a
+unit in flight always completes. Nothing bounded how long one unit could take,
+so a single unit could spend the whole fill. Run `484518-91681c1a` (iter 4,
+2026-09-23): `impl src/error.rs` opened on a 15-minute share and closed
+`REVERTED after 199.0 min (11 call(s), net +0, kept 0, reverted 9)` — five fix
+attempts, a floor stall, the maximal last-resort call, a retrospective, five
+more attempts, a second retrospective — and never compiled; the fill's
+200-minute budget was gone and every other run of that fill was deferred.
+`scripts/share_overrun.py` over the week before (211 route runs) put the p90
+minutes/share of every route kind between 1.80 and 3.40 and the impl route's
+max at 12.94, that run.
+
+WHAT. The run's clock (`fill_schedule.RunClock`) starts this clock on the
+claiming thread at every successful claim, with a bound of
+``FILL_UNIT_SHARE_MULTIPLE`` × the run's share. The fix loops read
+:func:`expired` at their attempt boundaries — the shared driver
+(`fix_loop.run_fix_loop`, via `drive_fix_loop`) before every attempt after
+the first, and the per-fn / per-impl retrospective loops before a
+last-resort call or a retrospective — so a unit ends at the next boundary
+past its bound with the exit its route already has for a failed unit. The
+attempt in flight completes. A thread that never claimed (task0c's loops, a
+test) has no bound, so a loop that reads the clock outside a fill is
+unaffected.
+
+This is not a stop: the process, the fill and the other runs continue. The
+process-level bound stays `fill_phase_clock`.
+"""
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable
+
+_local = threading.local()
+
+
+def start(bound_minutes: float | None, *,
+          now: Callable[[], float] = time.monotonic) -> None:
+    """Begin a unit on this thread. ``None`` or ``<= 0`` means unbounded."""
+    _local.now = now
+    _local.bound = bound_minutes if bound_minutes and bound_minutes > 0 else None
+    _local.started = now()
+    _local.noted = False
+
+
+def clear() -> None:
+    """No unit on this thread (tests, and the end of a fill)."""
+    _local.bound = None
+    _local.noted = False
+
+
+def bound_minutes() -> float | None:
+    """This thread's current unit bound in minutes, or None."""
+    return getattr(_local, "bound", None)
+
+
+def elapsed_minutes() -> float:
+    """Minutes since this thread's unit started; 0 when none started."""
+    now = getattr(_local, "now", None)
+    if now is None:
+        return 0.0
+    started: float = _local.started
+    return (float(now()) - started) / 60.0
+
+
+def expired() -> bool:
+    """True when this thread's unit has run past its bound."""
+    bound = bound_minutes()
+    return bound is not None and elapsed_minutes() >= bound
+
+
+def note_once() -> bool:
+    """True the first time an expired unit is noticed, so the caller logs
+    and emits once per unit however many boundaries read it."""
+    if not expired() or getattr(_local, "noted", False):
+        return False
+    _local.noted = True
+    return True

@@ -58,7 +58,9 @@ test, unit or crate name is an input:
   claiming new units. No unit, turn or session in flight is interrupted.
 
 `budget_minutes = 0` means ORDER ONLY: no shares, no weight-zero deferral.
-pair_wait, coverage-split and kind_cap still defer at budget 0.
+pair_wait, coverage-split, kind_cap and nothing_aimed (a run that fills no
+stub, aims at no failing test and writes no crash-blamed locator) still
+defer at budget 0.
 
 Deliberately not here: any route's own preconditions (what a session may
 edit, which blocks the impl route covers), the keep contract applied to a
@@ -75,6 +77,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
+from pipeline_core.domain import unit_clock
 from pipeline_core.domain.models import FnLocator, FnSite
 
 __all__ = [
@@ -91,6 +94,7 @@ __all__ = [
     "ScheduledRun",
     "bodies_sha_of",
     "carve_rebuys",
+    "condensed_order",
     "unit_evidence_from",
     "consecutive_unpaid",
     "hollow_by_test",
@@ -1180,6 +1184,111 @@ def _served_key_of(row: RouteLedgerRow) -> str:
         row.target_tests)
 
 
+def _aims_at_nothing(run: RouteRun, blamed: frozenset[FnLocator]) -> bool:
+    """True when no verdict can move by construction: the run fills no stub,
+    aims at no failing test, and writes no crash-blamed locator. It rewrites
+    bodies already on disk that nothing failing is attributed to. One rule
+    for every route, so a new route cannot recreate the case by omitting a
+    guard in its planner. Run `484518-91681c1a` fill 5 (2026-09-23): two
+    formatter pairs whose members had dropped out of the dispatch map
+    (`stubs []`, `target_tests []`) opened first and kept 4 bodies flat in
+    20 minutes.
+
+    A run with no targets writes nothing and spends no call; the per-fn
+    route plans one when every stub it found is cfg-dead, so the pass can
+    log and emit that refusal (`phase_c.dispatch.cfg_dead_refused`). It is
+    left to the route."""
+    return (bool(run.targets) and not run.stubs_in_targets
+            and not run.target_tests and not (run.targets & blamed))
+
+
+def condensed_order(keys: Sequence[str],
+                    blockers: Mapping[str, Collection[str]]) -> list[str]:
+    """`keys` (given in sort order) in a topological order of `blockers`
+    (key -> the keys that must go before it), where a set of keys that
+    block each other is placed as ONE node: its position is its best
+    member's sort position, and its members keep their sort order.
+
+    Equal to "first key in sort order whose blockers are all placed" on an
+    acyclic relation. It differs only on a cycle, and that is the case it
+    exists for: the plain walk can place a cycle only once NO key is
+    placeable, so every key outside the cycle — however low its sort
+    position — goes first. On a stub-heavy tree nearly every run holds a
+    stub some other run's tests are hollow on, so the blocks relation is
+    one large cycle and the runs outside it are exactly those nothing can
+    block (a run aiming at no test). Run `484518-91681c1a` fill 5
+    (2026-09-23): the sweep named the first failure of all 141 failing
+    tests, the per-fn run holding that stub sorted first (level 0), an
+    11-run cycle held it, and the two level-2 formatter pairs — no stub,
+    no aimed test — opened ahead of it for 20 flat minutes.
+    """
+    pos = {k: i for i, k in enumerate(keys)}
+    succ: dict[str, list[str]] = {k: [] for k in keys}
+    for k in keys:
+        for b in blockers.get(k, ()):
+            if b in pos and b != k:
+                succ[b].append(k)
+    for k in keys:
+        succ[k].sort(key=pos.__getitem__)
+
+    # Tarjan's strongly connected components, iterative so a large fill
+    # cannot hit the recursion limit; roots visited in sort order.
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    stack: list[str] = []
+    comp_of: dict[str, int] = {}
+    comps: list[list[str]] = []
+    counter = 0
+    for root in keys:
+        if root in index:
+            continue
+        work: list[tuple[str, int]] = [(root, 0)]
+        while work:
+            v, i = work.pop()
+            if i == 0:
+                index[v] = low[v] = counter
+                counter += 1
+                stack.append(v)
+                on_stack.add(v)
+            if i < len(succ[v]):
+                work.append((v, i + 1))
+                w = succ[v][i]
+                if w not in index:
+                    work.append((w, 0))
+                elif w in on_stack:
+                    low[v] = min(low[v], index[w])
+                continue
+            if low[v] == index[v]:
+                comp: list[str] = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    comp_of[w] = len(comps)
+                    comp.append(w)
+                    if w == v:
+                        break
+                comps.append(sorted(comp, key=pos.__getitem__))
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[v])
+
+    comp_blockers: list[set[int]] = [set() for _ in comps]
+    for k in keys:
+        for b in blockers.get(k, ()):
+            if b in pos and comp_of[b] != comp_of[k]:
+                comp_blockers[comp_of[k]].add(comp_of[b])
+    pending = sorted(range(len(comps)), key=lambda c: pos[comps[c][0]])
+    placed: set[int] = set()
+    out: list[str] = []
+    while pending:
+        pick = next(c for c in pending if not (comp_blockers[c] - placed))
+        placed.add(pick)
+        pending.remove(pick)
+        out.extend(comps[pick])
+    return out
+
+
 def _level(run: RouteRun, hollow: Mapping[str, frozenset[FnLocator]],
            blamed: frozenset[FnLocator]) -> int:
     """The blockers-first tier. 0: the run writes a locator the sweep's
@@ -1388,8 +1497,9 @@ def schedule(
     aimed test is unmeasurable and whose targets miss the crash-blamed
     set ranks as a flat re-buy (weight 0) even with no ledger row, so a
     positive budget defers it. ``budget_minutes=0`` still runs weight-zero
-    (order only), except pair_wait / coverage-split / kind_cap which
-    defer at budget 0 the way kind_cap already did.
+    (order only), except pair_wait / coverage-split / kind_cap /
+    nothing_aimed (:func:`_aims_at_nothing`) which defer at budget 0 the
+    way kind_cap already did.
 
     ``max_per_kind`` caps how many runs of a route kind one fill opens, in
     schedule order: the runs beyond a kind's cap are DEFERRED (reason
@@ -1548,9 +1658,10 @@ def schedule(
         return a.kind is not RouteKind.PAIR or _grace_left(a, b)
 
 
-    # Stable topological order over ALL runs: at each step the first run in
-    # sort order whose every blocker is already placed. A cycle (two runs
-    # each holding a stub the other's tests need) falls back to sort order.
+    # Topological order over the blocks relation, condensed to its strongly
+    # connected components (:func:`condensed_order`): runs that block each
+    # other form one component, which is placed by its best member's sort
+    # key like any single run.
     blockers_of: dict[str, tuple[str, ...]] = {
         it[0].key: tuple(
             other[0].label for other in ranked
@@ -1563,17 +1674,10 @@ def schedule(
             if other[0] is not it[0]
             and _orders(other[0], it[0])}
         for it in ranked}
-    ordered_items: list[tuple[RouteRun, int, str, int, int, tuple[str, ...]]] = []
-    pending = list(ranked)
-    placed: set[str] = set()
-    while pending:
-        pick = next((it for it in pending
-                     if not (blocker_keys[it[0].key] - placed)), None)
-        if pick is None:
-            pick = pending[0]
-        ordered_items.append((*pick, blockers_of[pick[0].key]))
-        placed.add(pick[0].key)
-        pending.remove(pick)
+    by_key = {it[0].key: it for it in ranked}
+    ordered_items: list[tuple[RouteRun, int, str, int, int, tuple[str, ...]]] = [
+        (*by_key[k], blockers_of[k])
+        for k in condensed_order([it[0].key for it in ranked], blocker_keys)]
 
     scheduled: list[ScheduledRun] = []
     for run, rank, reason, _d, level, by in ordered_items:
@@ -1618,6 +1722,10 @@ def schedule(
     kept: list[ScheduledRun] = []
     for s in scheduled:
         run = s.run
+        if _aims_at_nothing(run, blamed):
+            waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                   reason="nothing_aimed"))
+            continue
         blocking_pairs = [p for p in opened_runs
                           if p.kind is RouteKind.PAIR
                           and run_blocks(p, run, hollow, blamed)]
@@ -1782,8 +1890,12 @@ class RunClock:
                  fill_remaining: Callable[[], float | None],
                  now: Callable[[], float] = time.monotonic,
                  ground_moved: Callable[[frozenset[str] | None], bool] | None = None,
-                 scope: frozenset[str] | None = None) -> None:
+                 scope: frozenset[str] | None = None,
+                 unit_multiple: float = 0.0) -> None:
         self.share_minutes = share_minutes
+        #: Each claimed unit's own bound, as a multiple of the share
+        #: (`FILL_UNIT_SHARE_MULTIPLE`; :mod:`unit_clock`). 0 = unbounded.
+        self.unit_multiple = unit_multiple
         self._fill_remaining = fill_remaining
         self._ground_moved = ground_moved
         #: The tests the run was planned on (`RouteRun.target_tests`).
@@ -1807,24 +1919,43 @@ class RunClock:
         self.last_delta = int(delta)
 
     def may_claim(self, tests: Iterable[str] | None = None) -> bool:
-        """Budget follows payoff: within the share, always; past it only
-        while the last claim cashed and the fill has budget left. Never once
-        the ground this claim was planned on has moved: ``tests`` when the
-        route names the unit's own tests (a pooled per-fn unit), else the
-        run's scope; with neither, any move refuses."""
+        """True when the next claim may be made (:meth:`refusal` is "")."""
+        return not self.refusal(tests)
+
+    def refusal(self, tests: Iterable[str] | None = None) -> str:
+        """Make the next claim, or say why not: ``""`` when claimed,
+        ``"premise"`` when the ground this claim was planned on has moved,
+        ``"share"`` when the share is spent and the last claim bought
+        nothing. Budget follows payoff: within the share, always; past it
+        only while the last claim cashed and the fill has budget left.
+        Never once the ground this claim was planned on has moved:
+        ``tests`` when the route names the unit's own tests (a pooled
+        per-fn unit), else the run's scope; with neither, any move refuses.
+
+        One answer per call, so a parallel wave's workers each get the
+        reason for their own claim. The per-fn route names its unclaimed
+        units under each reason: one line for both could not say whether
+        run `484518-91681c1a` fill 4 refused `src/ptr.rs::new` because a
+        keep had just moved its tests onto it, or because the share ran out."""
         scope = frozenset(tests) if tests is not None else self.scope
         if self._ground_moved is not None and self._ground_moved(scope):
             self.refused += 1
-            return False
-        if self.share_minutes is None:
-            self.claims += 1
-            return True
-        if self.elapsed() < self.share_minutes:
-            self.claims += 1
-            return True
+            return "premise"
+        if self.share_minutes is None or self.elapsed() < self.share_minutes:
+            return self._claimed()
         fill_left = self._fill_remaining()
         if self.last_delta > 0 and (fill_left is None or fill_left > 0):
-            self.claims += 1
-            return True
+            return self._claimed()
         self.refused += 1
-        return False
+        return "share"
+
+    def _claimed(self) -> str:
+        """Count the claim and start the claiming thread's unit clock: the
+        unit may run until ``unit_multiple`` × the share, then ends at its
+        next attempt boundary (:mod:`unit_clock`)."""
+        self.claims += 1
+        unit_clock.start(
+            self.share_minutes * self.unit_multiple
+            if self.share_minutes and self.unit_multiple > 0 else None,
+            now=self._now)
+        return ""

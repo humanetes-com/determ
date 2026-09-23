@@ -222,8 +222,8 @@ def test_a_wave_of_parallel_runs_attributes_its_own_keeps(tmp_path: Path) -> Non
     calls: list[str] = []
     log: list[str] = []
     events: list[tuple[str, dict]] = []
-    a = RouteRun(kind=RouteKind.FILE, label="file a.rs", targets=frozenset({FnLocator("a.rs", "f")}), files=("a.rs",))
-    b = RouteRun(kind=RouteKind.FILE, label="file b.rs", targets=frozenset({FnLocator("b.rs", "g")}), files=("b.rs",), seq=1)
+    a = RouteRun(kind=RouteKind.FILE, label="file a.rs", targets=frozenset({FnLocator("a.rs", "f")}), target_tests=frozenset({"t_f"}), files=("a.rs",))
+    b = RouteRun(kind=RouteKind.FILE, label="file b.rs", targets=frozenset({FnLocator("b.rs", "g")}), target_tests=frozenset({"t_g"}), files=("b.rs",), seq=1)
     route = _Route(RouteKind.FILE, [a, b], parallel=True, calls=calls, keep_delta=3)
     out = execute_fill([route], hollow={}, bodies_sha=lambda _t: "b",
                        deps=_deps(tmp_path, log, events, parallelism=2))
@@ -323,11 +323,14 @@ def test_a_wave_s_rows_carry_each_run_s_own_units_and_a_run_that_never_opened_is
     from pipeline_core.domain.fill_attempts import FillAttempts, current_run_label
 
     a = RouteRun(kind=RouteKind.FILE, label="file a.rs",
-                 targets=frozenset({FnLocator("a.rs", "f")}), files=("a.rs",))
+                 targets=frozenset({FnLocator("a.rs", "f")}),
+                 target_tests=frozenset({"t_f"}), files=("a.rs",))
     b = RouteRun(kind=RouteKind.FILE, label="file b.rs",
-                 targets=frozenset({FnLocator("b.rs", "g")}), files=("b.rs",), seq=1)
+                 targets=frozenset({FnLocator("b.rs", "g")}),
+                 target_tests=frozenset({"t_g"}), files=("b.rs",), seq=1)
     c = RouteRun(kind=RouteKind.FILE, label="file c.rs",
-                 targets=frozenset({FnLocator("c.rs", "h")}), files=("c.rs",), seq=2)
+                 targets=frozenset({FnLocator("c.rs", "h")}),
+                 target_tests=frozenset({"t_h"}), files=("c.rs",), seq=2)
 
     class _WaveRoute:
         """Three runs in flight at once: every window holds every note."""
@@ -412,9 +415,11 @@ def test_every_wave_hands_its_kept_units_to_the_unit_ledger_writer(
     calls: list[str] = []
     seen: list[frozenset[FnLocator]] = []
     kept_run = RouteRun(kind=RouteKind.FILE, label="file src/x.rs",
-                        targets=frozenset({_FMT}))
+                        targets=frozenset({_FMT}),
+                        target_tests=frozenset({"t_fmt"}))
     cut_run = RouteRun(kind=RouteKind.PER_FN, label="per-fn 1 re-fill(s)",
-                       targets=frozenset({_STUB}))
+                       targets=frozenset({_STUB}),
+                       target_tests=frozenset({"t_hollow"}))
     routes = [
         _Route(RouteKind.FILE, [kept_run], calls=calls,
                report=RouteRunReport(model_calls=1, kept=frozenset({_FMT}))),
@@ -551,7 +556,8 @@ def test_a_keep_that_left_the_targets_as_they_were_is_recorded_as_keeping_nothin
         log: list[str] = []
         seen: list[frozenset[FnLocator]] = []
         run = RouteRun(kind=RouteKind.FILE, label="file src/x.rs",
-                       targets=frozenset({_FMT}))
+                       targets=frozenset({_FMT}),
+                       target_tests=frozenset({"t_fmt"}))
         route = _Route(RouteKind.FILE, [run], calls=[],
                        report=RouteRunReport(model_calls=1, kept=frozenset({_FMT})))
         deps = _replace(_deps(root, log, []), on_wave_kept=seen.append)
@@ -612,7 +618,8 @@ def test_a_session_floor_still_binds_when_earlier_runs_burn_their_share(
         target_tests=frozenset({"t_new"}))
     per_fn = [
         RouteRun(kind=RouteKind.PER_FN, label=f"per-fn {i}",
-                 targets=frozenset({FnLocator("src/p.rs", f"n{i}")}))
+                 targets=frozenset({FnLocator("src/p.rs", f"n{i}")}),
+                 target_tests=frozenset({f"t_n{i}"}))
         for i in range(10)]
     out = execute_fill(
         [_Burn(RouteKind.PER_FN, per_fn, calls=[]),

@@ -68,6 +68,7 @@ def _ledger() -> list[RouteLedgerRow]:
 #: only candidate the schedule re-admits everything (its own rule).
 _OTHER = RouteRun(kind=RouteKind.FILE, label="file src/q.rs",
                   targets=frozenset({FnLocator("src/q.rs", "e")}),
+                  target_tests=frozenset({"t_q"}),
                   bodies_sha="new")
 
 

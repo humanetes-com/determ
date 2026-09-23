@@ -666,6 +666,27 @@ def _read_session_min_turns() -> int:
         return 3
 
 
+def _read_unit_share_multiple() -> float:
+    """`FILL_UNIT_SHARE_MULTIPLE`, default 4; 0 disables the unit bound.
+
+    Read once at cluster entry like the other fill knobs. NOT a stop: each
+    claimed unit of a route run may take this many times the run's share,
+    then ends at its next attempt boundary with its route's failed-unit exit
+    (`unit_clock`); the fill, the other runs and the process continue.
+    Sized on `scripts/share_overrun.py` over 211 route runs (2026-09-16 to
+    2026-09-23): p90 minutes/share per route kind 1.80-3.40, so 4 cuts no
+    run at any kind's p90; the impl route's max, 12.94, is run
+    `484518-91681c1a`'s `impl src/error.rs` (199 min on a 15-min share,
+    never compiled). No effect when the fill is unbounded
+    (`TDD_FILL_BUDGET_MINUTES=0`: no shares). A garbage value keeps the
+    default."""
+    raw = os.getenv("FILL_UNIT_SHARE_MULTIPLE", "4").strip() or "4"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 4.0
+
+
 def _read_fill_budget_minutes() -> float:
     """`TDD_FILL_BUDGET_MINUTES`, 0 on unset or garbage."""
     raw = os.getenv("TDD_FILL_BUDGET_MINUTES", "0")
@@ -777,6 +798,7 @@ def run_phase_c_tdd(
     _fill_budget = _read_fill_budget_minutes()
     _max_sessions = _read_max_sessions_per_fill()
     _session_min_turns = _read_session_min_turns()
+    _unit_share_multiple = _read_unit_share_multiple()
     # Re-plan on a moved premise (`fill_scheduler._GroundGate`): a fill ends
     # at the first claim after a keep that changed which tests fail or where
     # they first fail, and the next sweep plans from the tree as it stands.
@@ -890,6 +912,8 @@ def run_phase_c_tdd(
          + (f", sessions-per-fill={_max_sessions}"
             if _max_sessions > 0 else ", sessions-per-fill=unbounded")
          + f", session-min-turns={_session_min_turns}"
+         + (f", unit-bound={_unit_share_multiple:g}x share"
+            if _unit_share_multiple > 0 else ", unit-bound=off")
          + f", language-driver={language_driver().name}"
          + f", followup-think={'on' if followup_think_env_on() else 'off'}"
          + f", replan-on-premise={'on' if _replan_on_premise else 'off'}"
@@ -5938,6 +5962,7 @@ def run_phase_c_tdd(
                     run_id=deps.run_id,
                     max_sessions_per_fill=_max_sessions,
                     session_min_turns=_session_min_turns,
+                    unit_share_multiple=_unit_share_multiple,
                     leaf_name_counts=leaf_counts,
                     fr_path=fr_path,
                     tdd_frontier_keys=frontier_keys,

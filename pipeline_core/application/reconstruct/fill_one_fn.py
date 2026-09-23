@@ -58,6 +58,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
 )
+from pipeline_core.domain import unit_clock
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.coverage_slice import (
@@ -1347,6 +1348,25 @@ class FillOneFn:
                 check_stop=self.tel.check_stop,
             )
             if success:
+                break
+            if unit_clock.expired():
+                # Past the unit's bound (`FILL_UNIT_SHARE_MULTIPLE` × the
+                # run's share): no retrospective — running out of time is not
+                # evidence about this body. The unit exits as a failed unit.
+                if unit_clock.note_once():
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {rel_file}::{fn_name}: UNIT_BOUND "
+                        f"— {unit_clock.elapsed_minutes():.0f} min past its "
+                        f"{unit_clock.bound_minutes():.0f}-min bound after "
+                        f"{fix_attempt} attempt(s), retro round {_retro_round}; "
+                        "no retrospective.")
+                    self.tel.emit("phase_c.unit.bound", data={
+                        "cluster": ctx.cluster_name, "route": "per-fn",
+                        "unit": f"{rel_file}::{fn_name}",
+                        "attempts": fix_attempt, "retro_round": _retro_round,
+                        "bound_minutes": unit_clock.bound_minutes(),
+                        "elapsed_minutes": round(
+                            unit_clock.elapsed_minutes(), 1)})
                 break
             if _crash_blocked_mark or _unpayable_mark:
                 # No retrospective and no conviction: the failure was never

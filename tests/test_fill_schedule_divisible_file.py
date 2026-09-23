@@ -54,6 +54,7 @@ A, B, C = (FnLocator("src/x.rs", n) for n in ("a", "b", "c"))
 # re-admits them all, which is not the question here.
 _OTHER = RouteRun(kind=RouteKind.FILE, label="file src/q.rs",
                   targets=frozenset({FnLocator("src/q.rs", "e")}),
+                  target_tests=frozenset({"t_q"}),
                   bodies_sha="new")
 
 

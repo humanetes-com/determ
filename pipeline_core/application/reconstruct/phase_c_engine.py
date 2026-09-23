@@ -350,6 +350,9 @@ class PhaseCFillEngine:
         # plain weighted split), priced at its measured turn cost by the
         # schedule.
         session_min_turns: int = 0,
+        # Each claimed unit's bound as a multiple of its run's share
+        # (`FILL_UNIT_SHARE_MULTIPLE`; `unit_clock`); 0 = unbounded.
+        unit_share_multiple: float = 0.0,
         # `(rel) -> healed?`: the heal hierarchy on one file of the tree,
         # for the boundary read before the per-pass test. None reports the
         # break and lets the pass test read it (the fixture path).
@@ -574,6 +577,7 @@ class PhaseCFillEngine:
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
                               if max_sessions_per_fill > 0 else {}),
                 session_min_turns=session_min_turns,
+                unit_share_multiple=unit_share_multiple,
                 on_wave_kept=on_wave_kept,
                 premise=fill_premise, ground_now=fill_ground_now))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
@@ -672,6 +676,7 @@ class PhaseCFillEngine:
         landed_before: Callable[[], int],
         claim: Callable[..., bool],
         heal_file: Callable[[str], bool] | None = None,
+        claim_refusal: Callable[..., str] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -944,15 +949,15 @@ class PhaseCFillEngine:
                 stub_free=not any(not _is_cfg_dead(k) for k in _pass_stub_keys),
             )
 
-            # Units the fill schedule's gate refused this pass (share spent,
-            # or their own tests moved under a keep): named once, below.
-            _unclaimed: list[str] = []
+            # Units the fill schedule's gate refused this pass, by the
+            # clock's reason (`RunClock.refusal`): named once, below.
+            _unclaimed: dict[str, list[str]] = {}
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
                         filled_this_pass: list[FnLocator] = filled_this_pass,
                         results_this_pass: list[FillResult] = results_this_pass,
-                        _unclaimed: list[str] = _unclaimed,
+                        _unclaimed: dict[str, list[str]] = _unclaimed,
                         pass_n: int = pass_n) -> None:
                 # B023: the per-LEVEL queue AND the per-pass ctx/list/number are
                 # passed explicitly — free-var reads would rely on late binding.
@@ -978,9 +983,13 @@ class PhaseCFillEngine:
                     _own = (tdd_frontier_tests.tests_for(
                                 FnLocator(rec.file, rec.fn_name))
                             if tdd_frontier_tests is not None else set())
-                    if not claim(frozenset(_own)):
+                    _why = (claim_refusal(frozenset(_own))
+                            if claim_refusal is not None
+                            else ("" if claim(frozenset(_own)) else "refused"))
+                    if _why:
                         with _counters_lock:
-                            _unclaimed.append(f"{rec.file}::{rec.fn_name}")
+                            _unclaimed.setdefault(_why, []).append(
+                                f"{rec.file}::{rec.fn_name}")
                         continue
                     try:
                         res = self.fill_one.run(idx, rec, ctx=_pass_ctx)
@@ -1039,14 +1048,24 @@ class PhaseCFillEngine:
                 else:
                     _worker(_work_queue)
 
-            if _unclaimed:
+            _why_text = {
+                "premise": "a keep of this fill moved the tests they were "
+                           "planned on",
+                "share": "the run's share is spent and its last landing "
+                         "bought nothing",
+            }
+            for _why, _units in sorted(_unclaimed.items()):
                 self.tel.log(
-                    f"  [phase-c/per-fn] pass {pass_n}: {len(_unclaimed)} "
-                    "unit(s) not claimed (fill share spent, or a keep of "
-                    "this fill moved the tests they were planned on): "
-                    + ", ".join(sorted(_unclaimed)[:8])
-                    + (f" (+{len(_unclaimed) - 8} more)"
-                       if len(_unclaimed) > 8 else ""))
+                    f"  [phase-c/per-fn] pass {pass_n}: {len(_units)} "
+                    f"unit(s) not claimed ({_why_text.get(_why, _why)}): "
+                    + ", ".join(sorted(_units)[:8])
+                    + (f" (+{len(_units) - 8} more)"
+                       if len(_units) > 8 else ""))
+            if _unclaimed:
+                self.tel.emit("phase_c.fn.unclaimed", data={
+                    "cluster": cluster_name, "pass_n": pass_n,
+                    "by_reason": {k: sorted(v)
+                                  for k, v in sorted(_unclaimed.items())}})
             if _pass_ctx.retro_gate.total:
                 self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: "
                              f"{_pass_ctx.retro_gate.render()}")
@@ -1534,7 +1553,8 @@ class _PerFnRoute:
             _is_cfg_dead=kw["is_cfg_dead"], _dispatched=kw["dispatched"],
             _reverted=kw["reverted"], _answer_lost=kw["answer_lost"],
             landed_before=kw["landed_before"], claim=clock.may_claim,
-            heal_file=kw["heal_file"])
+            heal_file=kw["heal_file"],
+            claim_refusal=clock.refusal)
         res = self.result
         disp = frozenset(kw["dispatched"]) - before_disp
         rev = frozenset(kw["reverted"]) - before_rev

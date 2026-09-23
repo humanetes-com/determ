@@ -51,6 +51,7 @@ _A, _B = FnLocator("src/p.rs", "a"), FnLocator("src/p.rs", "b")
 #: schedule re-admits everything (its own rule), which would hide a verdict.
 _OTHER = RouteRun(kind=RouteKind.FILE, label="file src/q.rs",
                   targets=frozenset({FnLocator("src/q.rs", "e")}),
+                  target_tests=frozenset({"t_q"}),
                   bodies_sha="new")
 
 
@@ -62,13 +63,14 @@ def _row(targets: Iterable[FnLocator], outcome: RunOutcome, *,
          kept: Iterable[FnLocator] = (), reverted: Iterable[FnLocator] = (),
          delta: int = 0, run_id: str = "r1", iteration: int = 1,
          kind: RouteKind = RouteKind.PER_FN, bodies: str = "old",
-         started: str = "2026-01-01T00:00") -> RouteLedgerRow:
+         started: str = "2026-01-01T00:00",
+         tests: tuple[str, ...] = ()) -> RouteLedgerRow:
     return RouteLedgerRow(
         kind=kind, label=f"{kind.value} run", bodies_sha=bodies,
         targets=_pairs(targets), oracle_fp="o", outcome=outcome,
         kept=_pairs(kept), reverted=_pairs(reverted), net_pass_delta=delta,
         model_calls=1, minutes=5.0, run_id=run_id, iteration=iteration,
-        started=started)
+        started=started, target_tests=tests)
 
 
 def _per_fn(targets: Iterable[FnLocator], *, bodies: str = "new",
@@ -182,9 +184,10 @@ def test_an_identical_run_s_flat_row_does_not_bypass_the_unit_verdict() -> None:
 def test_a_session_is_still_ranked_by_its_rows() -> None:
     """A session's try is keyed by the tests it aims at; the units its
     transcript touched are not the question."""
-    rows = [_row([_A], RunOutcome.FLAT, kept=[_A], kind=RouteKind.SESSION)]
+    rows = [_row([_A], RunOutcome.FLAT, kept=[_A], kind=RouteKind.SESSION,
+                 tests=("t_s",))]
     run = RouteRun(kind=RouteKind.SESSION, label="session", bodies_sha="new",
-                   targets=frozenset({_A}))
+                   targets=frozenset({_A}), target_tests=frozenset({"t_s"}))
     sched = schedule([run, _OTHER], rows, oracle_fp="o", hollow={},
                      budget_minutes=200,
                      unit_evidence=_ev({_A: ("sa", "unmeasured")}))

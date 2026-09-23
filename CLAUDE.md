@@ -944,6 +944,19 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   Prevents no reading; `0` restores the plain weighted split. Read once at
   cluster entry (`session-min-turns=N` on the cluster-entry line). Keep
   `SLICE_SESSION_MAX_PER_FILL × N × turn price` under the budget.
+- `FILL_UNIT_SHARE_MULTIPLE` (default 4) — NOT a stop: one claimed unit of
+  a route run may take this many times the run's share, then ends at its
+  next fix-loop attempt boundary with its route's failed-unit exit (no
+  last-resort call, no retrospective; `UNIT_BOUND` in the log,
+  `phase_c.unit.bound`). The attempt in flight completes; the fill and the
+  process continue (`domain/unit_clock.py`, read by `drive_fix_loop`).
+  Sized on `scripts/share_overrun.py` over 211 route runs (2026-09-16 →
+  09-23): per-kind p90 minutes/share 1.80–3.40; run `484518-91681c1a`'s
+  `impl src/error.rs` ran 199 min on a 15-min share (12.9×) and never
+  compiled. Prevents no reading: it shortens a fill, bringing the next
+  sweep forward. Inert when `TDD_FILL_BUDGET_MINUTES=0` (no shares). `0`
+  disables. Read once at cluster entry (`unit-bound=4x share` on the
+  cluster-entry line).
 - `PHASE_C_REPLAN_ON_PREMISE` (default 1) — NOT a stop: a fill ends at the
   first claim after a keep that changed which tests fail or where they first
   fail (`fill_scheduler._GroundGate`, `test_outcome.premise_of`), and the

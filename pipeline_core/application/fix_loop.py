@@ -62,6 +62,7 @@ from pipeline_core.application.reconstruct.write_gate import (
     WriteGateDeps,
     guarded_write,
 )
+from pipeline_core.domain import unit_clock
 from pipeline_core.domain.attribution import as_dispatch
 from pipeline_core.domain.behaviour import union_cluster_suites
 from pipeline_core.domain.fix_report import FixReport
@@ -118,7 +119,7 @@ class LoopOutcome:
     """Why :func:`run_fix_loop` stopped, and after how many attempts."""
 
     attempts: int
-    reason: str  # "accepted" | "dead_end" | "stalled" | "repeated" | "hard_cap" | "done"
+    reason: str  # "accepted" | "dead_end" | "stalled" | "repeated" | "hard_cap" | "done" | "unit_bound"
 
 
 def run_fix_loop(
@@ -129,6 +130,7 @@ def run_fix_loop(
     max_stalls: int,
     before_attempt: Callable[[int], None] = _noop,
     initial_done: bool = False,
+    should_end: Callable[[], bool] = lambda: False,
 ) -> LoopOutcome:
     """Run ``attempt`` until it accepts / dead-ends / the gauge stalls out /
     the gauge reports a repeated signature / the hard-cap backstop fires.
@@ -138,11 +140,18 @@ def run_fix_loop(
     it (graceful-stop check for the outcome view; pending-retro setup for the
     metric view). The stall / repeated checks read the gauge AFTER the attempt —
     in that order, matching the legacy per-fn/per-impl loops — so the attempt's
-    own mutation (observe / record) is visible to the exit decision."""
+    own mutation (observe / record) is visible to the exit decision.
+
+    `should_end()` is read before every attempt after the first; True ends
+    the loop there (reason ``"unit_bound"``) — the unit's wall-clock bound
+    (:mod:`unit_clock`), so the first attempt always runs and the one in
+    flight always completes."""
     if initial_done:
         return LoopOutcome(0, "done")
     n = 0
     while n < hard_cap:
+        if n > 0 and should_end():
+            return LoopOutcome(n, "unit_bound")
         n += 1
         before_attempt(n)
         status = attempt(n)
@@ -218,6 +227,9 @@ def drive_fix_loop(
     result = run_fix_loop(
         attempt, gauge, hard_cap=hard_cap, max_stalls=max_stalls,
         before_attempt=lambda n: check_stop(f"{stop_context} attempt {n}"),
+        # Every fix loop a fill route drives reads its unit's bound here, so
+        # a new route cannot run a unit unbounded by forgetting the check.
+        should_end=unit_clock.expired,
     )
     if result.reason == "stalled" and on_stall is not None:
         on_stall(result.attempts, gauge)

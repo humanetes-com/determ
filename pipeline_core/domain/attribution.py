@@ -163,9 +163,20 @@ class FailureFrontier:
             kept = set(tests) & dispatch[loc]
             if kept:
                 sites.setdefault(site, set()).update(kept)
+        # A pair travels with the frontier only while a failing test is
+        # dispatched against one of its members — the same invariant as
+        # conviction above. `dispatch_including_pairs` already leaves out a
+        # pair naming no test on either endpoint; carrying it here anyway
+        # handed the pair route a run with no aimed test (run
+        # `484518-91681c1a` fill 5, 2026-09-23: both members' tests had
+        # moved to a still-stubbed producer and been deferred, the pairs
+        # opened first and bought nothing).
+        live_pairs = frozenset(
+            p for p in pairs
+            if any(dispatch.get(loc) for loc in p.member_locators()))
         return cls(dict(dispatch), sites,
                    dict(evidence or {}), dict(sources or {}),
-                   frozenset(pairs))
+                   live_pairs)
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:

@@ -47,8 +47,10 @@ def _row(kind: RouteKind, targets: Iterable[FnLocator], outcome: RunOutcome, *,
 
 
 def _per_fn(targets: Iterable[FnLocator], label: str = "per-fn") -> RouteRun:
-    return RouteRun(kind=RouteKind.PER_FN, label=label,
-                    targets=frozenset(targets), bodies_sha="new")
+    ts = frozenset(targets)
+    return RouteRun(kind=RouteKind.PER_FN, label=label, targets=ts,
+                    target_tests=frozenset(f"t_{u.fn_name}" for u in ts),
+                    bodies_sha="new")
 
 
 def _pre_change_rank_is_never_served(run: RouteRun,

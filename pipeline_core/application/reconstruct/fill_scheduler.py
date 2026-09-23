@@ -35,6 +35,7 @@ from pipeline_core.application.reconstruct.fill_routes import (
     RouteRunReport,
 )
 from pipeline_core.application.reconstruct.unit_pool import run_units_concurrently
+from pipeline_core.domain import unit_clock
 from pipeline_core.domain.fill_context import route_scope
 from pipeline_core.domain.fill_schedule import (
     FillBudget,
@@ -90,6 +91,9 @@ class FillExecutionDeps:
     #: A session's share floor in turns (`schedule`'s ``session_min_turns``,
     #: `SLICE_SESSION_MIN_TURNS`); 0 = the plain weighted split.
     session_min_turns: int = 0
+    #: Each claimed unit's wall-clock bound as a multiple of its run's
+    #: share (`FILL_UNIT_SHARE_MULTIPLE`, `unit_clock`); 0 = unbounded.
+    unit_share_multiple: float = 0.0
     #: Locators leftover tests convict before measured-owners admission
     #: (eligible plus hop-pair members). Empty (the default) skips
     #: coverage-split marking, so every recorded fill fixture's order is
@@ -495,7 +499,8 @@ def execute_fill(
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,
                 now=deps.now, ground_moved=gate,
-                scope=w.run.target_tests or None)
+                scope=w.run.target_tests or None,
+                unit_multiple=deps.unit_share_multiple)
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}
@@ -522,7 +527,13 @@ def execute_fill(
                 # through the same client; a pooled route's workers see it
                 # because `run_units_concurrently` continues this context.
                 with observe_call() as _rows:
-                    _rep = _route.run(w.run, _clocks[w.run.key])
+                    try:
+                        _rep = _route.run(w.run, _clocks[w.run.key])
+                    finally:
+                        # The last claimed unit's bound ends with the run,
+                        # so no later loop on this thread (the next run, a
+                        # post-merge repair) inherits an expired clock.
+                        unit_clock.clear()
                 if not _rep.cap_owned and run_all_replies_capped(_rows):
                     _rep = replace(_rep, unmeasured=True)
                 _reports[w.run.key] = _landed_nothing(

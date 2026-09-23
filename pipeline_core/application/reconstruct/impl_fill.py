@@ -95,6 +95,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
     capture,
     restore,
 )
+from pipeline_core.domain import unit_clock
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
     escalation_refusal_note,
@@ -3903,6 +3904,27 @@ def prepare_impl_fill(
                 check_stop=_check_graceful_stop,
             )
             if members_filled_this_block > 0 or block_already_complete:
+                break
+            if unit_clock.expired():
+                # The unit ran past its bound (`FILL_UNIT_SHARE_MULTIPLE` ×
+                # the run's share): no last-resort call and no retrospective —
+                # running out of time is not evidence about these bodies. The
+                # block exits as a failed block (salvage, stubs to the per-fn
+                # route); run `484518-91681c1a` spent 199 minutes of a
+                # 15-minute share here.
+                if unit_clock.note_once():
+                    _log(f"  [phase-c/impl] {block_id}: UNIT_BOUND — "
+                         f"{unit_clock.elapsed_minutes():.0f} min past its "
+                         f"{unit_clock.bound_minutes():.0f}-min bound after "
+                         f"{fix_attempt} attempt(s), retro round {_retro_round}; "
+                         "no last-resort, no retrospective.")
+                    _emit("phase_c.unit.bound", data={
+                        "cluster": cluster_name, "route": "impl",
+                        "unit": block_id, "attempts": fix_attempt,
+                        "retro_round": _retro_round,
+                        "bound_minutes": unit_clock.bound_minutes(),
+                        "elapsed_minutes": round(
+                            unit_clock.elapsed_minutes(), 1)})
                 break
             if _crash_blocked_mark:
                 # No last-resort escalation, no retrospective, no conviction:
