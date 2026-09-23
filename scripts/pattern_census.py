@@ -282,6 +282,17 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      the schedule ranks each unit on its own graded landing and prints
      nothing new, so a post-fix hit is a defect.
 
+  P39 unevidenced stub narrowing — the engine replaced a whole fill with
+     the frontier's stubs (`deferring the impl route this iter`) although
+     the sweep that planned it printed no `still-stubbed fn(s) hold` line,
+     so no failing test first-failed at any stub.  Run 1038428-3372223f
+     (2026-09-23), cluster stable: iterations 4-6 at pass 161 fail 23
+     each ran `per-fn 6 / 4 / 2 stub(s), 0 re-fill(s)` with every
+     session, pair, file and impl run withheld, and the verdict vector sat
+     flat for three sweeps.  No reaction key: the narrowing was deleted
+     (the schedule orders a stub-hold blocker first), so the line cannot
+     print and a post-fix hit is a defect.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -619,6 +630,7 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "P36": [],
     "P38": [],
+    "P39": [],
     "P37": [
         ("owned up to their first panic", "cut-before-death"),
     ],
@@ -2682,6 +2694,29 @@ def detect_p37(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:3]}]
 
 
+RE_NARROWED = re.compile(r"deferring the impl route this iter")
+RE_STUB_HOLD = re.compile(r"still-stubbed fn\(s\) hold \d+ failing test")
+
+
+def detect_p39(run: Run, iters: list[dict]) -> list[dict]:
+    """A fill narrowed to stubs while the sweep before it named no stub
+    holding a failing test. One hit per run, counting the fills."""
+    refs: list[str] = []
+    held_since_sweep = False
+    for ref, text in run.lines:
+        if RE_ITER.search(text):
+            held_since_sweep = False
+        elif RE_STUB_HOLD.search(text):
+            held_since_sweep = True
+        elif RE_NARROWED.search(text) and not held_since_sweep:
+            refs.append(ref)
+    if not refs:
+        return []
+    return [{"evidence": f"{len(refs)} fill(s) narrowed to the frontier's "
+                         "stubs with no stub holding a failing test",
+             "refs": refs[:3]}]
+
+
 def p38_unfounded_flat(schedule: dict, flat: set[str]) -> list[tuple[str, list[str]]]:
     """The `rebuy_flat` deferrals of one schedule event that the standing
     FLAT set does not found, as (label, unfounded units). A divisible run
@@ -2771,7 +2806,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P28": detect_p28, "P29": detect_p29, "P30": detect_p30,
              "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
-             "P37": detect_p37, "P38": detect_p38}
+             "P37": detect_p37, "P38": detect_p38, "P39": detect_p39}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2805,7 +2840,8 @@ CLASS_NAMES = {
     "P35": "fill-wide premise refusal (a keep moved some tests and every unclaimed unit of the fill was refused; pre-fix the gate was not scoped to each claim's tests)",
     "P36": "bound-only input drop (a call ended input too long after replanning from vLLM's threshold, never the prompt's size; pre-fix no exact count)",
     "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)",
-    "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)"}
+    "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)",
+    "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)"}
 
 
 # -------------------------------------------------------------------- report

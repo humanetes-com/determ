@@ -44,7 +44,6 @@ def test_dispatch_class_values() -> None:
 from pipeline_core.domain.dispatch import (  # noqa: E402
     impl_route_covers,
     refills_deferred_by_impl_route,
-    stubs_deferred_by_impl_route,
 )
 from pipeline_core.domain.models import FnRecord, ImplBlock  # noqa: E402
 
@@ -65,28 +64,8 @@ def test_impl_route_skips_free_fns_and_oversized_blocks() -> None:
     assert not impl_route_covers(_blk("impl E", ("a", "b"), ("c",)), max_stubs=2)
 
 
-def test_deferred_stubs_are_exactly_the_uncovered_ones() -> None:
-    blocks = [_blk("impl E", ("covered",)),
-              _blk("", ("free1", "free2")),
-              _blk("impl Big", ("x", "y", "z"))]
-    got = stubs_deferred_by_impl_route(blocks, max_stubs=2)
-    assert got == frozenset({FnLocator("src/e.rs", "free1"),
-                             FnLocator("src/e.rs", "free2"),
-                             FnLocator("src/e.rs", "x"),
-                             FnLocator("src/e.rs", "y"),
-                             FnLocator("src/e.rs", "z")})
-    # a refill member of an uncovered block is NOT a stub → never deferred here
-    assert stubs_deferred_by_impl_route(
-        [_blk("", (), ("refill_only",))], max_stubs=2) == frozenset()
-
-
 def test_refills_of_uncovered_blocks_are_named_by_their_own_predicate() -> None:
-    """The counterpart to the assertion above, and the hole it used to leave.
-
-    `stubs_deferred_by_impl_route` returning nothing for a refill-only free-fn
-    block is correct — the caller narrows the whole iteration to what it
-    returns, which only an aborting `unimplemented!()` justifies. But nothing
-    else named those targets either, so a filled free fn implicated by a failing
+    """Nothing named the re-fill targets of blocks the impl route declines, so a filled free fn implicated by a failing
     test was written by no route at all: the impl route declined it on the
     container, the per-fn route was handed stubs only, and the file-first plan
     listed impl blocks. On the live anyhow tree that was all 13 free fns of
@@ -154,7 +133,6 @@ def test_nothing_implicated_yields_an_empty_frontier() -> None:
 
 from pipeline_core.domain.dispatch import (  # noqa: E402
     file_route_units,
-    impl_route_deferral_applies,
 )
 
 
@@ -205,20 +183,6 @@ def test_file_units_keep_impl_headers_before_free_fn_blocks() -> None:
         units = dict(file_route_units([free, viable], max_stubs=2,
                                       file_primary=primary))
         assert units["src/x.rs"][0] is viable
-
-
-def test_deferral_unchanged_by_default_and_narrowed_by_file_primary() -> None:
-    """DEFAULT: any impl-route-deferred frontier stub forces the stubs-first
-    iteration (that route never attempts free fns). FILE_PRIMARY: the file
-    pass names them itself, so the deferral applies only when re-fill targets
-    share the dispatch — the judged-against-an-aborting-binary hazard."""
-    stubs = frozenset({FnLocator("src/e.rs", "free1")})
-    assert impl_route_deferral_applies(stubs, False, file_primary=False)
-    assert impl_route_deferral_applies(stubs, True, file_primary=False)
-    assert not impl_route_deferral_applies(stubs, False, file_primary=True)
-    assert impl_route_deferral_applies(stubs, True, file_primary=True)
-    assert not impl_route_deferral_applies(frozenset(), True, file_primary=False)
-    assert not impl_route_deferral_applies(frozenset(), True, file_primary=True)
 
 
 # ---- sibling-blocked U2 failures: the post-fill counterpart of the

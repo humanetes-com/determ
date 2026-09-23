@@ -150,37 +150,12 @@ def impl_route_covers(block: ImplBlock, *, max_stubs: int) -> bool:
 
     A free-fn container (`""`) and a block whose unit size exceeds the per-impl
     cap are both delegated to the per-fn route; a block with no work is skipped.
-    Stated once so the impl route's viability filter and the engine's route
-    SEQUENCING check cannot drift — if they drift, a stub the impl route
-    silently drops still reads as "covered" to the sequencer and is never
-    filled."""
+    Stated once so the impl route's viability filter and the file route's
+    unit selection (:func:`file_route_units`) cannot drift — if they drift, a
+    stub the impl route silently drops still reads as "covered" to the file
+    route and is never filled."""
     return bool(block.container) and block.needs_fill and (
         len(block.stub_members) + len(block.refill_members) <= max_stubs)
-
-
-def stubs_deferred_by_impl_route(
-    blocks: list[ImplBlock], *, max_stubs: int,
-) -> frozenset[FnLocator]:
-    """Stubs that no impl-route unit will attempt — free fns and members of
-    oversized blocks.
-
-    These must be filled BEFORE any impl-route behavioural re-fill, not after
-    it. An `unimplemented!()` reached from a drop glue / vtable slot panics and
-    ABORTS the whole test binary, so every re-fill measured against that binary
-    is judged "crashed the siblings" and reverted however good the body was —
-    the re-fill work is unwinnable until the stub is gone. Running the impl
-    route first therefore spends the LLM budget on guaranteed reverts and
-    schedules the one fill that would unblock them last.
-
-    STUBS only, deliberately: the caller narrows the whole iteration to what
-    this returns, which is justified by the aborting `unimplemented!()` and by
-    nothing else. The re-fill analogue is
-    :func:`refills_deferred_by_impl_route`, which is a diagnostic rather than a
-    schedule."""
-    return frozenset(
-        FnLocator(b.file, m.fn_name)
-        for b in blocks if not impl_route_covers(b, max_stubs=max_stubs)
-        for m in b.stub_members)
 
 
 def file_route_units(
@@ -224,35 +199,11 @@ def file_route_units(
     ]
 
 
-def impl_route_deferral_applies(
-    deferred_stubs: frozenset[FnLocator], has_refill_targets: bool,
-    *, file_primary: bool,
-) -> bool:
-    """Whether the engine narrows this iteration to the impl-route-deferred
-    stubs before letting the impl path run at all.
-
-    The hazard the deferral guards is specific: an ``unimplemented!()`` free
-    fn reached from drop glue or a vtable slot ABORTS the test binary, so a
-    behavioural re-fill judged against that binary is reverted as a sibling
-    crash however good the body was. Under the DEFAULT route order the impl
-    path never attempts those stubs, so any deferred frontier stub forces the
-    stubs-first iteration. Under FILE_PRIMARY the file pass names free fns
-    and oversized blocks itself, so the premise "no route attempts them"
-    fails — the deferral is kept only when re-fill targets are actually in
-    the same dispatch (the judged-against-an-aborting-binary hazard), and an
-    all-stub frontier proceeds straight to the file pass."""
-    if not deferred_stubs:
-        return False
-    if not file_primary:
-        return True
-    return has_refill_targets
-
-
 def refills_deferred_by_impl_route(
     blocks: list[ImplBlock], *, max_stubs: int,
 ) -> frozenset[FnLocator]:
     """Behavioural RE-FILL targets no impl-route unit will attempt — the same
-    free-fn and oversized blocks :func:`stubs_deferred_by_impl_route` covers,
+    free-fn and oversized blocks :func:`impl_route_covers` declines,
     read for their `refill_members` instead of their stubs.
 
     Named because for three days nothing did. A filled free fn implicated by a
