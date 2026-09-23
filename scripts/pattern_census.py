@@ -285,13 +285,16 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
   P39 unevidenced stub narrowing — the engine replaced a whole fill with
      the frontier's stubs (`deferring the impl route this iter`) although
      the sweep that planned it printed no `still-stubbed fn(s) hold` line,
-     so no failing test first-failed at any stub.  Run 1038428-3372223f
-     (2026-09-23), cluster stable: iterations 4-6 at pass 161 fail 23
-     each ran `per-fn 6 / 4 / 2 stub(s), 0 re-fill(s)` with every
-     session, pair, file and impl run withheld, and the verdict vector sat
-     flat for three sweeps.  No reaction key: the narrowing was deleted
-     (the schedule orders a stub-hold blocker first), so the line cannot
-     print and a post-fix hit is a defect.
+     so no failing test first-failed at any stub.  The hold line is printed
+     before that sweep's iteration summary and the deferral after it, so
+     the summary is the boundary: a deferral counts only when the summary
+     before it saw no hold line.  Run 1038428-3372223f (2026-09-23),
+     cluster stable: iterations 4-6 at pass 161 fail 23 each ran
+     `per-fn 6 / 4 / 2 stub(s), 0 re-fill(s)` with every session, pair,
+     file and impl run withheld, and the verdict vector sat flat for three
+     sweeps.  No reaction key: the narrowing was deleted (the schedule
+     orders a stub-hold blocker first), so the line cannot print and a
+     post-fix hit is a defect.
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -2700,15 +2703,26 @@ RE_STUB_HOLD = re.compile(r"still-stubbed fn\(s\) hold \d+ failing test")
 
 def detect_p39(run: Run, iters: list[dict]) -> list[dict]:
     """A fill narrowed to stubs while the sweep before it named no stub
-    holding a failing test. One hit per run, counting the fills."""
+    holding a failing test. One hit per run, counting the fills.
+
+    The hold line is printed, then the iteration summary, then the
+    deferral. The summary is the sweep boundary: snapshot whether a hold
+    was seen since the previous summary, then clear. A deferral counts
+    only when that snapshot is false. A deferral before any summary has
+    no sweep and counts.
+    """
     refs: list[str] = []
-    held_since_sweep = False
+    held_since_summary = False
+    sweep_held = False
+    seen_summary = False
     for ref, text in run.lines:
         if RE_ITER.search(text):
-            held_since_sweep = False
+            sweep_held = held_since_summary
+            held_since_summary = False
+            seen_summary = True
         elif RE_STUB_HOLD.search(text):
-            held_since_sweep = True
-        elif RE_NARROWED.search(text) and not held_since_sweep:
+            held_since_summary = True
+        elif RE_NARROWED.search(text) and not (seen_summary and sweep_held):
             refs.append(ref)
     if not refs:
         return []
