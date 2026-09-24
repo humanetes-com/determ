@@ -167,8 +167,14 @@ def cluster_filter_type_members(
             m for m in r.methods
             if not any(cfg_set.evaluate(p) is False for p in m.cfg_predicates)
         )
+        # A slot candidate the cluster does not compile cannot be installed
+        # here; the fits list renders as complete, so it leaves it.
         kept_fields = tuple(
-            f for f in r.fields
+            f if f.fits is None else dataclasses.replace(f, fits=tuple(
+                c for c in f.fits
+                if not any(cfg_set.evaluate(p) is False
+                           for p in c.cfg_predicates)))
+            for f in r.fields
             if not any(cfg_set.evaluate(p) is False for p in f.cfg_predicates)
         )
         # A trait impl the cluster does not compile is not an impl here: the
@@ -177,7 +183,7 @@ def cluster_filter_type_members(
         # crate's type-parameter impls are the same kind of list.
         kept_impls = _cfg_kept(r.trait_impls)
         kept_blankets = _cfg_kept(r.blanket_impls)
-        if (len(kept) != len(r.methods) or len(kept_fields) != len(r.fields)
+        if (len(kept) != len(r.methods) or kept_fields != r.fields
                 or kept_impls != r.trait_impls
                 or kept_blankets != r.blanket_impls):
             out.append(dataclasses.replace(

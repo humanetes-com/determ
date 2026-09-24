@@ -41,7 +41,7 @@ from pipeline_core.adapters.artifacts import (  # noqa: F401  (smoke pin: test_a
 from pipeline_core.adapters.artifacts import (
     load_original_structure as _artifacts_load_original_structure,
 )
-from pipeline_core.adapters.ask_client import AskClient
+from pipeline_core.adapters.ask_client import AskClient, contents_index_hook
 from pipeline_core.adapters.behaviour_store import load_behaviour_suite
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
@@ -456,6 +456,7 @@ _ASK_CLIENT = AskClient(
     disclaimer=lambda: _prompts_disclaimer(_CRATE_DISPLAY_NAME),
     model_name=MODEL, context_chars=MODEL_CONTEXT_CHARS,
     single_call_char_limit=SINGLE_CALL_CHAR_LIMIT,
+    contents=contents_index_hook(),
 )
 
 # Supplementary-material prompt caps — the per-section sizing policy is a domain
@@ -1094,9 +1095,8 @@ from pipeline_core.application.reconstruct.sibling_context import (  # noqa: E40
     collect_sibling_filled_bodies as _collect_sibling_filled_bodies,  # noqa: F401  (test pin: pipeline._collect_sibling_filled_bodies)
 )
 
-# Per-fn conversation protocol with the guarded client + task2 model bound.
-_ask_per_fn_body: "Callable[..., tuple[str | None, str]]" = functools.partial(
-    _ask_per_fn_body_impl, _ASK_CLIENT, model=_TASK2_MODEL)
+# Per-fn extraction ladder; its conversation carries the client and model.
+_ask_per_fn_body: "Callable[..., tuple[str | None, str]]" = _ask_per_fn_body_impl
 
 
 # Retrospectives store relocated to pipeline_core/adapters/retros.py;

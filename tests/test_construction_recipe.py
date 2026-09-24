@@ -31,7 +31,6 @@ from pipeline_core.domain.language_driver import language_driver, using_driver
 from pipeline_core.domain.models import FnRecord, ImplBlock
 from pipeline_core.domain.type_production import constructs_type
 from pipeline_core.prompts.context import PerFnSections, PerImplSections
-from pipeline_core.prompts.fix_prompts import build_maximal_impl_prompt
 from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.prompts.per_fn import build_per_fn_prompt
 from pipeline_core.prompts.per_impl import build_per_impl_prompt
@@ -207,16 +206,6 @@ def _per_fn_and_per_impl_builders_derive_the_recipe() -> None:
     impl_gotchas = impl_p.index("<RUST_GOTCHAS>")
     assert CHAIN_TABLE_RECIPE in impl_p[stub_at:impl_gotchas]
 
-    max_p = build_maximal_impl_prompt(
-        file_rel="src/error.rs", container="impl Error",
-        stub_names=["context", "construct_from_boxed"],
-        file_text="fn context(){}", tests_block="", errs="e", notes="")
-    file_at = max_p.index("File: src/error.rs")
-    rust_at = max_p.index("```rust")
-    slot = max_p[file_at:rust_at]
-    assert CHAIN_TABLE_RECIPE in slot
-    assert WRAP_BOX_RECIPE in slot
-
 
 def test_generic_builders_pay_from_sig_on_a_crate_that_does_not_declare_the_wrappers() -> None:
     """Live builders under generic: wrap/identity from the sig, no
@@ -263,23 +252,3 @@ def test_generic_builders_pay_from_sig_on_a_crate_that_does_not_declare_the_wrap
     assert "erased identity type" in ident
     assert "ContextError" not in ident
     assert CHAIN_TABLE_RECIPE not in ident
-    max_p = build_maximal_impl_prompt(
-        file_rel="src/cell.rs", container="impl Cell",
-        stub_names=["from_payload", "and_then"],
-        file_text="fn from_payload(){}", tests_block="", errs="e", notes="",
-        sigs={"from_payload": wrap_sig,
-              "and_then": "fn and_then<C>(self, extra: C) -> Self"})
-    slot = max_p[max_p.index("File: src/cell.rs"):max_p.index("```rust")]
-    assert wrap_from_sig in slot
-    assert "erased identity type" in slot
-    assert "BoxedError" not in slot
-    assert "ContextError" not in slot
-    assert WRAP_BOX_RECIPE not in slot
-    assert CHAIN_TABLE_RECIPE not in slot
-    without = build_maximal_impl_prompt(
-        file_rel="src/cell.rs", container="impl Cell",
-        stub_names=["from_payload"],
-        file_text="fn from_payload(){}", tests_block="", errs="e", notes="")
-    without_slot = without[without.index("File: src/cell.rs"):
-                           without.index("```rust")]
-    assert "unsized" not in without_slot

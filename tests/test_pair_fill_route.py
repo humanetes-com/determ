@@ -275,6 +275,10 @@ def _install_routed_model(monkeypatch, prompts: list[str]) -> None:
             return RETRO_REPLY
         if "PAIRED WRITE" in prompt:
             return PAIR_REPLY
+        if prompt.startswith("RESULT of your previous reply"):
+            # A retry turn on the pair's conversation (its opening turn,
+            # the one carrying PAIRED WRITE, is above it).
+            return PAIR_REPLY
         return ""
 
     monkeypatch.setattr(pipeline, "_ask_raw", _ask)
@@ -616,9 +620,11 @@ def test_a_compile_fail_retries_with_last_error_and_does_not_lock_the_next_pass(
     assert "from_bytes" in rec["last_compile_error"]
     assert not rec.get("last_prompt_sha"), (
         "compile exhaust must clear the sha so the next pass is not locked")
-    if len(first_wave) > 1:
-        assert "<LAST_ERROR>" in first_wave[1]
-        assert "from_bytes" in first_wave[1]
+    # The in-call retry is a turn on the pair's conversation carrying the
+    # compile errors — not a rebuilt PAIRED WRITE prompt.
+    retries = [p for p in prompts if p.startswith("RESULT of your previous reply")]
+    assert len(first_wave) == 1 and retries
+    assert "from_bytes" in retries[0].split("<COMPILE_ERRORS>", 1)[1]
     n = len(first_wave)
     _run_with_tests(ws, tests)
     second_wave = [p for p in prompts if "PAIRED WRITE" in p]

@@ -33,10 +33,11 @@ Deterministic, no LLM, no name heuristics — the same contract
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from pipeline_core.domain.models import FnLocator, TypeRecord
+from pipeline_core.domain.models import FnLocator, SlotFit, TypeRecord
 from pipeline_core.domain.rust_idents import (
     canon_token_text,
     identifier_tokens,
@@ -251,8 +252,200 @@ def _coercible(decl: tuple[bool, tuple[str, ...], str],
     exact-equality rule drops it while admitting nothing in exchange."""
     d_unsafe, d_params, d_ret = decl
     f_unsafe, f_params, f_ret = field
-    return (d_params == f_params and d_ret == f_ret
+    return (len(d_params) == len(f_params)
+            and all(_same_type(d, f) for d, f in zip(d_params, f_params, strict=True))
+            and _same_type(d_ret, f_ret)
             and (f_unsafe or not d_unsafe))
+
+
+_PATH_PREFIX = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*::)+")
+
+
+def _same_type(a: str, b: str) -> bool:
+    """Two canonical type texts name the same type, whatever path each
+    spells it with. A field type and a declaration come from different
+    printers AND different authoring passes: on the live `stable` tree
+    (2026-09-24) `ErrorVTable`'s fields read `crate::ptr::Own<crate::error::
+    ErrorImpl>` while `object_drop<E>` declares `e: Own<ErrorImpl>`, so an
+    exact comparison matched 0 of the 7 declared fns for `object_drop`,
+    `object_ref` and `object_backtrace`, and the installable offers and the
+    session's table complement never listed `object_drop_front` or
+    `context_backtrace`. Paths are dropped segment-wise
+    (`core::any::TypeId` -> `TypeId`); two distinct types sharing a last
+    segment would compare equal, which the compiler then settles."""
+    return a == b or _PATH_PREFIX.sub("", a) == _PATH_PREFIX.sub("", b)
+
+def _generic_list(t: str, at: int) -> tuple[str, int] | None:
+    """The `<...>` opening at `at` in `t` and the index just past it."""
+    depth = 0
+    for i in range(at, len(t)):
+        if t[i] == "<":
+            depth += 1
+        elif t[i] == ">":
+            depth -= 1
+            if depth == 0:
+                return t[at + 1:i], i + 1
+    return None
+
+
+def _decl_type_params(sig: str) -> dict[str, str]:
+    """A declaration's own type parameters and the bounds it puts on each,
+    inline and in its `where` clause (`fn f<'a, T: A, const N: usize>(..)
+    where T: B` -> {"T": "A + B"}). Lifetimes and const generics are not
+    types a slot's parameter could bind."""
+    t = _norm(sig)
+    at = t.find("fn ")
+    if at == -1:
+        return {}
+    lt = t.find("<", at)
+    paren = t.find("(", at)
+    if lt == -1 or (paren != -1 and paren < lt):
+        return {}
+    got = _generic_list(t, lt)
+    if got is None:
+        return {}
+    inner, _ = got
+    bounds: dict[str, list[str]] = {}
+    for part in _split_top_level(inner):
+        p = part.strip()
+        if not p or p.startswith("'") or p.startswith("const "):
+            continue
+        name, _, bound = p.partition(":")
+        name = name.split("=", 1)[0].strip()
+        bounds[name] = [bound.strip()] if bound.strip() else []
+    if " where " in t:
+        for clause in _split_top_level(t.split(" where ", 1)[1].rstrip("{ ")):
+            lhs, _, rhs = clause.partition(":")
+            if lhs.strip() in bounds and rhs.strip():
+                bounds[lhs.strip()].append(rhs.strip())
+    return {n: " + ".join(b) for n, b in bounds.items()}
+
+
+def _fits(decl: tuple[bool, tuple[str, ...], str],
+          field: tuple[bool, tuple[str, ...], str],
+          params: Mapping[str, str]) -> dict[str, str] | None:
+    """The binding of the declaration's type parameters that stores it in
+    the field, or None when there is none.
+
+    `_coercible`, where a position the declaration types with one of its own
+    bare type parameters binds that parameter to the field's type there —
+    `fn f<T>(x: T)` can be stored as `fn(u8)` by naming `f::<u8>`. A
+    parameter binds once: `fn same<T>(a: T, b: T)` does not fit
+    `fn(u8, bool)`, and `fn id<T>(x: T) -> T` does not fit `fn(u8)` (no
+    return is `()`). Anything else must match as `_coercible` requires."""
+    d_unsafe, d_params, d_ret = decl
+    f_unsafe, f_params, f_ret = field
+    if len(d_params) != len(f_params) or (d_unsafe and not f_unsafe):
+        return None
+    bound: dict[str, str] = {}
+
+    def one(d: str, f: str) -> bool:
+        if d in params:
+            if d in bound:
+                return _same_type(bound[d], f)
+            bound[d] = f
+            return True
+        return _same_type(d, f)
+
+    pairs = [*zip(d_params, f_params, strict=True), (d_ret or "()", f_ret or "()")]
+    return bound if all(one(d, f) for d, f in pairs) else None
+
+
+def _spelled(record: object) -> str | None:
+    """How a table literal names the fn: `name<T, U>` (parameter names, no
+    bounds) for a free fn, `SelfType::name<…>` for an associated one; None
+    for a trait's declaration (it has no body a table could install)."""
+    name = _field(record, "fn_name")
+    container = _field(record, "container")
+    if not name or container.lstrip().startswith("trait"):
+        return None
+    sig = _field(record, "sig_text")
+    params = [p.strip() for p in _generic_names(sig)]
+    gen = f"<{', '.join(params)}>" if params else ""
+    if not container:
+        return f"{name}{gen}"
+    self_ty = impl_self_type(container)
+    return f"{self_ty}::{name}{gen}" if self_ty else None
+
+
+def _generic_names(sig: str) -> list[str]:
+    """Every generic parameter name of a declaration, lifetimes and consts
+    included, in order — how a turbofish lists them."""
+    t = _norm(sig)
+    at = t.find("fn ")
+    lt = t.find("<", at) if at != -1 else -1
+    paren = t.find("(", at) if at != -1 else -1
+    if lt == -1 or (paren != -1 and paren < lt):
+        return []
+    got = _generic_list(t, lt)
+    if got is None:
+        return []
+    out = []
+    for part in _split_top_level(got[0]):
+        p = part.strip()
+        if p.startswith("const "):
+            p = p[len("const "):]
+        out.append(p.split(":", 1)[0].split("=", 1)[0].strip())
+    return [p for p in out if p]
+
+
+def slot_fits(field_ty: str, fn_records: Sequence[object]
+              ) -> tuple[SlotFit, ...] | None:
+    """Every crate fn whose declared signature can be stored in a field of
+    type `field_ty`, in record order. None when `field_ty` is not a fn
+    pointer; () when it is and no crate fn fits.
+
+    Why: of the compile errors the pipeline quoted back to retries from
+    2026-09-01 to 2026-09-24, 143 named a fn that does not exist, and they
+    were one family — fn-pointer table slots written as if a fn of the
+    slot's name existed (`object_drop_rest` 24 times, where the crate's
+    fns of that signature are `object_drop_front`, `context_drop_rest`
+    and `context_chain_drop_rest`). The prompt showed the table's fields
+    and every fn, and never said which fns fit which slot."""
+    want = fn_pointer_shape(field_ty)
+    if want is None:
+        return None
+    out: list[SlotFit] = []
+    for r in fn_records:
+        spelled = _spelled(r)
+        if spelled is None:
+            continue
+        sig = _field(r, "sig_text")
+        shape = fn_decl_shape(sig)
+        params = _decl_type_params(sig)
+        binding = None if shape is None else _fits(shape, want, params)
+        if binding is None:
+            continue
+        # A bounded parameter fits only if the type it binds satisfies the
+        # bound, which this comparison cannot decide: the candidate is listed
+        # with the condition, never as an unconditional fit.
+        requires = "; ".join(f"{ty}: {params[p]}" for p, ty in binding.items()
+                             if params.get(p))
+        preds = (r.get("cfg_predicates") if isinstance(r, Mapping)
+                 else getattr(r, "cfg_predicates", ()))
+        out.append(SlotFit(spelled, _field(r, "file"),
+                           tuple(str(p) for p in preds or ()), requires))
+    return tuple(out)
+
+
+def attach_slot_fits(type_records: Sequence[TypeRecord],
+                     fn_records: Sequence[object]) -> list[TypeRecord]:
+    """The records with `FieldRecord.fits` set on every fn-pointer field.
+    Test fns are not candidates (a table never installs one)."""
+    fns = [r for r in fn_records
+           if not (r.get("is_test") if isinstance(r, Mapping)
+                   else getattr(r, "is_test", False))]
+    out: list[TypeRecord] = []
+    for tr in type_records:
+        if not tr.fields:
+            out.append(tr)
+            continue
+        fields = tuple(
+            replace(f, fits=fits) if (fits := slot_fits(f.ty, fns)) is not None
+            else f for f in tr.fields)
+        out.append(replace(tr, fields=fields) if fields != tr.fields else tr)
+    return out
+
 
 def offer_producers(
     measured: frozenset[FnLocator],

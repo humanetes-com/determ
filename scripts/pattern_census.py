@@ -296,6 +296,19 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      orders a stub-hold blocker first), so the line cannot print and a
      post-fix hit is a defect.
 
+  P40 requested and not held — a fill asked for a whole file
+     (`<REQUEST kind="file" arg="…"/>`, no from_line) and was answered with
+     the file, i.e. the conversation did not already carry it whole. Keyed
+     by path, so the builder that omits a file its units keep asking for is
+     a lookup. Measured 2026-09-24 by `scripts/prompt_sufficiency_census.py`
+     over fills since 2026-09-01: per-impl fills asked 66 times for their
+     own file, which that builder never rendered; per-fn units outside the
+     hub file asked for it 53 times. A request for a file the conversation
+     already held whole is answered by pointer (`already held whole` in the
+     same line) and is counted as the reaction, not a hit: the index or the
+     outline had to do the finding. Before that answer existed (pre
+     2026-09-24) a hit can also be a file the prompt held whole.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -634,6 +647,11 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P36": [],
     "P38": [],
     "P39": [],
+    "P40": [
+        # A whole-file request for a file the conversation held whole was
+        # answered by pointer instead of re-sending it.
+        ("already held whole — pointed at it", "pointer"),
+    ],
     "P37": [
         ("owned up to their first panic", "cut-before-death"),
     ],
@@ -2803,6 +2821,30 @@ def detect_p38(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [run.start_ref]}]
 
 
+RE_WHOLE_FILE_PULL = re.compile(
+    r'\[pull\] <REQUEST kind="file" arg="(?P<arg>[^"]+)"/> → ok \((?P<rest>[^)]*)\)')
+
+
+def detect_p40(run: Run, iters: list[dict]) -> list[dict]:
+    """Whole-file requests answered with the file: the conversation did not
+    hold it whole. One hit per run, keyed by the paths asked for most."""
+    asked: dict[str, int] = {}
+    refs: list[str] = []
+    for ref, text in run.lines:
+        m = RE_WHOLE_FILE_PULL.search(text)
+        if not m or "already held whole" in m["rest"] or "repeat" in m["rest"]:
+            continue
+        asked[m["arg"]] = asked.get(m["arg"], 0) + 1
+        refs.append(ref)
+    if not asked:
+        return []
+    top = sorted(asked.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"evidence": f"{sum(asked.values())} whole-file request(s) the "
+                         "prompt did not hold whole: "
+                         + ", ".join(f"{a} x{n}" for a, n in top[:6]),
+             "key": [a for a, _ in top[:3]], "refs": refs[:3]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2820,7 +2862,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P28": detect_p28, "P29": detect_p29, "P30": detect_p30,
              "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
-             "P37": detect_p37, "P38": detect_p38, "P39": detect_p39}
+             "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
+             "P40": detect_p40}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2855,7 +2898,8 @@ CLASS_NAMES = {
     "P36": "bound-only input drop (a call ended input too long after replanning from vLLM's threshold, never the prompt's size; pre-fix no exact count)",
     "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)",
     "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)",
-    "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)"}
+    "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)",
+    "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)"}
 
 
 # -------------------------------------------------------------------- report

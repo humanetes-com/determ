@@ -148,3 +148,33 @@ def test_slice_identifiers_tokenises_and_drops_noise() -> None:
     got = slice_identifiers("impl<T> Own<T> for Box<T>", "fn by_ref(&self)")
     assert "Own" in got and "Box" in got and "by_ref" in got
     assert "impl" not in got and "for" not in got and "T" not in got
+
+
+def test_types_the_units_file_names_from_another_file_rank_last() -> None:
+    """A stub's signature names none of the types its body will build; the
+    file's sibling bodies do, as paths into the declaring file. From
+    2026-09-01 to 2026-09-24 per-fn and per-impl fills asked 65 times for a
+    type definition the prompt did not render. The file's crate types
+    declared ELSEWHERE rank after everything the unit names; ones declared in
+    the unit's own file are already in its file view and stay out."""
+    recs = [
+        TypeRecord(name="Holder", kind="struct", file="src/a.rs",
+                   definition="struct Holder;"),
+        TypeRecord(name="Wrapped", kind="struct", file="src/wrap.rs",
+                   definition="pub struct Wrapped<M>(M);", is_pub=True),
+        TypeRecord(name="Local", kind="struct", file="src/a.rs",
+                   definition="struct Local;"),
+    ]
+    file_text = ("fn sibling() -> Holder { let w = crate::wrap::Wrapped(1); "
+                 "Local; todo!() }\nfn target(h: Holder) {}")
+    a = _assembler()
+    with_file = a.types_section_for_fix(
+        "fn target(h: Holder)", "", "", "", "", recs,
+        file_rel="src/a.rs", file_text=file_text)
+    assert "struct Holder" in with_file and "Wrapped" in with_file
+    assert with_file.index("struct Holder") < with_file.index("Wrapped")
+    assert "struct Local" not in with_file
+    # Negative control: the pre-change selection, no file text.
+    without = a.types_section_for_fix(
+        "fn target(h: Holder)", "", "", "", "", recs, file_rel="src/a.rs")
+    assert "Wrapped" not in without

@@ -365,10 +365,43 @@ def strip_list_marker(line: str) -> str:
     return line[j:]
 
 
+def _attrs_end(text: str, p: int) -> int:
+    """Index just past the `>` closing an opening tag whose attributes start
+    at `p`, or -1 when what follows is not ` name="value"` pairs and a `>`.
+    Values are skipped quote to quote, so a `>` inside one (`editable="fmt
+    (impl<A> Foo<A>)"`) does not close the tag."""
+    n = len(text)
+    while p < n:
+        c = text[p]
+        if c == ">":
+            return p + 1
+        if not c.isspace():
+            return -1
+        while p < n and text[p].isspace():
+            p += 1
+        if p < n and text[p] == ">":
+            return p + 1
+        name_start = p
+        while p < n and (text[p].isalnum() or text[p] in "_-"):
+            p += 1
+        if p == name_start or text[p:p + 2] != '="':
+            return -1
+        close_q = text.find('"', p + 2)
+        if close_q < 0:
+            return -1
+        p = close_q + 1
+    return -1
+
+
 def tagged_path_block_spans(text: str, tag: str) -> list[tuple[int, int]]:
-    """`(start, end)` spans of each `\\n<tag path="…">…</tag>` block, in order
-    (regex-free; mirrors `\\n<tag path="[^"]*">.*?</tag>` with DOTALL —
-    non-greedy: each block ends at its nearest `</tag>`)."""
+    """`(start, end)` spans of each `\\n<tag path="…" …>…</tag>` block, in
+    order — non-greedy: each block ends at its nearest `</tag>`.
+
+    Attributes after `path` are part of the opening tag. The scanner used to
+    require `">` right after the path (a port of the regex it replaced), so a
+    block with any further attribute was not a block to the context guard:
+    the slice session's `<FILE path=… editable="…">` could never be dropped
+    under pressure, and every fill prompt's file now declares its `view`."""
     open_lead = f'\n<{tag} path="'
     close = f"</{tag}>"
     spans: list[tuple[int, int]] = []
@@ -377,10 +410,11 @@ def tagged_path_block_spans(text: str, tag: str) -> list[tuple[int, int]]:
         q = text.find('"', s + len(open_lead))     # [^"]* then closing quote
         if q < 0:
             break
-        if text[q + 1:q + 2] != ">":                # require `">` immediately after
+        body_at = _attrs_end(text, q + 1)
+        if body_at < 0:
             i = s + len(open_lead)
             continue
-        e = text.find(close, q + 2)
+        e = text.find(close, body_at)
         if e < 0:
             break
         spans.append((s, e + len(close)))

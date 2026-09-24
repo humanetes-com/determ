@@ -29,7 +29,6 @@ from pipeline_core.application.reconstruct.import_repair import (
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
-    make_request_answerer,
     workspace_file_reader,
 )
 from pipeline_core.application.reconstruct.tree_txn import (
@@ -37,6 +36,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
     capture,
     restore,
 )
+from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.cluster_plan import cfg_world_rules
@@ -65,7 +65,6 @@ from pipeline_core.domain.test_results import (
 )
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.prompts.context import PerFnFixSections
-from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.sections import render_types_section
 
 
@@ -107,6 +106,9 @@ class RetryDeps:
     gather_fix_context: Callable[..., FnFixContext]
     build_per_fn_fix_prompt: Callable[..., str]
     ask_per_fn_body: Callable[..., tuple[str | None, str]]
+    # (label, *, route, sources, max_pulls) -> the body's conversation
+    # (`PromptContext.open_conversation`).
+    open_conversation: Callable[..., Any]
     splice_fn_body: Callable[..., SpliceOutcome]
     # The collision-safe write. `splice_fn_body` locates by bare name and
     # refuses `ambiguous_name` the moment a file holds two fns of that name,
@@ -773,12 +775,11 @@ def generate_one_body(
         fr_path=ctx.fr_path,
         kind=resolve_kind(None, err_excerpt),
     )
-    # Context pulls: bounded typed requests through the ladder (same rung re-asks
-    # with the answered context; budget per fix attempt).
-    _menu = ""
-    _answerer = None
+    # Context requests are answered on the body's conversation (the request
+    # turn stays above its answer).
+    _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
+    _sources: PullSources | None = None
     if os.getenv("CONTEXT_PULLS", "1") != "0":
-        _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
         _sources = PullSources(
             read_file=workspace_file_reader(ctx.project_dir),
             find_tests=lambda name: "\n\n".join(
@@ -794,13 +795,13 @@ def generate_one_body(
                 or std_api_def(name)),
             full_error=lambda: err_excerpt,
         )
-        _menu = pull_menu_section(_sources.available_kinds(), _max_pulls)
-        # RetryDeps carries no emit port — pulls here log only.
-        _answerer = make_request_answerer(
-            _sources, log=deps.log, emit=lambda *_a, **_k: None,
-            max_pulls=_max_pulls)
-    new_body, _ = deps.ask_per_fn_body(prompt + _menu, fn, [], sig_text=sig_t,
-                                       answer_request=_answerer)
+    _conv = deps.open_conversation(f"{rel_f}::{fn}", route="task3-per-fn",
+                                   sources=_sources, max_pulls=_max_pulls)
+    try:
+        new_body, _ = deps.ask_per_fn_body(prompt, fn, [], conversation=_conv,
+                                           sig_text=sig_t)
+    except TranscriptBound:
+        return None
     if not new_body:
         return None
     return BodyDraft(file=rel_f, fn=fn, container=container, sig_text=sig_t,

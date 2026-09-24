@@ -42,7 +42,13 @@ from pipeline_core.application.reconstruct.peel_revert import (
     PeelResult,
     peel_to_compiling,
 )
+from pipeline_core.application.reconstruct.pull_resolver import RequestAnswerer
 from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
+from pipeline_core.application.reconstruct.unit_conversation import (
+    ConversationPorts,
+    TranscriptBound,
+    UnitConversation,
+)
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.attribution import (
     container_key,
@@ -102,8 +108,10 @@ class SessionPorts:
     read_source: Callable[[str], str | None]
     # () -> current body text per slice unit.
     enumerate_bodies: Callable[[], Mapping[FnSite, str]]
-    # (reply) -> the follow-up text answering its requests, or None.
-    answer_pulls: Callable[[str], str | None]
+    # (reply, conversation=everything sent so far) -> the follow-up text
+    # answering its requests, or None. The transcript lets a request for a
+    # file the session already carries whole be answered by pointer.
+    answer_pulls: RequestAnswerer
     log: Callable[[str], None]
     emit: Callable[..., None]
     check_graceful_stop: Callable[[str], None]
@@ -200,14 +208,6 @@ class _JudgedState:
 
 def _leaf(name: str) -> str:
     return name.rsplit("::", 1)[-1]
-
-
-def _user(text: str) -> dict[str, Any]:
-    return {"role": "user", "content": text}
-
-
-def _assistant(text: str) -> dict[str, Any]:
-    return {"role": "assistant", "content": text}
 
 
 def _admit_from_file_requests(
@@ -340,7 +340,16 @@ def run_slice_session(
               f"{', '.join(slice_.tests)}; editable {len(slice_.units)} unit(s) "
               f"in {len(files)} file(s); budget {max_turns} turn(s).")
 
-    messages: list[dict[str, Any]] = [_user(turn0)]
+    # The session's transcript is a `UnitConversation`, the engine every
+    # fill route talks through. The session keeps its own request handling
+    # (a request is a counted turn that may admit units), so it sends plain
+    # turns (`say`); the engine owns the transcript and its bound.
+    conv = UnitConversation(
+        ConversationPorts(ask_turns=ports.ask_turns, log=ports.log,
+                          emit=ports.emit,
+                          max_transcript_chars=max_transcript_chars),
+        label=label, route="session")
+    pending = turn0
     started = ports.now()
     turns = 0
     model_calls = 0
@@ -475,9 +484,10 @@ def run_slice_session(
                           f"after {turns} turn(s) and the last turn moved no "
                           "verdict — no further turn opened.")
                 break
-            sent_chars = sum(len(str(m.get("content") or ""))
-                             for m in messages)
-            if 0 < max_transcript_chars < sent_chars:
+            try:
+                reply = conv.say(pending, kind="turn")
+            except TranscriptBound:
+                sent_chars = conv.chars() + len(pending)
                 ports.log(
                     f"  [phase-c/session] {label}: transcript "
                     f"{sent_chars:,} chars over the single-call bound "
@@ -487,14 +497,13 @@ def run_slice_session(
                     "cluster": cluster_name, "turn": turns + 1,
                     "chars": sent_chars, "bound": max_transcript_chars})
                 break
-            turns += 1
-            try:
-                reply = ports.ask_turns(messages)
             except Exception as exc:  # noqa: BLE001 — the loop reports, never dies
-                ports.log(f"  [phase-c/session] {label}: model error on turn {turns}: {exc}")
+                ports.log(f"  [phase-c/session] {label}: model error on turn "
+                          f"{turns + 1}: {exc}")
+                turns += 1
                 break
+            turns += 1
             model_calls += 1
-            messages.append(_assistant(reply))
             turn_notes = extract_notes(reply)
             if turn_notes:
                 notes = turn_notes
@@ -503,7 +512,7 @@ def run_slice_session(
             if cap is not None and cap.capped:
                 capped_turns += 1
             if not parsed:
-                followup = ports.answer_pulls(reply)
+                followup = ports.answer_pulls(reply, conversation=conv.text())
                 if followup:
                     admitted = _admit_from_file_requests(
                         reply, records, all_records, files, baseline_texts,
@@ -514,7 +523,7 @@ def run_slice_session(
                         "cluster": cluster_name, "turn": turns, "kind": "request",
                         "admitted": [site_payload(record_site(r))
                                      for r in admitted]})
-                    messages.append(_user(followup + "\n" + render_budget_turn(max_turns - turns)))
+                    pending = followup + "\n" + render_budget_turn(max_turns - turns)
                     continue
                 if cap is not None and cap.empty_after_cap:
                     # The reply was cut by the reasoning cap before it
@@ -531,8 +540,8 @@ def run_slice_session(
                                   "reply was reasoning-capped and its follow-up "
                                   "carried no change set; not a decision — re-asked "
                                   "from the deliberation so far.")
-                        messages.append(_user(render_capped_turn() + "\n"
-                                              + render_budget_turn(max_turns - turns)))
+                        pending = (render_capped_turn() + "\n"
+                                   + render_budget_turn(max_turns - turns))
                         continue
                     ports.log(f"  [phase-c/session] {label}: turn {turns} — the "
                               "reply was reasoning-capped with no change set and "
@@ -549,8 +558,8 @@ def run_slice_session(
                 ports.emit("phase_c.session.turn", data={
                     "cluster": cluster_name, "turn": turns, "kind": "rejected",
                     "rejected": list(cs.rejected)})
-                messages.append(_user(render_rejected_only_turn(cs.rejected)
-                                      + "\n" + render_budget_turn(max_turns - turns)))
+                pending = (render_rejected_only_turn(cs.rejected)
+                           + "\n" + render_budget_turn(max_turns - turns))
                 continue
             rejected, pre = _apply(cs)
             rc, out, diags = ports.check()
@@ -571,8 +580,8 @@ def run_slice_session(
                     ports.log(f"  [phase-c/session] {label}: turn {turns} — change set of "
                               f"{len(cs.routed)} body(ies) did not compile; restored, "
                               "diagnostics returned on the transcript.")
-                    messages.append(_user(render_compile_turn(diag, rejected)
-                                          + "\n" + render_budget_turn(max_turns - turns)))
+                    pending = (render_compile_turn(diag, rejected)
+                               + "\n" + render_budget_turn(max_turns - turns))
                     continue
                 dropped = list(peeled.reverted)
                 dropped_diag = ports.blamed_type_api(focused or out[-4000:])
@@ -593,9 +602,9 @@ def run_slice_session(
                     "units": [site_payload(u) for u in sorted(cs.units)],
                     "rejected": rejected})
                 _restore(pre)
-                messages.append(_user("RESULT: the test suite could not be measured "
-                                      "after this change set (build or timeout); it was "
-                                      "not applied.\n" + render_budget_turn(max_turns - turns)))
+                pending = ("RESULT: the test suite could not be measured "
+                           "after this change set (build or timeout); it was "
+                           "not applied.\n" + render_budget_turn(max_turns - turns))
                 continue
             judged_turns += 1
             if cap is not None and cap.capped:
@@ -673,10 +682,10 @@ def run_slice_session(
                 note = (f"The observed values are byte-identical to turn "
                         f"{unchanged_since}'s: the bodies you changed did not alter "
                         "what the failing assertions see.")
-            messages.append(_user(render_test_turn(
+            pending = (render_test_turn(
                 reading, rejected, dropped=dropped, dropped_diagnostics=dropped_diag,
                 coverage_note=note, restored_note=restored_note)
-                + "\n" + render_budget_turn(max_turns - turns)))
+                + "\n" + render_budget_turn(max_turns - turns))
     except BaseException:
         # A stop mid-session: the tree must not hold an unjudged change set.
         # It is put back to the best judged state when the end-of-session
@@ -756,7 +765,7 @@ def run_slice_session(
         outcome=outcome, turns=turns, model_calls=model_calls, kept=kept,
         reverted=reverted, dispatched=frozenset(dispatched), notes=notes,
         final=final, compile_failures=compile_failures,
-        transcript_chars=sum(len(str(m.get("content") or "")) for m in messages),
+        transcript_chars=conv.chars(),
         newly_red=newly_red, newly_red_output=newly_red_output,
         best_turn=ended.turn if ended is not None else None,
         preferred_turn=best.turn if best is not None else None,

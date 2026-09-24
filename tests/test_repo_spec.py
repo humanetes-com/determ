@@ -49,16 +49,17 @@ def test_render_repo_spec_relevance_and_parts() -> None:
     assert "FR-002" not in out                        # Display/Error → dropped
     assert "Methodology" in out                       # genesis prose
     # API slice: other files only — own file excluded even though it matches.
-    assert '<FILE path="src/chain.rs">' not in out
+    assert '<FILE path="src/chain.rs"' not in out
     # error.rs has no identifier overlap → excluded too.
-    assert '<FILE path="src/error.rs">' not in out
+    assert '<FILE path="src/error.rs"' not in out
 
 
 def test_render_repo_spec_api_cross_file_and_budget() -> None:
     idents = {"Chain"}
     out = render_repo_spec(_docs(), file_rel="src/error.rs",
                            identifiers=idents, char_budget=6000)
-    assert '<FILE path="src/chain.rs">' in out        # cross-file ground truth
+    # cross-file ground truth — the API surface, declared a part of the file
+    assert '<FILE path="src/chain.rs" view="part">' in out
     assert render_repo_spec(RepoSpecDocs(), identifiers=idents) == ""
     tight = render_repo_spec(_docs(), identifiers=idents, char_budget=120)
     assert len(tight) <= 240                          # trim_to_line + headers
@@ -118,3 +119,21 @@ def test_builders_carry_repository_specifications(tmp_path: Path) -> None:
         promoted_error_rules=pipeline._MODEL_NOTES_STORE.promoted_error_rules,
         repo_spec_section=pipeline._repo_spec_section,
     ))
+
+
+def test_the_api_slice_ranks_the_declaring_file_before_file_order() -> None:
+    """Under a cap that fits one file, the file that DECLARES the target's
+    type (its impl block) wins over an earlier file that merely mentions it.
+    Negative control: with nothing declared anywhere, file order stands."""
+    from pipeline_core.prompts.repo_spec import _api_slice
+    api = ('<FILE path="src/a_big.rs">\n' + "pub fn uses(x: &Widget) {}\n" * 20
+           + "</FILE>\n"
+           '<FILE path="src/z_home.rs">\npub struct Widget;\n'
+           'impl Widget {\n    pub fn make() -> Self;\n}\n</FILE>\n')
+    got = _api_slice(api, "src/t.rs", {"Widget"}, 200)
+    assert '<FILE path="src/z_home.rs"' in got and "src/a_big.rs" not in got
+    plain = api.replace("pub struct Widget;\nimpl Widget {",
+                        "pub fn other(w: &Widget);\nmod w {")
+    first = _api_slice(plain, "src/t.rs", {"Widget"}, 200)
+    assert first.startswith('<FILE path="src/a_big.rs"')
+    assert "src/z_home.rs" not in first

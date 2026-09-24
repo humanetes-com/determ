@@ -167,3 +167,67 @@ def test_followup_think_false_keeps_a_keywordless_fake_working():
         return "ok"
     c, _, _ = _client(raw)
     assert c.ask("hi", followup_think=False) == "ok"
+
+
+# ── the contents index opens a request-capable prompt, read off what is sent ──
+
+from pipeline_core.domain.prompt_holdings import (  # noqa: E402
+    CONTENTS_OPEN,
+    FileView,
+    contents_index,
+    file_block,
+)
+
+_MENU = '\nYou may reply <REQUEST kind="file" arg="src/x.rs"/>.'
+
+
+def test_a_request_capable_prompt_is_sent_opened_by_its_index():
+    sent: list[str] = []
+    c, _, _ = _client(lambda p, *a, **k: sent.append(p) or "ok",
+                      contents=contents_index)
+    prompt = file_block("src/a.rs", "fn a() {}", view=FileView.WHOLE) + _MENU
+    c.ask(prompt)
+    assert sent[0].startswith(CONTENTS_OPEN) and sent[0].endswith(prompt)
+    assert "src/a.rs — the whole file" in sent[0]
+
+
+def test_no_index_without_a_request_menu_or_without_the_hook():
+    """Negative controls: a prompt that cannot request, and the pre-change
+    client (`contents=None`, `PROMPT_CONTENTS_INDEX=0`), send it unchanged."""
+    prompt = file_block("src/a.rs", "fn a() {}", view=FileView.WHOLE)
+    for over, text in (({"contents": contents_index}, prompt),
+                       ({}, prompt + _MENU)):
+        sent: list[str] = []
+        c, _, _ = _client(lambda p, *a, _s=sent, **k: _s.append(p) or "ok", **over)
+        c.ask(text)
+        assert sent == [text]
+
+
+def test_the_index_never_lists_a_block_the_guard_dropped():
+    """The index is read off the FITTED prompt: a middle file block the
+    context guard removed is not listed, and room for the index was reserved
+    before fitting so the sent prompt still fits."""
+    blocks = "".join(
+        "\n" + file_block(f"src/{n}.rs", "x" * 3000, view=FileView.WHOLE)
+        for n in ("first", "middle", "last"))
+    sent: list[str] = []
+    c, _, guards = _client(lambda p, *a, **k: sent.append(p) or "ok",
+                           contents=contents_index, context_chars=8_500)
+    c.ask("task" + blocks + _MENU)
+    assert "context-guard/section_removal" in guards
+    assert "src/middle.rs" not in sent[0]
+    assert "src/first.rs —" in sent[0] and "src/last.rs —" in sent[0]
+    assert len(sent[0]) + len("DISCLAIMER") <= 8_500
+
+
+def test_a_session_indexes_its_first_user_turn_only():
+    got: list = []
+    c, _, _ = _client(lambda *a, **k: "ok", contents=contents_index,
+                      ask_turns_raw=lambda turns, **k: got.append(turns) or "ok")
+    turn0 = file_block("src/a.rs", "fn a() {}", view=FileView.WHOLE) + _MENU
+    c.ask_turns([{"role": "user", "content": turn0},
+                 {"role": "assistant", "content": "<REQUEST kind=\"file\" arg=\"src/a.rs\"/>"},
+                 {"role": "user", "content": "answer" + _MENU}])
+    turns = got[0]
+    assert turns[1]["content"].startswith(CONTENTS_OPEN)
+    assert turns[3]["content"] == "answer" + _MENU

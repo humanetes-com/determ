@@ -96,6 +96,32 @@ class SkeletoniseResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SlotFit:
+    """A crate fn whose declared signature can be stored in a fn-pointer
+    field: `name` as a table literal would spell it (`object_drop<E>`,
+    `Wrap::make`), where it is declared, and its cfg gate so a cluster that
+    does not compile it can drop it."""
+    name: str = ""
+    file: str = ""
+    cfg_predicates: tuple[str, ...] = ()
+    # The bound a generic parameter puts on the type the slot binds it to
+    # (`u8: Display`), which the signature comparison cannot decide. "" when
+    # the fit is unconditional.
+    requires: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SlotFit:
+        return cls(name=d.get("name", ""), file=d.get("file", ""),
+                   cfg_predicates=_strs(d.get("cfg_predicates")),
+                   requires=d.get("requires", ""))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "file": self.file,
+                "cfg_predicates": list(self.cfg_predicates),
+                "requires": self.requires}
+
+
+@dataclass(frozen=True, slots=True)
 class FieldRecord:
     """A struct field (model.rs FieldRecord)."""
     name: str = ""
@@ -107,16 +133,29 @@ class FieldRecord:
     # decides False; empty (a pre-field artefact, a hand-made record) reads as
     # ungated, so nothing is dropped on absence of evidence.
     cfg_predicates: tuple[str, ...] = ()
+    # For a fn-POINTER field, every crate fn whose signature fits it
+    # (`installable_fns.slot_fits`); () when none does. None: not a fn
+    # pointer, or the records were read without the crate's fns — a list
+    # printed as complete must be complete, so absence is never rendered as
+    # "nothing fits".
+    fits: tuple[SlotFit, ...] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FieldRecord:
+        raw = d.get("fits")
         return cls(name=d.get("name", ""), ty=d.get("ty", ""),
                    is_pub=bool(d.get("is_pub", False)),
-                   cfg_predicates=_strs(d.get("cfg_predicates")))
+                   cfg_predicates=_strs(d.get("cfg_predicates")),
+                   fits=(None if raw is None
+                         else tuple(SlotFit.from_dict(f) for f in raw)))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "ty": self.ty, "is_pub": self.is_pub,
-                "cfg_predicates": list(self.cfg_predicates)}
+        out: dict[str, Any] = {
+            "name": self.name, "ty": self.ty, "is_pub": self.is_pub,
+            "cfg_predicates": list(self.cfg_predicates)}
+        if self.fits is not None:
+            out["fits"] = [f.to_dict() for f in self.fits]
+        return out
 
 
 @dataclass(frozen=True, slots=True)

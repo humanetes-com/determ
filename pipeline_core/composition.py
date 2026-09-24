@@ -191,6 +191,7 @@ from pipeline_core.adapters.oracle_fingerprint import (
 from pipeline_core.adapters.oracle_fingerprint import (
     workspace_oracle_drift as _workspace_oracle_drift,
 )
+from pipeline_core.adapters.per_fn_ask import conversation_factory
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
@@ -1825,6 +1826,10 @@ def build_app(
         ),
         prompt=PromptContextAdapter(
             ask_per_fn_body_fn=_via("ask_per_fn_body"),
+            open_conversation_fn=conversation_factory(
+                ask_client, model=settings.task_models.task2, log=ports.log,
+                emit=ports.emit,
+                max_transcript_chars=cfg.single_call_char_limit),
             gather_fn=fix_context.gather,
             collect_sibling_filled_bodies_fn=_collect_sibling_filled_bodies,
             extract_crate_idioms_fn=_extract_crate_idioms,
@@ -2695,8 +2700,8 @@ def build_app(
             u2_test_gate=_via("u2_test_gate"),
             test_regression_baseline=helpers.test_regression_baseline,
             test_regression_gate=helpers.test_regression_gate,
-            ask=ask_client.ask,
             ask_turns=ask_client.ask_turns,
+            fit_turn=ask_client.fit,
             run_cargo=helpers.run_cargo,
             measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
             failed_body_cap=cfg.failed_body_cap,
@@ -2961,6 +2966,7 @@ def build_app(
                 gather_fix_context=fill_roles.prompt.gather,
                 build_per_fn_fix_prompt=build_per_fn_fix_prompt,
                 ask_per_fn_body=fill_roles.prompt.ask_per_fn_body,
+                open_conversation=fill_roles.prompt.open_conversation,
                 splice_fn_body=fill_roles.mut.splice_fn_body,
                 splice_body_scoped=fill_roles.mut.splice_body_scoped,
                 find_tests_for_fn=fill_roles.tests.find_tests_for_fn,

@@ -538,12 +538,13 @@ def test_reader_appends_external_records_last_and_the_env_switch_disables(
     assert "re-exported by this crate's use lines" in bt.definition.splitlines()[0]
     assert "#[cfg(" not in bt.definition  # no same-file crate item: no cfg complement
     assert source.asked == ["std::backtrace::Backtrace"]
-    assert stub.calls == ["--enumerate-types", "--enumerate-uses"]
+    # The crate's fns are read to attach fn-pointer slot candidates.
+    assert stub.calls == ["--enumerate-types", "--enumerate-fns", "--enumerate-uses"]
     # Off switch: crate records only, and `use` bindings are not even read.
     stub.calls.clear()
     monkeypatch.setenv(ENV_SWITCH, "0")
     assert reader.enumerate_types(root) == [TypeRecord.from_dict(CRATE_REC)]
-    assert stub.calls == ["--enumerate-types"]
+    assert stub.calls == ["--enumerate-types", "--enumerate-fns"]
 
 
 def test_reader_gates_the_external_arm_by_the_shim_complement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -594,6 +595,9 @@ def test_reader_skips_a_name_the_crate_declares_elsewhere_and_non_packages(
 
         def enumerate_types(self, src_dir: Path, **_k: Any) -> list[TypeRecord]:
             return [TypeRecord.from_dict(CRATE_REC)]
+
+        def enumerate_fns(self, src_dir: Path, **_k: Any) -> None:
+            return None
 
     scratch = tmp_path / "scratch"
     (scratch / "src").mkdir(parents=True)

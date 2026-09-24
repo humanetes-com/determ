@@ -52,6 +52,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
     guard_tree_boundary,
     restore,
 )
+from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
@@ -106,6 +107,12 @@ from pipeline_core.ports.fill_engine import (
 from pipeline_core.prompts.context import PerFnFixSections
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
+from pipeline_core.prompts.retry_turn import (
+    BODY_OUTPUT,
+    AttemptFeedback,
+    EvidenceSection,
+    types_new_to,
+)
 
 
 def _best_fails(gauge: FloorStall) -> int:
@@ -1054,7 +1061,11 @@ class PhaseCFillEngine:
                         self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: cargo test FAILED "
                                      f"(rc={rc}).")
                         # === Per-pass test fix loop ===
-                        test_fix_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
+                        # One conversation per (file, fn) across this pass's
+                        # test-fix iterations: the first re-ask opens it with
+                        # the fix prompt, every later one is a turn carrying
+                        # the new test output.
+                        test_fix_convs: dict[tuple[str, str], Any] = {}
                         _entry_fail_count = len(parse_failed_tests(test_out))
                         _stall_seen: dict[str, int] = {
                             "best": _entry_fail_count, "stalls": 0}
@@ -1064,7 +1075,7 @@ class PhaseCFillEngine:
                                               pass_n: int = pass_n,
                                               filled_this_pass: list[FnLocator] = filled_this_pass,
                                               test_cmd: str = test_cmd,
-                                              test_fix_history: dict[tuple[str, str], list[dict[str, Any]]] = test_fix_history,
+                                              test_fix_convs: dict[tuple[str, str], Any] = test_fix_convs,
                                               _stall_seen: dict[str, int] = _stall_seen,
                                               _iter_ctx: dict[str, Any] = _iter_ctx) -> FixOutcome:
                             nonlocal attempts, rc, test_out
@@ -1195,7 +1206,27 @@ class PhaseCFillEngine:
                                     file_rel=rel_f, src_dir=_src_for_macros,
                                     container=_ctx.container,
                                 )
-                                prompt = build_per_fn_fix_prompt(
+                                _conv = test_fix_convs.get((rel_f, fn))
+                                if _conv is None:
+                                    _conv = test_fix_convs[(rel_f, fn)] = (
+                                        self.prompt.open_conversation(
+                                            f"{rel_f}::{fn}", route="test-fix",
+                                            sources=None))
+                                _kind = resolve_kind(None, error_excerpt_test)
+                                turn: str | AttemptFeedback = AttemptFeedback(
+                                    kind=_kind, excerpt=error_excerpt_test,
+                                    targets=(fn,), output=BODY_OUTPUT,
+                                    sections=(
+                                        EvidenceSection(
+                                            "TYPES_IN_SCOPE", types_new_to(
+                                                _conv.text(), error_excerpt_test,
+                                                _crate_type_records,
+                                                viewer_file=rel_f),
+                                            "Types this result names that were "
+                                            "not shown above:\n"),
+                                        EvidenceSection(
+                                            "MODEL_NOTES", _ctx.notes_section))
+                                ) if _conv.opened else build_per_fn_fix_prompt(
                                     file_text=cur_text, fn_name=fn, sig_text=sig_t,
                                     test_blocks=t_blocks, module_name=module_name,
                                     cluster_name=cluster_name, file_rel=rel_f,
@@ -1211,13 +1242,16 @@ class PhaseCFillEngine:
                                             units=(IdentityMustUnit(
                                                 fn, container_for_fn, sig_t),))),
                                     fr_path=fr_path,  # note recall
-                                    attempt_history=test_fix_history.get((rel_f, fn), []),
-                                    kind=resolve_kind(None, error_excerpt_test),
+                                    kind=_kind,
                                 )
                                 attempts += 1
                                 attempts_log_t: list[str] = []
-                                new_body, _ = self.prompt.ask_per_fn_body(
-                                    prompt, fn, attempts_log_t, sig_text=sig_t)
+                                try:
+                                    new_body, _ = self.prompt.ask_per_fn_body(
+                                        turn, fn, attempts_log_t, conversation=_conv,
+                                        sig_text=sig_t)
+                                except TranscriptBound:
+                                    continue
                                 if not new_body:
                                     continue
                                 # allow_nonstub: every test-retry candidate is an
@@ -1235,14 +1269,6 @@ class PhaseCFillEngine:
                                     any_progress = True
                                     self.tel.log(f"  [phase-c/per-fn] test-fix: re-spliced "
                                                  f"{rel_f}::{fn} (attempt {test_fix_attempt}).")
-                                    test_fix_history.setdefault(
-                                        (rel_f, fn), []).append({
-                                            "attempt": test_fix_attempt,
-                                            "body": new_body,
-                                            "error_sig": self.cargo.focus_errors(
-                                                test_out, rel_f, max_chars=self.config.fix_err_cap),
-                                            "outcome": "test_fail",
-                                        })
                             if not any_progress:
                                 self.tel.log(f"  [phase-c/per-fn] pass {pass_n}: no fn could "
                                              f"be re-spliced for failing tests — stopping.")

@@ -67,7 +67,6 @@ from pipeline_core.application.reconstruct.peel_revert import (
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
-    ask_with_pulls,
     make_request_answerer,
     reconstruction_file_reader,
 )
@@ -95,6 +94,11 @@ from pipeline_core.application.reconstruct.tree_txn import (
     capture,
     restore,
 )
+from pipeline_core.application.reconstruct.unit_conversation import (
+    ConversationPorts,
+    TranscriptBound,
+    UnitConversation,
+)
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
@@ -114,7 +118,7 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
-from pipeline_core.domain.cfg import cluster_cfg_set
+from pipeline_core.domain.cfg import cluster_cfg_set, filter_cfg_inactive_branches
 from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.coverage_slice import entered_by_test
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
@@ -324,11 +328,17 @@ from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
     build_file_fill_prompt,
-    build_maximal_impl_prompt,
     restrict_fill_plan,
 )
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
+from pipeline_core.prompts.per_impl import sibling_rejected_note
 from pipeline_core.prompts.pull_menu import pull_menu_section
+from pipeline_core.prompts.retry_turn import (
+    AttemptFeedback,
+    EvidenceSection,
+    fn_output,
+    types_new_to,
+)
 from pipeline_core.prompts.slice_session import (
     DEFAULT_FILE_CHARS as SESSION_FILE_CHARS,
 )
@@ -504,7 +514,10 @@ class ImplFillDeps:
     u2_test_gate: U2TestGate
     test_regression_baseline: Callable[..., TestStateReading | None]
     test_regression_gate: Callable[..., tuple[RegressionComparison, str] | None]
-    ask: Callable[..., str]
+    # The transcript model call (`AskClient.ask_turns`): every fill route
+    # talks to the model through a `UnitConversation` on it, and so does the
+    # red-slice session.
+    ask_turns: Callable[..., str]
     failed_body_cap: Any
     per_fn_fix_hard_cap: Any
     per_impl_max_stubs: Any
@@ -516,9 +529,9 @@ class ImplFillDeps:
     # against (`SliceCosts.max_chars` = `SLICE_SESSION_TURN0_CHARS` or 45%
     # of it). 0 disables the char capacity (unit-count packing only).
     single_call_char_limit: int = 0
-    # The transcript model call (`AskClient.ask_turns`) the red-slice
-    # session runs on; None disables the session route.
-    ask_turns: Callable[..., str] | None = None
+    # A conversation's opening turn fitted to the context
+    # (`AskClient.fit`); None sends it as built.
+    fit_turn: Callable[[str], str] | None = None
     # (cmd, cwd, env, timeout) -> (rc, output): the plain cargo runner the
     # assertion probe builds its scratch crate with; None disables the probe.
     run_cargo: Callable[..., tuple[int, str]] | None = None
@@ -928,7 +941,6 @@ def prepare_impl_fill(
 
     _test_regression_baseline = deps.test_regression_baseline
     _test_regression_gate = deps.test_regression_gate
-    ask = deps.ask
     # Sieve counters for this whole impl-fill batch (workers share it).
     _retro_gate = RetroGateTally()
     _FAILED_BODY_CAP = deps.failed_body_cap
@@ -1297,6 +1309,15 @@ def prepare_impl_fill(
     # oracle's `tests/`): the pull route and the evidence block's panic-site
     # quote read the same files under the same containment.
     _read_source = reconstruction_file_reader(target_src_dir, project_dir)
+
+    def _cluster_view(text: str) -> str:
+        """A file as this cluster compiles it — what the prompts render."""
+        if cluster is None:
+            return text
+        return filter_cfg_inactive_branches(text, cluster_cfg_set(cluster))
+
+    def _has_fn_bodies(reply: str) -> bool:
+        return bool(extract_fn_bodies(reply))
     _pull_sources = PullSources(
         read_file=_read_source,
         find_tests=lambda name: "\n\n".join(
@@ -1313,9 +1334,9 @@ def prepare_impl_fill(
     _pull_menu = (pull_menu_section(_pull_sources.available_kinds(), _max_pulls)
                   if _pulls_on else "")
 
-    def _ask_fill(prompt: str, *, followup_think: bool = False) -> str:
-        """The shared ask seam: pull round-trips when enabled, plain ask
-        otherwise. Deliverable-first — FN bodies short-circuit.
+    def _fill_turns(messages: list[dict[str, Any]], *,
+                    followup_think: bool = False) -> str:
+        """The fill routes' model call, one transcript at a time.
 
         `followup_think` is the escalated grade's completion policy, gated
         by `PHASE_C_FOLLOWUP_THINK` (default off). On the strength dialect
@@ -1327,16 +1348,23 @@ def prepare_impl_fill(
         today's followup; an escalated write list asks for the reserve only
         when the env switch is on (after the reserve sits above Muse@high's
         measured p90)."""
-        if not _pulls_on:
-            return str(ask(prompt, model=_TASK2_MODEL,
-                           followup_think=followup_think))
-        return ask_with_pulls(
-            lambda p: str(ask(p, model=_TASK2_MODEL,
-                              followup_think=followup_think)),
-            prompt + _pull_menu,
-            sources=_pull_sources,
-            has_deliverable=lambda r: bool(extract_fn_bodies(r)),
-            log=_log, emit=_emit, max_pulls=_max_pulls)
+        return str(deps.ask_turns(messages, model=_TASK2_MODEL,
+                                  followup_think=followup_think))
+
+    def _open_conversation(label: str, route: str) -> UnitConversation:
+        """The conversation one fill unit (a block, a file group, a pair)
+        talks to the model through, from its turn-0 prompt to its last
+        retry. Requests are answered on it when `CONTEXT_PULLS` is on."""
+        return UnitConversation(
+            ConversationPorts(
+                ask_turns=_fill_turns, log=_log, emit=_emit,
+                fit=deps.fit_turn or (lambda t: t),
+                max_transcript_chars=int(deps.single_call_char_limit or 0)),
+            label=label, route=route,
+            requests=(make_request_answerer(
+                _pull_sources, log=_log, emit=_emit, max_pulls=_max_pulls)
+                if _pulls_on else None),
+            menu=_pull_menu)
 
     # Dispatch families: autoref-specialization trait sets dispatched
     # by a macro. Their correctness is a cross-impl invariant, so when a block
@@ -1877,13 +1905,19 @@ def prepare_impl_fill(
         _file_retro = "\n\n".join(_file_retro_parts)
         prior_error = ""
         _file_kind: LastErrorKind | None = None
-        _prev_prompt: str | None = None
         _retry_names: frozenset[str] | None = None
+        # What the kept remainder of a peeled reply was, for the retry turn.
+        _retry_note = ""
+        # The group's one conversation: attempt 1 opens it with the file
+        # prompt; a revert's retry and a peel's retry are turns on it.
+        _conv = _open_conversation(glabel, "file")
+        _prev_feedback: tuple[object, ...] | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
             # TYPES_IN_SCOPE selected over the WHOLE file, which is this
             # route's unit — the per-impl path searches one block's member
-            # signatures because that is all it may write.
-            _file_types = _types_section_for_fix(
+            # signatures because that is all it may write. A retry adds only
+            # the types its result names that were not shown.
+            _file_types = "" if _conv.opened else _types_section_for_fix(
                 "", snapshot, prior_error, "", "", _crate_type_records,
                 file_rel=file_rel, observables=_file_observables)
             _plans: list[BlockFillPlan] = [
@@ -1895,7 +1929,9 @@ def prepare_impl_fill(
                 _missing = tuple(sorted(_retry_names - _covered))
                 if _missing:
                     _plans.append(BlockFillPlan(header="", refills=_missing))
-            prompt = build_file_fill_prompt(
+            _targets = tuple(
+                n for p in _plans for n in (*p.stubs, *p.refills))
+            prompt = "" if _conv.opened else build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
                 fill_plan=_plans,
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
@@ -1920,26 +1956,28 @@ def prepare_impl_fill(
                      for b in fblocks
                      for m in (*b.stub_members, *b.refill_members)),
                     _union_pins))
-            # A rebuilt prompt byte-identical to the previous attempt's is a
-            # temperature resample, not a retry: every input — the snapshot,
-            # the plan, and above all `prior_error` — came out the same, so no
-            # new information reaches the model. This route retries on the
-            # feedback in `prior_error` and has no repeated-signature exit, so
-            # an identical revert reason looped it verbatim:
-            # `src/ensure.rs::render` sent the SAME prompt sha on attempts 2
-            # and 3 (2026-08-19 19:45:30 and 19:53:41 UTC; attempt 1
-            # differed), reverted all three times on the identical 11-test
-            # newly-red list, then fell back to per-block anyway.
-            if prompt == _prev_prompt:
-                _log(f"  [phase-c/file] {glabel}: attempt {_attempt} rebuilt "
-                     "a byte-identical prompt — the revert feedback did not "
-                     "change, so another call buys a temperature resample of "
-                     "the same question; falling back to per-block fills.")
+            # A retry whose measured feedback is identical to the previous
+            # retry's is a temperature resample, not a retry: the result, its
+            # kind and the targets came out the same, so no new information
+            # reaches the model. This route retries on that feedback and has
+            # no repeated-signature exit, so an identical revert reason looped
+            # it verbatim: `src/ensure.rs::render` sent the SAME prompt sha on
+            # attempts 2 and 3 (2026-08-19 19:45:30 and 19:53:41 UTC),
+            # reverted all three times on the identical 11-test newly-red
+            # list, then fell back to per-block anyway.
+            _feedback_key = (prior_error, _file_kind, _targets, _retry_note)
+            if _conv.opened and _feedback_key == _prev_feedback:
+                _log(f"  [phase-c/file] {glabel}: attempt {_attempt} would "
+                     "send the same result as the previous retry — the revert "
+                     "feedback did not change, so another call buys a "
+                     "temperature resample of the same question; falling back "
+                     "to per-block fills.")
                 _emit("phase_c.file.fill.resample_skipped", data={
                     "cluster": cluster_name, "file": file_rel, "group": glabel,
                     "attempt": _attempt})
                 return
-            _prev_prompt = prompt
+            if _conv.opened:
+                _prev_feedback = _feedback_key
             _log(f"  [phase-c/file] {glabel}: file-first fill "
                  f"({len(fblocks)} block(s), {len(stub_names)} stub(s), "
                  f"{len(refill_names)} re-fill(s), "
@@ -1957,10 +1995,40 @@ def prepare_impl_fill(
                         f"{file_rel}::{n}"
                         for n in (_retry_names if _retry_names is not None
                                   else wanted)):
-                    _file_reply = _ask_fill(
-                        prompt,
-                        followup_think=escalated_followup_think(_grade_parts))
+                    _think = escalated_followup_think(_grade_parts)
+                    if not _conv.opened:
+                        _file_reply = _conv.open(
+                            prompt, has_deliverable=_has_fn_bodies,
+                            followup_think=_think)
+                    else:
+                        _file_reply = _conv.retry(AttemptFeedback(
+                            kind=_file_kind,
+                            excerpt=with_blamed_type_api(
+                                prior_error, _crate_type_records),
+                            targets=_targets,
+                            output=fn_output(
+                                [(n, p.header) for p in _plans
+                                 for n in (*p.stubs, *p.refills)]),
+                            note=_retry_note,
+                            sections=(EvidenceSection(
+                                "TYPES_IN_SCOPE", types_new_to(
+                                    _conv.text(), prior_error,
+                                    _crate_type_records, viewer_file=file_rel),
+                                "Types this result names that were not "
+                                "shown above:\n"),),
+                            moved=_conv.bodies_moved(
+                                _read_source, frozenset(wanted),
+                                normalize=_cluster_view)),
+                            has_deliverable=_has_fn_bodies,
+                            followup_think=_think)
                 parsed = extract_fn_bodies(_file_reply)
+            except TranscriptBound:
+                # No reply: the conversation is full. Not an answer dropped
+                # and not a verdict on the bodies — the per-block route
+                # still gets its shot at the stubs.
+                _log(f"  [phase-c/file] {glabel}: conversation at its bound "
+                     "— falling back to per-block fills.")
+                return
             except Exception as e:
                 _log(f"  [phase-c/file] {file_rel}: LLM error: {e}")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, glabel, "file")
@@ -1993,9 +2061,8 @@ def prepare_impl_fill(
                     _log(f"  [phase-c/file] {file_rel}: empty/no FN blocks "
                          f"({fn_tag_occurrences(_file_reply)} FN tag(s) in "
                          "reply) on peel-retry — retrying (attempts remain).")
-                    prior_error = (
-                        (prior_error + "\n" if prior_error else "")
-                        + "previous retry returned no FN blocks")
+                    _retry_note = ("Your previous reply carried no <FN> "
+                                   "block the harness could parse.")
                     _pre = capture(file_path, None)
                     snapshot = _pre.text("replace")
                     continue
@@ -2613,6 +2680,16 @@ def prepare_impl_fill(
                              "judged and kept).")
                         prior_error = _peel_err
                         _retry_names = frozenset(_peel_reverted)
+                        _kept_names = sorted(
+                            {b.fn_name for b in _landed} - _retry_names)
+                        _retry_note = (
+                            "Your bodies for "
+                            + ", ".join(f"`{n}`" for n in _kept_names)
+                            + " compiled and were KEPT. The bodies for "
+                            + ", ".join(f"`{n}`" for n in sorted(_retry_names))
+                            + " were peeled back: the diagnostic below blamed "
+                            "them. Rewrite only those."
+                            if _kept_names else "")
                         _pre = capture(file_path, None)
                         snapshot = _pre.text("replace")
                         continue
@@ -2627,6 +2704,11 @@ def prepare_impl_fill(
                                  f"({', '.join(sorted(_unspliced))}) — "
                                  "retrying those names; judged remainder stays.")
                             _retry_names = _unspliced
+                            _retry_note = (
+                                "These names were not spliced from your last "
+                                "reply (no body for them reached the file): "
+                                + ", ".join(f"`{n}`" for n in sorted(_unspliced))
+                                + ". The rest of that reply is kept.")
                             _pre = capture(file_path, None)
                             snapshot = _pre.text("replace")
                             continue
@@ -2635,6 +2717,7 @@ def prepare_impl_fill(
                 # The whole reply is restored: the peel did not narrow the
                 # failure to its bodies, so no one of them is convicted by it.
                 _note_reverted(file_rel, _attempted_names, collateral=True)
+                _retry_note = ""
                 if _regr_file is not None:
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
@@ -3207,6 +3290,14 @@ def prepare_impl_fill(
             "refill_count": len(block.refill_members),
         })
 
+        # The block's one conversation: attempt 1 opens it with the per-impl
+        # prompt; every later attempt — a retry after a gate, a retro round's
+        # re-entry, the maximal last resort — is a turn on it that carries
+        # what was measured, with the model's own replies above.
+        _conv = _open_conversation(str(block_id), "impl")
+        _impl_output = fn_output(
+            [(n, block.container) for n in _block_target_names])
+
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
             nonlocal last_response
             attempts.note_call()
@@ -3214,14 +3305,24 @@ def prepare_impl_fill(
             # positively-identified pipeline-side losses below overwrite it, so
             # the escalation stays available exactly where it was before.
             _last_loss[:] = [AttemptLoss.MODEL_FAILURE]
-            # TYPES_IN_SCOPE re-selected each attempt from the
-            # member sigs + impl header + where clause + the current error
-            # (E0277/E0599/E0046/E0053 routinely name a trait
-            # the impl block's signatures don't mention).
-            _types_section_eff = _types_section_for_fix(
-                _member_sigs_text, "", last_error_excerpt or "",
-                _block_container, _block_where, _crate_type_records,
-                file_rel=block.file, observables=_block_ev.observables)
+            # The opening turn's TYPES_IN_SCOPE: the member sigs + impl header
+            # + where clause, and the types the file names that another file
+            # declares. A retry adds only the types its result names that the
+            # conversation has not shown (`types_new_to`); E0277/E0599/E0046/
+            # E0053 routinely name a trait the signatures don't mention.
+            # The whole file as the cluster compiles it, read when the
+            # conversation opens: the prompt's own-file view. Bodies other
+            # fills rewrite later reach the retry turn as `moved`.
+            _own_text = ""
+            _types_section_eff = ""
+            if not _conv.opened:
+                _own_text = _cluster_view(file_path.read_text(
+                    encoding="utf-8", errors="replace"))
+                _types_section_eff = _types_section_for_fix(
+                    _member_sigs_text, "", last_error_excerpt or "",
+                    _block_container, _block_where, _crate_type_records,
+                    file_rel=block.file, observables=_block_ev.observables,
+                    file_text=_own_text)
             # Attempt 2+: does the sibling reference carry the expression the
             # previous attempt was rejected on? Then the two sections
             # contradict each other and the prefix must say so — run
@@ -3242,7 +3343,7 @@ def prepare_impl_fill(
                     "shared": list(_steer.shared),
                     "error_codes": sorted(ecodes_in_text(last_error_excerpt)),
                 })
-            prompt = _build_per_impl_prompt(
+            prompt = "" if _conv.opened else _build_per_impl_prompt(
                 block=block,
                 related_blocks=related_blocks,
                 test_blocks=test_blocks,
@@ -3276,15 +3377,46 @@ def prepare_impl_fill(
                     aimed_refill_names=_aimed_refill,
                     sibling_rejected=_steer.shared,
                     identity_must=_identity_must(
-                        *block.stub_members, *block.refill_members)),
+                        *block.stub_members, *block.refill_members),
+                    own_file=_own_text),
                 fr_path=fr_path,
             )
+            _think = escalated_followup_think(_esc_targets)
             try:
                 with serving_units(f"{block.file}::{n}"
                                    for n in _block_target_names):
-                    response = _ask_fill(
-                        prompt,
-                        followup_think=escalated_followup_think(_esc_targets))
+                    if not _conv.opened:
+                        response = _conv.open(
+                            prompt, has_deliverable=_has_fn_bodies,
+                            followup_think=_think)
+                    else:
+                        response = _conv.retry(AttemptFeedback(
+                            kind=last_error_kind,
+                            excerpt=with_blamed_type_api(
+                                last_error_excerpt or "", _crate_type_records),
+                            targets=tuple(_block_target_names),
+                            output=_impl_output,
+                            note=(sibling_rejected_note(_steer.shared)
+                                  if _steer.contradicts else ""),
+                            sections=(
+                                EvidenceSection(
+                                    "TYPES_IN_SCOPE", types_new_to(
+                                        _conv.text(), last_error_excerpt or "",
+                                        _crate_type_records,
+                                        viewer_file=block.file),
+                                    "Types this result names that were not "
+                                    "shown above:\n"),
+                                EvidenceSection(
+                                    "RETROSPECTIVE_GUIDANCE", prior_retro,
+                                    "A diagnosis of the attempts so far:\n")),
+                            moved=_conv.bodies_moved(
+                                _read_source, frozenset(_block_target_names),
+                                normalize=_cluster_view)),
+                            has_deliverable=_has_fn_bodies,
+                            followup_think=_think)
+            except TranscriptBound:
+                _last_loss[:] = [AttemptLoss.TRANSCRIPT_BOUND]
+                return FixOutcome("stop")
             except Exception as e:
                 _log(f"  [phase-c/impl] {block_id}: LLM error: {e}")
                 return FixOutcome("stop")
@@ -3993,8 +4125,11 @@ def prepare_impl_fill(
                     f"maximal last-resort withheld — {_note}",
                     attempt=fix_attempt, model_calls=fix_attempt)
             elif _maximal_on:
-                _max_cap = int(os.getenv("PHASE_C_MAXIMAL_CHAR_CAP", "120000"))
-                _cur_text = file_path.read_text(encoding="utf-8", errors="replace")
+                # A turn on the block's conversation, not a second document:
+                # the whole file is already above (the opening turn renders
+                # it whole, and bodies rewritten since reach this turn as
+                # `moved`), so what the budgeted attempts lacked is every
+                # test that references the targets, verbatim.
                 _max_tests: list[tuple[str, str]] = []
                 _max_target_names = _block_target_names
                 for _fn in _max_target_names:
@@ -4004,54 +4139,57 @@ def prepare_impl_fill(
                             _max_tests.append((_pth, _txt))
                 _tests_text = "\n\n".join(
                     f"// {p}\n{t}" for p, t in _max_tests)
-                _max_prompt = build_maximal_impl_prompt(
-                    file_rel=block.file, container=block.container,
-                    stub_names=_max_target_names,
-                    file_text=_cur_text, tests_block=_tests_text,
-                    errs=with_blamed_type_api(
-                        last_error_excerpt, _crate_type_records),
-                    notes=notes_section,
-                    identity_must=_identity_must(
-                        *block.stub_members, *block.refill_members),
-                    sigs={m.fn_name: (m.sig_text or "")
-                          for m in (*block.stub_members, *block.refill_members)
-                          if m.sig_text})
-                if len(_max_prompt) > _max_cap:
-                    _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
-                         f"skipped ({len(_max_prompt)} chars > cap {_max_cap}).")
-                else:
-                    _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
-                         f"attempt (budgets off, {len(_max_prompt)} chars).")
-                    _emit("phase_c.impl.fill.maximal", data={
-                        "cluster": cluster_name, "file": block.file,
-                        "container": block.container,
-                        "prompt_chars": len(_max_prompt)})
-                    try:
-                        with serving_units(f"{block.file}::{n}"
-                                           for n in _max_target_names):
-                            _max_reply = _ask_fill(_max_prompt)
-                        _max_parsed = bind_headerless_names(
-                            extract_fn_bodies(_max_reply), _max_target_names)
-                        _max_audit = _audit_reply(
-                            _log, _emit, cluster=cluster_name,
-                            unit=str(block_id), route="impl-maximal",
-                            reply=_max_reply, parsed=_max_parsed)
-                        if _max_audit is not None and _max_audit.empty:
-                            _note_declined_units(
-                                block.file, _max_audit.empty,
-                                lambda _n: block.container,
-                                response_sha=_max_audit.response_sha,
-                                route="impl-maximal")
-                        if _max_parsed:
-                            _splice_and_verify(_max_parsed, fix_attempt + 1)
-                        else:
-                            _log(f"  [phase-c/impl] {block_id}: maximal attempt "
-                                 "returned no FN blocks "
-                                 f"({fn_tag_occurrences(_max_reply)} FN tag(s) "
-                                 "in reply).")
-                    except Exception as _me:
-                        _log(f"  [phase-c/impl] {block_id}: maximal attempt "
-                             f"error: {_me}")
+                _log(f"  [phase-c/impl] {block_id}: maximal last-resort "
+                     f"turn (every referencing test, {len(_tests_text)} "
+                     "chars).")
+                _emit("phase_c.impl.fill.maximal", data={
+                    "cluster": cluster_name, "file": block.file,
+                    "container": block.container,
+                    "prompt_chars": len(_tests_text)})
+                try:
+                    attempts.note_call()
+                    with serving_units(f"{block.file}::{n}"
+                                       for n in _max_target_names):
+                        _max_reply = _conv.retry(AttemptFeedback(
+                            kind=last_error_kind,
+                            excerpt=with_blamed_type_api(
+                                last_error_excerpt, _crate_type_records),
+                            targets=tuple(_max_target_names),
+                            output=_impl_output,
+                            note=("The budgeted attempts are spent. Below is "
+                                  "every test that references these targets, "
+                                  "whole; the file is above."),
+                            sections=(EvidenceSection(
+                                "TESTS_VERBATIM", _tests_text),),
+                            moved=_conv.bodies_moved(
+                                _read_source, frozenset(_max_target_names),
+                                normalize=_cluster_view)),
+                            has_deliverable=_has_fn_bodies)
+                    _max_parsed = bind_headerless_names(
+                        extract_fn_bodies(_max_reply), _max_target_names)
+                    _max_audit = _audit_reply(
+                        _log, _emit, cluster=cluster_name,
+                        unit=str(block_id), route="impl-maximal",
+                        reply=_max_reply, parsed=_max_parsed)
+                    if _max_audit is not None and _max_audit.empty:
+                        _note_declined_units(
+                            block.file, _max_audit.empty,
+                            lambda _n: block.container,
+                            response_sha=_max_audit.response_sha,
+                            route="impl-maximal")
+                    if _max_parsed:
+                        _splice_and_verify(_max_parsed, fix_attempt + 1)
+                    else:
+                        _log(f"  [phase-c/impl] {block_id}: maximal turn "
+                             "returned no FN blocks "
+                             f"({fn_tag_occurrences(_max_reply)} FN tag(s) "
+                             "in reply).")
+                except TranscriptBound:
+                    _log(f"  [phase-c/impl] {block_id}: maximal turn not "
+                         "sent — the conversation reached its bound.")
+                except Exception as _me:
+                    _log(f"  [phase-c/impl] {block_id}: maximal attempt "
+                         f"error: {_me}")
                 if members_filled_this_block > 0 or block_already_complete:
                     break
             # Per-impl retrospective — runs on EVERY failed round so the
@@ -4642,65 +4780,104 @@ def prepare_impl_fill(
         _raw_err = _pair_err.text
         _last_error = with_blamed_type_api(
             _raw_err, _crate_type_records) if _raw_err else ""
+        # The pair's one conversation: attempt 1 opens it with the joint
+        # prompt (LAST_ERROR there is the stored verdict of the previous
+        # fill); an in-call compile retry is a turn on it.
+        _conv = _open_conversation(pair_id, "pair")
+        _pair_targets = [
+            (m.fn_name, b.container)
+            for b in (pd.dispatcher_block, pd.implementer_block, *_pair_extra)
+            for m in (*b.stub_members, *b.refill_members)]
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
-            prompt = _make_pair_prompt(_last_error, _pair_err.kind)
-            # Compare against the sha of the last prompt SENT (the cache,
-            # which this loop updates), not the entry snapshot: an in-call
-            # compile retry must see attempt 1's stamp. A compile retry
-            # that rebuilds those same bytes (the diagnostic did not
-            # change) still clears the sha — otherwise the next pass
-            # seeds LAST_ERROR, rebuilds the same prompt, and the
-            # refusal locks the pair out of the error-informed question
-            # (run `719098-e021d93b`, 2026-09-01).
-            _prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-            _prev_sha = str(
-                (retros_cache.get(_pair_key, {}) or {}).get("last_prompt_sha")
-                or "")
-            if _prompt_sha == _prev_sha:
-                _log(f"  [phase-c/pair] {pair_id}: rebuilt a byte-identical "
-                     "prompt — the revert feedback did not change, so another "
-                     "call buys a temperature resample of the same question; "
-                     "pair not dispatched this pass.")
-                _emit("phase_c.pair.fill.resample_skipped", data={
+            if not _conv.opened:
+                prompt = _make_pair_prompt(_last_error, _pair_err.kind)
+                # Compare against the sha of the last prompt SENT (the cache,
+                # which this loop updates), not the entry snapshot: an in-call
+                # compile retry must see attempt 1's stamp. A compile retry
+                # that rebuilds those same bytes (the diagnostic did not
+                # change) still clears the sha — otherwise the next pass
+                # seeds LAST_ERROR, rebuilds the same prompt, and the
+                # refusal locks the pair out of the error-informed question
+                # (run `719098-e021d93b`, 2026-09-01).
+                _prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                _prev_sha = str(
+                    (retros_cache.get(_pair_key, {}) or {}).get("last_prompt_sha")
+                    or "")
+                if _prompt_sha == _prev_sha:
+                    _log(f"  [phase-c/pair] {pair_id}: rebuilt a byte-identical "
+                         "prompt — the revert feedback did not change, so another "
+                         "call buys a temperature resample of the same question; "
+                         "pair not dispatched this pass.")
+                    _emit("phase_c.pair.fill.resample_skipped", data={
+                        "cluster": cluster_name,
+                        "dispatcher": site_payload(pair.dispatcher),
+                        "implementer": site_payload(pair.implementer)})
+                    if _last_error:
+                        with _counters_lock:
+                            _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                            _crec["last_prompt_sha"] = ""
+                            retros_cache[_pair_key] = _crec
+                            _save_retrospectives(project_dir, retros_cache)
+                    return
+                _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
+                     "implementer written under ONE judgment across "
+                     f"{len(halves)} files ({len(_pair_tests)} convicting test(s)"
+                     + (f", {sum(len({m.fn_name for m in (*b.stub_members, *b.refill_members, *b.members)}) for b in _pair_extra)} table slot(s)"
+                        if _pair_extra else "")
+                     + ").")
+                _emit("phase_c.pair.fill.start", data={
                     "cluster": cluster_name,
                     "dispatcher": site_payload(pair.dispatcher),
-                    "implementer": site_payload(pair.implementer)})
-                if _last_error:
-                    with _counters_lock:
-                        _crec = dict(retros_cache.get(_pair_key, {}) or {})
-                        _crec["last_prompt_sha"] = ""
-                        retros_cache[_pair_key] = _crec
-                        _save_retrospectives(project_dir, retros_cache)
-                return
-            _log(f"  [phase-c/pair] {pair_id}: pair fill — dispatcher and "
-                 "implementer written under ONE judgment across "
-                 f"{len(halves)} files ({len(_pair_tests)} convicting test(s)"
-                 + (f", {sum(len({m.fn_name for m in (*b.stub_members, *b.refill_members, *b.members)}) for b in _pair_extra)} table slot(s)"
-                    if _pair_extra else "")
-                 + ").")
-            _emit("phase_c.pair.fill.start", data={
-                "cluster": cluster_name,
-                "dispatcher": site_payload(pair.dispatcher),
-                "implementer": site_payload(pair.implementer),
-                "convicting": sorted(_pair_tests)})
-            attempts.note_dispatched(_pair_locs)
-            attempts.note_call()
-            with _counters_lock:
-                # The sha of what is being SENT, persisted before the reply can
-                # arrive — the refusal above compares against the last prompt
-                # sent, not the last one that produced a revert.
-                retros_cache[_pair_key] = {
-                    **(retros_cache.get(_pair_key, {}) or {}),
-                    "last_prompt_sha": _prompt_sha}
-                _save_retrospectives(project_dir, retros_cache)
-            try:
-                with serving_units(f"{k.file}::{k.fn_name}"
-                                   for k in sorted(_pair_locs)):
-                    _pair_reply = _ask_fill(prompt)
-            except Exception as _pe:
-                _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
-                attempts.note_lost(_pair_locs)
-                return
+                    "implementer": site_payload(pair.implementer),
+                    "convicting": sorted(_pair_tests)})
+                attempts.note_dispatched(_pair_locs)
+                attempts.note_call()
+                with _counters_lock:
+                    # The sha of what is being SENT, persisted before the reply can
+                    # arrive — the refusal above compares against the last prompt
+                    # sent, not the last one that produced a revert.
+                    retros_cache[_pair_key] = {
+                        **(retros_cache.get(_pair_key, {}) or {}),
+                        "last_prompt_sha": _prompt_sha}
+                    _save_retrospectives(project_dir, retros_cache)
+                try:
+                    with serving_units(f"{k.file}::{k.fn_name}"
+                                       for k in sorted(_pair_locs)):
+                        _pair_reply = _conv.open(
+                            prompt, has_deliverable=_has_fn_bodies)
+                except TranscriptBound:
+                    return
+                except Exception as _pe:
+                    _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
+                    attempts.note_lost(_pair_locs)
+                    return
+            else:
+                attempts.note_call()
+                try:
+                    with serving_units(f"{k.file}::{k.fn_name}"
+                                       for k in sorted(_pair_locs)):
+                        _pair_reply = _conv.retry(AttemptFeedback(
+                            kind=LastErrorKind.COMPILE, excerpt=_last_error,
+                            targets=tuple(n for n, _ in _pair_targets),
+                            output=fn_output(_pair_targets),
+                            sections=(EvidenceSection(
+                                "TYPES_IN_SCOPE", types_new_to(
+                                    _conv.text(), _last_error,
+                                    _crate_type_records,
+                                    viewer_file=pd.dispatcher_block.file),
+                                "Types this result names that were not "
+                                "shown above:\n"),),
+                            moved=_conv.bodies_moved(
+                                _read_source,
+                                frozenset(n for n, _ in _pair_targets),
+                                normalize=_cluster_view)),
+                            has_deliverable=_has_fn_bodies)
+                except TranscriptBound:
+                    return
+                except Exception as _pe:
+                    _log(f"  [phase-c/pair] {pair_id}: LLM error: {_pe}")
+                    attempts.note_lost(_pair_locs)
+                    return
             _pair_parsed = extract_fn_bodies(_pair_reply)
             if not _pair_parsed:
                 _log(f"  [phase-c/pair] {pair_id}: empty/no FN blocks "
@@ -5105,8 +5282,7 @@ def prepare_impl_fill(
         """Plan the packed sessions and return the route that runs them one
         at a time under the fill schedule; None when nothing is planned."""
         served: set[FnLocator] = set()
-        if (not session_slices or deps.ask_turns is None
-                or os.getenv("SLICE_SESSION", "1") == "0"):
+        if not session_slices or os.getenv("SLICE_SESSION", "1") == "0":
             return None
         _ask_turns = deps.ask_turns
         _max_turns = int(os.getenv("SLICE_SESSION_MAX_TURNS", "8"))

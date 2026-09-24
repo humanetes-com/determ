@@ -14,12 +14,11 @@ strings are byte-for-byte the originals (a characterization test pins them).
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 
 from pipeline_core.domain.construction_recipe import (
     construction_recipe_prefix,
-    construction_recipes_for,
 )
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import (
@@ -29,6 +28,7 @@ from pipeline_core.domain.crash_site import (
 from pipeline_core.domain.installable_fns import ProducerBypass
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
+from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
 
 # The file/impl view handed to the model can itself contain HTML-escaped Rust —
@@ -602,9 +602,7 @@ signature EXACTLY as written; write bodies only.
 {ident}
 Functions to write (by impl block):
 {plan_lines}
-```rust
-{file_text}
-```
+{file_block(file_rel, file_text, view=FileView.WHOLE)}
 {gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{retro_part}{evidence_part}{regression_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
@@ -612,65 +610,6 @@ in `block` and NOWHERE else:
 {language_driver().file_fill_tag_examples()}
 {FN_LITERAL_RULE}
 <FN name="FUNCTION_NAME" block="IMPL_HEADER">
-...body...
-</FN>
-Output nothing else."""
-
-
-def build_maximal_impl_prompt(
-    *,
-    file_rel: str,
-    container: str,
-    stub_names: list[str],
-    file_text: str,
-    tests_block: str,
-    errs: str,
-    notes: str,
-    identity_must: str = "",
-    sigs: Mapping[str, str] | None = None,
-) -> str:
-    """Last resort — budgets OFF. After the budgeted per-impl loop
-    exhausts, the model gets ONE attempt with the WHOLE current file, every
-    referencing test verbatim, and the full focused error (a defect outside
-    the block's window is invisible to the budgeted prompt).
-
-    `identity_must` is the same TypeId instruction the budgeted per-impl
-    prompt carries after the stub list. Empty (the default) leaves the
-    prompt byte-identical to a call that never named the kwarg.
-
-    Construction recipes are derived from ``stub_names`` + ``container``
-    + ``sigs``. The catalog driver keys on name; the generic driver keys
-    on signature shape, so a last-resort prompt without ``sigs`` cannot
-    pay a wrap or identity instruction. Empty ``sigs`` (the default)
-    keeps the prompt byte-identical for every unit the catalog does not
-    name.
-    """
-    header = container.splitlines()[0] if container else "impl"
-    names = ", ".join(stub_names)
-    tests_part = (f"\nTests that exercise these functions (make them pass):\n"
-                  f"{tests_block}\n" if tests_block.strip() else "")
-    notes_part = (f"\nNotes from earlier attempts:\n{notes}\n"
-                  if notes.strip() else "")
-    recipe_text = construction_recipes_for(stub_names, container, sigs=sigs)
-    recipe_part = (f"{recipe_text}\n" if recipe_text else "")
-    must_part = (f"{identity_must}\n" if identity_must.strip() else "")
-    must_part += instruction_opener(file_rel, stub_names)
-    return f"""Previous attempts to implement functions in this Rust file failed.
-You now see the ENTIRE current file. Implement or CORRECT the function(s)
-{names} of `{header}` so the file compiles and the tests pass — some may
-already have a body that compiles but whose test still fails; rewrite its
-behavior. Keep every signature EXACTLY as written; change bodies only.
-File: {file_rel}
-{recipe_part}{must_part}```rust
-{file_text}
-```
-{tests_part}Compiler errors from the last attempt:
-```
-{errs}
-```
-{notes_part}For EACH function you implement, return one block (body statements only — no
-fn signature line, no outer braces). Use the function name verbatim:
-<FN name="FUNCTION_NAME" block="{header}">
 ...body...
 </FN>
 Output nothing else."""

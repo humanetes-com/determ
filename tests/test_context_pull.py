@@ -8,9 +8,13 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
-    ask_with_pulls,
+    make_request_answerer,
     resolve_pull,
     workspace_file_reader,
+)
+from pipeline_core.application.reconstruct.unit_conversation import (
+    ConversationPorts,
+    UnitConversation,
 )
 from pipeline_core.domain.context_pull import (
     ContextPull,
@@ -200,21 +204,60 @@ def test_resolve_caps_and_flags_truncation(tmp_path: Path) -> None:
 _BODY = '<FN name="f" block="impl A">1</FN>'
 
 
-def _loop(responses, tmp_path, max_pulls=2):
+def _loop(responses, tmp_path, max_pulls=2, transcripts=None):
+    """One conversation opened with "PROMPT" over a scripted transport;
+    `asked[i]` is the user turn call i sent."""
     seq = list(responses)
     asked: list[str] = []
 
-    def ask(p: str) -> str:
-        asked.append(p)
+    def ask_turns(messages, **_k) -> str:
+        asked.append(str(messages[-1]["content"]))
+        if transcripts is not None:
+            transcripts.append([dict(m) for m in messages])
         return str(seq.pop(0) if len(seq) > 1 else seq[0])
 
-    out = ask_with_pulls(
-        ask, "PROMPT", sources=_sources(
-            tmp_path, type_def=lambda n: f"struct {n};"),
-        has_deliverable=lambda r: "<FN " in r,
-        log=lambda _m: None, emit=lambda *_a, **_k: None,
-        max_pulls=max_pulls)
+    conv = UnitConversation(
+        ConversationPorts(ask_turns=ask_turns, log=lambda _m: None),
+        label="unit", route="test",
+        requests=make_request_answerer(
+            _sources(tmp_path, type_def=lambda n: f"struct {n};"),
+            log=lambda _m: None, emit=lambda *_a, **_k: None,
+            max_pulls=max_pulls))
+    out = conv.open("PROMPT", has_deliverable=lambda r: "<FN " in r)
     return out, asked
+
+
+def test_the_request_turn_stays_on_the_transcript(tmp_path: Path) -> None:
+    """The answer follows the model's own request turn; the prompt is not
+    re-sent as a new document with the answer glued on."""
+    req = '<REQUEST kind="type_def" arg="Buf"/>'
+    seen: list[list[dict]] = []
+    out, _ = _loop([req, _BODY], tmp_path, transcripts=seen)
+    assert out == _BODY
+    assert [m["role"] for m in seen[1]] == ["user", "assistant", "user"]
+    assert seen[1][0]["content"] == "PROMPT"
+    assert seen[1][1]["content"] == req
+    assert "struct Buf;" in seen[1][2]["content"]
+    assert "PROMPT" not in seen[1][2]["content"]
+
+
+def test_control_the_pre_conversation_loop_dropped_the_request_turn() -> None:
+    """Negative control: the loop this replaced (`ask_with_pulls`, deleted
+    2026-09-24) sent `prompt + answer` as one document — the request the
+    model wrote is nowhere in what it was sent next."""
+    req = '<REQUEST kind="type_def" arg="Buf"/>'
+    sent: list[str] = []
+    replies = [req, _BODY]
+
+    def ask(p: str) -> str:
+        sent.append(p)
+        return replies.pop(0)
+
+    current = "PROMPT"
+    reply = ask(current)
+    current = current + "\n<REQUESTED_CONTEXT>struct Buf;</REQUESTED_CONTEXT>"
+    ask(current)
+    assert reply == req and req not in sent[1]
 
 
 def test_ask_loop_answers_request_then_gets_bodies(tmp_path: Path) -> None:
@@ -295,43 +338,48 @@ def test_ask_loop_plain_response_passes_through(tmp_path: Path) -> None:
 # --- ladder integration (per_fn_ask + make_request_answerer) ------------------
 
 
-from pipeline_core.adapters.per_fn_ask import ask_per_fn_body  # noqa: E402
-from pipeline_core.application.reconstruct.pull_resolver import (  # noqa: E402
-    make_request_answerer,
+from pipeline_core.adapters.per_fn_ask import (  # noqa: E402
+    ask_per_fn_body,
+    conversation_factory,
 )
 
 
 class _LadderClient:
-    """Protocol-complete scripted client (matches _AskClient)."""
+    """Protocol-complete scripted transcript client."""
 
     def __init__(self, responses: list[str]) -> None:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def ask(self, prompt: str, system: str | None = None,
-            model: str | None = None, max_tokens: int | None = None,
-            think: bool | None = None,
-            temperature: float | None = None) -> str:
-        self.calls.append({"prompt": prompt, "think": think})
+    def ask_turns(self, messages, *, model=None, max_tokens=None, think=None,
+                  temperature=None, followup_think=False) -> str:
+        self.calls.append({
+            "prompt": str(messages[-1]["content"]), "think": think,
+            "transcript": "\n\n".join(str(m["content"]) for m in messages)})
         return (self.responses.pop(0) if len(self.responses) > 1
                 else self.responses[0])
 
+    def fit(self, prompt: str) -> str:
+        return prompt
 
-def _answerer_for(tmp_path: Path, max_pulls: int):
-    return make_request_answerer(
-        _sources(tmp_path, type_def=lambda n: f"struct {n};"),
-        log=lambda _m: None, emit=lambda *_a, **_k: None,
-        max_pulls=max_pulls)
+
+def _ladder(client: _LadderClient, tmp_path: Path, max_pulls: int | None):
+    conv = conversation_factory(
+        client, model="m", log=lambda _m: None, emit=lambda *_a, **_k: None,
+        max_transcript_chars=0)(
+        "foo", sources=(None if max_pulls is None else _sources(
+            tmp_path, type_def=lambda n: f"struct {n};")),
+        max_pulls=max_pulls or 0)
+    return ask_per_fn_body("PROMPT", "foo", [], conversation=conv,
+                           sig_text="fn foo()")
 
 
 def test_ladder_answers_request_on_same_rung(tmp_path: Path) -> None:
-    """A bodyless REQUEST reply re-asks the SAME rung with the answer —
-    no think=False rung burned."""
+    """A bodyless REQUEST reply is answered on the transcript at the SAME
+    rung — no think=False rung burned."""
     client = _LadderClient(
         ['<REQUEST kind="type_def" arg="Buf"/>', "<BODY>\n42\n</BODY>"])
-    body, _ = ask_per_fn_body(
-        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
-        answer_request=_answerer_for(tmp_path, 2))
+    body, _ = _ladder(client, tmp_path, 2)
     assert body == "42"
     assert len(client.calls) == 2
     assert client.calls[1]["think"] is None            # still the DEFAULT rung
@@ -340,38 +388,29 @@ def test_ladder_answers_request_on_same_rung(tmp_path: Path) -> None:
 
 def test_ladder_budget_falls_through_to_next_rung(tmp_path: Path) -> None:
     client = _LadderClient(['<REQUEST kind="type_def" arg="Buf"/>'])
-    body, _ = ask_per_fn_body(
-        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
-        answer_request=_answerer_for(tmp_path, 1))
+    body, _ = _ladder(client, tmp_path, 1)
     assert body is None
-    # 1 answered re-ask on rung 1, then ONE refusal notice re-ask on the same
-    # rung, then the 3 rungs exhaust: 5 asks. The notice is what makes rungs 2
-    # and 3 worth spending — without it they re-ask the original prompt, which
-    # says nothing about the spent budget, and the model just asks again.
+    # 1 answered turn on rung 1, then ONE refusal notice turn on the same
+    # rung, then rungs 2 and 3: 5 calls. The notice is what makes rungs 2
+    # and 3 worth spending — without it the model just asks again.
     assert len(client.calls) == 5
     assert "no context requests left" in client.calls[2]["prompt"]
     assert client.calls[3]["think"] is False           # ladder did move on
 
 
 def test_ladder_notice_is_issued_once_across_rungs(tmp_path: Path) -> None:
-    """The answerer's budget and its notice both persist across rungs, so a
-    model that keeps asking cannot re-buy an extra ask on every rung.
-
-    The notice TEXT is expected in every later prompt — the ladder carries its
-    augmented prompt forward on purpose. What must not repeat is the notice
-    being APPENDED again, which is what would buy the extra ask."""
+    """The conversation's request budget and its notice both persist across
+    rungs, so a model that keeps asking cannot re-buy an extra ask on every
+    rung. The notice sits once in the transcript every later call carries."""
     client = _LadderClient(['<REQUEST kind="type_def" arg="Buf"/>'])
-    ask_per_fn_body(
-        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
-        answer_request=_answerer_for(tmp_path, 0))
-    assert client.calls[-1]["prompt"].count("no context requests left") == 1
-    assert len(client.calls) == 4      # 3 rungs + the single notice re-ask
+    _ladder(client, tmp_path, 0)
+    assert client.calls[-1]["transcript"].count("no context requests left") == 1
+    assert len(client.calls) == 4      # 3 rungs + the single notice turn
 
 
 def test_ladder_without_answerer_unchanged(tmp_path: Path) -> None:
     client = _LadderClient([""])
-    body, _ = ask_per_fn_body(
-        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m")
+    body, _ = _ladder(client, tmp_path, None)
     assert body is None and len(client.calls) == 3
 
 
@@ -379,9 +418,7 @@ def test_ladder_never_splices_request_text_as_body(tmp_path: Path) -> None:
     """With the budget spent, a request-only reply must NOT raw-fallback into
     a 'body' (extract_body_response would return the tag text verbatim)."""
     client = _LadderClient(['<REQUEST kind="type_def" arg="Buf"/>'])
-    body, _ = ask_per_fn_body(
-        client, "PROMPT", "foo", [], sig_text="fn foo()", model="m",
-        answer_request=_answerer_for(tmp_path, 0))
+    body, _ = _ladder(client, tmp_path, 0)
     assert body is None
 
 
@@ -516,3 +553,97 @@ def test_a_repeat_still_spends_the_budget(tmp_path: Path) -> None:
                        tmp_path, max_pulls=2)
     assert out == _BODY
     assert "no context requests left" in asked[-1]
+
+
+# ── a whole-file request for a file the conversation already holds whole ─────
+
+from pipeline_core.domain.prompt_holdings import FileView, file_block  # noqa: E402
+
+_HELD = "pub struct A;\nimpl A {\n    pub fn get(&self) -> u8 { unimplemented!() }\n}\n"
+
+
+def _held_workspace(tmp_path: Path, disk: str = _HELD) -> PullSources:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src/a.rs").write_text(disk)
+    return _sources(tmp_path)
+
+
+def test_a_request_for_a_file_held_whole_is_answered_by_pointer(tmp_path: Path) -> None:
+    """2026-09-24 census: half the per-fn requests asked for what the prompt
+    already rendered. The answer names where it is and outlines it; the file
+    is not sent again. The budget is still spent — the cap is on round-trips."""
+    events: list[dict[str, Any]] = []
+    answer = make_request_answerer(
+        _held_workspace(tmp_path), log=lambda _m: None,
+        emit=lambda _e, data: events.append(data), max_pulls=2)
+    conv = file_block("src/a.rs", _HELD, view=FileView.WHOLE)
+    out = answer('<REQUEST kind="file" arg="src/a.rs"/>', conversation=conv)
+    assert out is not None
+    # The outline names the items; no body is re-sent.
+    assert "It is not sent again." in out and "unimplemented!()" not in out
+    assert "L3: pub fn get(&self) -> u8" in out
+    assert events[-1]["held_whole"] is True and events[-1]["remaining"] == 1
+
+
+def test_a_held_file_rewritten_since_carries_the_new_body(tmp_path: Path) -> None:
+    disk = _HELD.replace("unimplemented!()", "7")
+    answer = make_request_answerer(_held_workspace(tmp_path, disk),
+                                   log=lambda _m: None, emit=lambda *_a, **_k: None)
+    out = answer('<REQUEST kind="file" arg="src/a.rs"/>',
+                 conversation=file_block("src/a.rs", _HELD, view=FileView.WHOLE))
+    assert out is not None and "pub fn get(&self) -> u8 { 7 }" in out
+
+
+def test_a_part_a_window_or_no_conversation_is_answered_with_the_file(
+        tmp_path: Path) -> None:
+    """The negative controls: a part is not the file, a from_line asks for
+    lines on purpose, and with no conversation (the pre-change call) the file
+    is sent as before."""
+    src = _held_workspace(tmp_path)
+    part = file_block("src/a.rs", "pub struct A;", view=FileView.PART)
+    whole = file_block("src/a.rs", _HELD, view=FileView.WHOLE)
+    for reply, conv in (('<REQUEST kind="file" arg="src/a.rs"/>', part),
+                        ('<REQUEST kind="file" arg="src/a.rs" from_line="2"/>', whole),
+                        ('<REQUEST kind="file" arg="src/a.rs"/>', "")):
+        answer = make_request_answerer(src, log=lambda _m: None,
+                                       emit=lambda *_a, **_k: None)
+        out = answer(reply, conversation=conv)
+        assert out is not None and "It is not sent again." not in out
+        assert "impl A {" in out
+
+
+def test_a_conversation_points_at_a_file_its_own_opening_holds(tmp_path: Path) -> None:
+    sent: list[str] = []
+    replies = iter(['<REQUEST kind="file" arg="src/a.rs"/>', '<FN name="get">1</FN>'])
+
+    def _turns(messages, **_k) -> str:
+        sent.append("\n\n".join(str(m["content"]) for m in messages))
+        return next(replies)
+
+    conv = UnitConversation(
+        ConversationPorts(ask_turns=_turns, log=lambda _m: None),
+        label="u", route="t",
+        requests=make_request_answerer(
+            _held_workspace(tmp_path), log=lambda _m: None,
+            emit=lambda *_a, **_k: None))
+    out = conv.open(file_block("src/a.rs", _HELD, view=FileView.WHOLE) + "\ntask",
+                    has_deliverable=lambda r: "<FN" in r)
+    assert out.startswith("<FN")
+    assert "It is not sent again." in sent[1]
+    assert sent[1].count("unimplemented!()") == 1
+
+
+def test_a_type_the_prompt_already_defines_is_answered_with_where_it_is(
+        tmp_path: Path) -> None:
+    conv = "<TYPES_IN_SCOPE>\nstruct Buf\n  fields:\n</TYPES_IN_SCOPE>"
+    answer = make_request_answerer(
+        _sources(tmp_path, type_def=lambda n: f"struct {n};"),
+        log=lambda _m: None, emit=lambda *_a, **_k: None)
+    out = answer('<REQUEST kind="type_def" arg="Buf"/>', conversation=conv)
+    assert out is not None and "already defined in TYPES_IN_SCOPE above" in out
+    assert "struct Buf;" in out
+    other = make_request_answerer(
+        _sources(tmp_path, type_def=lambda n: f"struct {n};"),
+        log=lambda _m: None, emit=lambda *_a, **_k: None)
+    plain = other('<REQUEST kind="type_def" arg="Other"/>', conversation=conv)
+    assert plain is not None and "already defined" not in plain

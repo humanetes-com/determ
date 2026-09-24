@@ -262,7 +262,7 @@ def replay(session: Mapping[str, Any], root: Path, *,
         focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
         measure_suite=measure, read_source=lambda p: None,
         enumerate_bodies=tree.bodies,
-        answer_pulls=lambda r: "answered." if "<REQUEST" in r else None,
+        answer_pulls=lambda r, conversation="": "answered." if "<REQUEST" in r else None,
         log=log.append, emit=lambda name, **kw: events.append((name, dict(kw.get("data") or {}))),
         check_graceful_stop=lambda s: None,
         note_delta=deltas.append)

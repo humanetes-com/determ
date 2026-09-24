@@ -575,7 +575,9 @@ def generate_fix_loop(
         strip_ansi=deps.strip_ansi,
         frontier_from_diags=lambda diags: deps.frontier_from_diags(diags, project_dir))
     _fix_model = FixModelAdapter(
-        ask_fn=lambda prompt: deps.ASK_CLIENT.ask(prompt, model=model))
+        ask_turns_fn=lambda messages, **k: deps.ASK_CLIENT.ask_turns(
+            messages, model=model, **k),
+        fit_fn=lambda prompt: deps.ASK_CLIENT.fit(prompt))
     _fix_splicer = FixSplicerAdapter(
         locate_fn_fn=deps.locate_fn, is_pub_fn_fn=deps.is_pub_fn,
         render_impl_block_fn=deps.render_impl_block,
@@ -622,7 +624,7 @@ def generate_fix_loop(
         read_file=workspace_file_reader(project_dir),
         find_tests=lambda name: _tests_for_names({name}),
         type_def=_pull_type_def,
-        full_error=lambda: "",   # rebound per attempt by _BaseFixUnit._ask
+        full_error=lambda: "",   # rebound per unit to its latest check output
     )
     from pipeline_core.application.reconstruct.fix_unit import FixUnitDeps
     from pipeline_core.application.reconstruct.generate_fix import GenerateFixDeps
@@ -632,7 +634,8 @@ def generate_fix_loop(
         thinking_directive=deps.FIX_THINKING_DIRECTIVE, err_cap=deps.FIX_ERR_CAP,
         per_fn_max_stalls=int(os.getenv("FIX_LOOP_PER_FN_MAX_STALLS", "2")),
         pull_sources=_pull_sources, emit=deps.emit,
-        max_pulls=int(os.getenv("CONTEXT_PULLS_MAX", "2")))
+        max_pulls=int(os.getenv("CONTEXT_PULLS_MAX", "2")),
+        max_transcript_chars=int(deps.SINGLE_CALL_CHAR_LIMIT or 0))
 
     _behaviour_specs: tuple[Any, ...] = ()
     _load_suite = deps.load_behaviour_suite

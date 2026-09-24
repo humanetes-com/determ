@@ -108,3 +108,30 @@ def _isolate_observability_sinks(monkeypatch: pytest.MonkeyPatch, tmp_path) -> N
     monkeypatch.setattr(pipeline, "_GUARD_LOG", str(tmp_path / "guards.log"))
     monkeypatch.setattr(pipeline, "_PROMPTS_DIR", tmp_path / "prompts")
     monkeypatch.setattr(pipeline, "_EVENTS_LOG", str(tmp_path / "events.jsonl"))
+
+
+@pytest.fixture(autouse=True)
+def _turns_through_scripted_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every fill route now talks to the model through a transcript
+    (`AskClient.ask_turns` → `model_interact.ask_turns`), and the offline
+    suite scripts the single-prompt transport (`pipeline._ask_raw`). Route
+    the transcript transport to whatever `_ask_raw` is at call time, handing
+    it the LAST user turn as the prompt and the system turn as `system` —
+    the text a scripted fake sees for the opening turn is the prompt it saw
+    before, and a retry's is the retry turn. A test that scripts
+    `model_interact.ask_turns` itself overrides this; nothing reaches a real
+    server either way."""
+    import model_interact
+
+    def _via_raw(messages, **kwargs):
+        import pipeline
+        system = next((str(m.get("content") or "") for m in messages
+                       if m.get("role") == "system"), None)
+        last = next((str(m.get("content") or "") for m in reversed(messages)
+                     if m.get("role") == "user"), "")
+        if not kwargs.get("followup_think"):
+            # `AskClient.ask` forwards it only when set; so does this.
+            kwargs.pop("followup_think", None)
+        return pipeline._ask_raw(last, system, **kwargs)
+
+    monkeypatch.setattr(model_interact, "ask_turns", _via_raw)

@@ -28,7 +28,12 @@ from typing import Any, Protocol
 
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
-    ask_with_pulls,
+    make_request_answerer,
+)
+from pipeline_core.application.reconstruct.unit_conversation import (
+    ConversationPorts,
+    TranscriptBound,
+    UnitConversation,
 )
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
@@ -56,6 +61,11 @@ from pipeline_core.prompts.fix_prompts import (
 )
 from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
+from pipeline_core.prompts.retry_turn import (
+    AttemptFeedback,
+    EvidenceSection,
+    fn_output,
+)
 
 # The per-fn body-fix sig_rule (E0277 unsized-T relaxation) and the per-impl
 # where_rule, verbatim from the originals so the prompts stay byte-identical.
@@ -78,6 +88,10 @@ _IMPL_WHERE_RULE_RELAX = (
     "extra bound is rejected (E0276).\n"
 )
 _IMPL_WHERE_RULE_FIXED = "Do NOT change any signature.\n"
+
+
+def _has_fn_bodies(reply: str) -> bool:
+    return bool(extract_fn_bodies(reply))
 
 
 def _retro_block(retro: str) -> str:
@@ -129,12 +143,14 @@ class FixUnitDeps:
     thinking_directive: str
     err_cap: int
     per_fn_max_stalls: int
-    # Pull protocol (None → plain ask, existing constructions unchanged).
-    # `full_error` on the sources is a placeholder — each attempt rebinds it
-    # to that attempt's untruncated cargo output.
+    # Pull protocol (None → requests are not served). `full_error` on the
+    # sources is a placeholder — each unit rebinds it to its latest
+    # untruncated check output.
     pull_sources: PullSources | None = None
     emit: Callable[..., None] | None = None
     max_pulls: int = 2
+    # The unit conversation's single-call bound; 0 disables it.
+    max_transcript_chars: int = 0
 
 
 class FixUnit(Protocol):
@@ -159,6 +175,29 @@ class _BaseFixUnit:
         self.deps = deps
         self.target = target
         self._changed: list[str] = []
+        # The latest untruncated check output — the `full_error` request
+        # kind serves it verbatim.
+        self._last_output = ""
+        self._conv = self._open_conversation()
+
+    def _open_conversation(self) -> UnitConversation:
+        """The unit's one conversation: attempt 1 opens it with the fix
+        prompt, every later attempt is a turn carrying the new check output."""
+        d = self.deps
+        emit = d.emit or (lambda *_a, **_k: None)
+        requests = None
+        menu = ""
+        if d.pull_sources is not None and os.getenv("CONTEXT_PULLS", "1") != "0":
+            sources = replace(d.pull_sources, full_error=lambda: self._last_output)
+            requests = make_request_answerer(
+                sources, log=d.log, emit=emit, max_pulls=d.max_pulls)
+            menu = pull_menu_section(sources.available_kinds(), d.max_pulls)
+        return UnitConversation(
+            ConversationPorts(ask_turns=d.model.ask_turns, log=d.log, emit=emit,
+                              fit=d.model.fit,
+                              max_transcript_chars=d.max_transcript_chars),
+            label=self.target.label(), route=f"fix-{self._kind}",
+            requests=requests, menu=menu)
 
     # --- verify (shared; the verdict is on the target) ----------------------
     def _probe(self) -> CompileProbe:
@@ -182,22 +221,18 @@ class _BaseFixUnit:
         cap = self.deps.err_cap
         return output[-cap:] if len(output) > cap else output
 
-    def _ask(self, prompt: str, *, full_error: str) -> str:
-        """The unit's ask seam: bounded pull round-trips when sources
-        are bound and CONTEXT_PULLS is on; plain model ask otherwise.
-        `full_error` is THIS attempt's untruncated check output — the
-        `full_error` pull kind serves it verbatim."""
-        d = self.deps
-        if d.pull_sources is None or os.getenv("CONTEXT_PULLS", "1") == "0":
-            return d.model.ask(prompt)
-        sources = replace(d.pull_sources, full_error=lambda: full_error)
-        return ask_with_pulls(
-            d.model.ask,
-            prompt + pull_menu_section(sources.available_kinds(), d.max_pulls),
-            sources=sources,
-            has_deliverable=lambda r: bool(extract_fn_bodies(r)),
-            log=d.log, emit=d.emit or (lambda *_a, **_k: None),
-            max_pulls=d.max_pulls)
+    def _ask(self, opening: Callable[[], str], feedback: AttemptFeedback, *,
+             full_error: str) -> str | None:
+        """The unit's one call: the opening prompt (built only when the
+        conversation opens) or a retry turn carrying this attempt's check
+        output. None when the conversation reached its bound."""
+        self._last_output = full_error
+        try:
+            if not self._conv.opened:
+                return self._conv.open(opening(), has_deliverable=_has_fn_bodies)
+            return self._conv.retry(feedback, has_deliverable=_has_fn_bodies)
+        except TranscriptBound:
+            return None
 
     def _fixing_desc(self) -> str:  # pragma: no cover - overridden
         return self.target.label()
@@ -266,20 +301,31 @@ class FnFixUnit(_BaseFixUnit):
         # (unsized-T: returns `T` by value but `T` is `?Sized` → `where T: Sized`)
         # — never a trait-owned member (impl member or the trait's own default),
         # whose signature the trait fixes for every implementor (E0276).
-        allow_where = (len(history) >= 1 and not trait_owned_sig
+        allow_where = (self._conv.opened and not trait_owned_sig
                        and not self.deps.splicer.is_pub_fn(file_text, t.fn_name))
         sig_rule = _FN_SIG_RULE_RELAX if allow_where else _FN_SIG_RULE_FIXED
-        prompt = build_fn_fix_prompt(
-            thinking_directive=self.deps.thinking_directive, file_rel=t.file_rel,
-            fn_name=t.fn_name, sig_rule=sig_rule, sig_text=sig_text,
-            cur_body=cur_body, errs=self._err(output),
-            repo_block=self.deps.prompts.repo_spec_block(
-                file_rel=t.file_rel, fn_name=t.fn_name, container=t.container or ""),
-            retro_block=_retro_block(retro),
-            gotchas_block=self.deps.prompts.gotchas_block(output),
-            tests_block=self.deps.prompts.tests_block(frozenset({t.fn_name})),
-            container=t.container or "")
-        resp = self._ask(prompt, full_error=output)
+        resp = self._ask(
+            lambda: build_fn_fix_prompt(
+                thinking_directive=self.deps.thinking_directive,
+                file_rel=t.file_rel, fn_name=t.fn_name, sig_rule=sig_rule,
+                sig_text=sig_text, cur_body=cur_body, errs=self._err(output),
+                repo_block=self.deps.prompts.repo_spec_block(
+                    file_rel=t.file_rel, fn_name=t.fn_name,
+                    container=t.container or ""),
+                retro_block=_retro_block(retro),
+                gotchas_block=self.deps.prompts.gotchas_block(output),
+                tests_block=self.deps.prompts.tests_block(frozenset({t.fn_name})),
+                container=t.container or ""),
+            AttemptFeedback(
+                kind=None, excerpt=self._err(output), targets=(t.fn_name,),
+                output=fn_output([(t.fn_name, t.container or "")]),
+                note=_FN_SIG_RULE_RELAX if allow_where else "",
+                sections=(
+                    EvidenceSection("RETROSPECTIVE_GUIDANCE", retro),
+                    EvidenceSection("", self.deps.prompts.gotchas_block(output)))),
+            full_error=output)
+        if resp is None:
+            return FixReport.aborted(reason="transcript_bound")
         bodies = extract_fn_bodies(resp)
         blk = next((b for b in bodies if b.get("fn_name") == t.fn_name),
                    bodies[0] if bodies else None)
@@ -331,18 +377,30 @@ class ImplFixUnit(_BaseFixUnit):
             "mutually consistent (e.g. matching return types / bounds):\n"
             + "\n".join(f"- {s}" for s in siblings) + "\n"
         ) if siblings else ""
-        allow_where = len(history) >= 1
+        allow_where = self._conv.opened
         where_rule = _IMPL_WHERE_RULE_RELAX if allow_where else _IMPL_WHERE_RULE_FIXED
-        prompt = build_impl_fix_prompt(
-            thinking_directive=self.deps.thinking_directive, file_rel=t.file_rel,
-            where_rule=where_rule, block_src=block_src, sib_block=sib_block,
-            errs=self._err(output),
-            repo_block=self.deps.prompts.repo_spec_block(
-                file_rel=t.file_rel, container=t.container),
-            retro_block=_retro_block(retro),
-            gotchas_block=self.deps.prompts.gotchas_block(output),
-            tests_block=self.deps.prompts.tests_block(t.member_names()))
-        resp = self._ask(prompt, full_error=output)
+        resp = self._ask(
+            lambda: build_impl_fix_prompt(
+                thinking_directive=self.deps.thinking_directive,
+                file_rel=t.file_rel, where_rule=where_rule, block_src=block_src,
+                sib_block=sib_block, errs=self._err(output),
+                repo_block=self.deps.prompts.repo_spec_block(
+                    file_rel=t.file_rel, container=t.container),
+                retro_block=_retro_block(retro),
+                gotchas_block=self.deps.prompts.gotchas_block(output),
+                tests_block=self.deps.prompts.tests_block(t.member_names())),
+            AttemptFeedback(
+                kind=None, excerpt=self._err(output),
+                targets=tuple(sorted(t.member_names())),
+                output=fn_output([(n, t.container)
+                                  for n in sorted(t.member_names())]),
+                note=_IMPL_WHERE_RULE_RELAX.strip() if allow_where else "",
+                sections=(
+                    EvidenceSection("RETROSPECTIVE_GUIDANCE", retro),
+                    EvidenceSection("", self.deps.prompts.gotchas_block(output)))),
+            full_error=output)
+        if resp is None:
+            return FixReport.aborted(reason="transcript_bound")
         spliced = 0
         # A reply that answers with the CONTAINER header names no fn; the
         # per-fn route above already falls back positionally, so this is the
@@ -464,7 +522,12 @@ def one_shot_fill(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,
                 sig_text=sig_text, cur_body=cur_body, errs=errs,
                 container=container)
-        bodies = extract_fn_bodies(model.ask(prompt))
+        # One body per fn, one call: a conversation of one turn, so the
+        # call goes through the same transport and fitting as every fill.
+        conv = UnitConversation(
+            ConversationPorts(ask_turns=model.ask_turns, log=log, fit=model.fit),
+            label=f"{rel}::{fn}", route=f"fix-{kind}")
+        bodies = extract_fn_bodies(conv.open(prompt, has_deliverable=_has_fn_bodies))
         blk = next((b for b in bodies if b.get("fn_name") == fn),
                    bodies[0] if bodies else None)
         body = blk.get("body") if blk else None

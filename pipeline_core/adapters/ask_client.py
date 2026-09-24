@@ -16,12 +16,14 @@ would pin a stale function.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from ..domain.context_guard import fit_prompt
+from ..domain.prompt_holdings import contents_index
 from ..domain.text import turns_digest_text
 
 _NETWORK_ERR_WORDS = ("Timeout", "Connect", "Protocol", "Network")
@@ -45,6 +47,24 @@ class AskClient:
     # `ask_raw`: None resolves the module attribute at call time so the
     # hot-reload rebinding applies to it too.
     ask_turns_raw: Callable[..., str] | None = None
+    # (prompt) -> the contents index it opens with, "" for none. Applied to
+    # the FITTED prompt, so the index names only what is actually sent.
+    # None: prompts go out as built (`PROMPT_CONTENTS_INDEX=0`).
+    contents: Callable[[str], str] | None = None
+
+    def fit(self, prompt: str) -> str:
+        """A conversation's opening turn fitted to the context exactly as
+        :meth:`ask` fits a single prompt: the disclaimer's system turn and
+        the contents index are reserved first. `ask_turns` never trims a
+        turn, so the one turn that can be too big is fitted when it is
+        opened, and the transcript prefix never changes afterwards."""
+        sys_len = len(self.disclaimer()) + 2
+        reserve = len(self.contents(prompt)) + 2 if self.contents else 0
+        fitted = fit_prompt(prompt, sys_len + reserve,
+                            context_chars=self.context_chars)
+        for tag, msg in fitted.events:
+            self.guard(tag, msg)
+        return fitted.prompt
 
     def ask_turns(self, messages: list[dict[str, Any]], *, model: str | None = None,
                   max_tokens: int | None = None, think: bool | None = None,
@@ -61,6 +81,16 @@ class AskClient:
         session route owns its own turn budget and the whole list is what
         the model must see."""
         turns = [dict(m) for m in messages]
+        # The index opens the first user turn, the one that renders the
+        # files; it is computed from that turn alone, so it is the same on
+        # every call of the session and the transcript prefix stays stable.
+        if self.contents is not None:
+            for m in turns:
+                if m.get("role") == "user":
+                    first = str(m.get("content") or "")
+                    if index := self.contents(first):
+                        m["content"] = f"{index}\n\n{first}"
+                    break
         disclaimer = self.disclaimer()
         if turns and turns[0].get("role") == "system":
             turns[0]["content"] = f"{disclaimer}\n\n{turns[0].get('content') or ''}"
@@ -140,10 +170,17 @@ class AskClient:
         system = f"{disclaimer}\n\n{system}" if system else disclaimer
         sys_len = len(system)
 
-        fitted = fit_prompt(prompt, sys_len, context_chars=self.context_chars)
+        # Room for the index is reserved before fitting; the index itself is
+        # read off what survives the fit, so a block the guard dropped is
+        # never listed.
+        reserve = len(self.contents(prompt)) + 2 if self.contents else 0
+        fitted = fit_prompt(prompt, sys_len + reserve,
+                            context_chars=self.context_chars)
         for tag, msg in fitted.events:
             self.guard(tag, msg)
         prompt = fitted.prompt
+        if self.contents is not None and (index := self.contents(prompt)):
+            prompt = f"{index}\n\n{prompt}"
 
         kwargs: dict[str, Any] = {}
         if model is not None:
@@ -215,3 +252,10 @@ class AskClient:
                           data={"prompt_sha": prompt_meta["sha256"],
                                 "error_type": "Unpaired",
                                 "error_msg": "ask() exited without a terminal llm event"})
+
+
+def contents_index_hook() -> Callable[[str], str] | None:
+    """The contents index the composition root hands `AskClient`, or None
+    under `PROMPT_CONTENTS_INDEX=0` (the pre-index prompts, for an A/B).
+    Read once, at composition."""
+    return None if os.getenv("PROMPT_CONTENTS_INDEX", "1") == "0" else contents_index

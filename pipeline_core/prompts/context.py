@@ -125,3 +125,10 @@ class PerImplSections:
     # rendered as an instruction after the stub list — not as USAGE_EXAMPLES.
     # "" when no IDENTITY spec names this block's units.
     identity_must: str = ""
+    # The whole file the block lives in, as the cluster compiles it (inactive
+    # cfg arms removed). The per-fn prompt always carried its file; this one
+    # carried only the target block, the same-trait related blocks and other
+    # files' API, and 66 of the 105 context requests per-impl fills made from
+    # 2026-09-01 to 2026-09-24 asked for exactly that file (40 of them for
+    # `src/error.rs`). "" leaves the prompt as it was.
+    own_file: str = ""

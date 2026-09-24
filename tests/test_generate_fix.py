@@ -39,6 +39,12 @@ class _Model:
         self.resp = resp
         self.prompts: list[str] = []
 
+    def ask_turns(self, messages, **_k):  # the transcript port
+        return self.ask(str(messages[-1]["content"]))
+
+    def fit(self, prompt: str) -> str:
+        return prompt
+
     def ask(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.resp

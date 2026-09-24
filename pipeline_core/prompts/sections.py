@@ -16,6 +16,7 @@ from pipeline_core.domain.models import (
     DispatchFamily,
     FieldRecord,
     ImplBlock,
+    SlotFit,
     TraitImplRecord,
     TypeRecord,
 )
@@ -1645,6 +1646,25 @@ def render_types_section(
     return join_type_blocks(plain, cap)
 
 
+def _slot_fit_lines(f: FieldRecord, type_file: str) -> list[str]:
+    """For a fn-pointer field, the crate fns that fit it — the only names a
+    table literal can put there — or the statement that none does. Nothing
+    for any other field, or a record read without the crate's fns
+    (`fits is None`): a list printed as complete must be complete."""
+    if f.fits is None:
+        return []
+    if not f.fits:
+        return ["      fits: NONE — no crate fn is declared with a signature "
+                "this field can hold"]
+    def _one(c: SlotFit) -> str:
+        notes = [n for n in (c.file if c.file and c.file != type_file else "",
+                             f"only if {c.requires}" if c.requires else "") if n]
+        return f"{c.name} ({'; '.join(notes)})" if notes else c.name
+
+    names = ", ".join(_one(c) for c in f.fits)
+    return [f"      fits: {names}"]
+
+
 def format_type_for_prompt(
     rec: TypeRecord, observables: frozenset[str] = frozenset(),
     *, viewer_file: str = "",
@@ -1707,10 +1727,15 @@ def _type_block(
             (accessible if field_accessible_from(rec, f, viewer_file)
              else private).append(f)
         if accessible:
-            lines.append("  fields (access with .name):")
+            lines.append(
+                "  fields (access with .name; `fits:` under a fn-pointer field "
+                "is the COMPLETE list of crate fns it can hold):"
+                if any(f.fits is not None for f in accessible)
+                else "  fields (access with .name):")
             for f in accessible:
                 pub = "pub " if f.is_pub else ""
                 lines.append(f"    {pub}{f.name}: {f.ty}")
+                lines.extend(_slot_fit_lines(f, rec.file))
         if private:
             lines.extend(_private_field_lines(rec, private, viewer_file))
     if variants:

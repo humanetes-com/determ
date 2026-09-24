@@ -31,6 +31,7 @@ from pipeline_core.application.reconstruct.splice import (
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.retry_outcome import ClusterReading, TreeReading
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
+from tests.conversation_fakes import idle_conversation
 
 
 def _ctx(tmp_path: Path) -> RetryContext:
@@ -53,6 +54,7 @@ def _deps(**overrides) -> RetryDeps:
             container="", types_section="", notes_section="", bound_methods_section="")),
         "build_per_fn_fix_prompt": lambda **kw: "prompt",
         "ask_per_fn_body": lambda prompt, fn, log, **kw: (None, ""),
+        "open_conversation": idle_conversation,
         "splice_fn_body": lambda fp, fn, body, **kw: SpliceOutcome(True, "ok", 0),
         "splice_body_scoped": lambda fp, fn, container, sig, body, **kw: (
             SpliceOutcome(True, "ok", 0)),

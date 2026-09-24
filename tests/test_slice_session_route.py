@@ -120,10 +120,20 @@ def _setup(monkeypatch, tmp_path: Path) -> tuple[Path, list[Path]]:
 
 
 def _install_turns(monkeypatch, replies: list[str]) -> list[list[dict]]:
+    """Script the SESSION's transcript calls; returns them. Every fill route
+    now talks through a transcript too, so a call whose opening turn is not
+    a session's (it carries no "Session budget:") is handed to whatever
+    `pipeline._ask_raw` is at call time, with its last user turn as the
+    prompt — the pair / file / per-fn routes' own scripting."""
     transcripts: list[list[dict]] = []
     seq = list(replies)
 
     def _ask_turns(messages, **k):
+        first = next((str(m["content"]) for m in messages
+                      if m.get("role") == "user"), "")
+        if "Session budget:" not in first:
+            last = str(messages[-1]["content"])
+            return pipeline._ask_raw(last, None)
         transcripts.append([dict(m) for m in messages])
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
@@ -185,8 +195,10 @@ def test_a_session_carries_the_previous_reply_and_verdict_into_the_next_turn(
     # Turn 0 names the editable units of both files and the target's words.
     turn0 = transcripts[0][1]["content"]
     headers = [ln for ln in turn0.splitlines() if ln.startswith("<FILE ")]
-    assert any(h.startswith('<FILE path="src/lib.rs" editable="fmt (') for h in headers), headers
-    assert any(h.startswith('<FILE path="src/render.rs" editable="render (') for h in headers), headers
+    assert any(h.startswith('<FILE path="src/lib.rs" view="whole" editable="fmt (')
+               for h in headers), headers
+    assert any(h.startswith('<FILE path="src/render.rs" view="whole" editable="render (')
+               for h in headers), headers
     assert "t_pair — FAILING" in turn0 and 'right: "rendered hi"' in turn0
     # Both slice units count as dispatched; nothing was reverted.
     assert (_DISP.file, _DISP.fn_name) in (res.dispatched_fns or ())
@@ -237,7 +249,8 @@ def test_a_session_that_ends_regressing_restores_the_baseline(monkeypatch, tmp_p
 def test_negative_control_with_the_session_off_the_pair_route_rebuilds_a_prompt(
         monkeypatch, tmp_path):
     """The pre-fix shape: the same slice under SLICE_SESSION=0 goes to the
-    stateless pair route — a single-prompt document, no transcript."""
+    pair route — its own conversation opened with the joint prompt, no
+    session transcript."""
     ws, tests = _setup(monkeypatch, tmp_path)
     monkeypatch.setenv("SLICE_SESSION", "0")
     transcripts = _install_turns(monkeypatch, [SECOND_REPLY])

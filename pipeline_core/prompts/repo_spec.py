@@ -17,8 +17,10 @@ they mention the target's identifiers, and every part is budget-capped.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
+from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.domain.text import trim_to_line
 
 _RUST_NOISE_WORDS = frozenset({
@@ -75,17 +77,37 @@ def _matching_paragraphs(doc: str, identifiers: set[str], cap: int) -> str:
     return "\n\n".join(out)
 
 
+def _declares(body: str, ident: str) -> bool:
+    """`body` (a file's API surface) declares `ident` as a type, or opens an
+    impl block whose header names it — the file that answers "what can I do
+    with an X", not one that merely passes an X along."""
+    w = re.escape(ident)
+    return re.search(
+        rf"(?m)(?:\b(?:struct|enum|union|trait|type)\s+{w}\b"
+        rf"|^\s*(?:unsafe\s+)?impl\b[^\n{{;]*\b{w}\b)", body) is not None
+
+
 def _api_slice(
     api_surface: str, file_rel: str, identifiers: set[str], cap: int,
 ) -> str:
     """API-surface sections for files OTHER than the target file that mention
     any of the target's identifiers (cross-file ground truth — the target
-    file's own signatures are already in the prompt's file view)."""
+    file's own signatures are already in the prompt's file view).
+
+    Ranked before the cap is filled: files that DECLARE one of the
+    identifiers (its type, or an impl of it) first, by how many; then by how
+    many they mention; then in file order. The slice used to be filled in
+    file order, so any early file that merely mentioned an identifier took
+    the cap. Per-fn fills outside `src/error.rs` asked for that file 53 times
+    from 2026-09-01 to 2026-09-24; recomputed 2026-09-24 on the live API
+    surface at a 6000-char cap, file order gave `src/context.rs::fmt`
+    `src/ensure.rs` and `src/fmt.rs::display` / `::debug` `src/context.rs`
+    and `src/ensure.rs`, where this ranking gives `src/error.rs` — the file
+    that declares `ContextError`'s and `ErrorImpl`'s impls."""
     if not api_surface or cap <= 0:
         return ""
-    out: list[str] = []
-    used = 0
-    for chunk in api_surface.split('<FILE path="')[1:]:
+    ranked: list[tuple[int, int, int, str, str]] = []
+    for idx, chunk in enumerate(api_surface.split('<FILE path="')[1:]):
         path, sep, rest = chunk.partition('">')
         if not sep:
             continue
@@ -93,9 +115,18 @@ def _api_slice(
         if file_rel and path.endswith(file_rel):
             continue
         stem = path.rsplit("/", 1)[-1].split(".", 1)[0]
-        if not (stem in identifiers or any(i in body for i in identifiers)):
+        mentioned = [i for i in identifiers if i in body]
+        if not (stem in identifiers or mentioned):
             continue
-        sect = f'<FILE path="{path}">{body}\n</FILE>'
+        declared = sum(1 for i in identifiers if _declares(body, i)) + (
+            1 if stem in identifiers else 0)
+        ranked.append((-declared, -len(mentioned), idx, path, body))
+    ranked.sort()
+    out: list[str] = []
+    used = 0
+    for _d, _m, _i, path, body in ranked:
+        # The API surface of another file: signatures and docs, never bodies.
+        sect = file_block(path, body.lstrip("\n"), view=FileView.PART)
         if used + len(sect) > cap:
             sect = trim_to_line(sect, cap - used, "\n... (truncated)\n</FILE>")
             if len(sect) < 120:

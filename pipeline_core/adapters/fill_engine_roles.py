@@ -263,6 +263,7 @@ class CargoFillAdapter:
 @dataclass(frozen=True, slots=True)
 class PromptContextAdapter:
     ask_per_fn_body_fn: Callable[..., tuple[str | None, str]]
+    open_conversation_fn: Callable[..., Any]
     gather_fn: Callable[..., FnFixContext]
     collect_sibling_filled_bodies_fn: Callable[[str, str, str], str]
     extract_crate_idioms_fn: Callable[..., str]
@@ -270,12 +271,17 @@ class PromptContextAdapter:
     compute_cluster_macro_invariants_fn: Callable[[Path, Any], str]
     detect_crate_no_std_invariant_fn: Callable[[Path], str]
 
-    def ask_per_fn_body(self, prompt: str, fn_name: str, attempts_log: list[str],
-                        sig_text: str = "",
-                        answer_request: object = None) -> tuple[str | None, str]:
-        return self.ask_per_fn_body_fn(prompt, fn_name, attempts_log,
-                                       sig_text=sig_text,
-                                       answer_request=answer_request)
+    def open_conversation(self, label: str, *, route: str = "per-fn",
+                          sources: object = None, max_pulls: int = 2) -> Any:
+        return self.open_conversation_fn(label, route=route, sources=sources,
+                                         max_pulls=max_pulls)
+
+    def ask_per_fn_body(self, turn: object, fn_name: str, attempts_log: list[str],
+                        *, conversation: Any,
+                        sig_text: str = "") -> tuple[str | None, str]:
+        return self.ask_per_fn_body_fn(turn, fn_name, attempts_log,
+                                       conversation=conversation,
+                                       sig_text=sig_text)
 
     def gather(self, *, file_text: str, file_rel: str, fn_name: str, sig_text: str,
                body_text: str, error_excerpt: str, container: str,

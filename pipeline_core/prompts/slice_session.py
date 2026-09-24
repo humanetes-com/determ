@@ -24,6 +24,7 @@ from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.domain.slice_session import NOTES_CLOSE, NOTES_OPEN, SessionSlice
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
@@ -76,9 +77,9 @@ def render_slice_file(
                 else " [NOT executed by the failing tests on the current tree]")
     named = ", ".join(
         f"{r.fn_name} ({r.container or 'free fn'}){_mark(r)}" for r in editable)
-    head = (f'<FILE path="{file_rel}" editable="{named}">\n')
+    attrs = f' editable="{named}"'
     if len(text) <= file_chars:
-        return head + text.rstrip("\n") + "\n</FILE>"
+        return file_block(file_rel, text, view=FileView.WHOLE, attrs=attrs)
     edit_keys = {(r.fn_name, r.container) for r in editable}
     parts: list[str] = [ln for ln in text.splitlines()
                         if ln.lstrip().startswith(("use ", "pub use ", "pub(crate) use "))]
@@ -99,7 +100,9 @@ def render_slice_file(
                 parts.append(f"{pad}{r.sig_text.strip()} {{ /* … */ }}")
         if container:
             parts.append("}")
-    return head + "\n".join(parts) + "\n</FILE>"
+    # Condensed: the other fns are signatures, so this is a part of the file.
+    return file_block(file_rel, "\n".join(parts), view=FileView.PART,
+                      attrs=attrs)
 
 
 def _protocol(slice_: SessionSlice, records: Mapping[FnSite, FnRecord]) -> str:

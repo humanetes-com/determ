@@ -33,6 +33,12 @@ class FittedPrompt:
     events: tuple[tuple[str, str], ...]
 
 
+#: Written where a prompt's middle was cut; a reader of the prompt's own
+#: blocks (`prompt_holdings`) uses it to tell a declared-whole file that was
+#: cut to fit from one that arrived whole.
+TRIM_MARKER = "chars trimmed by context-guard"
+
+
 def fit_prompt(prompt: str, sys_len: int, *, context_chars: int) -> FittedPrompt:
     """Trim `prompt` (given a `sys_len`-char system prefix) to fit `context_chars`.
     Returns the original prompt with no events when it already fits."""
@@ -95,7 +101,7 @@ def fit_prompt(prompt: str, sys_len: int, *, context_chars: int) -> FittedPrompt
     dropped = len(trimmed) - head_keep - len(tail)
     final = (
         head
-        + f"\n\n[... {dropped:,} chars trimmed by context-guard to fit "
+        + f"\n\n[... {dropped:,} {TRIM_MARKER} to fit "
         f"{context_chars:,}-char context window ...]\n\n"
         + tail
     )

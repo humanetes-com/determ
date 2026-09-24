@@ -66,7 +66,7 @@ def _run(root: Path, *, bound: int, max_turns: int = 8):
         measure_suite=lambda raw: _reading(),
         read_source=lambda p: None,
         enumerate_bodies=lambda: {_FMT: "BASE"},
-        answer_pulls=lambda r: "here is the error",
+        answer_pulls=lambda r, conversation="": "here is the error",
         log=lambda m: None,
         emit=lambda ev, data=None, **k: events.append((ev, data or {})),
         check_graceful_stop=lambda s: None)

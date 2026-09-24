@@ -12,7 +12,7 @@ composition root; tests pass fakes.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.models import FnRecord, Frontier
@@ -31,9 +31,13 @@ class CompileChecker(Protocol):
 
 @runtime_checkable
 class FixModel(Protocol):
-    """The local LLM call (Hard Rule 7 — never an external model)."""
+    """The local LLM call (Hard Rule 7 — never an external model), as a
+    transcript call: a fix unit talks to the model through one conversation
+    (`unit_conversation.UnitConversation`), whose opening turn is fitted to
+    the context by `fit`."""
 
-    def ask(self, prompt: str) -> str: ...
+    def ask_turns(self, messages: list[dict[str, Any]], **kwargs: Any) -> str: ...
+    def fit(self, prompt: str) -> str: ...
 
 
 @runtime_checkable

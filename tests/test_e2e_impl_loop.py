@@ -22,10 +22,12 @@ from pipeline_core.domain.retro_gate import (
 )
 from tests.harness import (
     diag,
+    first_user,
     install_app_seams,
     install_cluster_scan,
     install_fake_extractor,
     install_scripted_cargo,
+    install_scripted_turns,
 )
 
 IMPL_LIB = """pub struct Foo { tag: u32 }
@@ -131,9 +133,11 @@ def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.impls_filled == 0 and res.impls_failed == 1
-    # Round 1: floor stall exhausts at 4. Retro round 1 baselines -> one
-    # informed retry; round 2 repeats E0999 twice -> repeated exit at 2.
-    assert res.attempts == 6
+    # Round 1: floor stall exhausts at 4, then the maximal last-resort turn
+    # (a model call, counted since it became a turn on the block's
+    # conversation). Retro round 1 baselines -> one informed retry; round 2
+    # repeats E0999 twice -> repeated exit at 2.
+    assert res.attempts == 7
     assert text == IMPL_LIB              # reverted to pristine stubs
     # Extractor seam returns None → remaining must come from the text-scan
     # fallback (was 0, silently skipping the caller's per-fn cleanup pass).
@@ -151,7 +155,8 @@ def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
         check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
     res = _run(ws)
     assert res.impls_filled == 0 and res.impls_failed == 1
-    assert res.attempts == 4          # 2 rounds x repeated-sig exit at 2
+    # 2 rounds x repeated-sig exit at 2, plus round 1's maximal turn.
+    assert res.attempts == 5
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
 
 
@@ -169,6 +174,37 @@ def test_impl_retry_prompt_carries_the_previous_attempts_errors(
     no LAST_ERROR section — which is also what guarantees attempt 2's prompt
     can never equal attempt 1's."""
     ws = _setup(monkeypatch, tmp_path)
+    sent = install_scripted_turns(monkeypatch, RESPONSE_BOTH)
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error[E0308]: mismatched types --> src/lib.rs:4",
+                    [diag("src/lib.rs", code="E0308")]))
+    _run(ws)
+    impl_calls = [t for t in sent if "TARGET_IMPL_BLOCK" in first_user(t)]
+    assert len(impl_calls) >= 2, "the fix loop must have retried"
+    first, second = impl_calls[0], impl_calls[1]
+    assert "<LAST_ERROR>" not in first_user(first), \
+        "attempt 1 has no previous attempt to report"
+    # Attempt 2 is a turn on the same conversation: the opening prompt and
+    # the model's own reply are above it, and the turn carries the errors.
+    assert [m["role"] for m in second][:4] == ["system", "user", "assistant", "user"]
+    assert second[2]["content"] == RESPONSE_BOTH
+    retry = second[3]["content"]
+    assert "TARGET_IMPL_BLOCK" not in retry, "a retry is not a rebuilt prompt"
+    section = retry.split("<COMPILE_ERRORS>", 1)[1].split("</COMPILE_ERRORS>", 1)[0]
+    assert "E0308" in section
+
+
+def test_impl_prompt_carries_its_whole_file_read_each_attempt(
+        monkeypatch, tmp_path):
+    """The per-impl prompt shows the whole file its block lives in, read
+    fresh per attempt. It used to carry only the target block, the
+    same-trait related blocks and other files' API, and 66 of the 105
+    context requests per-impl fills made from 2026-09-01 to 2026-09-24
+    asked for exactly that file. Read back through the prompt's own
+    grammar: a declared whole view of `src/lib.rs`."""
+    from pipeline_core.domain.prompt_holdings import FileView, read_holdings
+    ws = _setup(monkeypatch, tmp_path)
     prompts: list[str] = []
 
     def _capture(prompt, *a, **k):
@@ -182,15 +218,10 @@ def test_impl_retry_prompt_carries_the_previous_attempts_errors(
                     [diag("src/lib.rs", code="E0308")]))
     _run(ws)
     impl_prompts = [p for p in prompts if "TARGET_IMPL_BLOCK" in p]
-    assert len(impl_prompts) >= 2, "the fix loop must have retried"
-    first, second = impl_prompts[0], impl_prompts[1]
-    assert "<LAST_ERROR>" not in first, \
-        "attempt 1 has no previous attempt to report"
-    assert "<LAST_ERROR>" in second, \
-        "attempt 2 dropped the errors attempt 1 produced"
-    section = second.split("<LAST_ERROR>", 1)[1].split("</LAST_ERROR>", 1)[0]
-    assert "error" in section.lower()
-    assert first != second
+    assert impl_prompts
+    held = read_holdings(impl_prompts[0]).whole_view("src/lib.rs")
+    assert held is not None and held.view is FileView.WHOLE
+    assert held.text.strip() == IMPL_LIB.strip()
 
 
 def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
@@ -416,20 +447,10 @@ def test_maximal_last_resort_rescues_exhausted_block(monkeypatch, tmp_path):
     text = (ws / "src" / "lib.rs").read_text()
     assert res.impls_filled == 1 and res.fns_filled == 2
     assert res.impls_failed == 0
-    assert res.attempts == 2            # maximal is not a loop attempt
+    # Two loop attempts and the maximal turn — a model call on the block's
+    # conversation, counted as one.
+    assert res.attempts == 3
     assert "self.tag" in text and "unimplemented!()" not in text
-
-
-def test_maximal_skipped_when_over_char_cap(monkeypatch, tmp_path):
-    ws = _setup(monkeypatch, tmp_path)
-    monkeypatch.setenv("PHASE_C_MAXIMAL_CHAR_CAP", "10")
-    _install_model(monkeypatch, [RESPONSE_BOTH])
-    install_scripted_cargo(
-        monkeypatch,
-        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
-    res = _run(ws)
-    assert res.impls_failed == 1
-    assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB   # reverted
 
 
 def test_maximal_disabled_by_env(monkeypatch, tmp_path):
@@ -783,13 +804,7 @@ def test_file_first_retries_with_the_compiler_errors_from_the_failed_attempt(
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
     install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
-    prompts: list[str] = []
-
-    def _capture(prompt, *a, **k):
-        prompts.append(prompt)
-        return RESPONSE_TWO
-
-    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    sent = install_scripted_turns(monkeypatch, RESPONSE_TWO)
     monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "3")
     install_scripted_cargo(
         monkeypatch,
@@ -798,16 +813,15 @@ def test_file_first_retries_with_the_compiler_errors_from_the_failed_attempt(
                     (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
-    assert len(prompts) == 2, "compile failure must be retried file-first"
-    # The FEEDBACK section, not a bare code substring: the prompt now carries a
-    # static RUST_GOTCHAS block that names E0432 among its standing rules, so
-    # `"E0432" in prompt` is true of attempt 1 as well and says nothing about
-    # whether attempt 1's diagnostics were fed back.
-    feedback = "Your last attempt at this file failed:"
-    assert feedback not in prompts[0], "attempt 1 has no prior attempt to report"
-    tail = prompts[1].split(feedback, 1)
-    assert len(tail) == 2, "retry prompt must carry attempt 1's errors"
-    assert "E0432" in tail[1]
+    assert len(sent) == 2, "compile failure must be retried file-first"
+    # The FEEDBACK is the retry turn, not a bare code substring: the opening
+    # prompt carries a static RUST_GOTCHAS block that names E0432 among its
+    # standing rules, so `"E0432" in prompt` says nothing about feedback.
+    assert len(sent[0]) == 2 and "<COMPILE_ERRORS>" not in first_user(sent[0])
+    retry = sent[1][-1]["content"]
+    assert sent[1][-2]["content"] == RESPONSE_TWO, "the reply stays above the retry"
+    assert retry.startswith("RESULT of your previous reply")
+    assert "E0432" in retry.split("<COMPILE_ERRORS>", 1)[1]
     assert res.fns_filled == 2 and "unimplemented!()" not in text
 
 
@@ -848,25 +862,20 @@ def test_file_first_skips_the_byte_identical_resample(monkeypatch, tmp_path):
     (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
     install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
     install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
-    calls: list[str] = []
-
-    def _capture(prompt, *a, **k):
-        calls.append(prompt)
-        return RESPONSE_TWO
-
-    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    sent = install_scripted_turns(monkeypatch, RESPONSE_TWO)
     monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "3")
     install_scripted_cargo(
         monkeypatch,
         check_diag=(101, "error[E0432]: unresolved import `crate::Nope`",
                     [diag("src/lib.rs", code="E0432")]))
     _run(ws)
-    feedback = "Your last attempt at this file failed:"
-    with_feedback = [p for p in calls if feedback in p]
+    file_calls = [t for t in sent
+                  if "Write EVERY function listed below" in first_user(t)]
+    with_feedback = [t for t in file_calls
+                     if str(t[-1]["content"]).startswith("RESULT of your previous reply")]
     assert len(with_feedback) == 1, (
         "an unchanged error must buy ONE feedback-carrying retry, not a "
-        f"byte-identical resample per remaining attempt (got "
-        f"{len(with_feedback)})")
+        f"resample per remaining attempt (got {len(with_feedback)})")
 
 
 IMPL_LIB_FREE = """\
@@ -995,7 +1004,7 @@ def test_file_first_plan_names_a_filled_free_fn_the_frontier_convicts(
         tdd_frontier_tests=FailureFrontier.of_direct(
             {k: {"test_downcast"} for k in keys}))
     assert prompts, "the file-first route must have been reached"
-    plan = prompts[0].split("```rust", 1)[0]
+    plan = prompts[0].split('<FILE path=', 1)[0]
     assert "free fns" in plan, (
         f"the free fn is missing from the file-first plan:\n{plan}")
     assert "vtable" in plan, (
@@ -1258,7 +1267,7 @@ def _over_bound_frontier():
 
 
 def _plans_of(prompts: list[str]) -> list[str]:
-    return [p.split("```rust", 1)[0] for p in prompts
+    return [p.split('<FILE path=', 1)[0] for p in prompts
             if "Functions to write (by impl block)" in p]
 
 
@@ -1714,13 +1723,7 @@ def test_impl_retry_flips_a_sibling_that_carries_the_rejected_expression(
 
     ws = _setup(monkeypatch, tmp_path)
     (ws / "src" / "lib.rs").write_text(SIBLING_LIB)
-    prompts: list[str] = []
-
-    def _capture(prompt, *a, **k):
-        prompts.append(prompt)
-        return RESPONSE_LIKE_SIBLING
-
-    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    sent = install_scripted_turns(monkeypatch, RESPONSE_LIKE_SIBLING)
     install_scripted_cargo(
         monkeypatch,
         check_diag=(101, _REJECTED_RENDERED,
@@ -1728,17 +1731,17 @@ def test_impl_retry_flips_a_sibling_that_carries_the_rejected_expression(
                                 message="no method named `wrapping_add`",
                                 rendered=_REJECTED_RENDERED)]))
     _run(ws)
-    impl_prompts = [p for p in prompts if "TARGET_IMPL_BLOCK" in p]
-    assert len(impl_prompts) >= 2, "the fix loop must have retried"
-    first, second = impl_prompts[0], impl_prompts[1]
-    assert "<SIBLING_REFERENCE>" in first and "<SIBLING_REFERENCE>" in second, \
-        "Bar::kind is a same-named filled sibling and must be shown on both attempts"
+    impl_calls = [t for t in sent if "TARGET_IMPL_BLOCK" in first_user(t)]
+    assert len(impl_calls) >= 2, "the fix loop must have retried"
+    first = first_user(impl_calls[0])
+    retry = str(impl_calls[1][-1]["content"])
+    assert "<SIBLING_REFERENCE>" in first, \
+        "Bar::kind is a same-named filled sibling and must be shown"
     assert "follow the same structural pattern" in first
     assert "CAUTION" not in first
-    assert "<LAST_ERROR>" in second
-    sib2 = second.split("<SIBLING_REFERENCE>", 1)[1].split("</SIBLING_REFERENCE>", 1)[0]
-    assert "CAUTION" in sib2 and "`self.tag.wrapping_add(1)`" in sib2
-    assert "follow the same structural pattern" not in sib2
+    # The retry turn names the contradiction with the section above it.
+    assert "CAUTION" in retry and "`self.tag.wrapping_add(1)`" in retry
+    assert "SIBLING_REFERENCE above" in retry
 
 
 # --- The producer-bypass closure, route → prompt ------------------------------
@@ -1898,7 +1901,7 @@ def test_file_first_prompt_without_the_measured_set_offers_no_bypass(
     assert "REWRITE TO INVOKE THE PRODUCER" not in file_prompt
     assert "BUILD THE PER-TYPE TABLE" not in file_prompt
     # the undispatched block gets no plan entry without the measured set
-    plan = file_prompt.split("Functions to write", 1)[1].split("```rust", 1)[0]
+    plan = file_prompt.split("Functions to write", 1)[1].split('<FILE path=', 1)[0]
     assert "impl Clone for W" not in plan
     assert "[E0425]" in file_prompt
 

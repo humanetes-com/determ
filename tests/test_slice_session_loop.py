@@ -69,7 +69,7 @@ def _ports(*, measure, splice=None, ask=None, bodies=None):
         read_source=lambda p: None,
         enumerate_bodies=lambda: bodies or {
             u: r.body_text for u, r in _RECS.items()},
-        answer_pulls=lambda r: None,
+        answer_pulls=lambda r, conversation="": None,
         log=lambda m: None, emit=lambda *a, **k: None,
         check_graceful_stop=lambda s: None)
 
@@ -198,7 +198,7 @@ def test_a_hung_turn_restores_the_whole_change_set(tmp_path):
         measure_suite=measure,
         read_source=lambda p: None,
         enumerate_bodies=enumerate,
-        answer_pulls=lambda r: None,
+        answer_pulls=lambda r, conversation="": None,
         log=logs.append, emit=lambda *a, **k: None,
         check_graceful_stop=lambda s: None)
     out = run_slice_session(
@@ -303,7 +303,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
         else baseline,
         read_source=lambda p: None,
         enumerate_bodies=enumerate,
-        answer_pulls=lambda r: "file src/i.rs follows." if "<REQUEST" in r else None,
+        answer_pulls=lambda r, conversation="": "file src/i.rs follows." if "<REQUEST" in r else None,
         extend_body_watch=extend,
         log=logs.append, emit=lambda *a, **k: None,
         check_graceful_stop=lambda s: None)
@@ -339,7 +339,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
         measure_suite=lambda raw: baseline,
         read_source=lambda p: None,
         enumerate_bodies=lambda: {disp_site: disp.body_text},
-        answer_pulls=lambda r: None,
+        answer_pulls=lambda r, conversation="": None,
         log=lambda m: None, emit=emit,
         check_graceful_stop=lambda s: None)
     out_ctrl = run_slice_session(

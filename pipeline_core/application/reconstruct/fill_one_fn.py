@@ -51,13 +51,13 @@ from pipeline_core.application.reconstruct.import_repair import (
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
-    make_request_answerer,
     reconstruction_file_reader,
 )
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
 )
+from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
@@ -73,6 +73,7 @@ from pipeline_core.domain.fill_class import (
     tests_could_not_run,
 )
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
     body_fingerprint,
@@ -141,8 +142,14 @@ from pipeline_core.prompts.layout_authoring import identity_must_instruction
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt,
     build_per_fn_prompt,
+    sig_change_permission,
 )
-from pipeline_core.prompts.pull_menu import pull_menu_section
+from pipeline_core.prompts.retry_turn import (
+    BODY_OUTPUT,
+    AttemptFeedback,
+    EvidenceSection,
+    types_new_to,
+)
 from pipeline_core.prompts.sections import render_types_section
 
 
@@ -592,12 +599,14 @@ class FillOneFn:
         # from the last gather so the exhaustion retro can redirect to a frozen
         # bound's trait method instead of mis-routing to GENUINELY_HARD.
         retro_bound_methods = ""
-        # Pulls for the per-fn ladder: bounded typed requests; a bodyless
-        # reply with a <REQUEST .../> re-asks the SAME rung with the answer.
-        _pull_menu = ""
-        _answerer = None
+        # The unit's one conversation: the first attempt opens it (the stub
+        # prompt, or the fix prompt for a behavioural refill), every later
+        # attempt — a retry after a gate, a retro round's re-entry — is a
+        # turn on it that carries what was measured. Requests are answered
+        # on it when CONTEXT_PULLS is on.
+        _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
+        _pull_sources: PullSources | None = None
         if os.getenv("CONTEXT_PULLS", "1") != "0":
-            _max_pulls = int(os.getenv("CONTEXT_PULLS_MAX", "2"))
             _pull_sources = PullSources(
                 read_file=reconstruction_file_reader(
                     ctx.target_src_dir, ctx.project_dir),
@@ -614,11 +623,15 @@ class FillOneFn:
                     or std_api_def(name)),
                 full_error=lambda: error_excerpt,   # this fn's latest error
             )
-            _pull_menu = pull_menu_section(
-                _pull_sources.available_kinds(), _max_pulls)
-            _answerer = make_request_answerer(
-                _pull_sources, log=self.tel.log, emit=self.tel.emit,
-                max_pulls=_max_pulls)
+        _conv = self.prompt.open_conversation(
+            f"{rel_file}::{fn_name}", route="per-fn", sources=_pull_sources,
+            max_pulls=_max_pulls)
+        _read_view = reconstruction_file_reader(ctx.target_src_dir, ctx.project_dir)
+
+        def _cluster_view(text: str) -> str:
+            if ctx.cluster_cfg_set is None:
+                return text
+            return filter_cfg_inactive_branches(text, ctx.cluster_cfg_set)
         # History of (body, error_sig, outcome) for THIS fn's fix loop.
         # Surfaced to the model in subsequent fix prompts so it sees the
         # search space it has already explored.
@@ -659,8 +672,9 @@ class FillOneFn:
             retro_bound_methods = _fn_ctx.bound_methods_section
             # a re-fill target is corrective from attempt 1 — take the
             # fix branch (prev_body + failing test) rather than the stub-fill one.
-            if fix_attempt == 1 and not rec.refill:
-                prompt = build_per_fn_prompt(
+            turn: str | AttemptFeedback
+            if not _conv.opened and not rec.refill:
+                turn = build_per_fn_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                     test_blocks=test_blocks, module_name=ctx.module_name,
                     cluster_name=ctx.cluster_name, file_rel=rel_file,
@@ -709,7 +723,38 @@ class FillOneFn:
                 if (_rline := retired_guidance_line(
                         _retro_key, _retro_rec, _retro_verdict)):
                     self.tel.log(f"  {_rline}")
-                prompt = build_per_fn_fix_prompt(
+            if _conv.opened:
+                # A turn on the conversation: the model's previous body and
+                # its reasoning are above; this carries the measured result
+                # and only the evidence the conversation does not hold yet.
+                turn = AttemptFeedback(
+                    kind=fix_prompt_kind(
+                        _last_failure[0], quoted_run=_excerpt_quotes_run[0]),
+                    excerpt=error_excerpt, targets=(fn_name,),
+                    output=BODY_OUTPUT,
+                    note=(sig_change_permission(fn_name)
+                          if fix_attempt >= 5 else ""),
+                    sections=(
+                        EvidenceSection(
+                            "RETROSPECTIVE_GUIDANCE", _retro_guidance,
+                            "A diagnosis of the attempts so far:\n"),
+                        EvidenceSection(
+                            "TYPES_IN_SCOPE", types_new_to(
+                                _conv.text(), error_excerpt,
+                                ctx.crate_type_records, viewer_file=rel_file),
+                            "Types this result names that were not shown "
+                            "above:\n"),
+                        EvidenceSection("BOUND_METHODS",
+                                        _fn_ctx.bound_methods_section),
+                        EvidenceSection("MODEL_NOTES", notes_section),
+                        EvidenceSection(
+                            "RUST_GOTCHAS_DETAIL",
+                            language_driver().gotchas_for_error(error_excerpt))),
+                    moved=_conv.bodies_moved(
+                        _read_view, frozenset({fn_name}),
+                        normalize=_cluster_view))
+            elif rec.refill:
+                turn = build_per_fn_fix_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                     test_blocks=test_blocks, module_name=ctx.module_name,
                     cluster_name=ctx.cluster_name, file_rel=rel_file,
@@ -734,9 +779,8 @@ class FillOneFn:
                     # Open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.
-                    allow_sig_change=(fix_attempt >= 5),
+                    allow_sig_change=False,
                     fr_path=ctx.fr_path,
-                    attempt_history=per_fn_history,
                     kind=fix_prompt_kind(
                         _last_failure[0], quoted_run=_excerpt_quotes_run[0]),
                 )
@@ -744,10 +788,19 @@ class FillOneFn:
             # The stream-meta rows of this call carry the unit they serve,
             # so the FLAT grading can tell a measured refusal from a
             # reasoning-capped truncation per unit.
-            with serving_units((f"{rel_file}::{fn_name}",)):
-                body, last_response = self.prompt.ask_per_fn_body(
-                    prompt + _pull_menu, fn_name, attempts_log,
-                    sig_text=sig_text, answer_request=_answerer)
+            try:
+                with serving_units((f"{rel_file}::{fn_name}",)):
+                    body, last_response = self.prompt.ask_per_fn_body(
+                        turn, fn_name, attempts_log, conversation=_conv,
+                        sig_text=sig_text)
+            except TranscriptBound:
+                self.tel.emit("phase_c.fn.fill.skip", data={
+                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                    "file": rel_file, "fn": fn_name,
+                    "fix_attempt": fix_attempt,
+                    "reason": "transcript_bound",
+                })
+                return FixOutcome("stop")
             if body is None:
                 # Model gave no usable response — stop retrying this fn.
                 self.tel.emit("phase_c.fn.fill.skip", data={

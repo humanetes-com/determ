@@ -54,6 +54,33 @@ class _Script:
         return spec
 
 
+def install_scripted_turns(monkeypatch, reply: Callable[[list[dict]], str] | str
+                           ) -> list[list[dict[str, Any]]]:
+    """Script the transcript transport every fill route talks through
+    (`model_interact.ask_turns`) and record each call's whole message list
+    — system turn, opening turn, the model's replies, the harness's turns.
+    `reply` is a constant or a callable over the messages."""
+    import model_interact
+    sent: list[list[dict[str, Any]]] = []
+
+    def _turns(messages, **_k):
+        sent.append([dict(m) for m in messages])
+        return reply(messages) if callable(reply) else reply
+
+    monkeypatch.setattr(model_interact, "ask_turns", _turns)
+    # The single-prompt calls (retrospectives, notes) stay on `_ask_raw`;
+    # answer them from the same script so nothing reaches a real server.
+    monkeypatch.setattr(pipeline, "_ask_raw", lambda prompt, *a, **k: (
+        reply([{"role": "user", "content": prompt}]) if callable(reply) else reply))
+    return sent
+
+
+def first_user(messages: list[dict[str, Any]]) -> str:
+    """The opening turn of a recorded transcript."""
+    return next((str(m.get("content") or "") for m in messages
+                 if m.get("role") == "user"), "")
+
+
 def install_scripted_model(
     monkeypatch,
     per_fn_body: Callable[[str], str] | str = "{ unimplemented!() }",

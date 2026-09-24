@@ -34,6 +34,7 @@ from pipeline_core.domain.retro_gate import (
 )
 from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_results import RegressionComparison
+from tests.conversation_fakes import idle_conversation, send
 
 
 class FakeFill:
@@ -95,7 +96,13 @@ class FakeFill:
     def env(self) -> dict[str, str]: return {}
 
     # PromptContext
+    def open_conversation(self, label: str, **k: Any) -> Any:
+        return idle_conversation(label)
+
     def ask_per_fn_body(self, *a: Any, **k: Any) -> tuple[str | None, str]:
+        if a and "conversation" in k:
+            self.s.setdefault("turns", []).append((a[0], k["conversation"]))
+            self.s.setdefault("sent", []).append(send(k["conversation"], a[0]))
         return self.s.get("body", ("ok()", "RESP"))
     def gather(self, **k: Any) -> FnFixContext: return FnFixContext()
     def collect_sibling_filled_bodies(self, *a: Any) -> str: return ""
@@ -1517,3 +1524,51 @@ def test_external_only_keep_names_the_blockers_in_log_event_and_verdict(
     assert evs and "src/error.rs::construct" in evs[0]["blocking_fns"]
     rows = _verdicts(fake)
     assert rows and "src/error.rs::construct" in rows[0]["evidence_keys"]
+
+
+# --- the per-fn route on the unit conversation (a walk, cargo stubbed) ------
+
+
+def test_a_compile_failure_is_a_turn_on_the_same_conversation(tmp_path: Path) -> None:
+    """Attempt 1 opens the unit's conversation; attempt 2 is a turn on it
+    that carries the diagnostics, with the model's first reply above it — not
+    a second document to a model that no longer has its reply."""
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(loc=("pub fn answer()", 0, 16, 35),
+                    splice=SpliceOutcome(True, "ok", 4),
+                    run_seq=[(101, "error[E0425]: cannot find value `x`"), (0, "")],
+                    err="error[E0425]: cannot find value `x`",
+                    u2=None, body=("42", "RESP"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=_ctx(ws))
+    assert res.filled and res.attempts == 2
+    (t1, c1), (t2, c2) = fake.s["turns"]
+    assert isinstance(t1, str) and c1 is c2
+    assert [m["role"] for m in c2.messages] == ["user", "assistant", "user", "assistant"]
+    retry = fake.s["sent"][1]
+    assert retry.startswith("RESULT of your previous reply")
+    assert "E0425" in retry.split("<COMPILE_ERRORS>", 1)[1]
+    assert "<BODY>" in retry
+
+
+class _NoTranscriptFill(FakeFill):
+    """The pre-conversation ask: the reply never reaches a transcript."""
+
+    def ask_per_fn_body(self, *a: Any, **k: Any) -> tuple[str | None, str]:
+        self.s.setdefault("turns", []).append((a[0], k.get("conversation")))
+        return self.s.get("body", ("ok()", "RESP"))
+
+
+def test_control_without_the_transcript_attempt_two_is_a_whole_document(
+        tmp_path: Path) -> None:
+    """Negative control: when the model's reply is not on the conversation
+    (the one-call-per-attempt ask this replaced), the route has no turn to
+    continue and attempt 2 goes out as a whole new prompt."""
+    ws = _mk_ws(tmp_path)
+    fake = _NoTranscriptFill(loc=("pub fn answer()", 0, 16, 35),
+                             splice=SpliceOutcome(True, "ok", 4),
+                             run_seq=[(101, "error[E0425]: x"), (0, "")],
+                             err="error[E0425]: x", u2=None, body=("42", "RESP"))
+    _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=_ctx(ws))
+    (t1, _c1), (t2, c2) = fake.s["turns"]
+    assert isinstance(t1, str) and isinstance(t2, str)
+    assert not c2.messages

@@ -7,17 +7,19 @@ structural path containment — any path resolving outside the reconstruction
 tree is refused, so the upstream crate source is unreachable by construction
 rather than by policy.
 
-`ask_with_pulls` is the ONE round-trip driver every fill path shares:
-deliverable-first (a reply that already carries FN bodies is never delayed by
-its stray request tag), then at most `PullBudget.remaining` answered requests —
-ALL of a reply's requests are served, not just its last — then one final ask
-that tells a still-asking model the budget is spent, then the reply as-is.
+`ConversationRequests` answers the requests of one conversation: at most
+`PullBudget.remaining` answered requests per turn — ALL of a reply's requests
+are served, not just its last — then one notice that tells a still-asking
+model the budget is spent. The conversation that carries the answers is
+`unit_conversation.UnitConversation`; the request turn the model wrote stays
+in it, above the answer.
 """
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Protocol
 
 from pipeline_core.domain.context_pull import (
     ContextPull,
@@ -27,6 +29,7 @@ from pipeline_core.domain.context_pull import (
     extract_context_pulls,
     window_lines,
 )
+from pipeline_core.domain.prompt_holdings import held_file_answer, read_holdings
 from pipeline_core.prompts.pull_menu import (
     render_pull_budget_spent,
     render_pull_followups,
@@ -178,6 +181,49 @@ def resolve_pull(pull: ContextPull, sources: PullSources) -> PullAnswer:
 ServedAnswers = dict[ContextPull, str]
 
 
+def _held_whole(pull: ContextPull, sources: PullSources,
+                conversation: str) -> PullAnswer | None:
+    """The answer to a whole-file request for a file `conversation` already
+    carries as a declared whole view: where it is, what was rewritten on disk
+    since, and an outline — never the file again. None when the request is
+    for a window (`from_line`), the conversation holds no whole view of the
+    path, or the file cannot be read (then the ordinary answer applies).
+
+    Measured before this existed (2026-09-01 → 2026-09-24): the per-fn view
+    of `src/error.rs` is the file with the cluster's inactive cfg arms
+    removed, and the re-sent answer was the raw file — 11 to 14 more code
+    lines, all inactive — so the ask bought the same code plus noise."""
+    if pull.kind is not PullKind.FILE or pull.from_line > 1 or not conversation:
+        return None
+    held = read_holdings(conversation).whole_view(pull.arg)
+    if held is None:
+        return None
+    try:
+        disk = sources.read_file(pull.arg)
+    except Exception:  # a pull must never kill a fill
+        return None
+    if disk is None:
+        return None
+    return PullAnswer(pull, held_file_answer(pull.arg, held, disk))
+
+
+def _note_shown_type(answer: PullAnswer, conversation: str) -> PullAnswer:
+    """A type_def answer for a type the conversation's TYPES_IN_SCOPE already
+    defines says so first. The definition is still sent — it is short, and
+    the model asked because it did not find it — but the next ask for a
+    listed type is answered by the index the prompt opens with. Half of the
+    type_def requests from 2026-09-01 to 2026-09-24 (81 of 163) were for a
+    type the prompt had rendered."""
+    if (answer.pull.kind is not PullKind.TYPE_DEF or not answer.ok
+            or not conversation
+            or answer.pull.arg not in read_holdings(conversation).types):
+        return answer
+    return replace(answer, payload=(
+        f"({answer.pull.arg} is already defined in TYPES_IN_SCOPE above; "
+        "listed in the contents index at the top. Its definition again:)\n"
+        + answer.payload))
+
+
 def _answer_affordable(
     pulls: Sequence[ContextPull],
     budget: PullBudget,
@@ -186,6 +232,7 @@ def _answer_affordable(
     *,
     log: Callable[[str], None],
     emit: Callable[..., None],
+    conversation: str = "",
 ) -> tuple[list[tuple[PullAnswer, bool]], PullBudget, tuple[ContextPull, ...]]:
     """Answer `pulls` in document order for as long as `budget` lasts.
 
@@ -194,14 +241,19 @@ def _answer_affordable(
     the budget could not reach. Every ANSWERED request costs one unit, repeats
     included, so the cap stays a cap on round-trips: batching several into one
     reply buys the model fewer round-trips, never more context, and a model
-    re-asking the same thing cannot loop."""
+    re-asking the same thing cannot loop.
+
+    `conversation` is everything the model has been sent in this task; a
+    whole-file request for a file it holds whole is answered by `_held_whole`."""
     answers: list[tuple[PullAnswer, bool]] = []
     for i, pull in enumerate(pulls):
         spent = budget.spend()
         if spent is None:
             return answers, budget, tuple(pulls[i:])
         budget = spent
-        answer = resolve_pull(pull, sources)
+        held = _held_whole(pull, sources, conversation)
+        answer = held if held is not None else resolve_pull(pull, sources)
+        answer = _note_shown_type(answer, conversation)
         repeat = answer.ok and served.get(pull) == answer.payload
         if answer.ok:
             served[pull] = answer.payload
@@ -211,12 +263,14 @@ def _answer_affordable(
             f"{'ok' if answer.ok else 'unavailable'} "
             f"({len(answer.payload)} chars{window}"
             f"{', truncated' if answer.truncated else ''}"
+            f"{', already held whole — pointed at it' if held is not None else ''}"
             f"{', repeat — not re-sent' if repeat else ''})")
         emit("pull.answer", data={
             "kind": str(pull.kind), "arg": pull.arg, "ok": answer.ok,
             "chars": len(answer.payload), "truncated": answer.truncated,
             "from_line": pull.from_line, "last_line": answer.last_line,
             "total_lines": answer.total_lines, "repeat": repeat,
+            "held_whole": held is not None,
             "remaining": budget.remaining})
         answers.append((answer, repeat))
     return answers, budget, ()
@@ -229,86 +283,69 @@ def _log_refusals(pulls: Sequence[ContextPull],
             "asking once more for a body")
 
 
+class RequestAnswerer(Protocol):
+    """Given a raw reply and what the conversation has sent so far, the
+    follow-up addition for its requests, or None."""
+
+    def __call__(self, response: str, conversation: str = "") -> str | None: ...
+
+
+class ConversationRequests:
+    """The requests of one conversation, answered under a round-trip budget.
+
+    Called with a raw reply, returns the follow-up turn for its requests —
+    or None when there is no well-formed request, or the budget is spent AND
+    the model has already been told so. The one refusal notice is what stops
+    a conversation from spending its calls on a model that is asking rather
+    than answering: without it the next call re-asks the same question,
+    which says nothing about the spent budget, so the model asks again.
+
+    `open_turn` restores the budget for the next turn the caller opens (a
+    fill's retry is a new question and may ask again); answers already
+    served stay served for the conversation's lifetime, so a byte-identical
+    answer is flagged as a repeat instead of re-sent unnoticed. A session
+    never calls it: its budget is the session's."""
+
+    def __init__(self, sources: PullSources, *, log: Callable[[str], None],
+                 emit: Callable[..., None], max_pulls: int = 2) -> None:
+        self._sources = sources
+        self._log = log
+        self._emit = emit
+        self._max = max_pulls
+        self._budget = PullBudget(max_pulls)
+        self._warned = False
+        self._served: ServedAnswers = {}
+
+    @property
+    def sources(self) -> PullSources:
+        return self._sources
+
+    def open_turn(self) -> None:
+        self._budget = PullBudget(self._max)
+        self._warned = False
+
+    def __call__(self, response: str, conversation: str = "") -> str | None:
+        pulls = extract_context_pulls(response)
+        if not pulls:
+            return None
+        answers, self._budget, unanswered = _answer_affordable(
+            pulls, self._budget, self._sources, self._served,
+            log=self._log, emit=self._emit, conversation=conversation)
+        if answers:
+            return render_pull_followups(answers)
+        if self._warned:
+            return None
+        self._warned = True
+        _log_refusals(unanswered, self._log)
+        return render_pull_budget_spent(unanswered)
+
+
 def make_request_answerer(
     sources: PullSources,
     *,
     log: Callable[[str], None],
     emit: Callable[..., None],
     max_pulls: int = 2,
-) -> Callable[[str], str | None]:
-    """A stateful answerer for ask ladders that own their retry policy (the
-    per-fn 3-rung ladder): given a raw response, returns the follow-up prompt
-    ADDITION for its requests — or None when there is no well-formed request,
-    or the budget is spent AND the model has already been told so. Budget
-    persists across the ladder's rungs.
-
-    The one refusal notice is what stops the ladder burning its remaining rungs
-    on a model that is asking rather than answering: without it the rung breaks
-    and the next rung re-asks the ORIGINAL prompt, which says nothing about the
-    spent budget, so the model asks again and rungs 2 and 3 go the same way."""
-    budget = PullBudget(max_pulls)
-    warned = False
-    served: ServedAnswers = {}
-
-    def _answer(response: str) -> str | None:
-        nonlocal budget, warned
-        pulls = extract_context_pulls(response)
-        if not pulls:
-            return None
-        answers, budget, unanswered = _answer_affordable(
-            pulls, budget, sources, served, log=log, emit=emit)
-        if answers:
-            return render_pull_followups(answers)
-        if warned:
-            return None
-        warned = True
-        _log_refusals(unanswered, log)
-        return render_pull_budget_spent(unanswered)
-
-    return _answer
-
-
-def ask_with_pulls(
-    ask: Callable[[str], str],
-    prompt: str,
-    *,
-    sources: PullSources,
-    has_deliverable: Callable[[str], bool],
-    log: Callable[[str], None],
-    emit: Callable[..., None],
-    max_pulls: int = 2,
-) -> str:
-    """Drive one fill exchange with at most `max_pulls` answered requests.
-    Deliverable replies short-circuit; a reply with no well-formed request
-    ends the loop as-is (the caller's normal no-bodies handling applies).
-
-    A reply that STILL asks once the budget is spent gets one final ask that
-    says so, and that reply is returned whatever it holds. Returning the
-    request-only reply instead is a whole discarded attempt: on 2026-08-03 the
-    nightly src/error.rs file-first fill spent three round-trips and nine
-    minutes on a 40 000-char prompt, had the crash diagnosed in prose, asked
-    for one more type, and was logged `empty/no FN blocks (0 FN tag(s) in
-    reply) — falling back to per-block fills`. The model had not failed; it was
-    waiting on an answer nothing was going to send. Total asks stay bounded at
-    `max_pulls + 2` and the notice is issued at most once."""
-    budget = PullBudget(max_pulls)
-    current = prompt
-    warned = False
-    served: ServedAnswers = {}
-    while True:
-        response = ask(current)
-        if has_deliverable(response):
-            return response
-        pulls = extract_context_pulls(response)
-        if not pulls:
-            return response
-        answers, budget, unanswered = _answer_affordable(
-            pulls, budget, sources, served, log=log, emit=emit)
-        if answers:
-            current = current + render_pull_followups(answers)
-            continue
-        if warned:
-            return response
-        warned = True
-        _log_refusals(unanswered, log)
-        current = current + render_pull_budget_spent(unanswered)
+) -> ConversationRequests:
+    """The requests of one conversation (`ConversationRequests`)."""
+    return ConversationRequests(sources, log=log, emit=emit, max_pulls=max_pulls)

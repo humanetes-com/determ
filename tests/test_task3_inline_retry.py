@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.per_fn_retry import (
     env_for_cluster,
     run_task3_inline_retry,
 )
+from tests.conversation_fakes import idle_conversation
 
 
 def _failed(n: int) -> str:
@@ -55,6 +56,7 @@ def _deps(*, run=None, check_diag=None, parse_ok=None, unattributed=False,
             locate_fn=_unused, locate_all_fns=_unused,
             gather_fix_context=_unused,
             build_per_fn_fix_prompt=_unused, ask_per_fn_body=_unused,
+            open_conversation=idle_conversation,
             splice_fn_body=_unused, splice_body_scoped=_unused,
             find_tests_for_fn=_unused,
             focus_cargo_errors=_unused, is_gen_tests_file=lambda n: False,

@@ -133,9 +133,13 @@ class PromptContext(Protocol):
     per-fn context (types/notes/where), sibling bodies, crate idioms, crate
     macros, cluster macro invariants, and the no_std invariant."""
 
+    def open_conversation(
+        self, label: str, *, route: str = ..., sources: object = ...,
+        max_pulls: int = ...,
+    ) -> Any: ...
     def ask_per_fn_body(
-        self, prompt: str, fn_name: str, attempts_log: list[str],
-        sig_text: str = ..., answer_request: object = ...,
+        self, turn: object, fn_name: str, attempts_log: list[str], *,
+        conversation: Any, sig_text: str = ...,
     ) -> tuple[str | None, str]: ...
     def gather(
         self, *, file_text: str, file_rel: str, fn_name: str, sig_text: str,

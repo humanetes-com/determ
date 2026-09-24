@@ -722,15 +722,18 @@ def test_tagged_path_block_spans_matches_old_regex() -> None:
         assert text.tagged_path_block_spans(t, "FILE") == old(t, "FILE"), repr(t)
 
 
-def test_tagged_path_block_spans_requires_gt_after_quote() -> None:
-    """A `path="…"` not immediately followed by `>` is not a block opener; the
-    scanner advances past the false start and finds the next real block."""
-    t = '\n<FILE path="x" extra="y">body</FILE>\n<FILE path="z">ok</FILE>'
+def test_tagged_path_block_spans_reads_attributes_after_path() -> None:
+    """Attributes after `path` belong to the opening tag, a `>` inside a
+    quoted value does not close it, and a `path="…"` followed by anything
+    that is not ` name="value"` pairs and `>` is still not a block opener.
+    The pre-attribute scanner dropped the first block below, which is how the
+    session's `editable="…"` file escaped the context guard."""
+    t = ('\n<FILE path="x" view="whole" editable="fmt (impl<A> F<A>)">body</FILE>'
+         '\n<FILE path="bad" junk>no</FILE>\n<FILE path="z">ok</FILE>')
     spans = text.tagged_path_block_spans(t, "FILE")
-    # only the well-formed second block matches (`">` immediately after the quote)
-    assert len(spans) == 1
-    s, e = spans[0]
-    assert t[s:e] == '\n<FILE path="z">ok</FILE>'
+    assert [t[s:e] for s, e in spans] == [
+        '\n<FILE path="x" view="whole" editable="fmt (impl<A> F<A>)">body</FILE>',
+        '\n<FILE path="z">ok</FILE>']
 
 
 def test_sibling_comment_block_spans_matches_old_regex() -> None:

@@ -45,6 +45,12 @@ class AttemptLoss(StrEnum):
     """The model answered and the write was refused (guard, non-stub target,
     cfg scope). Same shape as a routing drop: an answer exists, unused."""
 
+    TRANSCRIPT_BOUND = "transcript_bound"
+    """No reply: the unit's conversation reached its single-call bound and
+    the next turn was not sent (`unit_conversation.TranscriptBound`). Not
+    evidence about the model, and no escalation can be sent either — it
+    would be a turn on the same full transcript."""
+
     @property
     def is_pipeline_side(self) -> bool:
         """True when the answer was lost after the model produced it.
@@ -76,13 +82,16 @@ def may_escalate_to_last_resort(
     16–94k chars across three eras, of which 177 of 185 sampled U2 floors
     never moved between the attempt that set them and the escalation fired
     after them."""
-    if signature_unchanged:
+    if signature_unchanged or loss is AttemptLoss.TRANSCRIPT_BOUND:
         return False
     return loss is None or not loss.is_pipeline_side
 
 
 def escalation_refusal_note(loss: AttemptLoss) -> str:
     """Why the escalation was withheld, for the log line that replaces it."""
+    if loss is AttemptLoss.TRANSCRIPT_BOUND:
+        return ("the unit's conversation reached its single-call bound; an "
+                "escalation would be one more turn on the same transcript")
     return (f"last loss was {loss.value} — the model answered and the answer "
             "was dropped before it reached the file; a bigger prompt cannot "
             "fix a routing/splice loss")

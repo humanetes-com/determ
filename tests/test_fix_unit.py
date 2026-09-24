@@ -37,6 +37,12 @@ class _Model:
     def __init__(self, resp: str) -> None:
         self.resp, self.prompts = resp, []
 
+    def ask_turns(self, messages, **_k):  # the transcript port
+        return self.ask(str(messages[-1]["content"]))
+
+    def fit(self, prompt: str) -> str:
+        return prompt
+
     def ask(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.resp
@@ -166,8 +172,11 @@ def test_fn_unit_allows_where_on_private_free_fn(tmp_path: Path) -> None:
     unit = FnFixUnit(_session(tmp_path),
                      _deps(_Checker("src/lib.rs", "foo"), _Model(_WHERE_RESP), splicer),
                      FnTarget("src/lib.rs", "foo"))
+    # The relaxation opens on the unit's SECOND turn: the first attempt is
+    # body-only, whatever it returns.
+    unit.attempt("E0277 boom", history=[])
     unit.attempt("E0277 boom", history=[{"attempt": 1}])
-    assert splicer.spliced == [("foo", "where C: 'static")]
+    assert splicer.spliced == [("foo", None), ("foo", "where C: 'static")]
 
 
 def test_impl_unit_denies_where_on_trait_impl(tmp_path: Path) -> None:
@@ -291,6 +300,12 @@ def test_fn_unit_pull_answered_then_body_spliced(tmp_path: Path) -> None:
         def __init__(self, responses: list[str]) -> None:
             self.responses = list(responses)
             self.prompts: list[str] = []
+
+        def ask_turns(self, messages, **_k):  # the transcript port
+            return self.ask(str(messages[-1]["content"]))
+
+        def fit(self, prompt: str) -> str:
+            return prompt
 
         def ask(self, prompt: str) -> str:
             self.prompts.append(prompt)

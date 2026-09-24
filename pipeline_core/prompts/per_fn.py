@@ -14,6 +14,7 @@ from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
+from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -142,9 +143,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
-<FILE path="{file_rel}">
-{annotated}
-</FILE>
+{file_block(file_rel, annotated, view=FileView.WHOLE)}
 {macros_block}
 Tests (read-only):
 
@@ -167,6 +166,23 @@ Rules:
   separately. Reinventing what a sibling stub already promises is the
   most common cause of fix-loop divergence.
 """
+
+
+def sig_change_permission(fn_name: str) -> str:
+    """The `<SIGNATURE>` escape hatch the per-fn loop opens after several
+    failed attempts — in the rebuilt fix prompt, and as a note on a retry
+    turn of the unit's conversation."""
+    return ("If the fix REQUIRES a signature change (e.g. adding `T: 'static`, "
+            "tightening lifetimes, or relaxing a generic bound), AND the "
+            "function is private (not pub), include a `<SIGNATURE>` block "
+            "AFTER your `<BODY>`:\n  <SIGNATURE>\n"
+            + language_driver().sig_change_example(fn_name)
+            + "  </SIGNATURE>\n"
+            "The signature line must end at the opening brace `{`. We will "
+            "splice it in place of the current signature. This option is "
+            "available only after multiple failed attempts; use it only when "
+            "the body cannot be made to compile under the existing signature. "
+            "Public fns: the signature MUST remain verbatim (tests depend on it).")
 
 
 def build_per_fn_fix_prompt(
@@ -356,9 +372,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 </RUST_GOTCHAS>
 {crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
-<FILE path="{file_rel}">
-{annotated}
-</FILE>
+{file_block(file_rel, annotated, view=FileView.WHOLE)}
 {macros_block}
 <PREVIOUS_BODY>
 {prev_body}
@@ -375,22 +389,9 @@ Output:
   <BODY>
   corrected body without surrounding braces
   </BODY>
-{
-((("\nIf the fix REQUIRES a signature change (e.g. adding `T: 'static`, "
-   "tightening lifetimes, or relaxing a generic bound), AND the function is "
-   "private (not pub), include a `<SIGNATURE>` block AFTER your `<BODY>`:\n"
-   "  <SIGNATURE>\n")
-  + language_driver().sig_change_example(fn_name)
-  + ("  </SIGNATURE>\n"
-     "The signature line must end at the opening brace `{{`. We will splice it "
-     "in place of the current signature. This option is available only after "
-     "multiple failed attempts; use it only when the body cannot be made to "
-     "compile under the existing signature."))
- if allow_sig_change else "")
-}
+{("\n" + sig_change_permission(fn_name)) if allow_sig_change else ""}
 Rules:
 - Body only — no sig in the BODY block.
 - Use fully-qualified paths for symbols not in the file's `use` block.
 - No unimplemented!()/todo!()/panic-only. Omit <BODY> if you cannot fix.
-{("- Public fns: signature MUST remain verbatim (tests depend on it).\n"
-  if allow_sig_change else "")}"""
+"""

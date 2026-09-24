@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.cargo_toml import cargo_default_features
+from pipeline_core.domain.installable_fns import attach_slot_fits
 from pipeline_core.domain.models import (
     BuildCluster,
     ConstRecord,
@@ -188,7 +189,15 @@ class CliStructureReader:
 
     def enumerate_types(self, src_dir: Path) -> list[TypeRecord] | None:
         recs = self.extractor.enumerate_types(src_dir)
-        if recs is None or self.std_types is None or not external_type_records_enabled():
+        if recs is None:
+            return recs
+        # Every fn-pointer field names the crate fns that fit it, read off
+        # the same tree. Without the fn records the fields keep `fits=None`
+        # and render nothing — never "nothing fits".
+        fns = self.extractor.enumerate_fns(src_dir)
+        if fns is not None:
+            recs = attach_slot_fits(recs, fns)
+        if self.std_types is None or not external_type_records_enabled():
             return recs
         if crate_root_of(src_dir) is None:
             return recs  # not a cargo package: nothing binds `std` here

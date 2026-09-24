@@ -110,8 +110,9 @@ class _LessonRetro(RecordingFill):
         self.prompts: list[str] = []
 
     def ask_per_fn_body(self, *a: Any, **k: Any) -> tuple[str | None, str]:
-        self.prompts.append(str(a[0]) if a else "")
-        return super().ask_per_fn_body(*a, **k)
+        out = super().ask_per_fn_body(*a, **k)
+        self.prompts.append(self.s["sent"][-1] if self.s.get("sent") else "")
+        return out
 
     def diagnose(self, **k: Any) -> dict[str, Any]:
         self.diagnose_calls += 1

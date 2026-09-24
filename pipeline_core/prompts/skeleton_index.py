@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.models import BuildCluster
+from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.domain.rust_fn_headers import (
     HeaderMatch,
     fn_headers,
@@ -61,7 +62,8 @@ def format_skeleton_index(skeleton_files: list[tuple[str, str]]) -> str:
         # in rule expansions that would otherwise confuse the fn scan).
         condensed = _elide_bodies(content, macro_headers(content), " { /* macro body elided — preserved verbatim on disk */ }")
         condensed = _elide_bodies(condensed, fn_headers(condensed, line_anchored=True), ";")
-        out_parts.append(f'<FILE path="{rel}" mode="signatures-only">\n{condensed}\n</FILE>')
+        out_parts.append(file_block(rel, condensed, view=FileView.PART,
+                                    attrs=' mode="signatures-only"'))
     return "\n\n".join(out_parts)
 
 

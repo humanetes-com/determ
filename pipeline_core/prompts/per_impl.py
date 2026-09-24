@@ -23,6 +23,7 @@ from pipeline_core.domain.last_error import (
 )
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.domain.pair_fill import extra_quoted_members, extra_write_members
+from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
@@ -128,6 +129,22 @@ def sibling_reference_prefix(rejected: tuple[str, ...]) -> str:
         "structural pattern here — reach the same result by a path THIS "
         "block's bounds allow (TYPES_IN_SCOPE and BOUND_METHODS name the "
         "fields and methods available):\n```rust\n")
+
+
+def sibling_rejected_note(rejected: tuple[str, ...]) -> str:
+    """The same contradiction as :func:`sibling_reference_prefix`, for a
+    retry turn: the SIBLING_REFERENCE above was introduced as a pattern to
+    follow, and it carries the expression this result rejected."""
+    if not rejected:
+        return ""
+    exprs = ", ".join(f"`{e}`" for e in rejected)
+    return (f"CAUTION — the SIBLING_REFERENCE above carries {exprs}: the "
+            "expression your previous reply wrote and this result rejected "
+            "under THIS block's bounds. The sibling compiles only because its "
+            "impl header bounds its types differently. Do NOT follow its "
+            "structural pattern here — reach the same result by a path THIS "
+            "block's bounds allow (TYPES_IN_SCOPE and BOUND_METHODS name the "
+            "fields and methods available).")
 
 
 def build_per_impl_prompt(
@@ -460,6 +477,11 @@ def build_per_impl_prompt(
         f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
     coverage_part = instruction_opener(
         file_rel, (m.fn_name for m in (*stub_members, *refill_members)))
+    own_file_block = (
+        "\nThe whole file this block lives in, as this cluster compiles it — "
+        "the TARGET_IMPL_BLOCK below is part of it; read the other items "
+        "here:\n" + file_block(file_rel, sections.own_file, view=FileView.WHOLE)
+        + "\n") if sections.own_file.strip() else ""
     return f"""Implement the marked [STUB] fns in this Rust impl block so the
 tests pass. The unit of work is the IMPL BLOCK — design every member
 together; each fn must respect the impl header's generic parameters,
@@ -473,7 +495,7 @@ Stubs to fill in this response: {stub_names}
 {pair_part}{recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}
+{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{last_error_block}{refill_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{dispatch_family_section}{related_section}{own_file_block}
 <TARGET_IMPL_BLOCK file="{file_rel}">
 ```rust
 {target_render}

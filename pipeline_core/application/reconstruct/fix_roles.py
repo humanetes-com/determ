@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.models import Diagnostic, FnRecord, Frontier
@@ -43,10 +44,14 @@ class FixCheckerAdapter:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class FixModelAdapter:
-    ask_fn: Callable[[str], str]
+    ask_turns_fn: Callable[..., str]
+    fit_fn: Callable[[str], str]
 
-    def ask(self, prompt: str) -> str:
-        return self.ask_fn(prompt)
+    def ask_turns(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+        return self.ask_turns_fn(messages, **kwargs)
+
+    def fit(self, prompt: str) -> str:
+        return self.fit_fn(prompt)
 
 
 # --------------------------------------------------------------------------- #

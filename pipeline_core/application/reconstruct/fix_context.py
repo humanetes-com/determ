@@ -69,6 +69,7 @@ class FixContextAssembler:
         type_records: list[TypeRecord],
         file_rel: str = "",
         observables: frozenset[str] = frozenset(),
+        file_text: str = "",
     ) -> str:
         """TYPES_IN_SCOPE for retry/fix prompts (parity with the initial-fill
         path). Selects from
@@ -89,7 +90,17 @@ class FixContextAssembler:
         tests assert appear in some rendering — a documented type that STATES
         one of them carries that doc region past the leading-lines cap
         (`_type_doc_lines`). Empty for the retry/fix routes, which have a
-        compiler diagnostic rather than an attributed test."""
+        compiler diagnostic rather than an attributed test.
+
+        `file_text` is the unit's whole file. The crate types it names that
+        ANOTHER file declares rank last, after everything the unit's own
+        text names: the file view shows their names and not their
+        definitions, and a stub's signature often names none of them. From
+        2026-09-01 to 2026-09-24 per-fn and per-impl fills asked 65 times for
+        a type definition the prompt did not render, most often
+        `MessageError`, `BoxedError` and `DisplayError` from `src/error.rs`
+        units, whose file names them only as `crate::wrapper::…` inside
+        sibling bodies. Last means the section's char cap cuts them first."""
         search = "\n".join([
             sig_text or "", container or "", impl_where or "",
             body_text or "", error_excerpt or "",
@@ -131,7 +142,13 @@ class FixContextAssembler:
                 search, type_records, visible_from=file_rel)
              if r.name not in head_names),
             key=_not_shown_elsewhere)
-        recs = (head + rest)[:self.budgets.types_count]
+        named = {r.name for r in (*head, *rest)}
+        declared_elsewhere = [
+            r for r in types_referenced_in_text(
+                file_text, type_records, visible_from=file_rel)
+            if r.name not in named and not getattr(r, "external_path", "")
+            and r.file and r.file != file_rel] if file_text else []
+        recs = (head + rest + declared_elsewhere)[:self.budgets.types_count]
         # The blanket list is printed once, ahead of the records. A record
         # that does not fit is cut before a list that says it is complete:
         # slicing after that header would make the sentence a lie.
@@ -178,7 +195,7 @@ class FixContextAssembler:
         impl_where = impl_where_clause(file_text, container)
         types_section = self.types_section_for_fix(
             sig_text, body_text, error_excerpt, container, impl_where,
-            type_records, file_rel=file_rel)
+            type_records, file_rel=file_rel, file_text=file_text)
         bound_methods_section = self.bound_methods_section_for(
             impl_where, type_records, file_rel=file_rel)
         notes_section = ""

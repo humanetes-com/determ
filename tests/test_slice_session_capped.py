@@ -87,7 +87,7 @@ def _run(root: Path, replies: list[str], readings: list[CallCapReading | None] |
         ask_turns=ask, splice=splice, check=lambda: (0, "", []),
         focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
         measure_suite=measure, read_source=lambda p: None,
-        enumerate_bodies=bodies, answer_pulls=lambda r: None,
+        enumerate_bodies=bodies, answer_pulls=lambda r, conversation="": None,
         log=lambda m: None, emit=lambda *a, **k: None,
         check_graceful_stop=lambda s: None,
         call_reading=(lambda: caps[len(calls) - 1] if readings is not None else None)
