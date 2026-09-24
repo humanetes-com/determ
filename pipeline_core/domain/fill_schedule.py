@@ -103,6 +103,7 @@ __all__ = [
     "schedule",
     "unopened_pair_fills",
     "unpaid_pair_buys",
+    "withhold_landed",
 ]
 
 
@@ -1057,6 +1058,52 @@ def carve_rebuys(run: RouteRun, units: UnitService, *,
     open_part = frozenset(run.targets) - rebuy
     return (_piece(open_part, "unit(s) to try"),
             _piece(frozenset(rebuy), "re-buy unit(s)"))
+
+
+def withhold_landed(run: RouteRun, landed: Collection[FnLocator],
+                    ) -> tuple[RouteRun | None, frozenset[FnLocator]]:
+    """`run` without the targets an earlier run of THIS fill kept a body
+    for: ``(run to open, withheld)``. ``None`` to open means defer the run.
+
+    A kept body is judged at the next sweep and not before: until then no
+    reading says whether it paid, so a second route rewriting it in the same
+    fill buys an answer to a question nobody has scored, and overwrites the
+    body the sweep was about to grade (`body_ledger.classify` then reads the
+    first landing `unmeasured`, because it is no longer the body on the
+    tree). Run `143676-7dadc500` (2026-09-24, cluster `stable`), iteration 3:
+    10 of the per-fn run's 12 targets were bodies the file runs had kept
+    earlier that fill; the per-fn run spent 86 min and 23 calls on them and
+    moved no verdict, and iteration 4 repeated it for 6 of 12. The per-impl
+    route already waited for the sweep after a file-first or pair landing
+    (`refill_stamp.blocks_after_file_first`, `pair_fill.
+    blocks_after_pair_fill`); the per-fn route asked neither, because each
+    rule lived inside the route that happened to follow the one it guarded.
+    This answers the question once, for every run the executor opens.
+
+    A route that writes each target on its own (``unit_tests``) is carved
+    to the rest, as `carve_rebuys` carves a re-buy; a transaction (a pair, a
+    file with no per-unit claims) or a run with nothing left is deferred
+    whole. A session is never withheld: its try is keyed by the tests it
+    aims at, not by the units its transcript touches
+    (:meth:`UnitService.judges_units`), and its own turns are judged by the
+    suite as they land. Its keeps still withhold them from later runs."""
+    held = frozenset(run.targets) & frozenset(landed)
+    if not held or run.kind is RouteKind.SESSION:
+        return run, frozenset()
+    rest = frozenset(run.targets) - held
+    if not run.unit_tests or not rest:
+        return None, held
+    tests_of = dict(run.unit_tests)
+    return replace(
+        run, label=f"{run.label} [{len(rest)} not landed this fill]",
+        targets=rest,
+        stubs_in_targets=run.stubs_in_targets & rest,
+        target_tests=frozenset().union(
+            *(tests_of.get(t, frozenset()) for t in rest)),
+        files=tuple(sorted({t.file for t in rest})),
+        unit_tests=tuple((t, tests_of.get(t, frozenset()))
+                         for t in sorted(rest, key=lambda u: (u.file, u.fn_name))),
+        bodies_sha="", parent=run.plan_key), held
 
 
 def _rank_of(run: RouteRun, oracle_fp: str,

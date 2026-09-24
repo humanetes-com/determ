@@ -48,6 +48,7 @@ from pipeline_core.domain.fill_schedule import (
     ScheduledRun,
     UnitEvidence,
     schedule,
+    withhold_landed,
 )
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
@@ -405,6 +406,48 @@ def _schedule_inputs(deps: FillExecutionDeps,
     return inputs
 
 
+def _withhold_landed_wave(
+    wave: Sequence[ScheduledRun], landed: set[FnLocator], *,
+    deps: FillExecutionDeps, started: str,
+) -> tuple[list[ScheduledRun], list[RouteLedgerRow]]:
+    """The wave with every run's already-landed targets withheld
+    (`fill_schedule.withhold_landed`), and a DEFERRED row per run that had
+    nothing left to open. A run keeps its planned share: the targets it
+    lost were not its to spend on."""
+    frozen = frozenset(landed)
+    opened: list[ScheduledRun] = []
+    deferred: list[RouteLedgerRow] = []
+    for w in wave:
+        run_now, held = withhold_landed(w.run, frozen)
+        if not held:
+            opened.append(w)
+            continue
+        names = sorted(f"{u.file}::{u.fn_name}" for u in held)
+        what = ("deferred" if run_now is None
+                else f"opens on the other {len(run_now.targets)}")
+        deps.log(
+            f"  [phase-c/schedule] fill {deps.iteration}: {w.run.label} — "
+            f"{len(held)} target(s) an earlier run of this fill kept a body "
+            "for are withheld until the sweep grades them; "
+            f"{what}: {names_of(names)}")
+        deps.emit("phase_c.fill.landed_withheld", data={
+            "cluster": deps.cluster, "iter": deps.iteration,
+            "run": w.run.label, "withheld": names,
+            "deferred": run_now is None,
+            "open": (sorted(f"{u.file}::{u.fn_name}" for u in run_now.targets)
+                     if run_now is not None else [])})
+        if run_now is None:
+            row = replace(
+                _row_for(w, None, None, deps=deps, started=started,
+                         minutes=0.0, share=0.0, outcome=RunOutcome.DEFERRED),
+                reason="landed_this_fill")
+            deferred.append(row)
+            _log_row(deps, row)
+            continue
+        opened.append(replace(w, run=run_now))
+    return opened, deferred
+
+
 def execute_fill(
     routes: Sequence[FillRoute],
     *,
@@ -478,6 +521,9 @@ def execute_fill(
     stopped = False
     ordered = list(sched.ordered)
     gate = _GroundGate(deps)
+    # Units a run of this fill kept a body for; no later run of the fill
+    # rewrites them before the sweep grades them (`withhold_landed`).
+    landed_fill: set[FnLocator] = set()
     i = 0
 
     def _flush(new_rows: list[RouteLedgerRow]) -> None:
@@ -517,6 +563,13 @@ def execute_fill(
                 _log_row(deps, row)
             _flush(rows[-len(wave):])
             continue
+        if landed_fill and deps.scheduled:
+            wave, withheld_rows = _withhold_landed_wave(
+                wave, landed_fill, deps=deps, started=started)
+            rows.extend(withheld_rows)
+            _flush(withheld_rows)
+            if not wave:
+                continue
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         # The plan reserved later floors against the whole budget. Opening
@@ -610,6 +663,10 @@ def execute_fill(
             _log_row(deps, row, unchanged=rep.unchanged)
         _flush(rows[-len(wave):])
         _notify_wave(deps, [reports.get(w.run.key) for w in wave])
+        for w in wave:
+            rep_w = reports.get(w.run.key)
+            if rep_w is not None:
+                landed_fill |= rep_w.kept
         # A wave can end without its routes asking the clock again after
         # their last keep; ask here, per run still ahead, so no run is opened
         # on a plan whose ground moved under it. Runs planned on tests that

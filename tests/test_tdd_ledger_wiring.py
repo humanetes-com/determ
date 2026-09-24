@@ -867,6 +867,74 @@ def test_a_flat_unit_re_enters_when_the_evidence_its_prompt_carries_moves(
     assert any("EXCLUDED from the batch" in ln for ln in c_logs), c_logs[-8:]
 
 
+def _flat_landing_run(monkeypatch, tmp_path: Path, *,
+                      stamp_at_dispatch: bool) -> tuple[list[str], list[str]]:
+    """The loop lands a new, compiling, non-paying body for `depth` in its
+    first fill and nothing afterwards; t2 stays red, so the next sweep grades
+    that body FLAT. Returns (units dispatched per iteration, log)."""
+    _tree(tmp_path, layout=_LAYOUT_TWO)
+    fills: list[str] = []
+
+    def _write(src: Path) -> None:
+        fills.append("fill")
+        if len(fills) == 1:
+            (src / "a.rs").write_text(
+                _LAYOUT_TWO.replace("        self.ptr\n    }\n\n    pub fn width",
+                                    "        self.ptr + 0\n    }\n\n    pub fn width"),
+                encoding="utf-8")
+
+    if stamp_at_dispatch:
+        # The pre-fix stamp, injected: the landed row carries the premise
+        # taken on the tree BEFORE the landing, as the dispatch computed it.
+        import pipeline_core.application.reconstruct.phase_c_tdd as tdd_mod
+        at_dispatch = _live_evidence(tmp_path)
+        real = tdd_mod.rows_for_units
+
+        def _rows(units, recs, **kw):
+            if kw.get("state") is BodyState.LANDED:
+                kw["evidence_of"] = dict.fromkeys(units, at_dispatch)
+            return real(units, recs, **kw)
+
+        monkeypatch.setattr(tdd_mod, "rows_for_units", _rows)
+    logs: list[str] = []
+    _run(monkeypatch, tmp_path, ledger={"rows": []}, events=[], logs=logs,
+         stubbed=False, layout=_LAYOUT_TWO, max_stalls="3", fill_write=_write)
+    # The driver opens the fill's routes on every iteration, an empty batch
+    # included; what it BOUGHT is the batch it dispatched.
+    dispatched = [m.group(1) for ln in logs
+                  if (m := re.search(r"cargo test rc=.*dispatching (\d+) of", ln))]
+    return dispatched, logs
+
+
+def test_a_kept_flat_body_is_not_bought_again_on_its_own_landing(
+        monkeypatch, tmp_path: Path) -> None:
+    """A landing must not move its own premise. The evidence digest carries
+    the unit's own body, so a premise stamped at dispatch always read as
+    moved once the body landed, and no FLAT claim on a kept body could stand:
+    run `143676-7dadc500` (2026-09-24) never excluded a unit, and
+    `src/context.rs::ext_context` was graded flat 11 times on 8 distinct
+    bodies under one oracle. Stamped at the landing, the claim stands until
+    something ELSE arrives, so the sweep after the flat grade excludes the
+    unit and the loop does not open a second fill on it.
+
+    Negative control: the identical run with the dispatch-time stamp
+    injected re-dispatches the unit on its own landing."""
+    dispatched, logs = _flat_landing_run(monkeypatch, tmp_path,
+                                         stamp_at_dispatch=False)
+    assert any("EXCLUDED from the batch" in ln and "src/a.rs::depth" in ln
+               for ln in logs), logs[-12:]
+    assert dispatched[0] == "1" and set(dispatched[1:]) == {"0"}, (
+        "the flat body is not bought a second time", dispatched)
+
+    control = tmp_path / "control"
+    (control / "src").mkdir(parents=True)
+    c_dispatched, c_logs = _flat_landing_run(monkeypatch, control,
+                                             stamp_at_dispatch=True)
+    assert not any("EXCLUDED from the batch" in ln for ln in c_logs)
+    assert c_dispatched[:2] == ["1", "1"], (
+        "under the dispatch stamp the unit is re-bought", c_dispatched)
+
+
 def test_an_iteration_that_dispatches_nothing_charges_the_frontier_stop(
         monkeypatch, tmp_path: Path) -> None:
     """PART 2 — the terminator keyed on the FRONTIER and the loop's own

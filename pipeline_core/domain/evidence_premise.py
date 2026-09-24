@@ -26,15 +26,23 @@ from, stamped on the row beside `oracle_fp` / `convicting` and compared at the
 next dispatch. The exclusion stands while the fingerprint is unchanged and
 lapses once for a unit whose next prompt would differ.
 
-ONE CALL SITE, BOTH SIDES. The fingerprint is computed at DISPATCH, from the
-channels dispatch already holds, and the value it computes is both (a)
-compared against the stored one and (b) threaded to the row writer for the
-fill it is about to buy. A builder-side computation would be a second call
-site over the same channels, and two computations of one identity is how
-`retro_gate`'s prose reader and its renderer drifted until every compiling
-crash reached the prompt dressed as a rustc rejection (run
-`681204-b695ab3f`). There is nothing to drift here: one function, one caller,
-comparison against its own earlier output.
+ONE FUNCTION, TWO MOMENTS. `evidence_fingerprints` is the only computation of
+the identity. Dispatch calls it to COMPARE; the landing calls it to STAMP,
+over the tree and the retrospectives store as the landing left them. A
+builder-side computation would be a second reading of the same channels, and
+two computations of one identity is how `retro_gate`'s prose reader and its
+renderer drifted until every compiling crash reached the prompt dressed as a
+rustc rejection (run `681204-b695ab3f`).
+
+The stamp was first taken at dispatch too, and that made the claim
+unreachable for any body the loop kept: the `context` slot digests the
+unit's own body, the landing replaces that body, so the next dispatch always
+read the premise as moved. Run `143676-7dadc500` (2026-09-24, cluster
+`stable`) never excluded a unit, ranked every flat re-buy `served`, and
+graded `src/context.rs::ext_context` flat 11 times on 8 distinct bodies. The
+premise is what the attempt was told PLUS what it wrote; only what arrives
+after it is a new question. A row whose body did not move (an escalated
+reply identical to the tree) is still stamped at dispatch: nothing landed.
 
 THE THREE CHANNELS, and why these.
 

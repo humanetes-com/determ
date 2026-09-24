@@ -4713,9 +4713,9 @@ def run_phase_c_tdd(
         # `837207-ce5b1647` (2026-09-15) excluded `src/fmt.rs::debug` from
         # iter 2 and `src/error.rs::fmt` from iter 3 and then read
         # `dispatching 0 of 0 (0/0 this pass)` against `frontier=3 fn(s)` for
-        # three hours until an external TERM. This value is BOTH the
-        # comparison and the stamp the fill's rows carry, so the question
-        # asked and the question recorded cannot drift apart.
+        # three hours until an external TERM. This value is the comparison;
+        # the rows a landing writes are stamped by `_landing_evidence` below,
+        # through the same function over the tree as the landing left it.
         _evidence_now = {
             LedgerKey(_proj, _cl, _u.file, _u.fn_name): _fp
             for _u, _fp in evidence_fingerprints(
@@ -4726,6 +4726,33 @@ def run_phase_c_tdd(
         _evidence_of = {
             (_k.file, _k.fn_name): _fp
             for _k, _fp in _evidence_now.items()}
+
+        def _landing_evidence(
+            units: Iterable[FnLocator], recs: list[dict[str, Any]], *,
+            _crash: Mapping[FnLocator, str] = crash_texts,
+        ) -> dict[tuple[str, str], str]:
+            """The premise a LANDED body's grade is scoped to: what its
+            prompt drew from plus what the attempt itself wrote — the file
+            and the retrospective rows as the landing left them, and this
+            sweep's crash excerpt. Stamped at dispatch instead, the landing
+            moved its own premise: the file digest carries the unit's own
+            body, so every flat keep read as new evidence at the next
+            dispatch and no FLAT claim on a kept body could ever stand. Run
+            `143676-7dadc500` (2026-09-24): `drop_standing_flat` never fired,
+            the schedule ranked every flat re-buy `served`, and
+            `src/context.rs::ext_context` was graded flat 11 times on 8
+            distinct bodies under one oracle. Stamped here, the premise moves
+            only on what arrives after the landing — another run's body in
+            the file, a retrospective row, a crash — which is the new
+            question the release exists for."""
+            return {
+                (_u.file, _u.fn_name): _fp
+                for _u, _fp in evidence_fingerprints(
+                    list(units), recs,
+                    retro=(deps.retro_evidence_texts(project_dir)
+                           if deps.retro_evidence_texts is not None else {}),
+                    crash=_crash).items()}
+
         _flat_standing = flat_standing_unchanged(
             _stand, oracle_fp_now=_oracle_fp(iter_n),
             convicting_now=_convict_now, evidence_now=_evidence_now)
@@ -5817,7 +5844,8 @@ def run_phase_c_tdd(
             _iter: int = iter_n,
             _rows: list[LedgerEntry] = _ledger_rows,
             _written: dict[FnLocator, str] = _wave_written,
-            _evidence: Mapping[tuple[str, str], str] = _evidence_of,
+            _evidence: Callable[..., dict[tuple[str, str], str]] = (
+                _landing_evidence),
         ) -> int:
             if (deps.ledger_append is None or deps.enumerate_fns is None
                     or _before is None):
@@ -5845,7 +5873,7 @@ def run_phase_c_tdd(
                                       for t in _elig.get(k, ()))
                             & bare_failed_w)
                         for k in landed_now},
-                    evidence_of=_evidence)
+                    evidence_of=_evidence(landed_now, recs_now))
                 fresh = [r for r in rows_w
                          if _written.get(FnLocator(r.key.file, r.key.fn_name))
                          != r.body_sha]
@@ -6263,7 +6291,8 @@ def run_phase_c_tdd(
                     state=BodyState.LANDED, items=_items, file_of=_file_of,
                     file_fp=_fps, run_id=deps.run_id, iteration=iter_n,
                     epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n),
-                    convicting_of=_convicting_of, evidence_of=_evidence_of)
+                    convicting_of=_convicting_of,
+                    evidence_of=_landing_evidence(_batch_landed, _recs_after))
                 # A row the wave writer already appended for this exact body
                 # is not written twice; a body a later wave moved again is a
                 # new row, as it should be.

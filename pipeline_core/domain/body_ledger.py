@@ -546,11 +546,11 @@ def rows_for_units(
             # bought THIS dispatch, per unit.
             convicting=tuple(sorted(
                 (convicting_of or {}).get((file, fn_name), ()))),
-            # ...and what the unit was TOLD when it was bought (see
-            # `LedgerEntry.evidence_fp`). The caller computes it at
-            # DISPATCH, so the value stamped here is the evidence the
-            # prompt this grade judges actually drew from — not a
-            # re-derivation taken after the fill moved the tree.
+            # ...and what the unit was TOLD when it was bought, plus what
+            # the attempt wrote (see `LedgerEntry.evidence_fp`). The caller
+            # computes it: over the tree as the landing left it for a body
+            # that landed, so the landing cannot move its own premise; at
+            # dispatch for a row whose body did not move.
             evidence_fp=str((evidence_of or {}).get((file, fn_name), ""))))
     return rows
 
