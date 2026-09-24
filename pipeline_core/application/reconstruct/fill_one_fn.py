@@ -38,12 +38,12 @@ from pipeline_core.application.reconstruct.fill_reading import (
     note_kept_comparison,
 )
 from pipeline_core.application.reconstruct.fill_rules import (
-    REFILL_SEED_EXCERPT,
     AttemptFailure,
     fix_prompt_kind,
     is_unimplemented_body,
     make_failed_attempt_body,
     module_of,
+    refill_seed_excerpt,
     seed_attempt_failure,
 )
 from pipeline_core.application.reconstruct.import_repair import (
@@ -85,6 +85,8 @@ from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
     asserted_output_literals_from_tests,
     pinned_observables_from_tests,
+    render_test_excerpts,
+    sweep_excerpts,
 )
 from pipeline_core.domain.refine import (
     CompilingSalvage,
@@ -591,7 +593,16 @@ class FillOneFn:
         _excerpt_quotes_run: list[bool] = [False]
         if rec.refill:
             last_body = _cur_body
-            error_excerpt = REFILL_SEED_EXCERPT
+            # What the attributed tests said on the sweep, read through the
+            # same function the file and per-impl REFILL sections use —
+            # panic, the probe's observed values, the source line quoted.
+            error_excerpt = refill_seed_excerpt(render_test_excerpts(
+                sweep_excerpts(
+                    sorted(ctx.tdd_frontier_tests.tests_for(_unit_loc))[:6]
+                    if ctx.tdd_frontier_tests is not None else (),
+                    ctx.tdd_frontier_tests,
+                    read_source=reconstruction_file_reader(
+                        ctx.target_src_dir, ctx.project_dir))))
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""

@@ -283,3 +283,105 @@ fn shapes() {
     # A receiver-less call and a trailing group that is not the last token.
     assert operands_of("assert!", "(a)(b)") == ("(a)(b)",)
     assert operands_of("assert!", "f(x) + 1") == ("f(x) + 1",)
+
+
+# --- helpers: the assertion the test reaches through a fn of its own file ----
+# Run `507656-fe50f9f1` (2026-09-24): 13 of 14 failing tests asserted through
+# one `#[track_caller]` helper; the body-only probe observed 1 of 14.
+
+HELPER = '''use crate_x::render;
+
+#[track_caller]
+fn check<F: Fn(i32) -> i32>(got_of: F, want: &'static str) {
+    let got = render(got_of(1));
+    assert_eq!(got.contains(" ~ "), want.contains(" ~ "));
+}
+
+fn relay(want: &'static str) {
+    check(|x| x, want);
+}
+
+fn quiet() -> i32 {
+    1
+}
+
+#[test]
+fn other_test() {
+    assert!(quiet() == 1);
+}
+
+#[test]
+fn via_helper() {
+    let n = quiet();
+    check(|x| x + n, "a ~ b");
+    relay("c ~ d");
+    other_test();
+    n.check_len();
+}
+'''
+
+
+def test_helpers_are_the_asserting_fns_a_named_test_reaches() -> None:
+    from pipeline_core.domain.assert_probe import helpers_called_by
+    # `relay` reaches `check` transitively; `quiet` holds no assertion; a
+    # `#[test]` fn is never a helper; `.check_len()` is a method call.
+    assert helpers_called_by(HELPER, ["via_helper"]) == ("check",)
+
+
+def test_negative_control_the_named_body_alone_holds_no_assertion() -> None:
+    """What the body-only rewrite saw: nothing to probe in `via_helper`."""
+    from pipeline_core.domain.assert_probe import _fn_body_span
+    span = _fn_body_span(HELPER, "via_helper")
+    assert span is not None and "assert" not in HELPER[span[0]:span[1]]
+
+
+def test_a_helper_assertion_prints_the_running_test_and_keeps_asserting() -> None:
+    text, points = rewrite_tests_for_probe(HELPER, ["via_helper"])
+    assert [(p.test, p.operands) for p in points] == [
+        ("@check", ("got.contains(\" ~ \")", "got", "want.contains(\" ~ \")", "want"))]
+    line = text.splitlines()[points[0].line - 1]
+    assert "::std::thread::current().name()" in line
+    assert line.rstrip().endswith('assert_eq!(got.contains(" ~ "), want.contains(" ~ "));')
+    # Every line keeps its number; the named test and `other_test` untouched.
+    assert len(text.splitlines()) == len(HELPER.splitlines())
+    assert "fn other_test() {\n    assert!(quiet() == 1);\n}" in text
+
+
+def test_a_blamed_helper_point_is_restored() -> None:
+    _, points = rewrite_tests_for_probe(HELPER, ["via_helper"])
+    restored, kept = without_probe_points(
+        HELPER, ["via_helper"], {(points[0].test, points[0].line)})
+    assert kept == () and restored == HELPER
+
+
+def test_a_fn_nested_in_a_named_test_is_rewritten_once() -> None:
+    src = '''#[test]
+fn outer() {
+    fn inner(v: i32) {
+        assert!(v == 2);
+    }
+    inner(1);
+}
+'''
+    text, points = rewrite_tests_for_probe(src, ["outer"])
+    assert [p.test for p in points] == ["outer"]
+    assert text.count("<<PROBE") == 1
+
+
+def test_helper_observations_parse_with_the_module_path_and_render_their_home() -> None:
+    out = '<<PROBE tests_mod::via_helper:6@check>> got = "a b"\n'
+    obs = parse_probe_output(out)
+    assert obs["tests_mod::via_helper"] == [
+        Observation("tests_mod::via_helper", 6, "got", '"a b"', helper="check")]
+    assert render_observations(obs["tests_mod::via_helper"]) == (
+        'observed at line 6 (in `check`, which this test calls): got = "a b"')
+
+
+def test_assert_eq_adds_what_a_derived_operand_was_derived_from() -> None:
+    # The panic prints `left` / `right`; the receiver is what it never prints.
+    assert operands_of("assert_eq!", 'got.contains(" ~ "), true') == (
+        'got.contains(" ~ ")', "got")
+    assert operands_of("assert_ne!", "a.len(), b.len()") == (
+        "a.len()", "a", "b.len()", "b")
+    # A non-call operand is unchanged.
+    assert operands_of("assert_eq!", "left, right") == ("left", "right")

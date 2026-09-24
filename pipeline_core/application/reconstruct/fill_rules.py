@@ -104,12 +104,31 @@ class AttemptFailure(Enum):
     ABORT = "abort"       # compiled; the test process died under it
 
 
-# The LAST_ERROR a behavioural refill's first ask carries: the body on disk
-# compiled, and the only evidence is the attributed test source.
+# The LAST_ERROR head a behavioural refill's first ask carries: the body on
+# disk compiled and its attributed tests fail.
 REFILL_SEED_EXCERPT = (
     "This body COMPILES but its attributed test(s) below still FAIL. "
     "Rewrite the BEHAVIOR so those test(s) pass; keep the signature "
     "and do not reintroduce `unimplemented!()`.")
+
+
+def refill_seed_excerpt(said: Iterable[str]) -> str:
+    """The first ask's LAST_ERROR for a behavioural refill: the instruction,
+    then what the attributed tests said on the sweep that measured THIS
+    body (`refill_evidence.render_test_excerpts` lines).
+
+    The seed used to be the instruction alone, on the premise that the only
+    evidence was the test source. The sweep had measured the body: run
+    `507656-fe50f9f1` (2026-09-24) sent `src/ensure.rs::render` a per-fn
+    refill whose LAST_ERROR was this one sentence, while the file-first
+    prompt for the same file, built the same iteration, quoted each test's
+    panic line under REFILL_EVIDENCE. The reply resubmitted the body."""
+    lines = list(said)
+    if not lines:
+        return REFILL_SEED_EXCERPT
+    return (REFILL_SEED_EXCERPT
+            + "\nWhat they said on the sweep that measured this body:\n"
+            + "\n".join(lines))
 
 
 def seed_attempt_failure(*, refill: bool,

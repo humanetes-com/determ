@@ -309,6 +309,16 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      outline had to do the finding. Before that answer existed (pre
      2026-09-24) a hit can also be a file the prompt held whole.
 
+  P41 blind probe — a sweep's assertion probe observed values for fewer
+     than half of the sweep's failing tests (`[probe] observed values for N
+     failing test(s)` after a summary with `fail=F`, 2N < F). The probe
+     rewrote test bodies only, so a test asserting through a helper fn of
+     its own file was never observed: run `507656-fe50f9f1` (2026-09-24),
+     three sweeps at fail=14, observed 1 each; 13 of the 14 asserted in one
+     `#[track_caller]` helper. Helpers are probed since 2026-09-24; a
+     post-fix hit is a failure shape the probe cannot rewrite (no assert
+     macro in reach, a helper in another file) — read which tests it missed.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -2845,6 +2855,35 @@ def detect_p40(run: Run, iters: list[dict]) -> list[dict]:
              "key": [a for a, _ in top[:3]], "refs": refs[:3]}]
 
 
+RE_SWEEP_FAIL = re.compile(r"\[phase-c/tdd\] iter \d+: cargo test .*? fail=(\d+)")
+RE_PROBE_OBSERVED = re.compile(r"\[probe\] observed values for (\d+) failing test")
+
+
+def detect_p41(run: Run, iters: list[dict]) -> list[dict]:
+    """Sweeps whose probe observed fewer than half the failing tests. One
+    hit per run, counting the sweeps."""
+    fail: int | None = None
+    refs: list[str] = []
+    seen: list[str] = []
+    for ref, text in run.lines:
+        m = RE_SWEEP_FAIL.search(text)
+        if m:
+            fail = int(m.group(1))
+            continue
+        m = RE_PROBE_OBSERVED.search(text)
+        if m and fail:
+            n = int(m.group(1))
+            if 2 * n < fail:
+                refs.append(ref)
+                seen.append(f"{n}/{fail}")
+            fail = None
+    if not refs:
+        return []
+    return [{"evidence": f"{len(refs)} sweep(s) observed fewer than half the "
+                         "failing tests: " + ", ".join(seen[:6]),
+             "refs": refs[:3]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2863,7 +2902,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
              "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
-             "P40": detect_p40}
+             "P40": detect_p40, "P41": detect_p41}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2899,7 +2938,8 @@ CLASS_NAMES = {
     "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)",
     "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)",
     "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)",
-    "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)"}
+    "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)",
+    "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)"}
 
 
 # -------------------------------------------------------------------- report

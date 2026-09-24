@@ -148,7 +148,12 @@ def run_assert_probes(
                    + " -- --nocapture --test-threads=1 "
                    + " ".join(shlex.quote(n) for n in names))
             rc, out = run_cargo(cmd, stage, env, timeout)
-            found = parse_probe_output(out)
+            # A libtest filter is a substring match, so `test_as` also runs
+            # `test_as_ref`; a helper's prints name whichever test ran it.
+            # Only the tests asked about are observations of this sweep.
+            wanted = {n.rsplit("::", 1)[-1] for n in names}
+            found = {t: obs for t, obs in parse_probe_output(out).items()
+                     if t.rsplit("::", 1)[-1] in wanted}
             if found:
                 for t, obs in found.items():
                     observations[t] = tuple(obs)

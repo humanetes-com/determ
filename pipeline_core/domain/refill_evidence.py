@@ -329,20 +329,46 @@ def collect_refill_evidence(
             b.container for b in blocks
             if b.file == block.file and b.container != block.container
             and any(r.fn_name == m.fn_name for r in b.refill_members))
-        excerpts: list[tuple[str, str]] = []
-        if frontier is not None:
-            for t in tests:
-                text = frontier.evidence_for(t)
-                if text and read_source is not None:
-                    text = quote_panic_site(text, read_source)
-                if text:
-                    excerpts.append((t, text))
         tries = tuple(history.get(m.fn_name, ()) if history else ())
         out.append(RefillEvidence(
             fn_name=m.fn_name, tests=tests, attribution=grade,
-            sibling_containers=siblings, excerpts=tuple(excerpts),
+            sibling_containers=siblings,
+            excerpts=sweep_excerpts(tests, frontier, read_source=read_source),
             history=tries))
     return tuple(out)
+
+
+def sweep_excerpts(
+    tests: Iterable[str], frontier: FailureFrontier | None, *,
+    read_source: Callable[[str], str | None] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """(test, what it said on the sweep) for each of `tests` that left
+    words — the panic, the probe's observed values beneath it, and with
+    `read_source` the source line the panic names. The one reading of the
+    frontier's per-test evidence every fill route renders: the file and
+    per-impl routes through `collect_refill_evidence`, the per-fn refill's
+    first ask through `render_test_excerpts`."""
+    if frontier is None:
+        return ()
+    out: list[tuple[str, str]] = []
+    for t in tests:
+        text = frontier.evidence_for(t)
+        if text and read_source is not None:
+            text = quote_panic_site(text, read_source)
+        if text:
+            out.append((t, text))
+    return tuple(out)
+
+
+def render_test_excerpts(excerpts: Iterable[tuple[str, str]]) -> list[str]:
+    """`  <test> said:` plus its words indented beneath — the lines the
+    REFILL section prints per member, and the per-fn refill seed prints
+    under its instruction."""
+    lines: list[str] = []
+    for test, text in excerpts:
+        lines.append(f"  {test} said:")
+        lines.extend("    " + ln for ln in text.splitlines())
+    return lines
 
 
 def _render_try_history(tries: tuple[TryRecord, ...], *, n_tests: int) -> str:
@@ -486,9 +512,7 @@ def render_refill_evidence(
             lines.append("  attributed failing test(s): " + ", ".join(e.tests))
         if e.history:
             lines.append(_render_try_history(e.history, n_tests=len(e.tests)))
-        for test, text in e.excerpts:
-            lines.append(f"  {test} said:")
-            lines.extend("    " + ln for ln in text.splitlines())
+        lines.extend(render_test_excerpts(e.excerpts))
     if pins:
         lines.append(
             f"  the attributed tests pin: {pins}"
