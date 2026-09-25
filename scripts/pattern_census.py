@@ -319,6 +319,17 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      post-fix hit is a failure shape the probe cannot rewrite (no assert
      macro in reach, a helper in another file) — read which tests it missed.
 
+  P42 wide-run premise refusal — a fill deferred a run `premise_moved`
+     although some of the tests that run was planned on had not moved (the
+     `phase_c.fill.premise_moved` event's moved list against the same fill's
+     schedule event's `target_tests`; events whose moved list was cut at 50
+     are skipped). The scoped gate refused a claim on ANY moved test in its
+     scope, which is the fill-wide rule again for a run planned on many
+     tests. Run 116341-24c76a97 (2026-09-25) fill 6: both formatter pairs
+     deferred on 2 of 54, the error.rs file and impl runs held behind them;
+     the pairs opened in none of six fills. Reaction: `claim on partly
+     moved ground stands` (a claim now stands on its unmoved tests).
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -653,6 +664,10 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P35": [
         # The gate refuses only claims planned on a moved test.
         ("Claims planned on a moved test are refused", "scoped-premise"),
+    ],
+    "P42": [
+        # A claim with planned tests left unmoved stands on them.
+        ("claim on partly moved ground stands", "ground-left"),
     ],
     "P36": [],
     "P38": [],
@@ -2452,7 +2467,8 @@ def _p32_events_by_run() -> dict[str, dict[str, list[dict]]]:
     if _P32_EVENTS is not None:
         return _P32_EVENTS
     out: dict[str, dict[str, list[dict]]] = defaultdict(
-        lambda: {"owner_map": [], "schedule": [], "service_order": []})
+        lambda: {"owner_map": [], "schedule": [], "service_order": [],
+                 "premise_moved": []})
     try:
         with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -2462,6 +2478,8 @@ def _p32_events_by_run() -> dict[str, dict[str, list[dict]]]:
                     kind = "schedule"
                 elif '"phase_c.dispatch.service_order"' in line:
                     kind = "service_order"
+                elif '"phase_c.fill.premise_moved"' in line:
+                    kind = "premise_moved"
                 else:
                     continue
                 try:
@@ -2884,6 +2902,49 @@ def detect_p41(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:3]}]
 
 
+def p42_wide_refusals(schedule_ev: list[dict], premise_ev: list[dict]
+                      ) -> list[str]:
+    """`iter N <label>: k of n unmoved` for each run a premise event
+    deferred while some of its planned tests had not moved. Pure over the
+    two event lists, so a test can feed recorded events."""
+    planned: dict[tuple[object, str], set[str]] = {}
+    for sc in schedule_ev:
+        for r in sc.get("runs") or ():
+            planned[(sc.get("iter"), str(r.get("label", "")))] = set(
+                r.get("target_tests") or ())
+    out: list[str] = []
+    for pm in premise_ev:
+        moved = list(pm.get("moved") or ())
+        if int(pm.get("moved_count") or 0) > len(moved):
+            continue
+        from pipeline_core.domain.test_outcome import ground_left
+        for label in pm.get("deferred") or ():
+            tests = planned.get((pm.get("iter"), str(label)))
+            if not tests or len(tests) < 2:
+                continue
+            # The gate's own rule: the planned tests the moves left alone
+            # (the premise read every failing test, so `read` is all of them).
+            left = ground_left(moved, tests, [*tests, *moved])
+            if left:
+                out.append(f"iter {pm.get('iter')} {label}: "
+                           f"{len(left)} of {len(tests)} unmoved")
+    return out
+
+
+def detect_p42(run: Run, iters: list[dict]) -> list[dict]:
+    """Runs deferred `premise_moved` with planned tests left unmoved. One
+    hit per run, counting the deferrals."""
+    ev = _p32_events_by_run().get(run.run_id)
+    if not ev or not ev["premise_moved"]:
+        return []
+    hits = p42_wide_refusals(ev["schedule"], ev["premise_moved"])
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} run(s) deferred on a partly moved "
+                         f"premise: {'; '.join(hits[:4])}",
+             "refs": [run.start_ref]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2902,7 +2963,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
              "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
-             "P40": detect_p40, "P41": detect_p41}
+             "P40": detect_p40, "P41": detect_p41, "P42": detect_p42}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -2939,7 +3000,8 @@ CLASS_NAMES = {
     "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)",
     "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)",
     "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)",
-    "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)"}
+    "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)",
+    "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)"}
 
 
 # -------------------------------------------------------------------- report

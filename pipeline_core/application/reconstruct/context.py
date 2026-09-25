@@ -90,6 +90,14 @@ class PerFnPassCtx:
     # instead of being kept until the next sweep's ratchet while every later
     # unit in the batch is judged with those binaries excluded.
     stub_free: bool = False
+    # The cluster's fn records at pass start (extractor dicts: `file`,
+    # `fn_name`, `container`, `sig_text`, `cfg_predicates`), gen-tests
+    # excluded: what the joint-write gate resolves a reply's extra `<FN>`
+    # blocks against (`domain.joint_write.admit_joint`). Empty keeps the
+    # unit single-body: the widening clause is not offered.
+    fn_records: tuple[Any, ...] = ()
+    # How many extra functions one reply may add to its write.
+    joint_max: int = 0
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

@@ -61,6 +61,40 @@ output the literal token NONE.
 """
 
 
+#: The exhausted loop's note: no body ever compiled, so there is no
+#: correction to state — only what was tried and the compiler's reason. The
+#: recovered prompt's "State the correction as a rule" made the model invent
+#: a cure nothing validated (run `116341-24c76a97`, 2026-09-25: "use self
+#: directly", the exact call the unit then failed with three fills running).
+_FAILURE_NOTE_PROMPT = """A model attempted to implement a Rust function and
+every attempt failed; no attempt compiled.
+
+Read the failed body and the cargo error. Then write a SINGLE short note to
+your future self, in first-person voice, that says what you tried and the
+concrete reason the compiler rejected it.
+
+Format guidance:
+  - Lead with what you tried that failed ("I tried X").
+  - Name the reason it failed in concrete terms ("because Y").
+  - Do NOT propose a correction or a replacement: nothing here was seen to
+    work, and an untested cure is worse than none.
+  - Keep it to ONE sentence; ≤300 chars.
+  - Do NOT mention the function name, file name, or crate name.
+  - Output ONLY the note text, no preamble, no markdown, no quotes.
+
+If no general lesson can be extracted (e.g. the failure was just a typo),
+output the literal token NONE.
+
+<FAILED_BODY>
+{failed_body}
+</FAILED_BODY>
+
+<COMPILE_ERROR>
+{error_excerpt}
+</COMPILE_ERROR>
+"""
+
+
 class _AskClient(Protocol):
     def ask(self, prompt: str, system: str | None = None, model: str | None = None,
             max_tokens: int | None = None, think: bool | None = None,
@@ -352,6 +386,31 @@ class FileModelNotesStore:
                       f"{n[:100]}…")
         return len(bad)
 
+    def retire_disproved(self, fr_path: Path, unit: str,
+                         error_codes: set[str] | frozenset[str],
+                         shown: str) -> int:
+        """Drop the unvalidated lessons ``unit``'s own failure with
+        ``error_codes`` just disproved (`model_notes.disproved_lessons`), on
+        disk and from the provenance sidecar. Returns notes removed."""
+        notes = self.load(fr_path)
+        prov = self._load_provenance(fr_path)
+        bad = mn.disproved_lessons(notes, prov, unit=unit,
+                                   error_codes=error_codes, shown=shown)
+        if not bad:
+            return 0
+        dead = set(bad)
+        kept = [n for n in notes if n not in dead]
+        self.save(fr_path, kept)
+        self._hash_cache.pop(fr_path, None)
+        live = {mn.note_hash(n) for n in kept}
+        self._save_provenance(fr_path, {h: p for h, p in prov.items()
+                                        if h in live})
+        for n in bad:
+            self._log("  [notes] retired an unvalidated lesson its own unit "
+                      f"just disproved ({unit}, {sorted(error_codes)}): "
+                      f"{n[:100]}…")
+        return len(bad)
+
     # -- recurring-error promotion ----------------------------------------
     def record_error_codes_seen(self, output: str) -> None:
         """Tally each unique E0xxx code in ``output`` and keep a capped excerpt
@@ -381,12 +440,14 @@ class FileModelNotesStore:
         declines (responds NONE/empty) or inputs are insufficient."""
         if not failed_body or not error_excerpt:
             return None
-        prompt = _NOTE_EXTRACTION_PROMPT.format(
+        prompt = (_NOTE_EXTRACTION_PROMPT.format(
             failed_body=failed_body[:self._failed_body_cap],
             error_excerpt=error_excerpt[:self._fix_err_cap],
-            fixed_body=(fixed_body[:self._failed_body_cap] if fixed_body
-                        else "(no fixed body — fix loop exhausted)"),
-        )
+            fixed_body=fixed_body[:self._failed_body_cap],
+        ) if fixed_body.strip() else _FAILURE_NOTE_PROMPT.format(
+            failed_body=failed_body[:self._failed_body_cap],
+            error_excerpt=error_excerpt[:self._fix_err_cap],
+        ))
         # Two-attempt ladder (default thinking, then think=False) — Qwen3.6
         # occasionally returns empty in one mode and not the other.
         # Bookkeeping, not a fill: the empty-then-retry ladder is by design,

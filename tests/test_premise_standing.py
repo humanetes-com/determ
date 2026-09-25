@@ -123,8 +123,13 @@ def test_a_chain_link_moves_tests_onto_one_unit_and_off_another() -> None:
     # A run-scoped claim writing b stands on the same reading.
     assert not gate(None, frozenset({_loc("src/x.rs::b"),
                                      _loc("src/x.rs::c")}))
-    # A test that stopped in test source names no unit.
-    assert gate(frozenset({"t3", "t2"}), frozenset({_loc("src/x.rs::c")}))
+    # t3 did not move: the claim stands on the part of its ground the
+    # plan's reading still describes (`test_outcome.ground_left`).
+    assert not gate(frozenset({"t3", "t2"}), frozenset({_loc("src/x.rs::c")}))
+    # Once t3 moves too, its new stop is in test source, which names no
+    # unit, so nothing stands the claim.
+    gate2 = _gate(plan, {**now, "t3": (False, ("at", "tests/t.rs", "9"), False)})
+    assert gate2(frozenset({"t3", "t2"}), frozenset({_loc("src/x.rs::c")}))
 
 
 def test_a_copy_in_another_binary_counts() -> None:

@@ -21,7 +21,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,7 @@ from pipeline_core.domain.fill_schedule import (
     UnitEvidence,
 )
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.joint_write import DEFAULT_JOINT_MAX
 from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -137,6 +138,11 @@ class EngineConfig:
     # Fill-route sequencing. Under FILE_PRIMARY the file-first pass takes
     # every frontier file (free fns included).
     route_order: RouteOrder = RouteOrder.DEFAULT
+    # How many other functions of its file one per-fn reply may write with
+    # its target (`domain.joint_write`); `PER_FN_JOINT_MAX=0` restores the
+    # single-body contract — the negative control of the joint write.
+    per_fn_joint_max: int = field(default_factory=lambda: int(
+        os.getenv("PER_FN_JOINT_MAX", str(DEFAULT_JOINT_MAX))))
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,6 +619,8 @@ class PhaseCFillEngine:
         landed (the stale-refill probe's premise)."""
         _fill_hist = FillClassHistogram()
         _last_payoff = None
+        # Write sets replies named as one (`FillResult.joint_named`).
+        _joint_sets: list[tuple[FnLocator, ...]] = []
         target_src_dir.mkdir(parents=True, exist_ok=True)
         bytes_before = sum(p.stat().st_size for p in target_src_dir.rglob("*.rs"))
         fns_filled = 0
@@ -778,6 +786,7 @@ class PhaseCFillEngine:
             # Count total fns in the cluster (regardless of body state) — the
             # monitor renders a cumulative progress bar. Excludes gen_tests.
             _total_fns_in_cluster = 0
+            _all_recs: list[dict[str, Any]] = []
             try:
                 _all_recs = self.ws.enumerate_fns(target_src_dir) or []
                 _all_recs = [r for r in _all_recs
@@ -876,6 +885,8 @@ class PhaseCFillEngine:
                 # cannot panic in its binaries and does not make the tree
                 # hollow for the gate's purpose.
                 stub_free=not any(not _is_cfg_dead(k) for k in _pass_stub_keys),
+                fn_records=tuple(_all_recs),
+                joint_max=self.config.per_fn_joint_max,
             )
 
             # Units the fill schedule's gate refused this pass, by the
@@ -952,6 +963,13 @@ class PhaseCFillEngine:
                                 "file": res.file, "fn": res.fn_name,
                             })
                             filled_this_pass.append(FnLocator(res.file, res.fn_name))
+                        # A joint write's extras are bodies this unit landed:
+                        # dispatched like the target, so the landed-change
+                        # audit and the unit ledger grade them.
+                        _joint_sets.extend(res.joint_named)
+                        for _extra in res.joint:
+                            _dispatched.add(_extra)
+                            _answer_lost.discard(_extra)
                         if res.error:
                             errors.append(res.error)
 
@@ -1418,6 +1436,7 @@ class PhaseCFillEngine:
             answer_lost_fns=tuple(sorted(_answer_lost - _reverted)),
             payoff=_last_payoff,
             fill_classes=_fill_hist,
+            joint_sets=tuple(dict.fromkeys(_joint_sets)),
         )
 
 
@@ -1513,4 +1532,5 @@ class _PerFnRoute:
             reverted=frozenset(rev), dispatched=frozenset(disp),
             classes={k: v for k, v in (res.fill_classes or FillClassHistogram()
                                        ).as_dict().items() if v},
-            empty=(res.attempts == 0 and not disp))
+            empty=(res.attempts == 0 and not disp),
+            joint_sets=res.joint_sets)

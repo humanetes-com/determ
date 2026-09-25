@@ -993,6 +993,14 @@ class FillResult:
     # value for this unit, or "" when the engine did not classify it
     # (skip-before-dispatch, tests). Aggregated onto ClusterFillResult.
     fill_class: str = ""
+    # The other functions of the unit's file its reply named as one write
+    # with it (`domain.joint_write`): `joint_named` every set the model
+    # asked for and the gate admitted, whatever became of it — the model's
+    # claim that these bodies belong together; `joint` the extras whose
+    # bodies are on the tree when the unit returns (landed with the target
+    # or restored by the salvage). Both empty for a single-body fill.
+    joint: tuple[FnLocator, ...] = ()
+    joint_named: tuple[tuple[FnLocator, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1097,6 +1105,10 @@ class ClusterFillResult:
     # None: caller/test did not populate it. The TDD driver prints the
     # previous call's histogram on the next iter line.
     fill_classes: FillClassHistogram | None = None
+    # The write sets a reply named as one (target first, then its extras;
+    # `FillResult.joint_named`), for the route ledger: a later schedule
+    # does not carve a named set apart (`fill_schedule.carve_rebuys`).
+    joint_sets: tuple[tuple[FnLocator, ...], ...] = ()
     # The tests whose first failure moved when the fill ended on its
     # premise (`fill_scheduler._GroundGate`); empty when it ran its plan
     # out. The driver reads it so units the cut fill never opened go back

@@ -47,6 +47,7 @@ from pipeline_core.domain.fill_schedule import (
     RunOutcome,
     ScheduledRun,
     UnitEvidence,
+    release_held,
     schedule,
     withhold_landed,
 )
@@ -54,6 +55,7 @@ from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
 from pipeline_core.domain.test_outcome import (
     PremiseEntry,
+    ground_left,
     moved_in_scope,
     names_of,
     premise_moved,
@@ -144,10 +146,13 @@ class FillExecution:
 class _GroundGate:
     """The fill's premise gate, shared by every run's clock.
 
-    Answers per claim: has the ground THIS claim was planned on moved
-    (`test_outcome.moved_in_scope`)? A claim's scope is the tests that put
+    Answers per claim: has ALL the ground THIS claim was planned on moved
+    (`test_outcome.ground_left` empty)? A claim's scope is the tests that put
     it on the plan — a pooled unit's own attributed tests, else its run's
-    target tests; a claim with no named test stands on the whole ground.
+    target tests; a claim with no named test stands on the whole ground. A
+    claim with some planned tests unmoved stands on them: the second form
+    refused on any one moved test, which is the fill-wide rule again for a
+    wide run (run `116341-24c76a97`, `test_outcome.ground_left`).
     The first form refused every claim of the fill on any move, so on a
     hollow tree each fill ended at its first keep: run `497151-a6fa205b`
     (2026-09-22) kept `src/error.rs::new`, its 13 held tests moved, and the
@@ -186,6 +191,7 @@ class _GroundGate:
         self._seen = kept_mark()
         self._now: Mapping[str, PremiseEntry] = {}
         self._admitted: set[frozenset[tuple[str, str]]] = set()
+        self._partial: set[frozenset[str]] = set()
         self.moved: tuple[str, ...] = ()
         self.refused = 0
         self.admitted = 0
@@ -220,8 +226,10 @@ class _GroundGate:
 
     def __call__(self, scope: frozenset[str] | None,
                  units: frozenset[FnLocator]) -> bool:
-        """True when the claim is refused: its planned ground moved and the
-        ground now holds none of its planned tests inside ``units``."""
+        """True when the claim is refused: its WHOLE planned ground moved
+        (`test_outcome.ground_left` is empty) and the ground now holds none
+        of its planned tests inside ``units``. A claim some of whose planned
+        tests still read as the plan read them stands on those."""
         if not self.armed:
             return False
         with self._lock:
@@ -229,6 +237,18 @@ class _GroundGate:
             if not self.moved:
                 return False
             if not moved_in_scope(self.moved, scope):
+                return False
+            assert self._premise is not None
+            left = ground_left(self.moved, scope, self._premise.keys())
+            if left:
+                key = frozenset(scope or ())
+                if key not in self._partial:
+                    self._partial.add(key)
+                    self._log(
+                        f"  [phase-c/schedule] fill {self._iteration}: "
+                        f"claim on partly moved ground stands — "
+                        f"{len(left)} of {len(key)} planned test(s) still "
+                        f"read as planned ({names_of(left)})")
                 return False
             pairs = frozenset((u.file, u.fn_name) for u in units)
             standing = standing_in(self._now, scope, pairs)
@@ -347,7 +367,8 @@ def _row_for(
         kept=_pairs(rep.kept), reverted=_pairs(rep.reverted),
         collateral=_pairs(rep.collateral & rep.reverted),
         target_tests=tuple(sorted(s.run.target_tests)),
-        classes=dict(rep.classes), share_minutes=share, reason=s.reason)
+        classes=dict(rep.classes), share_minutes=share, reason=s.reason,
+        joint_sets=tuple(_pairs(frozenset(js)) for js in rep.joint_sets))
 
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
@@ -409,14 +430,15 @@ def _schedule_inputs(deps: FillExecutionDeps,
 def _withhold_landed_wave(
     wave: Sequence[ScheduledRun], landed: set[FnLocator], *,
     deps: FillExecutionDeps, started: str,
-) -> tuple[list[ScheduledRun], list[RouteLedgerRow]]:
+) -> tuple[list[ScheduledRun], list[RouteLedgerRow], set[str]]:
     """The wave with every run's already-landed targets withheld
     (`fill_schedule.withhold_landed`), and a DEFERRED row per run that had
-    nothing left to open. A run keeps its planned share: the targets it
-    lost were not its to spend on."""
+    nothing left to open, and the keys of those runs. A run keeps its
+    planned share: the targets it lost were not its to spend on."""
     frozen = frozenset(landed)
     opened: list[ScheduledRun] = []
     deferred: list[RouteLedgerRow] = []
+    gone: set[str] = set()
     for w in wave:
         run_now, held = withhold_landed(w.run, frozen)
         if not held:
@@ -442,10 +464,11 @@ def _withhold_landed_wave(
                          minutes=0.0, share=0.0, outcome=RunOutcome.DEFERRED),
                 reason="landed_this_fill")
             deferred.append(row)
+            gone.add(w.run.key)
             _log_row(deps, row)
             continue
         opened.append(replace(w, run=run_now))
-    return opened, deferred
+    return opened, deferred, gone
 
 
 def execute_fill(
@@ -525,10 +548,39 @@ def execute_fill(
     # rewrites them before the sweep grades them (`withhold_landed`).
     landed_fill: set[FnLocator] = set()
     i = 0
+    # The schedule's holds and what the executor did to their holders: a
+    # held run whose every holder this executor deferred is released
+    # (`fill_schedule.release_held`) at the cursor, in schedule order.
+    held = [h for h in sched.deferred if h.held_by]
+    not_opened: set[str] = set()
+    released: set[str] = set()
 
     def _flush(new_rows: list[RouteLedgerRow]) -> None:
         if deps.ledger is not None and new_rows:
             deps.ledger.append(deps.project, new_rows)
+
+    def _release(keys: set[str]) -> None:
+        nonlocal ordered
+        not_opened.update(keys)
+        freed = release_held(
+            [h for h in held if h.run.key not in released], not_opened)
+        if not freed:
+            return
+        released.update(h.run.key for h in freed)
+        ordered = ordered[:i] + sorted([*ordered[i:], *freed],
+                                       key=lambda r: r.position)
+        labels = {h.run.key: h.run.label for h in sched.ordered}
+        for h in freed:
+            deps.log(
+                f"  [phase-c/schedule] fill {deps.iteration}: {h.run.label} "
+                f"released — the run(s) its hold waited on did not open "
+                f"this fill ({names_of(sorted(labels.get(k, k) for k in h.held_by))}); "
+                f"ranked {h.reason} again")
+        deps.emit("phase_c.fill.hold_released", data={
+            "cluster": deps.cluster, "iter": deps.iteration,
+            "released": [h.run.label for h in freed],
+            "holders": sorted({labels.get(k, k) for h in freed
+                               for k in h.held_by})})
     while i < len(ordered):
         s = ordered[i]
         route = by_key[s.run.plan_key]
@@ -562,12 +614,15 @@ def execute_fill(
                 rows.append(row)
                 _log_row(deps, row)
             _flush(rows[-len(wave):])
+            _release({w.run.key for w in wave})
             continue
         if landed_fill and deps.scheduled:
-            wave, withheld_rows = _withhold_landed_wave(
+            wave, withheld_rows, withheld_keys = _withhold_landed_wave(
                 wave, landed_fill, deps=deps, started=started)
             rows.extend(withheld_rows)
             _flush(withheld_rows)
+            if withheld_keys:
+                _release(withheld_keys)
             if not wave:
                 continue
         clocks: dict[str, RunClock] = {}
@@ -671,38 +726,45 @@ def execute_fill(
         # their last keep; ask here, per run still ahead, so no run is opened
         # on a plan whose ground moved under it. Runs planned on tests that
         # did not move stay on the plan.
-        if i < len(ordered) and gate.armed:
+        # A run the release below puts back at the cursor is asked the
+        # same question before it opens; the loop ends when a pass defers
+        # nothing (each pass removes at least one run from the plan).
+        while i < len(ordered) and gate.armed:
             rest = [w for w in ordered[i:]
                     if gate(w.run.target_tests or None, w.run.targets)]
-            if rest:
-                deps.log(
-                    f"  [phase-c/schedule] fill {deps.iteration}: premise "
-                    f"moved after {s.run.label} — {len(gate.moved)} test(s) "
-                    f"no longer fail where the plan read them "
-                    f"({names_of(gate.moved)}); {len(rest)} run(s) planned "
-                    f"on them deferred for the sweep to re-plan, "
-                    f"{len(ordered) - i - len(rest)} run(s) continue")
-                deps.emit("phase_c.fill.premise_moved", data={
-                    "cluster": deps.cluster, "iter": deps.iteration,
-                    "after": s.run.label, "moved": list(gate.moved[:50]),
-                    "moved_count": len(gate.moved),
-                    "deferred": [w.run.label for w in rest],
-                    "continuing": len(ordered) - i - len(rest)})
-                started = datetime.now(UTC).isoformat(timespec="seconds")
-                for w in rest:
-                    row = replace(
-                        _row_for(w, None, None, deps=deps, started=started,
-                                 minutes=0.0, share=0.0,
-                                 outcome=RunOutcome.DEFERRED),
-                        reason="premise_moved")
-                    rows.append(row)
-                    _log_row(deps, row)
-                _flush(rows[-len(rest):])
-                gone = {id(w) for w in rest}
-                ordered = ordered[:i] + [w for w in ordered[i:]
-                                         if id(w) not in gone]
+            if not rest:
+                break
+            deps.log(
+                f"  [phase-c/schedule] fill {deps.iteration}: premise "
+                f"moved after {s.run.label} — {len(gate.moved)} test(s) "
+                f"no longer fail where the plan read them "
+                f"({names_of(gate.moved)}); {len(rest)} run(s) planned "
+                f"on them deferred for the sweep to re-plan, "
+                f"{len(ordered) - i - len(rest)} run(s) continue")
+            deps.emit("phase_c.fill.premise_moved", data={
+                "cluster": deps.cluster, "iter": deps.iteration,
+                "after": s.run.label, "moved": list(gate.moved[:50]),
+                "moved_count": len(gate.moved),
+                "deferred": [w.run.label for w in rest],
+                "continuing": len(ordered) - i - len(rest)})
+            started = datetime.now(UTC).isoformat(timespec="seconds")
+            for w in rest:
+                row = replace(
+                    _row_for(w, None, None, deps=deps, started=started,
+                             minutes=0.0, share=0.0,
+                             outcome=RunOutcome.DEFERRED),
+                    reason="premise_moved")
+                rows.append(row)
+                _log_row(deps, row)
+            _flush(rows[-len(rest):])
+            gone = {id(w) for w in rest}
+            ordered = ordered[:i] + [w for w in ordered[i:]
+                                     if id(w) not in gone]
+            _release({w.run.key for w in rest})
     deferred_rows: list[RouteLedgerRow] = []
     for s in sched.deferred:
+        if s.run.key in released:
+            continue
         row = _row_for(s, None, None, deps=deps,
                        started=datetime.now(UTC).isoformat(timespec="seconds"),
                        minutes=0.0, share=0.0, outcome=RunOutcome.DEFERRED)

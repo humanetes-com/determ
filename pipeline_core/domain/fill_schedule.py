@@ -352,6 +352,11 @@ class RouteLedgerRow:
     #: written before 2026-09-23, which reads as "every revert implicated
     #: its unit", the reading those rows were ranked on.
     collateral: tuple[tuple[str, str], ...] = ()
+    #: Write sets a reply of this run named as one (the target and the
+    #: extras it wrote with it, as sorted pairs; `domain.joint_write`).
+    #: Empty on every row written before 2026-09-25 and on every run whose
+    #: replies named none.
+    joint_sets: tuple[tuple[tuple[str, str], ...], ...] = ()
 
     @property
     def identity(self) -> str:
@@ -380,6 +385,7 @@ class RouteLedgerRow:
             "newly_green": (list(self.newly_green)
                             if self.newly_green is not None else None),
             "collateral": [list(t) for t in self.collateral],
+            "joint_sets": [[list(t) for t in js] for js in self.joint_sets],
         }
 
     @classmethod
@@ -416,6 +422,9 @@ class RouteLedgerRow:
             newly_green=(tuple(str(x) for x in green)
                          if isinstance(green, list) else None),
             collateral=_pairs("collateral"),
+            joint_sets=tuple(
+                tuple((str(a), str(b)) for a, b in js)
+                for js in raw.get("joint_sets") or () if js),
         )
 
     def to_json(self) -> str:
@@ -474,6 +483,17 @@ class ScheduledRun:
     #: no floor. `floor_note` says how it was priced, or that it was clipped.
     floor_minutes: float | None = None
     floor_note: str = ""
+    #: The runs (keys) a `pair_wait` / `coverage_split` hold waited on, and
+    #: the reason the run was ranked with before the hold. A hold is "wait
+    #: for X"; the schedule holds a run only behind runs its pass OPENS, but
+    #: the executor can still defer X (premise moved, landed this fill,
+    #: budget spent), and a run waiting on a run that never opens waits for
+    #: nothing. The executor releases it (`execute_fill`) from these.
+    held_by: tuple[str, ...] = ()
+    prior_reason: str = ""
+    #: This run's index in the schedule's topological order, deferred runs
+    #: included, so a released run re-enters where the order put it.
+    position: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -486,6 +506,7 @@ class ScheduledRun:
                               if self.share_minutes is not None else None),
             "deferred": self.deferred, "blocked_by": list(self.blocked_by),
             "lapsed": list(self.lapsed), "mutual": list(self.mutual),
+            "held_by": list(self.held_by),
         }
 
 
@@ -830,6 +851,8 @@ class UnitService:
         self._deferred: dict[FnLocator, list[RouteLedgerRow]] = {}
         self._min_turns = session_min_turns
         self._evidence = evidence
+        rows = list(rows)
+        self._joint = joint_sets_of(rows, oracle_fp)
         for r in rows:
             if r.oracle_fp != oracle_fp:
                 continue
@@ -907,7 +930,38 @@ class UnitService:
         latest opened row on this route gives it, and — for a re-buy only —
         how many times this route deferred it since that row (the bounded
         re-admission count). A target never opened on any route is
-        never-served."""
+        never-served.
+
+        A re-buy is the same try again. A unit offered together with every
+        partner a reply named it with (`RouteLedgerRow.joint_sets`), when
+        its last try on this route wrote it without one of them, is not: that
+        write was never tried, so it is `served`. Run `116341-24c76a97`
+        (2026-09-25) fill 6: `src/error.rs::context`, reverted alone on the
+        file route, was carved into a re-buy piece away from the table fns
+        its body installs, and neither piece could write the pair."""
+        cls, deferrals = self._target_class(t, run, grace_left=grace_left)
+        if (cls in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED)
+                and self._joint_untried(t, run)):
+            return _RANK_SERVED, None
+        return cls, deferrals
+
+    def _joint_untried(self, t: FnLocator, run: RouteRun) -> bool:
+        """``t`` rides in ``run`` with every partner of a set a reply named
+        it with, and its latest try on this route wrote it without one."""
+        named = [js for js in self._joint if t in js and js <= run.targets]
+        if not named:
+            return False
+        here = [r for r in self._opened.get(t, ()) if self._same_route(r, run)]
+        wrote: set[FnLocator] = set()
+        if here:
+            last = here[-1]
+            wrote = {FnLocator(f, fn) for f, fn in last.targets}
+            for js in last.joint_sets:
+                wrote |= {FnLocator(f, fn) for f, fn in js}
+        return any(not js <= wrote for js in named)
+
+    def _target_class(self, t: FnLocator, run: RouteRun, *,
+                      grace_left: bool) -> tuple[int, int | None]:
         if not self.served(t):
             return _RANK_NEVER_SERVED, None
         if self.judges_units(run):
@@ -1004,6 +1058,22 @@ def _landed(row: RouteLedgerRow, t: FnLocator) -> bool:
     return t in _locs(row.kept) or t in _locs(row.reverted)
 
 
+def joint_sets_of(rows: Iterable[RouteLedgerRow], oracle_fp: str
+                  ) -> tuple[frozenset[FnLocator], ...]:
+    """Every write set a reply named as one, from the ledger rows under
+    ``oracle_fp`` (a set named under another oracle was a claim about
+    another test suite's tree)."""
+    out: dict[frozenset[FnLocator], None] = {}
+    for r in rows:
+        if r.oracle_fp != oracle_fp:
+            continue
+        for js in r.joint_sets:
+            members = frozenset(FnLocator(f, fn) for f, fn in js)
+            if len(members) > 1:
+                out[members] = None
+    return tuple(out)
+
+
 def carve_rebuys(run: RouteRun, units: UnitService, *,
                  readmit_after: int) -> tuple[RouteRun, ...]:
     """A run whose route writes each target on its own, split into the
@@ -1058,6 +1128,31 @@ def carve_rebuys(run: RouteRun, units: UnitService, *,
     open_part = frozenset(run.targets) - rebuy
     return (_piece(open_part, "unit(s) to try"),
             _piece(frozenset(rebuy), "re-buy unit(s)"))
+
+
+def release_held(held: Sequence[ScheduledRun],
+                 not_opened: Collection[str]) -> tuple[ScheduledRun, ...]:
+    """The held runs every holder of which is known not to open this fill
+    (``not_opened``: run keys the executor deferred), released: no longer
+    deferred, ranked again with the reason they had before the hold.
+
+    The schedule's pass holds a run only behind a run it OPENS, because a
+    hold on a run that never opens is a wait for nothing — no grace clock
+    can release it, a deferred run writes no graded row (run
+    `3127-6763a5c6`, 2026-09-18: fills 2-6 opened nothing). The pass cannot
+    see the executor defer that holder afterwards. Run `116341-24c76a97`
+    (2026-09-25) fill 6: both formatter pairs were deferred `premise_moved`
+    after the per-fn run's keeps, and the error.rs file and impl runs and
+    the 26-unit session they held stayed `pair_wait` behind them — the one
+    planned run that held `src/error.rs::context` beside its table fns
+    never opened. One rule for both holds (`pair_wait`, `coverage_split`);
+    a run with no recorded holder is not a hold and is never released."""
+    gone = frozenset(not_opened)
+    return tuple(
+        replace(h, deferred=False, reason=h.prior_reason or h.reason,
+                share_minutes=None)
+        for h in held
+        if h.held_by and gone.issuperset(h.held_by))
 
 
 def withhold_landed(run: RouteRun, landed: Collection[FnLocator],
@@ -1727,11 +1822,11 @@ def schedule(
         for k in condensed_order([it[0].key for it in ranked], blocker_keys)]
 
     scheduled: list[ScheduledRun] = []
-    for run, rank, reason, _d, level, by in ordered_items:
+    for pos, (run, rank, reason, _d, level, by) in enumerate(ordered_items):
         weight = 1 if reason == "rebuy_readmitted" else _WEIGHT[rank]
         scheduled.append(ScheduledRun(
             run=run, rank=rank, weight=weight, reason=reason, level=level,
-            blocked_by=by))
+            blocked_by=by, position=pos))
 
     # ONE pass in schedule order decides every deferral, and a run is held
     # only by a run this pass has already OPENED. Every deferral above is
@@ -1779,9 +1874,12 @@ def schedule(
         mutual = [p for p in blocking_pairs
                   if run_blocks(run, p, hollow, blamed)]
         with_grace = [p for p in blocking_pairs if _grace_left(p, run)]
-        if any(p not in mutual for p in with_grace):
+        holders = [p for p in with_grace if p not in mutual]
+        if holders:
             waiting.append(replace(s, deferred=True, share_minutes=0.0,
-                                   reason="pair_wait"))
+                                   reason="pair_wait",
+                                   held_by=tuple(p.key for p in holders),
+                                   prior_reason=s.reason))
             continue
         if with_grace:
             s = replace(s, mutual=tuple(p.label for p in with_grace))
@@ -1791,14 +1889,16 @@ def schedule(
             shared = frozenset().union(*(
                 run.target_tests & o.target_tests for o in non_split_runs))
             if shared:
-                held = any(
-                    o in opened_runs and (run.target_tests & o.target_tests)
-                    for o in non_split_runs)
-                if held and not all(_test_spent("attributed", t)
-                                    for t in shared):
-                    waiting.append(replace(s, deferred=True,
-                                           share_minutes=0.0,
-                                           reason="coverage_split"))
+                split_holders = [
+                    o for o in non_split_runs
+                    if o in opened_runs and (run.target_tests & o.target_tests)]
+                if split_holders and not all(_test_spent("attributed", t)
+                                             for t in shared):
+                    waiting.append(replace(
+                        s, deferred=True, share_minutes=0.0,
+                        reason="coverage_split",
+                        held_by=tuple(o.key for o in split_holders),
+                        prior_reason=s.reason))
                     continue
                 s = replace(s, lapsed=tuple(dict.fromkeys(
                     (*s.lapsed, "coverage_split"))))

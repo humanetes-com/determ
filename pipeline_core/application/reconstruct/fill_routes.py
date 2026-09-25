@@ -90,6 +90,10 @@ class RouteRunReport:
     #: before the run (whitespace-folded): the reply re-emitted the tree.
     #: Set by the executor, which then records the run as keeping nothing.
     unchanged: bool = False
+    #: Write sets a reply of this run named as one (target first, then the
+    #: extras it wrote with it; `domain.joint_write`). Recorded on the
+    #: ledger row so a later schedule keeps each named set whole.
+    joint_sets: tuple[tuple[FnLocator, ...], ...] = ()
 
     @classmethod
     def from_delta(cls, delta: AttemptsDelta,

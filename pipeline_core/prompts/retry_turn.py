@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from pipeline_core.domain.joint_write import JOINT_OUTPUT_CLAUSE
 from pipeline_core.domain.last_error import (
     LastErrorKind,
     instruction_for,
@@ -117,6 +118,12 @@ def types_new_to(conversation: str, evidence: str,
 
 #: The per-fn routes' output contract (`<BODY>`), restated on every turn.
 BODY_OUTPUT = ("<BODY>\ncorrected body without surrounding braces\n</BODY>")
+
+#: The per-fn fill route's contract when its reply may widen the write to
+#: other functions of the file (`domain.joint_write`); restated on every turn
+#: of that route only — the routes that cannot splice extras keep
+#: `BODY_OUTPUT`.
+PER_FN_JOINT_OUTPUT = BODY_OUTPUT + "\n" + JOINT_OUTPUT_CLAUSE
 
 
 def fn_output(targets: Sequence[tuple[str, str]]) -> str:

@@ -69,6 +69,9 @@ class SalvagedFill:
 
     body: str
     metric: FixProgress
+    #: Bodies written with this one as a single write (`domain.joint_write`
+    #: `JointUnit`s): a joint attempt is only salvageable whole.
+    extras: tuple[Any, ...] = ()
 
 
 class CompilingSalvage:
@@ -94,13 +97,16 @@ class CompilingSalvage:
     def __init__(self) -> None:
         self._best: SalvagedFill | None = None
 
-    def offer(self, body: str, metric: FixProgress) -> None:
+    def offer(self, body: str, metric: FixProgress,
+              extras: tuple[Any, ...] = ()) -> None:
         """Record an attempt. Red attempts and empty bodies are ignored — only a
-        body that COMPILED is a candidate to keep over the stub."""
+        body that COMPILED is a candidate to keep over the stub. ``extras``
+        are the other bodies the attempt wrote with it; a restore puts them
+        back together or not at all."""
         if not body.strip() or not metric.compiles:
             return
         if self._best is None or metric < self._best.metric:
-            self._best = SalvagedFill(body, metric)
+            self._best = SalvagedFill(body, metric, tuple(extras))
 
     @property
     def best(self) -> SalvagedFill | None:

@@ -133,8 +133,11 @@ class FakeFill:
     def is_fn_fully_exhausted(self, *a: Any) -> bool: return self.s.get("exhausted", False)
     def diagnose(self, **k: Any) -> dict[str, Any]: return {"signal": "", "category": ""}
     def append_note(self, *a: Any, **k: Any) -> bool: return False
-    def extract_self_note(self, *a: Any) -> str | None: return None
+    def extract_self_note(self, *a: Any, **k: Any) -> str | None: return None
     def record_error_codes(self, *a: Any) -> None: ...
+    def retire_disproved_notes(self, *a: Any) -> int:
+        self.s.setdefault("retire_disproved", []).append(a)
+        return 0
 
     # TestLinker
     def find_tests_for_fn(self, *a: Any, **k: Any) -> list[tuple[str, str]]: return []

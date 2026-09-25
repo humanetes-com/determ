@@ -1858,6 +1858,7 @@ def build_app(
             append_note_fn=model_notes_store.append,
             extract_self_note_fn=model_notes_store.extract_self_note,
             record_error_codes_fn=model_notes_store.record_error_codes_seen,
+            retire_disproved_notes_fn=model_notes_store.retire_disproved,
         ),
         tests=TestLinkerAdapter(
             find_tests_for_fn_fn=_find_tests_for_fn,

@@ -990,11 +990,17 @@ class NoteProvenance:
     error_codes: tuple[str, ...]       # the codes the attempt died with
     rejected_symbols: tuple[str, ...]  # what the compiler said does not exist
     failed_body_hash: str              # fingerprint of the rejected body
+    # True: a later attempt of the same loop COMPILED (the recovered path),
+    # so the lesson's correction was seen to work. False: the loop was
+    # exhausted and nothing validated it. None: a record written before
+    # 2026-09-25, which does not say — treated as not validated.
+    validated: bool | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {"unit": self.unit, "error_codes": list(self.error_codes),
                 "rejected_symbols": list(self.rejected_symbols),
-                "failed_body_hash": self.failed_body_hash}
+                "failed_body_hash": self.failed_body_hash,
+                "validated": self.validated}
 
     @staticmethod
     def from_dict(raw: object) -> NoteProvenance | None:
@@ -1007,7 +1013,9 @@ class NoteProvenance:
                 error_codes=tuple(str(c) for c in raw.get("error_codes") or ()),
                 rejected_symbols=tuple(
                     str(s) for s in raw.get("rejected_symbols") or ()),
-                failed_body_hash=str(raw.get("failed_body_hash", "")))
+                failed_body_hash=str(raw.get("failed_body_hash", "")),
+                validated=(bool(raw["validated"])
+                           if raw.get("validated") is not None else None))
         except (TypeError, ValueError):
             return None
 
@@ -1027,6 +1035,43 @@ def is_error_code_lesson(note: str) -> bool:
 def error_code_lessons(notes: list[str]) -> list[str]:
     """The subset of ``notes`` that are ``[E0xxx]`` compile lessons."""
     return [n for n in notes if is_error_code_lesson(n)]
+
+
+def disproved_lessons(
+    notes: list[str],
+    provenance: Mapping[str, NoteProvenance],
+    *, unit: str, error_codes: Iterable[str], shown: str,
+) -> list[str]:
+    """The stored lessons ``unit``'s own failure just disproved: learned on
+    that very unit (`NoteProvenance.unit`), never validated by a compiling
+    body (`validated` is not True), and about a code the unit has just
+    failed with again — with the lesson in its prompt.
+
+    Such a note prescribes a cure nothing ever saw work, and here its own
+    unit re-fails the way it claims to prevent. Run `116341-24c76a97`
+    (2026-09-25): an exhausted `context` loop wrote "[E0277] … use self
+    directly, not a boxed dyn conversion" at 11:10 — a cure invented with no
+    fixed body — and `context` then failed E0277 in fills 5, 6 and 7 with
+    that note twice in its prompt (MODEL_NOTES and the RECURRING_ERRORS
+    echo). The premise check (`void_premise_lessons`) keys on rejected
+    symbols, of which this note had none, and `contradicted_notes` on
+    E0599/E0425, so nothing could retire it. A validated lesson is kept: a
+    compiling body once proved it, and one more failure of its unit is not
+    evidence against it. ``shown`` is the text of the prompt the failed
+    attempt answered: a lesson that was not in it was not followed, and its
+    unit's failure says nothing about it."""
+    codes = frozenset(error_codes)
+    seen = " ".join(shown.split())
+    if not codes or not seen:
+        return []
+    out: list[str] = []
+    for n in notes:
+        prov = provenance.get(note_hash(n))
+        if (prov is not None and prov.validated is not True
+                and prov.unit == unit and codes & set(prov.error_codes)
+                and " ".join(n.split())[:80] in seen):
+            out.append(n)
+    return out
 
 
 def void_premise_lessons(

@@ -384,6 +384,8 @@ class RetrosAdapter:
     append_note_fn: Callable[..., bool]
     extract_self_note_fn: Callable[[str, str, str], str | None]
     record_error_codes_fn: Callable[[str], object]  # return discarded
+    retire_disproved_notes_fn: Callable[[Path, str, frozenset[str], str], int] = (
+        lambda _p, _u, _c, _s: 0)
 
     def load(self, project_dir: Path) -> dict[str, Any]:
         return self.load_fn(project_dir)
@@ -427,6 +429,10 @@ class RetrosAdapter:
 
     def record_error_codes(self, output: str) -> None:
         self.record_error_codes_fn(output)
+
+    def retire_disproved_notes(self, fr_path: Path, unit: str,
+                               error_codes: frozenset[str], shown: str) -> int:
+        return self.retire_disproved_notes_fn(fr_path, unit, error_codes, shown)
 
 
 # --------------------------------------------------------------------------- #

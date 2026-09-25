@@ -59,7 +59,7 @@ TRANSACTION_MODULES: frozenset[str] = frozenset({
 # and is not a byte restore — cannot be added back without a reviewable
 # line here. Anything else routes through TreeTxn.
 ALLOWLIST: dict[tuple[str, str], str] = {
-    ("application/reconstruct/fill_one_fn.py", "run"):
+    ("application/reconstruct/fill_one_fn.py", "_run"):
         "failures-dir text log, not a tree file",
     ("application/reconstruct/group_fill.py", "task2_fill_groups"):
         "legacy grouped route: skeleton seed copy (parseable by construction), "

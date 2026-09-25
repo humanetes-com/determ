@@ -10,9 +10,10 @@ four bodies in flight.
 
 The plan's sentence: after that keep, every unit whose held tests did not
 move is still claimed; only a claim planned on a moved test is refused.
-Negative control: the same claims asked without their own tests (the run's
-whole scope, which contains the moved tests) are refused after the keep —
-the live outcome.
+Negative control: the same claims asked with no ground of their own (the
+fill-wide gate: any move refuses) are refused after the keep — the live
+outcome. The run's whole scope is no longer that control: 55 of its tests
+did not move, so a claim made on it stands (`test_outcome.ground_left`).
 """
 from __future__ import annotations
 
@@ -107,7 +108,11 @@ def _replay(tmp_path: Path, *, own_tests: bool,
     run = RouteRun(
         kind=RouteKind.PER_FN, label=f"per-fn {len(batch)} stub(s)",
         targets=frozenset(_loc(u) for u in batch),
-        target_tests=frozenset(t for u in batch for t in held.get(u, ())),
+        # The control is the fill-wide gate: a claim with no ground of its
+        # own, which any move refuses. With the run's whole scope the claim
+        # now stands on the 55 tests the keep did not move.
+        target_tests=(frozenset(t for u in batch for t in held.get(u, ()))
+                      if own_tests else frozenset()),
         stubs_in_targets=frozenset(_loc(u) for u in batch),
         files=tuple(sorted({_loc(u).file for u in batch})))
     route = _PooledRoute(run, batch, held, keep, own_tests=own_tests)

@@ -227,6 +227,10 @@ class Retros(Protocol):
         self, failed_body: str, error_excerpt: str, fixed_body: str,
     ) -> str | None: ...
     def record_error_codes(self, output: str) -> None: ...
+    def retire_disproved_notes(
+        self, fr_path: Path, unit: str, error_codes: frozenset[str],
+        shown: str,
+    ) -> int: ...
 
 
 @runtime_checkable

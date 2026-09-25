@@ -50,6 +50,7 @@ __all__ = [
     "PremiseEntry",
     "outcomes_of",
     "premise_moved",
+    "ground_left",
     "moved_in_scope",
     "names_of",
     "premise_of",
@@ -325,6 +326,40 @@ def moved_in_scope(
         return moved_t
     leaves = {_scope_leaf(s) for s in scope}
     return tuple(m for m in moved_t if _scope_leaf(m) in leaves)
+
+
+def ground_left(
+    moved: Iterable[str], scope: Iterable[str] | None, read: Iterable[str],
+) -> tuple[str, ...]:
+    """The planned tests of a claim that the plan READ (``read``: the
+    premise's keys) and no keep moved, sorted: the part of its ground the
+    plan's reading still describes. A planned test the premise holds no
+    entry for is no ground at all — absence is not a reading
+    (:func:`premise_moved`), so it cannot keep a claim standing.
+
+    A claim is made from several tests' readings, and a move invalidates the
+    reading of the tests it moved and no other. Refusing a claim because ONE
+    of its tests moved made the rule fill-wide again for any claim that is
+    wide: run `116341-24c76a97` (2026-09-25, cluster `stable`) fill 6, the
+    keeps of a per-fn run moved `test_downcast` and `test_downcast_mut` (a
+    binary whose abort site shifts with every drop body), and every run
+    ahead with more than one planned test intersected the fill's moved set
+    (counted at the fill's end: the error.rs file run 2 of 54, its impl twin
+    3 of 55, both formatter pairs 2 of 54, of which 1 had moved when the
+    pairs were deferred), so each was deferred while nearly all of its
+    readings still held; the pairs had opened in none of the run's six
+    fills.
+
+    A claim with no named test (None or empty) has no part of the ground of
+    its own: nothing is left once anything moved, which keeps the unscoped
+    rule of :func:`moved_in_scope`."""
+    if not scope:
+        return ()
+    gone = {_scope_leaf(m) for m in moved}
+    seen = {_scope_leaf(r) for r in read}
+    return tuple(sorted({s for s in scope
+                         if _scope_leaf(s) in seen
+                         and _scope_leaf(s) not in gone}))
 
 
 def _first_fail_fns(identity: tuple[str, ...]) -> frozenset[tuple[str, str]]:

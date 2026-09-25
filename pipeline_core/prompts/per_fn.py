@@ -12,6 +12,7 @@ from typing import Any
 from pipeline_core.domain.construction_recipe import construction_recipe_prefix
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import crash_evidence_prefix
+from pipeline_core.domain.joint_write import JOINT_OUTPUT_CLAUSE
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.prompt_holdings import FileView, file_block
@@ -22,6 +23,14 @@ from pipeline_core.prompts.runtime import (
     repo_spec_section,
 )
 from pipeline_core.prompts.sections import tag_block
+
+
+def _joint_clause(on: bool) -> str:
+    """The output contract's widening clause, for the routes that splice
+    and judge the extra `<FN>` blocks as one write (`domain.joint_write`).
+    Off for every other caller of these builders: a route that cannot write
+    the extras must not be told it may."""
+    return f"{JOINT_OUTPUT_CLAUSE}\n" if on else ""
 
 
 def build_per_fn_prompt(
@@ -35,6 +44,7 @@ def build_per_fn_prompt(
     sections: PerFnSections,
     *,
     fr_path: Path | None = None,
+    joint_output: bool = False,
 ) -> str:
     """Small focused prompt for one fn fill. No crate-wide signature index,
     no full FR, no genesis — only what the model needs to implement THIS fn.
@@ -153,7 +163,7 @@ Output:
   <BODY>
   body without surrounding braces
   </BODY>
-
+{_joint_clause(joint_output)}
 Rules:
 - Body only — no sig, no markdown, no use statements inside body.
 - Use fully-qualified paths (std::fmt::Write, crate::Error) for symbols
@@ -201,6 +211,7 @@ def build_per_fn_fix_prompt(
     fr_path: Path | None = None,
     attempt_history: list[dict[str, Any]] | None = None,
     kind: LastErrorKind | None = None,
+    joint_output: bool = False,
 ) -> str:
     """Re-prompt for a fn whose previous fill failed.
 
@@ -389,7 +400,7 @@ Output:
   <BODY>
   corrected body without surrounding braces
   </BODY>
-{("\n" + sig_change_permission(fn_name)) if allow_sig_change else ""}
+{_joint_clause(joint_output)}{("\n" + sig_change_permission(fn_name)) if allow_sig_change else ""}
 Rules:
 - Body only — no sig in the BODY block.
 - Use fully-qualified paths for symbols not in the file's `use` block.

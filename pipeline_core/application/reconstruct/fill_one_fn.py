@@ -16,7 +16,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,13 @@ from pipeline_core.domain.fill_class import (
     tests_could_not_run,
 )
 from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.joint_write import (
+    JointAdmission,
+    JointUnit,
+    admit_joint,
+)
 from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.model_notes import (
     NoteProvenance,
     body_fingerprint,
@@ -148,6 +154,7 @@ from pipeline_core.prompts.per_fn import (
 )
 from pipeline_core.prompts.retry_turn import (
     BODY_OUTPUT,
+    PER_FN_JOINT_OUTPUT,
     AttemptFeedback,
     EvidenceSection,
     types_new_to,
@@ -164,6 +171,29 @@ def _cfg_dead_fns_of(ctx: PerFnPassCtx, rel_file: str) -> frozenset[str]:
 
 # Attributed leaves whose source is sliced for pins — the impl routes' cap.
 _ATTRIBUTED_TEST_LEAF_CAP = 12
+
+
+@dataclass
+class _JointState:
+    """One unit fill's joint write (`domain.joint_write`), shared by the
+    attempt closure, every revert and the salvage.
+
+    ``live`` holds the extras the attempt in flight spliced, each with the
+    body it replaced; a revert of the unit restores them with it, so no
+    revert site can leave half a write on the tree. ``named`` is every set
+    the gate admitted and the splice landed (the model's claim these bodies
+    belong together); ``kept`` the extras on the tree when the unit
+    returns; ``refusal`` the note the next turn carries."""
+
+    live: list[tuple[JointUnit, str]] = field(default_factory=list)
+    named: list[tuple[FnLocator, ...]] = field(default_factory=list)
+    kept: list[FnLocator] = field(default_factory=list)
+    refusal: str = ""
+
+    def settle(self) -> None:
+        """The attempt in flight is kept: its extras stay on the tree."""
+        self.kept = [u.locator for u, _pre in self.live]
+        self.live.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +219,7 @@ class FillOneFn:
     def _salvage_compiling_body(
         self, ctx: PerFnPassCtx, salvage: CompilingSalvage, file_path: Path,
         rel_file: str, fn_name: str, container: str, sig_text: str, rec: Stub,
-        revert: Callable[[], bool],
+        revert: Callable[[], bool], joint: _JointState | None = None,
     ) -> bool:
         """Restore the fix loop's best COMPILING body instead of leaving the
         stub. Call with the stub already reverted in, holding the splice lock.
@@ -213,6 +243,16 @@ class FillOneFn:
             self.tel.log(f"  [phase-c/per-fn] salvage splice refused for "
                          f"{rel_file}::{fn_name}: {_sp.reason} — stub kept.")
             return False
+        if best.extras and joint is not None:
+            # The best attempt was a joint write: restore it whole or not at
+            # all — its body alone is not the attempt that compiled.
+            _missed = self._splice_extras(file_path, best.extras, joint)
+            if _missed:
+                self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: best "
+                             "compiling joint attempt NOT salvaged (extras "
+                             f"not restorable: {_missed}) — reverting to stub.")
+                revert()
+                return False
         _rc, _ = self.cargo.run(ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
         _regr = (self.cargo.test_regression_gate(
             ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base,
@@ -226,6 +266,8 @@ class FillOneFn:
                          "reverting to stub.")
             revert()
             return False
+        if joint is not None:
+            joint.settle()
         _ctx = f" [{container}]" if container else ""
         self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}{_ctx}: fix loop "
                      f"exhausted — KEEPING best compiling body ({best.metric}); "
@@ -239,6 +281,66 @@ class FillOneFn:
         return True
 
     def run(self, idx: int, rec: Stub, *, ctx: PerFnPassCtx) -> FillResult:
+        """Fill one unit. The joint write the unit's replies named rides out
+        on the result, whichever exit the fill took."""
+        joint = _JointState()
+        res = self._run(idx, rec, ctx=ctx, joint=joint)
+        if joint.live:
+            # An exit that returned with an attempt's extras still spliced
+            # is a bug in that exit; the tree must not keep half a write.
+            with ctx.splice_check_lock:
+                self._revert_extras(Path(ctx.target_src_dir) / rec.file,
+                                    joint, ctx)
+        return replace(res, joint=tuple(joint.kept),
+                       joint_named=tuple(dict.fromkeys(joint.named)))
+
+    def _revert_extras(self, file_path: Path, joint: _JointState,
+                       ctx: PerFnPassCtx) -> bool:
+        """Restore every extra the attempt in flight spliced, last first.
+        Caller holds the splice lock. False when any restore failed (logged
+        loudly: a failed restore leaves a broken body in the tree)."""
+        ok = True
+        for u, pre in reversed(joint.live):
+            out = self.mut.revert_body_scoped(
+                file_path, u.fn_name, u.container, u.sig_text, pre,
+                cfg_predicates=u.cfg_predicates or None)
+            if not out.ok:
+                ok = False
+                self.tel.log(f"  [phase-c/per-fn] REVERT FAILED for joint "
+                             f"extra {u.label}: {out.reason} — broken body "
+                             "left in tree.")
+                self.tel.emit("phase_c.fn.revert.fail", data={
+                    "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                    "file": u.file, "fn": u.fn_name, "reason": out.reason,
+                    "joint": True,
+                })
+        joint.live.clear()
+        return ok
+
+    def _splice_extras(self, file_path: Path, units: tuple[JointUnit, ...],
+                       joint: _JointState) -> list[tuple[str, str]]:
+        """Splice each admitted extra, recording its prior body in
+        ``joint.live``. Caller holds the splice lock. Returns the extras
+        that could not be written, with the splicer's reason."""
+        failed: list[tuple[str, str]] = []
+        for u in units:
+            loc = self.mut.locate_fn_by_record(
+                file_path, u.fn_name, u.container, u.sig_text,
+                u.cfg_predicates or None)
+            if loc is None:
+                failed.append((u.label, "not found in the file now"))
+                continue
+            out = self.mut.splice_body_scoped(
+                file_path, u.fn_name, u.container, u.sig_text, u.body,
+                cfg_predicates=u.cfg_predicates or None, allow_nonstub=True)
+            if not out.ok:
+                failed.append((u.label, out.reason))
+                continue
+            joint.live.append((u, loc.body_text))
+        return failed
+
+    def _run(self, idx: int, rec: Stub, *, ctx: PerFnPassCtx,
+             joint: _JointState) -> FillResult:
         rel_file = rec.file
         fn_name = rec.fn_name
         container = rec.container
@@ -463,6 +565,9 @@ class FillOneFn:
         # three `filled` constructors back to `unimplemented!()`). Revert only
         # THIS fn, at offsets resolved against the file as it stands now.
         _own_pre_image = _cur_body or "unimplemented!()"
+        # The reply may widen the write to other functions of this file
+        # when the pass knows the file's records to resolve them against.
+        _joint_on = bool(ctx.fn_records) and ctx.joint_max > 0
 
         def _revert_own_body() -> bool:
             # A revert that silently no-ops leaves the failed body in the
@@ -470,6 +575,8 @@ class FillOneFn:
             # the next attempt's splice refuses `target_not_stub`, and the
             # race guard misreads that as another worker's fill. Surface
             # the failure loudly — never assume a revert landed.
+            # A joint write is reverted whole: the extras the attempt
+            # spliced go back with the target, at every revert site.
             out = self.mut.revert_body_scoped(
                 file_path, fn_name, container, sig_text, _own_pre_image,
                 cfg_predicates=rec.cfg_predicates)
@@ -481,7 +588,8 @@ class FillOneFn:
                     "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                     "file": rel_file, "fn": fn_name, "reason": out.reason,
                 })
-            return out.ok
+            extras_ok = self._revert_extras(file_path, joint, ctx)
+            return out.ok and extras_ok
 
         test_blocks = self.tests.find_tests_for_fn(
             ctx.tests_dir_files, fn_name,
@@ -707,6 +815,7 @@ class FillOneFn:
                             units=(IdentityMustUnit(
                                 fn_name, container, sig_text),))),
                     fr_path=ctx.fr_path,
+                    joint_output=_joint_on,
                 )
             else:
                 # prior retrospective guidance — start from "what to try
@@ -742,9 +851,11 @@ class FillOneFn:
                     kind=fix_prompt_kind(
                         _last_failure[0], quoted_run=_excerpt_quotes_run[0]),
                     excerpt=error_excerpt, targets=(fn_name,),
-                    output=BODY_OUTPUT,
-                    note=(sig_change_permission(fn_name)
-                          if fix_attempt >= 5 else ""),
+                    output=PER_FN_JOINT_OUTPUT if _joint_on else BODY_OUTPUT,
+                    note="\n".join(p for p in (
+                        joint.refusal,
+                        sig_change_permission(fn_name)
+                        if fix_attempt >= 5 else "") if p),
                     sections=(
                         EvidenceSection(
                             "RETROSPECTIVE_GUIDANCE", _retro_guidance,
@@ -794,6 +905,7 @@ class FillOneFn:
                     fr_path=ctx.fr_path,
                     kind=fix_prompt_kind(
                         _last_failure[0], quoted_run=_excerpt_quotes_run[0]),
+                    joint_output=_joint_on,
                 )
 
             # The stream-meta rows of this call carry the unit they serve,
@@ -837,6 +949,32 @@ class FillOneFn:
                     self.tel.log(f"  [phase-c/per-fn] {fn_name}: sig swapped (attempt "
                                  f"{fix_attempt}): {sig_text}")
 
+            # The reply's extra `<FN>` blocks: which other functions of this
+            # file the unit may write with its target (`domain.joint_write`).
+            _admission = JointAdmission()
+            if _joint_on:
+                _admission = admit_joint(
+                    extract_fn_bodies(last_response), target_file=rel_file,
+                    target_name=fn_name, target_container=container,
+                    records=ctx.fn_records, cfg_dead=ctx.cfg_dead,
+                    cap=ctx.joint_max)
+                joint.refusal = _admission.refusal_note()
+                if _admission.asked:
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {rel_file}::{fn_name}: reply "
+                        f"widened the write — admitted "
+                        f"{[u.label for u in _admission.admitted] or 'none'}"
+                        + (f", refused {list(_admission.refused)}"
+                           if _admission.refused else "")
+                        + f" (attempt {fix_attempt}).")
+                    self.tel.emit("phase_c.fn.joint_asked", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "fix_attempt": fix_attempt,
+                        "admitted": [u.label for u in _admission.admitted],
+                        "refused": [list(r) for r in _admission.refused],
+                    })
+
             # Splice by exact byte offset. Re-enumerate just before
             # splicing because prior fills (or our sig swap above) may
             # have shifted offsets. When a fn's name is duplicated in a
@@ -872,6 +1010,25 @@ class FillOneFn:
                 return self.mut.splice_fn_body(
                     file_path, fn_name, body, allow_nonstub=rec.refill)
 
+            if _admission.admitted:
+                # Extras first, then the target: every splice re-locates by
+                # record, so the target's offsets are read after the extras
+                # moved them. A revert of this attempt restores them all.
+                _not_written = self._splice_extras(
+                    file_path, _admission.admitted, joint)
+                if _not_written:
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {rel_file}::{fn_name}: joint "
+                        f"extra(s) not written: {_not_written}.")
+                    joint.refusal = "\n".join(p for p in (
+                        joint.refusal,
+                        "Not written (the splicer refused them): "
+                        + "; ".join(f"`{n}`: {w}" for n, w in _not_written)
+                        + ".") if p)
+                if joint.live:
+                    joint.named.append((
+                        FnLocator(rel_file, fn_name),
+                        *(u.locator for u, _pre in joint.live)))
             splice_out = _locate_and_splice()
             # Diagnose a `target_not_stub` WHILE STILL HOLDING the lock: the
             # non-stub body is either another worker's fill (genuine race) or
@@ -923,6 +1080,8 @@ class FillOneFn:
                              "dropping the fn's own closing brace — the reply "
                              "closed the body itself.")
             if not ok:
+                # The target did not land: its extras must not stay alone.
+                self._revert_extras(file_path, joint, ctx)
                 ctx.splice_check_lock.release()
                 _lock_released = True
                 _ctx = f" [{container}]" if container else ""
@@ -977,9 +1136,13 @@ class FillOneFn:
                 # the free `not(cond)` stub) is external, not this fn's failure.
                 # Same set the skip gate judged the stored conviction against —
                 # one definition of what this fn answers for.
+                # A joint write answers for its extras too: a panic inside
+                # one of them is this unit's failure, not a sibling's.
                 _v = self.cargo.u2_test_gate(
                     set(_evidence.tests),
-                    frozenset({FnSite(rel_file, fn_name, container)}),
+                    frozenset({FnSite(rel_file, fn_name, container),
+                               *(FnSite(u.file, u.fn_name, u.container)
+                                 for u, _pre in joint.live)}),
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
                     _attempt_baseline_test)
                 _u2_passed = _v.self_passed
@@ -1172,6 +1335,8 @@ class FillOneFn:
                             ctx.target_src_dir,
                             [b.file for b in (ctx.crash_blamed or frozenset())])]
             if rc == 0 and _u2_fail_sig is None:
+                _joint_labels = [u.label for u, _pre in joint.live]
+                joint.settle()
                 ctx.splice_check_lock.release()
                 _lock_released = True
                 _ctx = f" [{container}]" if container else ""
@@ -1179,7 +1344,17 @@ class FillOneFn:
                              f"{rel_file}::{fn_name}{_ctx} "
                              f"({delta:+d} bytes, body={len(body)}"
                              + (f", fix-attempts={fix_attempt}" if fix_attempt > 1 else "")
+                             + (f", with {len(_joint_labels)} joint "
+                                f"extra(s): {_joint_labels}"
+                                if _joint_labels else "")
                              + ")")
+                if _joint_labels:
+                    self.tel.emit("phase_c.fn.joint_kept", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "extras": _joint_labels,
+                        "fix_attempt": fix_attempt,
+                    })
                 self.tel.emit("phase_c.fn.fill.done", duration_ms=int(
                         (time.monotonic() - _fn_t0) * 1000),
                       data={
@@ -1244,7 +1419,8 @@ class FillOneFn:
                         rejected_symbols=tuple(sorted(
                             rejected_symbols_in_errors(
                                 first_error_excerpt or ""))),
-                        failed_body_hash=body_fingerprint(first_failed_body))
+                        failed_body_hash=body_fingerprint(first_failed_body),
+                        validated=True)
                     if note and self.retros.append_note(ctx.fr_path, note,
                                                         error_codes=_ecodes,
                                                         provenance=_prov):
@@ -1290,6 +1466,13 @@ class FillOneFn:
             # tests are still failing. Scoring both on one count made the first
             # compiling attempt look like a regression and stalled the loop out.
             _compiled = _u2_fail_sig is not None
+            if ctx.fr_path is not None and not _compiled:
+                # An unvalidated lesson learned on THIS unit, shown in this
+                # conversation, about a code this attempt died with again:
+                # its cure is disproved (`model_notes.disproved_lessons`).
+                self.retros.retire_disproved_notes(
+                    ctx.fr_path, f"{rel_file}::{fn_name}",
+                    frozenset(ecodes_in_text(cargo_out)), _conv.text())
             cur_metric = FixProgress(
                 compile_errors=0 if _compiled else max(1, len(cur_err_sig)),
                 failing_tests=len(cur_err_sig) if _compiled else 0)
@@ -1312,7 +1495,8 @@ class FillOneFn:
             })
             last_body = body
             last_metric = cur_metric
-            salvage.offer(body, cur_metric)
+            salvage.offer(body, cur_metric,
+                          extras=tuple(u for u, _pre in joint.live))
             error_excerpt = _excerpt()
             _excerpt_quotes_run[0] = True
             # Revert to snapshot before returning; the model will see
@@ -1818,7 +2002,7 @@ class FillOneFn:
                 _revert_own_body()
                 _salvaged = self._salvage_compiling_body(
                     ctx, salvage, file_path, rel_file, fn_name, container,
-                    sig_text, rec, _revert_own_body)
+                    sig_text, rec, _revert_own_body, joint=joint)
                 if not _salvaged:
                     annotated_body = make_failed_attempt_body(
                         attempted_body=last_body or first_failed_body or "",
@@ -1880,7 +2064,8 @@ class FillOneFn:
                             (error_excerpt or "")
                             + "\n" + (first_error_excerpt or "")))),
                     failed_body_hash=body_fingerprint(
-                        last_body or first_failed_body or ""))
+                        last_body or first_failed_body or ""),
+                    validated=False)
                 if note and self.retros.append_note(ctx.fr_path, note,
                                                     error_codes=_ecodes2,
                                                     provenance=_prov2):
