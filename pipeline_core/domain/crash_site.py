@@ -14,7 +14,7 @@ test list.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -989,7 +989,12 @@ class CrashSite:
     def fault(self) -> FaultClass:
         """The class of this fault, from the report's own kind — read here once
         so no rule below matches the signal string again."""
-        return fault_class(self.signal)
+        cls = fault_class(self.signal)
+        if cls is FaultClass.OTHER and self.origin_frames:
+            # A detector that printed an ORIGIN stack (freed by / allocated by)
+            # is speaking about invalid memory whatever its kind string says.
+            return FaultClass.INVALID_MEMORY
+        return cls
 
     @property
     def destruction(self) -> DestructionFault | None:
@@ -1006,7 +1011,7 @@ class CrashSite:
     def is_memory_fault(self) -> bool:
         """Whether the signal names a use-of-invalid-memory class, for which
         the faulting frame is routinely an innocent reader."""
-        return is_memory_fault_signal(self.signal)
+        return self.fault is FaultClass.INVALID_MEMORY
 
     @property
     def blamed(self) -> CrashFrame | None:
@@ -1114,63 +1119,7 @@ class CrashSite:
         model acts on the actual faulting path, not on prose about crashes."""
         if self.provenance == PROVENANCE_CHAIN:
             return self._render_chain_evidence()
-        if self.fault is FaultClass.EXHAUSTION:
-            return render_exhaustion_evidence([self])
-        where = f" while running `{self.test_name}`" if self.test_name else ""
-        lines = [
-            f"Test binary `{self.binary_label}` died with {self.signal}"
-            f"{where} — it never reported its remaining tests.",
-            "Faulting access (innermost first, crate frames only):",
-        ]
-        lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
-                  for i, fr in enumerate(self.frames)]
-        if self.origin_frames:
-            lines.append("The invalid memory it reads was CREATED by:")
-            lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
-                      for i, fr in enumerate(self.origin_frames)]
-        raw_origin = origin_stack_text(self.raw_report)
-        if raw_origin:
-            # UNFILTERED. The in-crate filter keeps only `src/…` frames, and on
-            # this class the decisive frame is usually the std one it drops:
-            # live, `free <- drop_glue::<RawVec<u8>> <- Error::downcast` says
-            # the payload's buffer is being dropped by a vtable call after the
-            # value was moved out — and only the middle frame says WHICH
-            # payload. The blamed fn's own line number is where the call sits,
-            # not necessarily where the defect is.
-            lines.append("The detector's own stack for that memory "
-                         "(std frames included — read them, the crate frames "
-                         "alone do not say what was freed):")
-            lines.append(raw_origin)
-        f = self.blamed
-        if f is not None:
-            lines.append(
-                f"Fix the pointer/lifetime scheme in `{f.fn_name}` "
-                f"({_frame_locus(f)}) — this class of silent crash means "
-                "memory that outlived its owner (dangling 'static from a "
-                "stack local, wrong cast target, double free). Do not patch "
-                "the calling test's fn.")
-        elif self.origin_unattributed:
-            # Say the origin is unknown instead of naming the reader. The
-            # frames above ARE the access path and are worth showing; what
-            # they do not tell anyone is which fn to change.
-            lines.append(
-                "The detector did not report an in-crate origin for the freed "
-                "memory, so the fn that invalidated it is UNKNOWN — the frames "
-                "above only read it. Do not assume the innermost frame is at "
-                "fault: for this class the defect is normally in the code that "
-                "frees or fabricates the pointer (drop glue, vtable "
-                "construction, a wrong cast target), which may not appear "
-                "above at all.")
-        elif self.all_frames and not authorable_frames(self.all_frames):
-            # Every surviving frame is in a generated test sibling, so there is
-            # no body here to name. Without this the site would render its
-            # frames and then say nothing at all about what to do with them.
-            lines.append(
-                "Every frame above is in a generated test file, which no fill "
-                "may rewrite — so this crash names no fn to change. Treat the "
-                "frames as the access path only: the defect is in whatever "
-                "crate code produced the memory those tests touch.")
-        return "\n".join(lines)
+        return FAULT_RENDERERS[self.fault](self)
 
     def _render_chain_evidence(self) -> str:
         """The chain-derived variant: no frame is shown because none exists —
@@ -1206,6 +1155,109 @@ class CrashSite:
                 "not):")
             lines.append(self.raw_report)
         return "\n".join(lines)
+
+
+def _render_invalid_memory(site: CrashSite) -> str:
+    """The invalid-memory reading: the faulting frames are the ACCESS path and
+    the defect is where the memory was invalidated (an origin stack), so it
+    prints both stacks and a pointer/lifetime instruction — the class this
+    prescription was measured on, and no other."""
+    where = f" while running `{site.test_name}`" if site.test_name else ""
+    lines = [
+        f"Test binary `{site.binary_label}` died with {site.signal}"
+        f"{where} — it never reported its remaining tests.",
+        "Faulting access (innermost first, crate frames only):",
+    ]
+    lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+              for i, fr in enumerate(site.frames)]
+    if site.origin_frames:
+        lines.append("The invalid memory it reads was CREATED by:")
+        lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+                  for i, fr in enumerate(site.origin_frames)]
+    raw_origin = origin_stack_text(site.raw_report)
+    if raw_origin:
+        # UNFILTERED. The in-crate filter keeps only `src/…` frames, and on
+        # this class the decisive frame is usually the std one it drops:
+        # live, `free <- drop_glue::<RawVec<u8>> <- Error::downcast` says
+        # the payload's buffer is being dropped by a vtable call after the
+        # value was moved out — and only the middle frame says WHICH
+        # payload. The blamed fn's own line number is where the call sits,
+        # not necessarily where the defect is.
+        lines.append("The detector's own stack for that memory "
+                     "(std frames included — read them, the crate frames "
+                     "alone do not say what was freed):")
+        lines.append(raw_origin)
+    f = site.blamed
+    if f is not None:
+        lines.append(
+            f"Fix the pointer/lifetime scheme in `{f.fn_name}` "
+            f"({_frame_locus(f)}) — this class of silent crash means "
+            "memory that outlived its owner (dangling 'static from a "
+            "stack local, wrong cast target, double free). Do not patch "
+            "the calling test's fn.")
+    elif site.origin_unattributed:
+        # Say the origin is unknown instead of naming the reader. The
+        # frames above ARE the access path and are worth showing; what
+        # they do not tell anyone is which fn to change.
+        lines.append(
+            "The detector did not report an in-crate origin for the freed "
+            "memory, so the fn that invalidated it is UNKNOWN — the frames "
+            "above only read it. Do not assume the innermost frame is at "
+            "fault: for this class the defect is normally in the code that "
+            "frees or fabricates the pointer (drop glue, vtable "
+            "construction, a wrong cast target), which may not appear "
+            "above at all.")
+    elif site.all_frames and not authorable_frames(site.all_frames):
+        # Every surviving frame is in a generated test sibling, so there is
+        # no body here to name. Without this the site would render its
+        # frames and then say nothing at all about what to do with them.
+        lines.append(
+            "Every frame above is in a generated test file, which no fill "
+            "may rewrite — so this crash names no fn to change. Treat the "
+            "frames as the access path only: the defect is in whatever "
+            "crate code produced the memory those tests touch.")
+    return "\n".join(lines)
+
+
+def _render_other_fault(site: CrashSite) -> str:
+    """A fault of no memory class (a signal that names no invalid access, no
+    exhaustion): the observation only — where the process died and the crate
+    frames it was on. No mechanism is asserted: nothing here says what was
+    freed, invalidated or recursed, so nothing tells the model to look for it.
+    Measured before this split (2026-09-26, computed on a SIGFPE site with one
+    crate frame): the memory-lifetime instruction was printed for it."""
+    where = f" while running `{site.test_name}`" if site.test_name else ""
+    lines = [
+        f"Test binary `{site.binary_label}` died with {site.signal}"
+        f"{where} — it never reported its remaining tests.",
+        "Crate frames it was on (innermost first):",
+    ]
+    lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+              for i, fr in enumerate(site.frames)]
+    if site.all_frames and not authorable_frames(site.all_frames):
+        lines.append(
+            "Every frame above is in a generated test file, which no fill may "
+            "rewrite — so this crash names no fn to change.")
+    elif site.frames:
+        lines.append(
+            "The innermost frame is where the process died; it is not "
+            "necessarily where the defect is.")
+    return "\n".join(lines)
+
+
+def _render_exhaustion(site: CrashSite) -> str:
+    return render_exhaustion_evidence([site])
+
+
+#: One renderer per :class:`FaultClass`. A class without an entry here cannot
+#: be rendered, and `test_stack_exhaustion` fails when one is added without it:
+#: what the model is told about a crash is decided per class, never inherited
+#: from whichever branch happened to be written first.
+FAULT_RENDERERS: Mapping[FaultClass, Callable[[CrashSite], str]] = {
+    FaultClass.INVALID_MEMORY: _render_invalid_memory,
+    FaultClass.EXHAUSTION: _render_exhaustion,
+    FaultClass.OTHER: _render_other_fault,
+}
 
 
 def render_exhaustion_evidence(sites: Sequence[CrashSite]) -> str:

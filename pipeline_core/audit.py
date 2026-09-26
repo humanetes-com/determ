@@ -489,6 +489,208 @@ def check_parallel_stream_integrity(run: RunData) -> Verdict:
                    f"every overlap on a distinct thread")
 
 
+#: A dispatched unit that no scheduled run held is a stall shape only when it
+#: repeats: one iteration of it is a unit whose tests already passed after an
+#: earlier fill (legitimately dropped); the same unit on consecutive iterations
+#: is a filter that keeps dropping what the dispatch keeps choosing.
+UNROUTED_WARN_STREAK = 2
+UNROUTED_FAIL_STREAK = 3
+#: The same crashed test blamed on nobody, with crate frames in its site, on
+#: this many consecutive sweeps.
+UNBLAMED_WARN_STREAK = 2
+#: A fill judged for yield spent at least this many GPU minutes, and bought
+#: fewer verdict gains per hour than this floor, or than a quarter of the
+#: median of the three fills before it.
+YIELD_MIN_MINUTES = 60.0
+YIELD_FLOOR_PER_HOUR = 0.5
+YIELD_COLLAPSE_RATIO = 0.25
+
+
+def _cluster_of(d: dict[str, Any]) -> str:
+    return str(d.get("cluster") or "")
+
+
+def unrouted_units(run: RunData) -> dict[str, list[tuple[int, frozenset[str]]]]:
+    """Per cluster, in iteration order, the units the landed-change audit says
+    no route attempted AND that no scheduled run of the same fill held at all
+    (deferred runs count as holding their targets: a deferral is a recorded
+    reason, a missing run is not)."""
+    held: dict[tuple[str, int], set[str]] = {}
+    for e in run.named("phase_c.route.run"):
+        d = e.get("data") or {}
+        key = (_cluster_of(d), int(d.get("iteration", 0) or 0))
+        held.setdefault(key, set())          # a fill with runs, held or not
+        for t in d.get("targets") or ():
+            held[key].add(f"{t[0]}::{t[1]}")
+    out: dict[str, list[tuple[int, frozenset[str]]]] = {}
+    for e in run.named("phase_c.tdd.landed_change"):
+        d = e.get("data") or {}
+        if "unattempted" not in d:
+            continue
+        cl, it = _cluster_of(d), int(d.get("iter", 0) or 0)
+        if (cl, it) not in held:
+            continue          # no route events for this fill: nothing to join
+        gone = frozenset(set(d["unattempted"]) - held[(cl, it)])
+        out.setdefault(cl, []).append((it, gone))
+    for lst in out.values():
+        lst.sort(key=lambda x: x[0])
+    return out
+
+
+def check_dispatched_routed(run: RunData) -> Verdict:
+    """C11: a unit the dispatch chose must reach a route, or a recorded reason.
+
+    Joins each iteration's `phase_c.tdd.landed_change.unattempted` to the same
+    fill's `phase_c.route.run` targets. A unit unattempted AND held by no run
+    on consecutive iterations is a filter between the dispatch and the route
+    planners with no recorded reason: run `38934-2999cc94` (2026-09-26) had two
+    units of a recursion in every batch of sweeps 5-7 and in no run's targets;
+    over the 80 runs since 2026-08-31, 99 such unit-iterations in 8 runs
+    (`scripts/stage_leak_census.py`). WARN at two consecutive iterations, FAIL
+    at three. Reports; changes no decision."""
+    series = unrouted_units(run)
+    if not series:
+        return Verdict("C11 dispatched-routed", SKIP,
+                       "no fill with both a landed-change audit and route runs")
+    worst: dict[str, int] = {}
+    for cl, lst in series.items():
+        streak: dict[str, int] = {}
+        prev_it = None
+        for it, gone in lst:
+            consecutive = prev_it is not None and it == prev_it + 1
+            streak = {u: n + 1 for u, n in streak.items() if u in gone} \
+                if consecutive else {}
+            for u in gone:
+                streak.setdefault(u, 1)
+            for u, n in streak.items():
+                worst[f"{cl}:{u}" if cl else u] = max(worst.get(
+                    f"{cl}:{u}" if cl else u, 0), n)
+            prev_it = it
+    top = max(worst.values(), default=0)
+    stuck = sorted(u for u, n in worst.items() if n >= UNROUTED_WARN_STREAK)
+    if top >= UNROUTED_FAIL_STREAK:
+        return Verdict("C11 dispatched-routed", FAIL,
+                       f"{len(stuck)} unit(s) dispatched and held by no run on "
+                       f"{top}+ consecutive iterations: {', '.join(stuck[:6])}")
+    if top >= UNROUTED_WARN_STREAK:
+        return Verdict("C11 dispatched-routed", WARN,
+                       f"{len(stuck)} unit(s) dispatched and held by no run on "
+                       f"{top} consecutive iterations: {', '.join(stuck[:6])}")
+    return Verdict("C11 dispatched-routed", PASS,
+                   f"{sum(len(g) for lst in series.values() for _i, g in lst)} "
+                   "unrouted unit-iteration(s), none on consecutive iterations")
+
+
+def check_crash_culprits(run: RunData) -> Verdict:
+    """C12: a crashed test whose site holds crate frames must name culprits.
+
+    Reads `phase_c.crash.localized`. A test that dies on consecutive sweeps
+    with crate frames in its site and no culprit (`culprits` empty; events that
+    predate the field fall back to `blamed`) is a crash the localizer read and
+    did not convict: run `38934-2999cc94` blamed NOBODY for 13 tests on sweeps
+    5-7 while every report held the recursion's cycle (`scripts/
+    pattern_census.py` P43). A use-after-free whose origin lies outside the
+    crate is also unblamed by design and is reported the same way — a finding,
+    not an error. WARN only."""
+    by_test: dict[tuple[str, str], dict[int, bool]] = {}
+    for e in run.named("phase_c.crash.localized"):
+        d = e.get("data") or {}
+        test = str(d.get("test") or "")
+        if not test or not d.get("frames"):
+            continue
+        culprits = d.get("culprits")
+        unblamed = (not culprits) if culprits is not None \
+            else d.get("blamed") is None
+        it = int(d.get("iter", 0) or 0)
+        by_test.setdefault((_cluster_of(d), test), {})[it] = (
+            by_test.get((_cluster_of(d), test), {}).get(it, False) or unblamed)
+    if not by_test:
+        return Verdict("C12 crash-culprits", SKIP, "no localized crash in run")
+    stuck: list[str] = []
+    for (cl, test), its in by_test.items():
+        run_len = best = 0
+        prev = None
+        for it in sorted(its):
+            if its[it]:
+                run_len = run_len + 1 if prev is not None and it == prev + 1 \
+                    else 1
+                best = max(best, run_len)
+                prev = it
+            else:
+                run_len, prev = 0, None
+        if best >= UNBLAMED_WARN_STREAK:
+            stuck.append(f"{cl}:{test}" if cl else test)
+    if stuck:
+        return Verdict("C12 crash-culprits", WARN,
+                       f"{len(stuck)} crashed test(s) with crate frames in the "
+                       f"site and no culprit on {UNBLAMED_WARN_STREAK}+ "
+                       f"consecutive sweeps: {', '.join(sorted(stuck)[:5])}")
+    return Verdict("C12 crash-culprits", PASS,
+                   f"{len(by_test)} crashed test(s) localized, none unblamed "
+                   f"on {UNBLAMED_WARN_STREAK}+ consecutive sweeps")
+
+
+def fill_yields(run: RunData) -> dict[str, list[tuple[int, float, float]]]:
+    """Per cluster, for each COMPLETED fill (a later sweep exists), (iteration,
+    GPU minutes, verdict gain): the ledger's per-run minutes and the positive
+    part of each run's net pass delta, summed."""
+    sweeps: dict[str, set[int]] = {}
+    for e in run.named("phase_c.tdd.iter"):
+        d = e.get("data") or {}
+        sweeps.setdefault(_cluster_of(d), set()).add(int(d.get("iter", 0) or 0))
+    mins: dict[tuple[str, int], float] = {}
+    gain: dict[tuple[str, int], float] = {}
+    for e in run.named("phase_c.route.run"):
+        d = e.get("data") or {}
+        if d.get("outcome") == "deferred":
+            continue
+        key = (_cluster_of(d), int(d.get("iteration", 0) or 0))
+        mins[key] = mins.get(key, 0.0) + float(d.get("minutes") or 0.0)
+        gain[key] = gain.get(key, 0.0) + max(int(d.get("net_pass_delta") or 0), 0)
+    out: dict[str, list[tuple[int, float, float]]] = {}
+    for (cl, it), m in mins.items():
+        if (it + 1) in sweeps.get(cl, set()):
+            out.setdefault(cl, []).append((it, m, gain[(cl, it)]))
+    for lst in out.values():
+        lst.sort(key=lambda x: x[0])
+    return out
+
+
+def check_fill_yield(run: RunData) -> Verdict:
+    """C13: a fill's verdict gain per GPU hour must not collapse silently.
+
+    C4 reads the pass count, so `+1` after 148 minutes is still "the series
+    advances": run `38934-2999cc94` printed `C4 plateau PASS` while fills 4-6
+    bought +9, +8 and +1 for 204, 198 and 148 minutes. For the last completed
+    fill of each cluster: WARN when it spent at least YIELD_MIN_MINUTES and
+    bought fewer than YIELD_FLOOR_PER_HOUR tests per hour, or fewer than
+    YIELD_COLLAPSE_RATIO of the median of the three fills before it (when that
+    median is at least one per hour). The median, not the best, so a stub
+    fill's one-off jump is not the yardstick. Reports; changes no decision."""
+    fills = fill_yields(run)
+    if not fills:
+        return Verdict("C13 fill-yield", SKIP, "no completed fill with route runs")
+    warns: list[str] = []
+    notes: list[str] = []
+    for cl, lst in fills.items():
+        it, m, g = lst[-1]
+        rate = 60.0 * g / m if m else 0.0
+        prev = sorted(60.0 * gg / mm for _i, mm, gg in lst[-4:-1] if mm)
+        med = prev[len(prev) // 2] if prev else 0.0
+        label = f"{cl}:" if cl else ""
+        notes.append(f"{label}fill {it}: +{int(g)} in {m:.0f} min ({rate:.1f}/h)")
+        if m < YIELD_MIN_MINUTES:
+            continue
+        if rate < YIELD_FLOOR_PER_HOUR or (
+                med >= 1.0 and rate < YIELD_COLLAPSE_RATIO * med):
+            warns.append(f"{label}fill {it} +{int(g)} in {m:.0f} min "
+                         f"({rate:.1f}/h) against a median of {med:.1f}/h over "
+                         "the three fills before it")
+    if warns:
+        return Verdict("C13 fill-yield", WARN, "; ".join(warns))
+    return Verdict("C13 fill-yield", PASS, "; ".join(notes))
+
+
 def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
           project_dir: Path | None, since: str, plateau_n: int) -> list[Verdict]:
     run = load_run(events_path, prompts_dir, log_path, since)
@@ -503,6 +705,9 @@ def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
         check_harness_fix_effect(run),
         check_success_evidence(run),
         check_parallel_stream_integrity(run),
+        check_dispatched_routed(run),
+        check_crash_culprits(run),
+        check_fill_yield(run),
     ]
 
 

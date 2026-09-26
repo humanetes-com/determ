@@ -249,6 +249,7 @@ from pipeline_core.domain.test_results import (
     sweep_build,
     uncoded_src_diagnostics,
 )
+from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
     paid_off,
@@ -6431,8 +6432,29 @@ def run_phase_c_tdd(
                        for k in _batch_esc_capped)[:12])
                    if _batch_esc_capped else "")
                 + ".")
+            # Where each dispatched unit went, on the route ledger's rows of
+            # THIS fill: the one classification of the units the line above
+            # calls `no route attempted` (attempted elsewhere, deferred with a
+            # reason, or held by no run). Reads and prints; decides nothing.
+            # Skipped when the ledger is unavailable — an empty row set would
+            # read every unattempted unit as held by no run.
+            _exits_payload: dict[str, object] | None = None
+            if deps.route_ledger_rows is not None and frontier_keys:
+                _fill_rows = [
+                    r for r in deps.route_ledger_rows(
+                        project_dir.name, cluster.name)
+                    if r.run_id == deps.run_id and r.iteration == iter_n
+                    and r.cluster == cluster.name]
+                if _fill_rows:
+                    _exits = unit_exits(
+                        frontier_keys, attempted=_attempted,
+                        landed=_batch_landed, rows=_fill_rows)
+                    _exits_payload = exits_payload(_exits)
+                    deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                             + exit_line(_exits))
             deps.emit("phase_c.tdd.landed_change", data={
                 "cluster": cluster.name, "iter": iter_n,
+                "exits": _exits_payload,
                 "dispatched": len(frontier_keys),
                 "attempted": sorted(f"{k.file}::{k.fn_name}"
                                     for k in _attempted),

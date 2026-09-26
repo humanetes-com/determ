@@ -421,3 +421,113 @@ def test_iteration_checks_read_the_tdd_loops_own_iterations(tmp_path: Path) -> N
     ev4, pdir4, lg4 = _write_run(tmp_path / "plain", plain)
     vs4 = {v.check: v for v in flow_audit.audit(ev4, pdir4, lg4, None, "", 3)}
     assert vs4["C3 floor-monotonicity"].status == "FAIL"
+
+
+# ---- C11-C13: the boundaries no verdict used to read ----
+#
+# Run `38934-2999cc94` (2026-09-26): two units of a recursion were in every
+# dispatch batch of sweeps 5-7 and in no run's targets; 13 tests were blamed on
+# nobody for three sweeps; fills 4-6 bought +9/+8/+1 for ~200 minutes each while
+# `C4 plateau` printed PASS. The three checks read what the run already emitted.
+
+from pipeline_core.audit import (  # noqa: E402
+    RunData,
+    check_crash_culprits,
+    check_dispatched_routed,
+    check_fill_yield,
+)
+
+
+def _landed(it: int, unattempted: list[str], cluster: str = "c") -> dict:
+    return {"event": "phase_c.tdd.landed_change",
+            "data": {"cluster": cluster, "iter": it, "dispatched": 12,
+                     "unattempted": unattempted}}
+
+
+def _route(it: int, targets: list[tuple[str, str]], *, outcome: str = "flat",
+           minutes: float = 10.0, net: int = 0, cluster: str = "c") -> dict:
+    return {"event": "phase_c.route.run",
+            "data": {"cluster": cluster, "iteration": it, "kind": "file",
+                     "targets": [list(t) for t in targets], "outcome": outcome,
+                     "minutes": minutes, "net_pass_delta": net}}
+
+
+def _sweep(it: int, cluster: str = "c") -> dict:
+    return {"event": "phase_c.tdd.iter", "data": {"cluster": cluster, "iter": it}}
+
+
+def test_c11_warns_at_two_and_fails_at_three_consecutive_unrouted_iterations() -> None:
+    other = [("src/o.rs", "held")]
+    ev = []
+    for it in (5, 6):
+        ev += [_landed(it, ["src/a.rs::lost", "src/o.rs::held"]),
+               _route(it, other)]
+    warn = check_dispatched_routed(RunData(events=ev))
+    assert warn.status == "WARN" and "src/a.rs::lost" in warn.evidence
+    assert "src/o.rs::held" not in warn.evidence      # held by a run: not lost
+    ev += [_landed(7, ["src/a.rs::lost"]), _route(7, other)]
+    assert check_dispatched_routed(RunData(events=ev)).status == "FAIL"
+
+
+def test_c11_a_deferred_run_is_a_recorded_reason_and_a_gap_resets_the_streak() -> None:
+    held_by_deferral = [_landed(5, ["src/a.rs::u"]),
+                        _route(5, [("src/a.rs", "u")], outcome="deferred"),
+                        _landed(6, ["src/a.rs::u"]),
+                        _route(6, [("src/a.rs", "u")], outcome="deferred")]
+    assert check_dispatched_routed(RunData(events=held_by_deferral)).status == "PASS"
+    gap = [_landed(5, ["src/a.rs::u"]), _route(5, []),
+           _landed(6, []), _route(6, []),
+           _landed(7, ["src/a.rs::u"]), _route(7, [])]
+    assert check_dispatched_routed(RunData(events=gap)).status == "PASS"
+    assert check_dispatched_routed(RunData(events=[])).status == "SKIP"
+
+
+def _crash(it: int, test: str, *, culprits: list[str] | None = None,
+           blamed: list[str] | None = None, frames: int = 2) -> dict:
+    d: dict = {"cluster": "c", "iter": it, "test": test, "blamed": blamed,
+               "frames": [["src/a.rs", 1, "f"]] * frames}
+    if culprits is not None:
+        d["culprits"] = culprits
+    return {"event": "phase_c.crash.localized", "data": d}
+
+
+def test_c12_an_unblamed_crash_with_frames_on_two_sweeps_warns() -> None:
+    # Events of the pre-fix shape carry no `culprits`: `blamed` decides.
+    two = [_crash(5, "t_one"), _crash(6, "t_one")]
+    assert check_crash_culprits(RunData(events=two)).status == "WARN"
+    # Negative controls: a culprit named, a single sweep, a gap, no frames.
+    named = [_crash(5, "t_one", culprits=["src/a.rs::f"]),
+             _crash(6, "t_one", culprits=["src/a.rs::f"])]
+    assert check_crash_culprits(RunData(events=named)).status == "PASS"
+    assert check_crash_culprits(RunData(events=two[:1])).status == "PASS"
+    gap = [_crash(5, "t_one"), _crash(7, "t_one")]
+    assert check_crash_culprits(RunData(events=gap)).status == "PASS"
+    blind = [_crash(5, "t_one", frames=0), _crash(6, "t_one", frames=0)]
+    assert check_crash_culprits(RunData(events=blind)).status == "SKIP"
+
+
+# The recorded fills of run 38934-2999cc94: (fill, minutes, tests gained).
+_FILLS_38934 = [(1, 65, 6), (2, 87, 0), (3, 76, 114), (4, 204, 9),
+                (5, 198, 8), (6, 148, 1)]
+
+
+def _yield_events(fills: list[tuple[int, float, int]], upto: int) -> list[dict]:
+    ev = []
+    for it, minutes, gain in fills:
+        if it > upto:
+            break
+        ev += [_route(it, [("src/a.rs", f"u{it}")], minutes=minutes, net=gain),
+               _sweep(it + 1)]
+    return ev
+
+
+def test_c13_the_recorded_collapse_warns_at_fill_six_and_not_at_fill_five() -> None:
+    six = check_fill_yield(RunData(events=_yield_events(_FILLS_38934, 6)))
+    assert six.status == "WARN" and "fill 6 +1 in 148 min" in six.evidence
+    five = check_fill_yield(RunData(events=_yield_events(_FILLS_38934, 5)))
+    assert five.status == "PASS"                    # 2.4/h against a 2.6/h median
+    # A stub fill's one-off jump is not the yardstick (median, not best), and a
+    # short fill is not judged.
+    short = [(1, 65, 6), (2, 87, 3), (3, 20, 0)]
+    assert check_fill_yield(RunData(events=_yield_events(short, 3))).status == "PASS"
+    assert check_fill_yield(RunData(events=[])).status == "SKIP"

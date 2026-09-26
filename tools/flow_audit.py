@@ -24,6 +24,17 @@ Checks
   C10 parallel-streams   concurrent llm calls never share a thread name
                          (per-thread stream files would collide); torn
                          events.jsonl lines reported
+  C11 dispatched-routed  a unit the dispatch chose (landed-change audit's
+                         `unattempted`) is held by some run of the same fill;
+                         WARN at 2 consecutive iterations held by none, FAIL
+                         at 3
+  C12 crash-culprits     a crashed test whose site holds crate frames names
+                         culprits; WARN when it is blamed on nobody on 2+
+                         consecutive sweeps
+  C13 fill-yield         the last completed fill's verdict gain per GPU hour
+                         is not below a floor or a quarter of the median of
+                         the three fills before it; WARN (C4 reads the pass
+                         count and calls +1 in 148 minutes "advancing")
 
 Usage:
   python tools/flow_audit.py [--events logs/events.jsonl] [--prompts logs/prompts]

@@ -303,3 +303,39 @@ def test_a_measured_test_is_never_overwritten_and_control_is_unchanged() -> None
     # Negative control: no site, the pre-fix record — the aborted test owns
     # only what the store remembered.
     assert faulting_stack_records((), store, ["t_one"]) == store
+
+
+# ---- what the model is told is decided per fault class ----
+
+
+def test_every_fault_class_has_a_renderer_and_renders() -> None:
+    """A class added to `FaultClass` without a renderer fails here, not in a
+    prompt: the evidence for a crash is never inherited from another class's
+    branch."""
+    from pipeline_core.domain.crash_site import FAULT_RENDERERS
+    raw = [{"func": "crate::a::f", "file": "src/a.rs", "line": 4}]
+    signals = {FaultClass.INVALID_MEMORY: "AddressSanitizer: heap-use-after-free",
+               FaultClass.EXHAUSTION: "AddressSanitizer: stack-overflow",
+               FaultClass.OTHER: "SIGFPE"}
+    for cls in FaultClass:
+        assert cls in FAULT_RENDERERS, f"no renderer for {cls}"
+        site = site_from_frames("tests/t.rs", "t", signals[cls], raw,
+                                origin_capable=True)
+        assert site.fault is cls
+        assert site.render_evidence()
+
+
+def test_a_fault_of_no_memory_class_prints_the_observation_and_no_mechanism() -> None:
+    """Computed 2026-09-26 on a SIGFPE site with one crate frame: the
+    memory-lifetime instruction ("memory that outlived its owner") was printed
+    for a fault that names no invalid access."""
+    raw = [{"func": "crate::a::f", "file": "src/a.rs", "line": 4}]
+    other = site_from_frames("tests/t.rs", "t", "SIGFPE", raw)
+    text = other.render_evidence()
+    assert "crate::a::f" in text and "src/a.rs:4" in text
+    assert "pointer/lifetime" not in text and "outlived" not in text
+    # Negative control: the same frame as an invalid-memory fault keeps the
+    # instruction it was measured for.
+    memory = site_from_frames("tests/t.rs", "t", "SIGSEGV", raw)
+    assert memory.fault is FaultClass.INVALID_MEMORY
+    assert "pointer/lifetime scheme in `f`" in memory.render_evidence()
