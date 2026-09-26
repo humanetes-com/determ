@@ -26,6 +26,7 @@ Pure: records in, admission out. The splice, the judge and the revert are
 the route's (`fill_one_fn`)."""
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -86,6 +87,27 @@ def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
+_LABELLED = re.compile(r"^(?P<name>[^\s\[(]+)\s*[\[(](?P<container>.+?)[\])]$")
+
+
+def _split_label(name: str) -> tuple[str, str]:
+    """``fmt [impl Debug for MyError]`` -> (``fmt``, ``impl Debug for MyError``).
+
+    The pipeline names a unit that way everywhere the model reads it (the
+    session's editable list, the fill log, the route labels, ``JointUnit.label``),
+    so a reply echoes the label into ``name=`` — measured on run
+    `38934-2999cc94` (2026-09-26): `reply widened the write — admitted none,
+    refused [('fmt [impl Debug for MyError]', 'no function of that name in
+    src/nightly.rs')]`, a fn that exists in that file, refused because the
+    whole label was read as its name. The input vocabulary is the output
+    vocabulary; a name that is not a bare identifier is split, never refused
+    for its spelling. A bare name comes back unchanged with no container."""
+    m = _LABELLED.match(name.strip())
+    if m is None:
+        return name.strip(), ""
+    return m.group("name"), m.group("container").strip()
+
+
 def _block_matches(block: str, container: str) -> bool:
     b = _norm(block)
     if not b or b.lower() == FREE_FNS:
@@ -123,6 +145,13 @@ def admit_joint(
         block = str(b.get("block", "") or "")
         body = str(b.get("body", "") or "")
         shown = name + (f" [{block}]" if block else "")
+        if not any(str(r.get("fn_name", "")) == name for r in here):
+            # Only when the literal name resolves to nothing: a fn whose own
+            # name is the identifier keeps the reading it always had, and an
+            # explicit `block=` outranks a container spelled into the name.
+            bare, labelled = _split_label(name)
+            if bare != name:
+                name, block = bare, (block or labelled)
         if not name or not body.strip():
             refused.append((shown or "?", "no name or no body"))
             continue

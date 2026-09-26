@@ -83,9 +83,11 @@ from pipeline_core.domain.crash_site import (
     crash_evidence_by_locator,
     crash_signal_hint,
     destruction_path_subjects,
+    faulting_stack_records,
     origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
+    reader_blamed_locators,
     vanish_is_stub_confounded,
     vanished_subject_fns,
 )
@@ -3288,13 +3290,11 @@ def run_phase_c_tdd(
                 _unattributed_sites = [
                     s for s in _sites if s.origin_unattributed]
                 for _site in _sites:
-                    _blame = (str(_site.blamed_locator)
-                              if _site.blamed_locator is not None
-                              else "NOBODY (origin not attributed in-crate)")
                     deps.log(f"  {tag} [phase-c/crash] {_site.binary_label}"
                              f"::{_site.test_name or '?'} {_site.signal} — "
-                             f"blamed {_blame} "
-                             f"(provenance={_site.provenance})")
+                             f"blamed {_site.blame_label} "
+                             f"(fault={_site.fault.value}, "
+                             f"provenance={_site.provenance})")
                     # Access and origin stacks stay SEPARATE on the event: the
                     # old single `frames` list was access+origin concatenated,
                     # so "origin is empty" was only inferrable by counting, and
@@ -3310,6 +3310,13 @@ def run_phase_c_tdd(
                                           for f in _site.origin_frames],
                         "blamed": (None if _site.blamed is None else
                                    [_site.blamed.file_rel, _site.blamed.fn_name]),
+                        "fault": _site.fault.value,
+                        "culprits": sorted(
+                            f"{c.file}::{c.fn_name}"
+                            for c in _site.culprit_locators),
+                        "cycle": (None if _site.cycle is None else {
+                            "period": len(_site.cycle.frames),
+                            "repeats": _site.cycle.repeats}),
                         "origin_unattributed": _site.origin_unattributed,
                         "provenance": _site.provenance,
                         "raw_report": _site.raw_report})
@@ -3390,11 +3397,16 @@ def run_phase_c_tdd(
                 # alone, so nothing here can convict, crash-block or revert on
                 # an inference. `setdefault` for the same reason: a real frame's
                 # evidence outranks a producer guess about the same fn.
-                if crash_blamed and deps.enumerate_fns is not None:
+                # The READER blame only: a stack exhaustion's cycle is not a
+                # frame that reads a value someone else made, so its members
+                # have no "producer one call away" (their callees are the
+                # other members).
+                _reader_blamed = reader_blamed_locators(_sites)
+                if _reader_blamed and deps.enumerate_fns is not None:
                     _recs = deps.enumerate_fns(target_src_dir) or []
                     _placeholder = read_placeholder_pointer_fault(output)
                     _producers: set[FnLocator] = set()
-                    for _b in sorted(crash_blamed):
+                    for _b in sorted(_reader_blamed):
                         _producers |= callee_subjects(_b, _recs)
                     if _placeholder is not None:
                         # The reading names the fault as a fabricated pointer,
@@ -3404,7 +3416,7 @@ def run_phase_c_tdd(
                         _producers |= placeholder_pointer_subjects(_recs)
                     _producers -= set(crash_texts)
                     _blame_txt = ", ".join(f"{b.file}::{b.fn_name}"
-                                           for b in sorted(crash_blamed))
+                                           for b in sorted(_reader_blamed))
                     for _loc in _producers:
                         crash_texts[_loc] = "\n\n".join(filter(None, (
                             f"A crash was localized to {_blame_txt}, and this "
@@ -3433,7 +3445,7 @@ def run_phase_c_tdd(
                         deps.emit("phase_c.crash.producer_aimed", data={
                             "cluster": cluster.name, "iter": iter_n,
                             "blamed": sorted(f"{b.file}::{b.fn_name}"
-                                             for b in crash_blamed),
+                                             for b in _reader_blamed),
                             "placeholder_pointer": (
                                 None if _placeholder is None else {
                                     "address": _placeholder.address,
@@ -4810,6 +4822,10 @@ def run_phase_c_tdd(
             if _no_owner and deps.recorded_entry_sets is not None:
                 _recorded = dict(deps.recorded_entry_sets(
                     project_dir, _no_owner))
+            # The fns an aborted test's own faulting stack passed through were
+            # executed by it: positive evidence the stand-in record is the
+            # typed slot for (only for a test with no measured owner set).
+            _recorded = faulting_stack_records(_sites, _recorded, _no_owner)
             _cov, _dead_withheld = withhold_unmeasured(_cov, _truncated)
             if _cov.unmeasured_tests:
                 deps.log(

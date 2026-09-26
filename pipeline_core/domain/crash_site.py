@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 
 from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name,
@@ -55,10 +56,60 @@ _MEMORY_FAULT_SIGNALS = (
     "SIGSEGV", "SIGBUS", "SIGILL", "SIGABRT", "ADDRESSSANITIZER")
 
 
-def is_memory_fault_signal(signal: str) -> bool:
-    """Whether ``signal`` names a use-of-invalid-memory class."""
+class FaultClass(Enum):
+    """What a crash report's KIND says about where the defect lives.
+
+    The blame rules differ by class, and one catch-all answered for all of
+    them: `_MEMORY_FAULT_SIGNALS` lists `ADDRESSSANITIZER` because a use-after-
+    free is "in this class by construction", and a stack-overflow report is
+    an AddressSanitizer verdict too. Read as invalid memory, the faulting
+    frames of an unbounded recursion were "routinely an innocent reader", the
+    report's missing origin stack was "unattributed", and the loop blamed
+    NOBODY for 13 of the last 14 failures of run `38934-2999cc94` (2026-09-26,
+    sweeps 5-7) while the report held the whole cycle — 81-123 repeats of two
+    or three in-crate fns — and named the two units that were rewritten
+    around it for three fills and never opened.
+
+    INVALID_MEMORY — the faulting frame reads memory another fn invalidated;
+        the culprit is on an origin stack (freed by / allocated by), and an
+        origin the detector cannot place is unattributed. The reading every
+        rule of this module was written for.
+    EXHAUSTION — a bounded resource ran out in the faulting stack itself
+        (the sanitizer's `stack-overflow`). Nothing was invalidated and no
+        origin stack exists to look for: the faulting stack IS the defect
+        and its repeating in-crate frames are the culprits, jointly.
+    OTHER — a stub's abort, a panic, a signal that names no memory class: the
+        faulting frame is the site.
+
+    The class is read once, from the detector's own kind string, by
+    :func:`fault_class`; every consumer asks the site (`CrashSite.fault`)
+    instead of matching the string again."""
+
+    INVALID_MEMORY = "invalid_memory"
+    EXHAUSTION = "exhaustion"
+    OTHER = "other"
+
+
+#: The sanitizer's kind for unbounded stack use. Not a substring of any memory
+#: class, and checked before the ADDRESSSANITIZER catch-all.
+_EXHAUSTION_SIGNALS = ("STACK-OVERFLOW",)
+
+
+def fault_class(signal: str) -> FaultClass:
+    """The :class:`FaultClass` a report's kind (``signal``) names."""
     up = signal.upper()
-    return any(s in up for s in _MEMORY_FAULT_SIGNALS)
+    if any(s in up for s in _EXHAUSTION_SIGNALS):
+        return FaultClass.EXHAUSTION
+    if any(s in up for s in _MEMORY_FAULT_SIGNALS):
+        return FaultClass.INVALID_MEMORY
+    return FaultClass.OTHER
+
+
+def is_memory_fault_signal(signal: str) -> bool:
+    """Whether ``signal`` names a use-of-invalid-memory class — the class for
+    which the faulting frame is routinely an innocent reader. A stack
+    exhaustion is not one (see :class:`FaultClass`)."""
+    return fault_class(signal) is FaultClass.INVALID_MEMORY
 
 
 # Blame provenance. A frame-derived blame is an OBSERVED fault location — a
@@ -678,6 +729,86 @@ def recover_owner_from_caller_source(
                       named_by=named_by)
 
 
+#: A cycle is a recursion, not a coincidence, when its frames come round this
+#: many times in one stack. Every recorded overflow repeats 80-120 times; a
+#: finite recursion that then hit something else is nowhere near it.
+CYCLE_MIN_REPEATS = 3
+#: The longest cycle looked for. Mutual recursion through a handful of fns is
+#: the shape; a longer period is a search that finds noise.
+CYCLE_MAX_PERIOD = 8
+
+
+@dataclass(frozen=True, slots=True)
+class StackCycle:
+    """The repeating part of a faulting stack: ``frames`` (innermost first, one
+    period) came round ``repeats`` times. Identity is (file, fn), never the
+    line — a recursion may re-enter the same fn from different call sites."""
+
+    frames: tuple[CrashFrame, ...]
+    repeats: int
+
+    @property
+    def members(self) -> tuple[CrashFrame, ...]:
+        """One frame per distinct fn of the period, in stack order."""
+        seen: set[tuple[str, str]] = set()
+        out: list[CrashFrame] = []
+        for f in self.frames:
+            key = (f.file_rel, f.fn_name)
+            if key not in seen:
+                seen.add(key)
+                out.append(f)
+        return tuple(out)
+
+    @property
+    def key(self) -> tuple[tuple[str, str], ...]:
+        """The cycle as a rotation-free identity, so the same recursion seen
+        from two binaries (which may start at different members) compares
+        equal."""
+        ids = [(f.file_rel, f.fn_name) for f in self.frames]
+        return min(tuple(ids[i:] + ids[:i]) for i in range(len(ids)))
+
+
+def repeating_cycle(
+    frames: Sequence[CrashFrame], *,
+    min_repeats: int = CYCLE_MIN_REPEATS,
+    max_period: int = CYCLE_MAX_PERIOD,
+) -> StackCycle | None:
+    """The cycle a faulting stack's in-crate frames repeat, or None.
+
+    ``frames`` are innermost-first, already reduced to authorable crate frames
+    (the std frames a recursion passes through are gone, so a cycle through an
+    iterator adapter or a trait shim is still periodic here). The search is
+    over the shape alone: for each period p and start offset s, count how many
+    times ``frames[s:s+p]`` comes round back to back; the winner covers the
+    most of the stack, the shortest period on a tie. Innermost frames that
+    belong to the fault rather than the loop (an inlined callee the symbolizer
+    labelled with the wrong parent) sit before ``s`` and are not members.
+    Names nothing: two fns, three, or one that calls itself decide alike."""
+    ids = [(f.file_rel, f.fn_name) for f in frames]
+    n = len(ids)
+    best: tuple[int, int, int, int] | None = None     # (coverage, -period, s, repeats)
+    for p in range(1, max_period + 1):
+        for s in range(0, min(n, max_period + 1)):
+            if s + p * min_repeats > n:
+                continue
+            unit = ids[s:s + p]
+            if len(unit) < p:
+                continue
+            r = 1
+            while ids[s + r * p:s + (r + 1) * p] == unit:
+                r += 1
+            if r < min_repeats:
+                continue
+            cand = (r * p, -p, -s, r)
+            if best is None or cand > best:
+                best = cand
+    if best is None:
+        return None
+    _cov, negp, negs, r = best
+    p, s = -negp, -negs
+    return StackCycle(frames=tuple(frames[s:s + p]), repeats=r)
+
+
 def _frame_locus(fr: CrashFrame) -> str:
     """Where a frame is shown in prompt evidence.
 
@@ -849,6 +980,16 @@ class CrashSite:
     chain_blamed: tuple[FnLocator, ...] = ()
     # The tests the chain was derived from, for rendering.
     chain_tests: tuple[str, ...] = ()
+    # EXHAUSTION sites only: the repeating part of the faulting stack, found
+    # from ALL the report's authorable crate frames (`frames` keeps the
+    # innermost few for display, too few to hold a three-member period twice).
+    cycle: StackCycle | None = None
+
+    @property
+    def fault(self) -> FaultClass:
+        """The class of this fault, from the report's own kind — read here once
+        so no rule below matches the signal string again."""
+        return fault_class(self.signal)
 
     @property
     def destruction(self) -> DestructionFault | None:
@@ -894,6 +1035,9 @@ class CrashSite:
         `authorable_frames` — a generated test sibling is an access path, never
         a body the loop can be asked to fix (see that function for the run this
         cost). Blaming nobody is the honest answer there too."""
+        if self.fault is FaultClass.EXHAUSTION:
+            culprits = self.culprit_frames
+            return culprits[0] if culprits else None
         origin = self.culprit_origin_frames
         if origin:
             return origin[0]
@@ -908,6 +1052,38 @@ class CrashSite:
         destructor. See :func:`non_destructor_frames` for why freeing a
         resource never convicts the body that freed it."""
         return prefer_non_destructor(authorable_frames(self.origin_frames))
+
+    @property
+    def culprit_frames(self) -> tuple[CrashFrame, ...]:
+        """The frames whose bodies jointly hold the defect, by fault class.
+
+        EXHAUSTION: the distinct authorable members of the stack's repeating
+        cycle — a recursion is closed by all of them and opened by any one, so
+        the culprit is a SET (empty when the stack held no repeating in-crate
+        frames: an overflow through std alone convicts nobody). Every other
+        class: the single blamed frame, or nothing."""
+        if self.fault is FaultClass.EXHAUSTION:
+            if self.cycle is None:
+                return ()
+            return authorable_frames(self.cycle.members)
+        f = self.blamed
+        return (f,) if f is not None else ()
+
+    @property
+    def culprit_locators(self) -> frozenset[FnLocator]:
+        return frozenset(FnLocator(f.file_rel, f.fn_name)
+                         for f in self.culprit_frames)
+
+    @property
+    def blame_label(self) -> str:
+        """The one-line reading of who is blamed, for logs and events."""
+        culprits = sorted(self.culprit_locators)
+        if culprits:
+            return ", ".join(f"{c.file}::{c.fn_name}" for c in culprits)
+        if self.fault is FaultClass.EXHAUSTION:
+            return ("NOBODY (the stack overflowed with no repeating in-crate "
+                    "frames)")
+        return "NOBODY (origin not attributed in-crate)"
 
     @property
     def origin_unattributed(self) -> bool:
@@ -938,6 +1114,8 @@ class CrashSite:
         model acts on the actual faulting path, not on prose about crashes."""
         if self.provenance == PROVENANCE_CHAIN:
             return self._render_chain_evidence()
+        if self.fault is FaultClass.EXHAUSTION:
+            return render_exhaustion_evidence([self])
         where = f" while running `{self.test_name}`" if self.test_name else ""
         lines = [
             f"Test binary `{self.binary_label}` died with {self.signal}"
@@ -1028,6 +1206,57 @@ class CrashSite:
                 "not):")
             lines.append(self.raw_report)
         return "\n".join(lines)
+
+
+def render_exhaustion_evidence(sites: Sequence[CrashSite]) -> str:
+    """Prompt-ready evidence for stack exhaustion, ONE block for every binary
+    that died of the same stack.
+
+    Sites of the same cycle are one observation seen from several test
+    binaries: run `38934-2999cc94` printed the same paragraph eleven times,
+    once per binary, above frames it then told the reader not to trust. This
+    states what was observed (the cycle, how often it came round, which tests
+    died of it) and what it means — the fns call each other without a base
+    case — and prescribes no body and no lifetime scheme: nothing was freed
+    and nothing outlived its owner."""
+    first = sites[0]
+    tests = sorted({t for s in sites for t in [s.test_name] if t})
+    who = (f"Test(s) {', '.join(f'`{t}`' for t in tests)}" if tests
+           else f"Test binary `{first.binary_label}`")
+    binaries = sorted({s.binary_label for s in sites})
+    lines = [f"{who} died with a STACK OVERFLOW"
+             + (f" ({len(binaries)} test binaries, one stack)"
+                if len(binaries) > 1 else "")
+             + " — the process aborted, so those tests (and any test that "
+               "shares their binary and had not yet reported) have no verdict."]
+    cyc = first.cycle
+    if cyc is None:
+        lines.append(
+            "The faulting stack holds no repeating in-crate frames, so no fn "
+            "of this crate is named as the loop: the recursion, if that is "
+            "what it is, runs through std or dependency code.")
+        if first.frames:
+            lines.append("Innermost crate frames:")
+            lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+                      for i, fr in enumerate(first.frames)]
+        return "\n".join(lines)
+    lines.append(
+        f"The stack is one cycle of {len(cyc.frames)} in-crate call(s), "
+        f"repeated {cyc.repeats}+ times until the stack ran out "
+        "(innermost first):")
+    lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+              for i, fr in enumerate(cyc.frames)]
+    names = ", ".join(f"`{m.fn_name}` ({m.file_rel})" for m in cyc.members)
+    lines.append(
+        f"These fns call each other without a base case ({names}): each body "
+        "reaches the next and the last reaches the first, so the recursion "
+        "never returns for the input these tests give it. This is not a "
+        "memory-lifetime fault — nothing was freed and nothing outlived its "
+        "owner. The cycle is closed by its members together: a body that "
+        "hands its work to the next member without ever computing a result "
+        "keeps it closed, and so does rewriting one member while another "
+        "still calls it back.")
+    return "\n".join(lines)
 
 
 def chain_derived_site(
@@ -1162,6 +1391,12 @@ def site_from_frames(
     """
     origin_raw = origin_raw_frames or []
     origin = _crate_frames(origin_raw, crate_file_prefix, max_frames)
+    cycle: StackCycle | None = None
+    if fault_class(signal or "") is FaultClass.EXHAUSTION:
+        # The whole faulting stack, not the innermost `max_frames`: a period
+        # of three fns needs two periods to be seen as one.
+        cycle = repeating_cycle(authorable_frames(_crate_frames(
+            raw_frames, crate_file_prefix, len(raw_frames) or 1)))
     if source_line or source_window is not None:
         recovered = recover_owner_from_caller_source(
             origin_raw, raw_frames, source_line, named_by=source_loc,
@@ -1174,7 +1409,7 @@ def site_from_frames(
         signal=signal or "fatal signal",
         frames=_crate_frames(raw_frames, crate_file_prefix, max_frames),
         origin_frames=origin,
-        raw_report=raw_report, origin_capable=origin_capable)
+        raw_report=raw_report, origin_capable=origin_capable, cycle=cycle)
 
 
 def asan_stack_excerpt(report: str, *, max_access: int = 24,
@@ -1578,14 +1813,38 @@ def crash_evidence_by_locator(
     the same evidence channel, one grade weaker, and the rendered text says
     so."""
     out: dict[FnLocator, str] = {}
-    for site in sites:
-        text = site.render_evidence()
-        keys = [FnLocator(fr.file_rel, fr.fn_name)
-                for fr in site.all_frames] + list(site.chain_blamed)
+
+    def _put(keys: Iterable[FnLocator], text: str) -> None:
         for key in keys:
             if key in out and text in out[key]:
                 continue
             out[key] = (out[key] + "\n\n" + text) if key in out else text
+
+    # Stack exhaustion is ONE observation however many test binaries died of
+    # it: sites of the same cycle share a single block (the tests they killed
+    # listed in it), instead of one block per binary above the same frames.
+    exhausted: dict[object, list[CrashSite]] = {}
+    for site in sites:
+        if site.fault is FaultClass.EXHAUSTION and site.provenance == PROVENANCE_FRAME:
+            ident = (site.cycle.key if site.cycle is not None
+                     else tuple((f.file_rel, f.fn_name) for f in site.frames))
+            exhausted.setdefault(ident, []).append(site)
+            continue
+        _put([FnLocator(fr.file_rel, fr.fn_name) for fr in site.all_frames]
+             + list(site.chain_blamed), site.render_evidence())
+    for group in exhausted.values():
+        # The cycle's members carry the evidence, not every frame: the
+        # innermost frames of an overflow are wherever the stack ran out — on
+        # the recorded report an inlined callee the symbolizer labelled with
+        # the wrong parent (`backtrace.rs:10` under `Boxed::new`) — and keying
+        # them ranked an unrelated unit as crash evidence. An overflow with no
+        # repeating crate frame has no cycle to key and falls back to the
+        # frames it has.
+        keys = {loc for site in group for loc in site.culprit_locators}
+        if not keys:
+            keys = {FnLocator(fr.file_rel, fr.fn_name)
+                    for site in group for fr in site.all_frames}
+        _put(sorted(keys), render_exhaustion_evidence(group))
     return out
 
 
@@ -1602,10 +1861,71 @@ def origin_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]
     construction; a non-None locator here is always frame-derived, with
     no need to re-check `provenance`."""
     return frozenset(
-        loc for s in sites if (loc := s.blamed_locator) is not None)
+        loc for s in sites
+        if s.fault is not FaultClass.EXHAUSTION
+        and (loc := s.blamed_locator) is not None)
+
+
+def faulting_stack_records(
+    sites: tuple[CrashSite, ...],
+    recorded: Mapping[str, frozenset[FnLocator]],
+    unowned: Collection[str],
+) -> dict[str, frozenset[FnLocator]]:
+    """``recorded`` with, for each unowned test a site was in flight for, the
+    fns of that site's faulting stack.
+
+    A test whose binary aborted has no measured executed set, and the fns its
+    own faulting stack passed through were executed by it by definition —
+    observed, not inferred. Without them an aborted test owns nothing, so a
+    session planned for it lists none of the fns the crash names as executed
+    (`unmeasured (binary did not complete)` on 13 of 14 failures of run
+    `38934-2999cc94`) and the ranking has no positive evidence for them.
+    ``recorded`` is the store's record of what the test entered when it last
+    ran; the stack is unioned into it, and only for a test with no measured
+    owner set (``unowned``): a measurement is never overwritten. Positive
+    evidence only — it names what ran, never what did not. One in-flight
+    test per binary has a stack; its siblings that never got to run have
+    none and stay unowned. Every fault class contributes: the access stack of
+    a use-after-free was executed too."""
+    bare_unowned = {t.rsplit("::", 1)[-1] for t in unowned}
+    out = {t: frozenset(v) for t, v in recorded.items()}
+    for site in sites:
+        test = (site.test_name or "").rsplit("::", 1)[-1]
+        if (site.provenance != PROVENANCE_FRAME or not test
+                or test not in bare_unowned):
+            continue
+        locs = {FnLocator(f.file_rel, f.fn_name)
+                for f in authorable_frames(site.frames)} | set(
+                    site.culprit_locators)
+        if locs:
+            out[test] = frozenset(out.get(test, frozenset()) | locs)
+    return out
+
+
+def exhaustion_culprit_locators(
+    sites: tuple[CrashSite, ...],
+) -> frozenset[FnLocator]:
+    """Every fn of every stack-exhaustion cycle: the joint culprit set.
+
+    Kept out of :func:`origin_blamed_locators` on purpose. The layout
+    retrigger's filled-body gate and OWNS grade read OBSERVED ORIGIN blame —
+    a type whose construction wrote invalid memory — and a recursion between
+    two bodies is not a type re-author; feeding it there would aim a layout
+    walk at a call cycle."""
+    return frozenset(loc for s in sites
+                     if s.fault is FaultClass.EXHAUSTION
+                     for loc in s.culprit_locators)
 
 
 def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
+    """Everything a sweep's crash sites convict: the origin blame with its
+    family (:func:`reader_blamed_locators`) plus the cycle of every stack
+    exhaustion (:func:`exhaustion_culprit_locators`). The set the refill
+    stamp, the schedule and the dispatch grade read."""
+    return reader_blamed_locators(sites) | exhaustion_culprit_locators(sites)
+
+
+def reader_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     """The ORIGIN blame, widened to the whole :data:`CONVERSION_FAMILY` at a
     site's file whenever the origin is a family member — built on
     :func:`origin_blamed_locators`, which is one locator per site, where the

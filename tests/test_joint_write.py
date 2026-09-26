@@ -95,6 +95,38 @@ def test_the_target_another_file_a_compiled_out_fn_and_the_cap_are_refused() -> 
     assert "`other`" in adm.refusal_note()
 
 
+def test_a_unit_named_the_way_the_pipeline_labels_it_is_admitted() -> None:
+    """Run `38934-2999cc94` (2026-09-26): the reply wrote `name="fmt [impl Debug
+    for MyError]"`, the label every prompt and log line uses for that unit, and
+    the whole label was refused as `no function of that name`. Both spellings
+    the pipeline prints (`name [container]`, `name (container)`) resolve."""
+    for label in ("fmt [impl Display for Gauge]", "fmt (impl Display for Gauge)"):
+        adm = _admit(_block(label))
+        assert [(u.fn_name, u.container) for u in adm.admitted] == [
+            ("fmt", "impl Display for Gauge")], label
+        assert not adm.refused
+    # A bare name that is a real fn keeps its reading; an explicit block wins
+    # over a container spelled into the name; a label that names no impl of
+    # the file is refused by the ordinary ambiguity rule, never guessed.
+    assert [u.fn_name for u in _admit(_block("triple")).admitted] == ["triple"]
+    won = _admit(_block("fmt [impl Debug for Gauge]", "impl Display for Gauge"))
+    assert [u.container for u in won.admitted] == ["impl Display for Gauge"]
+    unknown = _admit(_block("fmt [impl Debug for Nothing]"))
+    assert not unknown.admitted and "ambiguous" in dict(unknown.refused)[
+        "fmt [impl Debug for Nothing]"]
+
+
+def test_negative_control_the_label_read_as_a_bare_name_is_refused(
+        monkeypatch: Any) -> None:
+    from pipeline_core.domain import joint_write
+    monkeypatch.setattr(joint_write, "_split_label",
+                        lambda name: (name.strip(), ""))
+    adm = _admit(_block("fmt [impl Display for Gauge]"))
+    assert not adm.admitted
+    assert "no function of that name" in dict(adm.refused)[
+        "fmt [impl Display for Gauge]"]
+
+
 # ---- the unit writes, keeps and reverts the set as one ----
 
 

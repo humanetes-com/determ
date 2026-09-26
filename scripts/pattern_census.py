@@ -330,6 +330,19 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      the pairs opened in none of six fills. Reaction: `claim on partly
      moved ground stands` (a claim now stands on its unmoved tests).
 
+  P43 stack overflow blamed nobody — the crash localizer logged
+     `AddressSanitizer: stack-overflow — blamed NOBODY (origin not
+     attributed in-crate)` for a binary, at least twice. The report of an
+     unbounded recursion holds the whole cycle in its faulting stack, and
+     the pre-fix localizer read every sanitizer verdict as invalid memory,
+     so the missing origin stack was "unattributed" and the cycle's fns were
+     refill targets of no route. Run `38934-2999cc94` (2026-09-26): 36
+     lines, 13 of the last 14 failures, the two units of a two-fn cycle
+     `no route attempted` after two fills. Other unattributed kinds
+     (use-after-free with an origin outside the crate) are NOT this class:
+     the split is the report kind. Reaction: `fault=exhaustion` on the
+     `[phase-c/crash]` line and the culprit fns named instead of NOBODY.
+
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
 (nothing new dispatched); or `ARMED iter a` — the run's last dispatching
@@ -668,6 +681,10 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P42": [
         # A claim with planned tests left unmoved stands on them.
         ("claim on partly moved ground stands", "ground-left"),
+    ],
+    "P43": [
+        # A stack overflow's cycle was read as the culprit set.
+        ("fault=exhaustion", "cycle-culprits"),
     ],
     "P36": [],
     "P38": [],
@@ -2945,6 +2962,24 @@ def detect_p42(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [run.start_ref]}]
 
 
+RE_EXHAUSTION_NOBODY = re.compile(
+    r"AddressSanitizer: stack-overflow — blamed NOBODY "
+    r"\(origin not attributed in-crate\)")
+
+
+def detect_p43(run: Run, iters: list[dict]) -> list[dict]:
+    """Stack-overflow reports the localizer blamed nobody for (the pre-fix
+    reading). One hit per run, counting the lines; a single line is not a
+    class (one binary, one sweep)."""
+    refs = [ref for ref, _ in run.find(RE_EXHAUSTION_NOBODY)]
+    if len(refs) < 2:
+        return []
+    return [{"evidence": f"{len(refs)} stack-overflow report(s) blamed "
+                         "NOBODY — the faulting stack's repeating in-crate "
+                         "frames were never read as the culprit",
+             "refs": refs[:4]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2963,7 +2998,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P31": detect_p31, "P32": detect_p32, "P33": detect_p33,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
              "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
-             "P40": detect_p40, "P41": detect_p41, "P42": detect_p42}
+             "P40": detect_p40, "P41": detect_p41, "P42": detect_p42,
+             "P43": detect_p43}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3001,7 +3037,8 @@ CLASS_NAMES = {
     "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)",
     "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)",
     "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)",
-    "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)"}
+    "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)",
+    "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 
 # -------------------------------------------------------------------- report
