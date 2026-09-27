@@ -357,6 +357,14 @@ class RouteLedgerRow:
     #: Empty on every row written before 2026-09-25 and on every run whose
     #: replies named none.
     joint_sets: tuple[tuple[tuple[str, str], ...], ...] = ()
+    #: The units the run actually OPENED (its per-run attempt delta:
+    #: dispatched, kept or reverted). ``targets`` is fixed when the schedule
+    #: plans the run; the route's own planners (the refill collector, the
+    #: stale probe, the landed-this-fill withholding) drop units after that,
+    #: so a target the run never opened is a unit filtered inside the run.
+    #: None on every row written before 2026-09-27: not recorded, which is
+    #: not the same claim as "opened nothing".
+    opened: tuple[tuple[str, str], ...] | None = None
 
     @property
     def identity(self) -> str:
@@ -386,6 +394,8 @@ class RouteLedgerRow:
                             if self.newly_green is not None else None),
             "collateral": [list(t) for t in self.collateral],
             "joint_sets": [[list(t) for t in js] for js in self.joint_sets],
+            "opened": ([list(t) for t in self.opened]
+                       if self.opened is not None else None),
         }
 
     @classmethod
@@ -425,6 +435,8 @@ class RouteLedgerRow:
             joint_sets=tuple(
                 tuple((str(a), str(b)) for a, b in js)
                 for js in raw.get("joint_sets") or () if js),
+            opened=(_pairs("opened") if isinstance(raw.get("opened"), list)
+                    else None),
         )
 
     def to_json(self) -> str:

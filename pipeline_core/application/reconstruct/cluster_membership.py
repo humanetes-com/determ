@@ -36,6 +36,7 @@ from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.refill_stamp import (
     convicting_tests_for_member,
     homonym_containers,
+    refill_admission,
     stamp_reads_dispatch,
 )
 from pipeline_core.domain.rust_lex import code_mask
@@ -362,7 +363,8 @@ def collect_impl_refill_targets(
             m for m in b.members
             if (loc := FnLocator(b.file, m.fn_name)) in tdd_frontier_keys
             and loc not in stub_keys
-            and (tdd_frontier_tests.tests_for(loc) or loc in crashed)
+            and refill_admission(tdd_frontier_tests.tests_for(loc),
+                                 crash_blamed=loc in crashed) is not None
         )
         probe = dataclasses.replace(b, refill_members=dispatched)
         covers = impl_route_covers(probe, max_stubs=max_stubs)
@@ -371,10 +373,12 @@ def collect_impl_refill_targets(
         else:
             refill = tuple(
                 m for m in dispatched
-                if convicting_tests_for_member(
-                    tdd_frontier_tests, b.file, m.fn_name, b.container,
-                    homs.get((b.file, m.fn_name), (b.container,)))
-                or FnLocator(b.file, m.fn_name) in crashed
+                if refill_admission(
+                    convicting_tests_for_member(
+                        tdd_frontier_tests, b.file, m.fn_name, b.container,
+                        homs.get((b.file, m.fn_name), (b.container,))),
+                    crash_blamed=FnLocator(b.file, m.fn_name) in crashed)
+                is not None
             )
         out.append(dataclasses.replace(b, refill_members=refill) if refill else b)
     return out

@@ -344,3 +344,47 @@ def test_lib_compile_clean_is_false_without_evidence():
     assert not lib_compile_clean("")
     assert not lib_compile_clean("error: linking with `cc` failed: exit status: 1")
     assert not lib_compile_clean("test result: FAILED. 3 passed; 2 failed")
+
+
+_TRYBUILD_AFTER_OPEN = (
+    "tests/fixtures/crash/asan_trybuild_stderr_after_open_section_12616.txt")
+
+
+def _read_trybuild_fixture() -> str:
+    from pathlib import Path
+    return (Path(__file__).parent.parent / _TRYBUILD_AFTER_OPEN).read_text(
+        encoding="utf-8", errors="replace")
+
+
+def test_a_foreign_coloured_test_line_does_not_replace_the_in_flight_test():
+    # Recorded sanitized sweep of run `12616-8345ae1d` (2026-09-27): the last
+    # stdout section printed its in-flight test and aborted; trybuild's
+    # ANSI-coloured progress lines arrive later on stderr.
+    from pipeline_core.domain.test_results import parse_binary_results
+    by_label = {b.label: b for b in parse_binary_results(_read_trybuild_fixture())}
+    crashed = by_label["tests/wrapper_gen_6.rs"]
+    assert not crashed.completed
+    assert crashed.dangling == "test_boxed_error_debug_via_as_ref"
+    assert not any("\x1b" in n for b in by_label.values()
+                   for n in b.passed | b.failed)
+
+
+def test_the_foreign_line_reading_is_the_phantom_name(monkeypatch):
+    # Negative control: the same capture, read without the name rule, names
+    # the crashed binary's in-flight test after a trybuild UI case.
+    from pipeline_core.domain import test_results
+    monkeypatch.setattr(test_results, "_has_control", lambda _t: False)
+    by_label = {b.label: b for b in
+                test_results.parse_binary_results(_read_trybuild_fixture())}
+    assert "temporary-value.rs" in (by_label["tests/wrapper_gen_6.rs"].dangling
+                                    or "")
+
+
+def test_a_coloured_libtest_verdict_still_parses():
+    # libtest colours the verdict slot, never the name: that line stays a
+    # test line with its name intact.
+    from pipeline_core.domain.test_results import parse_binary_results
+    out = ("running 1 test\n"
+           "test foo::bar ... \x1b[32mok\x1b[0m\n")
+    (b,) = parse_binary_results(out)
+    assert b.dangling == "foo::bar"

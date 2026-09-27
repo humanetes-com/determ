@@ -89,11 +89,16 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.pass_payoff import assess_fill_results, combine_payoffs
 from pipeline_core.domain.refill_stamp import (
     convicting_tests_for_member,
+    refill_admission,
     stamp_reads_dispatch,
 )
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_outcome import PremiseEntry
-from pipeline_core.domain.test_results import parse_failed_tests, still_open_names
+from pipeline_core.domain.test_results import (
+    parse_binary_results,
+    parse_failed_tests,
+    still_open_names,
+)
 from pipeline_core.ports.fill_engine import (
     Cargo,
     EngineTelemetry,
@@ -230,7 +235,8 @@ class PhaseCFillEngine:
                 m for m in members
                 if (loc := FnLocator(m.file, m.fn_name)) not in _stub_keys
                 and loc in tdd_frontier_keys
-                and (tdd_frontier_tests.tests_for(loc) or loc in crashed))
+                and refill_admission(tdd_frontier_tests.tests_for(loc),
+                                     crash_blamed=loc in crashed) is not None)
             probe = ImplBlock(
                 file=file, container=container, members=members,
                 stub_members=stub_m, refill_members=dispatched)
@@ -252,7 +258,7 @@ class PhaseCFillEngine:
                 tests = set(convicting_tests_for_member(
                     tdd_frontier_tests, rec.file, rec.fn_name, rec.container,
                     containers_by_key.get(rec.key, [rec.container])))
-            if not tests and rec.key not in crashed:
+            if refill_admission(tests, crash_blamed=rec.key in crashed) is None:
                 continue
             out.append(replace(rec, refill=True))
             _seen.add(ident)
@@ -738,20 +744,36 @@ class PhaseCFillEngine:
                 # `object_downcast` while `test_large_alignment` was still
                 # dangling. `still_open_names` is that third cargo outcome.
                 _still_open = still_open_names(_out_probe)
+                # The collector admitted on failing tests OR crash blame; the
+                # probe re-asks the same question of its own reading. Blame
+                # holds while the probe still has a binary that did not
+                # complete — the crash the localizer read.
+                _crash_now = any(not b.completed
+                                 for b in parse_binary_results(_out_probe))
+                _blamed = crash_blamed or frozenset()
                 _fresh_recs = [
                     r for r in _refill_recs
-                    if tdd_frontier_tests.tests_for(r.key) & _still_open]
+                    if refill_admission(
+                        tdd_frontier_tests.tests_for(r.key) & _still_open,
+                        crash_blamed=_crash_now and r.key in _blamed)
+                    is not None]
                 _stale = [r for r in _refill_recs if r not in _fresh_recs]
                 if _stale:
+                    _was_blamed = sorted(f"{r.file}::{r.fn_name}"
+                                         for r in _stale if r.key in _blamed)
                     self.tel.log(
                         f"  [phase-c/per-fn] {len(_stale)} re-fill target(s) "
-                        "dropped — their attributed test(s) already pass "
-                        "after this call's earlier fills: " + ", ".join(
-                            sorted(f"{r.file}::{r.fn_name}" for r in _stale)))
+                        "dropped — no attributed test still open and no crash "
+                        "still observed after this call's earlier fills: "
+                        + ", ".join(sorted(f"{r.file}::{r.fn_name}"
+                                           for r in _stale))
+                        + (f" (crash-blamed, crash gone: {', '.join(_was_blamed)})"
+                           if _was_blamed else ""))
                     self.tel.emit("phase_c.refill.stale_dropped", data={
                         "cluster": cluster_name,
                         "targets": sorted(f"{r.file}::{r.fn_name}"
-                                          for r in _stale)})
+                                          for r in _stale),
+                        "crash_blamed": _was_blamed})
                     _refill_recs = _fresh_recs
             if not stubs and not _refill_recs:
                 break

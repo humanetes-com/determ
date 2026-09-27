@@ -1,0 +1,24 @@
+
+
+running 1 test
+test ui ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+
+running 3 tests
+test test_boxed_error_debug_via_as_ref ... 
+   Compiling anyhow v1.0.104 (/home/user/determ/tmp/anyhow/.skeleton-filled/stable)
+     Running tests/compiletest.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/compiletest-19782b821ad8c479)
+[0m[31m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0mnote: If the [0m[31mactual output[0m is the correct output you can bless it by rerunning
+      your test with the environment variable TRYBUILD=overwrite
+
+test [0m[1mtests/ui/temporary-value.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/wrong-interpolation.rs[0m ... [0m[32mok
+[0m
+
+error: test failed, to rerun pass `--test compiletest`
+     Running tests/wrapper_gen_6.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/wrapper_gen_6-8cd1b1908d56e7ad)
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==21483==ERROR: AddressSanitizer: stack-overflow on address 0x7b30fd3fffc8 (pc 0x560539a30a46 bp 0x7b30fd400810 sp 0x7b30fd3fffd0 T1)

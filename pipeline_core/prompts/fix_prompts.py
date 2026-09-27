@@ -22,6 +22,7 @@ from pipeline_core.domain.construction_recipe import (
 )
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import (
+    CRASH_EVIDENCE_LEAD,
     family_members_beside_a_crashed_conversion,
     ownership_transfer_must,
 )
@@ -575,12 +576,15 @@ def build_file_fill_prompt(
             "consistent.\n")
     else:
         error_part = ""
-    crash_part = (f"\n<CRASH_EVIDENCE>\nA test binary CRASHED at runtime inside "
-                  f"this file:\n{crash_evidence}\nAn already-written body in the "
-                  "file above uses a scheme that is UNSOUND — do NOT copy that "
-                  "pattern into the bodies you write, and if a stub you are "
-                  "filling participates in the same scheme, implement it the "
-                  "sound way.\n</CRASH_EVIDENCE>\n"
+    # The builder frames the evidence and asserts nothing about it: what the
+    # crash MEANS is decided per fault class by the renderer that wrote
+    # `crash_evidence` (`crash_site.FAULT_RENDERERS`). A tail here saying "an
+    # already-written body uses an UNSOUND scheme" was printed under every
+    # class — live on run `12616-8345ae1d` (2026-09-27, prompt `4d49ac47…`)
+    # right after a stack-overflow block that said "this is not a
+    # memory-lifetime fault".
+    crash_part = (f"\n<CRASH_EVIDENCE>\n{CRASH_EVIDENCE_LEAD}"
+                  f"{crash_evidence}\n</CRASH_EVIDENCE>\n"
                   if crash_evidence.strip() else "")
     gotchas_part = (f"\n<RUST_GOTCHAS>\n{gotchas}\n</RUST_GOTCHAS>\n"
                     if gotchas.strip() else "")

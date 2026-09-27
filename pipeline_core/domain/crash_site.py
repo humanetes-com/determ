@@ -22,7 +22,8 @@ from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name,
     parse_gen_tests_integration_filename,
 )
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
 
 @dataclass(frozen=True, slots=True)
@@ -1154,7 +1155,23 @@ class CrashSite:
                 "WHAT was freed and dropped, which the crate code alone does "
                 "not):")
             lines.append(self.raw_report)
+        lines.append(_UNSOUND_SCHEME_ALREADY_WRITTEN)
         return "\n".join(lines)
+
+
+#: How a builder introduces the rendered evidence of a crash inside the file
+#: it shows: an observation, no mechanism. What the crash means belongs to the
+#: fault class's renderer below.
+CRASH_EVIDENCE_LEAD = "A test binary CRASHED at runtime inside this file:\n"
+
+#: The invalid-memory instruction about the bodies already on disk. It used to
+#: be appended by the file-first builder to every crash block whatever its
+#: class; it is this class's claim — memory that outlived its owner is a
+#: scheme, and a scheme spreads by imitation — and no other class makes it.
+_UNSOUND_SCHEME_ALREADY_WRITTEN = (
+    "An already-written body in the file above uses a scheme that is UNSOUND "
+    "— do NOT copy that pattern into the bodies you write, and if a stub you "
+    "are filling participates in the same scheme, implement it the sound way.")
 
 
 def _render_invalid_memory(site: CrashSite) -> str:
@@ -1216,6 +1233,7 @@ def _render_invalid_memory(site: CrashSite) -> str:
             "may rewrite — so this crash names no fn to change. Treat the "
             "frames as the access path only: the defect is in whatever "
             "crate code produced the memory those tests touch.")
+    lines.append(_UNSOUND_SCHEME_ALREADY_WRITTEN)
     return "\n".join(lines)
 
 
@@ -1952,6 +1970,86 @@ def faulting_stack_records(
         if locs:
             out[test] = frozenset(out.get(test, frozenset()) | locs)
     return out
+
+
+def frame_site(
+    frame: CrashFrame,
+    records: Sequence[FnRecord],
+    file_text: Callable[[str], str | None],
+) -> FnSite | None:
+    """The one declared fn a frame's ``(file, line)`` lies inside, with its
+    container — or None.
+
+    A frame names a body by LOCATION; ``(file, fn_name)`` names every body
+    that shares the identifier. `src/kind.rs::new` is three bodies (three
+    impl blocks) on the anyhow tree, so the session's recorded-site join,
+    which keeps a locator only when it names exactly one container, dropped
+    the stack-overflow cycle's `new [impl Boxed]` from every session planned
+    for the aborted tests (run `12616-8345ae1d`, 2026-09-27: the slices held
+    `from_boxed` and neither cycle member). The frame's line is inside exactly
+    one record's ``sig_byte_start..body_byte_end`` span; the narrowest one
+    wins for a nested fn. Language-free: byte spans the extractor already
+    records, no impl parsing. A frame whose located record does not carry the
+    frame's own fn name is an inlined or macro-expanded frame the symbolizer
+    labelled from elsewhere (the recorded overflow's innermost `Boxed::new`
+    at `src/backtrace.rs:10`) and resolves to nothing rather than to a body
+    the stack never named."""
+    if frame.line <= 0:
+        return None
+    text = file_text(frame.file_rel)
+    if text is None:
+        return None
+    raw = text.encode("utf-8")
+    offset = 0
+    for _ in range(frame.line - 1):
+        nl = raw.find(b"\n", offset)
+        if nl < 0:
+            return None
+        offset = nl + 1
+    end = raw.find(b"\n", offset)
+    line_end = len(raw) if end < 0 else end
+    want = norm_src_rel(frame.file_rel)
+    best: FnRecord | None = None
+    for r in records:
+        if norm_src_rel(r.file) != want or r.body_byte_end <= 0:
+            continue
+        if r.sig_byte_start <= line_end and offset <= r.body_byte_end:
+            if best is None or (r.body_byte_end - r.sig_byte_start
+                                < best.body_byte_end - best.sig_byte_start):
+                best = r
+    if best is None or best.fn_name != frame.fn_name:
+        return None
+    return FnSite(frame.file_rel, best.fn_name, best.container)
+
+
+def faulting_stack_sites(
+    sites: tuple[CrashSite, ...],
+    unowned: Collection[str],
+    records: Sequence[FnRecord],
+    file_text: Callable[[str], str | None],
+) -> dict[str, frozenset[FnSite]]:
+    """For each unowned test a site was in flight for, the declared bodies of
+    its faulting stack — :func:`faulting_stack_records` resolved to sites by
+    :func:`frame_site`, so a homonym is the ONE body the stack ran, not every
+    body of that name and not none of them. This is what makes a joint defect
+    writable in one transaction: a recursion's members sit in different files
+    (`construct_from_boxed` in `src/error.rs`, `new [impl Boxed]` in
+    `src/kind.rs`), the file and per-fn routes write one file, and the slice
+    session — the route whose editable set spans files — lists what its tests
+    executed. Positive evidence only, and only for tests with no measured
+    owner set, exactly as the locator record."""
+    bare_unowned = {t.rsplit("::", 1)[-1] for t in unowned}
+    out: dict[str, set[FnSite]] = {}
+    for site in sites:
+        test = (site.test_name or "").rsplit("::", 1)[-1]
+        if (site.provenance != PROVENANCE_FRAME or not test
+                or test not in bare_unowned):
+            continue
+        for fr in (*authorable_frames(site.frames), *site.culprit_frames):
+            resolved = frame_site(fr, records, file_text)
+            if resolved is not None:
+                out.setdefault(test, set()).add(resolved)
+    return {t: frozenset(v) for t, v in out.items()}
 
 
 def exhaustion_culprit_locators(

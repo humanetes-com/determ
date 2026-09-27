@@ -84,6 +84,7 @@ from pipeline_core.domain.crash_site import (
     crash_signal_hint,
     destruction_path_subjects,
     faulting_stack_records,
+    faulting_stack_sites,
     origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
@@ -174,6 +175,7 @@ from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
     FnLocator,
+    FnRecord,
     FnSite,
     Frontier,
     SiteFrontier,
@@ -520,6 +522,20 @@ class SweepReading(NamedTuple):
     failed: set[str]
     oracle: SweepOracle
     passing: frozenset[str]
+
+
+def _read_cluster_file(target_src_dir: Path, rel: str) -> str | None:
+    """A crash frame's file (``src/x.rs``, cluster-root relative) as text, or
+    None. Frames and records disagree on the ``src/`` prefix, so both roots
+    are tried."""
+    for base in (target_src_dir.parent, target_src_dir):
+        p = base / rel
+        try:
+            if p.is_file():
+                return p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+    return None
 
 
 def _log_attribution_gap(
@@ -4813,6 +4829,7 @@ def run_phase_c_tdd(
         # `_owners_positive` is taken before the withholding, and the record
         # of what a crashed test entered when it last ran stands in for it.
         _recorded: dict[str, frozenset[FnLocator]] = {}
+        _stack_sites: dict[str, frozenset[FnSite]] = {}
         _owners_positive: dict[str, frozenset[FnSite]] = (
             dict(_cov.owners) if _cov is not None else {})
         if _cov is not None:
@@ -4827,6 +4844,15 @@ def run_phase_c_tdd(
             # executed by it: positive evidence the stand-in record is the
             # typed slot for (only for a test with no measured owner set).
             _recorded = faulting_stack_records(_sites, _recorded, _no_owner)
+            # The same stacks resolved to the bodies they ran (span of the
+            # frame's line), for the session's editable set: a locator record
+            # of a homonym reaches ranking and never a session.
+            if (_sites and _no_owner and deps.enumerate_fns is not None):
+                _stack_sites = faulting_stack_sites(
+                    _sites, _no_owner,
+                    [FnRecord.from_dict(r)
+                     for r in deps.enumerate_fns(target_src_dir) or []],
+                    lambda rel: _read_cluster_file(target_src_dir, rel))
             _cov, _dead_withheld = withhold_unmeasured(_cov, _truncated)
             if _cov.unmeasured_tests:
                 deps.log(
@@ -4859,6 +4885,9 @@ def run_phase_c_tdd(
         _owners_read.update(_recorded_rank)
         _recorded_sites = recorded_locator_sites(
             _recorded_failing, _attr.site_frontier)
+        for _t, _ks in _stack_sites.items():
+            if _t in _recorded_failing:
+                _recorded_sites[_t] = _recorded_sites.get(_t, frozenset()) | _ks
         # The owner map decided a refusal and reached no record: nothing in
         # `events.jsonl` carried it, so every later argument about whether a
         # demotion was right had to re-measure the tree to find out what the

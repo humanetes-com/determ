@@ -147,7 +147,10 @@ def test_file_fill_prompt_carries_crash_evidence() -> None:
         **kw, crash_evidence="stack-use-after-return in construct_from_std")
     assert "<CRASH_EVIDENCE>" in with_ev
     assert "construct_from_std" in with_ev
-    assert "do NOT copy that pattern" in with_ev
+    # The builder frames the evidence and asserts no mechanism of its own:
+    # the "do not copy that scheme" instruction is the invalid-memory
+    # renderer's, and a raw string carries none.
+    assert "do NOT copy that pattern" not in with_ev
 
 
 def test_vanish_is_stub_confounded() -> None:

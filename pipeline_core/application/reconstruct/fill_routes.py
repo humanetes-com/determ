@@ -94,6 +94,19 @@ class RouteRunReport:
     #: extras it wrote with it; `domain.joint_write`). Recorded on the
     #: ledger row so a later schedule keeps each named set whole.
     joint_sets: tuple[tuple[FnLocator, ...], ...] = ()
+    #: The units the run held open for writing, when that is not what it
+    #: dispatched: a session has its whole slice editable and in view and
+    #: reports only the units it wrote. None reads as the attempt delta
+    #: (`opened_units`).
+    opened: frozenset[FnLocator] | None = None
+
+    @property
+    def opened_units(self) -> frozenset[FnLocator]:
+        """What the run actually opened, for the ledger row: a target outside
+        it was dropped inside the run by the route's own planners."""
+        if self.opened is not None:
+            return self.opened
+        return self.dispatched | self.kept | self.reverted
 
     @classmethod
     def from_delta(cls, delta: AttemptsDelta,

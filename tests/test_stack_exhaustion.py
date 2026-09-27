@@ -339,3 +339,159 @@ def test_a_fault_of_no_memory_class_prints_the_observation_and_no_mechanism() ->
     memory = site_from_frames("tests/t.rs", "t", "SIGSEGV", raw)
     assert memory.fault is FaultClass.INVALID_MEMORY
     assert "pointer/lifetime scheme in `f`" in memory.render_evidence()
+
+
+def _file_prompt_crash_block(evidence: str) -> str:
+    from pipeline_core.prompts.fix_prompts import BlockFillPlan, build_file_fill_prompt
+    prompt = build_file_fill_prompt(
+        file_rel="src/error.rs", file_text="fn a() {}",
+        fill_plan=[BlockFillPlan("impl Error", ("construct_from_boxed",))],
+        tests_block="", blueprint="", notes="", crash_evidence=evidence)
+    return prompt.split("<CRASH_EVIDENCE>\n", 1)[1].split(
+        "\n</CRASH_EVIDENCE>", 1)[0]
+
+
+def test_the_file_prompt_says_about_a_crash_only_what_its_class_renderer_says() -> None:
+    """Live on run `12616-8345ae1d` (2026-09-27, prompt `4d49ac47…`): the
+    file-first builder appended "an already-written body … uses a scheme that
+    is UNSOUND" after the stack-overflow block that says "this is not a
+    memory-lifetime fault". The block the builder sends is the class's
+    rendering behind an observation lead, for every class."""
+    from pipeline_core.domain.crash_site import CRASH_EVIDENCE_LEAD
+    raw = [{"func": "crate::a::f", "file": "src/a.rs", "line": 4}]
+    signals = {FaultClass.INVALID_MEMORY: "AddressSanitizer: heap-use-after-free",
+               FaultClass.EXHAUSTION: "AddressSanitizer: stack-overflow",
+               FaultClass.OTHER: "SIGFPE"}
+    for cls in FaultClass:
+        text = site_from_frames("tests/t.rs", "t", signals[cls], raw,
+                                origin_capable=True).render_evidence()
+        assert _file_prompt_crash_block(text) == CRASH_EVIDENCE_LEAD + text, cls
+        assert ("UNSOUND" in text) is (cls is FaultClass.INVALID_MEMORY), cls
+
+
+def test_the_recorded_cycle_reaches_the_file_prompt_without_a_memory_claim() -> None:
+    sites = _sites(_TWO, _BINARIES)
+    evidence = crash_evidence_by_locator(sites)[_LOC_CFB]
+    block = _file_prompt_crash_block(evidence)
+    assert "without a base case" in block
+    assert "UNSOUND" not in block and "pointer/lifetime" not in block
+    # Negative control: an invalid-memory site keeps the instruction it was
+    # measured for, now from its renderer rather than from the builder.
+    raw = [{"func": "crate::a::f", "file": "src/a.rs", "line": 4}]
+    memory = site_from_frames("tests/t.rs", "t", "SIGSEGV", raw).render_evidence()
+    assert _file_prompt_crash_block(memory).count("UNSOUND") == 1
+
+
+# ---- a frame resolves to the ONE body its line lies in ----
+
+_THREE_NEWS = """struct A;
+struct B;
+struct C;
+impl A {
+    fn new() -> A { A }
+}
+impl B {
+    fn new() -> B {
+        ring_other()
+    }
+}
+impl C {
+    fn new() -> C { C }
+}
+fn ring_other() -> B {
+    B::new()
+}
+"""
+
+
+def _records_of(text: str, file: str):
+    """Byte-span records of the invented file above, as the extractor emits
+    them (signature start through the closing brace)."""
+    from pipeline_core.domain.models import FnRecord
+    out = []
+    raw = text.encode()
+    containers = {5: "impl A", 8: "impl B", 13: "impl C", 15: ""}
+    lines = text.splitlines(keepends=True)
+    starts = [0]
+    for ln in lines:
+        starts.append(starts[-1] + len(ln.encode()))
+    for line_no, cont in containers.items():
+        sig = starts[line_no - 1] + lines[line_no - 1].index("fn ")
+        brace = raw.index(b"{", sig)
+        depth, i = 0, brace
+        while True:
+            if raw[i:i + 1] == b"{":
+                depth += 1
+            elif raw[i:i + 1] == b"}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        name = lines[line_no - 1].split("fn ")[1].split("(")[0]
+        out.append(FnRecord(file=file, fn_name=name, sig_byte_start=sig,
+                            body_byte_start=brace + 1, body_byte_end=i,
+                            container=cont))
+    return out
+
+
+def test_a_frame_names_the_one_homonym_its_line_lies_in() -> None:
+    """Run `12616-8345ae1d` (2026-09-27): the overflow's `new [impl Boxed]`
+    shares its name with two other impl blocks' `new`; the locator join keeps a
+    locator only when it names one container, so no session listed it. The
+    frame's line names exactly one body."""
+    from pipeline_core.domain.crash_site import frame_site
+    from pipeline_core.domain.models import FnSite
+    recs = _records_of(_THREE_NEWS, "src/k.rs")
+
+    def text(rel):
+        return _THREE_NEWS if rel == "src/k.rs" else None
+    fr = CrashFrame(file_rel="src/k.rs", line=9, fn_name="new", symbol="<k::B>::new")
+    assert frame_site(fr, recs, text) == FnSite("src/k.rs", "new", "impl B")
+    other = CrashFrame(file_rel="src/k.rs", line=16, fn_name="ring_other",
+                       symbol="k::ring_other")
+    assert frame_site(other, recs, text) == FnSite("src/k.rs", "ring_other", "")
+    # A frame whose located body carries another name (an inlined callee the
+    # symbolizer labelled from elsewhere) resolves to nothing.
+    liar = CrashFrame(file_rel="src/k.rs", line=16, fn_name="new", symbol="x")
+    assert frame_site(liar, recs, text) is None
+
+
+def test_negative_control_the_locator_join_drops_the_homonym() -> None:
+    from pipeline_core.domain.models import FnSite
+    from pipeline_core.domain.slice_session import recorded_locator_sites
+    recs = _records_of(_THREE_NEWS, "src/k.rs")
+    tree = [FnSite(r.file, r.fn_name, r.container) for r in recs]
+    got = recorded_locator_sites(
+        {"t": frozenset({FnLocator("src/k.rs", "new"),
+                         FnLocator("src/k.rs", "ring_other")})}, tree)
+    # Neither member: the homonym names three containers and the free fn has
+    # none, and the join keeps only a locator with exactly one container.
+    assert got == {}
+
+
+def test_an_aborted_test_gets_every_cycle_member_as_a_session_site() -> None:
+    """Each of the recorded sweep's aborted tests gets the cycle's members as
+    sites the session can list (the recorded sweep-7 report on the tree its
+    frames name; `kind.rs:76` is `new [impl Boxed]`, `error.rs:228`
+    `construct_from_boxed [impl Error]`), and a measured test gets none."""
+    from pipeline_core.domain.crash_site import faulting_stack_sites
+    from pipeline_core.domain.models import FnRecord
+    sites = _sites(_TWO, _BINARIES)
+    lines = {"src/kind.rs": 76, "src/error.rs": 228}
+
+    def text(rel):
+        n = lines.get(rel)
+        return None if n is None else "\n" * (n - 1) + "    x\n"
+    recs = [FnRecord(file="src/kind.rs", fn_name="new", container="impl Boxed",
+                     sig_byte_start=70, body_byte_start=72, body_byte_end=80),
+            FnRecord(file="src/kind.rs", fn_name="new", container="impl Adhoc",
+                     sig_byte_start=10, body_byte_start=12, body_byte_end=20),
+            FnRecord(file="src/error.rs", fn_name="construct_from_boxed",
+                     container="impl Error", sig_byte_start=220,
+                     body_byte_start=222, body_byte_end=240)]
+    got = faulting_stack_sites(sites, ["t_one", "t_two"], recs, text)
+    want = frozenset({("src/error.rs", "construct_from_boxed", "impl Error"),
+                      ("src/kind.rs", "new", "impl Boxed")})
+    assert set(got) == {"t_one", "t_two"}
+    for t in ("t_one", "t_two"):
+        assert {tuple(s) for s in got[t]} == want

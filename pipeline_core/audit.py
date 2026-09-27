@@ -514,13 +514,20 @@ def unrouted_units(run: RunData) -> dict[str, list[tuple[int, frozenset[str]]]]:
     """Per cluster, in iteration order, the units the landed-change audit says
     no route attempted AND that no scheduled run of the same fill held at all
     (deferred runs count as holding their targets: a deferral is a recorded
-    reason, a missing run is not)."""
+    reason, a missing run is not). An executed run holds what it OPENED when
+    its row records that (`opened`, rows from 2026-09-27 on): a planned
+    target the run's own planners dropped is not held, it is filtered inside
+    the run — `construct_from_boxed` in run `1098314-0d249d31`'s per-fn run,
+    dropped by the stale probe."""
     held: dict[tuple[str, int], set[str]] = {}
     for e in run.named("phase_c.route.run"):
         d = e.get("data") or {}
         key = (_cluster_of(d), int(d.get("iteration", 0) or 0))
         held.setdefault(key, set())          # a fill with runs, held or not
-        for t in d.get("targets") or ():
+        opened = d.get("opened")
+        units = (opened if isinstance(opened, list)
+                 and d.get("outcome") != "deferred" else d.get("targets"))
+        for t in units or ():
             held[key].add(f"{t[0]}::{t[1]}")
     out: dict[str, list[tuple[int, frozenset[str]]]] = {}
     for e in run.named("phase_c.tdd.landed_change"):
@@ -570,12 +577,12 @@ def check_dispatched_routed(run: RunData) -> Verdict:
     stuck = sorted(u for u, n in worst.items() if n >= UNROUTED_WARN_STREAK)
     if top >= UNROUTED_FAIL_STREAK:
         return Verdict("C11 dispatched-routed", FAIL,
-                       f"{len(stuck)} unit(s) dispatched and held by no run on "
-                       f"{top}+ consecutive iterations: {', '.join(stuck[:6])}")
+                       f"{len(stuck)} unit(s) dispatched and opened by no run "
+                       f"on {top}+ consecutive iterations: {', '.join(stuck[:6])}")
     if top >= UNROUTED_WARN_STREAK:
         return Verdict("C11 dispatched-routed", WARN,
-                       f"{len(stuck)} unit(s) dispatched and held by no run on "
-                       f"{top} consecutive iterations: {', '.join(stuck[:6])}")
+                       f"{len(stuck)} unit(s) dispatched and opened by no run "
+                       f"on {top} consecutive iterations: {', '.join(stuck[:6])}")
     return Verdict("C11 dispatched-routed", PASS,
                    f"{sum(len(g) for lst in series.values() for _i, g in lst)} "
                    "unrouted unit-iteration(s), none on consecutive iterations")

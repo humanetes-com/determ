@@ -5844,7 +5844,10 @@ def prepare_impl_fill(
                 reverted=frozenset(locator_of(u) for u in _out.reverted),
                 dispatched=frozenset(locator_of(u) for u in _out.dispatched),
                 stopped=_out.outcome == "stopped",
-                unmeasured=_out.unmeasured, cap_owned=True)
+                unmeasured=_out.unmeasured, cap_owned=True,
+                # Every slice unit with a record was editable and in view;
+                # a unit with none (`_missing`) was left out inside the run.
+                opened=frozenset(locator_of(u) for u in _records))
 
         return SessionRoute(_plans, _run_one_session, served, log=_log)
 

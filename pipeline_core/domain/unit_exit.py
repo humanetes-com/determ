@@ -38,10 +38,17 @@ class ExitKind(StrEnum):
     declined return)."""
 
     RUN_TARGET = "run_target"
-    """The engine did not report the unit dispatched, yet an EXECUTED run's
-    targets hold it: the two accountings disagree. A session or a pair writes a
-    unit its own way and may not credit it as an attempt; the cause is not
-    settled here, the kind exists so the disagreement is countable."""
+    """The engine did not report the unit dispatched, yet an EXECUTED run
+    opened it (the row's ``opened``), or the rows predate ``opened`` and only
+    say the run held it: an answer lost after dispatch, or a route that
+    writes a unit its own way without crediting an attempt."""
+
+    FILTERED = "filtered"
+    """Executed runs held the unit in their planned targets and none of them
+    opened it: the route's own planners dropped it after the schedule fixed
+    the targets (the refill collector, the stale probe, a withholding). The
+    ledger's ``targets`` alone read this as held, which is why 37% of the
+    census's unattempted units looked routed; ``detail`` names the runs."""
 
     DEFERRED = "deferred"
     """Every run holding the unit was deferred; `detail` lists the reasons
@@ -72,7 +79,9 @@ def unit_exits(
     ``rows`` are the ledger rows of THIS fill only (the caller filters run,
     cluster and iteration). The classification of the units the audit calls
     unattempted (`batch - attempted - landed`) is the join the census computes:
-    an executed run's targets first, then deferred runs' targets, else none."""
+    an executed run that opened it (or whose row predates ``opened``), then
+    executed runs that held it and opened none of it, then deferred runs'
+    targets, else none."""
     held: dict[FnLocator, list[RouteLedgerRow]] = {}
     for r in rows:
         for f, n in r.targets:
@@ -86,7 +95,12 @@ def unit_exits(
         else:
             runs = held.get(u, [])
             executed = [r for r in runs if r.outcome is not RunOutcome.DEFERRED]
-            if executed:
+            key = (u.file, u.fn_name)
+            if executed and all(r.opened is not None and key not in r.opened
+                                for r in executed):
+                out[u] = UnitExit(ExitKind.FILTERED,
+                                  ", ".join(sorted({r.label for r in executed})))
+            elif executed:
                 out[u] = UnitExit(ExitKind.RUN_TARGET,
                                   ", ".join(sorted({r.label for r in executed})))
             elif runs:
@@ -112,6 +126,10 @@ def exit_line(exits: dict[FnLocator, UnitExit]) -> str:
     if why:
         text += " (deferred by " + ", ".join(
             f"{k} {v}" for k, v in sorted(why.items())) + ")"
+    dropped = sorted(f"{k.file}::{k.fn_name}" for k, e in exits.items()
+                     if e.kind is ExitKind.FILTERED)
+    if dropped:
+        text += "; filtered inside a run: " + ", ".join(dropped[:8])
     lost = sorted(f"{k.file}::{k.fn_name}" for k, e in exits.items()
                   if e.kind is ExitKind.UNROUTED)
     if lost:

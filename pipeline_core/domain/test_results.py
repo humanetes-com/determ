@@ -1544,12 +1544,25 @@ def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
     """``test NAME ... ok|FAILED|ignored|bench`` → (name, verdict); a line
     whose verdict slot is empty or holds foreign text (the in-flight test when
     a binary dies) → (name, ""). None otherwise. Pure string ops. Handles
-    doc-test names containing spaces by splitting on the LAST ``" ... "``."""
+    doc-test names containing spaces by splitting on the LAST ``" ... "``.
+
+    A NAME holding a control character is not libtest's line: libtest never
+    colours a test name, and trybuild prints its own progress in the same
+    shape with the name wrapped in ANSI escapes (``test \\x1b[0m\\x1b[1m
+    tests/ui/x.rs\\x1b[0m ... \\x1b[0m\\x1b[32mok``) on stderr, which a
+    combined capture places after every binary's stdout. Read as a verdict-less
+    test line, it became the in-flight test of the last stdout section when
+    that binary aborted before flushing its own line: the sanitized sweep of
+    run `12616-8345ae1d` (2026-09-27, `logs/asan/asan-20260927T064608729091.txt`)
+    named `tests/wrapper_gen_6.rs`'s crashed test `tests/ui/temporary-value.rs`,
+    and that phantom name reached the crash lines, the crash event and every
+    CRASH_EVIDENCE block, while the binary's real in-flight test was named
+    nowhere. An unknown in-flight name is honest; a foreign one is not."""
     if not line.startswith("test "):
         return None
     if " ... " in line:
         name, _, tail = line[len("test "):].rpartition(" ... ")
-        if not name:
+        if not name or _has_control(name):
             return None
         # libtest may qualify a verdict with a reason — `ignored, requires
         # nightly`. The token carries the comma, so an unstripped compare
@@ -1560,8 +1573,12 @@ def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
         return (strip_libtest_qualifier(name.strip()), verdict)
     if line.endswith(" ..."):
         name = strip_libtest_qualifier(line[len("test "):-len(" ...")].strip())
-        return (name, "") if name else None
+        return (name, "") if name and not _has_control(name) else None
     return None
+
+
+def _has_control(text: str) -> bool:
+    return any(ord(c) < 0x20 or ord(c) == 0x7F for c in text)
 
 
 def _target_label(line: str) -> tuple[str, str | None] | None:

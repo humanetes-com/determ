@@ -32,6 +32,7 @@ from pipeline_core.domain.landed_change import unattempted_units
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.unit_exit import (
     ExitKind,
+    UnitExit,
     exit_histogram,
     exit_line,
     exits_payload,
@@ -127,3 +128,73 @@ def test_the_line_names_the_histogram_the_reasons_and_the_lost_units() -> None:
     assert payload["histogram"]["unrouted"] == 2   # type: ignore[index]
     assert "src/error.rs::construct_from_boxed" in payload["left"]  # type: ignore[operator]
     assert exit_histogram(ex)[ExitKind.UNROUTED] == 2
+
+
+def _opened(row: RouteLedgerRow, units: list[str]) -> RouteLedgerRow:
+    from dataclasses import replace
+    return replace(row, opened=tuple(
+        (u.rsplit("::", 1)[0], u.rsplit("::", 1)[1]) for u in units))
+
+
+def test_a_target_no_executed_run_opened_is_filtered_inside_the_run() -> None:
+    """The ledger's targets are fixed when the schedule plans the run; the
+    route's own planners drop units after that. Run `1098314-0d249d31`
+    (2026-09-26): the per-fn run's targets held `construct_from_boxed` and the
+    stale probe dropped it — read off `targets`, it was a RUN_TARGET."""
+    ring = _loc("src/e.rs::ring")
+    per_fn = _row("per-fn", "per-fn", ["src/e.rs::ring", "src/e.rs::x"], "flat")
+    exits = unit_exits([ring], attempted=set(), landed=set(),
+                       rows=[_opened(per_fn, ["src/e.rs::x"])])
+    assert exits[ring] == UnitExit(ExitKind.FILTERED, "per-fn")
+    assert "filtered inside a run: src/e.rs::ring" in exit_line(exits)
+    # Opened by the run, not credited as an attempt: an answer lost after
+    # dispatch, not a filter.
+    exits = unit_exits([ring], attempted=set(), landed=set(),
+                       rows=[_opened(per_fn, ["src/e.rs::ring"])])
+    assert exits[ring].kind is ExitKind.RUN_TARGET
+    # Negative control: a row that predates `opened` says only "held".
+    exits = unit_exits([ring], attempted=set(), landed=set(), rows=[per_fn])
+    assert exits[ring].kind is ExitKind.RUN_TARGET
+
+
+def test_opened_survives_the_ledger_round_trip_and_none_stays_none() -> None:
+    row = _opened(_row("file", "f", ["src/e.rs::a"], "flat"), ["src/e.rs::a"])
+    back = RouteLedgerRow.from_dict(json.loads(row.to_json()))
+    assert back is not None and back.opened == (("src/e.rs", "a"),)
+    old = RouteLedgerRow.from_dict(json.loads(
+        _row("file", "f", ["src/e.rs::a"], "flat").to_json()))
+    assert old is not None and old.opened is None
+    empty = _opened(_row("file", "f", ["src/e.rs::a"], "flat"), [])
+    back = RouteLedgerRow.from_dict(json.loads(empty.to_json()))
+    assert back is not None and back.opened == ()
+
+
+def test_the_scheduler_writes_what_the_run_opened() -> None:
+    """`_row_for` puts the report's opened units on the row: the attempt
+    delta by default, a session's whole editable slice when it says so, and
+    None for a row with no report (deferred / not opened)."""
+    from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
+    from pipeline_core.application.reconstruct.fill_scheduler import (
+        FillExecutionDeps,
+        _row_for,
+    )
+    from pipeline_core.domain.fill_schedule import RouteRun, ScheduledRun
+    a, b = _loc("src/e.rs::a"), _loc("src/e.rs::b")
+    sched = ScheduledRun(
+        run=RouteRun(kind=RouteKind.PER_FN, label="per-fn",
+                     targets=frozenset({a, b}), bodies_sha="x"),
+        rank=0, weight=1, reason="served", level=0)
+    deps = FillExecutionDeps(
+        log=lambda _m: None, emit=lambda *a, **k: None,
+        check_stop=lambda _s: None, ledger=None, project="p", cluster="c",
+        run_id="r", iteration=1, oracle_fp="o")
+
+    def row(rep):
+        return _row_for(sched, rep, None, deps=deps, started="",
+                        minutes=1.0, share=None)
+    assert row(RouteRunReport(dispatched=frozenset({a}))).opened == (
+        ("src/e.rs", "a"),)
+    assert row(RouteRunReport(dispatched=frozenset({a}),
+                              opened=frozenset({a, b}))).opened == (
+        ("src/e.rs", "a"), ("src/e.rs", "b"))
+    assert row(None).opened is None

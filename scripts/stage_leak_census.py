@@ -28,12 +28,15 @@ HOW TO INTERPRET
         route attempted. It is NOT all defect: a unit whose only run was
         deferred `premise_moved` or `landed_this_fill` exited legitimately.
         The three buckets separate the cases:
-          attempted-elsewhere  the ledger lists the unit in an executed run's
-                               targets while the audit calls it unattempted —
-                               the two accountings disagree; the cause is
-                               unverified (a session/pair run may not credit
-                               its write set as an attempt). Fix the
-                               accounting before reading the other buckets.
+          attempted-elsewhere  an executed run OPENED the unit (or its row
+                               predates `opened`, 2026-09-27, and only says
+                               the run held it) while the audit calls it
+                               unattempted: an answer lost after dispatch, or
+                               a route that does not credit its write set.
+          filtered-in-run      executed runs held the unit in their planned
+                               targets and opened none of it: the route's own
+                               planners dropped it (refill collector, stale
+                               probe, withholding). Rows from 2026-09-27 on.
           deferred-only        every run holding the unit was deferred; the
                                reason column says which rule kept it out.
           no-run               NO scheduled run held the unit: dropped before
@@ -135,17 +138,25 @@ def leak(since: str, runs: set[str], rows: list[dict]) -> None:
             if rs is None:
                 continue
             executed: set[str] = set()
+            filtered: set[str] = set()
             deferred: dict[str, set[str]] = collections.defaultdict(set)
             for r in rs:
+                opened = r.get("opened")
+                opened_units = ({f"{f}::{n}" for f, n in opened}
+                                if isinstance(opened, list) else None)
                 for f, n in r["targets"]:
                     unit = f"{f}::{n}"
                     if r["outcome"] == "deferred":
                         deferred[unit].add(r["reason"])
+                    elif opened_units is not None and unit not in opened_units:
+                        filtered.add(unit)
                     else:
                         executed.add(unit)
             for unit in u:
                 if unit in executed:
                     buckets["attempted-elsewhere"] += 1
+                elif unit in filtered:
+                    buckets["filtered-in-run"] += 1
                 elif unit in deferred:
                     buckets["deferred-only"] += 1
                     for why in deferred[unit]:
@@ -162,7 +173,8 @@ def leak(since: str, runs: set[str], rows: list[dict]) -> None:
     print(f"      dispatched units {disp}  unattempted {unatt} "
           f"({100 * unatt / max(disp, 1):.1f}%)")
     matched = sum(buckets.values())
-    for name in ("attempted-elsewhere", "deferred-only", "no-run"):
+    for name in ("attempted-elsewhere", "filtered-in-run", "deferred-only",
+                 "no-run"):
         print(f"      {name:20s} {buckets[name]:4d} "
               f"({100 * buckets[name] / max(matched, 1):.0f}% of {matched} "
               "unit-iterations joined to a same-fill ledger)")

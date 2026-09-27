@@ -482,6 +482,25 @@ def test_c11_a_deferred_run_is_a_recorded_reason_and_a_gap_resets_the_streak() -
     assert check_dispatched_routed(RunData(events=[])).status == "SKIP"
 
 
+def test_c11_a_target_the_run_did_not_open_is_not_held() -> None:
+    """Run `1098314-0d249d31` (2026-09-26): the per-fn run's planned targets
+    held `construct_from_boxed` and its stale probe dropped it. A row that
+    records what the run opened says so; the unit is not held."""
+    unit = ("src/a.rs", "ring")
+    ev = []
+    for it in (5, 6):
+        r = _route(it, [unit, ("src/a.rs", "other")])
+        r["data"]["opened"] = [["src/a.rs", "other"]]
+        ev += [_landed(it, ["src/a.rs::ring"]), r]
+    warn = check_dispatched_routed(RunData(events=ev))
+    assert warn.status == "WARN" and "src/a.rs::ring" in warn.evidence
+    # Negative control: rows without `opened` (written before it existed)
+    # still read the planned targets as held.
+    for e in ev:
+        e["data"].pop("opened", None)
+    assert check_dispatched_routed(RunData(events=ev)).status == "PASS"
+
+
 def _crash(it: int, test: str, *, culprits: list[str] | None = None,
            blamed: list[str] | None = None, frames: int = 2) -> dict:
     d: dict = {"cluster": "c", "iter": it, "test": test, "blamed": blamed,

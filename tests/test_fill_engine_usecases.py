@@ -736,6 +736,59 @@ def test_refill_kept_when_its_test_is_dangling_at_the_probe(
     assert any("behavioral re-fill target(s)" in m for m in fake.logs)
 
 
+def _crash_blamed_probe(tmp_path: Path, probe: tuple[int, str]):
+    from pipeline_core.domain.models import FnLocator
+    ws = _mk_ws(tmp_path)
+    key = FnLocator("src/error.rs", "ring_member")
+    fake = FakeFill(
+        impl_stats=ClusterFillResult(remaining=1, fns_filled=2,
+                                     dispatched_fns=()),
+        stub_records=[], stub_tuples=[],
+        fns=[{"file": "src/error.rs", "fn_name": "ring_member",
+              "container": "impl Error", "sig_text": "fn ring_member()"}],
+        run=probe,
+    )
+    _engine(fake, FillUnit.IMPL).run(
+        ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+        tdd_frontier_keys={key},
+        # The crashed tests are unmeasured and owned by other units: the
+        # blamed unit has no attributed test at all.
+        tdd_frontier_tests=FailureFrontier.of_direct(
+            {FnLocator("src/error.rs", "static_owner"): {"t_crashed"}}),
+        crash_blamed=frozenset({key}),
+        tdd_test_cmd="cargo test", skip_end_pass_test=True)
+    return fake
+
+
+def test_a_crash_blamed_refill_stays_while_the_probe_still_crashes(
+        tmp_path: Path) -> None:
+    """Run `1098314-0d249d31` (2026-09-26) fill 1: the collector admitted
+    `construct_from_boxed` on the stack-overflow blame, and the probe dropped
+    it as "attributed test(s) already pass" — it has none, and eleven binaries
+    were still aborting. The probe asks the collector's question: blame holds
+    while a binary still does not complete."""
+    fake = _crash_blamed_probe(tmp_path, (101,
+        "    Running tests/ring.rs (target/debug/deps/ring-abc)\n"
+        "running 1 test\n"
+        "test t_crashed ...\n"))
+    assert "phase_c.refill.stale_dropped" not in fake.events
+    assert any("behavioral re-fill target(s)" in m for m in fake.logs)
+
+
+def test_a_crash_blamed_refill_is_dropped_once_the_crash_is_gone(
+        tmp_path: Path) -> None:
+    # Negative control: the same unit when every binary completes — the crash
+    # an earlier fill of this call broke — is stale, and the line says why.
+    fake = _crash_blamed_probe(tmp_path, (0,
+        "    Running tests/ring.rs (target/debug/deps/ring-abc)\n"
+        "running 1 test\n"
+        "test t_crashed ... ok\n"
+        "test result: ok. 1 passed; 0 failed\n"))
+    assert "phase_c.refill.stale_dropped" in fake.events
+    assert any("crash-blamed, crash gone: src/error.rs::ring_member" in m
+               for m in fake.logs)
+
+
 def _cluster(name: str = "stable"):
     from pipeline_core.domain.models import BuildCluster
     return BuildCluster(name=name, env_extra={}, tarpaulin_exclude_files=[],

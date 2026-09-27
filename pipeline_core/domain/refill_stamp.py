@@ -18,8 +18,9 @@ they can be judged.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import replace
+from enum import StrEnum
 
 from pipeline_core.domain.attribution import FailureFrontier, container_key
 from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
@@ -107,6 +108,39 @@ def assertion_owned_by_container(
 
 def _stub_panic_in_src(text: str) -> bool:
     return "unimplemented" in text or "not implemented" in text or "todo!" in text
+
+
+class RefillAdmission(StrEnum):
+    """Why a FILLED unit is a behavioral re-fill target — the one rule every
+    collector and every later filter of the same target reads."""
+
+    FAILING_TESTS = "failing_tests"
+    """An attributed test of the unit is still open."""
+
+    CRASH_BLAMED = "crash_blamed"
+    """The crash localizer blames the unit and a binary still crashes. A
+    crashed binary reports no verdict, so the unit may own no open test."""
+
+
+def refill_admission(
+    open_tests: Collection[str], *, crash_blamed: bool,
+) -> RefillAdmission | None:
+    """The reason a filled unit is a re-fill target, or None.
+
+    ``open_tests`` are the unit's attributed tests still open in the reading
+    the caller holds; ``crash_blamed`` is the localizer's blame AND a crash
+    still observed in that reading. The per-fn route's pre-dispatch probe
+    applied only the first half after the collector had admitted on either:
+    run `1098314-0d249d31` (2026-09-26) fill 1 admitted
+    `construct_from_boxed` on the stack-overflow blame and then dropped it as
+    "attributed test(s) already pass" — it has none, and its eleven crashed
+    tests were still aborting. The collector and the probe now ask the same
+    question of their own reading."""
+    if open_tests:
+        return RefillAdmission.FAILING_TESTS
+    if crash_blamed:
+        return RefillAdmission.CRASH_BLAMED
+    return None
 
 
 def stamp_reads_dispatch(*, covers: bool, file_primary: bool) -> bool:
